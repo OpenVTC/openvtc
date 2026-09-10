@@ -2962,6 +2962,7 @@ fn spawn_persona_effect(
                 admin_vta: admin_vta.clone(),
                 include_values: state.main_page.content_panel.identity.show_values,
                 targets: persona_actions::PersonaReadJob::targets(state),
+                needs_claim_types: !state.main_page.content_panel.identity.claim_types_loaded,
             };
             state.main_page.content_panel.identity.loading = true;
             background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {

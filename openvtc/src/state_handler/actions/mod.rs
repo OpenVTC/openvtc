@@ -240,6 +240,19 @@ pub enum PersonaAction {
     ProfileEdit(usize),
     ProfileDeleteArm(usize),
 
+    /// Open the picker: which world does this face belong to?
+    ///
+    /// On the Faces tab rather than the Worlds one, because the holder has to
+    /// be able to see the face they are moving. A world's membership is
+    /// therefore edited from exactly one place, which is what keeps the replace
+    /// semantics of `persona/facet/put` in one place too.
+    FacePlaceOpen(usize),
+
+    // ── Worlds ───────────────────────────────────────────────────────────
+    FacetNew,
+    FacetEdit(usize),
+    FacetDeleteArm(usize),
+
     // ── Communities ──────────────────────────────────────────────────────
     /// Open the picker: what should this persona present here?
     BindOpen(usize),

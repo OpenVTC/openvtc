@@ -104,8 +104,14 @@ skip-tree = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Both entries are rev-pinned git sources standing in for a release that has not
-# happened yet, and both are meant to be deleted rather than lived with.
+# Every entry is a rev-pinned git source standing in for a release that has not
+# happened yet, and every one is meant to be deleted rather than lived with.
+#
+# This list is the second half of each `[patch.crates-io]` entry in the root
+# `Cargo.toml`. A patch added there and not here fails `cargo deny check
+# sources` rather than quietly resolving to a source nobody reviewed, which is
+# what `unknown-git = "deny"` is for — so the two are edited together or the
+# build says so.
 #
 # * `verifiable-git-infrastructure` — `did-git-sign`'s published 0.4.6 requires
 #   `vta-sdk ^0.27`, which does not build against this workspace's 0.31. The
@@ -116,7 +122,15 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 #   dependency until the trust-registry release pipeline publishes a version
 #   built on the current trust-tasks line. It reaches this workspace only
 #   through VGI, whose own manifest pins the same rev.
+# * `verifiable-trust-infrastructure` — `vta-sdk` ahead of its last release, for
+#   `persona/facet/*` and nothing else. VTI #1338 landed after 0.34.1 was cut,
+#   so the three `TASK_PERSONA_FACET_*` constants the identity pane addresses
+#   worlds through exist on `main` and nowhere on crates.io. The pin is #1338's
+#   own merge commit rather than the head of `main`, so it adds those constants
+#   and moves nothing else. **Delete this entry and the patch together the
+#   moment a `vta-sdk` release carries #1338.**
 allow-git = [
     "https://github.com/OpenVTC/verifiable-git-infrastructure",
     "https://github.com/affinidi/affinidi-trust-registry-rs",
+    "https://github.com/OpenVTC/verifiable-trust-infrastructure",
 ]

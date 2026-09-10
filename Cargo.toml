@@ -292,9 +292,12 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # had been cut to 0.3 while three of the four dispatch runners still sent 0.2 or
 # 0.1, so setup's last step died with `unsupportedType` against a healthy VTA,
 # and the reply came back labelled with a schema it could not satisfy). On this
-# line 0.34.0 is the first release of its minor and there is no such release to
-# exclude, so the patch is named only to record what was verified.
-vta-sdk = { version = "0.34.0", features = [
+# line the patch names 0.34.1, and it is a floor rather than a record: 0.34.0
+# has neither `persona/facet/*` nor `persona/claim-types/list`, and the identity
+# pane now calls both. On 0.34.0 the pane compiles and then cannot find the
+# constants; naming the patch is what turns that into a resolver error at the
+# point where it can be read.
+vta-sdk = { version = "0.34.1", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
@@ -380,3 +383,26 @@ strip = "symbols"
 [patch.crates-io]
 did-git-sign = { git = "https://github.com/OpenVTC/verifiable-git-infrastructure", rev = "5111dc177d25d68088a4d6ba991210e262498950" }
 vgi-core = { git = "https://github.com/OpenVTC/verifiable-git-infrastructure", rev = "5111dc177d25d68088a4d6ba991210e262498950" }
+# `vta-sdk` ahead of its last release, for `persona/facet/*` only.
+#
+# **Temporary, and this note is the owner.** The released 0.34.1 carries
+# `persona/claim-types/list` (VTI #1315) but not the facet tasks: #1338 landed
+# after that release was cut, so the three `TASK_PERSONA_FACET_*` constants
+# exist on `main` and nowhere on crates.io. Worlds are the holder-facing half of
+# that task family, and a client cannot address a Trust Task whose Type URI it
+# has no way to name.
+#
+# A rev, not a branch: this pin *follows* the VTA rather than leading it, and a
+# branch would let it drift under a routine refresh onto something nobody here
+# read. It is #1338's own merge commit rather than the head of `main`: at that
+# point `vta-sdk` is still the 0.34.1 that was released, so the patch adds three
+# Type URI constants and moves nothing else. Later revs carry the rooms and
+# `present/0.2` work, which pulls the whole TDK line forward — a real bump, and
+# not one that belongs in a change about worlds.
+#
+# **Delete this entry as soon as a `vta-sdk` release carries #1338**, and move
+# the requirement above to name that patch. Two entries in this block already
+# carry an unwind obligation and the `did-git-sign` note above is what one looks
+# like after six cycles of not being unwound; a third is where "temporary" stops
+# being true by itself.
+vta-sdk = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "129597aa86a0ebf5681b5d5485cb353f544e7bcc" }

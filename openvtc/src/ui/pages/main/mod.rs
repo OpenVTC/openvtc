@@ -469,7 +469,7 @@ impl MainPage {
     fn handle_personas_key(&mut self, key: KeyEvent) -> bool {
         use crate::state_handler::actions::PersonaAction as PA;
         use crate::state_handler::main_page::content::{
-            PersonaConfirm, PersonaMode, PersonaTab, ProfileFormFocus,
+            FacetFormFocus, PersonaConfirm, PersonaMode, PersonaTab, ProfileFormFocus,
         };
 
         let personas = &self.props.main_page.content_panel.identity;
@@ -513,6 +513,38 @@ impl MainPage {
                     // would refuse to let a profile be called "Work laptop".
                     KeyCode::Char(' ') if on_entries => send(PA::FormToggleEntry),
                     _ => send(PA::FormKey(key)),
+                };
+            }
+            PersonaMode::Facet(form) => {
+                if form.working {
+                    return true;
+                }
+                let on_colour = form.focus == FacetFormFocus::Colour;
+                return match key.code {
+                    KeyCode::Esc => send(PA::FormCancel),
+                    KeyCode::Enter => send(PA::FormSubmit),
+                    KeyCode::Tab => send(PA::FormField(true)),
+                    KeyCode::BackTab => send(PA::FormField(false)),
+                    // ←/→ move the colour wherever the focus is, so a holder
+                    // who has not worked out that the swatch row is a field can
+                    // still change it. On the colour field ↑/↓ do it too.
+                    KeyCode::Right => send(PA::FormCycle(true)),
+                    KeyCode::Left => send(PA::FormCycle(false)),
+                    KeyCode::Down if on_colour => send(PA::FormCycle(true)),
+                    KeyCode::Up if on_colour => send(PA::FormCycle(false)),
+                    _ => send(PA::FormKey(key)),
+                };
+            }
+            PersonaMode::PlaceFace(picker) => {
+                if picker.working {
+                    return true;
+                }
+                return match key.code {
+                    KeyCode::Esc => send(PA::FormCancel),
+                    KeyCode::Enter => send(PA::FormSubmit),
+                    KeyCode::Down => send(PA::FormCycle(true)),
+                    KeyCode::Up => send(PA::FormCycle(false)),
+                    _ => true,
                 };
             }
             PersonaMode::Bind(picker) => {
@@ -672,6 +704,24 @@ impl MainPage {
                     KeyCode::Char('e') if selected < count => send(PA::ProfileEdit(selected)),
                     KeyCode::Char('d') | KeyCode::Delete if selected < count => {
                         send(PA::ProfileDeleteArm(selected))
+                    }
+                    // `m` for *move*, on the tab where the face being moved is
+                    // visible. A world's membership is edited from here and
+                    // nowhere else — see `PersonaAction::FacePlaceOpen`.
+                    KeyCode::Char('m') if selected < count => send(PA::FacePlaceOpen(selected)),
+                    _ => false,
+                }
+            }
+            PersonaTab::Facets => {
+                let count = personas.facets.len();
+                let selected = personas.facet_selected;
+                match key.code {
+                    KeyCode::Up if count > 0 => send(PA::Select(selected.saturating_sub(1))),
+                    KeyCode::Down if count > 0 => send(PA::Select((selected + 1).min(count - 1))),
+                    KeyCode::Char('n') => send(PA::FacetNew),
+                    KeyCode::Char('e') if selected < count => send(PA::FacetEdit(selected)),
+                    KeyCode::Char('d') | KeyCode::Delete if selected < count => {
+                        send(PA::FacetDeleteArm(selected))
                     }
                     _ => false,
                 }

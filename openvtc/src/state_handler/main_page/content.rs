@@ -416,6 +416,8 @@ pub enum PersonaTab {
     Attributes,
     /// Named projections over the pool.
     Profiles,
+    /// The facets: parts of a life, and the projections that belong to them.
+    Facets,
     /// Which persona each community sees, and what it presents there.
     Communities,
     /// What has actually left, and to whom.
@@ -425,11 +427,12 @@ pub enum PersonaTab {
 impl PersonaTab {
     /// Every tab, in display order.
     #[must_use]
-    pub fn all() -> [PersonaTab; 5] {
+    pub fn all() -> [PersonaTab; 6] {
         [
             PersonaTab::Personas,
             PersonaTab::Attributes,
             PersonaTab::Profiles,
+            PersonaTab::Facets,
             PersonaTab::Communities,
             PersonaTab::Disclosures,
         ]
@@ -442,13 +445,15 @@ impl PersonaTab {
     /// The variants keep the spec's nouns because that is what they address:
     /// `Profiles` is `persona/profile/*`. The screen says *Faces*, because
     /// "profile" already means three things in this product and "my LinkedIn
-    /// page" to everyone else.
+    /// page" to everyone else; `Facets` is `persona/facet/*` and the screen
+    /// says *Worlds*, because nobody says "my work facet" to a friend.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             PersonaTab::Personas => "Personas",
             PersonaTab::Attributes => "Your attributes",
             PersonaTab::Profiles => "Faces",
+            PersonaTab::Facets => "Worlds",
             PersonaTab::Communities => "Communities",
             PersonaTab::Disclosures => "What has left",
         }
@@ -466,6 +471,7 @@ impl PersonaTab {
             self,
             PersonaTab::Attributes
                 | PersonaTab::Profiles
+                | PersonaTab::Facets
                 | PersonaTab::Communities
                 | PersonaTab::Disclosures
         )
@@ -476,7 +482,8 @@ impl PersonaTab {
         match self {
             PersonaTab::Personas => PersonaTab::Attributes,
             PersonaTab::Attributes => PersonaTab::Profiles,
-            PersonaTab::Profiles => PersonaTab::Communities,
+            PersonaTab::Profiles => PersonaTab::Facets,
+            PersonaTab::Facets => PersonaTab::Communities,
             PersonaTab::Communities => PersonaTab::Disclosures,
             PersonaTab::Disclosures => PersonaTab::Personas,
         }
@@ -488,7 +495,8 @@ impl PersonaTab {
             PersonaTab::Personas => PersonaTab::Disclosures,
             PersonaTab::Attributes => PersonaTab::Personas,
             PersonaTab::Profiles => PersonaTab::Attributes,
-            PersonaTab::Communities => PersonaTab::Profiles,
+            PersonaTab::Facets => PersonaTab::Profiles,
+            PersonaTab::Communities => PersonaTab::Facets,
             PersonaTab::Disclosures => PersonaTab::Communities,
         }
     }
@@ -557,6 +565,19 @@ pub enum PersonaConfirm {
         profile_id: String,
         name: String,
         unbind: bool,
+    },
+    /// Delete a world. Named, not indexed, for the reason above.
+    ///
+    /// `faces` is how many faces belong to it now, so the prompt can say what
+    /// will *not* happen: a world arranges, it does not contain, and "delete
+    /// Work" reads to almost everyone as though the faces in it go too. The
+    /// count is resolved against the face list rather than taken from the
+    /// record, so it is the number the holder can see on screen.
+    DeleteFacet {
+        facet_id: String,
+        name: String,
+        expected_version: Option<u64>,
+        faces: usize,
     },
     /// Clear what one persona presents in one context — the pair the binding is
     /// addressed by, carried whole for the same reason as above.
@@ -685,6 +706,87 @@ pub struct BindPicker {
     pub error: Option<String>,
 }
 
+/// The editor for one world: its name, its colour, its mark.
+///
+/// Membership is **not** edited here, and the omission is deliberate. A world's
+/// faces are changed from the Faces tab, where the holder can see the face they
+/// are moving; a second membership editor would be a second place to get the
+/// replace semantics of `persona/facet/put` wrong. What the form does carry is
+/// the whole membership as read, so that saving a rename puts it back untouched
+/// — the field below is that copy, and it is why this form cannot be built from
+/// nothing.
+#[derive(Clone, Debug, Default)]
+pub struct FacetForm {
+    /// The world being edited; `None` creates a new one.
+    pub facet_id: Option<String>,
+    pub expected_version: Option<u64>,
+    pub name: tui_input::Input,
+    /// Cursor into [`Colour::all`](openvtc_core::persona::facet::Colour::all).
+    pub colour: usize,
+    /// One or two emoji, or nothing. Optional, and a terminal that cannot draw
+    /// it loses nothing that carries meaning.
+    pub icon: tui_input::Input,
+    pub focus: FacetFormFocus,
+    /// The membership as it was read, written back unchanged.
+    ///
+    /// `put` is a replace: omitting these means *empty them*, not "leave them
+    /// alone". A form that rebuilt the record from its own fields would empty
+    /// the world every time somebody renamed it, and the loss would be silent —
+    /// the world would still be there, just with nothing in it.
+    pub face_ids: Vec<String>,
+    pub attribute_ids: Vec<String>,
+    pub error: Option<String>,
+    pub working: bool,
+}
+
+/// Which field of [`FacetForm`] has the keyboard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FacetFormFocus {
+    #[default]
+    Name,
+    Colour,
+    Icon,
+}
+
+impl FacetFormFocus {
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Name => Self::Colour,
+            Self::Colour => Self::Icon,
+            Self::Icon => Self::Name,
+        }
+    }
+
+    #[must_use]
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Name => Self::Icon,
+            Self::Colour => Self::Name,
+            Self::Icon => Self::Colour,
+        }
+    }
+}
+
+/// The world picker for one face: which part of your life does this belong to?
+#[derive(Clone, Debug, Default)]
+pub struct FacePlacer {
+    /// The face being moved, named rather than indexed — the face list is
+    /// re-sorted by world on every read, so an index taken before a refresh
+    /// would name a different face afterwards, and this picker's whole job is
+    /// to move a specific one.
+    pub profile_id: String,
+    /// Display only: which face the holder is looking at.
+    pub face_name: String,
+    /// Cursor over the options, where 0 is always "belongs to no world" — a
+    /// first-class choice rather than the absence of one. Every face belonging
+    /// somewhere is fine too, and a picker with no way back out would make a
+    /// world a trap rather than an arrangement.
+    pub cursor: usize,
+    pub working: bool,
+    pub error: Option<String>,
+}
+
 /// What owns the keyboard inside the pane.
 #[derive(Clone, Debug, Default)]
 pub enum PersonaMode {
@@ -692,16 +794,19 @@ pub enum PersonaMode {
     View,
     Attribute(AttributeForm),
     Profile(ProfileForm),
+    Facet(FacetForm),
+    PlaceFace(FacePlacer),
     Bind(BindPicker),
 }
 
 /// The persona pane: every surface for the holder's own identity, in one place.
 ///
-/// Four of the five tabs are served by the agent and one by `Config`, and the
+/// Five of the six tabs are served by the agent and one by `Config`, and the
 /// difference is load-bearing rather than incidental. Personas are on disk, so
-/// they draw at launch with no session; the pool, the profiles and the bindings
-/// are the agent's, so each of them has to be able to say "I could not ask"
-/// distinctly from "you hold nothing" — see [`load_error`](Self::load_error).
+/// they draw at launch with no session; the pool, the profiles, the facets and
+/// the bindings are the agent's, so each of them has to be able to say "I could
+/// not ask" distinctly from "you hold nothing" — see
+/// [`load_error`](Self::load_error).
 #[derive(Clone, Debug, Default)]
 pub struct IdentityState {
     pub tab: PersonaTab,
@@ -759,6 +864,29 @@ pub struct IdentityState {
     /// arrived at one keypress at a time.
     pub revealed_attribute: Option<String>,
 
+    // ── Links (from the agent) ───────────────────────────────────────────
+    /// Where the holder's identities join up, and which joins cross a world.
+    ///
+    /// Read alongside the pool rather than on demand: the answer is computed
+    /// across every attribute at once, so a per-row question would be one
+    /// round-trip each for a page the agent builds in one.
+    ///
+    /// Empty means the agent found nothing *or* does not serve
+    /// `persona/correlation/analyze`. Neither is a failure; a read that failed
+    /// lands in [`load_error`](Self::load_error), because a clean bill of
+    /// health nobody computed is the answer that misleads.
+    pub links: Arc<[openvtc_core::persona::correlation::Finding]>,
+
+    // ── Worlds (from the agent) ──────────────────────────────────────────
+    /// The parts of the holder's life, and which faces belong to them.
+    ///
+    /// Empty is a real answer and means the holder has arranged nothing yet —
+    /// or that the agent predates `persona/facet/*`, which amounts to the same
+    /// thing from here, because such a holder cannot have a world to show. A
+    /// read that *failed* lands in [`load_error`](Self::load_error) instead.
+    pub facets: Arc<[openvtc_core::persona::facet::Facet]>,
+    pub facet_selected: usize,
+
     // ── Profiles (from the agent) ────────────────────────────────────────
     pub profiles: Arc<[openvtc_core::persona::profile::ProfileSummary]>,
     pub profile_selected: usize,
@@ -791,6 +919,25 @@ pub struct IdentityState {
     pub disclosure_selected: usize,
 
     // ── Shared ───────────────────────────────────────────────────────────
+    /// The claim-type registry this agent resolves against — how each value is
+    /// shown, and what it takes to let it leave.
+    ///
+    /// Read once per load and held for the session, because it is a constant
+    /// for a given agent. It starts as the compiled copy so the very first
+    /// frame has a table to draw with; the read replaces it, and
+    /// [`Registry::is_fallback`](openvtc_core::persona::claim_types::Registry::is_fallback)
+    /// is what lets the pane say when a masking decision came from a table the
+    /// holder's own agent did not supply.
+    pub claim_types: openvtc_core::persona::claim_types::Registry,
+    /// Whether [`claim_types`](Self::claim_types) is still the compiled copy
+    /// this pane started with.
+    ///
+    /// Separate from `Registry::is_fallback`, which answers a different
+    /// question: that one says *the agent told us it cannot serve the table*,
+    /// this one says *we have not asked yet*. Collapsing them would make a
+    /// refresh re-read a constant, or make a never-asked pane claim its agent
+    /// is old.
+    pub claim_types_loaded: bool,
     /// The `did:key` this install authenticates to the agent as, when the
     /// account is agent-managed.
     ///
