@@ -419,9 +419,13 @@ impl Registry {
     /// Parse a served response.
     ///
     /// Read member by member and defensively: a missing ordering leaves the
-    /// axis empty, which [`Axis::rank`] reads as "everything is most
-    /// protective" — degraded, but degraded towards showing less.
-    fn from_wire(value: &Value) -> Self {
+    /// axis unable to place either token, which [`Axis::stricter`] resolves to
+    /// the floor — degraded, but degraded towards showing less.
+    ///
+    /// `pub(crate)` for [`family`](crate::persona::family)'s tests, which need
+    /// a table declaring a root this build has no words for and cannot get one
+    /// from the compiled copy by construction.
+    pub(crate) fn from_wire(value: &Value) -> Self {
         let entries = value
             .get("entries")
             .and_then(Value::as_array)

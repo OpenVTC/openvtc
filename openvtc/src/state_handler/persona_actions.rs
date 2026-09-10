@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 
 use openvtc_core::persona::{
-    binding, claim_types, disclosure,
+    binding, claim_types, disclosure, family,
     pool::{self, AttributeDraft, PoolAttribute},
     profile::{self, ProfileDetail, ProfileSummary},
 };
@@ -848,7 +848,20 @@ impl PersonaOutcome {
                     p.claim_types = *registry;
                     p.claim_types_loaded = true;
                 }
-                if let Ok(list) = attributes {
+                if let Ok(mut list) = attributes {
+                    // Grouped order, decided here rather than in the renderer.
+                    // The pane draws the pool under family headings, and the
+                    // cursor walks `attributes` by index — so if the list order
+                    // were not the *drawn* order, `j` would move the highlight
+                    // between groups at random. `pool::list` cannot do this
+                    // sort: a family is a question about the claim-type table,
+                    // and the table is only known here.
+                    list.sort_by(|a, b| {
+                        family::Family::of(&a.claim_type, &p.claim_types)
+                            .cmp(&family::Family::of(&b.claim_type, &p.claim_types))
+                            .then_with(|| a.claim_type.cmp(&b.claim_type))
+                            .then_with(|| a.display_name().cmp(b.display_name()))
+                    });
                     p.attribute_selected = p.attribute_selected.min(list.len().saturating_sub(1));
                     p.attributes = list.into();
                     // The list under the reveal has been rebuilt and may be

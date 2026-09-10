@@ -57,6 +57,7 @@ use crate::state_handler::{
     state::ConnectionState,
 };
 use openvtc_core::display::display_identifier;
+use openvtc_core::persona::family::Family;
 use ratatui::{
     style::{Style, Stylize},
     text::{Line, Span},
@@ -439,7 +440,31 @@ fn render_attributes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
 
     push_registry_notes(state, lines);
 
+    // The list arrives already in family order — `PersonaOutcome::Read` sorts
+    // it there, so that the cursor, which walks this slice by index, walks the
+    // groups in the order they are drawn. All this loop does is notice the
+    // boundary and put the heading on it.
+    let mut current_family: Option<Family> = None;
+
     for (i, attr) in state.attributes.iter().enumerate() {
+        let family = Family::of(&attr.claim_type, &state.claim_types);
+        if current_family != Some(family) {
+            if current_family.is_some() {
+                lines.push(Line::from(""));
+            }
+            lines.push(
+                Line::from(format!(" {}", family.label()))
+                    .fg(COLOR_TEXT_DEFAULT)
+                    .bold(),
+            );
+            // The heading names the group; this line says what the group *is*.
+            // Both, every time: "Your agent asks first" is a behaviour nobody
+            // can infer from four registered tokens, and a heading a reader has
+            // to decode is a heading that gets skipped.
+            lines.push(Line::from(format!("   {}", family.note())).fg(COLOR_DARK_GRAY));
+            current_family = Some(family);
+        }
+
         let is_selected = i == state.attribute_selected;
         let row_style = if is_selected {
             Style::new().fg(COLOR_SUCCESS).bold()
@@ -1530,6 +1555,83 @@ mod tests {
         assert!(
             shown.contains("(no value)"),
             "a listing that asked and got nothing says so: {shown}"
+        );
+    }
+
+    /// The pool is drawn under family headings, and each heading carries the
+    /// line that says what its group is.
+    ///
+    /// The wall this replaces is the failure mode: thirty rows in one
+    /// undifferentiated list is where the answer to "what do I actually keep
+    /// about myself" goes to hide.
+    #[test]
+    fn the_pool_is_drawn_under_family_headings() {
+        let mut state = populated(PersonaTab::Attributes);
+        loaded(&mut state);
+        let shown = text(&render(&state));
+
+        assert!(shown.contains("How to reach you"), "{shown}");
+        assert!(
+            shown.contains("an address someone can arrive at"),
+            "{shown}"
+        );
+        assert!(shown.contains("Your agent asks first"), "{shown}");
+
+        // …and in the declared order, not the order the rows happened to
+        // arrive in: `email.work` is contact, `payment.card` is gated, and
+        // contact comes first.
+        let contact = shown.find("How to reach you").expect("contact heading");
+        let gated = shown.find("Your agent asks first").expect("gated heading");
+        assert!(contact < gated, "groups are out of order:\n{shown}");
+    }
+
+    /// A token the registry does not declare is grouped as unregistered rather
+    /// than guessed at from its spelling — and the heading says which.
+    #[test]
+    fn an_undeclared_token_is_grouped_honestly() {
+        let mut state = populated(PersonaTab::Attributes);
+        loaded(&mut state);
+        let mut attrs = state.attributes.to_vec();
+        attrs.push(PoolAttribute {
+            attribute_id: "01C".into(),
+            claim_type: "profile.github".into(),
+            ..PoolAttribute::default()
+        });
+        state.attributes = attrs.into();
+
+        let shown = text(&render(&state));
+        assert!(shown.contains("Not in the registry"), "{shown}");
+        assert!(
+            shown.contains("does not declare these"),
+            "the heading has to say why, not just that: {shown}"
+        );
+    }
+
+    /// A pane drawing from the compiled table says so.
+    ///
+    /// Otherwise a masking decision this binary made is indistinguishable from
+    /// one the holder's own agent made, which is the confident wrong answer
+    /// R6.4 exists to refuse.
+    #[test]
+    fn a_compiled_table_is_disclosed_as_one() {
+        let mut state = populated(PersonaTab::Attributes);
+        loaded(&mut state);
+        let shown = text(&render(&state));
+        assert!(
+            shown.contains("this build's own copy of the claim-type table"),
+            "{shown}"
+        );
+
+        // …and a pane drawing from the agent's own table says nothing at all,
+        // because there is nothing to disclose. The flag is what the render
+        // keys on, so setting it is the whole of the difference under test —
+        // the rows themselves resolve identically either way.
+        state.claim_types.is_fallback = false;
+        state.claim_types_loaded = true;
+        let served = text(&render(&state));
+        assert!(
+            !served.contains("this build's own copy"),
+            "the agent's own table needs no apology: {served}"
         );
     }
 
