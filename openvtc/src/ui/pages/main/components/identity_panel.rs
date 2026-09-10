@@ -57,8 +57,6 @@ use crate::state_handler::{
     state::ConnectionState,
 };
 use openvtc_core::display::display_identifier;
-use openvtc_core::persona::pool::PoolAttribute;
-use openvtc_core::persona::profile::ResolvedClaim;
 use ratatui::{
     style::{Style, Stylize},
     text::{Line, Span},
@@ -320,6 +318,65 @@ fn render_personas(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
 // Attributes
 // ---------------------------------------------------------------------------
 
+/// What the holder needs to know about the table these rows were painted from.
+///
+/// Two different sentences, and they are not variants of one:
+///
+/// - **The table is this build's, not the agent's.** Every mask on the screen
+///   below was decided by a compiled copy of spec 0.1 because the agent does
+///   not serve `persona/claim-types/list`. It is very likely right, and it
+///   cannot know about anything the deployment declared for itself — so the
+///   line says where the answers came from rather than claiming a fault.
+/// - **The agent refused part of its own configuration.** This one is a fault,
+///   and it is invisible without saying so: a refused row resolves exactly as
+///   it would with no configuration at all, so an operator's intended
+///   tightening is quietly not in force and the screen looks entirely normal.
+///
+/// Both are drawn under the mask explanation and above the rows, because they
+/// qualify the rows rather than the pane.
+fn push_registry_notes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
+    let registry = &state.claim_types;
+
+    if registry.is_fallback {
+        lines.push(
+            Line::from(
+                " Masking here follows this build's own copy of the claim-type table: your \
+                 agent is older than this client and does not serve one. Anything your \
+                 deployment added to it is not reflected below.",
+            )
+            .fg(COLOR_DARK_GRAY),
+        );
+        lines.push(Line::from(""));
+    }
+
+    if let Some(error) = &registry.unapplied.file_error {
+        lines.push(
+            Line::from(format!(
+                " Your agent could not read its own claim-type file, so none of what this \
+                 deployment declared is in force: {error}"
+            ))
+            .fg(COLOR_WARNING_ACCESSIBLE_RED),
+        );
+        lines.push(Line::from(""));
+    }
+
+    // Named one by one rather than counted. "3 claim types were rejected" sends
+    // the reader to a file to work out which; the token and the agent's own
+    // reason are the whole of what they need to fix it.
+    for rejected in &registry.unapplied.rejected {
+        lines.push(
+            Line::from(format!(
+                " Your agent would not apply `{}` from this deployment's claim types: {}",
+                rejected.claim_type, rejected.reason
+            ))
+            .fg(COLOR_WARNING_ACCESSIBLE_RED),
+        );
+    }
+    if !registry.unapplied.rejected.is_empty() {
+        lines.push(Line::from(""));
+    }
+}
+
 fn render_attributes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
     if push_agent_state(state, lines, "attributes") {
         return;
@@ -364,7 +421,11 @@ fn render_attributes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
     // key, and it says what the mask is worth. Only when something on screen is
     // actually masked — an explanation of a mechanism the holder is not looking
     // at is noise.
-    if state.attributes.iter().any(PoolAttribute::is_masked) {
+    if state
+        .attributes
+        .iter()
+        .any(|a| a.is_masked(&state.claim_types))
+    {
         lines.push(
             Line::from(
                 " Some attributes are masked by what they are — `s` shows the selected one. The \
@@ -375,6 +436,8 @@ fn render_attributes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         );
         lines.push(Line::from(""));
     }
+
+    push_registry_notes(state, lines);
 
     for (i, attr) in state.attributes.iter().enumerate() {
         let is_selected = i == state.attribute_selected;
@@ -411,9 +474,9 @@ fn render_attributes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         let revealed =
             is_selected && state.revealed_attribute.as_deref() == Some(attr.attribute_id.as_str());
         let value = if revealed {
-            attr.revealed_value(state.show_values)
+            attr.revealed_value(&state.claim_types, state.show_values)
         } else {
-            attr.display_value(state.show_values)
+            attr.display_value(&state.claim_types, state.show_values)
         };
         let mut value_spans = vec![Span::styled(
             format!("      {}", truncate(&value, 70)),
@@ -426,7 +489,7 @@ fn render_attributes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         // Without this the row is a wrong answer rather than a reduced one:
         // `••••••••` and "(no value)" are the same shape, and a holder reading
         // the first as the second believes they hold nothing.
-        if attr.is_masked() {
+        if attr.is_masked(&state.claim_types) {
             value_spans.push(Span::styled(
                 if revealed {
                     "   showing — s to mask"
@@ -482,9 +545,9 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
                 // a stale grant cannot open a row nobody chose.
                 let revealed = is_selected && state.revealed_face_claim == Some(i);
                 let value = if revealed {
-                    claim.revealed_value()
+                    claim.revealed_value(&state.claim_types)
                 } else {
-                    claim.display_value()
+                    claim.display_value(&state.claim_types)
                 };
                 let mut spans = vec![
                     Span::styled(
@@ -505,7 +568,7 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
                 // one: `••••••••` and "(no value)" are the same shape, and a
                 // holder reading the first as the second believes the face
                 // shows nothing.
-                if claim.is_masked() && !revealed {
+                if claim.is_masked(&state.claim_types) && !revealed {
                     spans.push(Span::styled(
                         if is_selected {
                             "   masked — s to show"
@@ -533,7 +596,11 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         // Said once, above the keys, rather than on every row — and only when
         // something on screen is actually masked, because explaining a
         // mechanism the holder is not looking at is noise.
-        if detail.resolved.iter().any(ResolvedClaim::is_masked) {
+        if detail
+            .resolved
+            .iter()
+            .any(|c| c.is_masked(&state.claim_types))
+        {
             lines.push(
                 Line::from(
                     " Some values are masked by what they are — `s` shows the selected one. The \

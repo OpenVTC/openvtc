@@ -791,6 +791,25 @@ pub struct IdentityState {
     pub disclosure_selected: usize,
 
     // ── Shared ───────────────────────────────────────────────────────────
+    /// The claim-type registry this agent resolves against — how each value is
+    /// shown, and what it takes to let it leave.
+    ///
+    /// Read once per load and held for the session, because it is a constant
+    /// for a given agent. It starts as the compiled copy so the very first
+    /// frame has a table to draw with; the read replaces it, and
+    /// [`Registry::is_fallback`](openvtc_core::persona::claim_types::Registry::is_fallback)
+    /// is what lets the pane say when a masking decision came from a table the
+    /// holder's own agent did not supply.
+    pub claim_types: openvtc_core::persona::claim_types::Registry,
+    /// Whether [`claim_types`](Self::claim_types) is still the compiled copy
+    /// this pane started with.
+    ///
+    /// Separate from `Registry::is_fallback`, which answers a different
+    /// question: that one says *the agent told us it cannot serve the table*,
+    /// this one says *we have not asked yet*. Collapsing them would make a
+    /// refresh re-read a constant, or make a never-asked pane claim its agent
+    /// is old.
+    pub claim_types_loaded: bool,
     /// The `did:key` this install authenticates to the agent as, when the
     /// account is agent-managed.
     ///

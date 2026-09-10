@@ -37,7 +37,7 @@ use vta_sdk::client::VtaClient;
 use vta_sdk::protocols::persona::ProfileEntry;
 
 use crate::errors::OpenVTCError;
-use crate::persona::claim_types;
+use crate::persona::claim_types::Registry;
 use crate::persona::pool::ProvenanceKind;
 
 /// A profile as a list row.
@@ -146,8 +146,8 @@ impl ResolvedClaim {
     /// See [`revealed_value`](Self::revealed_value) for lifting the mask on one
     /// claim.
     #[must_use]
-    pub fn display_value(&self) -> String {
-        self.value_line(false)
+    pub fn display_value(&self, registry: &Registry) -> String {
+        self.value_line(registry, false)
     }
 
     /// The same line with the mask lifted, for a holder who asked for this one
@@ -169,11 +169,11 @@ impl ResolvedClaim {
     /// site had to *name*. A boolean gets passed through, and the caller that
     /// ends up passing `true` is rarely the one that meant to.
     #[must_use]
-    pub fn revealed_value(&self) -> String {
-        self.value_line(true)
+    pub fn revealed_value(&self, registry: &Registry) -> String {
+        self.value_line(registry, true)
     }
 
-    fn value_line(&self, reveal: bool) -> String {
+    fn value_line(&self, registry: &Registry, reveal: bool) -> String {
         if self.stale {
             return "stale — can no longer be proven".to_string();
         }
@@ -181,7 +181,7 @@ impl ResolvedClaim {
             if reveal {
                 text
             } else {
-                claim_types::resolve(&self.claim_type).render(&text)
+                registry.resolve(&self.claim_type).render(&text)
             }
         };
         match &self.value {
@@ -194,10 +194,8 @@ impl ResolvedClaim {
     /// Whether [`display_value`](Self::display_value) is reducing a value we
     /// hold, so a face can say *masked* rather than let the row read as empty.
     #[must_use]
-    pub fn is_masked(&self) -> bool {
-        !self.stale
-            && self.value.is_some()
-            && claim_types::resolve(&self.claim_type).masks_by_default()
+    pub fn is_masked(&self, registry: &Registry) -> bool {
+        !self.stale && self.value.is_some() && registry.resolve(&self.claim_type).masks_by_default()
     }
 }
 
@@ -379,6 +377,15 @@ fn string_at(value: &Value, key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::persona::claim_types::Registry;
+
+    /// The compiled copy — spec 0.1 — as the table these tests resolve
+    /// against. A unit test must not depend on what a live agent happens to
+    /// serve, and every assertion below is about a token 0.1 declares.
+    fn reg() -> Registry {
+        Registry::vendored()
+    }
+
     use super::*;
 
     fn profile_wire(entries: Value) -> Value {
@@ -463,7 +470,7 @@ mod tests {
             "stale": false,
         }));
         assert!(claim.attribute_id.is_none());
-        assert_eq!(claim.display_value(), "Ace");
+        assert_eq!(claim.display_value(&reg()), "Ace");
     }
 
     /// A resolved read that came back without a value says so, rather than
@@ -475,7 +482,11 @@ mod tests {
             "value": Value::Null,
             "stale": true,
         }));
-        assert!(claim.display_value().contains("can no longer be proven"));
+        assert!(
+            claim
+                .display_value(&reg())
+                .contains("can no longer be proven")
+        );
     }
 
     /// A masked claim reads back whole when a caller asks for that one claim.
@@ -492,8 +503,8 @@ mod tests {
             "valueType": "string",
             "provenance": { "kind": "selfAsserted" },
         }));
-        assert_eq!(claim.display_value(), "••••••••••56");
-        assert_eq!(claim.revealed_value(), "+61400123456");
+        assert_eq!(claim.display_value(&reg()), "••••••••••56");
+        assert_eq!(claim.revealed_value(&reg()), "+61400123456");
     }
 
     /// A stale claim says it is stale under a reveal too.
@@ -508,7 +519,11 @@ mod tests {
             "value": "+61400123456",
             "stale": true,
         }));
-        assert!(claim.revealed_value().contains("can no longer be proven"));
+        assert!(
+            claim
+                .revealed_value(&reg())
+                .contains("can no longer be proven")
+        );
     }
 
     /// A face masks what its type says to mask, and says that it did.
@@ -524,16 +539,16 @@ mod tests {
             "valueType": "string",
             "provenance": { "kind": "selfAsserted" },
         }));
-        assert!(claim.is_masked());
-        assert_eq!(claim.display_value(), "••••••••••56");
+        assert!(claim.is_masked(&reg()));
+        assert_eq!(claim.display_value(&reg()), "••••••••••56");
 
         let normal = ResolvedClaim::from_wire(&serde_json::json!({
             "type": "name.given",
             "value": "Alice",
             "valueType": "string",
         }));
-        assert!(!normal.is_masked());
-        assert_eq!(normal.display_value(), "Alice");
+        assert!(!normal.is_masked(&reg()));
+        assert_eq!(normal.display_value(&reg()), "Alice");
     }
 
     /// Masked and absent stay distinguishable here too — a face that shows
@@ -545,8 +560,8 @@ mod tests {
             "type": "phone.mobile",
             "value": Value::Null,
         }));
-        assert!(!absent.is_masked());
-        assert_eq!(absent.display_value(), "(no value)");
+        assert!(!absent.is_masked(&reg()));
+        assert_eq!(absent.display_value(&reg()), "(no value)");
     }
 
     /// The put ordering: ticked entries first, preserved forms after, so the

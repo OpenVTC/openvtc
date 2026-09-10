@@ -32,7 +32,7 @@ use vta_sdk::client::VtaClient;
 use vta_sdk::protocols::persona::{Provenance, ValueType};
 
 use crate::errors::OpenVTCError;
-use crate::persona::claim_types::{self, ClaimTypeDefaults};
+use crate::persona::claim_types::{ClaimTypeDefaults, Registry};
 
 /// Where an attribute's value came from, reduced to what a panel can act on.
 ///
@@ -180,8 +180,8 @@ impl PoolAttribute {
 
     /// What this attribute's claim type says about showing its value.
     #[must_use]
-    pub fn claim_defaults(&self) -> ClaimTypeDefaults {
-        claim_types::resolve(&self.claim_type)
+    pub fn claim_defaults(&self, registry: &Registry) -> ClaimTypeDefaults {
+        registry.resolve(&self.claim_type)
     }
 
     /// Whether [`display_value`](Self::display_value) is showing a reduced form
@@ -191,8 +191,8 @@ impl PoolAttribute {
     /// empty: `••••••••` and "(no value)" are one glance apart, and one of them
     /// is a wrong answer about what the holder holds.
     #[must_use]
-    pub fn is_masked(&self) -> bool {
-        !self.stale && self.value.is_some() && self.claim_defaults().masks_by_default()
+    pub fn is_masked(&self, registry: &Registry) -> bool {
+        !self.stale && self.value.is_some() && self.claim_defaults(registry).masks_by_default()
     }
 
     /// The value as one line, or the reason there is none — masked when its
@@ -204,8 +204,8 @@ impl PoolAttribute {
     /// have it and are not painting it* — which is why it is
     /// [`is_masked`](Self::is_masked) rather than a fourth string here.
     #[must_use]
-    pub fn display_value(&self, values_requested: bool) -> String {
-        self.value_line(values_requested, false)
+    pub fn display_value(&self, registry: &Registry, values_requested: bool) -> String {
+        self.value_line(registry, values_requested, false)
     }
 
     /// The same line with the mask lifted, for a holder who asked for this one
@@ -217,11 +217,11 @@ impl PoolAttribute {
     /// gets passed through, and the caller that ends up passing `true` is
     /// rarely the one that meant to.
     #[must_use]
-    pub fn revealed_value(&self, values_requested: bool) -> String {
-        self.value_line(values_requested, true)
+    pub fn revealed_value(&self, registry: &Registry, values_requested: bool) -> String {
+        self.value_line(registry, values_requested, true)
     }
 
-    fn value_line(&self, values_requested: bool, reveal: bool) -> String {
+    fn value_line(&self, registry: &Registry, values_requested: bool, reveal: bool) -> String {
         if self.stale {
             return match &self.stale_reason {
                 Some(reason) => format!("stale · {reason} — can no longer be proven"),
@@ -232,7 +232,7 @@ impl PoolAttribute {
             if reveal {
                 text
             } else {
-                self.claim_defaults().render(&text)
+                self.claim_defaults(registry).render(&text)
             }
         };
         match &self.value {
@@ -442,6 +442,15 @@ pub fn parse_typed_value(text: &str, value_type: ValueType) -> Result<Value, Str
 
 #[cfg(test)]
 mod tests {
+    use crate::persona::claim_types::Registry;
+
+    /// The compiled copy — spec 0.1 — as the table these tests resolve
+    /// against. A unit test must not depend on what a live agent happens to
+    /// serve, and every assertion below is about a token 0.1 declares.
+    fn reg() -> Registry {
+        Registry::vendored()
+    }
+
     use super::*;
 
     fn wire(provenance: &str) -> Value {
@@ -494,15 +503,18 @@ mod tests {
     #[test]
     fn the_three_reasons_for_an_absent_value_read_differently() {
         let mut attr = PoolAttribute::from_wire(&wire("selfAsserted"));
-        assert_eq!(attr.display_value(false), "(hidden)");
-        assert_eq!(attr.display_value(true), "(no value)");
+        assert_eq!(attr.display_value(&reg(), false), "(hidden)");
+        assert_eq!(attr.display_value(&reg(), true), "(no value)");
         attr.stale = true;
-        assert!(attr.display_value(true).contains("can no longer be proven"));
+        assert!(
+            attr.display_value(&reg(), true)
+                .contains("can no longer be proven")
+        );
         // The reason is shown beside the word, never instead of it: "stale"
         // alone says something is wrong without saying what.
         attr.stale_reason = Some("revoked".into());
         assert_eq!(
-            attr.display_value(true),
+            attr.display_value(&reg(), true),
             "stale · revoked — can no longer be proven"
         );
     }
@@ -515,7 +527,7 @@ mod tests {
         let mut attr = PoolAttribute::from_wire(&wire("selfAsserted"));
         attr.claim_type = "name.given".into();
         attr.value = Some(Value::String("Alice".into()));
-        assert_eq!(attr.display_value(true), "Alice");
+        assert_eq!(attr.display_value(&reg(), true), "Alice");
     }
 
     /// A typed field stores the type it declares. The number case is the one
@@ -551,9 +563,9 @@ mod tests {
         attr.claim_type = "payment.card".into();
         attr.value = Some(Value::String("4242424242424242".into()));
 
-        assert!(attr.is_masked());
-        assert_eq!(attr.display_value(true), "••••••••••••4242");
-        assert_eq!(attr.revealed_value(true), "4242424242424242");
+        assert!(attr.is_masked(&reg()));
+        assert_eq!(attr.display_value(&reg(), true), "••••••••••••4242");
+        assert_eq!(attr.revealed_value(&reg(), true), "4242424242424242");
     }
 
     /// A type whose style is `none` is shown as it is held. Masking every attribute
@@ -564,8 +576,8 @@ mod tests {
         let mut attr = PoolAttribute::from_wire(&wire("selfAsserted"));
         attr.claim_type = "name.given".into();
         attr.value = Some(Value::String("Alice".into()));
-        assert!(!attr.is_masked());
-        assert_eq!(attr.display_value(true), "Alice");
+        assert!(!attr.is_masked(&reg()));
+        assert_eq!(attr.display_value(&reg(), true), "Alice");
     }
 
     /// Sensitivity is not what triggers the mask — the style is. An email
@@ -575,9 +587,9 @@ mod tests {
     fn a_normal_type_with_a_style_is_still_masked() {
         let mut attr = PoolAttribute::from_wire(&wire("selfAsserted"));
         attr.value = Some(Value::String("alice@example.com".into()));
-        assert!(attr.is_masked());
-        assert_eq!(attr.display_value(true), "a•••@example.com");
-        assert_eq!(attr.revealed_value(true), "alice@example.com");
+        assert!(attr.is_masked(&reg()));
+        assert_eq!(attr.display_value(&reg(), true), "a•••@example.com");
+        assert_eq!(attr.revealed_value(&reg(), true), "alice@example.com");
     }
 
     /// A vocabulary this build has never seen is masked, because nothing here
@@ -587,8 +599,8 @@ mod tests {
         let mut attr = PoolAttribute::from_wire(&wire("selfAsserted"));
         attr.claim_type = "x:employer.badge".into();
         attr.value = Some(Value::String("A-1174".into()));
-        assert!(attr.is_masked());
-        assert_eq!(attr.display_value(true), "••••••••");
+        assert!(attr.is_masked(&reg()));
+        assert_eq!(attr.display_value(&reg(), true), "••••••••");
     }
 
     /// Masked and absent are different states, and a caller has to be able to
@@ -598,12 +610,12 @@ mod tests {
     fn masked_is_not_the_same_state_as_absent() {
         let mut attr = PoolAttribute::from_wire(&wire("selfAsserted"));
         attr.claim_type = "person.birthDate".into();
-        assert!(!attr.is_masked(), "nothing held is nothing to mask");
-        assert_eq!(attr.display_value(true), "(no value)");
-        assert_eq!(attr.display_value(false), "(hidden)");
+        assert!(!attr.is_masked(&reg()), "nothing held is nothing to mask");
+        assert_eq!(attr.display_value(&reg(), true), "(no value)");
+        assert_eq!(attr.display_value(&reg(), false), "(hidden)");
 
         attr.value = Some(Value::String("1990-01-01".into()));
-        assert!(attr.is_masked());
+        assert!(attr.is_masked(&reg()));
     }
 
     /// A stale value keeps saying it is stale. The reason it cannot be shown is
@@ -617,9 +629,9 @@ mod tests {
         attr.stale = true;
         attr.stale_reason = Some("revoked".into());
 
-        assert!(!attr.is_masked());
+        assert!(!attr.is_masked(&reg()));
         assert_eq!(
-            attr.display_value(true),
+            attr.display_value(&reg(), true),
             "stale · revoked — can no longer be proven"
         );
     }

@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 
 use openvtc_core::persona::{
-    binding, disclosure,
+    binding, claim_types, disclosure,
     pool::{self, AttributeDraft, PoolAttribute},
     profile::{self, ProfileDetail, ProfileSummary},
 };
@@ -632,6 +632,12 @@ pub(crate) struct PersonaReadJob {
     pub(crate) admin_vta: VtaClient,
     pub(crate) include_values: bool,
     pub(crate) targets: Vec<BindingTarget>,
+    /// Whether this read should also fetch the claim-type registry.
+    ///
+    /// Once per session, not once per refresh: the table is a constant for a
+    /// given agent, and a round-trip on every `r` would buy nothing but
+    /// latency on the one action whose whole point is to feel immediate.
+    pub(crate) needs_claim_types: bool,
 }
 
 impl PersonaReadJob {
@@ -662,12 +668,22 @@ impl PersonaReadJob {
                 .map_err(|e| format!("{e}")),
             None => Ok(Vec::new()),
         };
+        let claim_types = match self.needs_claim_types {
+            true => Some(
+                claim_types::Registry::fetch(&self.admin_vta)
+                    .await
+                    .map(Box::new)
+                    .map_err(|e| format!("{e}")),
+            ),
+            false => None,
+        };
         let bindings = persona_binding_refresh::resolve_batch(self.admin_vta, self.targets).await;
         PersonaOutcome::Read {
             attributes,
             profiles,
             disclosures,
             bindings,
+            claim_types,
             include_values: self.include_values,
         }
     }
@@ -762,6 +778,16 @@ pub(crate) enum PersonaOutcome {
         profiles: Result<Vec<ProfileSummary>, String>,
         disclosures: Result<Vec<disclosure::DisclosureRow>, String>,
         bindings: HashMap<BindingTarget, openvtc_core::persona::binding::BindingSummary>,
+        /// The claim-type registry, when this read asked for it. `None` means
+        /// it was not asked for — a refresh over a table already held — which
+        /// is a different thing from a read that failed.
+        ///
+        /// Boxed because this variant is already the widest of the four and a
+        /// whole registry inline pushes `DispatchOutcome` past what
+        /// `clippy::large_enum_variant` will accept: every outcome, including
+        /// the three one-word ones, would then be moved at the width of the
+        /// table.
+        claim_types: Option<Result<Box<claim_types::Registry>, String>>,
         include_values: bool,
     },
     Written {
@@ -791,6 +817,7 @@ impl PersonaOutcome {
                 profiles,
                 disclosures,
                 bindings,
+                claim_types,
                 include_values,
             } => {
                 // A listing for a filter the operator has since flipped is
@@ -800,13 +827,27 @@ impl PersonaOutcome {
                     return;
                 }
                 // The first failure is the one shown, and it is shown *instead*
-                // of an empty list — the whole reason `load_error` exists.
+                // of an empty list — the whole reason `load_error` exists. The
+                // registry is in that chain rather than silently below it: a
+                // failed read leaves the pane drawing from the compiled copy,
+                // and a masking decision this binary made where the agent's own
+                // table was supposed to speak is exactly the kind of thing R6.4
+                // says must not pass for a normal screen.
                 p.load_error = attributes
                     .as_ref()
                     .err()
                     .or(profiles.as_ref().err())
                     .or(disclosures.as_ref().err())
+                    .or_else(|| claim_types.as_ref().and_then(|r| r.as_ref().err()))
                     .cloned();
+                // A successful read is kept whatever else failed, and marks the
+                // table read for the session; a failed one leaves the previous
+                // table in place and stays unmarked, so the next refresh asks
+                // again rather than settling for spec 0.1 forever.
+                if let Some(Ok(registry)) = claim_types {
+                    p.claim_types = *registry;
+                    p.claim_types_loaded = true;
+                }
                 if let Ok(list) = attributes {
                     p.attribute_selected = p.attribute_selected.min(list.len().saturating_sub(1));
                     p.attributes = list.into();
@@ -1079,6 +1120,7 @@ mod tests {
             profiles: Ok(Vec::new()),
             disclosures: Ok(Vec::new()),
             bindings: HashMap::new(),
+            claim_types: None,
             include_values: false,
         }
         .apply(&mut state);
@@ -1172,7 +1214,10 @@ mod tests {
         let mut attr = attribute("01A");
         attr.claim_type = "payment.card".into();
         attr.value = Some(serde_json::json!("4242424242424242"));
-        assert!(attr.is_masked(), "the fixture has to be a masked one");
+        assert!(
+            attr.is_masked(&claim_types::Registry::vendored()),
+            "the fixture has to be a masked one"
+        );
 
         let mut state = state_with(IdentityState {
             attributes: vec![attr].into(),
@@ -1369,6 +1414,7 @@ mod tests {
             profiles: Ok(Vec::new()),
             disclosures: Ok(Vec::new()),
             bindings: HashMap::new(),
+            claim_types: None,
             include_values: true,
         }
         .apply(&mut re_read);
@@ -1400,6 +1446,7 @@ mod tests {
             profiles: Ok(Vec::new()),
             disclosures: Ok(Vec::new()),
             bindings: HashMap::new(),
+            claim_types: None,
             include_values: false,
         }
         .apply(&mut state);
@@ -1426,6 +1473,7 @@ mod tests {
             profiles: Ok(Vec::new()),
             disclosures: Ok(Vec::new()),
             bindings: HashMap::new(),
+            claim_types: None,
             include_values: false,
         }
         .apply(&mut state);
