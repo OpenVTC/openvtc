@@ -1314,6 +1314,20 @@ mod tsp_discovery_tests {
     ///
     /// Only `did:web` and `did:webvh` have a domain to synthesize from, which is
     /// why the test above needs a method that does not.
+    ///
+    /// **The address is loopback with a closed port on purpose, and must stay
+    /// that way.** This asserts what the fallback does when resolution fails,
+    /// so it needs resolution to fail *quickly*: the call is wrapped in
+    /// [`TSP_DISCOVERY_TIMEOUT`], and a timeout reports `Unavailable` — the
+    /// other outcome, which flips the assertion.
+    ///
+    /// It named `nothing-seeded.example` until this bump, which made a real DNS
+    /// query. A resolver that answers NXDOMAIN instantly gives `NotAdvertised`;
+    /// one that hangs on an unknown TLD gives a 5s timeout and `Unavailable`.
+    /// So the test asserted a property of the environment's DNS as much as of
+    /// this code, and duly failed on a macOS runner while passing everywhere
+    /// else. Port 1 on 127.0.0.1 is refused by the kernel, with no name to look
+    /// up, so every machine reaches the same branch the same way.
     #[tokio::test]
     async fn an_unresolvable_did_web_falls_back_rather_than_failing() {
         let resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build())
@@ -1321,7 +1335,7 @@ mod tsp_discovery_tests {
             .expect("local DID cache");
 
         assert_eq!(
-            discover_tsp_mediator("did:web:nothing-seeded.example", &resolver).await,
+            discover_tsp_mediator("did:web:127.0.0.1%3A1", &resolver).await,
             TspDiscovery::NotAdvertised,
             "the URL fallback makes this look resolved"
         );
