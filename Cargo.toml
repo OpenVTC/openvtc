@@ -292,9 +292,12 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # had been cut to 0.3 while three of the four dispatch runners still sent 0.2 or
 # 0.1, so setup's last step died with `unsupportedType` against a healthy VTA,
 # and the reply came back labelled with a schema it could not satisfy). On this
-# line 0.34.0 is the first release of its minor and there is no such release to
-# exclude, so the patch is named only to record what was verified.
-vta-sdk = { version = "0.34.0", features = [
+# line the patch names 0.34.1, and it is a floor rather than a record: 0.34.0
+# has neither `persona/facet/*` nor `persona/claim-types/list`, and the identity
+# pane now calls both. On 0.34.0 the pane compiles and then cannot find the
+# constants; naming the patch is what turns that into a resolver error at the
+# point where it can be read.
+vta-sdk = { version = "0.34.1", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
