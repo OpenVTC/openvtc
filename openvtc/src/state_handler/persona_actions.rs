@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 
 use openvtc_core::persona::{
-    binding, claim_types, disclosure, family,
+    binding, claim_types, disclosure, facet, family,
     pool::{self, AttributeDraft, PoolAttribute},
     profile::{self, ProfileDetail, ProfileSummary},
 };
@@ -46,8 +46,8 @@ use vta_sdk::client::VtaClient;
 
 use crate::state_handler::actions::PersonaAction;
 use crate::state_handler::main_page::content::{
-    AttributeField, AttributeForm, BindPicker, PersonaConfirm, PersonaMode, PersonaTab,
-    ProfileForm, ProfileFormFocus, VALUE_TYPES,
+    AttributeField, AttributeForm, BindPicker, FacePlacer, FacetForm, FacetFormFocus,
+    PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus, VALUE_TYPES,
 };
 use crate::state_handler::persona_binding_refresh::{self, BindingTarget};
 use crate::state_handler::state::State;
@@ -88,6 +88,23 @@ pub(crate) enum PersonaJob {
         /// to populate a form the holder may cancel is a read that did not need
         /// to happen.
         edit: bool,
+    },
+    /// Create or replace one world.
+    FacetPut(facet::FacetDraft),
+    FacetDelete {
+        facet_id: String,
+        expected_version: Option<u64>,
+    },
+    /// Move one face into a world, or out of every world.
+    ///
+    /// Carries the world list it was decided against, because placing is two
+    /// conditional writes and both need the versions that were on screen when
+    /// the holder chose. A job that re-read first would be deciding against a
+    /// list nobody looked at.
+    FacePlace {
+        facets: Vec<facet::Facet>,
+        profile_id: String,
+        into: Option<String>,
     },
     /// Decide what one persona presents in one context.
     Bind {
@@ -140,6 +157,7 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                 PersonaTab::Personas => p.persona_selected = *index,
                 PersonaTab::Attributes => p.attribute_selected = *index,
                 PersonaTab::Profiles => p.profile_selected = *index,
+                PersonaTab::Facets => p.facet_selected = *index,
                 PersonaTab::Communities => p.membership_selected = *index,
                 PersonaTab::Disclosures => p.disclosure_selected = *index,
             }
@@ -295,6 +313,62 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             PersonaEffect::None
         }
 
+        PersonaAction::FacePlaceOpen(index) => {
+            let p = &mut state.main_page.content_panel.identity;
+            let Some(face) = p.profiles.get(*index).cloned() else {
+                return PersonaEffect::None;
+            };
+            // Start on the world that holds it now, so ⏎ on an unchanged
+            // picker is a no-op rather than a silent removal.
+            let cursor = p
+                .facets
+                .iter()
+                .position(|f| f.holds_face(&face.profile_id))
+                .map_or(0, |i| i + 1);
+            p.mode = PersonaMode::PlaceFace(FacePlacer {
+                profile_id: face.profile_id.clone(),
+                face_name: face.display_name().to_string(),
+                cursor,
+                ..FacePlacer::default()
+            });
+            PersonaEffect::None
+        }
+
+        // ── Worlds ───────────────────────────────────────────────────────
+        PersonaAction::FacetNew => {
+            state.main_page.content_panel.identity.mode = PersonaMode::Facet(FacetForm::default());
+            PersonaEffect::None
+        }
+        PersonaAction::FacetEdit(index) => {
+            let p = &mut state.main_page.content_panel.identity;
+            let Some(facet) = p.facets.get(*index).cloned() else {
+                return PersonaEffect::None;
+            };
+            p.mode = PersonaMode::Facet(form_for_facet(&facet));
+            PersonaEffect::None
+        }
+        PersonaAction::FacetDeleteArm(index) => {
+            let p = &mut state.main_page.content_panel.identity;
+            let Some(facet) = p.facets.get(*index) else {
+                return PersonaEffect::None;
+            };
+            // Counted against the face list rather than off the record: a world
+            // may name faces that have since been deleted, and the prompt has
+            // to say the number the holder can see.
+            let faces = facet
+                .face_ids
+                .iter()
+                .filter(|id| p.profiles.iter().any(|x| &&x.profile_id == id))
+                .count();
+            p.confirm = PersonaConfirm::DeleteFacet {
+                facet_id: facet.facet_id.clone(),
+                name: facet.display_name().to_string(),
+                expected_version: Some(facet.version),
+                faces,
+            };
+            PersonaEffect::None
+        }
+
         // ── Communities ──────────────────────────────────────────────────
         PersonaAction::BindOpen(index) => {
             let p = &mut state.main_page.content_panel.identity;
@@ -359,7 +433,18 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                         form.name.handle_event(&event);
                     }
                 }
-                PersonaMode::Bind(_) | PersonaMode::View => {}
+                PersonaMode::Facet(form) => match form.focus {
+                    FacetFormFocus::Name => {
+                        form.name.handle_event(&event);
+                    }
+                    FacetFormFocus::Icon => {
+                        form.icon.handle_event(&event);
+                    }
+                    // The colour is a choice, not a text field: ←/→ move it and
+                    // a keystroke here is not an edit.
+                    FacetFormFocus::Colour => {}
+                },
+                PersonaMode::PlaceFace(_) | PersonaMode::Bind(_) | PersonaMode::View => {}
             }
             PersonaEffect::None
         }
@@ -379,13 +464,23 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                         ProfileFormFocus::Entries => ProfileFormFocus::Name,
                     };
                 }
-                PersonaMode::Bind(_) | PersonaMode::View => {}
+                PersonaMode::Facet(form) => {
+                    form.focus = if *forwards {
+                        form.focus.next()
+                    } else {
+                        form.focus.prev()
+                    };
+                }
+                PersonaMode::PlaceFace(_) | PersonaMode::Bind(_) | PersonaMode::View => {}
             }
             PersonaEffect::None
         }
         PersonaAction::FormCycle(forwards) => {
             let attribute_count = state.main_page.content_panel.identity.attributes.len();
             let option_count = state.main_page.content_panel.identity.profiles.len() + 1;
+            // …and one more than the worlds, because row 0 is always "belongs
+            // to no world".
+            let world_count = state.main_page.content_panel.identity.facets.len() + 1;
             let p = &mut state.main_page.content_panel.identity;
             match &mut p.mode {
                 PersonaMode::Attribute(form) => {
@@ -400,6 +495,14 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                 }
                 PersonaMode::Profile(form) => {
                     form.cursor = step(form.cursor, attribute_count, *forwards);
+                }
+                PersonaMode::Facet(form) => {
+                    if form.focus == FacetFormFocus::Colour {
+                        form.colour = step(form.colour, facet::Colour::all().len(), *forwards);
+                    }
+                }
+                PersonaMode::PlaceFace(picker) => {
+                    picker.cursor = step(picker.cursor, world_count, *forwards);
                 }
                 PersonaMode::Bind(picker) => {
                     picker.cursor = step(picker.cursor, option_count, *forwards);
@@ -463,6 +566,14 @@ fn confirm_yes(state: &mut State) -> PersonaEffect {
         PersonaConfirm::DeleteProfile {
             profile_id, unbind, ..
         } => PersonaEffect::Job(PersonaJob::ProfileDelete { profile_id, unbind }),
+        PersonaConfirm::DeleteFacet {
+            facet_id,
+            expected_version,
+            ..
+        } => PersonaEffect::Job(PersonaJob::FacetDelete {
+            facet_id,
+            expected_version,
+        }),
         PersonaConfirm::Unbind {
             context_id,
             persona_did,
@@ -483,6 +594,17 @@ fn form_submit(state: &mut State) -> PersonaEffect {
         .content_panel
         .identity
         .profiles
+        .iter()
+        .cloned()
+        .collect();
+    // Taken here, before the mode is borrowed mutably, and handed to the job
+    // whole: placing a face is two conditional writes, and both need the
+    // versions that were on screen when the holder chose.
+    let facets: Vec<facet::Facet> = state
+        .main_page
+        .content_panel
+        .identity
+        .facets
         .iter()
         .cloned()
         .collect();
@@ -534,6 +656,53 @@ fn form_submit(state: &mut State) -> PersonaEffect {
                 expected_version: form.expected_version,
             })
         }
+        PersonaMode::Facet(form) => {
+            let name = form.name.value().trim().to_string();
+            if name.is_empty() {
+                form.error = Some("A world needs a name — \"Work\", \"Home\".".to_string());
+                return PersonaEffect::None;
+            }
+            let icon = form.icon.value().trim();
+            // Bounded at 8 bytes by the schema, because it is a mark and not a
+            // field: anything longer is text, and text belongs in the name
+            // where it will be laid out. Refused here rather than at the agent
+            // so the holder is told which field, while they are still in it.
+            if icon.len() > 8 {
+                form.error = Some(
+                    "A mark is one or two emoji. Longer text belongs in the name.".to_string(),
+                );
+                return PersonaEffect::None;
+            }
+            form.error = None;
+            form.working = true;
+            PersonaEffect::Job(PersonaJob::FacetPut(facet::FacetDraft {
+                facet_id: form.facet_id.clone(),
+                name,
+                colour: facet::Colour::all()[form.colour.min(facet::Colour::all().len() - 1)],
+                icon: (!icon.is_empty()).then(|| icon.to_string()),
+                // Straight back out as they came in. See `FacetForm`.
+                face_ids: form.face_ids.clone(),
+                attribute_ids: form.attribute_ids.clone(),
+                // `Some(0)` on a create, so a retry after a lost response
+                // cannot replace what the first attempt made.
+                expected_version: form.expected_version.or(Some(0)),
+            }))
+        }
+        PersonaMode::PlaceFace(picker) => {
+            // Row 0 is "belongs to no world"; the rest index the world list.
+            let into = picker
+                .cursor
+                .checked_sub(1)
+                .and_then(|i| facets.get(i))
+                .map(|f| f.facet_id.clone());
+            picker.error = None;
+            picker.working = true;
+            PersonaEffect::Job(PersonaJob::FacePlace {
+                facets,
+                profile_id: picker.profile_id.clone(),
+                into,
+            })
+        }
         PersonaMode::Bind(picker) => {
             // Row 0 is "nothing"; the rest index the profile list.
             let profile_id = picker
@@ -570,6 +739,14 @@ pub(crate) fn release_form(state: &mut State, reason: String) {
         PersonaMode::Profile(form) => {
             form.working = false;
             form.error = Some(reason);
+        }
+        PersonaMode::Facet(form) => {
+            form.working = false;
+            form.error = Some(reason);
+        }
+        PersonaMode::PlaceFace(picker) => {
+            picker.working = false;
+            picker.error = Some(reason);
         }
         PersonaMode::Bind(picker) => {
             picker.working = false;
@@ -619,6 +796,42 @@ fn step(cursor: usize, len: usize, forwards: bool) -> usize {
 // The jobs
 // ---------------------------------------------------------------------------
 
+/// The editor, filled from a world that already exists.
+///
+/// Membership comes across whole and untouched. `persona/facet/put` is a
+/// replace, so a form that carried only the fields it can edit would empty the
+/// world's faces and attributes the first time somebody renamed it — and the
+/// world would still be there afterwards, just with nothing in it.
+fn form_for_facet(facet: &facet::Facet) -> FacetForm {
+    FacetForm {
+        facet_id: Some(facet.facet_id.clone()),
+        expected_version: Some(facet.version),
+        name: tui_input::Input::new(facet.name.clone()),
+        colour: facet::Colour::all()
+            .iter()
+            .position(|c| *c == facet.colour)
+            .unwrap_or_default(),
+        icon: tui_input::Input::new(facet.icon.clone().unwrap_or_default()),
+        face_ids: facet.face_ids.clone(),
+        attribute_ids: facet.attribute_ids.clone(),
+        ..FacetForm::default()
+    }
+}
+
+/// Where a face sorts: by the world that holds it, in the order the worlds are
+/// listed, and after every placed face when no world holds it.
+///
+/// `usize::MAX` for a homeless face rather than a sentinel at the front,
+/// because "belongs to no world" is the group the console draws last and it is
+/// the honest end of the list: every face belonging somewhere is fine too, and
+/// leading with the ones that do not would read as a fault.
+fn world_rank(facets: &[facet::Facet], profile_id: &str) -> usize {
+    facets
+        .iter()
+        .position(|f| f.holds_face(profile_id))
+        .unwrap_or(usize::MAX)
+}
+
 /// How much of the disclosure history one read asks for.
 ///
 /// The record is append-only and never trimmed, so "all of it" is a query that
@@ -662,6 +875,9 @@ impl PersonaReadJob {
         let profiles = profile::list(&self.admin_vta)
             .await
             .map_err(|e| format!("{e}"));
+        let facets = facet::list(&self.admin_vta)
+            .await
+            .map_err(|e| format!("{e}"));
         let disclosures = match std::num::NonZeroU64::new(DISCLOSURE_PAGE) {
             Some(limit) => disclosure::history(&self.admin_vta, limit)
                 .await
@@ -681,6 +897,7 @@ impl PersonaReadJob {
         PersonaOutcome::Read {
             attributes,
             profiles,
+            facets,
             disclosures,
             bindings,
             claim_types,
@@ -750,6 +967,67 @@ impl PersonaJobRun {
                     .await
                     .map_err(|e| format!("{e}")),
             },
+            PersonaJob::FacetPut(draft) => PersonaOutcome::Written {
+                verb: match draft.facet_id.is_some() {
+                    true => "Saved the world",
+                    false => "Made the world",
+                },
+                error: facet::put(&client, draft)
+                    .await
+                    .err()
+                    .map(|e| format!("{e}")),
+            },
+            PersonaJob::FacetDelete {
+                facet_id,
+                expected_version,
+            } => match facet::delete(&client, &facet_id, expected_version).await {
+                // The count finishes the sentence honestly. "Deleted the world"
+                // on its own reads to almost everyone as though the faces in it
+                // went too, and they did not: a world arranges, it does not
+                // contain.
+                Ok(deletion) if deletion.released_faces > 0 => PersonaOutcome::Deleted {
+                    message: format!(
+                        "Deleted the world. {} face{} kept — {} belong{} to no world now.",
+                        deletion.released_faces,
+                        if deletion.released_faces == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
+                        if deletion.released_faces == 1 {
+                            "it"
+                        } else {
+                            "they"
+                        },
+                        if deletion.released_faces == 1 {
+                            "s"
+                        } else {
+                            ""
+                        },
+                    ),
+                },
+                Ok(_) => PersonaOutcome::Deleted {
+                    message: "Deleted the world. Nothing else changed.".to_string(),
+                },
+                Err(e) => PersonaOutcome::Written {
+                    verb: "Deleted the world",
+                    error: Some(format!("{e}")),
+                },
+            },
+            PersonaJob::FacePlace {
+                facets,
+                profile_id,
+                into,
+            } => PersonaOutcome::Written {
+                verb: match into.is_some() {
+                    true => "Moved the face",
+                    false => "Took the face out of its world",
+                },
+                error: facet::place_face(&client, &facets, &profile_id, into.as_deref())
+                    .await
+                    .err()
+                    .map(|e| format!("{e}")),
+            },
             PersonaJob::Bind {
                 context_id,
                 persona_did,
@@ -776,6 +1054,7 @@ pub(crate) enum PersonaOutcome {
     Read {
         attributes: Result<Vec<PoolAttribute>, String>,
         profiles: Result<Vec<ProfileSummary>, String>,
+        facets: Result<Vec<facet::Facet>, String>,
         disclosures: Result<Vec<disclosure::DisclosureRow>, String>,
         bindings: HashMap<BindingTarget, openvtc_core::persona::binding::BindingSummary>,
         /// The claim-type registry, when this read asked for it. `None` means
@@ -794,6 +1073,10 @@ pub(crate) enum PersonaOutcome {
         verb: &'static str,
         error: Option<String>,
     },
+    /// A deletion that succeeded and has something to say about what it left
+    /// behind. Distinct from a [`Written`](Self::Written) success, whose whole
+    /// message is its verb.
+    Deleted { message: String },
     ProfileRead {
         edit: bool,
         result: Result<ProfileDetail, String>,
@@ -815,6 +1098,7 @@ impl PersonaOutcome {
             PersonaOutcome::Read {
                 attributes,
                 profiles,
+                facets,
                 disclosures,
                 bindings,
                 claim_types,
@@ -837,6 +1121,7 @@ impl PersonaOutcome {
                     .as_ref()
                     .err()
                     .or(profiles.as_ref().err())
+                    .or(facets.as_ref().err())
                     .or(disclosures.as_ref().err())
                     .or_else(|| claim_types.as_ref().and_then(|r| r.as_ref().err()))
                     .cloned();
@@ -869,7 +1154,23 @@ impl PersonaOutcome {
                     // the holder chose.
                     p.revealed_attribute = None;
                 }
-                if let Ok(list) = profiles {
+                // Worlds before faces: the face list is sorted by which world
+                // holds each face, so the sort needs the answer that is about
+                // to land rather than the one from the previous read.
+                if let Ok(list) = facets {
+                    p.facet_selected = p.facet_selected.min(list.len().saturating_sub(1));
+                    p.facets = list.into();
+                }
+                if let Ok(mut list) = profiles {
+                    // Grouped order, for the reason the pool is grouped here
+                    // too: the cursor walks this slice by index, so the drawn
+                    // order has to *be* the list order or `j` moves the
+                    // highlight between worlds at random.
+                    list.sort_by(|a, b| {
+                        world_rank(&p.facets, &a.profile_id)
+                            .cmp(&world_rank(&p.facets, &b.profile_id))
+                            .then_with(|| a.display_name().cmp(b.display_name()))
+                    });
                     p.profile_selected = p.profile_selected.min(list.len().saturating_sub(1));
                     p.profiles = list.into();
                 }
@@ -910,6 +1211,14 @@ impl PersonaOutcome {
                                 form.working = false;
                                 form.error = Some(e.clone());
                             }
+                            PersonaMode::Facet(form) => {
+                                form.working = false;
+                                form.error = Some(e.clone());
+                            }
+                            PersonaMode::PlaceFace(picker) => {
+                                picker.working = false;
+                                picker.error = Some(e.clone());
+                            }
                             _ => p.status_message = Some(e.clone()),
                         }
                         state
@@ -917,6 +1226,13 @@ impl PersonaOutcome {
                             .log_error(format!("{verb} failed"), e.as_str());
                     }
                 }
+            }
+
+            PersonaOutcome::Deleted { message } => {
+                p.refresh_queued = true;
+                p.mode = PersonaMode::View;
+                p.status_message = Some(message.clone());
+                state.main_page.log(message);
             }
 
             PersonaOutcome::ProfileRead { edit, result } => match result {
@@ -1132,6 +1448,7 @@ mod tests {
             attributes: Ok(vec![attribute("01B"), attribute("01A")]),
             profiles: Ok(Vec::new()),
             disclosures: Ok(Vec::new()),
+            facets: Ok(Vec::new()),
             bindings: HashMap::new(),
             claim_types: None,
             include_values: false,
@@ -1426,6 +1743,7 @@ mod tests {
             attributes: Ok(vec![attribute("01B"), attribute("01A")]),
             profiles: Ok(Vec::new()),
             disclosures: Ok(Vec::new()),
+            facets: Ok(Vec::new()),
             bindings: HashMap::new(),
             claim_types: None,
             include_values: true,
@@ -1458,6 +1776,7 @@ mod tests {
             attributes: Ok(vec![attribute("01B"), attribute("01C")]),
             profiles: Ok(Vec::new()),
             disclosures: Ok(Vec::new()),
+            facets: Ok(Vec::new()),
             bindings: HashMap::new(),
             claim_types: None,
             include_values: false,
@@ -1485,6 +1804,7 @@ mod tests {
             attributes: Err("connection refused".to_string()),
             profiles: Ok(Vec::new()),
             disclosures: Ok(Vec::new()),
+            facets: Ok(Vec::new()),
             bindings: HashMap::new(),
             claim_types: None,
             include_values: false,

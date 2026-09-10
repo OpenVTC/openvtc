@@ -48,6 +48,7 @@
 pub mod binding;
 pub mod claim_types;
 pub mod disclosure;
+pub mod facet;
 pub mod family;
 pub mod pool;
 pub mod profile;

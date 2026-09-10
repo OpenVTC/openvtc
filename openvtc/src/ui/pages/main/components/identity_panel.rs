@@ -51,12 +51,14 @@ use crate::colors::{
 };
 use crate::state_handler::{
     main_page::content::{
-        AttributeField, AttributeForm, BindPicker, IdentityState, PersonaConfirm, PersonaMode,
-        PersonaTab, ProfileForm, ProfileFormFocus, VALUE_TYPES,
+        AttributeField, AttributeForm, BindPicker, FacePlacer, FacetForm, FacetFormFocus,
+        IdentityState, PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus,
+        VALUE_TYPES,
     },
     state::ConnectionState,
 };
 use openvtc_core::display::display_identifier;
+use openvtc_core::persona::facet::Colour;
 use openvtc_core::persona::family::Family;
 use ratatui::{
     style::{Style, Stylize},
@@ -91,6 +93,8 @@ pub fn render(state: &IdentityState) -> Vec<Line<'static>> {
     match &state.mode {
         PersonaMode::Attribute(form) => render_attribute_form(form),
         PersonaMode::Profile(form) => render_profile_form(state, form),
+        PersonaMode::Facet(form) => render_facet_form(form),
+        PersonaMode::PlaceFace(picker) => render_face_placer(state, picker),
         PersonaMode::Bind(picker) => render_bind_picker(state, picker),
         PersonaMode::View => render_tabs(state),
     }
@@ -128,6 +132,7 @@ fn render_tabs(state: &IdentityState) -> Vec<Line<'static>> {
         PersonaTab::Personas => render_personas(state, &mut lines),
         PersonaTab::Attributes => render_attributes(state, &mut lines),
         PersonaTab::Profiles => render_profiles(state, &mut lines),
+        PersonaTab::Facets => render_facets(state, &mut lines),
         PersonaTab::Communities => render_communities(state, &mut lines),
         PersonaTab::Disclosures => render_disclosures(state, &mut lines),
     }
@@ -193,6 +198,21 @@ fn confirm_prompt(state: &IdentityState) -> Option<String> {
                 ))
             }
         }
+        PersonaConfirm::DeleteFacet { name, faces, .. } => Some(match faces {
+            // The sentence a holder needs is about what *survives*. "Delete
+            // Work" reads to almost everyone as though the faces in it go too,
+            // and a prompt that leaves that uncorrected is answered under a
+            // belief nobody checked.
+            0 => format!("Delete the world \"{name}\"?   y: confirm    n: cancel"),
+            1 => format!(
+                "Delete the world \"{name}\"? The face in it is kept and belongs to no world \
+                 afterwards.   y: confirm    n: cancel"
+            ),
+            n => format!(
+                "Delete the world \"{name}\"? The {n} faces in it are kept and belong to no \
+                 world afterwards.   y: confirm    n: cancel"
+            ),
+        }),
         PersonaConfirm::Unbind { community, .. } => Some(format!(
             "Take it off — show {community} nothing?   Nothing already shared is affected \
              — that has left.   y: confirm    n: cancel"
@@ -210,7 +230,11 @@ fn hints(state: &IdentityState) -> &'static str {
              r: refresh   ⇥/⇧⇥: tab"
         }
         PersonaTab::Profiles => {
-            "↑/↓ select   ⏎: what it shows   n: make a face   e: edit   d: delete   r: refresh   ⇥/⇧⇥: tab"
+            "↑/↓ select   ⏎: what it shows   n: make a face   e: edit   m: move to a world   \
+             d: delete   r: refresh   ⇥/⇧⇥: tab"
+        }
+        PersonaTab::Facets => {
+            "↑/↓ select   n: new world   e: edit   d: delete   r: refresh   ⇥/⇧⇥: tab"
         }
         PersonaTab::Communities => {
             "↑/↓ select   b: change face   u: take it off   r: refresh   ⇥/⇧⇥: tab"
@@ -673,7 +697,35 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         return;
     }
 
+    // The list arrives sorted by which world holds each face, so a heading goes
+    // wherever that answer changes. Drawn only when the holder has arranged
+    // something: a single "Belongs to no world" heading over every face they
+    // own is a question asked of somebody who has not been offered the answer.
+    let arranged = !state.facets.is_empty();
+    let mut current_world: Option<Option<usize>> = None;
+
     for (i, profile) in state.profiles.iter().enumerate() {
+        if arranged {
+            let world = state
+                .facets
+                .iter()
+                .position(|f| f.holds_face(&profile.profile_id));
+            if current_world != Some(world) {
+                if current_world.is_some() {
+                    lines.push(Line::from(""));
+                }
+                match world.and_then(|w| state.facets.get(w)) {
+                    Some(facet) => lines.push(world_heading(facet)),
+                    None => lines.push(
+                        Line::from(" Belongs to no world")
+                            .fg(COLOR_DARK_GRAY)
+                            .bold(),
+                    ),
+                }
+                current_world = Some(world);
+            }
+        }
+
         let is_selected = i == state.profile_selected;
         let row_style = if is_selected {
             Style::new().fg(COLOR_SUCCESS).bold()
@@ -695,6 +747,128 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
                 Style::new().fg(COLOR_DARK_GRAY),
             ),
         ]));
+    }
+}
+
+/// One world's heading: its mark, its name, and nothing else.
+///
+/// The colour is the holder's decoration and it is deliberately *not* drawn as
+/// a colour here. A terminal has one channel for emphasis and this pane already
+/// spends it on selection and on warnings; painting a world's own hue into that
+/// channel would make "Money" look like an error to anyone who did not choose
+/// it. The mark is the carrier that survives a terminal, and the name is the
+/// carrier that survives everything.
+fn world_heading(facet: &openvtc_core::persona::facet::Facet) -> Line<'static> {
+    let mark = facet
+        .icon
+        .as_deref()
+        .map(|i| format!("{i} "))
+        .unwrap_or_default();
+    Line::from(format!(" {mark}{}", facet.display_name()))
+        .fg(COLOR_TEXT_DEFAULT)
+        .bold()
+}
+
+// ---------------------------------------------------------------------------
+// Worlds
+// ---------------------------------------------------------------------------
+
+fn render_facets(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
+    if push_agent_state(state, lines, "worlds") {
+        return;
+    }
+
+    lines.push(
+        Line::from(format!(
+            " {} world{}",
+            state.facets.len(),
+            if state.facets.len() == 1 { "" } else { "s" }
+        ))
+        .fg(COLOR_TEXT_DEFAULT),
+    );
+    lines.push(Line::from(""));
+
+    if state.facets.is_empty() {
+        lines.push(
+            Line::from(
+                " No worlds yet. A world is a part of your life, and the faces that belong to \
+                 it — \"Work\", \"Home\", \"Play\". `n` makes one.",
+            )
+            .fg(COLOR_DARK_GRAY),
+        );
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(
+                " Keep your worlds apart. Two that share a value are two anyone who sees both \
+                 knows are the same person.",
+            )
+            .fg(COLOR_DARK_GRAY),
+        );
+        return;
+    }
+
+    for (i, facet) in state.facets.iter().enumerate() {
+        let is_selected = i == state.facet_selected;
+        let row_style = if is_selected {
+            Style::new().fg(COLOR_SUCCESS).bold()
+        } else {
+            Style::new().fg(COLOR_TEXT_DEFAULT)
+        };
+        let mark = facet
+            .icon
+            .as_deref()
+            .map(|m| format!("{m} "))
+            .unwrap_or_default();
+
+        // A world names ids; a face list may no longer contain them. The count
+        // that matters to a holder is what they will actually see under this
+        // heading, so it is resolved rather than taken from the record — and
+        // the difference is named below rather than quietly absorbed.
+        let live = facet
+            .face_ids
+            .iter()
+            .filter(|id| state.profiles.iter().any(|p| &&p.profile_id == id))
+            .count();
+
+        lines.push(Line::from(vec![
+            Span::styled(if is_selected { "▸ " } else { "  " }, row_style),
+            Span::styled(
+                format!(
+                    "{:<26}",
+                    truncate(&format!("{mark}{}", facet.display_name()), 25)
+                ),
+                row_style,
+            ),
+            Span::styled(
+                format!(
+                    "{live} face{}   {} attribute{}",
+                    if live == 1 { "" } else { "s" },
+                    facet.attribute_ids.len(),
+                    if facet.attribute_ids.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+                Style::new().fg(COLOR_DARK_GRAY),
+            ),
+        ]));
+
+        // A world may name a face that has since been deleted. The agent keeps
+        // those deliberately — a dangling id is how a holder can be offered the
+        // chance to tidy — so saying so is the point of keeping them.
+        let dangling = facet.face_ids.len().saturating_sub(live);
+        if dangling > 0 {
+            lines.push(
+                Line::from(format!(
+                    "      {dangling} face{} this world names {} gone. Nothing was lost here — \
+                     editing this world tidies the reference.",
+                    if dangling == 1 { "" } else { "s" },
+                    if dangling == 1 { "is" } else { "are" },
+                ))
+                .fg(COLOR_ORANGE),
+            );
+        }
     }
 }
 
@@ -1119,6 +1293,186 @@ fn render_profile_form(state: &IdentityState, form: &ProfileForm) -> Vec<Line<'s
 // The bind picker
 // ---------------------------------------------------------------------------
 
+/// The world editor: a name, a colour, an optional mark.
+///
+/// No membership here. A world's faces are moved from the Faces tab, where the
+/// face being moved is on screen — see `PersonaAction::FacePlaceOpen`. What this
+/// form does carry, invisibly, is the membership it was opened with, so that
+/// saving a rename puts it back untouched.
+fn render_facet_form(form: &FacetForm) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("")];
+    lines.push(
+        Line::from(match form.facet_id.is_some() {
+            true => " Edit this world",
+            false => " A new part of your life",
+        })
+        .fg(COLOR_SUCCESS)
+        .bold(),
+    );
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(
+            " A world is a part of your life, and the faces that belong to it — \"Work\", \
+             \"Home\", \"Play\". It arranges what you keep; it never contains it, so deleting \
+             one keeps every face in it.",
+        )
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+
+    let focused = |field: FacetFormFocus| {
+        if form.focus == field {
+            Style::new().fg(COLOR_SUCCESS).bold()
+        } else {
+            Style::new().fg(COLOR_TEXT_DEFAULT)
+        }
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled(" What do you call it?  ", focused(FacetFormFocus::Name)),
+        Span::styled(form.name.value().to_string(), focused(FacetFormFocus::Name)),
+        Span::styled(
+            if form.focus == FacetFormFocus::Name {
+                "▏"
+            } else {
+                ""
+            },
+            focused(FacetFormFocus::Name),
+        ),
+    ]));
+    lines.push(
+        Line::from("   Only you ever see it — it is not a scope, and no counterparty is told it.")
+            .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+
+    // The colours are offered by name rather than painted. A terminal spends
+    // its one emphasis channel on selection and on warnings, and a world's own
+    // hue rendered into that channel would make "Money" read as an error to
+    // anyone who did not choose it.
+    let mut swatches = vec![Span::styled(
+        " Colour               ",
+        focused(FacetFormFocus::Colour),
+    )];
+    for (i, colour) in Colour::all().into_iter().enumerate() {
+        let chosen = i == form.colour;
+        swatches.push(Span::styled(
+            format!("{}{} ", if chosen { "▸" } else { " " }, colour.as_wire()),
+            if chosen {
+                Style::new().fg(COLOR_SUCCESS).bold()
+            } else {
+                Style::new().fg(COLOR_DARK_GRAY)
+            },
+        ));
+    }
+    lines.push(Line::from(swatches));
+    lines.push(Line::from("   ←/→ to choose.").fg(COLOR_DARK_GRAY));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(vec![
+        Span::styled(" A mark (optional)    ", focused(FacetFormFocus::Icon)),
+        Span::styled(form.icon.value().to_string(), focused(FacetFormFocus::Icon)),
+        Span::styled(
+            if form.focus == FacetFormFocus::Icon {
+                "▏"
+            } else {
+                ""
+            },
+            focused(FacetFormFocus::Icon),
+        ),
+    ]));
+    lines.push(
+        Line::from("   One or two emoji. A terminal that cannot draw it shows the name instead.")
+            .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+
+    if let Some(error) = &form.error {
+        super::status::push_status(&mut lines, error, " ");
+        lines.push(Line::from(""));
+    }
+    lines.push(
+        Line::from(if form.working {
+            " Saving…"
+        } else {
+            " ⇥/⇧⇥: field   ←/→: colour   ⏎: save   Esc: cancel"
+        })
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines
+}
+
+/// The world picker for one face.
+fn render_face_placer(state: &IdentityState, picker: &FacePlacer) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("")];
+    lines.push(
+        Line::from(format!(
+            " Which part of your life does \"{}\" belong to?",
+            picker.face_name
+        ))
+        .fg(COLOR_SUCCESS)
+        .bold(),
+    );
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(
+            " A face belongs to one world at a time. Moving it changes nothing about what \
+             the face shows or where it is already worn — a world is how you keep the parts \
+             of your life apart, not what holds them.",
+        )
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+
+    for (i, label) in place_options(state).into_iter().enumerate() {
+        let is_cursor = i == picker.cursor;
+        let style = if is_cursor {
+            Style::new().fg(COLOR_SUCCESS).bold()
+        } else {
+            Style::new().fg(COLOR_TEXT_DEFAULT)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if is_cursor { " ▸ " } else { "   " }, style),
+            Span::styled(label, style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    if let Some(error) = &picker.error {
+        super::status::push_status(&mut lines, error, " ");
+        lines.push(Line::from(""));
+    }
+    lines.push(
+        Line::from(if picker.working {
+            " Moving…"
+        } else {
+            " ↑/↓: move   ⏎: apply   Esc: cancel"
+        })
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines
+}
+
+/// The picker's rows: "belongs to no world", then every world.
+///
+/// Derived rather than stored, so a world renamed between opening the picker
+/// and reading it cannot show a stale name.
+pub fn place_options(state: &IdentityState) -> Vec<String> {
+    // Row 0, and a real answer rather than the absence of one: every face
+    // belonging somewhere is fine too, and a picker with no way back out would
+    // make a world a trap rather than an arrangement.
+    let mut options = vec!["Belongs to no world".to_string()];
+    options.extend(state.facets.iter().map(|facet| {
+        let mark = facet
+            .icon
+            .as_deref()
+            .map(|m| format!("{m} "))
+            .unwrap_or_default();
+        format!("{mark}{}", facet.display_name())
+    }));
+    options
+}
+
 fn render_bind_picker(state: &IdentityState, picker: &BindPicker) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("")];
     lines.push(
@@ -1216,6 +1570,7 @@ mod tests {
     use super::*;
     use crate::state_handler::main_page::content::{ManagedDid, PersonaMembership};
     use openvtc_core::persona::binding::BindingSummary;
+    use openvtc_core::persona::facet::Facet;
     use openvtc_core::persona::pool::PoolAttribute;
 
     fn text(lines: &[Line<'static>]) -> String {
@@ -1312,6 +1667,17 @@ mod tests {
         for mode in [
             PersonaMode::Attribute(AttributeForm::default()),
             PersonaMode::Profile(ProfileForm::default()),
+            PersonaMode::Facet(FacetForm::default()),
+            PersonaMode::Facet(FacetForm {
+                // The edit heading and the save path differ from the create
+                // ones, and only an id tells them apart.
+                facet_id: Some("01FACET".into()),
+                ..FacetForm::default()
+            }),
+            PersonaMode::PlaceFace(FacePlacer {
+                face_name: "Work".into(),
+                ..FacePlacer::default()
+            }),
             PersonaMode::Bind(BindPicker::default()),
         ] {
             let mut state = populated(PersonaTab::Personas);
@@ -1378,12 +1744,44 @@ mod tests {
             }]
             .into(),
             attributes: vec![attr, card].into(),
-            profiles: vec![ProfileSummary {
-                profile_id: "01P".into(),
-                name: "Work".into(),
-                entry_count: 3,
-                ..ProfileSummary::default()
-            }]
+            facets: vec![
+                Facet {
+                    facet_id: "01FACET".into(),
+                    name: "Working life".into(),
+                    colour: Colour::Moss,
+                    icon: Some("💼".into()),
+                    face_ids: vec!["01P".into(), "01GONE".into()],
+                    attribute_ids: vec!["01A".into()],
+                    version: 2,
+                    ..Facet::default()
+                },
+                // A second world with nothing in it, so the empty-group and
+                // the dangling-reference copy are both read by the guard.
+                Facet {
+                    facet_id: "02FACET".into(),
+                    name: "Home".into(),
+                    version: 1,
+                    ..Facet::default()
+                },
+            ]
+            .into(),
+            profiles: vec![
+                ProfileSummary {
+                    profile_id: "01P".into(),
+                    name: "Work".into(),
+                    entry_count: 3,
+                    ..ProfileSummary::default()
+                },
+                // In no world, so the "belongs to no world" group is drawn and
+                // the guard reads its copy. Every face belonging somewhere is a
+                // real arrangement and this is the other one.
+                ProfileSummary {
+                    profile_id: "02P".into(),
+                    name: "OSS Developer".into(),
+                    entry_count: 2,
+                    ..ProfileSummary::default()
+                },
+            ]
             .into(),
             memberships: vec![PersonaMembership {
                 community_name: "Acme".into(),
@@ -1632,6 +2030,99 @@ mod tests {
         assert!(
             !served.contains("this build's own copy"),
             "the agent's own table needs no apology: {served}"
+        );
+    }
+
+    /// The faces list is drawn under the world that holds each face, and the
+    /// ones no world holds are named as such rather than left unlabelled.
+    #[test]
+    fn faces_are_drawn_under_their_world() {
+        let mut state = populated(PersonaTab::Profiles);
+        loaded(&mut state);
+        state.open_profile = None;
+        let shown = text(&render(&state));
+
+        assert!(shown.contains("Working life"), "{shown}");
+        assert!(shown.contains("Belongs to no world"), "{shown}");
+    }
+
+    /// …and a holder who has arranged nothing is not asked a question they have
+    /// not been offered the answer to.
+    ///
+    /// A single "Belongs to no world" heading over every face somebody owns
+    /// says a world exists to belong to, when none does.
+    #[test]
+    fn an_unarranged_holder_sees_no_world_headings() {
+        let mut state = populated(PersonaTab::Profiles);
+        loaded(&mut state);
+        state.open_profile = None;
+        state.facets = Vec::new().into();
+        let shown = text(&render(&state));
+
+        assert!(!shown.contains("Belongs to no world"), "{shown}");
+    }
+
+    /// A world says how many faces it actually has, and says so about the ones
+    /// it names that are gone.
+    ///
+    /// The agent keeps a dangling id deliberately — it is how a holder can be
+    /// offered the chance to tidy — so a pane that silently resolved it away
+    /// would turn a deletion they may not have intended into one they cannot
+    /// see.
+    #[test]
+    fn a_world_says_what_it_still_holds() {
+        let mut state = populated(PersonaTab::Facets);
+        loaded(&mut state);
+        let shown = text(&render(&state));
+
+        assert!(shown.contains("Working life"), "{shown}");
+        // One live face (`01P`) of the two the world names.
+        assert!(shown.contains("1 face"), "{shown}");
+        assert!(
+            shown.contains("Nothing was lost here"),
+            "the dangling reference has to be named: {shown}"
+        );
+    }
+
+    /// Deleting a world says what survives it, because "delete Work" reads to
+    /// almost everyone as though the faces in it go too.
+    #[test]
+    fn deleting_a_world_says_what_it_keeps() {
+        let mut state = populated(PersonaTab::Facets);
+        loaded(&mut state);
+        state.confirm = PersonaConfirm::DeleteFacet {
+            facet_id: "01FACET".into(),
+            name: "Working life".into(),
+            expected_version: Some(2),
+            faces: 2,
+        };
+        let shown = text(&render(&state));
+        assert!(shown.contains("are kept"), "{shown}");
+        assert!(shown.contains("belong to no world afterwards"), "{shown}");
+
+        // …and a world with nothing in it makes no such promise, because there
+        // is nothing for the sentence to be about.
+        state.confirm = PersonaConfirm::DeleteFacet {
+            facet_id: "02FACET".into(),
+            name: "Home".into(),
+            expected_version: Some(1),
+            faces: 0,
+        };
+        let empty = text(&render(&state));
+        assert!(!empty.contains("are kept"), "{empty}");
+    }
+
+    /// The world picker leads with "belongs to no world", so a face can always
+    /// be taken back out of one.
+    #[test]
+    fn the_world_picker_offers_a_way_back_out() {
+        let mut state = populated(PersonaTab::Profiles);
+        loaded(&mut state);
+        let options = place_options(&state);
+        assert_eq!(options[0], "Belongs to no world");
+        assert!(
+            options.iter().any(|o| o.contains("Working life")),
+            "{options:?}"
         );
     }
 
