@@ -33,22 +33,21 @@ anyhow.workspace = true
 # own repo (OpenVTC/verifiable-git-infrastructure); openvtc is a downstream
 # consumer of the published crate.
 #
-# Floor is 0.4.6, but 0.4.6 is NOT where this resolves from: the `did-git-sign`
-# entry under `[patch.crates-io]` in the root manifest redirects it to VGI main
-# at the #37 merge — merged, but not published — which takes VGI to vta-sdk
-# 0.34. The published
-# 0.4.6 requires `^0.27`, which against this workspace's 0.34 does not merely
-# split the graph — an older `vta-keys` will not compile against the current
-# `vti-common`, so the build fails outright. Read the patch block for the full
-# rationale and for what to delete once 0.4.7 exists; this line then names 0.4.7.
+# Floor is 0.4.8, and for the first time in six minors it is also where this
+# actually resolves from. 0.4.8 is published and requires `vta-sdk ^0.35`, so
+# the `[patch.crates-io]` redirect to VGI's unreleased `main` is deleted rather
+# than repointed — see the note where that block used to be, at the foot of the
+# root manifest.
 #
-# That patch is what the standing obligation now looks like when it is not yet
-# discharged. It is the sixth consecutive cycle — 0.4.3 was the first release on
-# vta-sdk 0.23, 0.4.5 the first on 0.25, 0.4.6 the first on 0.27, and 0.31, 0.32
-# and 0.34 have each been carried by a rev-pin because 0.4.7 still cannot be
-# published — so read the rule rather than the version: when the workspace's
-# vta-sdk minor moves, VGI has to move with it, and until it publishes, the graph
-# carries two sdks unless something says otherwise.
+# Read the rule rather than the version, because the rule has not changed: when
+# the workspace's vta-sdk minor moves, VGI has to move with it, and until it
+# publishes, the graph carries two sdks unless something says otherwise. That
+# went unsatisfied five cycles running — 0.4.3 was the first release on vta-sdk
+# 0.23, 0.4.5 the first on 0.25, 0.4.6 the first on 0.27, and 0.31, 0.32 and
+# 0.34 were each carried by a rev-pin because 0.4.7 could not be published while
+# VGI held a git dependency of its own. What changed is not the rule but the
+# cadence: `trql-client` 0.17 shipped, VGI's manifest went back to a version
+# requirement, and `publish.yml` could get past the manifest again.
 #
 # The floor must name the exact release, never a lower caret. `"0.4.3"` admitted
 # 0.4.5, which requires `vta-sdk ^0.25` — so while this workspace was already on
@@ -68,7 +67,7 @@ anyhow.workspace = true
 # rather than as a wall of satisfied constraints — 0.4.5 was the first release on
 # vta-sdk 0.25, 0.4.3 the first on 0.23, and 0.4.0/0.4.1 were on `^0.19` and put
 # a second vta-sdk *and* a second trust-tasks in the binary.
-did-git-sign = "0.4.6"
+did-git-sign = "0.4.8"
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true
