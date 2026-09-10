@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 
 use openvtc_core::persona::{
-    binding, claim_types, disclosure, facet, family,
+    binding, claim_types, correlation, disclosure, facet, family,
     pool::{self, AttributeDraft, PoolAttribute},
     profile::{self, ProfileDetail, ProfileSummary},
 };
@@ -878,6 +878,9 @@ impl PersonaReadJob {
         let facets = facet::list(&self.admin_vta)
             .await
             .map_err(|e| format!("{e}"));
+        let links = correlation::analyze(&self.admin_vta)
+            .await
+            .map_err(|e| format!("{e}"));
         let disclosures = match std::num::NonZeroU64::new(DISCLOSURE_PAGE) {
             Some(limit) => disclosure::history(&self.admin_vta, limit)
                 .await
@@ -898,6 +901,7 @@ impl PersonaReadJob {
             attributes,
             profiles,
             facets,
+            links,
             disclosures,
             bindings,
             claim_types,
@@ -1055,6 +1059,7 @@ pub(crate) enum PersonaOutcome {
         attributes: Result<Vec<PoolAttribute>, String>,
         profiles: Result<Vec<ProfileSummary>, String>,
         facets: Result<Vec<facet::Facet>, String>,
+        links: Result<Vec<correlation::Finding>, String>,
         disclosures: Result<Vec<disclosure::DisclosureRow>, String>,
         bindings: HashMap<BindingTarget, openvtc_core::persona::binding::BindingSummary>,
         /// The claim-type registry, when this read asked for it. `None` means
@@ -1099,6 +1104,7 @@ impl PersonaOutcome {
                 attributes,
                 profiles,
                 facets,
+                links,
                 disclosures,
                 bindings,
                 claim_types,
@@ -1122,6 +1128,7 @@ impl PersonaOutcome {
                     .err()
                     .or(profiles.as_ref().err())
                     .or(facets.as_ref().err())
+                    .or(links.as_ref().err())
                     .or(disclosures.as_ref().err())
                     .or_else(|| claim_types.as_ref().and_then(|r| r.as_ref().err()))
                     .cloned();
@@ -1157,6 +1164,9 @@ impl PersonaOutcome {
                 // Worlds before faces: the face list is sorted by which world
                 // holds each face, so the sort needs the answer that is about
                 // to land rather than the one from the previous read.
+                if let Ok(list) = links {
+                    p.links = list.into();
+                }
                 if let Ok(list) = facets {
                     p.facet_selected = p.facet_selected.min(list.len().saturating_sub(1));
                     p.facets = list.into();
@@ -1449,6 +1459,7 @@ mod tests {
             profiles: Ok(Vec::new()),
             disclosures: Ok(Vec::new()),
             facets: Ok(Vec::new()),
+            links: Ok(Vec::new()),
             bindings: HashMap::new(),
             claim_types: None,
             include_values: false,
@@ -1744,6 +1755,7 @@ mod tests {
             profiles: Ok(Vec::new()),
             disclosures: Ok(Vec::new()),
             facets: Ok(Vec::new()),
+            links: Ok(Vec::new()),
             bindings: HashMap::new(),
             claim_types: None,
             include_values: true,
@@ -1777,6 +1789,7 @@ mod tests {
             profiles: Ok(Vec::new()),
             disclosures: Ok(Vec::new()),
             facets: Ok(Vec::new()),
+            links: Ok(Vec::new()),
             bindings: HashMap::new(),
             claim_types: None,
             include_values: false,
@@ -1805,6 +1818,7 @@ mod tests {
             profiles: Ok(Vec::new()),
             disclosures: Ok(Vec::new()),
             facets: Ok(Vec::new()),
+            links: Ok(Vec::new()),
             bindings: HashMap::new(),
             claim_types: None,
             include_values: false,

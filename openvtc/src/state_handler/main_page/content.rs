@@ -864,6 +864,19 @@ pub struct IdentityState {
     /// arrived at one keypress at a time.
     pub revealed_attribute: Option<String>,
 
+    // ── Links (from the agent) ───────────────────────────────────────────
+    /// Where the holder's identities join up, and which joins cross a world.
+    ///
+    /// Read alongside the pool rather than on demand: the answer is computed
+    /// across every attribute at once, so a per-row question would be one
+    /// round-trip each for a page the agent builds in one.
+    ///
+    /// Empty means the agent found nothing *or* does not serve
+    /// `persona/correlation/analyze`. Neither is a failure; a read that failed
+    /// lands in [`load_error`](Self::load_error), because a clean bill of
+    /// health nobody computed is the answer that misleads.
+    pub links: Arc<[openvtc_core::persona::correlation::Finding]>,
+
     // ── Worlds (from the agent) ──────────────────────────────────────────
     /// The parts of the holder's life, and which faces belong to them.
     ///

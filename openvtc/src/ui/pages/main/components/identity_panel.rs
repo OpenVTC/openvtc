@@ -58,6 +58,7 @@ use crate::state_handler::{
     state::ConnectionState,
 };
 use openvtc_core::display::display_identifier;
+use openvtc_core::persona::correlation;
 use openvtc_core::persona::facet::Colour;
 use openvtc_core::persona::family::Family;
 use ratatui::{
@@ -463,6 +464,7 @@ fn render_attributes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
     }
 
     push_registry_notes(state, lines);
+    push_link_summary(state, lines);
 
     // The list arrives already in family order — `PersonaOutcome::Read` sorts
     // it there, so that the cursor, which walks this slice by index, walks the
@@ -553,7 +555,60 @@ fn render_attributes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
             ));
         }
         lines.push(Line::from(value_spans));
+
+        // The link, under the value it is about. Only the cross-world ones get
+        // a row of their own: a value shared between two faces in the same
+        // world is linkage the holder arranged on purpose — a work email in
+        // every work face — and a pane that flagged it would teach them to
+        // scroll past the flag that matters.
+        if let Some(finding) = correlation::for_attribute(&state.links, &attr.attribute_id)
+            && finding.crosses_a_world()
+        {
+            lines.push(Line::from(format!("      {}", finding.headline())).fg(COLOR_ORANGE));
+            if is_selected {
+                // The cause and the ways out, but only under the cursor: on
+                // every row they would be four lines of prose per attribute,
+                // and a warning nobody can see past is one nobody reads.
+                if !finding.why.is_empty() {
+                    lines.push(Line::from(format!("      {}", finding.why)).fg(COLOR_DARK_GRAY));
+                }
+                for remedy in &finding.remedies {
+                    lines.push(
+                        Line::from(format!("        · {}", remedy.label())).fg(COLOR_DARK_GRAY),
+                    );
+                }
+            }
+        }
     }
+}
+
+/// How many links cross a part of the holder's life, said once above the rows.
+///
+/// Two things kept apart, because collapsing them is the whole failure mode
+/// this task's second axis exists to prevent. The count is of links that cross
+/// a **world** — parts of a life the holder has said belong apart — and not of
+/// links in general: most of those are arrangements they made on purpose, and
+/// counting them here would put a number on the screen whose only honest
+/// reading is "you have an identity".
+///
+/// Nothing is drawn when the holder has arranged no worlds, because
+/// `crossesFacets` is then absent from every finding and there is no question
+/// for this line to answer.
+fn push_link_summary(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
+    let crossing = state.links.iter().filter(|f| f.crosses_a_world()).count();
+    if crossing == 0 {
+        return;
+    }
+
+    lines.push(
+        Line::from(format!(
+            " {crossing} value{} {} in more than one of your worlds. Keep your worlds apart:              anyone who sees both knows they are the same person.",
+            if crossing == 1 { "" } else { "s" },
+            if crossing == 1 { "is" } else { "are" },
+        ))
+        .fg(COLOR_ORANGE),
+    );
+    lines.push(Line::from(""));
 }
 
 // ---------------------------------------------------------------------------
@@ -1570,6 +1625,7 @@ mod tests {
     use super::*;
     use crate::state_handler::main_page::content::{ManagedDid, PersonaMembership};
     use openvtc_core::persona::binding::BindingSummary;
+    use openvtc_core::persona::correlation::{Finding, Remedy};
     use openvtc_core::persona::facet::Facet;
     use openvtc_core::persona::pool::PoolAttribute;
 
@@ -2124,6 +2180,70 @@ mod tests {
             options.iter().any(|o| o.contains("Working life")),
             "{options:?}"
         );
+    }
+
+    /// A value in two worlds is flagged, and the flag says why.
+    #[test]
+    fn a_link_across_worlds_is_raised() {
+        let mut state = populated(PersonaTab::Attributes);
+        loaded(&mut state);
+        state.links = vec![Finding {
+            attribute_id: Some("01B".into()),
+            crosses_worlds: Some(true),
+            why: "the same card is in your work and money worlds".into(),
+            remedies: vec![Remedy::UseDifferentValue],
+            ..Finding::default()
+        }]
+        .into();
+
+        let shown = text(&render(&state));
+        assert!(shown.contains("in more than one of your worlds"), "{shown}");
+        assert!(shown.contains("knows they are the same person"), "{shown}");
+    }
+
+    /// …and a link *inside* one world is not.
+    ///
+    /// A work email in every work face is an arrangement the holder made on
+    /// purpose. Flagging it teaches them to scroll past the flag that matters,
+    /// which is the failure the task's second axis exists to prevent.
+    #[test]
+    fn a_link_inside_one_world_is_left_alone() {
+        let mut state = populated(PersonaTab::Attributes);
+        loaded(&mut state);
+        state.links = vec![Finding {
+            attribute_id: Some("01B".into()),
+            crosses_worlds: Some(false),
+            // High severity, and still not raised: severity says how strongly
+            // a disclosure would link, not whether the holder would mind.
+            severity: openvtc_core::persona::correlation::Severity::High,
+            why: "the same card is in two of your work faces".into(),
+            ..Finding::default()
+        }]
+        .into();
+
+        let shown = text(&render(&state));
+        assert!(
+            !shown.contains("in more than one of your worlds"),
+            "{shown}"
+        );
+    }
+
+    /// An agent that does not implement worlds gets silence, not a clean bill
+    /// of health. A reassurance nobody computed is worse than none.
+    #[test]
+    fn an_agent_without_worlds_says_nothing_about_them() {
+        let mut state = populated(PersonaTab::Attributes);
+        loaded(&mut state);
+        state.links = vec![Finding {
+            attribute_id: Some("01B".into()),
+            crosses_worlds: None,
+            why: "the same card is in two faces".into(),
+            ..Finding::default()
+        }]
+        .into();
+
+        let shown = text(&render(&state));
+        assert!(!shown.contains("worlds"), "{shown}");
     }
 
     /// A persona shown to more than one community carries the linkage warning.
