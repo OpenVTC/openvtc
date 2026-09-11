@@ -2272,7 +2272,7 @@ impl MainPage {
             (_, KeyCode::Up) if selected > 0 => V::Select(selected - 1),
             (_, KeyCode::Down) if selected + 1 < len => V::Select(selected + 1),
             (VettingTab::Applications, KeyCode::Char('n')) => V::StartApplication,
-            (VettingTab::Applications, KeyCode::Char('i')) => V::EditIdentity,
+            (VettingTab::Applications, KeyCode::Char('f')) => V::ChooseFace,
             (VettingTab::Applications, KeyCode::Char('r')) => V::RequestVetter,
             (VettingTab::Applications, KeyCode::Char('m')) => V::RefreshRequirements,
             (VettingTab::Applications, KeyCode::Char('c') | KeyCode::Enter) => V::ReviewCard,

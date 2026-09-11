@@ -38,6 +38,7 @@ use vta_sdk::vetting::requirements::{
 use vta_sdk::vetting::statement::verify_statement;
 
 use crate::config::account::PersonaId;
+use crate::persona::disclosure::ReleasedClaim;
 
 /// Why an applicant-side step was refused.
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +61,19 @@ pub enum ApplicantError {
     /// The card would lack a claim the session requires.
     #[error("the card needs a `{0}` claim")]
     MissingClaim(String),
+    /// A claim was released without its value — proved as a predicate — and a
+    /// vetter has to read the value to check it against a document.
+    #[error("your face releases `{0}` without its value, and a vetter has to read it")]
+    ValueWithheld(String),
+    /// A credential-backed claim can no longer be proven.
+    #[error("`{0}` can no longer be proven — refresh it under My Identity")]
+    StaleClaim(String),
+    /// The face now shows a value other than the one earlier cards committed to.
+    #[error(
+        "your face now shows a different `{0}` than the cards you already sent — the \
+         community would refer the application"
+    )]
+    IdentityChanged(String),
     /// Building or verifying an artifact failed.
     #[error(transparent)]
     Vetting(#[from] VettingError),
@@ -85,6 +99,12 @@ pub struct Application {
     pub persona: PersonaId,
     /// The DID every card is signed by and every statement names (D13).
     pub join_did: String,
+    /// The VTA context the persona's face for this community is worn in. Set
+    /// the first time a face is chosen or a card is sent, and reused as the
+    /// membership's sub-context when the join goes through, so the face the
+    /// vetters saw is the face the community sees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
     /// The manifest criterion being gathered for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub criterion_id: Option<String>,
@@ -97,10 +117,10 @@ pub struct Application {
     /// One salt for the whole application, so every vetter sees the same
     /// identity commitment. Goes to vetters, never to the community.
     pub commitment_salt: String,
-    /// The identity the applicant shows every vetter, entered once. Reusing it
-    /// is what keeps the commitment identical across cards: two cards that
-    /// spell a name differently commit to different identities, and the
-    /// community refers the application.
+    /// The identity vetters have been shown, as the persona's face disclosed
+    /// it. Every later card must show the same values: two cards that spell a
+    /// name differently commit to different identities, and the community
+    /// refers the application.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identity_claims: Vec<CardClaim>,
     /// Requests to vetters, newest last.
@@ -277,6 +297,7 @@ impl Application {
             community: community.to_string(),
             persona,
             join_did: join_did.to_string(),
+            context_id: None,
             criterion_id: None,
             requirements: None,
             requirements_digest: None,
@@ -518,6 +539,118 @@ impl Application {
         })
     }
 
+    /// The claim types a card for `session_id` asks the face for: required,
+    /// then optional.
+    #[must_use]
+    pub fn requested_claims(&self, session_id: &str) -> Vec<String> {
+        self.session(session_id)
+            .map(|(_, s)| {
+                s.required_claims
+                    .iter()
+                    .chain(&s.optional_claims)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The card claims for `session_id` from what the face released (or would
+    /// release — a preview has the same shape).
+    ///
+    /// Only the session's claim types are kept. Each needs a readable, current
+    /// value, and a value vetters were already shown must not have changed.
+    ///
+    /// # Errors
+    ///
+    /// No such session, a required claim missing, a value withheld or stale, or
+    /// an identity that differs from the cards already sent.
+    pub fn card_claims(
+        &self,
+        session_id: &str,
+        released: &[ReleasedClaim],
+    ) -> Result<Vec<CardClaim>, ApplicantError> {
+        let (_, session) = self
+            .session(session_id)
+            .ok_or(ApplicantError::NoMatchingRequest)?;
+        let wanted = |t: &str| {
+            session.required_claims.iter().any(|r| r == t)
+                || session.optional_claims.iter().any(|o| o == t)
+        };
+        let mut claims = Vec::new();
+        for claim in released.iter().filter(|c| wanted(&c.claim_type)) {
+            if claim.stale {
+                return Err(ApplicantError::StaleClaim(claim.claim_type.clone()));
+            }
+            let Some(value) = claim.value.clone() else {
+                return Err(ApplicantError::ValueWithheld(claim.claim_type.clone()));
+            };
+            if self
+                .identity_claims
+                .iter()
+                .any(|shown| shown.claim_type == claim.claim_type && shown.value != value)
+            {
+                return Err(ApplicantError::IdentityChanged(claim.claim_type.clone()));
+            }
+            claims.push(CardClaim {
+                claim_type: claim.claim_type.clone(),
+                value,
+                provenance: claim
+                    .provenance
+                    .clone()
+                    .unwrap_or_else(|| "unstated".to_string()),
+            });
+        }
+        if let Some(missing) = session
+            .required_claims
+            .iter()
+            .find(|t| !claims.iter().any(|c| &c.claim_type == *t))
+        {
+            return Err(ApplicantError::MissingClaim(missing.clone()));
+        }
+        Ok(claims)
+    }
+
+    /// Record a card that has been sent into `session_id`, and remember the
+    /// identity it showed so later cards show the same.
+    ///
+    /// # Errors
+    ///
+    /// No such session, or claims that differ from those already shown.
+    pub fn record_sent_card(
+        &mut self,
+        session_id: &str,
+        card: SentCard,
+        claims: &[CardClaim],
+        now: DateTime<Utc>,
+    ) -> Result<(), ApplicantError> {
+        if let Some(changed) = claims.iter().find(|c| {
+            self.identity_claims
+                .iter()
+                .any(|shown| shown.claim_type == c.claim_type && shown.value != c.value)
+        }) {
+            return Err(ApplicantError::IdentityChanged(changed.claim_type.clone()));
+        }
+        let request = self
+            .requests
+            .iter_mut()
+            .find(|r| matches!(&r.state, RequestState::Session { session, .. } if session.id == session_id))
+            .ok_or(ApplicantError::NoMatchingRequest)?;
+        if let RequestState::Session { card: sent, .. } = &mut request.state {
+            *sent = Some(card);
+        }
+        request.updated_at = now;
+        for claim in claims {
+            if !self
+                .identity_claims
+                .iter()
+                .any(|shown| shown.claim_type == claim.claim_type)
+            {
+                self.identity_claims.push(claim.clone());
+            }
+        }
+        Ok(())
+    }
+
     /// The card to sign for `session_id`, from the claims the applicant chose
     /// to disclose. Only the session's required and optional claim types are
     /// kept; the identity commitment covers the required ones.
@@ -568,6 +701,7 @@ impl Application {
 
     /// Record the signed card we are sending into `session_id`. Verifies it the
     /// way the vetter will, so a card that would be refused never leaves.
+    /// Returns what was recorded.
     ///
     /// # Errors
     ///
@@ -578,7 +712,7 @@ impl Application {
         card: &Value,
         resolver: &TrustTaskVmResolver,
         now: DateTime<Utc>,
-    ) -> Result<(), ApplicantError> {
+    ) -> Result<SentCard, ApplicantError> {
         let join_did = self.join_did.clone();
         let community = self.community.clone();
         let request = self
@@ -608,14 +742,15 @@ impl Application {
             resolver,
         )
         .await?;
-        *sent = Some(SentCard {
+        let recorded = SentCard {
             id: verified.card().id.clone(),
             digest_multibase: verified.digest_multibase().to_string(),
             identity_commitment: verified.card().identity_commitment.clone(),
             sent_at: now,
-        });
+        };
+        *sent = Some(recorded.clone());
         request.updated_at = now;
-        Ok(())
+        Ok(recorded)
     }
 
     /// A statement arrived from `vetter`. Verified and bound to this

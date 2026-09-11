@@ -12,9 +12,9 @@ use crate::colors::{
 };
 use crate::state_handler::{
     main_page::content::{
-        AttestForm, ContentPanelState, DeskStage, VETTING_METHODS, VETTING_RELATIONSHIPS,
-        VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VettingMode, VettingState, VettingTab,
-        method_label, reason_label, relationship_label,
+        AttestForm, CardPreview, ContentPanelState, DeskStage, VETTING_METHODS,
+        VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VettingMode,
+        VettingState, VettingTab, method_label, reason_label, relationship_label,
     },
     state::ConnectionState,
 };
@@ -46,7 +46,7 @@ pub fn mode_id(state: &VettingState) -> &'static str {
         (VettingMode::List, VettingTab::Tickets) => "tickets",
         (VettingMode::List, VettingTab::Issued) => "issued",
         (VettingMode::NewApplication { .. }, _) => "new-application",
-        (VettingMode::EditIdentity { .. }, _) => "identity",
+        (VettingMode::ChooseFace { .. }, _) => "face",
         (VettingMode::RequestVetter { .. }, _) => "request",
         (VettingMode::SendCard { .. }, _) => "card",
         (VettingMode::NewTicket { .. }, _) => "new-ticket",
@@ -171,23 +171,45 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.push(hint("Enter: start  Tab: next field  Esc: cancel"));
         }
-        VettingMode::EditIdentity {
-            claims, field: f, ..
-        } => {
-            lines.push(heading("The identity you show vetters"));
+        VettingMode::ChooseFace { faces, index, .. } => {
+            lines.push(heading("The face vetters are shown"));
             lines.push(Line::from(""));
             lines.push(hint(
-                "Enter it exactly as it appears on the documents you will show. Every vetter sees",
+                "A vetter's card is read from this face, and they check it against your documents.",
             ));
             lines.push(hint(
-                "the same values; a difference between two cards makes the community refer you.",
+                "It is worn in this community's context, so the community sees the same face when",
+            ));
+            lines.push(hint(
+                "you join. Its values must match your documents exactly, and must not change later.",
             ));
             lines.push(Line::from(""));
-            for (i, (claim_type, current)) in claims.iter().enumerate() {
-                lines.push(field(claim_type, current.clone(), i == *f, true));
+            for (i, face) in faces.iter().enumerate() {
+                let chosen = i == *index;
+                let style = if chosen {
+                    Style::new().fg(COLOR_SUCCESS).bold()
+                } else {
+                    label()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(if chosen { "▸ " } else { "  " }, style),
+                    Span::styled(face.name.clone(), style),
+                    Span::styled(
+                        format!(
+                            "  {} attribute{}",
+                            face.entries,
+                            if face.entries == 1 { "" } else { "s" }
+                        ),
+                        dim(),
+                    ),
+                    Span::styled(
+                        if face.worn { "  worn now" } else { "" },
+                        Style::new().fg(COLOR_SUCCESS),
+                    ),
+                ]));
             }
             lines.push(Line::from(""));
-            lines.push(hint("Enter: save  ↑/↓: field  Esc: cancel"));
+            lines.push(hint("↑/↓: choose  Enter: wear it  Esc: cancel"));
         }
         VettingMode::RequestVetter {
             vetter,
@@ -209,7 +231,8 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
         VettingMode::SendCard {
             application_id,
             session_id,
-        } => send_card(&mut lines, v, application_id, session_id),
+            preview,
+        } => send_card(&mut lines, v, application_id, session_id, preview.as_ref()),
         VettingMode::NewTicket {
             membership_index,
             uses_index,
@@ -406,11 +429,21 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(" Identity shown to vetters").fg(COLOR_SUCCESS));
+    lines.push(Line::from(vec![
+        Span::styled(format!("  {:<20}", "face"), label()),
+        match v.worn_faces.get(&app.id) {
+            Some(face) => Span::styled(face.clone(), value()),
+            None => Span::styled("f shows or changes it", dim()),
+        },
+    ]));
     for (claim_type, shown) in &app.identity {
         lines.push(Line::from(vec![
             Span::styled(format!("  {claim_type:<20}"), label()),
             if shown.is_empty() {
-                Span::styled("not set — press i", Style::new().fg(COLOR_ORANGE))
+                Span::styled(
+                    "not shown yet — read from the face with your first card",
+                    dim(),
+                )
             } else {
                 Span::styled(shown.clone(), value())
             },
@@ -442,7 +475,7 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     }
     lines.push(Line::from(""));
     lines.push(hint(
-        "n: new  i: identity  r: ask a vetter  c: send card  m: refresh requirements  Tab: next tab",
+        "n: new  f: face  r: ask a vetter  c: send card  m: refresh requirements  Tab: next tab",
     ));
 }
 
@@ -451,6 +484,7 @@ fn send_card(
     v: &VettingState,
     application_id: &str,
     session_id: &str,
+    preview: Option<&CardPreview>,
 ) {
     lines.push(heading("Send your card"));
     lines.push(Line::from(""));
@@ -486,26 +520,48 @@ fn send_card(
         }
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(" The card shows").fg(COLOR_SUCCESS));
-    for (claim_type, shown) in &app.identity {
+    let face = v
+        .worn_faces
+        .get(application_id)
+        .cloned()
+        .unwrap_or_else(|| "the face this persona wears in the community".to_string());
+    let Some(preview) = preview else {
+        lines.push(Line::from(vec![
+            Span::styled("The card is read from  ", label()),
+            Span::styled(face, value()),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(hint(
+            "Enter asks your VTA what that face would show this vetter. Nothing leaves until you",
+        ));
+        lines.push(hint("have seen it and pressed Enter again."));
+        lines.push(Line::from(""));
+        lines.push(hint(
+            "Enter: preview  Esc: not now (f on the application changes the face)",
+        ));
+        return;
+    };
+    lines.push(Line::from(" The card will show").fg(COLOR_SUCCESS));
+    for (claim_type, shown) in &preview.claims {
         lines.push(Line::from(vec![
             Span::styled(format!("  {claim_type:<20}"), label()),
-            if shown.is_empty() {
-                Span::styled(
-                    "not set — Esc, then i",
-                    Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
-                )
-            } else {
-                Span::styled(shown.clone(), value())
-            },
+            Span::styled(shown.clone(), value()),
         ]));
     }
     lines.push(Line::from(""));
+    if let Some(problem) = &preview.problem {
+        lines.push(Line::from(problem.clone()).fg(COLOR_WARNING_ACCESSIBLE_RED));
+        lines.push(Line::from(""));
+        lines.push(hint(
+            "Esc, fix the face under My Identity (or choose another with f), then preview again.",
+        ));
+        return;
+    }
     lines.push(hint(
         "No document numbers or images are sent: the vetter looks at your document, not a copy.",
     ));
     lines.push(Line::from(""));
-    lines.push(hint("Enter: sign and send  Esc: not now"));
+    lines.push(hint("Enter: approve, sign and send  Esc: not now"));
 }
 
 fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {

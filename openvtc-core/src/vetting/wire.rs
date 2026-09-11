@@ -274,6 +274,62 @@ pub(crate) mod tests {
         secret.id.split('#').next().unwrap().to_string()
     }
 
+    /// A persona's assertionMethod key as `Config::regenerate_persona_keys`
+    /// loads it: the secret id is the did:webvh verification method.
+    fn webvh_persona_secret() -> Secret {
+        let mut secret = Secret::generate_ed25519(None, Some(&[7u8; 32]));
+        secret.id = "did:webvh:QmScid:example.com:alice#key-0".to_string();
+        secret
+    }
+
+    /// Vetting documents and cards are signed locally as the persona DID — the
+    /// same path reciprocal VMCs and capabilities take — so the proof names
+    /// the persona's own verification method, not a VTA key or a did:key.
+    #[tokio::test]
+    async fn a_persona_signs_as_its_webvh_verification_method() {
+        let signer = webvh_persona_secret();
+        let persona = "did:webvh:QmScid:example.com:alice";
+        let mut doc = document(
+            VETTING_DECLINE_TYPE,
+            persona,
+            "did:webvh:QmScid:example.com:bob",
+            new_id(),
+            &decline(),
+        )
+        .unwrap();
+        sign(&mut doc, &signer).await.unwrap();
+        let signed = serde_json::to_value(&doc).unwrap();
+        assert_eq!(
+            signed.pointer("/proof/verificationMethod"),
+            Some(&json!("did:webvh:QmScid:example.com:alice#key-0"))
+        );
+
+        let draft = vta_sdk::vetting::card::CardDraft {
+            id: new_id(),
+            publisher: persona.to_string(),
+            audience: "did:webvh:QmScid:example.com:bob".to_string(),
+            community: "did:webvh:QmScid:example.com:vtc".to_string(),
+            challenge: "c".repeat(43),
+            domain: "did:webvh:QmScid:example.com:vtc".to_string(),
+            issued_at: Utc::now(),
+            validity: chrono::Duration::minutes(10),
+            claims: vec![vta_sdk::protocols::vetting::CardClaim {
+                claim_type: "name.legal".into(),
+                value: json!("Alice Example"),
+                provenance: "selfAsserted".into(),
+            }],
+            identity_types: vec!["name.legal".into()],
+            salt: vta_sdk::vetting::card::new_commitment_salt().unwrap(),
+        };
+        let card = vta_sdk::vetting::card::sign_card(draft, &signer)
+            .await
+            .unwrap();
+        assert_eq!(
+            card.pointer("/proof/verificationMethod"),
+            Some(&json!("did:webvh:QmScid:example.com:alice#key-0"))
+        );
+    }
+
     fn decline() -> VettingDeclineBody {
         VettingDeclineBody {
             request_id: "r1".into(),

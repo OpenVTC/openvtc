@@ -305,7 +305,7 @@ pub enum VettingAction {
     Status(String),
     // ── Applicant ────────────────────────────────────────────────────────
     StartApplication,
-    EditIdentity,
+    ChooseFace,
     RequestVetter,
     RefreshRequirements,
     ReviewCard,

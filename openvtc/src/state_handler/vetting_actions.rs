@@ -7,19 +7,25 @@
 //! background job. A send that fails puts the book back the way it was, so the
 //! step can simply be tried again.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use affinidi_tdk::didcomm::Message;
+use affinidi_tdk::secrets_resolver::secrets::Secret;
 use chrono::Utc;
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
+use openvtc_core::config::context_path::build_sub_context_id;
 use openvtc_core::didcomm::Messaging;
-use openvtc_core::vetting::applicant::{RequestDraft, RequestState};
+use openvtc_core::persona::disclosure::{self, PresentError};
+use openvtc_core::persona::{binding, profile};
+use openvtc_core::vetting::applicant::{Application, RequestDraft, RequestState, SentCard};
 use openvtc_core::vetting::book::FALLBACK_REQUIRED_CLAIMS;
 use openvtc_core::vetting::tickets::{DEFAULT_VALIDITY, Ticket, normalise_code};
 use openvtc_core::vetting::vetter::{Attestation, DeskState};
 use openvtc_core::vetting::wire::{self, Document};
 use serde_json::Value;
+use vta_sdk::client::VtaClient;
 use vta_sdk::protocols::vetting::{
     CardClaim, TicketPresentation, VETTING_DECLINE_TYPE, VETTING_REQUEST_TYPE,
     VETTING_REVOKE_STATEMENT_TYPE, VETTING_SESSION_RESPONSE_TYPE, VETTING_SESSION_TYPE,
@@ -34,9 +40,10 @@ use crate::state_handler::actions::VettingAction;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
 use crate::state_handler::dispatch_util::{self, Persist, SyncLog};
 use crate::state_handler::main_page::content::{
-    ApplicationRow, AttestForm, DeskRow, DeskStage, IssuedRow, RequestRow, TicketRow,
-    VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS,
-    VettingMembership, VettingMode, VettingPersona, VettingState, VettingTab, method_label,
+    ApplicationRow, AttestForm, CardPreview, DeskRow, DeskStage, FaceChoice, IssuedRow, RequestRow,
+    TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
+    VETTING_WITHDRAWAL_REASONS, VettingMembership, VettingMode, VettingPersona, VettingState,
+    VettingTab, method_label,
 };
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
 use crate::state_handler::runtime_actions::ActionCtx;
@@ -403,14 +410,10 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 };
             }
         }
-        VettingAction::EditIdentity => {
+        VettingAction::ChooseFace => {
             let v = page(ctx);
             if let Some(row) = v.applications.get(v.selected).cloned() {
-                v.mode = VettingMode::EditIdentity {
-                    application_id: row.id,
-                    claims: row.identity,
-                    field: 0,
-                };
+                list_faces(ctx, &row.id);
             }
         }
         VettingAction::RequestVetter => {
@@ -440,6 +443,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                     v.mode = VettingMode::SendCard {
                         application_id: row.id,
                         session_id,
+                        preview: None,
                     };
                 }
                 None => status(ctx, "No vetter is waiting for your card."),
@@ -535,11 +539,6 @@ fn input(mode: &mut VettingMode, text: String) {
             field: 0,
             ..
         } => *community = text,
-        VettingMode::EditIdentity { claims, field, .. } => {
-            if let Some((_, value)) = claims.get_mut(*field) {
-                *value = text;
-            }
-        }
         VettingMode::RequestVetter {
             vetter, field: 0, ..
         } => *vetter = text,
@@ -563,7 +562,7 @@ fn move_field(v: &mut VettingState, forward: bool) {
         VettingMode::NewApplication { field, .. }
         | VettingMode::RequestVetter { field, .. }
         | VettingMode::NewTicket { field, .. } => step(field, 2),
-        VettingMode::EditIdentity { claims, field, .. } => step(field, claims.len()),
+        VettingMode::ChooseFace { faces, index, .. } => step(index, faces.len()),
         VettingMode::Attest { form, .. } => step(&mut form.field, AttestForm::FIELDS),
         _ => {}
     }
@@ -610,6 +609,7 @@ fn cycle(v: &mut VettingState, forward: bool) {
         VettingMode::Withdraw { reason_index, .. } => {
             turn(reason_index, VETTING_WITHDRAWAL_REASONS.len());
         }
+        VettingMode::ChooseFace { faces, index, .. } => turn(index, faces.len()),
         _ => {}
     }
 }
@@ -622,11 +622,11 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             persona_index,
             ..
         } => start_application(ctx, community.trim(), persona_index).await,
-        VettingMode::EditIdentity {
+        VettingMode::ChooseFace {
             application_id,
-            claims,
-            ..
-        } => save_identity(ctx, &application_id, claims),
+            faces,
+            index,
+        } => wear_face(ctx, &application_id, faces.get(index).cloned()),
         VettingMode::RequestVetter {
             application_id,
             vetter,
@@ -636,7 +636,8 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
         VettingMode::SendCard {
             application_id,
             session_id,
-        } => send_card(ctx, &application_id, &session_id).await,
+            preview,
+        } => send_card(ctx, &application_id, &session_id, preview).await,
         VettingMode::NewTicket {
             membership_index,
             uses_index,
@@ -787,46 +788,6 @@ async fn start_application(ctx: &mut ActionCtx<'_>, community: &str, persona_ind
     refresh_requirements(ctx, &application_id).await;
 }
 
-fn save_identity(ctx: &mut ActionCtx<'_>, application_id: &str, claims: Vec<(String, String)>) {
-    if claims.iter().any(|(_, value)| value.trim().is_empty()) {
-        return status(
-            ctx,
-            "Fill in every claim — a vetter checks each one against you and your documents.",
-        );
-    }
-    let Some(app) = ctx
-        .config
-        .private
-        .vetting
-        .application_by_id_mut(application_id)
-    else {
-        return;
-    };
-    let shown = app.requests.iter().any(|r| {
-        matches!(
-            &r.state,
-            RequestState::Session { card: Some(_), .. } | RequestState::Attested { .. }
-        )
-    });
-    if shown {
-        return status(
-            ctx,
-            "A vetter has already seen this identity. Changing it now would make your \
-             statements disagree, and the community would refer the application.",
-        );
-    }
-    app.identity_claims = claims
-        .into_iter()
-        .map(|(claim_type, value)| CardClaim {
-            claim_type,
-            value: Value::String(value.trim().to_string()),
-            provenance: "selfAsserted".to_string(),
-        })
-        .collect();
-    page(ctx).mode = VettingMode::List;
-    persist(ctx, "Identity saved — every vetter is shown exactly this.");
-}
-
 async fn request_vetter(ctx: &mut ActionCtx<'_>, application_id: &str, vetter: &str, code: &str) {
     if !vetter.starts_with("did:") {
         return status(ctx, "Enter the vetter's DID (it starts with did:).");
@@ -887,9 +848,135 @@ async fn request_vetter(ctx: &mut ActionCtx<'_>, application_id: &str, vetter: &
     }
 }
 
-async fn send_card(ctx: &mut ActionCtx<'_>, application_id: &str, session_id: &str) {
-    let now = Utc::now();
-    let Some(app) = ctx
+/// What a card's disclosure tells the VTA it is for.
+const VETTING_PURPOSE: &str = "identity vetting";
+
+/// The VTA session, or say why there is none.
+fn admin_client(ctx: &mut ActionCtx<'_>) -> Option<VtaClient> {
+    let client = ctx.admin_vta.cloned();
+    if client.is_none() {
+        status(
+            ctx,
+            "Faces live in your VTA, and it is not connected — try again once it is.",
+        );
+    }
+    client
+}
+
+/// The VTA context an application's face is worn in, and its join DID.
+/// Derived the first time it is needed and kept on the application, so the
+/// membership reuses it when the join goes through.
+fn application_context(
+    config: &mut Config,
+    application_id: &str,
+) -> Result<(String, String), String> {
+    let app = config
+        .private
+        .vetting
+        .applications
+        .iter()
+        .find(|a| a.id == application_id)
+        .ok_or("the application is gone")?;
+    let join_did = app.join_did.clone();
+    if let Some(id) = &app.context_id {
+        return Ok((id.clone(), join_did));
+    }
+    let community = app.community.clone();
+    let name = config.agent_name_for(&community).map(ToString::to_string);
+    let id = build_sub_context_id(
+        &config.account.top_context_id,
+        name.as_deref(),
+        &community,
+        |id| {
+            config.account.memberships().any(|m| m.sub_context_id == id)
+                || config
+                    .private
+                    .vetting
+                    .applications
+                    .iter()
+                    .any(|a| a.context_id.as_deref() == Some(id))
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(app) = config.private.vetting.application_by_id_mut(application_id) {
+        app.context_id = Some(id.clone());
+    }
+    Ok((id, join_did))
+}
+
+fn spawn_job(ctx: &mut ActionCtx<'_>, job: impl Future<Output = VettingOutcome> + Send + 'static) {
+    background_dispatch::spawn_dispatch(
+        ctx.dispatch_tx.clone(),
+        DispatchDomain::Vetting,
+        async move { DispatchOutcome::Vetting(job.await) },
+    );
+}
+
+/// Read the holder's faces, and which one the application wears.
+fn list_faces(ctx: &mut ActionCtx<'_>, application_id: &str) {
+    let Some(client) = admin_client(ctx) else {
+        return;
+    };
+    let (context_id, persona_did) = match application_context(ctx.config, application_id) {
+        Ok(found) => found,
+        Err(e) => return status(ctx, format!("Cannot choose a face: {e}")),
+    };
+    if !begin(ctx) {
+        return;
+    }
+    status(ctx, "Reading your faces…");
+    let job = FaceJob::List {
+        client,
+        context_id,
+        persona_did,
+        application_id: application_id.to_string(),
+    };
+    spawn_job(ctx, job.run());
+}
+
+/// Wear `face` in the application's context.
+fn wear_face(ctx: &mut ActionCtx<'_>, application_id: &str, face: Option<FaceChoice>) {
+    let Some(face) = face else {
+        return status(ctx, "Make a face under My Identity first.");
+    };
+    if face.worn {
+        page(ctx).mode = VettingMode::List;
+        return status(
+            ctx,
+            format!("{} is already the face vetters are shown.", face.name),
+        );
+    }
+    let Some(client) = admin_client(ctx) else {
+        return;
+    };
+    let (context_id, persona_did) = match application_context(ctx.config, application_id) {
+        Ok(found) => found,
+        Err(e) => return status(ctx, format!("Cannot wear that face: {e}")),
+    };
+    if !begin(ctx) {
+        return;
+    }
+    page(ctx).mode = VettingMode::List;
+    status(ctx, format!("Wearing {}…", face.name));
+    let job = FaceJob::Wear {
+        client,
+        context_id,
+        persona_did,
+        application_id: application_id.to_string(),
+        face,
+    };
+    spawn_job(ctx, job.run());
+}
+
+/// The card for `session_id`, in two steps: preview what the face would show
+/// the vetter, then — once the holder has seen it — release, sign and send.
+async fn send_card(
+    ctx: &mut ActionCtx<'_>,
+    application_id: &str,
+    session_id: &str,
+    preview: Option<CardPreview>,
+) {
+    let Some(application) = ctx
         .config
         .private
         .vetting
@@ -900,60 +987,70 @@ async fn send_card(ctx: &mut ActionCtx<'_>, application_id: &str, session_id: &s
     else {
         return;
     };
-    if app.identity_claims.is_empty() {
+    let Some((vetter, expires_at)) = application
+        .session(session_id)
+        .map(|(vetter, s)| (vetter.to_string(), s.expires_at))
+    else {
+        return status(ctx, "That session has closed.");
+    };
+    if expires_at <= Utc::now() {
         return status(
             ctx,
-            "First enter the identity you will show vetters (i on the application).",
+            "The session has expired — ask the vetter to open another.",
         );
     }
-    let draft = match app.card_draft(session_id, app.identity_claims.clone(), now) {
-        Ok(draft) => draft,
+    if let Some(problem) = preview.as_ref().and_then(|p| p.problem.clone()) {
+        return status(ctx, problem);
+    }
+    let Some(client) = admin_client(ctx) else {
+        return;
+    };
+    let context_id = match application_context(ctx.config, application_id) {
+        Ok((id, _)) => id,
         Err(e) => return status(ctx, format!("Cannot send a card: {e}")),
     };
     if !begin(ctx) {
         return;
     }
-    let (vetter, join_did) = (draft.audience.clone(), draft.publisher.clone());
-    let keys = match ctx.config.get_persona_keys_for(app.persona, ctx.tdk).await {
-        Ok(keys) => keys,
-        Err(e) => return abandon(ctx, "Could not sign the card", e),
+    let step = match preview {
+        None => {
+            status(ctx, "Asking your VTA what your face shows this vetter…");
+            CardStep::Preview
+        }
+        Some(preview) => {
+            // The card is signed here, as the persona DID, with the persona's
+            // own assertionMethod key — the same path every other document
+            // this client signs takes.
+            let signer = match ctx
+                .config
+                .get_persona_keys_for(application.persona, ctx.tdk)
+                .await
+            {
+                Ok(keys) => keys.signing.secret.clone(),
+                Err(e) => return abandon(ctx, "Could not sign the card", e),
+            };
+            status(ctx, "Releasing and signing your card…");
+            CardStep::Present(Box::new(Presenting {
+                preview_id: preview.preview_id,
+                signer,
+                resolver: resolver(ctx),
+                service: ctx.didcomm_service.clone(),
+                listener_id: openvtc_core::didcomm::listener_id_for_did(
+                    &application.join_did,
+                    ctx.config,
+                ),
+            }))
+        }
     };
-    let card = match sign_card(draft, &keys.signing.secret).await {
-        Ok(card) => card,
-        Err(e) => return abandon(ctx, "Could not sign the card", e),
-    };
-    let resolver = resolver(ctx);
-    let recorded = match ctx
-        .config
-        .private
-        .vetting
-        .application_by_id_mut(application_id)
-    {
-        Some(app) => app.record_card(session_id, &card, &resolver, now).await,
-        None => return abandon(ctx, "Could not send the card", "the application is gone"),
-    };
-    if let Err(e) = recorded {
-        return abandon(ctx, "The card did not verify", e);
-    }
-    let mut document = match wire::document(
-        VETTING_SESSION_RESPONSE_TYPE,
-        &join_did,
-        &vetter,
-        wire::new_id(),
-        &VettingSessionResponseBody { card, ext: None },
-    ) {
-        Ok(d) => d,
-        Err(e) => return abandon(ctx, "Could not send the card", e),
-    };
-    document.thread_id = Some(session_id.to_string());
-    page(ctx).mode = VettingMode::List;
-    persist(ctx, "Sending your card…");
-    let sent = Sent::Card {
+    let job = CardJob {
+        client,
+        context_id,
+        vetter,
+        application,
         session_id: session_id.to_string(),
+        step,
     };
-    if let Err(e) = sign_and_send(ctx, app.persona, document, sent).await {
-        abandon(ctx, "Could not send the card", e);
-    }
+    spawn_job(ctx, job.run());
 }
 
 fn issue_ticket(ctx: &mut ActionCtx<'_>, membership_index: usize, uses_index: usize) {
@@ -1307,9 +1404,6 @@ pub(crate) enum Sent {
         document_id: String,
         vetter: String,
     },
-    Card {
-        session_id: String,
-    },
     Session {
         request_id: String,
     },
@@ -1345,29 +1439,433 @@ impl SendJob {
             &self.to,
         )
         .await;
-        VettingOutcome {
-            sent: self.sent,
+        VettingOutcome::Sent {
+            sent: Box::new(self.sent),
             error: result.err().map(|e| e.to_string()),
         }
     }
 }
 
-/// How a vetting send went. Applied on the loop thread.
-pub(crate) struct VettingOutcome {
-    sent: Sent,
-    error: Option<String>,
+/// Reading or wearing a face. I/O only.
+pub(crate) enum FaceJob {
+    List {
+        client: VtaClient,
+        context_id: String,
+        persona_did: String,
+        application_id: String,
+    },
+    Wear {
+        client: VtaClient,
+        context_id: String,
+        persona_did: String,
+        application_id: String,
+        face: FaceChoice,
+    },
+}
+
+impl FaceJob {
+    pub(crate) async fn run(self) -> VettingOutcome {
+        match self {
+            FaceJob::List {
+                client,
+                context_id,
+                persona_did,
+                application_id,
+            } => {
+                let result = match profile::list(&client).await {
+                    Ok(profiles) => {
+                        // What is worn now is a nicety for the picker; a failed
+                        // read leaves nothing marked rather than failing the list.
+                        let worn = binding::get(&client, &context_id, &persona_did)
+                            .await
+                            .ok()
+                            .filter(|b| b.bound)
+                            .and_then(|b| b.profile_id);
+                        Ok(profiles
+                            .into_iter()
+                            .map(|p| FaceChoice {
+                                worn: worn.as_deref() == Some(p.profile_id.as_str()),
+                                name: sanitize_display(p.display_name(), 128),
+                                entries: p.entry_count,
+                                profile_id: p.profile_id,
+                            })
+                            .collect())
+                    }
+                    Err(e) => Err(e.to_string()),
+                };
+                VettingOutcome::Faces {
+                    application_id,
+                    result,
+                }
+            }
+            FaceJob::Wear {
+                client,
+                context_id,
+                persona_did,
+                application_id,
+                face,
+            } => VettingOutcome::FaceWorn {
+                error: binding::set(&client, &context_id, &persona_did, Some(&face.profile_id))
+                    .await
+                    .err()
+                    .map(|e| e.to_string()),
+                application_id,
+                name: face.name,
+            },
+        }
+    }
+}
+
+/// Which half of the card's two steps a job runs.
+pub(crate) enum CardStep {
+    /// Ask what the face would show. Nothing leaves.
+    Preview,
+    /// Release what the preview showed, then sign, check and send the card.
+    Present(Box<Presenting>),
+}
+
+/// What releasing and sending a card needs.
+pub(crate) struct Presenting {
+    preview_id: String,
+    signer: Secret,
+    resolver: TrustTaskVmResolver,
+    service: Messaging,
+    listener_id: String,
+}
+
+/// One step of sending a card. Works on a copy of the application; the
+/// outcome carries back what the book has to record.
+pub(crate) struct CardJob {
+    client: VtaClient,
+    context_id: String,
+    vetter: String,
+    application: Application,
+    session_id: String,
+    step: CardStep,
+}
+
+/// Why a card did not go.
+pub(crate) enum CardFailure {
+    /// The VTA wants a fresh approval; the preview is still good.
+    StepUp,
+    Failed(String),
+}
+
+fn failed(e: impl std::fmt::Display) -> CardFailure {
+    CardFailure::Failed(e.to_string())
+}
+
+impl CardJob {
+    pub(crate) async fn run(self) -> VettingOutcome {
+        let CardJob {
+            client,
+            context_id,
+            vetter,
+            mut application,
+            session_id,
+            step,
+        } = self;
+        let application_id = application.id.clone();
+        match step {
+            CardStep::Preview => {
+                let requested = application.requested_claims(&session_id);
+                let result = disclosure::preview(
+                    &client,
+                    &context_id,
+                    &application.join_did,
+                    &vetter,
+                    requested,
+                    VETTING_PURPOSE,
+                )
+                .await
+                .map(|preview| CardPreview {
+                    problem: application
+                        .card_claims(&session_id, &preview.claims)
+                        .err()
+                        .map(|e| e.to_string()),
+                    claims: preview
+                        .claims
+                        .iter()
+                        .map(|c| {
+                            (
+                                sanitize_display(&c.claim_type, 64),
+                                match &c.value {
+                                    Some(value) => sanitize_display(&claim_text(value), 256),
+                                    None => "(proved without its value)".to_string(),
+                                },
+                            )
+                        })
+                        .collect(),
+                    preview_id: preview.preview_id,
+                })
+                .map_err(|e| e.to_string());
+                VettingOutcome::Previewed {
+                    application_id,
+                    session_id,
+                    result,
+                }
+            }
+            CardStep::Present(presenting) => {
+                let Presenting {
+                    preview_id,
+                    signer,
+                    resolver,
+                    service,
+                    listener_id,
+                } = *presenting;
+                let result = async {
+                    let challenge = application
+                        .session(&session_id)
+                        .map(|(_, s)| s.challenge.clone())
+                        .ok_or_else(|| failed("the session has closed"))?;
+                    let presented =
+                        disclosure::present(&client, &context_id, &preview_id, Some(&challenge))
+                            .await
+                            .map_err(|e| match e {
+                                PresentError::StepUpRequired => CardFailure::StepUp,
+                                PresentError::Failed(message) => CardFailure::Failed(message),
+                            })?;
+                    let now = Utc::now();
+                    let claims = application
+                        .card_claims(&session_id, &presented.claims)
+                        .map_err(failed)?;
+                    let draft = application
+                        .card_draft(&session_id, claims.clone(), now)
+                        .map_err(failed)?;
+                    let card = sign_card(draft, &signer).await.map_err(failed)?;
+                    let sent = application
+                        .record_card(&session_id, &card, &resolver, now)
+                        .await
+                        .map_err(|e| failed(format!("the card did not verify: {e}")))?;
+                    let mut document = wire::document(
+                        VETTING_SESSION_RESPONSE_TYPE,
+                        &application.join_did,
+                        &vetter,
+                        wire::new_id(),
+                        &VettingSessionResponseBody { card, ext: None },
+                    )
+                    .map_err(failed)?;
+                    document.thread_id = Some(session_id.clone());
+                    wire::sign(&mut document, &signer).await.map_err(failed)?;
+                    let message = wire::to_message(&document).map_err(failed)?;
+                    openvtc_core::didcomm::send_message_via(
+                        &service,
+                        &message,
+                        &listener_id,
+                        &vetter,
+                    )
+                    .await
+                    .map_err(failed)?;
+                    Ok((sent, claims))
+                }
+                .await;
+                VettingOutcome::CardSent {
+                    application_id,
+                    session_id,
+                    result,
+                }
+            }
+        }
+    }
+}
+
+/// How a vetting job went. Applied on the loop thread.
+pub(crate) enum VettingOutcome {
+    /// A document went out, or did not.
+    Sent {
+        /// Boxed: a desk state carries the card, and dwarfs every other outcome.
+        sent: Box<Sent>,
+        error: Option<String>,
+    },
+    /// The holder's faces, for the picker.
+    Faces {
+        application_id: String,
+        result: Result<Vec<FaceChoice>, String>,
+    },
+    /// A face is worn, or is not.
+    FaceWorn {
+        application_id: String,
+        name: String,
+        error: Option<String>,
+    },
+    /// What a card would show.
+    Previewed {
+        application_id: String,
+        session_id: String,
+        result: Result<CardPreview, String>,
+    },
+    /// A card went out — with what it showed — or did not.
+    CardSent {
+        application_id: String,
+        session_id: String,
+        result: Result<(SentCard, Vec<CardClaim>), CardFailure>,
+    },
 }
 
 impl VettingOutcome {
-    /// Report success, clearing the inbox task the step answered; or undo the
-    /// step and say why.
+    /// Fold the result into the book and the page.
     pub(crate) fn apply(self, state: &mut State, config: &mut Config, save: &mut SaveScheduler) {
-        let tasks = &mut config.private.tasks;
-        let book = &mut config.private.vetting;
-        let clear = |tasks: &mut openvtc_core::tasks::Tasks, id: String| {
-            tasks.remove(&Arc::new(id));
+        let v = &mut state.main_page.content_panel.vetting;
+        let (message, persist) = match self {
+            VettingOutcome::Sent { sent, error } => sent_result(*sent, error, config),
+            VettingOutcome::Faces {
+                application_id,
+                result: Ok(faces),
+            } => {
+                if let Some(worn) = faces.iter().find(|f| f.worn) {
+                    v.worn_faces
+                        .insert(application_id.clone(), worn.name.clone());
+                }
+                let message = if faces.is_empty() {
+                    "You have no faces yet — make one under My Identity with the claims the \
+                     community requires, then press f again."
+                } else {
+                    "Choose the face vetters are shown."
+                };
+                if matches!(v.mode, VettingMode::List) && !faces.is_empty() {
+                    let index = faces.iter().position(|f| f.worn).unwrap_or(0);
+                    v.mode = VettingMode::ChooseFace {
+                        application_id,
+                        faces,
+                        index,
+                    };
+                }
+                // The application may have just been given its context.
+                (message.to_string(), true)
+            }
+            VettingOutcome::Faces { result: Err(e), .. } => {
+                (format!("Could not read your faces: {e}"), true)
+            }
+            VettingOutcome::FaceWorn {
+                application_id,
+                name,
+                error: None,
+            } => {
+                v.worn_faces.insert(application_id, name.clone());
+                (
+                    format!(
+                        "Vetters are shown your {name} face, and the community sees the same one \
+                         when you join."
+                    ),
+                    true,
+                )
+            }
+            VettingOutcome::FaceWorn {
+                name,
+                error: Some(e),
+                ..
+            } => (format!("Could not wear {name}: {e}"), true),
+            VettingOutcome::Previewed {
+                application_id,
+                session_id,
+                result: Ok(preview),
+            } => {
+                let message = match &preview.problem {
+                    Some(problem) => format!("This face cannot make the card: {problem}"),
+                    None => "This is what the card shows. Enter approves and sends it.".to_string(),
+                };
+                if let VettingMode::SendCard {
+                    application_id: open_application,
+                    session_id: open,
+                    preview: shown,
+                } = &mut v.mode
+                    && *open == session_id
+                    && *open_application == application_id
+                {
+                    *shown = Some(preview);
+                }
+                (message, true)
+            }
+            VettingOutcome::Previewed { result: Err(e), .. } => {
+                (format!("Could not preview the card: {e}"), true)
+            }
+            VettingOutcome::CardSent {
+                application_id,
+                session_id,
+                result: Ok((card, claims)),
+            } => {
+                if matches!(&v.mode, VettingMode::SendCard { session_id: open, .. } if *open == session_id)
+                {
+                    v.mode = VettingMode::List;
+                }
+                config
+                    .private
+                    .tasks
+                    .remove(&Arc::new(format!("vetting-session-{session_id}")));
+                let recorded = config
+                    .private
+                    .vetting
+                    .application_by_id_mut(&application_id)
+                    .map(|app| app.record_sent_card(&session_id, card, &claims, Utc::now()));
+                match recorded {
+                    Some(Ok(())) => (
+                        "Card sent — the vetter checks it against you and your documents."
+                            .to_string(),
+                        true,
+                    ),
+                    Some(Err(e)) => (
+                        format!("Card sent, but it could not be recorded: {e}"),
+                        true,
+                    ),
+                    None => ("Card sent, but the application is gone.".to_string(), true),
+                }
+            }
+            VettingOutcome::CardSent {
+                result: Err(CardFailure::StepUp),
+                ..
+            } => (
+                "Your VTA wants you to approve this disclosure. Approve it on your device, then \
+                 press Enter again."
+                    .to_string(),
+                false,
+            ),
+            VettingOutcome::CardSent {
+                session_id,
+                result: Err(CardFailure::Failed(e)),
+                ..
+            } => {
+                // The preview may be spent; the next Enter asks for a new one.
+                if let VettingMode::SendCard {
+                    session_id: open,
+                    preview,
+                    ..
+                } = &mut v.mode
+                    && *open == session_id
+                {
+                    *preview = None;
+                }
+                (
+                    format!("Could not send the card: {e}. Enter previews it again."),
+                    true,
+                )
+            }
         };
-        let (message, persist) = match (self.sent, self.error) {
+        dispatch_util::save_and_sync(
+            &mut state.main_page,
+            config,
+            save,
+            if persist {
+                Persist::SaveAndSync
+            } else {
+                Persist::SyncOnly
+            },
+            |mp| &mut mp.content_panel.vetting.status_message,
+            message.clone(),
+            SyncLog::Plain(message),
+        );
+    }
+}
+
+/// Report a send: clear the inbox task the step answered, or undo the step and
+/// say why. Returns the message and whether the book changed.
+fn sent_result(sent: Sent, error: Option<String>, config: &mut Config) -> (String, bool) {
+    let tasks = &mut config.private.tasks;
+    let book = &mut config.private.vetting;
+    let clear = |tasks: &mut openvtc_core::tasks::Tasks, id: String| {
+        tasks.remove(&Arc::new(id));
+    };
+    {
+        match (sent, error) {
             (Sent::Manifest { community }, None) => (
                 format!(
                     "Asked {} for its vetting requirements.",
@@ -1382,13 +1880,6 @@ impl VettingOutcome {
                 ),
                 false,
             ),
-            (Sent::Card { session_id }, None) => {
-                clear(tasks, format!("vetting-session-{session_id}"));
-                (
-                    "Card sent — the vetter checks it against you and your documents.".to_string(),
-                    true,
-                )
-            }
             (Sent::Session { request_id }, None) => {
                 clear(tasks, format!("vetting-request-{request_id}"));
                 ("Session sent — waiting for their card.".to_string(), true)
@@ -1454,23 +1945,10 @@ impl VettingOutcome {
                 }
                 (format!("Could not send the withdrawal: {e}"), true)
             }
-            (Sent::Manifest { .. } | Sent::Card { .. } | Sent::Session { .. }, Some(e)) => {
+            (Sent::Manifest { .. } | Sent::Session { .. }, Some(e)) => {
                 (format!("Could not send — try again: {e}"), false)
             }
-        };
-        dispatch_util::save_and_sync(
-            &mut state.main_page,
-            config,
-            save,
-            if persist {
-                Persist::SaveAndSync
-            } else {
-                Persist::SyncOnly
-            },
-            |mp| &mut mp.content_panel.vetting.status_message,
-            message.clone(),
-            SyncLog::Plain(message),
-        );
+        }
     }
 }
 
@@ -1481,10 +1959,76 @@ mod tests {
     use openvtc_core::vetting::applicant::Application;
 
     fn outcome(sent: Sent, error: Option<&str>) -> VettingOutcome {
-        VettingOutcome {
-            sent,
+        VettingOutcome::Sent {
+            sent: Box::new(sent),
             error: error.map(ToString::to_string),
         }
+    }
+
+    /// A step-up refusal keeps the preview the holder approved, so pressing
+    /// Enter after approving presents the same one; any other failure drops
+    /// it, because the preview may already be spent.
+    #[test]
+    fn a_step_up_keeps_the_preview_and_a_failure_drops_it() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+        let preview = CardPreview {
+            preview_id: "01PREVIEW".into(),
+            claims: vec![("name.legal".into(), "Alice Example".into())],
+            problem: None,
+        };
+        state.main_page.content_panel.vetting.mode = VettingMode::SendCard {
+            application_id: "a".into(),
+            session_id: "s".into(),
+            preview: Some(preview.clone()),
+        };
+        let card_sent = |result| VettingOutcome::CardSent {
+            application_id: "a".into(),
+            session_id: "s".into(),
+            result,
+        };
+
+        card_sent(Err(CardFailure::StepUp)).apply(&mut state, &mut config, &mut save);
+        let v = &state.main_page.content_panel.vetting;
+        assert!(matches!(&v.mode, VettingMode::SendCard { preview: Some(p), .. } if *p == preview));
+        assert!(
+            v.status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("approve"))
+        );
+
+        card_sent(Err(CardFailure::Failed("preview expired".into()))).apply(
+            &mut state,
+            &mut config,
+            &mut save,
+        );
+        assert!(matches!(
+            &state.main_page.content_panel.vetting.mode,
+            VettingMode::SendCard { preview: None, .. }
+        ));
+    }
+
+    /// The picker opens on the face already worn, and the page remembers it.
+    #[test]
+    fn the_face_picker_opens_on_the_worn_face() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+        let face = |id: &str, worn| FaceChoice {
+            profile_id: id.into(),
+            name: id.to_uppercase(),
+            entries: 2,
+            worn,
+        };
+        VettingOutcome::Faces {
+            application_id: "a".into(),
+            result: Ok(vec![face("home", false), face("work", true)]),
+        }
+        .apply(&mut state, &mut config, &mut save);
+        let v = &state.main_page.content_panel.vetting;
+        assert!(matches!(&v.mode, VettingMode::ChooseFace { index: 1, .. }));
+        assert_eq!(v.worn_faces.get("a").map(String::as_str), Some("WORK"));
     }
 
     /// A request that never left is forgotten, so retrying is not shadowed by

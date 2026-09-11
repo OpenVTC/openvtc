@@ -1069,28 +1069,39 @@ async fn run_join_sequence(
     // persona pre-existed and is left intact.
     let minted = minted_persona.is_some();
 
-    // 6. Derive the per-community sub-context id (D9, collision-safe).
-    let sub_context_id =
-        match build_sub_context_id(&top_context_id, display_name.as_deref(), &vtc_did, |id| {
+    // 6. Derive the per-community sub-context id (D9, collision-safe). An
+    // application to be vetted already has one — the context its face was worn
+    // in for the vetters — and the membership keeps it, so the community sees
+    // the face the vetters checked.
+    let vetted_context = config
+        .private
+        .vetting
+        .application(&vtc_did, persona_id)
+        .and_then(|a| a.context_id.clone())
+        .filter(|id| {
+            !config
+                .account
+                .memberships()
+                .any(|c| &c.sub_context_id == id)
+        });
+    let derived = match vetted_context {
+        Some(id) => Ok(id),
+        None => build_sub_context_id(&top_context_id, display_name.as_deref(), &vtc_did, |id| {
             config.account.memberships().any(|c| c.sub_context_id == id)
-        }) {
-            Ok(id) => id,
-            Err(e) => {
-                state
-                    .join
-                    .fail(format!("Failed to derive sub-context id: {e}"));
-                if minted {
-                    rollback_minted_persona(
-                        config,
-                        persona_id,
-                        state,
-                        profile,
-                        prior_friendly_name,
-                    );
-                }
-                return;
+        }),
+    };
+    let sub_context_id = match derived {
+        Ok(id) => id,
+        Err(e) => {
+            state
+                .join
+                .fail(format!("Failed to derive sub-context id: {e}"));
+            if minted {
+                rollback_minted_persona(config, persona_id, state, profile, prior_friendly_name);
             }
-        };
+            return;
+        }
+    };
 
     // 7. Register the sub-context at the VTA.
     state

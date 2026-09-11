@@ -25,7 +25,7 @@ use vta_sdk::vetting::card::sign_card;
 use vta_sdk::vetting::statement::sign_statement;
 
 use super::VettingBook;
-use super::applicant::{RequestDraft, RequestState};
+use super::applicant::{ApplicantError, RequestDraft, RequestState};
 use super::inbound::{Context, Handled, Notice, handle};
 use super::tickets::{DEFAULT_VALIDITY, Ticket};
 use super::vetter::{Attestation, DeskState};
@@ -34,6 +34,7 @@ use super::wire::{
     tests::{did, secret},
 };
 use crate::config::account::{Account, CommunityRecord, PersonaId};
+use crate::persona::disclosure::ReleasedClaim;
 
 const COMMUNITY: &str = "did:web:vtc.example";
 
@@ -324,6 +325,75 @@ async fn an_applicant_is_vetted_end_to_end() {
             .on_withdrawal_recorded(COMMUNITY, &notice_id, Utc::now())
             .is_some()
     );
+}
+
+/// What the face released, as the disclosure reports it.
+fn released(name: Option<&str>) -> Vec<ReleasedClaim> {
+    vec![
+        ReleasedClaim {
+            claim_type: "name.legal".into(),
+            value: name.map(|n| json!(n)),
+            provenance: Some("selfAsserted".into()),
+            stale: false,
+        },
+        ReleasedClaim {
+            claim_type: "email.work".into(),
+            value: Some(json!("alice@example.com")),
+            provenance: Some("selfAsserted".into()),
+            stale: false,
+        },
+    ]
+}
+
+/// A card's identity comes from the persona's face, and every later card has
+/// to show what the first one did.
+#[tokio::test]
+async fn cards_come_from_the_face_and_keep_showing_the_same_identity() {
+    let (mut applicant, mut vetter, _) = ready().await;
+    let resolver = TrustTaskVmResolver::did_key_only();
+    let (_, session_doc) = in_session(&mut applicant, &mut vetter).await;
+    let message = signed(session_doc, &vetter.secret).await;
+    let handled = applicant.receive(&message, &vetter.did).await;
+    let Some(Notice::SessionOpened { session_id, .. }) = handled.notice else {
+        panic!("the session opens");
+    };
+    let signer = applicant.secret.clone();
+    let app = applicant.application();
+    assert_eq!(app.requested_claims(&session_id), vec!["name.legal"]);
+
+    // Only the session's claim types go on the card, and each needs a value a
+    // vetter can read.
+    let claims = app
+        .card_claims(&session_id, &released(Some("Alice Example")))
+        .unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].value, json!("Alice Example"));
+    assert!(matches!(
+        app.card_claims(&session_id, &released(None)),
+        Err(ApplicantError::ValueWithheld(t)) if t == "name.legal"
+    ));
+    assert!(matches!(
+        app.card_claims(&session_id, &[]),
+        Err(ApplicantError::MissingClaim(_))
+    ));
+
+    let draft = app
+        .card_draft(&session_id, claims.clone(), Utc::now())
+        .unwrap();
+    let card = sign_card(draft, &signer).await.unwrap();
+    let sent = app
+        .record_card(&session_id, &card, &resolver, Utc::now())
+        .await
+        .unwrap();
+    app.record_sent_card(&session_id, sent, &claims, Utc::now())
+        .unwrap();
+    assert_eq!(app.identity_claims, claims);
+
+    // The face has changed since: the next card is refused before it is signed.
+    assert!(matches!(
+        app.card_claims(&session_id, &released(Some("Alicia Example"))),
+        Err(ApplicantError::IdentityChanged(t)) if t == "name.legal"
+    ));
 }
 
 #[tokio::test]
