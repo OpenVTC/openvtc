@@ -303,12 +303,20 @@ pub enum VettingAction {
     Submit,
     /// Show a status line (e.g. a clipboard result).
     Status(String),
+    /// Pasted text that is a `vetting-ticket:` link, for the request form.
+    PasteTicket(String),
     // ── Applicant ────────────────────────────────────────────────────────
     StartApplication,
     ChooseFace,
     RequestVetter,
     RefreshRequirements,
     ReviewCard,
+    /// Open the vetter directory.
+    FindVetters,
+    /// Fetch the next (`true`) or previous directory page.
+    DirectoryPage(bool),
+    /// Ask the highlighted directory vetter: fill the request form.
+    AskListedVetter,
     // ── Vetter ───────────────────────────────────────────────────────────
     NewTicket,
     DeleteTicket,
@@ -316,6 +324,12 @@ pub enum VettingAction {
     StartAttest,
     ArmDecline,
     ArmWithdraw,
+    /// Open the vetter profile form.
+    EditProfile,
+    /// Remove the highlighted event from the profile form.
+    RemoveEvent,
+    /// Ask a community to send our vetter credential again.
+    AskResend,
 }
 
 /// A membership's VTA context, from the communities panel: deleting a finished
@@ -447,6 +461,20 @@ pub enum Action {
 
     /// Commit the highlighted context and launch the join in it.
     JoinContextChoose,
+
+    /// Vetting page: start the application to the community (or continue the
+    /// one under way) and go to it on the Vetting page.
+    JoinVettingApply,
+    /// Vetting page: join now — presenting the application's statements when
+    /// it meets the requirements, otherwise without them, which the community
+    /// refers to its moderators.
+    JoinVettingJoin,
+    /// Vetting page: ask the community for its requirements again.
+    JoinVettingAskAgain,
+    /// Vetting page: move the focus (`true` = next field).
+    JoinVettingField(bool),
+    /// Vetting page: cycle the focused choice (`true` = forwards).
+    JoinVettingCycle(bool),
 
     /// Issue this Active membership's reciprocal VMC (member → community) and
     /// send it to the community's VTC over DIDComm (`members/vmc/1.0`). Indexed

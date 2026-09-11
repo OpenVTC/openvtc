@@ -20,17 +20,25 @@ use openvtc_core::config::context_path::parse_sub_context_id;
 use openvtc_core::didcomm::Messaging;
 use openvtc_core::persona::disclosure::{self, PresentError};
 use openvtc_core::persona::{binding, profile};
+use openvtc_core::vetting::VettingBook;
 use openvtc_core::vetting::applicant::{
-    Application, RequestDraft, RequestState, SentCard, VetterEligibility,
+    Application, GrantStatus, NextStep, RequestDraft, RequestState, SentCard, VetterEligibility,
 };
 use openvtc_core::vetting::book::FALLBACK_REQUIRED_CLAIMS;
+use openvtc_core::vetting::queries::{
+    CommunityAnswer, CommunityQuery, QUERY_TIMEOUT, QueryKind, refusal_words,
+};
+use openvtc_core::vetting::registry::{
+    EventDraft, ProfileDraft, ProfileState, VetterProfileRecord, event_line, location_line,
+};
+use openvtc_core::vetting::status::GrantCheck;
 use openvtc_core::vetting::tickets::{DEFAULT_VALIDITY, Ticket, normalise_code};
 use openvtc_core::vetting::vetter::{Attestation, DeskState};
 use openvtc_core::vetting::wire::{self, Document};
 use serde_json::Value;
 use vta_sdk::client::VtaClient;
 use vta_sdk::protocols::vetting::{
-    CardClaim, TicketPresentation, VETTING_DECLINE_TYPE, VETTING_REQUEST_TYPE,
+    CardClaim, ListedVetter, TicketPresentation, VETTING_DECLINE_TYPE, VETTING_REQUEST_TYPE,
     VETTING_REVOKE_STATEMENT_TYPE, VETTING_SESSION_RESPONSE_TYPE, VETTING_SESSION_TYPE,
     VettingMethod, VettingRequirements, VettingSessionResponseBody, documentation,
 };
@@ -38,17 +46,20 @@ use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::card::sign_card;
 use vta_sdk::vetting::requirements::{Evaluation, Need};
 use vta_sdk::vetting::statement::sign_statement;
+use vta_sdk::vetting::status::StatusCheck;
 
 use crate::state_handler::actions::VettingAction;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
 use crate::state_handler::dispatch_util::{self, Persist, SyncLog};
 use crate::state_handler::join_flow;
 use crate::state_handler::main_page::content::{
-    ApplicationRow, AttestForm, CardPreview, DeskRow, DeskStage, FaceChoice, IssuedRow, RequestRow,
-    TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
-    VETTING_WITHDRAWAL_REASONS, VettingMembership, VettingMode, VettingPersona, VettingState,
-    VettingTab, method_label,
+    ApplicationRow, AttestForm, CardPreview, DIRECTORY_FIELDS, DIRECTORY_METHODS, DeskRow,
+    DeskStage, DirectoryCommunity, DirectoryView, EVENT_FIELDS, EventForm, FaceChoice, IssuedRow,
+    LineTone, ListedVetterRow, PROFILE_FIELDS, RequestRow, TicketRow, VETTING_METHODS,
+    VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm,
+    VettingMembership, VettingMode, VettingPersona, VettingState, VettingTab, method_label,
 };
+use crate::state_handler::main_page::menu::MainMenu;
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
 use crate::state_handler::runtime_actions::ActionCtx;
 use crate::state_handler::save_coalesce::SaveScheduler;
@@ -63,14 +74,18 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
     let now = Utc::now();
     let book = &config.private.vetting;
     let name = |did: &str| config.agent_name_for(did).map(|n| sanitize_display(n, 256));
+    // The membership's own name first; the name the community gives itself in
+    // its branding only when there is none.
     let community_name = |did: &str| {
         config
             .account
             .memberships()
             .find(|m| m.vtc_did == did)
             .and_then(|m| m.display_name.as_deref())
+            .or_else(|| book.branding(did).and_then(|b| b.display_name.as_deref()))
             .map(|n| sanitize_display(n, 128))
     };
+    let accent = |did: &str| book.branding(did).and_then(|b| b.accent_rgb());
 
     vetting.personas = config
         .identities
@@ -91,14 +106,54 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
         .filter(|m| book.vetter_grant(&m.vtc_did, m.persona_ref, now).is_some())
         .map(|m| VettingMembership {
             community: m.vtc_did.clone(),
-            name: m
-                .display_name
-                .as_deref()
-                .map(|n| sanitize_display(n, 128))
-                .unwrap_or_else(|| shorten_did(&m.vtc_did, 48)),
+            name: community_name(&m.vtc_did).unwrap_or_else(|| shorten_did(&m.vtc_did, 48)),
             persona: m.persona_ref,
+            accent: accent(&m.vtc_did),
         })
         .collect();
+
+    vetting.resend_candidates = book
+        .resend_candidates(&config.account, now)
+        .into_iter()
+        .map(|m| VettingMembership {
+            community: m.vtc_did.clone(),
+            name: community_name(&m.vtc_did).unwrap_or_else(|| shorten_did(&m.vtc_did, 48)),
+            persona: m.persona_ref,
+            accent: accent(&m.vtc_did),
+        })
+        .collect();
+
+    // The directory is searched as a persona the community knows of: the
+    // application's join DID first, else the membership's.
+    let mut directory: Vec<DirectoryCommunity> = Vec::new();
+    for app in &book.applications {
+        if !directory.iter().any(|d| d.community == app.community) {
+            directory.push(DirectoryCommunity {
+                community: app.community.clone(),
+                name: community_name(&app.community)
+                    .unwrap_or_else(|| shorten_did(&app.community, 48)),
+                accent: accent(&app.community),
+                persona: app.persona,
+                application_id: Some(app.id.clone()),
+            });
+        }
+    }
+    for m in config
+        .account
+        .memberships()
+        .filter(|m| m.status.is_active())
+    {
+        if !directory.iter().any(|d| d.community == m.vtc_did) {
+            directory.push(DirectoryCommunity {
+                community: m.vtc_did.clone(),
+                name: community_name(&m.vtc_did).unwrap_or_else(|| shorten_did(&m.vtc_did, 48)),
+                accent: accent(&m.vtc_did),
+                persona: m.persona_ref,
+                application_id: None,
+            });
+        }
+    }
+    vetting.directory_communities = directory.into();
 
     vetting.documentation = book
         .policy
@@ -140,6 +195,8 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                 id: app.id.clone(),
                 community: app.community.clone(),
                 community_name: community_name(&app.community),
+                accent: accent(&app.community),
+                next_step: Some(next_step_words(&app.next_step(now))),
                 join_did: app.join_did.clone(),
                 requirements: app.requirements.as_ref().map(requirements_line),
                 progress: evaluation.as_ref().map(progress_line),
@@ -196,6 +253,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                             match_code,
                             card_session,
                             eligibility: r.eligibility.as_ref().map(eligibility_line),
+                            grant: r.grant_status.as_ref().map(grant_line),
                         }
                     })
                     .collect(),
@@ -278,6 +336,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
             uses_left: t.uses_left,
             expires: t.expires_at.format("%Y-%m-%d").to_string(),
             live: t.is_live(now),
+            uri: persona_did(config, t.persona).map(|did| t.uri(&did)),
         })
         .collect();
 
@@ -314,10 +373,7 @@ fn eligibility_line(eligibility: &VetterEligibility) -> (bool, String) {
     match eligibility {
         VetterEligibility::Shown { valid_until, .. } => (
             true,
-            format!(
-                "named a vetter by the community until {}",
-                valid_until.format("%Y-%m-%d")
-            ),
+            format!("named a vetter until {}", valid_until.format("%Y-%m-%d")),
         ),
         VetterEligibility::NotShown => (
             false,
@@ -332,6 +388,71 @@ fn eligibility_line(eligibility: &VetterEligibility) -> (bool, String) {
             ),
         ),
     }
+}
+
+/// Whether the community revoked the vetter's grant, in a line.
+fn grant_line(status: &GrantStatus) -> (LineTone, String) {
+    match status {
+        GrantStatus::Checking { .. } => (
+            LineTone::Caution,
+            "checking whether the community has revoked this vetter's grant…".to_string(),
+        ),
+        GrantStatus::Active { checked_at } => (
+            LineTone::Good,
+            format!(
+                "not revoked when checked on {}",
+                checked_at.format("%Y-%m-%d")
+            ),
+        ),
+        GrantStatus::Revoked { .. } => (
+            LineTone::Bad,
+            "the community has revoked this vetter's grant — their statement will not count"
+                .to_string(),
+        ),
+        GrantStatus::Unknown { reason, .. } => (
+            LineTone::Caution,
+            format!(
+                "could not check whether the grant was revoked ({})",
+                sanitize_display(reason, 200)
+            ),
+        ),
+    }
+}
+
+/// What to do next on an application, with the key that does it.
+pub(crate) fn next_step_words(step: &NextStep) -> String {
+    match step {
+        NextStep::SendCard { .. } => {
+            "c — a vetter opened a session: read the code together, then send your card"
+        }
+        NextStep::LearnRequirements => "m — ask the community what it requires",
+        NextStep::Join => "join from Communities (j) — your statements go with the request",
+        NextStep::ChooseFace => "f — choose the face vetters are shown, then ask a vetter",
+        NextStep::AskVetter => "r — ask a vetter with their ticket, or v to find one",
+        NextStep::WaitForVetters => "wait for your vetters — you are told when one answers",
+    }
+    .to_string()
+}
+
+/// A community's name for messages: the membership's, then the one it
+/// publishes, then a verified agent name, then its DID.
+pub(crate) fn community_display(config: &Config, did: &str) -> String {
+    let named = config
+        .account
+        .memberships()
+        .find(|m| m.vtc_did == did)
+        .and_then(|m| m.display_name.clone())
+        .or_else(|| {
+            config
+                .private
+                .vetting
+                .branding(did)
+                .and_then(|b| b.display_name.clone())
+        });
+    sanitize_display(
+        &crate::state_handler::community_label(config, did, named.as_deref(), 48),
+        128,
+    )
 }
 
 fn requirements_line(r: &VettingRequirements) -> String {
@@ -349,7 +470,7 @@ fn requirements_line(r: &VettingRequirements) -> String {
     line
 }
 
-fn progress_line(evaluation: &Evaluation) -> String {
+pub(crate) fn progress_line(evaluation: &Evaluation) -> String {
     if evaluation.satisfied() {
         return "meets the published requirements — join from Communities".to_string();
     }
@@ -414,7 +535,33 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             let v = page(ctx);
             v.selected = i.min(v.tab_len().saturating_sub(1));
         }
-        VettingAction::Back => page(ctx).mode = VettingMode::List,
+        VettingAction::Back => back(page(ctx)),
+        VettingAction::PasteTicket(text) => paste_ticket(ctx, &text),
+        VettingAction::FindVetters => open_directory(ctx),
+        VettingAction::DirectoryPage(forward) => directory_page(ctx, forward).await,
+        VettingAction::AskListedVetter => ask_listed_vetter(ctx),
+        VettingAction::EditProfile => open_profile(ctx),
+        VettingAction::RemoveEvent => {
+            if let VettingMode::Profile(form) = &mut page(ctx).mode
+                && form.event.is_none()
+                && let Some(i) = form.event_index()
+            {
+                form.draft.events.remove(i);
+                form.field = form.field.min(form.rows() - 1);
+                form.error = None;
+            }
+        }
+        VettingAction::AskResend => {
+            if page(ctx).resend_candidates.is_empty() {
+                status(
+                    ctx,
+                    "Every community you are an active member of has already sent you a live \
+                     vetter credential — or you are not an active member of any.",
+                );
+            } else {
+                page(ctx).mode = VettingMode::Resend { index: 0 };
+            }
+        }
         VettingAction::Status(message) => status(ctx, message),
         VettingAction::Input(text) => {
             input(&mut page(ctx).mode, text);
@@ -423,18 +570,41 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
         VettingAction::NextField => move_field(page(ctx), true),
         VettingAction::PrevField => move_field(page(ctx), false),
         VettingAction::Cycle(forward) => {
+            let before = profile_membership(page(ctx));
             cycle(page(ctx), forward);
+            let after = profile_membership(page(ctx));
+            if let Some(index) = after
+                && before != after
+            {
+                // Each community has its own profile: show the one for this one.
+                let form = profile_form(
+                    &ctx.state.main_page.content_panel.vetting,
+                    &ctx.config.private.vetting,
+                    index,
+                    0,
+                );
+                page(ctx).mode = VettingMode::Profile(Box::new(form));
+            }
             refresh_application_contexts(ctx);
         }
-        VettingAction::Toggle => {
-            if let VettingMode::Attest { form, .. } = &mut page(ctx).mode {
+        VettingAction::Toggle => match &mut page(ctx).mode {
+            VettingMode::Attest { form, .. } => match form.field {
+                3 => form.liveness_confirmed = !form.liveness_confirmed,
+                4 => form.attested = !form.attested,
+                _ => {}
+            },
+            VettingMode::Profile(form) if form.event.is_none() => {
                 match form.field {
-                    3 => form.liveness_confirmed = !form.liveness_confirmed,
-                    4 => form.attested = !form.attested,
+                    1 => form.draft.listed = !form.draft.listed,
+                    7 => form.draft.toggle_method(VettingMethod::InPerson),
+                    8 => form.draft.toggle_method(VettingMethod::Video),
+                    9 => form.draft.toggle_method(VettingMethod::PriorAcquaintance),
                     _ => {}
                 }
+                form.error = None;
             }
-        }
+            _ => {}
+        },
         VettingAction::StartApplication => {
             if page(ctx).personas.is_empty() {
                 status(
@@ -465,6 +635,8 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                     application_id: row.id,
                     vetter: String::new(),
                     code: String::new(),
+                    ticket: None,
+                    note: None,
                     field: 0,
                 };
             }
@@ -576,17 +748,43 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
 }
 
 fn input(mode: &mut VettingMode, text: String) {
+    // Typing a code replaces a ticket read from a link.
+    if let VettingMode::RequestVetter {
+        ticket, field: 1, ..
+    } = mode
+    {
+        *ticket = None;
+    }
+    if let Some(focused) = mode.focused_text_mut() {
+        *focused = text;
+    }
     match mode {
-        VettingMode::NewApplication {
-            community,
-            field: 0,
-            ..
-        } => *community = text,
-        VettingMode::RequestVetter {
-            vetter, field: 0, ..
-        } => *vetter = text,
-        VettingMode::RequestVetter { code, field: 1, .. } => *code = text,
+        VettingMode::Directory(view) => view.error = None,
+        VettingMode::Profile(form) => {
+            form.error = None;
+            if let Some(event) = &mut form.event {
+                event.error = None;
+            }
+        }
         _ => {}
+    }
+}
+
+/// Esc: an open event form returns to its profile; anything else to the list.
+fn back(v: &mut VettingState) {
+    if let VettingMode::Profile(form) = &mut v.mode
+        && form.event.is_some()
+    {
+        form.event = None;
+        return;
+    }
+    v.mode = VettingMode::List;
+}
+
+fn profile_membership(v: &VettingState) -> Option<usize> {
+    match &v.mode {
+        VettingMode::Profile(form) => Some(form.membership_index),
+        _ => None,
     }
 }
 
@@ -606,6 +804,17 @@ fn move_field(v: &mut VettingState, forward: bool) {
         VettingMode::RequestVetter { field, .. } | VettingMode::NewTicket { field, .. } => {
             step(field, 2);
         }
+        VettingMode::Directory(view) => {
+            let rows = view.rows();
+            step(&mut view.field, rows);
+        }
+        VettingMode::Profile(form) => match &mut form.event {
+            Some(event) => step(&mut event.field, EVENT_FIELDS),
+            None => {
+                let rows = form.rows();
+                step(&mut form.field, rows);
+            }
+        },
         VettingMode::ChooseFace { faces, index, .. } => step(index, faces.len()),
         VettingMode::Attest { form, .. } => step(&mut form.field, AttestForm::FIELDS),
         _ => {}
@@ -625,7 +834,17 @@ fn cycle(v: &mut VettingState, forward: bool) {
     };
     let (personas, memberships, documentation) =
         (v.personas.len(), v.memberships.len(), v.documentation.len());
+    let (communities, resend) = (v.directory_communities.len(), v.resend_candidates.len());
     match &mut v.mode {
+        VettingMode::Directory(view) => match view.field {
+            0 => turn(&mut view.community_index, communities),
+            5 => turn(&mut view.method_index, DIRECTORY_METHODS.len()),
+            _ => {}
+        },
+        VettingMode::Profile(form) if form.event.is_none() && form.field == 0 => {
+            turn(&mut form.membership_index, memberships);
+        }
+        VettingMode::Resend { index } => turn(index, resend),
         VettingMode::NewApplication {
             persona_index,
             field: 1,
@@ -688,8 +907,15 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             application_id,
             vetter,
             code,
+            ticket,
             ..
-        } => request_vetter(ctx, &application_id, vetter.trim(), &code).await,
+        } => request_vetter(ctx, &application_id, vetter.trim(), &code, ticket).await,
+        VettingMode::Directory(view) => match view.result_index() {
+            Some(_) => ask_listed_vetter(ctx),
+            None => search_directory(ctx, vec![None]).await,
+        },
+        VettingMode::Profile(form) => profile_submit(ctx, *form).await,
+        VettingMode::Resend { index } => ask_resend(ctx, index).await,
         VettingMode::SendCard {
             application_id,
             session_id,
@@ -887,6 +1113,10 @@ async fn start_application(
         }
         Err(e) => return status(ctx, format!("Could not start the application: {e}")),
     };
+    ctx.config
+        .private
+        .vetting
+        .adopt_known_requirements(&application_id);
     {
         let v = page(ctx);
         v.mode = VettingMode::List;
@@ -903,12 +1133,32 @@ async fn start_application(
     refresh_requirements(ctx, &application_id).await;
 }
 
-async fn request_vetter(ctx: &mut ActionCtx<'_>, application_id: &str, vetter: &str, code: &str) {
+async fn request_vetter(
+    ctx: &mut ActionCtx<'_>,
+    application_id: &str,
+    vetter: &str,
+    code: &str,
+    ticket: Option<TicketPresentation>,
+) {
+    // A link typed into the DID field is read the same as a pasted one.
+    if vetter.to_ascii_lowercase().starts_with("vetting-ticket:") {
+        return paste_ticket(ctx, vetter);
+    }
     if !vetter.starts_with("did:") {
         return status(ctx, "Enter the vetter's DID (it starts with did:).");
     }
-    let Some(code) = normalise_code(code) else {
-        return status(ctx, "That is not a ticket code — they look like K7QF-2M9X.");
+    let presentation = match ticket {
+        Some(ticket) if code.is_empty() => ticket,
+        _ => match normalise_code(code) {
+            Some(code) => TicketPresentation::Code { code },
+            None => {
+                return status(
+                    ctx,
+                    "That is not a ticket code — they look like K7QF-2M9X. Or paste the link \
+                     from their QR code.",
+                );
+            }
+        },
     };
     if !begin(ctx) {
         return;
@@ -926,7 +1176,7 @@ async fn request_vetter(ctx: &mut ActionCtx<'_>, application_id: &str, vetter: &
     let body = match app.prepare_request(
         &document_id,
         vetter,
-        TicketPresentation::Code { code },
+        presentation,
         RequestDraft::default(),
         Utc::now(),
     ) {
@@ -960,6 +1210,447 @@ async fn request_vetter(ctx: &mut ActionCtx<'_>, application_id: &str, vetter: &
             app.forget_unsent(&document_id);
         }
         abandon(ctx, "Could not send the request", e);
+    }
+}
+
+/// Fill the request form from a pasted `vetting-ticket:` link — the vetter's
+/// DID and the scanned ticket — or say why it cannot be used.
+fn paste_ticket(ctx: &mut ActionCtx<'_>, text: &str) {
+    let VettingMode::RequestVetter { application_id, .. } = &page(ctx).mode else {
+        return;
+    };
+    let application_id = application_id.clone();
+    let Some(app) = ctx
+        .config
+        .private
+        .vetting
+        .applications
+        .iter()
+        .find(|a| a.id == application_id)
+    else {
+        return;
+    };
+    match app.ticket_from_uri(text) {
+        Ok(ticket) => {
+            let shown = shorten_did(&ticket.vetter, 64);
+            if let VettingMode::RequestVetter {
+                vetter,
+                code,
+                ticket: slot,
+                field,
+                ..
+            } = &mut page(ctx).mode
+            {
+                *vetter = ticket.vetter;
+                code.clear();
+                *slot = Some(ticket.presentation);
+                *field = 1;
+            }
+            status(
+                ctx,
+                format!("Filled in from the ticket link: {shown}. Enter sends the request."),
+            );
+        }
+        Err(e) => status(ctx, sanitize_display(&e.to_string(), 400)),
+    }
+}
+
+fn open_directory(ctx: &mut ActionCtx<'_>) {
+    let v = page(ctx);
+    if v.directory_communities.is_empty() {
+        return status(
+            ctx,
+            "The vetter directory is searched per community: start an application (n) or join a \
+             community first.",
+        );
+    }
+    let from_application = (v.tab == VettingTab::Applications)
+        .then(|| v.applications.get(v.selected))
+        .flatten()
+        .map(|a| a.community.clone());
+    let community_index = from_application
+        .and_then(|c| {
+            v.directory_communities
+                .iter()
+                .position(|d| d.community == c)
+        })
+        .unwrap_or(0);
+    v.mode = VettingMode::Directory(Box::new(DirectoryView {
+        community_index,
+        ..DirectoryView::default()
+    }));
+    v.status_message = None;
+}
+
+/// Ask the directory's community for one page. `cursors` is what the view's
+/// page stack becomes once the answer arrives; its last entry is the cursor
+/// sent.
+async fn search_directory(ctx: &mut ActionCtx<'_>, cursors: Vec<Option<String>>) {
+    let prepared = {
+        let v = page(ctx);
+        let VettingMode::Directory(view) = &mut v.mode else {
+            return;
+        };
+        if view.pending.is_some() {
+            return;
+        }
+        let Some(target) = v.directory_communities.get(view.community_index).cloned() else {
+            return;
+        };
+        let mut filter = view.filter.clone();
+        filter.method = DIRECTORY_METHODS[view.method_index.min(DIRECTORY_METHODS.len() - 1)];
+        match filter.to_body(cursors.last().cloned().flatten()) {
+            Ok(body) => (target, body),
+            Err(e) => {
+                view.error = Some(e.to_string());
+                return;
+            }
+        }
+    };
+    let (target, body) = prepared;
+    let Some(asker) = persona_did(ctx.config, target.persona) else {
+        return status(
+            ctx,
+            "The persona the directory would be searched as is not available.",
+        );
+    };
+    if !begin(ctx) {
+        return;
+    }
+    let document = match wire::vetter_list_request(&asker, &target.community, &body) {
+        Ok(d) => d,
+        Err(e) => return abandon(ctx, "Could not search the directory", e),
+    };
+    let document_id = document.id.clone();
+    ctx.config.private.vetting.ask(CommunityQuery {
+        document_id: document_id.clone(),
+        community: target.community.clone(),
+        persona: target.persona,
+        kind: QueryKind::VetterList,
+        sent_at: Utc::now(),
+    });
+    if let VettingMode::Directory(view) = &mut page(ctx).mode {
+        view.pending = Some(document_id.clone());
+        view.pending_cursors = Some(cursors);
+        view.error = None;
+    }
+    status(
+        ctx,
+        format!("Asking {} for its vetter directory…", target.name),
+    );
+    let sent = Sent::Query {
+        document_id: document_id.clone(),
+        community: target.community.clone(),
+        kind: QueryKind::VetterList,
+    };
+    if let Err(e) = sign_and_send(ctx, target.persona, document, sent).await {
+        ctx.config.private.vetting.forget_query(&document_id);
+        if let VettingMode::Directory(view) = &mut page(ctx).mode {
+            view.pending = None;
+            view.pending_cursors = None;
+        }
+        abandon(ctx, "Could not search the directory", e);
+    }
+}
+
+async fn directory_page(ctx: &mut ActionCtx<'_>, forward: bool) {
+    let (mut cursors, next) = match &page(ctx).mode {
+        VettingMode::Directory(view) if view.pending.is_none() => {
+            (view.cursors.clone(), view.next_cursor.clone())
+        }
+        _ => return,
+    };
+    if forward {
+        let Some(next) = next else {
+            return status(ctx, "That is the last page.");
+        };
+        cursors.push(Some(next));
+    } else {
+        if cursors.len() <= 1 {
+            return status(ctx, "This is the first page.");
+        }
+        cursors.pop();
+    }
+    search_directory(ctx, cursors).await;
+}
+
+/// Open the request form for the highlighted directory vetter. The directory
+/// finds a vetter; it does not let anyone skip the ticket, so the form says
+/// how this vetter hands them out.
+fn ask_listed_vetter(ctx: &mut ActionCtx<'_>) {
+    let v = page(ctx);
+    let VettingMode::Directory(view) = &v.mode else {
+        return;
+    };
+    let Some(row) = view
+        .result_index()
+        .and_then(|i| view.results.get(i))
+        .cloned()
+    else {
+        return;
+    };
+    let Some(target) = v.directory_communities.get(view.community_index).cloned() else {
+        return;
+    };
+    let Some(application_id) = target.application_id.clone() else {
+        return status(
+            ctx,
+            format!(
+                "To ask {} you need an application to {} — start one on the Applications tab (n), \
+                 then find them here again.",
+                row.name, target.name
+            ),
+        );
+    };
+    let how = match &row.contact_hint {
+        Some(hint) => format!("they say: {hint}"),
+        None => "they have not said how, so ask them".to_string(),
+    };
+    let v = page(ctx);
+    v.mode = VettingMode::RequestVetter {
+        application_id,
+        vetter: row.did.clone(),
+        code: String::new(),
+        ticket: None,
+        note: Some(format!(
+            "{} still has to give you a ticket before they answer — {how}. Paste the link from \
+             their QR code, or type the code they read to you.",
+            row.name
+        )),
+        field: 1,
+    };
+    v.tab = VettingTab::Applications;
+}
+
+/// The profile form for membership `membership_index`, from what was last sent
+/// there — or a first profile from this vetter's own policy.
+pub(crate) fn profile_form(
+    v: &VettingState,
+    book: &VettingBook,
+    membership_index: usize,
+    field: usize,
+) -> VetterProfileForm {
+    let record = v
+        .memberships
+        .get(membership_index)
+        .and_then(|m| book.vetter_profile(&m.community, m.persona));
+    VetterProfileForm {
+        membership_index,
+        draft: record.map_or_else(
+            || ProfileDraft::new(&book.policy),
+            |r| r.draft(&book.policy),
+        ),
+        field,
+        event: None,
+        error: None,
+        state_line: record.map(profile_state_line),
+    }
+}
+
+fn profile_state_line(record: &VetterProfileRecord) -> (LineTone, String) {
+    let day = |at: &chrono::DateTime<Utc>| at.format("%Y-%m-%d").to_string();
+    match &record.state {
+        ProfileState::Sent { sent_at } => (
+            LineTone::Caution,
+            format!(
+                "Sent {} — the community has not answered yet.",
+                day(sent_at)
+            ),
+        ),
+        ProfileState::Stored {
+            listed: true,
+            updated_at,
+        } => (
+            LineTone::Good,
+            format!("Published {} and listed in the directory.", day(updated_at)),
+        ),
+        ProfileState::Stored { updated_at, .. } => (
+            LineTone::Good,
+            format!("Published {}, not listed.", day(updated_at)),
+        ),
+        ProfileState::Refused { code, at } => (
+            LineTone::Bad,
+            format!(
+                "Refused {} ({}) — the community did not count you as a vetter then.",
+                day(at),
+                sanitize_display(code, 80)
+            ),
+        ),
+    }
+}
+
+fn open_profile(ctx: &mut ActionCtx<'_>) {
+    let v = &ctx.state.main_page.content_panel.vetting;
+    if v.memberships.is_empty() {
+        let hint = if v.resend_candidates.is_empty() {
+            ""
+        } else {
+            " If one did and the credential never arrived, g asks it to send it again."
+        };
+        return status(
+            ctx,
+            format!(
+                "A profile is published to a community that named you a vetter, and none has.{hint}"
+            ),
+        );
+    }
+    let form = profile_form(v, &ctx.config.private.vetting, 0, 0);
+    page(ctx).mode = VettingMode::Profile(Box::new(form));
+}
+
+/// Enter on the profile form: keep an open event, open one, or publish.
+async fn profile_submit(ctx: &mut ActionCtx<'_>, form: VetterProfileForm) {
+    if let Some(event) = &form.event {
+        let result = event.draft.to_event();
+        if let VettingMode::Profile(open) = &mut page(ctx).mode {
+            match result {
+                Ok(_) => {
+                    let kept = match event.index {
+                        Some(i) if i < open.draft.events.len() => {
+                            open.draft.events[i] = event.draft.clone();
+                            i
+                        }
+                        _ => {
+                            open.draft.events.push(event.draft.clone());
+                            open.draft.events.len() - 1
+                        }
+                    };
+                    open.event = None;
+                    open.error = None;
+                    open.field = PROFILE_FIELDS + kept;
+                }
+                Err(e) => {
+                    if let Some(open_event) = &mut open.event {
+                        open_event.error = Some(e.to_string());
+                    }
+                }
+            }
+        }
+        return;
+    }
+    if let Some(i) = form.event_index() {
+        if let VettingMode::Profile(open) = &mut page(ctx).mode {
+            open.event = Some(EventForm {
+                index: Some(i),
+                draft: form.draft.events[i].clone(),
+                field: 0,
+                error: None,
+            });
+        }
+        return;
+    }
+    if form.on_add_event() {
+        if let VettingMode::Profile(open) = &mut page(ctx).mode {
+            open.event = Some(EventForm {
+                index: None,
+                draft: EventDraft::default(),
+                field: 0,
+                error: None,
+            });
+        }
+        return;
+    }
+    publish_profile(ctx, &form).await;
+}
+
+async fn publish_profile(ctx: &mut ActionCtx<'_>, form: &VetterProfileForm) {
+    let Some(membership) = page(ctx).memberships.get(form.membership_index).cloned() else {
+        return;
+    };
+    let body = match form.draft.to_body() {
+        Ok(body) => body,
+        Err(e) => {
+            if let VettingMode::Profile(open) = &mut page(ctx).mode {
+                open.error = Some(e.to_string());
+            }
+            return;
+        }
+    };
+    let Some(vetter_did) = persona_did(ctx.config, membership.persona) else {
+        return status(
+            ctx,
+            "The persona this community named a vetter is not available.",
+        );
+    };
+    if !begin(ctx) {
+        return;
+    }
+    let document = match wire::vetter_profile_request(&vetter_did, &membership.community, &body) {
+        Ok(d) => d,
+        Err(e) => return abandon(ctx, "Could not publish your profile", e),
+    };
+    let document_id = document.id.clone();
+    let now = Utc::now();
+    let book = &mut ctx.config.private.vetting;
+    let previous = book.record_profile_sent(&membership.community, membership.persona, &body, now);
+    book.ask(CommunityQuery {
+        document_id: document_id.clone(),
+        community: membership.community.clone(),
+        persona: membership.persona,
+        kind: QueryKind::VetterProfile,
+        sent_at: now,
+    });
+    {
+        let v = page(ctx);
+        v.mode = VettingMode::List;
+        v.tab = VettingTab::Tickets;
+    }
+    persist(ctx, format!("Sending your profile to {}…", membership.name));
+    let sent = Sent::Profile {
+        document_id: document_id.clone(),
+        community: membership.community.clone(),
+        persona: membership.persona,
+        previous: previous.clone().map(Box::new),
+    };
+    if let Err(e) = sign_and_send(ctx, membership.persona, document, sent).await {
+        let book = &mut ctx.config.private.vetting;
+        book.restore_profile(&membership.community, membership.persona, previous);
+        book.forget_query(&document_id);
+        abandon(ctx, "Could not publish your profile", e);
+    }
+}
+
+async fn ask_resend(ctx: &mut ActionCtx<'_>, index: usize) {
+    let Some(target) = page(ctx).resend_candidates.get(index).cloned() else {
+        return;
+    };
+    let Some(did) = persona_did(ctx.config, target.persona) else {
+        return status(
+            ctx,
+            "The persona that belongs to this community is not available.",
+        );
+    };
+    if !begin(ctx) {
+        return;
+    }
+    let document = match wire::vetter_resend_request(&did, &target.community) {
+        Ok(d) => d,
+        Err(e) => return abandon(ctx, "Could not ask for your vetter credential", e),
+    };
+    let document_id = document.id.clone();
+    ctx.config.private.vetting.ask(CommunityQuery {
+        document_id: document_id.clone(),
+        community: target.community.clone(),
+        persona: target.persona,
+        kind: QueryKind::VetterResend,
+        sent_at: Utc::now(),
+    });
+    page(ctx).mode = VettingMode::List;
+    status(
+        ctx,
+        format!(
+            "Asking {} to send your vetter credential again…",
+            target.name
+        ),
+    );
+    let sent = Sent::Query {
+        document_id: document_id.clone(),
+        community: target.community.clone(),
+        kind: QueryKind::VetterResend,
+    };
+    if let Err(e) = sign_and_send(ctx, target.persona, document, sent).await {
+        ctx.config.private.vetting.forget_query(&document_id);
+        abandon(ctx, "Could not ask for your vetter credential", e);
     }
 }
 
@@ -1531,6 +2222,19 @@ pub(crate) enum Sent {
     Withdrawal {
         statement_id: String,
     },
+    /// A question to a community: its directory, or a resend of our grant.
+    Query {
+        document_id: String,
+        community: String,
+        kind: QueryKind,
+    },
+    /// Our vetter profile, and the record it replaced, for undoing.
+    Profile {
+        document_id: String,
+        community: String,
+        persona: PersonaId,
+        previous: Option<Box<VetterProfileRecord>>,
+    },
 }
 
 /// One vetting send. I/O only.
@@ -1839,7 +2543,17 @@ impl VettingOutcome {
     pub(crate) fn apply(self, state: &mut State, config: &mut Config, save: &mut SaveScheduler) {
         let v = &mut state.main_page.content_panel.vetting;
         let (message, persist) = match self {
-            VettingOutcome::Sent { sent, error } => sent_result(*sent, error, config),
+            VettingOutcome::Sent { sent, error } => {
+                if let (Sent::Query { document_id, .. }, Some(e)) = (&*sent, &error)
+                    && let VettingMode::Directory(view) = &mut v.mode
+                    && view.pending.as_deref() == Some(document_id.as_str())
+                {
+                    view.pending = None;
+                    view.pending_cursors = None;
+                    view.error = Some(format!("Could not ask the community: {e}"));
+                }
+                sent_result(*sent, error, config)
+            }
             VettingOutcome::Faces {
                 application_id,
                 result: Ok(faces),
@@ -2030,6 +2744,57 @@ fn sent_result(sent: Sent, error: Option<String>, config: &mut Config) -> (Strin
                 false,
             ),
             (
+                Sent::Query {
+                    kind: QueryKind::VetterResend,
+                    ..
+                },
+                None,
+            ) => (
+                "Asked — if the community holds a vetter credential for you, it arrives under \
+                 Tickets."
+                    .to_string(),
+                false,
+            ),
+            (Sent::Query { .. }, None) => (
+                "Asked the community — waiting for its answer.".to_string(),
+                false,
+            ),
+            (Sent::Profile { .. }, None) => (
+                "Profile sent — waiting for the community to store it.".to_string(),
+                true,
+            ),
+            (
+                Sent::Query {
+                    document_id,
+                    community,
+                    kind,
+                },
+                Some(e),
+            ) => {
+                book.forget_query(&document_id);
+                (
+                    format!(
+                        "Could not ask {} for {}: {e}",
+                        shorten_did(&community, 48),
+                        kind.describe()
+                    ),
+                    false,
+                )
+            }
+            (
+                Sent::Profile {
+                    document_id,
+                    community,
+                    persona,
+                    previous,
+                },
+                Some(e),
+            ) => {
+                book.restore_profile(&community, persona, previous.map(|p| *p));
+                book.forget_query(&document_id);
+                (format!("Could not send your profile: {e}"), true)
+            }
+            (
                 Sent::Request {
                     application_id,
                     document_id,
@@ -2084,11 +2849,524 @@ fn sent_result(sent: Sent, error: Option<String>, config: &mut Config) -> (Strin
     }
 }
 
+// ============================================================================
+// Answers from communities, revocation checks, and the join flow's hand-off
+// ============================================================================
+
+/// Fold communities' answers into the page: a directory page into the view
+/// that asked for it, everything else into the status line and the log.
+pub(crate) fn apply_answers(state: &mut State, config: &Config, answers: Vec<CommunityAnswer>) {
+    for answer in answers {
+        let name = community_display(config, answer.community());
+        let v = &mut state.main_page.content_panel.vetting;
+        let message = match answer {
+            CommunityAnswer::Manifest { .. } => None,
+            CommunityAnswer::Vetters { query, page, .. } => match &mut v.mode {
+                VettingMode::Directory(view) if view.pending.as_deref() == Some(query.as_str()) => {
+                    view.pending = None;
+                    if let Some(cursors) = view.pending_cursors.take() {
+                        view.cursors = cursors;
+                    }
+                    view.results = page.vetters.iter().map(|l| listed_row(config, l)).collect();
+                    view.next_cursor = page.next_cursor;
+                    view.searched = true;
+                    view.error = None;
+                    view.field = if view.results.is_empty() {
+                        view.field.min(DIRECTORY_FIELDS - 1)
+                    } else {
+                        DIRECTORY_FIELDS
+                    };
+                    Some(match view.results.len() {
+                        0 => format!("No vetter listed in {name} matches."),
+                        1 => format!("1 vetter listed in {name} matches."),
+                        n => format!("{n} vetters listed in {name} match, on this page."),
+                    })
+                }
+                _ => None,
+            },
+            CommunityAnswer::ProfileStored { listed, .. } => Some(if listed {
+                format!("{name} published your vetter profile and lists you in its directory.")
+            } else {
+                format!(
+                    "{name} stored your vetter profile. You are not listed, so only people you \
+                     give a ticket can reach you."
+                )
+            }),
+            CommunityAnswer::Resent { valid_until, .. } => Some(format!(
+                "{name} is sending your vetter credential again, valid until {}. It shows under \
+                 Tickets when it arrives.",
+                valid_until.format("%Y-%m-%d")
+            )),
+            CommunityAnswer::Refused {
+                query,
+                kind,
+                code,
+                message,
+                ..
+            } => {
+                let mut words = refusal_words(kind, &name, &sanitize_display(&code, 120));
+                if let Some(note) = message {
+                    words.push_str(&format!(" They said: {}", sanitize_display(&note, 300)));
+                }
+                directory_failed(v, &query, &words);
+                Some(words)
+            }
+            CommunityAnswer::Unreadable {
+                query,
+                kind,
+                detail,
+                ..
+            } => {
+                let words = format!(
+                    "{name} answered about {} in a form this client cannot read — the two \
+                     disagree about the task; it is not a refusal ({}).",
+                    kind.describe(),
+                    sanitize_display(&detail, 200)
+                );
+                directory_failed(v, &query, &words);
+                Some(words)
+            }
+        };
+        if let Some(message) = message {
+            state.main_page.content_panel.vetting.status_message = Some(message.clone());
+            state.main_page.log(message);
+        }
+    }
+}
+
+/// The directory view waiting on `query` stops waiting, and says why.
+fn directory_failed(v: &mut VettingState, query: &str, why: &str) {
+    if let VettingMode::Directory(view) = &mut v.mode
+        && view.pending.as_deref() == Some(query)
+    {
+        view.pending = None;
+        view.pending_cursors = None;
+        view.error = Some(why.to_string());
+    }
+}
+
+/// One listed vetter, ready to show. The name is the one they published — it
+/// is shown beside their DID, never instead of it.
+fn listed_row(config: &Config, listed: &ListedVetter) -> ListedVetterRow {
+    let join = |items: &[String], none: &str| {
+        if items.is_empty() {
+            none.to_string()
+        } else {
+            sanitize_display(&items.join(", "), 300)
+        }
+    };
+    ListedVetterRow {
+        did: listed.vetter_did.clone(),
+        name: listed
+            .display_name
+            .as_deref()
+            .or_else(|| config.agent_name_for(&listed.vetter_did))
+            .map(|n| sanitize_display(n, 128))
+            .unwrap_or_else(|| shorten_did(&listed.vetter_did, 48)),
+        languages: join(&listed.languages, "no language listed"),
+        location: listed
+            .location
+            .as_ref()
+            .map(|l| sanitize_display(&location_line(l), 300)),
+        methods: listed
+            .methods
+            .iter()
+            .map(|m| method_label(*m))
+            .collect::<Vec<_>>()
+            .join(", "),
+        documentation: join(
+            &listed.accepts_documentation,
+            "no documentation listed — ask them",
+        ),
+        availability: listed
+            .availability
+            .as_deref()
+            .map(|a| sanitize_display(a, 500)),
+        contact_hint: listed
+            .contact_hint
+            .as_deref()
+            .map(|h| sanitize_display(h, 300)),
+        events: listed
+            .events
+            .iter()
+            .map(|e| sanitize_display(&event_line(e), 300))
+            .collect(),
+        grant_until: listed.grant_valid_until.format("%Y-%m-%d").to_string(),
+    }
+}
+
+/// Tell whoever is waiting that a question went unanswered, and forget it. A
+/// manifest question is the join flow's, which keeps its own, shorter clock.
+pub(crate) fn expire_queries(state: &mut State, config: &mut Config, now: chrono::DateTime<Utc>) {
+    let expired = config.private.vetting.expire_queries(now, QUERY_TIMEOUT);
+    for query in expired {
+        if query.kind == QueryKind::Manifest {
+            continue;
+        }
+        let name = community_display(config, &query.community);
+        let words = format!(
+            "No answer from {name} about {} within {} seconds — its service may be offline. Try \
+             again later.",
+            query.kind.describe(),
+            QUERY_TIMEOUT.num_seconds()
+        );
+        let v = &mut state.main_page.content_panel.vetting;
+        directory_failed(v, &query.document_id, &words);
+        v.status_message = Some(words.clone());
+        state.main_page.log(words);
+    }
+}
+
+/// Check, off the loop, whether the community revoked a vetter's grant.
+///
+/// Not claimed through the busy-guard: a check starts from an inbound
+/// acceptance rather than a person, each is independent, and none may hold up
+/// a vetting send the person is making.
+pub(crate) fn spawn_grant_check(
+    dispatch_tx: &tokio::sync::mpsc::UnboundedSender<DispatchOutcome>,
+    tdk: &affinidi_tdk::TDK,
+    check: GrantCheck,
+) {
+    let resolver = TrustTaskVmResolver::new(tdk.did_resolver().clone());
+    background_dispatch::spawn_dispatch(
+        dispatch_tx.clone(),
+        DispatchDomain::VettingStatus,
+        async move {
+            let result = check.run(&resolver).await;
+            DispatchOutcome::VettingStatus(GrantChecked { check, result })
+        },
+    );
+}
+
+/// A finished revocation check.
+pub(crate) struct GrantChecked {
+    pub(crate) check: GrantCheck,
+    pub(crate) result: StatusCheck,
+}
+
+impl GrantChecked {
+    /// Record the result on the request. A revocation is said on the page;
+    /// the other results only change the request's line and the log.
+    pub(crate) fn apply(self, state: &mut State, config: &mut Config, save: &mut SaveScheduler) {
+        let GrantChecked { check, result } = self;
+        let vetter = config
+            .agent_name_for(&check.vetter)
+            .map(|n| sanitize_display(n, 128))
+            .unwrap_or_else(|| shorten_did(&check.vetter, 48));
+        let community = community_display(config, &check.issuer);
+        let message = match &result {
+            StatusCheck::Active => format!("{community} has not revoked {vetter}'s vetter grant."),
+            StatusCheck::Revoked => format!(
+                "{community} has revoked {vetter}'s vetter grant — a statement from them will not \
+                 count."
+            ),
+            StatusCheck::Unknown(reason) => format!(
+                "Could not check whether {community} revoked {vetter}'s vetter grant: {}",
+                sanitize_display(reason, 200)
+            ),
+        };
+        let revoked = result == StatusCheck::Revoked;
+        let recorded = config
+            .private
+            .vetting
+            .application_by_id_mut(&check.application_id)
+            .is_some_and(|app| {
+                app.record_grant_status(
+                    &check.request_document_id,
+                    &check.vetter,
+                    GrantStatus::from_check(result, Utc::now()),
+                )
+                .is_ok()
+            });
+        if !recorded {
+            // The application or request went away while the check ran.
+            state.main_page.log(message);
+            return;
+        }
+        if revoked {
+            dispatch_util::save_and_sync(
+                &mut state.main_page,
+                config,
+                save,
+                Persist::SaveAndSync,
+                |mp| &mut mp.content_panel.vetting.status_message,
+                message.clone(),
+                SyncLog::Plain(message),
+            );
+        } else {
+            save.mark_dirty();
+            state.main_page.sync_from_config(config);
+            state.main_page.log(message);
+        }
+    }
+}
+
+/// Show application `application_id` on the Vetting page, with `message`. Used
+/// by the join flow when a person starts or continues an application there.
+pub(crate) fn focus_application(
+    state: &mut State,
+    config: &Config,
+    application_id: &str,
+    message: String,
+) {
+    state.main_page.sync_from_config(config);
+    state.main_page.menu_panel.selected_menu = MainMenu::Vetting;
+    state.main_page.menu_panel.selected = false;
+    state.main_page.content_panel.selected = true;
+    let v = &mut state.main_page.content_panel.vetting;
+    v.tab = VettingTab::Applications;
+    v.mode = VettingMode::List;
+    if let Some(i) = v.applications.iter().position(|a| a.id == application_id) {
+        v.selected = i;
+    }
+    v.status_message = Some(message);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state_handler::dispatch_util::test_config;
     use openvtc_core::vetting::applicant::Application;
+    use vta_sdk::protocols::vetting::{
+        VETTING_VETTER_RESEND_ERR_NOT_GRANTED, VetterListResponseBody,
+    };
+
+    fn listed(did: &str) -> ListedVetter {
+        serde_json::from_value(serde_json::json!({
+            "vetterDid": did,
+            "displayName": "Carol",
+            "languages": ["en"],
+            "methods": ["inPerson"],
+            "acceptsDocumentation": [],
+            "contactHint": "ask at the LPC desk",
+            "events": [],
+            "grantValidUntil": "2027-09-01T00:00:00Z",
+            "updatedAt": "2026-09-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn directory_waiting_on(query: &str) -> State {
+        let mut state = State::default();
+        state.main_page.content_panel.vetting.mode =
+            VettingMode::Directory(Box::new(DirectoryView {
+                pending: Some(query.into()),
+                pending_cursors: Some(vec![None, Some("page-2".into())]),
+                cursors: vec![None],
+                ..DirectoryView::default()
+            }));
+        state
+    }
+
+    /// A directory page lands only in the view that asked for it, and moves the
+    /// focus onto the first result.
+    #[test]
+    fn a_directory_page_lands_only_where_it_was_asked_for() {
+        let config = test_config();
+        let mut state = directory_waiting_on("q1");
+        let page = VetterListResponseBody {
+            vetters: vec![listed("did:key:zCarol")],
+            next_cursor: None,
+        };
+        apply_answers(
+            &mut state,
+            &config,
+            vec![CommunityAnswer::Vetters {
+                query: "someone-else".into(),
+                community: "did:web:vtc".into(),
+                page: page.clone(),
+            }],
+        );
+        let VettingMode::Directory(view) = &state.main_page.content_panel.vetting.mode else {
+            panic!("still the directory");
+        };
+        assert!(view.results.is_empty() && view.pending.is_some());
+
+        apply_answers(
+            &mut state,
+            &config,
+            vec![CommunityAnswer::Vetters {
+                query: "q1".into(),
+                community: "did:web:vtc".into(),
+                page,
+            }],
+        );
+        let VettingMode::Directory(view) = &state.main_page.content_panel.vetting.mode else {
+            panic!("still the directory");
+        };
+        assert_eq!(view.results.len(), 1);
+        assert_eq!(view.results[0].name, "Carol");
+        assert_eq!(
+            view.results[0].documentation,
+            "no documentation listed — ask them"
+        );
+        assert_eq!(view.cursors.len(), 2, "this is page two");
+        assert_eq!(view.result_index(), Some(0));
+        assert!(view.pending.is_none());
+    }
+
+    /// A refusal reads as what to do next, on the page and in the view.
+    #[test]
+    fn refusals_are_said_plainly() {
+        let config = test_config();
+        let mut state = directory_waiting_on("q1");
+        apply_answers(
+            &mut state,
+            &config,
+            vec![CommunityAnswer::Refused {
+                query: "q1".into(),
+                community: "did:web:vtc".into(),
+                kind: QueryKind::VetterList,
+                code: "permissionDenied".into(),
+                message: None,
+            }],
+        );
+        let v = &state.main_page.content_panel.vetting;
+        let VettingMode::Directory(view) = &v.mode else {
+            panic!("still the directory");
+        };
+        assert!(view.pending.is_none());
+        assert!(
+            view.error
+                .as_deref()
+                .is_some_and(|e| e.contains("would not answer"))
+        );
+
+        apply_answers(
+            &mut state,
+            &config,
+            vec![CommunityAnswer::Refused {
+                query: "r1".into(),
+                community: "did:web:vtc".into(),
+                kind: QueryKind::VetterResend,
+                code: VETTING_VETTER_RESEND_ERR_NOT_GRANTED.into(),
+                message: None,
+            }],
+        );
+        assert!(
+            state
+                .main_page
+                .content_panel
+                .vetting
+                .status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("has not named you a vetter"))
+        );
+    }
+
+    /// A question nobody answered is said to be unanswered, not left spinning.
+    #[test]
+    fn an_unanswered_search_stops_waiting() {
+        let mut config = test_config();
+        let mut state = directory_waiting_on("q1");
+        config.private.vetting.ask(CommunityQuery {
+            document_id: "q1".into(),
+            community: "did:web:vtc".into(),
+            persona: PersonaId::new(),
+            kind: QueryKind::VetterList,
+            sent_at: Utc::now() - QUERY_TIMEOUT,
+        });
+        expire_queries(&mut state, &mut config, Utc::now());
+        let VettingMode::Directory(view) = &state.main_page.content_panel.vetting.mode else {
+            panic!("still the directory");
+        };
+        assert!(view.pending.is_none());
+        assert!(
+            view.error
+                .as_deref()
+                .is_some_and(|e| e.contains("No answer"))
+        );
+    }
+
+    fn application_with_request(config: &mut Config) -> (String, String) {
+        let mut app = Application::new(
+            "did:web:vtc.example",
+            PersonaId::new(),
+            "did:key:zApplicant",
+            Utc::now(),
+        )
+        .unwrap();
+        app.prepare_request(
+            "urn:uuid:r1",
+            "did:key:zVetter",
+            TicketPresentation::Code {
+                code: "K7QF-2M9X".into(),
+            },
+            RequestDraft::default(),
+            Utc::now(),
+        )
+        .unwrap();
+        let id = app.id.clone();
+        config.private.vetting.applications.push(app);
+        (id, "urn:uuid:r1".into())
+    }
+
+    /// A revoked grant is recorded on the request and said on the page.
+    #[test]
+    fn a_revoked_grant_is_recorded_and_said() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+        let (application_id, request_document_id) = application_with_request(&mut config);
+        GrantChecked {
+            check: GrantCheck {
+                application_id,
+                request_document_id,
+                vetter: "did:key:zVetter".into(),
+                issuer: "did:web:vtc.example".into(),
+                credential_status: serde_json::json!({}),
+            },
+            result: StatusCheck::Revoked,
+        }
+        .apply(&mut state, &mut config, &mut save);
+        assert!(matches!(
+            config.private.vetting.applications[0].requests[0].grant_status,
+            Some(GrantStatus::Revoked { .. })
+        ));
+        let v = &state.main_page.content_panel.vetting;
+        assert!(
+            v.status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("has revoked"))
+        );
+        assert_eq!(
+            v.applications[0].requests[0]
+                .grant
+                .as_ref()
+                .map(|(t, _)| *t),
+            Some(LineTone::Bad)
+        );
+    }
+
+    /// The form opens on what was last sent to that community.
+    #[test]
+    fn the_profile_form_opens_on_what_was_last_sent() {
+        let mut book = VettingBook::default();
+        let persona = PersonaId::new();
+        let mut draft = ProfileDraft::new(&book.policy);
+        draft.display_name = "Carol".into();
+        book.record_profile_sent(
+            "did:web:vtc",
+            persona,
+            &draft.to_body().unwrap(),
+            Utc::now(),
+        );
+        let v = VettingState {
+            memberships: vec![VettingMembership {
+                community: "did:web:vtc".into(),
+                name: "VTC".into(),
+                persona,
+                accent: None,
+            }]
+            .into(),
+            ..VettingState::default()
+        };
+        let form = profile_form(&v, &book, 0, 0);
+        assert_eq!(form.draft.display_name, "Carol");
+        assert!(matches!(form.state_line, Some((LineTone::Caution, _))));
+        let fresh = profile_form(&VettingState::default(), &book, 0, 0);
+        assert!(!fresh.draft.listed, "a first profile is unlisted");
+    }
 
     fn outcome(sent: Sent, error: Option<&str>) -> VettingOutcome {
         VettingOutcome::Sent {
@@ -2233,6 +3511,15 @@ mod tests {
         let mut v = VettingState::default();
         sync(&mut v, &config);
         assert_eq!(v.applications.len(), 1);
+        assert_eq!(
+            v.applications[0].next_step.as_deref(),
+            Some(next_step_words(&NextStep::LearnRequirements).as_str())
+        );
+        assert_eq!(
+            v.directory_communities.len(),
+            1,
+            "an application can search"
+        );
         assert_eq!(
             v.applications[0].identity,
             vec![("name.legal".to_string(), String::new())],

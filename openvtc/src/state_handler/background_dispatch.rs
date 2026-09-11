@@ -123,6 +123,11 @@ pub(crate) enum DispatchDomain {
     /// Reading every membership context's device grants once a run, so the
     /// communities panel's detail can show them without being asked.
     DeviceGrantSweep,
+    /// Checking whether a community revoked a vetter's grant: one HTTPS fetch of
+    /// its status list. Never claimed with `try_begin` — each check is started
+    /// by an inbound acceptance, not a person, is independent of the others,
+    /// and must not hold up a vetting send the person is making.
+    VettingStatus,
 }
 
 impl DispatchDomain {
@@ -147,6 +152,7 @@ impl DispatchDomain {
             DispatchDomain::CommunityContexts => "Community context registration",
             DispatchDomain::CommunityAccess => "Community context request",
             DispatchDomain::DeviceGrantSweep => "Device access refresh",
+            DispatchDomain::VettingStatus => "Vetter grant check",
         }
     }
 }
@@ -269,6 +275,9 @@ pub(crate) enum DispatchOutcome {
     Panicked(DispatchDomain),
     /// A vetting send finished (or failed, and was undone).
     Vetting(crate::state_handler::vetting_actions::VettingOutcome),
+    /// A vetter grant's revocation check finished. Its own domain, so it never
+    /// releases the `Vetting` domain a person's send holds.
+    VettingStatus(crate::state_handler::vetting_actions::GrantChecked),
     /// Membership contexts were checked at the VTA: each context id, and
     /// whether it had to be created or why it could not be.
     CommunityContexts(Vec<(String, Result<bool, String>)>),
@@ -308,6 +317,7 @@ impl DispatchOutcome {
             DispatchOutcome::Vic(_) => DispatchDomain::Vic,
             DispatchOutcome::VicMutation(_) => DispatchDomain::Vic,
             DispatchOutcome::Vetting(_) => DispatchDomain::Vetting,
+            DispatchOutcome::VettingStatus(_) => DispatchDomain::VettingStatus,
             DispatchOutcome::CommunityContexts(_) => DispatchDomain::CommunityContexts,
             DispatchOutcome::CommunityContext(_) => DispatchDomain::CommunityAccess,
             DispatchOutcome::DeviceGrantSweep(_) => DispatchDomain::DeviceGrantSweep,
@@ -443,6 +453,7 @@ pub(crate) fn apply_outcome(
         },
         DispatchOutcome::Relationship(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Vetting(outcome) => outcome.apply(state, config, save),
+        DispatchOutcome::VettingStatus(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Inbox(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Did(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::AgentName(results) => {

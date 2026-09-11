@@ -103,10 +103,14 @@ pub fn render(
         // membership is a selectable sub-row labelled by its presented persona.
         let new_group = i == 0 || state.items[i - 1].vtc_did != c.vtc_did;
         if new_group {
-            lines.push(Line::from(Span::styled(
-                format!("  {}", c.display_name),
-                Style::new().fg(COLOR_TEXT_DEFAULT).bold(),
-            )));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                super::vetting_panel::accent_swatch(c.accent),
+                Span::styled(
+                    c.display_name.clone(),
+                    Style::new().fg(COLOR_TEXT_DEFAULT).bold(),
+                ),
+            ]));
         }
 
         let row_style = if is_selected {
@@ -705,6 +709,7 @@ mod key_hint_tests {
             request_id: String::new(),
             has_membership_credential: false,
             has_role_credential: false,
+            accent: None,
         }
     }
 

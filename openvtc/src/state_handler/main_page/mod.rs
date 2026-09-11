@@ -584,12 +584,22 @@ impl MainPageState {
                 }
                 _ => String::new(),
             };
+            let branding = config.private.vetting.branding(&c.vtc_did);
             community_items.push(content::CommunitySummary {
+                // The name the community publishes in its branding comes after
+                // the membership's own and a verified agent name: it is what
+                // the community says about itself.
                 display_name: c
                     .display_name
                     .clone()
                     .or_else(|| config.agent_name_for(&c.vtc_did).map(str::to_owned))
+                    .or_else(|| {
+                        branding
+                            .and_then(|b| b.display_name.as_deref())
+                            .map(|n| sanitize_display(n, 128))
+                    })
                     .unwrap_or_else(|| shorten_did(&c.vtc_did, 40)),
+                accent: branding.and_then(|b| b.accent_rgb()),
                 status_label: community_status_label(&c.status),
                 persona_label,
                 member_since: c

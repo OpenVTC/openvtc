@@ -122,6 +122,12 @@ pub struct InboundEffects {
     /// Personhood challenges the community answered with. Display state with a
     /// ten-minute life — never persisted.
     pub personhood_challenges: Vec<openvtc_core::personhood::ChallengeReply>,
+    /// Communities' answers to questions we put to them — a directory page, a
+    /// stored profile, a resent grant, a manifest — for whoever is waiting.
+    pub vetting_answers: Vec<openvtc_core::vetting::queries::CommunityAnswer>,
+    /// Vetters' grants to check for revocation. The check fetches over HTTPS,
+    /// so the loop runs it as a background job.
+    pub vetting_grant_checks: Vec<openvtc_core::vetting::status::GrantCheck>,
 }
 
 /// Process an inbound DIDComm message.
@@ -142,6 +148,8 @@ pub async fn process_inbound_message(
         inactivated,
         capability_replies,
         personhood_challenges,
+        vetting_answers,
+        vetting_grant_checks,
     } = effects;
     // Drop messages outside the replay / freshness window before doing
     // any state-mutating work. Saves us from acting on stale captures
@@ -240,6 +248,12 @@ pub async fn process_inbound_message(
                     openvtc_core::vetting::wire::send_reply(config, tdk, service, reply).await
             {
                 warn!(to = %from_did, error = %e, "could not send vetting reply");
+            }
+            if let Some(answer) = handled.answer {
+                vetting_answers.push(answer);
+            }
+            if let Some(check) = handled.grant_check {
+                vetting_grant_checks.push(check);
             }
             let noticed = handled.notice.is_some();
             if let Some(notice) = handled.notice {
