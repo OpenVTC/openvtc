@@ -1,6 +1,6 @@
 #[cfg(feature = "openpgp-card")]
 use crate::cli::get_user_pin;
-use crate::colors::{CLI_BLUE, CLI_ORANGE, CLI_PURPLE, CLI_RED};
+use crate::colors::{CLI_CAUTION, CLI_ERROR, CLI_EXAMPLE, CLI_INFO, Themed};
 use crate::{
     cli::cli,
     state_handler::{DeferredLoad, StartingMode, StateHandler},
@@ -50,7 +50,7 @@ async fn load_config_for_health(profile: &str, unlock_code_arg: Option<&str>) ->
         Err(e) => {
             eprintln!(
                 "{} {}",
-                style("Account not loaded:").color256(CLI_ORANGE),
+                style("Account not loaded:").themed(CLI_CAUTION),
                 redact_paths(&e.to_string()),
             );
             return None;
@@ -70,7 +70,7 @@ async fn load_config_for_health(profile: &str, unlock_code_arg: Option<&str>) ->
         Err(e) => {
             eprintln!(
                 "{} {e}",
-                style("Account not loaded (TDK init failed):").color256(CLI_ORANGE)
+                style("Account not loaded (TDK init failed):").themed(CLI_CAUTION)
             );
             return None;
         }
@@ -108,7 +108,7 @@ async fn load_config_for_health(profile: &str, unlock_code_arg: Option<&str>) ->
         Err(e) => {
             eprintln!(
                 "{} {}",
-                style("Account not loaded:").color256(CLI_ORANGE),
+                style("Account not loaded:").themed(CLI_CAUTION),
                 redact_paths(&e.to_string()),
             );
             None
@@ -239,7 +239,7 @@ fn init_default_keyring_store(profile: &str) -> Result<()> {
                      only so you can recover an older profile: export a backup now \
                      (Settings -> Export Config), then restart without the variable set."
                 )
-                .color256(CLI_ORANGE)
+                .themed(CLI_CAUTION)
             );
             Ok(())
         }
@@ -350,11 +350,17 @@ async fn main() -> Result<()> {
     // the unlock-code passed into `load_fast`). Unknown subcommands and
     // `--help`/`--version` are handled here by clap (process exits).
     let matches = cli().get_matches();
+    // The theme colours everything printed from here on — prompts and errors
+    // as well as the TUI — so it is chosen first. Under `auto` this asks the
+    // terminal for its background, which only works before the TUI starts.
+    let theme_roots = theme::catalog::Roots::from_env();
+    let theme_in_use = theme::init(&theme_roots);
     // `theme` needs no profile: how the TUI looks is the person's, not an
     // account's, so it runs before any profile is resolved or opened.
     if let Some(("theme", theme_args)) = matches.subcommand() {
         return theme_cmd::run(theme_args);
     }
+    let theme_watcher = theme::live::Watcher::new(theme_roots, &theme_in_use);
     let cli_profile = matches
         .get_one::<String>("profile")
         .cloned()
@@ -387,20 +393,20 @@ async fn main() -> Result<()> {
         // ENV Profile will override the CLI Argument
         if cli_profile != "default" && cli_profile != env_profile {
             println!("{}", 
-                style("WARNING: Using both ENV OPENVTC_CONFIG_PROFILE and CLI profile! These do not match!").color256(CLI_ORANGE)
+                style("WARNING: Using both ENV OPENVTC_CONFIG_PROFILE and CLI profile! These do not match!").themed(CLI_CAUTION)
             );
             println!(
                 "{} {}",
-                style("WARNING: Using CLI Profile:").color256(CLI_ORANGE),
-                style(&cli_profile).color256(CLI_PURPLE)
+                style("WARNING: Using CLI Profile:").themed(CLI_CAUTION),
+                style(&cli_profile).themed(CLI_EXAMPLE)
             );
             cli_profile
         } else {
             println!(
                 "{}{}{}",
-                style("Using profile (").color256(CLI_BLUE),
-                style(&env_profile).color256(CLI_PURPLE),
-                style(") from OPENVTC_CONFIG_PROFILE ENV variable").color256(CLI_BLUE)
+                style("Using profile (").themed(CLI_INFO),
+                style(&env_profile).themed(CLI_EXAMPLE),
+                style(") from OPENVTC_CONFIG_PROFILE ENV variable").themed(CLI_INFO)
             );
             env_profile
         }
@@ -419,8 +425,8 @@ async fn main() -> Result<()> {
     {
         eprintln!(
             "{} {}",
-            style("ERROR: Invalid profile name:").color256(CLI_RED),
-            style(&profile).color256(CLI_ORANGE)
+            style("ERROR: Invalid profile name:").themed(CLI_ERROR),
+            style(&profile).themed(CLI_CAUTION)
         );
         bail!("Profile name may only contain [A-Za-z0-9._-] and must not contain '..'");
     }
@@ -479,7 +485,7 @@ async fn main() -> Result<()> {
                          this version of OpenVTC (format v{expected}) and cannot be upgraded \
                          automatically."
                     ))
-                    .color256(CLI_ORANGE)
+                    .themed(CLI_CAUTION)
                 );
                 eprintln!(
                     "{}",
@@ -487,7 +493,7 @@ async fn main() -> Result<()> {
                         "Continuing will DELETE the existing configuration and its stored \
                          credentials, then start a fresh setup. This cannot be undone."
                     )
-                    .color256(CLI_RED)
+                    .themed(CLI_ERROR)
                 );
                 let confirmed = Confirm::with_theme(&ColorfulTheme::default())
                     .with_prompt("Delete the incompatible configuration and reset?")
@@ -503,7 +509,7 @@ async fn main() -> Result<()> {
                 for warning in &summary.warnings {
                     eprintln!(
                         "{}",
-                        style(format!("warning during reset: {warning}")).color256(CLI_ORANGE)
+                        style(format!("warning during reset: {warning}")).themed(CLI_CAUTION)
                     );
                 }
                 starting_mode = StartingMode::SetupWizard;
@@ -519,17 +525,17 @@ async fn main() -> Result<()> {
                 };
                 eprintln!(
                     "{} {}",
-                    style("ERROR: Couldn't reach the VTA! Reason:").color256(CLI_RED),
-                    style(redact_paths(&e.to_string())).color256(CLI_ORANGE)
+                    style("ERROR: Couldn't reach the VTA! Reason:").themed(CLI_ERROR),
+                    style(redact_paths(&e.to_string())).themed(CLI_CAUTION)
                 );
-                eprintln!("{}", style(hint).color256(CLI_ORANGE));
+                eprintln!("{}", style(hint).themed(CLI_CAUTION));
                 bail!("VTA Connection Error");
             }
             Err(e) => {
                 eprintln!(
                     "{} {}",
-                    style("ERROR: Couldn't load configuration! Reason:").color256(CLI_RED),
-                    style(redact_paths(&e.to_string())).color256(CLI_ORANGE)
+                    style("ERROR: Couldn't load configuration! Reason:").themed(CLI_ERROR),
+                    style(redact_paths(&e.to_string())).themed(CLI_CAUTION)
                 );
                 bail!("Configuration Error");
             }
@@ -541,16 +547,11 @@ async fn main() -> Result<()> {
         bail!("Starting mode not set correctly!");
     }
 
-    // The chosen theme, before the first frame is drawn.
-    theme::set_active(&theme::catalog::load_selected(
-        &theme::catalog::Roots::from_env(),
-    ));
-
     // Setup the initial state
     let (terminator, mut interrupt_rx) = create_termination();
     let (mut state, state_rx) = StateHandler::new(&profile, starting_mode);
     state.set_invitation_credential(invitation_credential);
-    let (ui_manager, action_rx) = UiManager::new();
+    let (ui_manager, action_rx) = UiManager::new(theme_watcher);
 
     tokio::try_join!(
         state.main_loop(terminator, action_rx, interrupt_rx.resubscribe()),
@@ -685,7 +686,7 @@ fn load_fast(profile: &str, unlock_code_arg: Option<&str>) -> Result<DeferredLoa
                         "WARNING: --unlock-code exposes the passphrase in the process list; \
                          prefer the interactive prompt on shared systems."
                     )
-                    .color256(CLI_ORANGE)
+                    .themed(CLI_CAUTION)
                 );
                 Some(UnlockCode::from_string(passphrase)?)
             } else {
