@@ -9,7 +9,13 @@ pub const CLI_PURPLE: u8 = 165; // Use for Example data
 
 // ****************************************************************************
 
-// Ratatui CLI Color codes
+// Ratatui colour roles
+//
+// Each constant below names a *role*, and these are OpenVTC's own colours for
+// it. Panels style with the roles; after every frame `crate::theme::paint`
+// swaps each role for the active theme's colour (docs/themes.md). Keep styling
+// with these rather than literal colours, or a panel will ignore the theme.
+
 /// Success state - Completed actions, valid inputs, positive feedback
 pub const COLOR_SUCCESS: Color = Color::Rgb(61, 220, 132); // #3DDC84 - Android Green
 

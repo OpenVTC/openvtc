@@ -80,6 +80,7 @@ pub fn cli() -> Command {
                         ),
                 ]),
         )
+        .subcommand(crate::theme_cmd::command())
 }
 
 #[cfg(feature = "openpgp-card")]
@@ -139,6 +140,23 @@ mod tests {
             .try_get_matches_from(["openvtc", "setup"])
             .expect("`setup` is a valid subcommand");
         assert_eq!(matches.subcommand_name(), Some("setup"));
+    }
+
+    #[test]
+    fn theme_subcommands_are_accepted() {
+        let matches = cli()
+            .try_get_matches_from(["openvtc", "theme", "import", "nvim:tokyonight", "--use"])
+            .expect("`theme import` is a valid subcommand");
+        let (_, theme) = matches.subcommand().expect("theme");
+        let (sub, import) = theme.subcommand().expect("import");
+        assert_eq!(sub, "import");
+        assert!(import.get_flag("use"));
+        assert!(
+            cli()
+                .try_get_matches_from(["openvtc", "theme", "set"])
+                .is_err(),
+            "`set` needs a theme id"
+        );
     }
 
     #[test]

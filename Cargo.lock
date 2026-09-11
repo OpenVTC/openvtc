@@ -6142,6 +6142,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "tui-input",

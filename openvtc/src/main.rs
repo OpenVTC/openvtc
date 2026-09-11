@@ -27,6 +27,8 @@ mod clipboard;
 mod colors;
 mod health_cmd;
 mod state_handler;
+mod theme;
+mod theme_cmd;
 mod ui;
 
 /// Load the full account for `openvtc health`, or `None` if it cannot be had.
@@ -348,6 +350,11 @@ async fn main() -> Result<()> {
     // the unlock-code passed into `load_fast`). Unknown subcommands and
     // `--help`/`--version` are handled here by clap (process exits).
     let matches = cli().get_matches();
+    // `theme` needs no profile: how the TUI looks is the person's, not an
+    // account's, so it runs before any profile is resolved or opened.
+    if let Some(("theme", theme_args)) = matches.subcommand() {
+        return theme_cmd::run(theme_args);
+    }
     let cli_profile = matches
         .get_one::<String>("profile")
         .cloned()
@@ -533,6 +540,11 @@ async fn main() -> Result<()> {
     if let StartingMode::NotSet = starting_mode {
         bail!("Starting mode not set correctly!");
     }
+
+    // The chosen theme, before the first frame is drawn.
+    theme::set_active(&theme::catalog::load_selected(
+        &theme::catalog::Roots::from_env(),
+    ));
 
     // Setup the initial state
     let (terminator, mut interrupt_rx) = create_termination();

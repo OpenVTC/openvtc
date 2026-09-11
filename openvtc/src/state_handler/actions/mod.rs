@@ -186,6 +186,18 @@ pub enum SettingsAction {
     TokenBack,
     /// Clipboard copy result message for display on the status panel.
     ClipboardCopied(String),
+    /// Open the theme picker.
+    ThemeOpen,
+    /// Highlight — and preview — the theme at this row.
+    ThemeSelect(usize),
+    /// Keep the highlighted theme.
+    ThemeApply,
+    /// Put back the theme in use before the picker opened.
+    ThemeCancel,
+    /// Copy the highlighted theme into the person's themes, to edit.
+    ThemeCopy,
+    /// Re-read the themes, picking up edits to theme files.
+    ThemeReload,
 }
 
 /// Identity-pane actions — the holder's own personas, pool, profiles and bindings.

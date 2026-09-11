@@ -49,7 +49,12 @@ impl UiManager {
 
         let result: anyhow::Result<Interrupted> = loop {
             if let Err(err) = terminal
-                .draw(|frame| app_router.render(frame, ()))
+                .draw(|frame| {
+                    app_router.render(frame, ());
+                    // Every panel draws with colour roles; the active theme
+                    // colours the finished frame (docs/themes.md).
+                    crate::theme::paint(frame.buffer_mut());
+                })
                 .context("could not render to the terminal")
             {
                 break Err(err);

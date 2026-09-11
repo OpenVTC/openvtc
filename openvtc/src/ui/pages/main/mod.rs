@@ -1924,13 +1924,14 @@ impl MainPage {
             SettingsMode::View => {
                 let selected = settings.selected_index;
                 // 0=name, 1=mediator, 2=org, 3=persona(ro), 4=protection, 5=export,
-                // 6=import, [7=token w/ openpgp-card,] last=wipe.
+                // 6=import, 7=theme, [8=token w/ openpgp-card,] last=wipe.
+                let theme_index = crate::ui::pages::main::components::settings_panel::THEME_ROW;
                 #[cfg(feature = "openpgp-card")]
-                let token_index: usize = 7;
+                let token_index: usize = 8;
                 #[cfg(feature = "openpgp-card")]
-                let wipe_index: usize = 8;
+                let wipe_index: usize = 9;
                 #[cfg(not(feature = "openpgp-card"))]
-                let wipe_index: usize = 7;
+                let wipe_index: usize = 8;
                 let max_index = wipe_index;
 
                 match key.code {
@@ -1966,6 +1967,10 @@ impl MainPage {
                             let _ = self
                                 .action_tx
                                 .send(Action::Settings(SettingsAction::StartEdit));
+                        } else if selected == theme_index {
+                            let _ = self
+                                .action_tx
+                                .send(Action::Settings(SettingsAction::ThemeOpen));
                         }
                         #[cfg(feature = "openpgp-card")]
                         if selected == token_index {
@@ -1988,6 +1993,22 @@ impl MainPage {
                     }
                     _ => false,
                 }
+            }
+            SettingsMode::ThemePicker { rows, selected, .. } => {
+                let (selected, count) = (*selected, rows.len());
+                let action = match key.code {
+                    KeyCode::Up if selected > 0 => SettingsAction::ThemeSelect(selected - 1),
+                    KeyCode::Down if selected + 1 < count => {
+                        SettingsAction::ThemeSelect(selected + 1)
+                    }
+                    KeyCode::Enter => SettingsAction::ThemeApply,
+                    KeyCode::Esc => SettingsAction::ThemeCancel,
+                    KeyCode::Char('c') => SettingsAction::ThemeCopy,
+                    KeyCode::Char('r') => SettingsAction::ThemeReload,
+                    _ => return false,
+                };
+                let _ = self.action_tx.send(Action::Settings(action));
+                true
             }
             SettingsMode::WipeConfirm { confirm_input } => {
                 let current = confirm_input.clone();
@@ -2320,6 +2341,7 @@ fn view_id(page: &MainPageState) -> String {
             #[cfg(feature = "openpgp-card")]
             SettingsMode::TokenManagement { .. } => "token",
             SettingsMode::WipeConfirm { .. } => "wipe",
+            SettingsMode::ThemePicker { .. } => "theme",
         },
         _ => "",
     };
