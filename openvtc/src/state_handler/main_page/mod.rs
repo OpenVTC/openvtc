@@ -621,6 +621,10 @@ impl MainPageState {
                     c,
                 )
                 .describe(),
+                has_own_context: openvtc_core::config::community_context::is_sub_context(
+                    &c.sub_context_id,
+                    &config.account.top_context_id,
+                ),
                 request_id,
                 has_membership_credential: c
                     .credentials

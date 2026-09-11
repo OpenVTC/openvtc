@@ -1039,6 +1039,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
             }
         }
         Action::Vetting(va) => vetting_actions::dispatch(ctx, va).await,
+        Action::CommunityContext(action) => community_context_actions::dispatch(ctx, action),
         Action::Settings(sa) => {
             match settings_actions::dispatch(
                 sa,
@@ -1131,6 +1132,9 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::StartCreatePersona
         | Action::CreatePersonaInput(..)
         | Action::CreatePersonaClose
+        | Action::CreatePersonaContextSelect(..)
+        | Action::CreatePersonaContextSlug(..)
+        | Action::CreatePersonaBack
         | Action::AgentNameManagerInput(..)
         | Action::AgentNameManagerSelect(..)
         | Action::AgentNameManagerConfirmRemove
@@ -1436,5 +1440,253 @@ mod tests {
         let outcome =
             tokio::time::timeout(std::time::Duration::from_secs(30), h.dispatch_rx.recv()).await;
         assert!(outcome.is_ok(), "a spawned job must deliver an outcome");
+    }
+
+    // ── Community contexts ──────────────────────────────────────────────
+
+    use crate::state_handler::actions::CommunityContextAction;
+    use crate::state_handler::main_page::content::{
+        ContextDeletePhase, ContextDeleteView, GrantForm, GrantListing,
+    };
+    use openvtc_core::config::account::{
+        CommunityRecord, CommunityStatus, PersonaId, PersonaRecord,
+    };
+    use openvtc_core::config::community_context::ContextDeletionPreview;
+
+    const VTC: &str = "did:webvh:QmScid:example.com:acme";
+
+    /// One membership of the account, in `context`, with `status`.
+    fn membership(h: &mut Harness, context: &str, status: CommunityStatus) -> PersonaId {
+        h.config.account.top_context_id = "openvtc".into();
+        let persona = PersonaId::new();
+        let mut record = CommunityRecord::new_pending(
+            VTC.into(),
+            None,
+            context.into(),
+            persona,
+            uuid::Uuid::new_v4(),
+            chrono::Utc::now(),
+        );
+        record.status = status;
+        h.config.account.add_membership(record);
+        persona
+    }
+
+    fn community_access_busy(h: &Harness) -> bool {
+        h.in_flight
+            .is_busy(background_dispatch::DispatchDomain::CommunityAccess)
+    }
+
+    fn status(h: &Harness) -> String {
+        h.state
+            .main_page
+            .content_panel
+            .communities
+            .status_message
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// A context holding the persona's keys is refused before the VTA is asked,
+    /// and the refusal names the persona.
+    #[tokio::test]
+    async fn a_context_holding_persona_keys_is_not_deleted() {
+        let mut h = Harness::new(true).await;
+        let persona = membership(&mut h, "openvtc/acme", CommunityStatus::Left);
+        h.config.account.personas.insert(
+            persona,
+            PersonaRecord {
+                extra: serde_json::Map::new(),
+                persona_id: persona,
+                did: "did:webvh:scid:example.com:kernel".into(),
+                did_document: None,
+                key_refs: vec![],
+                mediator_did: None,
+                origin_context_id: "openvtc/acme".into(),
+                created_at: chrono::Utc::now(),
+                label: Some("Kernel me".into()),
+            },
+        );
+
+        h.handle(Action::CommunityContext(
+            CommunityContextAction::DeleteStart(0),
+        ))
+        .await;
+
+        assert!(!community_access_busy(&h), "nothing may be sent to the VTA");
+        assert!(
+            h.state
+                .main_page
+                .content_panel
+                .communities
+                .context_delete
+                .is_none()
+        );
+        assert!(status(&h).contains("Kernel me"), "{}", status(&h));
+    }
+
+    #[tokio::test]
+    async fn an_unused_context_is_previewed_before_anything_else() {
+        let mut h = Harness::new(true).await;
+        membership(&mut h, "openvtc/acme", CommunityStatus::Left);
+
+        h.handle(Action::CommunityContext(
+            CommunityContextAction::DeleteStart(0),
+        ))
+        .await;
+
+        assert!(community_access_busy(&h), "the preview is in flight");
+        let view = h
+            .state
+            .main_page
+            .content_panel
+            .communities
+            .context_delete
+            .clone()
+            .expect("the deletion view is open");
+        assert_eq!(view.context_id, "openvtc/acme");
+        assert!(matches!(view.phase, ContextDeletePhase::Previewing));
+    }
+
+    /// The delete runs only on the exact word, and only if nothing started
+    /// using the context while the preview was on screen.
+    #[tokio::test]
+    async fn a_delete_needs_the_word_and_a_fresh_check() {
+        let mut h = Harness::new(true).await;
+        let persona = membership(&mut h, "openvtc/acme", CommunityStatus::Left);
+        let open = |typed: &str| ContextDeleteView {
+            vtc_did: VTC.into(),
+            persona,
+            community: "Acme".into(),
+            context_id: "openvtc/acme".into(),
+            phase: ContextDeletePhase::Ready(ContextDeletionPreview::default()),
+            typed: typed.into(),
+        };
+        let confirm = Action::CommunityContext;
+
+        h.state.main_page.content_panel.communities.context_delete = Some(open("delete"));
+        h.handle(confirm(CommunityContextAction::DeleteConfirm))
+            .await;
+        assert!(!community_access_busy(&h));
+        assert!(status(&h).contains("Type DELETE"), "{}", status(&h));
+
+        // The community was rejoined meanwhile: the membership is live again.
+        h.config
+            .account
+            .membership_mut(VTC, persona)
+            .unwrap()
+            .status = CommunityStatus::Active;
+        h.state.main_page.content_panel.communities.context_delete = Some(open("DELETE"));
+        h.handle(confirm(CommunityContextAction::DeleteConfirm))
+            .await;
+        assert!(!community_access_busy(&h));
+        assert!(
+            h.state
+                .main_page
+                .content_panel
+                .communities
+                .context_delete
+                .is_none()
+        );
+        assert!(status(&h).contains("Leave the community"), "{}", status(&h));
+
+        h.config
+            .account
+            .membership_mut(VTC, persona)
+            .unwrap()
+            .status = CommunityStatus::Left;
+        h.state.main_page.content_panel.communities.context_delete = Some(open("DELETE"));
+        h.handle(confirm(CommunityContextAction::DeleteConfirm))
+            .await;
+        assert!(community_access_busy(&h), "the delete is in flight");
+        assert!(matches!(
+            h.state
+                .main_page
+                .content_panel
+                .communities
+                .context_delete
+                .as_ref()
+                .map(|v| &v.phase),
+            Some(ContextDeletePhase::Deleting)
+        ));
+    }
+
+    #[tokio::test]
+    async fn device_access_is_never_scoped_to_the_top_context() {
+        let mut h = Harness::new(true).await;
+        membership(&mut h, "openvtc", CommunityStatus::Active);
+
+        h.handle(Action::CommunityContext(
+            CommunityContextAction::DevicesOpen(0),
+        ))
+        .await;
+
+        assert!(
+            h.state
+                .main_page
+                .content_panel
+                .communities
+                .device_access
+                .is_none()
+        );
+        assert!(!community_access_busy(&h));
+        assert!(status(&h).contains("top context"), "{}", status(&h));
+    }
+
+    /// Opening device access reads the grants; a pasted DID that is not a
+    /// device key is caught before a grant is attempted.
+    #[tokio::test]
+    async fn device_access_reads_grants_and_checks_the_did_first() {
+        let mut h = Harness::new(true).await;
+        membership(&mut h, "openvtc/acme", CommunityStatus::Active);
+
+        h.handle(Action::CommunityContext(
+            CommunityContextAction::DevicesOpen(0),
+        ))
+        .await;
+        assert!(community_access_busy(&h), "the listing is in flight");
+        let communities = &h.state.main_page.content_panel.communities;
+        assert!(
+            communities
+                .device_access
+                .as_ref()
+                .is_some_and(|v| v.can_grant && v.busy)
+        );
+        assert!(matches!(
+            communities.device_grants.get("openvtc/acme"),
+            Some(GrantListing::Loading)
+        ));
+
+        h.in_flight
+            .finish(background_dispatch::DispatchDomain::CommunityAccess);
+        if let Some(view) = h
+            .state
+            .main_page
+            .content_panel
+            .communities
+            .device_access
+            .as_mut()
+        {
+            view.busy = false;
+            view.form = Some(GrantForm {
+                did: "did:webvh:scid:example.com:not-a-device".into(),
+                ..GrantForm::default()
+            });
+        }
+        h.handle(Action::CommunityContext(
+            CommunityContextAction::GrantSubmit,
+        ))
+        .await;
+        assert!(!community_access_busy(&h), "nothing is granted");
+        let view = h
+            .state
+            .main_page
+            .content_panel
+            .communities
+            .device_access
+            .clone()
+            .unwrap();
+        assert!(view.message.unwrap_or_default().contains("did:key"));
+        assert!(view.form.is_some(), "the form stays open to fix the DID");
     }
 }

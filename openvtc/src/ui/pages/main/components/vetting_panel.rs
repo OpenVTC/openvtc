@@ -18,7 +18,7 @@ use crate::state_handler::{
     },
     state::ConnectionState,
 };
-use openvtc_core::config::community_context::{ContextKind, ContextOption};
+use openvtc_core::config::community_context::ContextOption;
 use openvtc_core::display::display_identifier;
 use ratatui::{
     style::{Style, Stylize},
@@ -97,23 +97,6 @@ fn field(name: &str, shown: String, focused: bool, text: bool) -> Line<'static> 
     Line::from(spans)
 }
 
-/// A context choice, in a line.
-fn context_label(option: &ContextOption) -> String {
-    let id = &option.context_id;
-    match option.kind {
-        ContextKind::New => format!("{id}  (a context of its own)"),
-        ContextKind::Existing if option.holds_persona_keys => {
-            format!("{id}  (this persona's context)")
-        }
-        ContextKind::Existing => match option.communities.len() {
-            0 => format!("{id}  (in use)"),
-            1 => format!("{id}  (shared with 1 community)"),
-            n => format!("{id}  (shared with {n} communities)"),
-        },
-        ContextKind::Top => format!("{id}  (top context — nothing kept apart)"),
-    }
-}
-
 fn tick(on: bool) -> String {
     if on { "[x]" } else { "[ ]" }.to_string()
 }
@@ -190,7 +173,7 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(field("Join as", persona, *f == 1, false));
             let context = context_options
                 .get(*context_index)
-                .map_or_else(|| "—".to_string(), context_label);
+                .map_or_else(|| "—".to_string(), ContextOption::summary);
             lines.push(field("Context", context, *f == 2, false));
             lines.push(Line::from(""));
             lines.push(hint(

@@ -579,13 +579,11 @@ impl StateHandler {
 /// Whether `context_id` is already claimed: by a membership, a persona's keys,
 /// or a vetting application's face.
 pub(crate) fn context_taken(config: &Config, context_id: &str) -> bool {
-    community_context::context_in_use(&config.account, context_id)
-        || config
-            .private
-            .vetting
-            .applications
-            .iter()
-            .any(|a| a.context_id.as_deref() == Some(context_id))
+    community_context::context_claimed(
+        &config.account,
+        &config.private.vetting.applications,
+        context_id,
+    )
 }
 
 /// The new sub-context to suggest for `vtc_did`: named after the community,

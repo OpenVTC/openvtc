@@ -319,8 +319,39 @@ impl Component for MainPage {
                     _ => {}
                 }
             }
+            // A pasted did:key lands in the grant form's focused text field. The
+            // deletion confirmation takes no paste: typing it is the point.
+            MainMenu::Communities => {
+                if let Some(form) = self
+                    .props
+                    .main_page
+                    .content_panel
+                    .communities
+                    .device_access
+                    .as_ref()
+                    .filter(|v| !v.busy)
+                    .and_then(|v| v.form.as_ref())
+                    .filter(|f| f.field < 2)
+                {
+                    let _ = self.action_tx.send(Action::CommunityContext(
+                        crate::state_handler::actions::CommunityContextAction::GrantInput {
+                            field: form.field,
+                            value: format!("{}{trimmed}", grant_form_text(form)),
+                        },
+                    ));
+                }
+            }
             _ => {}
         }
+    }
+}
+
+/// The grant form's focused text field: the DID, or the device's name.
+fn grant_form_text(form: &crate::state_handler::main_page::content::GrantForm) -> &str {
+    if form.field == 0 {
+        &form.did
+    } else {
+        &form.name
     }
 }
 
@@ -815,6 +846,27 @@ impl MainPage {
         if let Some(view) = self.props.main_page.content_panel.capabilities.view.clone() {
             return self.handle_capabilities_key(key, &view);
         }
+        // Deleting a context, or device access, owns the keys while open.
+        if let Some(view) = self
+            .props
+            .main_page
+            .content_panel
+            .communities
+            .context_delete
+            .clone()
+        {
+            return self.handle_context_delete_key(key, &view);
+        }
+        if let Some(view) = self
+            .props
+            .main_page
+            .content_panel
+            .communities
+            .device_access
+            .clone()
+        {
+            return self.handle_device_access_key(key, &view);
+        }
         let comms = &self.props.main_page.content_panel.communities;
         let count = comms.items.len();
         let selected = comms.selected_index;
@@ -861,6 +913,7 @@ impl MainPage {
         let sel_active = comms.items.get(selected).is_some_and(|c| c.is_active);
         let sel_inactive = comms.items.get(selected).is_some_and(|c| c.is_inactive);
         let sel_pending = comms.items.get(selected).is_some_and(|c| c.is_pending);
+        let sel_own_context = comms.items.get(selected).is_some_and(|c| c.has_own_context);
 
         match key.code {
             KeyCode::Char('j') => {
@@ -958,6 +1011,22 @@ impl MainPage {
                     .send(Action::CommunityConfirmDelete(selected));
                 true
             }
+            // Delete a finished membership's own context. Never offered for the
+            // top context or a live membership; what else uses the context is
+            // checked in the loop before the VTA is asked anything.
+            KeyCode::Char('D') if sel_inactive && sel_own_context => {
+                let _ = self.action_tx.send(Action::CommunityContext(
+                    crate::state_handler::actions::CommunityContextAction::DeleteStart(selected),
+                ));
+                true
+            }
+            // Device access, scoped to this community's own context.
+            KeyCode::Char('g') if sel_own_context => {
+                let _ = self.action_tx.send(Action::CommunityContext(
+                    crate::state_handler::actions::CommunityContextAction::DevicesOpen(selected),
+                ));
+                true
+            }
             KeyCode::Esc => {
                 let _ = self
                     .action_tx
@@ -968,8 +1037,118 @@ impl MainPage {
         }
     }
 
-    /// Create-persona overlay keys. Label phase: Enter mints, Esc cancels,
-    /// other keys edit the label. Working phase swallows input. Done/Failed:
+    /// Context-deletion keys, while one is open. While the VTA is previewing,
+    /// only Esc (close). With the preview shown: typing builds the
+    /// confirmation, Backspace erases, Enter deletes, Esc closes. While the
+    /// delete runs, nothing — it cannot be called back. Paste is deliberately
+    /// not accepted into the confirmation: typing it is the point.
+    fn handle_context_delete_key(
+        &mut self,
+        key: KeyEvent,
+        view: &crate::state_handler::main_page::content::ContextDeleteView,
+    ) -> bool {
+        use crate::state_handler::actions::CommunityContextAction as C;
+        use crate::state_handler::main_page::content::ContextDeletePhase as Phase;
+        let action = match (&view.phase, key.code) {
+            (Phase::Deleting, _) => None,
+            (_, KeyCode::Esc) => Some(C::DeleteCancel),
+            (Phase::Ready(_), KeyCode::Enter) => Some(C::DeleteConfirm),
+            (Phase::Ready(_), KeyCode::Backspace) => {
+                let mut typed = view.typed.clone();
+                typed.pop();
+                Some(C::DeleteInput(typed))
+            }
+            (Phase::Ready(_), KeyCode::Char(c)) => {
+                Some(C::DeleteInput(format!("{}{c}", view.typed)))
+            }
+            _ => None,
+        };
+        let handled = action.is_some();
+        if let Some(action) = action {
+            let _ = self.action_tx.send(Action::CommunityContext(action));
+        }
+        handled
+    }
+
+    /// Device-access keys, while the view is open. With the grant form open:
+    /// typing fills the focused field, Tab/↑/↓ move between fields, ←/→ choose
+    /// the expiry, Enter grants, Esc closes the form. With a revocation armed:
+    /// y/Enter revokes, anything else disarms. Otherwise ↑/↓ select, `n` adds a
+    /// device (live memberships only), `x`/Delete arms a revocation, `r`
+    /// re-reads, Esc closes. While a request runs, only Esc (close).
+    fn handle_device_access_key(
+        &mut self,
+        key: KeyEvent,
+        view: &crate::state_handler::main_page::content::DeviceAccessView,
+    ) -> bool {
+        use crate::state_handler::actions::CommunityContextAction as C;
+        use crate::state_handler::main_page::content::GrantForm;
+        let grants = self
+            .props
+            .main_page
+            .content_panel
+            .communities
+            .device_grants
+            .get(&view.context_id)
+            .map_or(0, |l| l.grants().len());
+        let action = if view.busy {
+            matches!(key.code, KeyCode::Esc).then_some(C::DevicesClose)
+        } else if let Some(form) = &view.form {
+            let fields = GrantForm::FIELDS;
+            match key.code {
+                KeyCode::Esc => Some(C::GrantCancel),
+                KeyCode::Enter => Some(C::GrantSubmit),
+                KeyCode::Tab | KeyCode::Down => Some(C::GrantField((form.field + 1) % fields)),
+                KeyCode::BackTab | KeyCode::Up => {
+                    Some(C::GrantField((form.field + fields - 1) % fields))
+                }
+                KeyCode::Left if form.field == 2 => {
+                    Some(C::GrantExpiry(form.expiry.saturating_sub(1)))
+                }
+                KeyCode::Right if form.field == 2 => Some(C::GrantExpiry(form.expiry + 1)),
+                KeyCode::Backspace if form.field < 2 => {
+                    let mut value = grant_form_text(form).to_string();
+                    value.pop();
+                    Some(C::GrantInput {
+                        field: form.field,
+                        value,
+                    })
+                }
+                KeyCode::Char(c) if form.field < 2 => Some(C::GrantInput {
+                    field: form.field,
+                    value: format!("{}{c}", grant_form_text(form)),
+                }),
+                _ => None,
+            }
+        } else if view.confirm_revoke {
+            Some(match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => C::RevokeConfirm,
+                _ => C::RevokeCancel,
+            })
+        } else {
+            match key.code {
+                KeyCode::Esc => Some(C::DevicesClose),
+                KeyCode::Up if grants > 0 => {
+                    Some(C::DevicesSelect(view.selected.saturating_sub(1)))
+                }
+                KeyCode::Down if grants > 0 => Some(C::DevicesSelect(view.selected + 1)),
+                KeyCode::Char('n') if view.can_grant => Some(C::GrantStart),
+                KeyCode::Char('x') | KeyCode::Delete if grants > 0 => Some(C::RevokeArm),
+                KeyCode::Char('r') => Some(C::DevicesRefresh),
+                _ => None,
+            }
+        };
+        let handled = action.is_some();
+        if let Some(action) = action {
+            let _ = self.action_tx.send(Action::CommunityContext(action));
+        }
+        handled
+    }
+
+    /// Create-persona overlay keys. Label phase: Enter goes on to the context
+    /// choice, Esc cancels, other keys edit the label. Context phase: ↑/↓
+    /// choose, typing names a new sub-context, Enter mints, Esc goes back to the
+    /// label. Working phase swallows input. Done/Failed:
     /// `c` re-copies the DID (Done only), Enter/Esc close. Called only while the
     /// overlay is open, where it owns all input.
     fn handle_create_persona_key(&mut self, key: KeyEvent) {
@@ -989,6 +1168,29 @@ impl MainPage {
                     let _ = self.action_tx.send(Action::CreatePersonaInput(key));
                 }
             },
+            CreatePersonaPhase::Context => {
+                let selected = overlay.context_selected;
+                let last = overlay.context_options.len().saturating_sub(1);
+                let new_row = overlay.context_options.get(selected).is_some_and(|o| {
+                    o.kind == openvtc_core::config::community_context::ContextKind::New
+                });
+                let action = match key.code {
+                    KeyCode::Up => Action::CreatePersonaContextSelect(selected.saturating_sub(1)),
+                    KeyCode::Down => Action::CreatePersonaContextSelect((selected + 1).min(last)),
+                    KeyCode::Enter => Action::CreatePersonaSubmit,
+                    KeyCode::Esc => Action::CreatePersonaBack,
+                    KeyCode::Char(c) if new_row => {
+                        Action::CreatePersonaContextSlug(format!("{}{c}", overlay.context_slug))
+                    }
+                    KeyCode::Backspace if new_row => {
+                        let mut slug = overlay.context_slug.clone();
+                        slug.pop();
+                        Action::CreatePersonaContextSlug(slug)
+                    }
+                    _ => return,
+                };
+                let _ = self.action_tx.send(action);
+            }
             // Mint in progress: lock input (no cancel — the sequence is short and
             // persists atomically).
             CreatePersonaPhase::Working => {}
@@ -2713,8 +2915,16 @@ impl MainPage {
         };
 
         let area = frame.area();
-        let popup_width = 64u16.min(area.width.saturating_sub(4));
-        let popup_height = 11u16.min(area.height.saturating_sub(2)).max(7);
+        // The context choice lists paths, so it is wider and grows with them.
+        let choosing = overlay.phase == CreatePersonaPhase::Context;
+        let popup_width = if choosing { 84u16 } else { 64u16 }.min(area.width.saturating_sub(4));
+        let popup_height = if choosing {
+            (overlay.context_options.len() + overlay.messages.len()) as u16 + 9
+        } else {
+            11u16
+        }
+        .min(area.height.saturating_sub(2))
+        .max(7);
 
         let [popup_area] = Layout::vertical([Constraint::Length(popup_height)])
             .flex(Flex::Center)
@@ -2743,8 +2953,63 @@ impl MainPage {
                     Style::new().fg(COLOR_SOFT_PURPLE).bold(),
                 )));
                 lines.push(Line::default());
+                for msg in &overlay.messages {
+                    lines.push(Line::from(Span::styled(
+                        msg.clone(),
+                        Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+                    )));
+                }
                 lines.push(Line::from(Span::styled(
-                    "⏎ create   esc cancel",
+                    "⏎ next   esc cancel",
+                    Style::new().fg(COLOR_BORDER),
+                )));
+            }
+            CreatePersonaPhase::Context => {
+                use openvtc_core::config::community_context::ContextKind;
+                lines.push(Line::from(Span::styled(
+                    "Where should this persona's keys and DID live?",
+                    Style::new().fg(COLOR_TEXT_DEFAULT),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "A persona is presented from the context it is minted in.",
+                    Style::new().fg(COLOR_BORDER),
+                )));
+                lines.push(Line::default());
+                for (i, option) in overlay.context_options.iter().enumerate() {
+                    let selected = i == overlay.context_selected;
+                    let text = match option.kind {
+                        ContextKind::New => {
+                            let parent = openvtc_core::config::context_path::parse_sub_context_id(
+                                &option.context_id,
+                            )
+                            .map_or(option.context_id.as_str(), |(parent, _)| parent);
+                            format!(
+                                "{parent}/{}{}  (a context of its own)",
+                                overlay.context_slug,
+                                if selected { "▎" } else { "" }
+                            )
+                        }
+                        ContextKind::Existing | ContextKind::Top => option.summary(),
+                    };
+                    let style = if selected {
+                        Style::new().fg(COLOR_SUCCESS).bold()
+                    } else {
+                        Style::new().fg(COLOR_TEXT_DEFAULT)
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("{}{text}", if selected { "▸ " } else { "  " }),
+                        style,
+                    )));
+                }
+                for msg in &overlay.messages {
+                    lines.push(Line::from(Span::styled(
+                        msg.clone(),
+                        Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+                    )));
+                }
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    "↑/↓ choose   type: name the new context   ⏎ create   esc back",
                     Style::new().fg(COLOR_BORDER),
                 )));
             }
@@ -3230,6 +3495,7 @@ mod key_handler_tests {
             vtc_agent_name: None,
             sub_context_id: format!("top/{name}"),
             context_note: String::new(),
+            has_own_context: true,
             request_id: String::new(),
             has_membership_credential: false,
             has_role_credential: false,
@@ -3697,6 +3963,281 @@ mod key_handler_tests {
         assert!(
             rx.try_recv().is_err(),
             "a persona a community presents must not arm a deletion"
+        );
+    }
+
+    // ----- Community contexts ----------------------------------------------
+
+    fn context_action(
+        rx: &mut UnboundedReceiver<Action>,
+    ) -> Option<crate::state_handler::actions::CommunityContextAction> {
+        match rx.try_recv() {
+            Ok(Action::CommunityContext(action)) => Some(action),
+            _ => None,
+        }
+    }
+
+    fn device_grant(did: &str) -> openvtc_core::community_access::DeviceGrant {
+        openvtc_core::community_access::DeviceGrant {
+            did: did.to_string(),
+            role: "application".to_string(),
+            label: None,
+            contexts: vec!["top/a".to_string()],
+            elsewhere: vec![],
+            expires_at: None,
+        }
+    }
+
+    fn device_view() -> crate::state_handler::main_page::content::DeviceAccessView {
+        crate::state_handler::main_page::content::DeviceAccessView {
+            community: "a".to_string(),
+            context_id: "top/a".to_string(),
+            can_grant: true,
+            selected: 0,
+            form: None,
+            confirm_revoke: false,
+            busy: false,
+            message: None,
+        }
+    }
+
+    /// `D` deletes a finished membership's own context, and is not offered on
+    /// a live row or on a row in the top context.
+    #[test]
+    fn communities_shift_d_starts_a_context_deletion_only_where_one_can_happen() {
+        use crate::state_handler::actions::CommunityContextAction as C;
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            s.main_page.content_panel.communities.items =
+                vec![community_summary_with("a", false, true, false)].into();
+        });
+        page.handle_key_event(press(KeyCode::Char('D')));
+        assert!(matches!(context_action(&mut rx), Some(C::DeleteStart(0))));
+
+        for summary in [
+            community_summary_with("a", true, false, false),
+            CommunitySummary {
+                has_own_context: false,
+                ..community_summary_with("a", false, true, false)
+            },
+        ] {
+            let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+                s.main_page.content_panel.communities.items = vec![summary].into();
+            });
+            page.handle_key_event(press(KeyCode::Char('D')));
+            assert!(context_action(&mut rx).is_none());
+        }
+    }
+
+    #[test]
+    fn communities_g_opens_device_access_for_an_own_context_only() {
+        use crate::state_handler::actions::CommunityContextAction as C;
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            s.main_page.content_panel.communities.items = vec![community_summary("a")].into();
+        });
+        page.handle_key_event(press(KeyCode::Char('g')));
+        assert!(matches!(context_action(&mut rx), Some(C::DevicesOpen(0))));
+
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            s.main_page.content_panel.communities.items = vec![CommunitySummary {
+                has_own_context: false,
+                ..community_summary("a")
+            }]
+            .into();
+        });
+        page.handle_key_event(press(KeyCode::Char('g')));
+        assert!(context_action(&mut rx).is_none());
+    }
+
+    /// While a deletion is open every letter is part of the confirmation —
+    /// `j` does not start a join — and a running delete takes no keys at all.
+    #[test]
+    fn a_context_deletion_owns_the_keys_while_open() {
+        use crate::state_handler::actions::CommunityContextAction as C;
+        use crate::state_handler::main_page::content::{ContextDeletePhase, ContextDeleteView};
+        use openvtc_core::config::community_context::ContextDeletionPreview;
+        let view = |phase| ContextDeleteView {
+            vtc_did: "did:example:a".to_string(),
+            persona: openvtc_core::config::account::PersonaId::new(),
+            community: "a".to_string(),
+            context_id: "top/a".to_string(),
+            phase,
+            typed: "DELET".to_string(),
+        };
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            s.main_page.content_panel.communities.items = vec![community_summary("a")].into();
+            s.main_page.content_panel.communities.context_delete = Some(view(
+                ContextDeletePhase::Ready(ContextDeletionPreview::default()),
+            ));
+        });
+        page.handle_key_event(press(KeyCode::Char('E')));
+        assert!(matches!(context_action(&mut rx), Some(C::DeleteInput(t)) if t == "DELETE"));
+        page.handle_key_event(press(KeyCode::Char('j')));
+        assert!(matches!(context_action(&mut rx), Some(C::DeleteInput(t)) if t == "DELETj"));
+        page.handle_key_event(press(KeyCode::Backspace));
+        assert!(matches!(context_action(&mut rx), Some(C::DeleteInput(t)) if t == "DELE"));
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(context_action(&mut rx), Some(C::DeleteConfirm)));
+        page.handle_key_event(press(KeyCode::Esc));
+        assert!(matches!(context_action(&mut rx), Some(C::DeleteCancel)));
+        page.handle_paste_event("DELETE");
+        assert!(
+            rx.try_recv().is_err(),
+            "the confirmation is typed, not pasted"
+        );
+
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            s.main_page.content_panel.communities.context_delete =
+                Some(view(ContextDeletePhase::Deleting));
+        });
+        page.handle_key_event(press(KeyCode::Esc));
+        page.handle_key_event(press(KeyCode::Char('j')));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn device_access_keys_drive_the_list() {
+        use crate::state_handler::actions::CommunityContextAction as C;
+        use crate::state_handler::main_page::content::GrantListing;
+        let with_grant = |s: &mut State| {
+            s.main_page.content_panel.communities.device_access = Some(device_view());
+            s.main_page.content_panel.communities.device_grants.insert(
+                "top/a".to_string(),
+                GrantListing::Loaded(vec![device_grant("did:key:zA")]),
+            );
+        };
+        let (mut page, mut rx) = page_for(MainMenu::Communities, with_grant);
+        for (code, expected) in [
+            (KeyCode::Char('n'), "GrantStart"),
+            (KeyCode::Char('x'), "RevokeArm"),
+            (KeyCode::Char('r'), "DevicesRefresh"),
+            (KeyCode::Down, "DevicesSelect"),
+            (KeyCode::Esc, "DevicesClose"),
+        ] {
+            page.handle_key_event(press(code));
+            let got = match context_action(&mut rx) {
+                Some(C::GrantStart) => "GrantStart",
+                Some(C::RevokeArm) => "RevokeArm",
+                Some(C::DevicesRefresh) => "DevicesRefresh",
+                Some(C::DevicesSelect(0 | 1)) => "DevicesSelect",
+                Some(C::DevicesClose) => "DevicesClose",
+                _ => "something else",
+            };
+            assert_eq!(got, expected, "{code:?}");
+        }
+
+        // A finished membership takes no new device.
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            with_grant(s);
+            if let Some(v) = s.main_page.content_panel.communities.device_access.as_mut() {
+                v.can_grant = false;
+            }
+        });
+        page.handle_key_event(press(KeyCode::Char('n')));
+        assert!(context_action(&mut rx).is_none());
+
+        // An armed revocation is confirmed with `y` and dropped by anything else.
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            with_grant(s);
+            if let Some(v) = s.main_page.content_panel.communities.device_access.as_mut() {
+                v.confirm_revoke = true;
+            }
+        });
+        page.handle_key_event(press(KeyCode::Char('y')));
+        assert!(matches!(context_action(&mut rx), Some(C::RevokeConfirm)));
+        page.handle_key_event(press(KeyCode::Char('n')));
+        assert!(matches!(context_action(&mut rx), Some(C::RevokeCancel)));
+    }
+
+    #[test]
+    fn the_grant_form_takes_typing_paste_and_the_expiry() {
+        use crate::state_handler::actions::CommunityContextAction as C;
+        use crate::state_handler::main_page::content::GrantForm;
+        let with_form = |field: usize| {
+            move |s: &mut State| {
+                s.main_page.content_panel.communities.device_access =
+                    Some(crate::state_handler::main_page::content::DeviceAccessView {
+                        form: Some(GrantForm {
+                            did: "did:key:z".to_string(),
+                            field,
+                            ..GrantForm::default()
+                        }),
+                        ..device_view()
+                    });
+            }
+        };
+        let (mut page, mut rx) = page_for(MainMenu::Communities, with_form(0));
+        page.handle_key_event(press(KeyCode::Char('6')));
+        assert!(matches!(
+            context_action(&mut rx),
+            Some(C::GrantInput { field: 0, value }) if value == "did:key:z6"
+        ));
+        page.handle_paste_event("  6MkPasted \n");
+        assert!(matches!(
+            context_action(&mut rx),
+            Some(C::GrantInput { field: 0, value }) if value == "did:key:z6MkPasted"
+        ));
+        page.handle_key_event(press(KeyCode::Tab));
+        assert!(matches!(context_action(&mut rx), Some(C::GrantField(1))));
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(context_action(&mut rx), Some(C::GrantSubmit)));
+        page.handle_key_event(press(KeyCode::Esc));
+        assert!(matches!(context_action(&mut rx), Some(C::GrantCancel)));
+
+        let (mut page, mut rx) = page_for(MainMenu::Communities, with_form(2));
+        page.handle_key_event(press(KeyCode::Right));
+        assert!(matches!(
+            context_action(&mut rx),
+            Some(C::GrantExpiry(i)) if i == openvtc_core::community_access::DEFAULT_EXPIRY + 1
+        ));
+        page.handle_key_event(press(KeyCode::Char('q')));
+        assert!(
+            context_action(&mut rx).is_none(),
+            "the expiry is chosen, not typed"
+        );
+    }
+
+    #[test]
+    fn create_persona_context_phase_keys() {
+        use crate::state_handler::main_page::content::{CreatePersonaPhase, CreatePersonaState};
+        use openvtc_core::config::community_context::{ContextKind, ContextOption};
+        let option = |id: &str, kind| ContextOption {
+            context_id: id.to_string(),
+            kind,
+            communities: vec![],
+            holds_persona_keys: false,
+        };
+        let overlay = |selected: usize| {
+            move |s: &mut State| {
+                s.main_page.create_persona = Some(CreatePersonaState {
+                    phase: CreatePersonaPhase::Context,
+                    context_options: vec![
+                        option("openvtc/laptop", ContextKind::New),
+                        option("openvtc", ContextKind::Top),
+                    ],
+                    context_selected: selected,
+                    context_slug: "lapto".to_string(),
+                    ..Default::default()
+                });
+            }
+        };
+        let (mut page, mut rx) = page_for(MainMenu::Identity, overlay(0));
+        page.handle_key_event(press(KeyCode::Char('p')));
+        assert!(matches!(rx.try_recv(), Ok(Action::CreatePersonaContextSlug(s)) if s == "laptop"));
+        page.handle_key_event(press(KeyCode::Down));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::CreatePersonaContextSelect(1))
+        ));
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(rx.try_recv(), Ok(Action::CreatePersonaSubmit)));
+        page.handle_key_event(press(KeyCode::Esc));
+        assert!(matches!(rx.try_recv(), Ok(Action::CreatePersonaBack)));
+
+        let (mut page, mut rx) = page_for(MainMenu::Identity, overlay(1));
+        page.handle_key_event(press(KeyCode::Char('x')));
+        assert!(
+            rx.try_recv().is_err(),
+            "only the new context's row takes a name"
         );
     }
 
