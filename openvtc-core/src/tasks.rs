@@ -77,6 +77,34 @@ pub enum TaskType {
     VRCRequestRejected,
     /// A VRC has been issued (either by us or received from a remote party).
     VRCIssued { vrc: Box<DTGCredential> },
+    /// Vetter: an applicant redeemed one of our tickets. Open a session when
+    /// the two of you are together.
+    VettingRequestInbound {
+        /// Our desk handle (`crate::vetting::VettingBook::desk_entry`).
+        request_id: String,
+        /// The applicant's join DID.
+        applicant: Arc<String>,
+        /// The community they are applying to.
+        community: String,
+    },
+    /// Applicant: a vetter opened a session. Read the match code to each
+    /// other, then send the card.
+    VettingSessionInbound {
+        /// The application.
+        application_id: String,
+        /// The session document id.
+        session_id: String,
+        /// The vetter.
+        vetter: Arc<String>,
+    },
+    /// Vetter: the applicant's card arrived and verified. Check the person,
+    /// then attest or decline.
+    VettingCardReceived {
+        /// Our desk handle.
+        request_id: String,
+        /// The applicant's join DID.
+        applicant: Arc<String>,
+    },
 }
 
 impl Display for TaskType {
@@ -93,6 +121,9 @@ impl Display for TaskType {
             TaskType::VRCRequestInbound { .. } => "VRC Request Received",
             TaskType::VRCRequestRejected => "VRC Request Rejected",
             TaskType::VRCIssued { .. } => "VRC Issued",
+            TaskType::VettingRequestInbound { .. } => "Vetting Request (Inbound)",
+            TaskType::VettingSessionInbound { .. } => "Vetting Session (Send Card)",
+            TaskType::VettingCardReceived { .. } => "Vetting Card Received",
         };
         write!(f, "{}", friendly_name)
     }

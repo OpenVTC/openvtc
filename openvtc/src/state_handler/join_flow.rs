@@ -1276,11 +1276,31 @@ async fn run_join_sequence(
     // subject, prove the subject authorized this presenter (signed with the
     // subject persona's key). On the join-as-subject path (#1a) this is `None`.
     let linkage = build_linkage_proof(config, admin_vta, state, &applicant_did).await;
-    let vp = openvtc_core::join::build_join_vp(
+    let mut vp = openvtc_core::join::build_join_vp(
         &applicant_did,
         state.invitation_credential.as_ref(),
         linkage.as_ref(),
     );
+    // Peer identity vetting: present the statements gathered for this community
+    // under this persona, and name the requirements they were gathered against
+    // so the community applies the same criterion (vetting-process.md §10.1).
+    let presentation = match config.private.vetting.application(&vtc_did, persona_id) {
+        Some(application) if application.join_did == applicant_did => {
+            let statements = application.presentable_statements(chrono::Utc::now());
+            if !statements.is_empty() {
+                state.join.info(format!(
+                    "Presenting {} vetting statement(s) to the community…",
+                    statements.len()
+                ));
+            }
+            openvtc_core::join::attach_credentials(&mut vp, statements);
+            openvtc_core::join::JoinPresentation {
+                vp,
+                extensions: application.join_extensions(),
+            }
+        }
+        _ => vp.into(),
+    };
     // Settle the wire. TSP needs **both** legs, which is the workspace rule that
     // the protocol is the highest-preference one present in *both* parties'
     // documents — and here it is not a formality. A TSP send posts the raw CESR
@@ -1341,7 +1361,7 @@ async fn run_join_sequence(
         &applicant_did,
         &vtc_did,
         &persona_mediator,
-        vp,
+        presentation,
         vtc_tsp_mediator.as_deref(),
     )
     .await
