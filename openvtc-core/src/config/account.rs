@@ -89,7 +89,11 @@ pub struct PersonaRecord {
     pub key_refs: Vec<KeyRef>,
     /// Mediator DID; defaults to the VTA mediator, optional override at mint (D7).
     pub mediator_did: Option<String>,
-    /// The sub-context the persona was minted under — provenance only (D6).
+    /// The VTA context the persona's keys and DID were minted in. A persona can
+    /// only be presented from here, so joining a community with it shares this
+    /// context ([`crate::config::community_context`]). Empty for a persona
+    /// minted before per-community contexts, whose keys are in the account's
+    /// top context.
     pub origin_context_id: String,
     /// When the persona was created.
     pub created_at: DateTime<Utc>,
@@ -566,9 +570,16 @@ impl CommunityRecord {
     /// with a `requested_at` at least the timeout old. Returns `true` if it
     /// transitioned to `Expired`.
     pub fn expire_if_stale(&mut self, now: DateTime<Utc>) -> bool {
+        self.expire_if_stale_after(now, TimeDelta::days(PENDING_TIMEOUT_DAYS))
+    }
+
+    /// [`Self::expire_if_stale`] with the timeout given — a community's
+    /// published `decisionSla` for a vetted join, which may be longer or shorter
+    /// than the client default.
+    pub fn expire_if_stale_after(&mut self, now: DateTime<Utc>, timeout: TimeDelta) -> bool {
         if matches!(self.status, CommunityStatus::Pending { .. })
             && let Some(requested) = self.requested_at
-            && now - requested >= TimeDelta::days(PENDING_TIMEOUT_DAYS)
+            && now - requested >= timeout
         {
             self.status = CommunityStatus::Expired;
             self.acknowledged = false;
@@ -891,9 +902,21 @@ impl Account {
     /// transitioned to `Expired` so the caller can persist and raise the
     /// actions-required indicator (R-S-2).
     pub fn expire_stale_pending(&mut self, now: DateTime<Utc>) -> Vec<(VtcDid, PersonaId)> {
+        self.expire_stale_pending_with(now, |_| TimeDelta::days(PENDING_TIMEOUT_DAYS))
+    }
+
+    /// [`Self::expire_stale_pending`] with a timeout chosen per membership, so a
+    /// community that publishes a `decisionSla` is waited on for that long
+    /// rather than the fixed client default (vetting-process.md §14.1).
+    pub fn expire_stale_pending_with(
+        &mut self,
+        now: DateTime<Utc>,
+        timeout_for: impl Fn(&CommunityRecord) -> TimeDelta,
+    ) -> Vec<(VtcDid, PersonaId)> {
         let mut expired = Vec::new();
         for community in self.memberships_mut() {
-            if community.expire_if_stale(now) {
+            let timeout = timeout_for(community);
+            if community.expire_if_stale_after(now, timeout) {
                 expired.push((community.vtc_did.clone(), community.persona_ref));
             }
         }
@@ -1667,6 +1690,36 @@ mod tests {
         let removed = acct.delete_membership("left", pid).unwrap();
         assert_eq!(removed.vtc_did, "left");
         assert!(acct.membership("left", pid).is_none());
+    }
+
+    #[test]
+    fn a_published_decision_sla_replaces_the_client_timeout() {
+        let now = Utc::now();
+        let mut acct = Account::default();
+        let mut record = CommunityRecord::new_pending(
+            "did:webvh:vetted".into(),
+            None,
+            "top/vetted".into(),
+            PersonaId::new(),
+            Uuid::new_v4(),
+            now,
+        );
+        // Older than the 7-day default, younger than a 30-day SLA.
+        record.requested_at = Some(now - TimeDelta::days(PENDING_TIMEOUT_DAYS + 3));
+        acct.add_membership(record);
+
+        let expired = acct.expire_stale_pending_with(now, |c| {
+            if c.vtc_did == "did:webvh:vetted" {
+                TimeDelta::days(30)
+            } else {
+                TimeDelta::days(PENDING_TIMEOUT_DAYS)
+            }
+        });
+        assert!(expired.is_empty(), "the community said it may take 30 days");
+        assert!(
+            !acct.expire_stale_pending(now).is_empty(),
+            "the default would have expired it"
+        );
     }
 
     #[test]

@@ -1300,6 +1300,8 @@ pub const OPENVTC_CATCH_ALL_PATTERN: &str = concat!(
     r"|https://trusttasks\.org/openvtc/vtc/.*",
     r"|https://trusttasks\.org/spec/vtc/.*",
     r"|https://trusttasks\.org/spec/credential-exchange/.*",
+    r"|https://trusttasks\.org/spec/vetting/.*",
+    r"|https://trusttasks\.org/spec/trust-task-error/.*",
     r"|https://didcomm\.org/report-problem/.*",
 );
 
@@ -2531,6 +2533,26 @@ mod catch_all_tests {
             "https://trusttasks.org/spec/vtc/join-requests/submit/0.1#response",
             "https://trusttasks.org/spec/vtc/join-requests/status/0.1#response",
             "https://trusttasks.org/spec/vtc/members/self-remove/0.1",
+        ] {
+            assert!(matches(uri), "{uri} must reach the OpenVTC handler");
+        }
+    }
+
+    /// Peer vetting tasks travel member to member, not through a community,
+    /// so they live under their own prefix; and a refusal of any Trust Task
+    /// arrives as a `trust-task-error`, which a vetter uses to refuse a request.
+    /// Without these arms both are dropped before dispatch.
+    #[test]
+    fn vetting_tasks_and_trust_task_errors_are_routed() {
+        for uri in [
+            "https://trusttasks.org/spec/vetting/request/0.1",
+            "https://trusttasks.org/spec/vetting/request/0.1#response",
+            "https://trusttasks.org/spec/vetting/session/0.1",
+            "https://trusttasks.org/spec/vetting/session/0.1#response",
+            "https://trusttasks.org/spec/vetting/decline/0.1",
+            "https://trusttasks.org/spec/vtc/vetting/revoke-statement/0.1#response",
+            "https://trusttasks.org/spec/vtc/join-requests/manifest/0.2#response",
+            "https://trusttasks.org/spec/trust-task-error/0.5",
         ] {
             assert!(matches(uri), "{uri} must reach the OpenVTC handler");
         }

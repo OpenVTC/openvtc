@@ -261,6 +261,7 @@ mod setup_token_actions;
 mod setup_vta_actions;
 mod setup_wizard;
 pub mod state;
+mod vetting_actions;
 mod vic;
 mod vta_transports;
 
@@ -1025,6 +1026,10 @@ impl StateHandler {
         let (dispatch_tx, mut dispatch_rx) =
             mpsc::unbounded_channel::<background_dispatch::DispatchOutcome>();
         let mut in_flight = background_dispatch::InFlight::default();
+        // Membership contexts already checked at the VTA this run. A failure is
+        // logged and retried on the next launch rather than every tick.
+        let mut contexts_checked: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // Coalesced + offloaded config persistence (R11). Mutation sites mark the
         // config dirty on the loop thread instead of saving inline; the
@@ -1568,10 +1573,29 @@ impl StateHandler {
                     }
                 }
                 _ = pending_expiry_tick.tick() => {
-                    // R-B-7: expire Pending joins unanswered for 7 days, raising
+                    // R-B-7: expire Pending joins unanswered for 7 days — or for
+                    // the `decisionSla` a vetting community publishes — raising
                     // actions-required, and tear down each one's now-dead session
                     // (R-S-3). Records are retained read-only (R-S-1).
-                    let expired = config.account.expire_stale_pending(chrono::Utc::now());
+                    let vetting = &config.private.vetting;
+                    let default_timeout = chrono::TimeDelta::days(
+                        openvtc_core::config::account::PENDING_TIMEOUT_DAYS,
+                    );
+                    let timeouts: std::collections::HashMap<_, _> = config
+                        .account
+                        .memberships()
+                        .filter_map(|c| {
+                            vetting
+                                .decision_sla(&c.vtc_did, c.persona_ref)
+                                .map(|sla| ((c.vtc_did.clone(), c.persona_ref), sla))
+                        })
+                        .collect();
+                    let expired = config.account.expire_stale_pending_with(chrono::Utc::now(), |c| {
+                        timeouts
+                            .get(&(c.vtc_did.clone(), c.persona_ref))
+                            .copied()
+                            .unwrap_or(default_timeout)
+                    });
                     if !expired.is_empty() {
                         save.mark_dirty();
                         for (vtc, persona) in &expired {
@@ -1587,7 +1611,7 @@ impl StateHandler {
                         }
                         state.main_page.sync_from_config(&config);
                         state.main_page.log(format!(
-                            "{} pending join{} expired (no response within 7 days).",
+                            "{} pending join{} expired (no decision within the time allowed).",
                             expired.len(),
                             if expired.len() == 1 { "" } else { "s" },
                         ));
@@ -1669,6 +1693,56 @@ impl StateHandler {
                                     persona_binding_refresh::resolve_batch(client, binding_targets)
                                         .await,
                                 )
+                            },
+                        );
+                    }
+
+                    // Register the contexts memberships name. Joins before
+                    // per-community contexts recorded an id without creating it;
+                    // faces worn there worked only because nothing checked.
+                    let top_context_id = config.account.top_context_id.clone();
+                    let unchecked: Vec<String> = config
+                        .account
+                        .memberships()
+                        .map(|c| c.sub_context_id.clone())
+                        .filter(|id| {
+                            openvtc_core::config::community_context::is_sub_context(
+                                id,
+                                &top_context_id,
+                            ) && !contexts_checked.contains(id)
+                        })
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    if !unchecked.is_empty()
+                        && let Some(client) = admin_vta.as_ref()
+                        && in_flight
+                            .try_begin(background_dispatch::DispatchDomain::CommunityContexts)
+                    {
+                        contexts_checked.extend(unchecked.iter().cloned());
+                        let client = client.clone();
+                        background_dispatch::spawn_dispatch(
+                            dispatch_tx.clone(),
+                            background_dispatch::DispatchDomain::CommunityContexts,
+                            async move {
+                                let mut results = Vec::with_capacity(unchecked.len());
+                                for context_id in unchecked {
+                                    let name = openvtc_core::config::context_path::parse_sub_context_id(
+                                        &context_id,
+                                    )
+                                    .map_or(context_id.clone(), |(_, slug)| slug.to_string());
+                                    let result =
+                                        openvtc_core::config::community_context::ensure_context(
+                                            &client,
+                                            &top_context_id,
+                                            &context_id,
+                                            &name,
+                                        )
+                                        .await
+                                        .map_err(|e| e.to_string());
+                                    results.push((context_id, result));
+                                }
+                                background_dispatch::DispatchOutcome::CommunityContexts(results)
                             },
                         );
                     }
@@ -2274,6 +2348,8 @@ impl StateHandler {
                     Action::JoinIdentitySelect(..) | Action::JoinIdentityChoose |
                     Action::JoinReuseConfirm | Action::JoinReuseCancel |
                     Action::JoinInvitationSelect(..) | Action::JoinInvitationChoose |
+                    Action::JoinContextSelect(..) | Action::JoinContextSlug(..) |
+                    Action::JoinContextChoose |
                     Action::JoinCancel | Action::JoinPasteVic(..) | Action::JoinPasteFromClipboard |
                     Action::JoinClearVic | Action::ImportConfig(..) | Action::SetProtection(..) |
                     Action::VtaSubmitDid(..) | Action::VtaStartProvision(..) |
@@ -2282,6 +2358,15 @@ impl StateHandler {
                     #[cfg(feature = "openpgp-card")]
                     Action::GetTokens | Action::SetAdminPin(..) | Action::SetTouchPolicy(..) |
                     Action::SetTokenName(..) | Action::FactoryReset(..) | Action::TokenWriteKeys(..) => {}
+
+                    // Vetting sends and receives peer messages as a persona, and
+                    // this loop has neither a persona nor an inbound arm.
+                    Action::Vetting(..) => {
+                        state.main_page.log(
+                            "Vetting needs a persona — create one under My Identity, then \
+                             restart OpenVTC to apply or to vet.",
+                        );
+                    }
 
                     // Genuinely unavailable: these need a live community and the
                     // messaging runtime that comes with it. Inert, but not

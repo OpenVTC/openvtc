@@ -251,6 +251,21 @@ impl Component for MainPage {
                         .send(Action::Credential(CredentialAction::ReasonUpdate(updated)));
                 }
             }
+            MainMenu::Vetting => {
+                if let Some(current) = self
+                    .props
+                    .main_page
+                    .content_panel
+                    .vetting
+                    .mode
+                    .focused_text()
+                {
+                    let updated = format!("{current}{trimmed}");
+                    let _ = self.action_tx.send(Action::Vetting(
+                        crate::state_handler::actions::VettingAction::Input(updated),
+                    ));
+                }
+            }
             MainMenu::Settings => {
                 match &self.props.main_page.content_panel.settings.mode {
                     SettingsMode::EditFriendlyName { input }
@@ -354,6 +369,7 @@ impl MainPage {
             MainMenu::Communities => self.handle_communities_key(key),
             MainMenu::Identity => self.handle_personas_key(key),
             MainMenu::Vta => self.handle_vta_key(key),
+            MainMenu::Vetting => self.handle_vetting_key(key),
             _ => false,
         }
     }
@@ -2231,6 +2247,79 @@ impl MainPage {
 /// the key edits the buffer, or `None` otherwise. Append-only semantics
 /// (printable char appends at the end; Backspace removes the last char) — these
 /// inline editors have no cursor, matching the prior behavior exactly.
+impl MainPage {
+    /// Vetting page keys.
+    ///
+    /// In a list: `Tab` switches tab, `↑/↓` select, and each tab has its own
+    /// verbs (shown in its footer). In a form: `↑/↓`/`Tab` move between fields,
+    /// a text field takes typing, `←/→` cycle a choice, `Space` ticks, `Enter`
+    /// commits and `Esc` leaves.
+    fn handle_vetting_key(&mut self, key: KeyEvent) -> bool {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::{VettingMode, VettingTab};
+
+        let vetting = &self.props.main_page.content_panel.vetting;
+        if !matches!(vetting.mode, VettingMode::List) {
+            let text = vetting.mode.focused_text().map(str::to_string);
+            let confirming = matches!(vetting.mode, VettingMode::ConfirmDecline { .. });
+            let action = match key.code {
+                KeyCode::Esc => Some(V::Back),
+                KeyCode::Enter => Some(V::Submit),
+                KeyCode::Tab | KeyCode::Down => Some(V::NextField),
+                KeyCode::BackTab | KeyCode::Up => Some(V::PrevField),
+                KeyCode::Left => Some(V::Cycle(false)),
+                KeyCode::Right => Some(V::Cycle(true)),
+                code => match text {
+                    Some(current) => edit_text(code, &current).map(V::Input),
+                    None if code == KeyCode::Char('y') && confirming => Some(V::Submit),
+                    None if code == KeyCode::Char('n') && confirming => Some(V::Back),
+                    None if code == KeyCode::Char(' ') => Some(V::Toggle),
+                    None => None,
+                },
+            };
+            return match action {
+                Some(action) => {
+                    let _ = self.action_tx.send(Action::Vetting(action));
+                    true
+                }
+                None => false,
+            };
+        }
+
+        let selected = vetting.selected;
+        let len = vetting.tab_len();
+        let action = match (vetting.tab, key.code) {
+            (_, KeyCode::Tab) => V::SwitchTab,
+            (_, KeyCode::Up) if selected > 0 => V::Select(selected - 1),
+            (_, KeyCode::Down) if selected + 1 < len => V::Select(selected + 1),
+            (VettingTab::Applications, KeyCode::Char('n')) => V::StartApplication,
+            (VettingTab::Applications, KeyCode::Char('f')) => V::ChooseFace,
+            (VettingTab::Applications, KeyCode::Char('r')) => V::RequestVetter,
+            (VettingTab::Applications, KeyCode::Char('m')) => V::RefreshRequirements,
+            (VettingTab::Applications, KeyCode::Char('c') | KeyCode::Enter) => V::ReviewCard,
+            (VettingTab::Desk, KeyCode::Char('o')) => V::OpenSession,
+            (VettingTab::Desk, KeyCode::Char('a') | KeyCode::Enter) => V::StartAttest,
+            (VettingTab::Desk, KeyCode::Char('x')) => V::ArmDecline,
+            (VettingTab::Tickets, KeyCode::Char('t')) => V::NewTicket,
+            (VettingTab::Tickets, KeyCode::Char('d')) => V::DeleteTicket,
+            (VettingTab::Tickets, KeyCode::Char('y')) => {
+                let Some(ticket) = vetting.tickets.get(selected) else {
+                    return true;
+                };
+                let status = match crate::clipboard::copy_to_clipboard(&ticket.code) {
+                    Ok(method) => format!("Ticket code copied via {}.", method.label()),
+                    Err(e) => format!("Could not copy the code: {e}"),
+                };
+                V::Status(status)
+            }
+            (VettingTab::Issued, KeyCode::Char('w')) => V::ArmWithdraw,
+            _ => return false,
+        };
+        let _ = self.action_tx.send(Action::Vetting(action));
+        true
+    }
+}
+
 fn edit_text(code: KeyCode, current: &str) -> Option<String> {
     match code {
         KeyCode::Char(c) => {
@@ -2343,6 +2432,7 @@ fn view_id(page: &MainPageState) -> String {
             SettingsMode::WipeConfirm { .. } => "wipe",
             SettingsMode::ThemePicker { .. } => "theme",
         },
+        MainMenu::Vetting => components::vetting_panel::mode_id(&page.content_panel.vetting),
         _ => "",
     };
     format!("{menu:?}:{mode}")
@@ -3161,6 +3251,7 @@ mod key_handler_tests {
             vtc_did: format!("did:example:{name}"),
             vtc_agent_name: None,
             sub_context_id: format!("top/{name}"),
+            context_note: String::new(),
             request_id: String::new(),
             has_membership_credential: false,
             has_role_credential: false,
@@ -3221,6 +3312,82 @@ mod key_handler_tests {
             remote_agent_name: None,
             created: String::new(),
         }
+    }
+
+    // ----- Vetting -----------------------------------------------------------
+
+    fn vetting_action(
+        rx: &mut UnboundedReceiver<Action>,
+    ) -> crate::state_handler::actions::VettingAction {
+        match rx.try_recv() {
+            Ok(Action::Vetting(action)) => action,
+            _ => panic!("expected a Vetting action"),
+        }
+    }
+
+    #[test]
+    fn vetting_list_keys_follow_the_tab() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::VettingTab;
+
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |_| {});
+        page.handle_key_event(press(KeyCode::Char('n')));
+        assert!(matches!(vetting_action(&mut rx), V::StartApplication));
+
+        // The same key means nothing on the desk…
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
+            s.main_page.content_panel.vetting.tab = VettingTab::Desk;
+        });
+        page.handle_key_event(press(KeyCode::Char('n')));
+        assert!(rx.try_recv().is_err());
+        // …where `x` arms a decline.
+        page.handle_key_event(press(KeyCode::Char('x')));
+        assert!(matches!(vetting_action(&mut rx), V::ArmDecline));
+
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |_| {});
+        page.handle_key_event(press(KeyCode::Tab));
+        assert!(matches!(vetting_action(&mut rx), V::SwitchTab));
+    }
+
+    #[test]
+    fn vetting_forms_take_text_cycle_and_tick() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::{AttestForm, VettingMode};
+
+        // A focused text field takes typing, spaces included.
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
+            s.main_page.content_panel.vetting.mode = VettingMode::RequestVetter {
+                application_id: "a1".into(),
+                vetter: "did:key:z".into(),
+                code: String::new(),
+                field: 0,
+            };
+        });
+        page.handle_key_event(press(KeyCode::Char('Q')));
+        assert!(matches!(vetting_action(&mut rx), V::Input(text) if text == "did:key:zQ"));
+
+        // In the checklist, Space ticks and the arrows cycle.
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
+            s.main_page.content_panel.vetting.mode = VettingMode::Attest {
+                request_id: "r1".into(),
+                form: AttestForm::default(),
+            };
+        });
+        page.handle_key_event(press(KeyCode::Char(' ')));
+        assert!(matches!(vetting_action(&mut rx), V::Toggle));
+        page.handle_key_event(press(KeyCode::Right));
+        assert!(matches!(vetting_action(&mut rx), V::Cycle(true)));
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(vetting_action(&mut rx), V::Submit));
+
+        // A decline is confirmed with y, and n keeps the request.
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
+            s.main_page.content_panel.vetting.mode = VettingMode::ConfirmDecline {
+                request_id: "r1".into(),
+            };
+        });
+        page.handle_key_event(press(KeyCode::Char('n')));
+        assert!(matches!(vetting_action(&mut rx), V::Back));
     }
 
     // ----- Communities -------------------------------------------------------

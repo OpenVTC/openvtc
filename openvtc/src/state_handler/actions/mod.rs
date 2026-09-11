@@ -290,6 +290,46 @@ pub enum PersonaAction {
     FormCancel,
 }
 
+/// Vetting-page actions (`docs/design/vetting-process.md` §12).
+///
+/// Forms are driven generically — the focused field takes text, cycles through
+/// choices, or ticks — so the page needs no variant per field.
+pub enum VettingAction {
+    /// Show the next tab.
+    SwitchTab,
+    /// Move the selection.
+    Select(usize),
+    /// Leave the open form.
+    Back,
+    /// Replace the focused text field's value.
+    Input(String),
+    /// Focus the next field.
+    NextField,
+    /// Focus the previous field.
+    PrevField,
+    /// Cycle the focused choice (`true` = forwards).
+    Cycle(bool),
+    /// Tick or untick the focused field.
+    Toggle,
+    /// Commit the open form.
+    Submit,
+    /// Show a status line (e.g. a clipboard result).
+    Status(String),
+    // ── Applicant ────────────────────────────────────────────────────────
+    StartApplication,
+    ChooseFace,
+    RequestVetter,
+    RefreshRequirements,
+    ReviewCard,
+    // ── Vetter ───────────────────────────────────────────────────────────
+    NewTicket,
+    DeleteTicket,
+    OpenSession,
+    StartAttest,
+    ArmDecline,
+    ArmWithdraw,
+}
+
 // ============================================================================
 // Top-level Action enum
 // ============================================================================
@@ -320,6 +360,8 @@ pub enum Action {
     Settings(SettingsAction),
     /// Identity pane (personas / pool / profiles / bindings).
     Persona(PersonaAction),
+    /// Vetting page (applications / desk / tickets / issued statements).
+    Vetting(VettingAction),
 
     /// Dismiss the startup loading screen (Enter, once loading has completed) and
     /// reveal the main page. Phase-2 connections are already running in the
@@ -359,6 +401,15 @@ pub enum Action {
     /// Commit the highlighted invitation choice and proceed to identity
     /// selection (or mint).
     JoinInvitationChoose,
+
+    /// Move the context-choice highlight to this row.
+    JoinContextSelect(usize),
+
+    /// Replace the name typed for a new sub-context.
+    JoinContextSlug(String),
+
+    /// Commit the highlighted context and launch the join in it.
+    JoinContextChoose,
 
     /// Issue this Active membership's reciprocal VMC (member → community) and
     /// send it to the community's VTC over DIDComm (`members/vmc/1.0`). Indexed

@@ -12,6 +12,7 @@ use crate::{
     logs::{LogFamily, Logs},
     relationships::Relationships,
     tasks::Tasks,
+    vetting::VettingBook,
     vrc::Vrcs,
 };
 use affinidi_tdk::TDK;
@@ -246,6 +247,12 @@ pub struct ProtectedConfig {
     #[serde(default)]
     pub agent_names: HashMap<String, CachedAgentName>,
 
+    /// Peer identity vetting: our applications, and our desk as a vetter
+    /// ([`crate::vetting`]). Skipped when empty, so a config that has never
+    /// vetted round-trips byte-identically.
+    #[serde(default, skip_serializing_if = "VettingBook::is_empty")]
+    pub vetting: VettingBook,
+
     /// Fields written by a newer build, preserved verbatim (D19).
     ///
     /// The protected tier is where the account lives, so an older build
@@ -304,6 +311,7 @@ impl Default for ProtectedConfig {
             vrcs_issued: Vrcs::default(),
             vrcs_received: Vrcs::default(),
             agent_names: HashMap::default(),
+            vetting: VettingBook::default(),
         }
     }
 }

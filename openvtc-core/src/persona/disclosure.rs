@@ -1,18 +1,23 @@
-//! What has actually left — the permanent record of every release.
-//! **Holder-scoped**, and the one read in this module family that deliberately
-//! spans every context at once.
+//! Releasing what a face shows, and the permanent record of every release.
 //!
-//! # Read-only here, and that is the design
+//! # Only when someone asks
 //!
 //! The two writing halves of `persona/disclosure/*` are a preview and the
 //! present it authorises, and they exist to be driven by a verifier's request:
-//! a site asks, a human is shown exactly what would go, and only then is
-//! anything signed. OpenVTC is not a verifier and has nothing asking, so a
-//! "disclose something now" button here would be a request with no requester —
-//! the one shape the two-call gate exists to prevent.
+//! someone asks, a human is shown exactly what would go, and only then does
+//! anything leave. A "disclose something now" button with nobody asking would
+//! be a request with no requester — the one shape the two-call gate exists to
+//! prevent.
 //!
-//! What the TUI can usefully answer is the question asked after the fact: what does
-//! anyone already know, and how did they come to know it. That is this module.
+//! Peer vetting has a requester. A vetter's `vetting/session` names the claim
+//! types they will check against the person in front of them, so [`preview`]
+//! and [`present`] are driven by that session: the verifier is the vetter, the
+//! challenge is the session's, and the holder approves the preview before the
+//! card is signed (`docs/design/vetting-process.md` §9.2).
+//!
+//! [`history`] answers the question asked after the fact: what does anyone
+//! already know, and how did they come to know it. It is **holder-scoped**, and
+//! the one read in this module family that deliberately spans every context.
 //!
 //! # A rung is not a detail
 //!
@@ -146,6 +151,187 @@ fn rung_label(rung: &str) -> &str {
     }
 }
 
+/// The renderer a vetting card is built from: the one that carries provenance.
+pub const RCARD_RENDERER: &str = "rcard";
+
+/// One claim as a disclosure carries it — what the holder is shown in a
+/// preview, and what left in the artifact. The two have the same shape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReleasedClaim {
+    /// The vocabulary token — `name.legal`.
+    pub claim_type: String,
+    /// Absent when the claim is proved as a predicate: the verifier learns an
+    /// answer, never the value.
+    pub value: Option<Value>,
+    /// Where the value came from: `selfAsserted`, `credentialBacked`, …
+    /// Absent only when the renderer dropped it.
+    pub provenance: Option<String>,
+    /// A credential-backed value that could not be re-derived.
+    pub stale: bool,
+}
+
+impl ReleasedClaim {
+    fn from_wire(value: &Value) -> Self {
+        Self {
+            claim_type: value
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            value: value.get("value").cloned().filter(|v| !v.is_null()),
+            // The preview names the kind; the artifact carries the whole
+            // provenance object. Only the kind travels on.
+            provenance: match value.get("provenance") {
+                Some(Value::String(kind)) => Some(kind.clone()),
+                Some(other) => other
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                None => None,
+            },
+            stale: value.get("stale").and_then(Value::as_bool).unwrap_or(false),
+        }
+    }
+}
+
+/// A preview: what would leave, held by the agent until presented or expired.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Preview {
+    /// Single use; [`present`] consumes it.
+    pub preview_id: String,
+    pub claims: Vec<ReleasedClaim>,
+    pub expires_at: String,
+}
+
+/// Ask what `persona_did`'s face in `context_id` would show `verifier_did`.
+///
+/// Signs nothing and sends nothing. The claims come back so the holder can be
+/// shown them before [`present`] releases them.
+pub async fn preview(
+    client: &VtaClient,
+    context_id: &str,
+    persona_did: &str,
+    verifier_did: &str,
+    requested_claims: Vec<String>,
+    purpose: &str,
+) -> Result<Preview, OpenVTCError> {
+    let value = client
+        .persona_disclosure_preview(
+            context_id,
+            persona_did,
+            verifier_did,
+            requested_claims,
+            Some(purpose),
+            Some(RCARD_RENDERER),
+        )
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("persona disclosure preview failed: {e}")))?;
+    let preview_id = value
+        .get("previewId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| OpenVTCError::Vta("the disclosure preview carried no previewId".into()))?
+        .to_string();
+    Ok(Preview {
+        preview_id,
+        claims: value
+            .get("claims")
+            .and_then(Value::as_array)
+            .map(|claims| claims.iter().map(ReleasedClaim::from_wire).collect())
+            .unwrap_or_default(),
+        expires_at: value
+            .get("expiresAt")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+/// What a present released.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Presented {
+    pub disclosure_id: String,
+    pub claims: Vec<ReleasedClaim>,
+}
+
+/// Why a present did not release anything.
+#[derive(Debug, thiserror::Error)]
+pub enum PresentError {
+    /// A claim needs a fresh approval. The preview survives: approve on the
+    /// device, then present the same preview again.
+    #[error("a claim in this disclosure needs your approval first")]
+    StepUpRequired,
+    /// Anything else. The preview may be gone.
+    #[error("{0}")]
+    Failed(String),
+}
+
+/// Release what the preview `preview_id` showed, bound to `challenge`.
+///
+/// # Errors
+///
+/// [`PresentError::StepUpRequired`] when the agent wants a fresh approval —
+/// the one refusal that leaves the preview usable.
+pub async fn present(
+    client: &VtaClient,
+    context_id: &str,
+    preview_id: &str,
+    challenge: Option<&str>,
+) -> Result<Presented, PresentError> {
+    let value = client
+        .persona_disclosure_present(context_id, preview_id, challenge, None)
+        .await
+        .map_err(|e| {
+            let message = e.to_string();
+            // `persona/disclosure/present/1.0` refuses with a
+            // specification-extended code the SDK reports as text.
+            if message.contains("stepUpRequired") {
+                PresentError::StepUpRequired
+            } else {
+                PresentError::Failed(format!("persona disclosure present failed: {message}"))
+            }
+        })?;
+    let claims = value
+        .get("artifact")
+        .map(artifact_claims)
+        .transpose()
+        .map_err(PresentError::Failed)?
+        .ok_or_else(|| PresentError::Failed("the disclosure carried no artifact".into()))?;
+    Ok(Presented {
+        disclosure_id: value
+            .get("disclosureId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        claims,
+    })
+}
+
+/// The claims in a rendered artifact, in the order the renderer numbered them.
+///
+/// The artifact travels as a JSON string; an object is accepted too.
+fn artifact_claims(artifact: &Value) -> Result<Vec<ReleasedClaim>, String> {
+    let parsed;
+    let document = match artifact {
+        Value::String(text) => {
+            parsed = serde_json::from_str::<Value>(text)
+                .map_err(|e| format!("the disclosure artifact is not JSON: {e}"))?;
+            &parsed
+        }
+        other => other,
+    };
+    let claims = document
+        .get("claims")
+        .and_then(Value::as_object)
+        .ok_or("the disclosure artifact carries no claims")?;
+    let mut numbered: Vec<(&String, &Value)> = claims.iter().collect();
+    numbered.sort_by(|a, b| a.0.cmp(b.0));
+    Ok(numbered
+        .into_iter()
+        .map(|(_, claim)| ReleasedClaim::from_wire(claim))
+        .collect())
+}
+
 /// Every release, newest first, across every context.
 ///
 /// `limit` caps the read: a history is append-only and unbounded, and a panel
@@ -217,6 +403,47 @@ mod tests {
             "claims": [{ "type": "email.work" }],
         }));
         assert_eq!(row.claims[0].rung, "whole");
+    }
+
+    /// The artifact's claims come back in the renderer's order, with the
+    /// provenance kind lifted out of its object and a predicate left valueless.
+    #[test]
+    fn an_artifact_yields_its_claims_in_order() {
+        let artifact = serde_json::json!({
+            "type": ["VerifiableDataStructure", "RelationshipCard"],
+            "claims": {
+                "0001": { "type": "age.over18", "predicate": { "op": "gte" },
+                          "provenance": { "kind": "credentialBacked", "credentialId": "c1",
+                                          "claimPath": "/age" } },
+                "0000": { "type": "name.legal", "value": "Alice Example",
+                          "provenance": { "kind": "selfAsserted" } },
+            },
+            "unsigned": true,
+        })
+        .to_string();
+        let claims = artifact_claims(&Value::String(artifact)).unwrap();
+        assert_eq!(claims[0].claim_type, "name.legal");
+        assert_eq!(claims[0].value, Some(serde_json::json!("Alice Example")));
+        assert_eq!(claims[0].provenance.as_deref(), Some("selfAsserted"));
+        assert_eq!(claims[1].value, None);
+        assert_eq!(claims[1].provenance.as_deref(), Some("credentialBacked"));
+    }
+
+    /// A preview names provenance by kind alone.
+    #[test]
+    fn a_preview_claim_reads_its_provenance_kind() {
+        let claim = ReleasedClaim::from_wire(&serde_json::json!({
+            "type": "name.legal", "value": "Alice Example",
+            "provenance": "selfAsserted", "rung": "whole", "newToThisVerifier": true,
+        }));
+        assert_eq!(claim.provenance.as_deref(), Some("selfAsserted"));
+        assert!(!claim.stale);
+    }
+
+    #[test]
+    fn an_artifact_without_claims_is_refused() {
+        assert!(artifact_claims(&Value::String("{}".into())).is_err());
+        assert!(artifact_claims(&Value::String("not json".into())).is_err());
     }
 
     /// A release with nothing recorded says so, rather than rendering as a
