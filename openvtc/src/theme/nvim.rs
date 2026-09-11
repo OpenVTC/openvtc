@@ -220,13 +220,23 @@ mod tests {
         assert!(import("bad name; !rm", true).is_err());
     }
 
-    /// Against a real Neovim, with a colorscheme it bundles. Ignored by
-    /// default: CI machines need not have Neovim.
+    /// Against a real Neovim, with a colorscheme every Neovim release bundles.
+    ///
+    /// Skips itself when Neovim is not on `PATH`, rather than being `#[ignore]`d:
+    /// the coverage job runs ignored tests too, and CI machines need not have
+    /// Neovim.
     #[test]
-    #[ignore = "needs nvim on PATH"]
     fn a_bundled_colorscheme_imports() {
-        let theme = import("habamax", true).unwrap();
-        assert_eq!(theme.name, "Habamax");
+        if std::process::Command::new("nvim")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: nvim is not on PATH");
+            return;
+        }
+        let theme = import("desert", true).unwrap();
+        assert_eq!(theme.name, "Desert");
         assert!(theme.palette.background.is_some());
     }
 }
