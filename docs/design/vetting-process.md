@@ -801,10 +801,12 @@ The VTC's ceremony pipeline (`vtc-service/src/join/orchestrate.rs`,
    - still holds it **now**, or policy allows post-issuance lapse
      (`eligibleAtIssuanceOnly`).
 
-   *As built (D20):* the member record exists and is not removed; it joined
-   before `validFrom`; and its ACL entry holds the role `eligibleVetters.role`
-   names (`vetter` or `custom:vetter`) and is unexpired **now**. The role VEC
-   and at-issuance role history (D5) come in V1.
+   *As built (D20):* the member record exists and is not removed, and it
+   joined before `validFrom`. It holds a grant of the role
+   `eligibleVetters.role` names — the role credential issued by
+   `vtc/vetting/vetters/grant` (§10.3) — that was recorded during this
+   membership by `validFrom`, was unexpired at `validFrom`, and is not
+   revoked now.
 
 Today `issuer_trusted` (`vtc-service/src/routes/join_requests/present.rs`)
 returns true only for the community DID or a registry-recognised issuer.
@@ -862,6 +864,20 @@ issued and revoked by the VTC (D5). This gives three things:
 - the VTC can verify "eligible at issuance" from its own records;
 - the kernel's "trust path to Linus ≤ 5 hops" becomes a policy input rather
   than a graph computation over a published keyring.
+
+*As built:*
+- **Issuing.** An admin grants the role with `vtc/vetting/vetters/grant/0.1`
+  (`POST /v1/vetting/vetters`). The credential is an `EndorsementCredential`
+  with endorsement `{type: "CommunityRole", role: "vetter", communityDid}`,
+  a `validUntil`, and a status-list `credentialStatus`. Leaving the community
+  revokes it. Running `vetter_eligibility.rego` automatically is V1.
+- **Holding.** The member's client keeps the credential apart from their
+  ordinary community role credential. It refuses requests (`notEligible`) and
+  offers no tickets for a community without a live grant.
+- **Presenting.** Every acceptance carries the credential as `eligibilityVp`,
+  with `nonce` = the request document `id` and `domain` = the applicant's
+  `joinDid`. The applicant verifies it and shows the result; the check is
+  advisory.
 
 A new `vetter_eligibility.rego` purpose evaluates candidates on these facts:
 `status`, `roles`, `tenure_days`, `admitted_via` (`genesis` | `vetting` |
@@ -1419,11 +1435,11 @@ modern-signature subgraph only (O7).
 | D17 | Portraits | **Not in V0** *(agreed)* |
 | D18 | Revocation | **Yes.** V0: vetter sends a revocation notice to the VTC; V1: VTA-hosted status lists *(agreed; mechanism proposed)* |
 | D19 | Who signs the card and the statement | **OpenVTC, as the persona DID.** `sign_card` and `sign_statement` use the persona's `assertionMethod` key (`did:webvh:…#key-N`), loaded like every other persona key — derived, imported or VTA-managed — and the proof names that verification method. This is the path OpenVTC already takes for reciprocal VMCs, capability grants and personhood proofs, so nothing new is asked of the VTA. (Its signing tasks would not fit anyway: `keys/derive-and-sign-document` signs as a derived `did:key`, and `keys/sign` is domain-separated.) Because OpenVTC holds the key, a VTA step-up cannot gate the signature; V0 gates signing and revocation with an explicit confirmation. A VTA sign-as-persona task over non-exportable keys would move that gate into the VTA (V1) |
-| D20 | Vetter eligibility in V0 | **Membership plus ACL role at decision time.** The member is not removed, joined before `validFrom`, and holds an unexpired `vetter` role. The role VEC and at-issuance role history (D5) come in V1 |
+| D20 | Vetter eligibility in V0 | **Membership plus a revocable `vetter` role credential (D5), granted by an admin.** The member is not removed, joined before `validFrom`, and holds a grant recorded during this membership by `validFrom`, unexpired then, and not revoked now. The vetter presents it to applicants as `eligibilityVp`. Automatic grants from `vetter_eligibility.rego` come in V1 |
 | D21 | Wire values | **lowerCamelCase** for every enum and documentation value (`inPerson`, `priorAcquaintance`, `nationalId`), per Trust Tasks SPEC §4.10. Host fact codes (`issuer-not-vetter`) stay kebab-case |
 | D22 | `needs` | Policy returns the generic `vetting`; the host expands it to `vetting:statements:<n>` / `vetting:method:<method>:<n>`, so visually authored policy stays static |
 | D23 | Which criterion applies | The one whose `requirementsDigest` the applicant names in `extensions`; otherwise the first vetting criterion |
-| D24 | Session binding details | Match-code tag `vetting-session-match/v1\0`, distinct from `vtc-personhood-match/v1\0`. The eligibility VP's challenge is the `vetting/request` document `id` |
+| D24 | Session binding details | Match-code tag `vetting-session-match/v1\0`, distinct from `vtc-personhood-match/v1\0`. `eligibilityVp` carries `nonce` = the `vetting/request` document `id` and `domain` = the applicant's `joinDid` |
 
 ### 15.2 Open questions
 
