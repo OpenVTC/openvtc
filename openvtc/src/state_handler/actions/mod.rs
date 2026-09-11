@@ -390,6 +390,15 @@ pub enum Action {
     /// selection (or mint).
     JoinInvitationChoose,
 
+    /// Move the context-choice highlight to this row.
+    JoinContextSelect(usize),
+
+    /// Replace the name typed for a new sub-context.
+    JoinContextSlug(String),
+
+    /// Commit the highlighted context and launch the join in it.
+    JoinContextChoose,
+
     /// Issue this Active membership's reciprocal VMC (member → community) and
     /// send it to the community's VTC over DIDComm (`members/vmc/1.0`). Indexed
     /// into the Communities display list.

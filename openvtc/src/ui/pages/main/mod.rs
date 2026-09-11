@@ -3229,6 +3229,7 @@ mod key_handler_tests {
             vtc_did: format!("did:example:{name}"),
             vtc_agent_name: None,
             sub_context_id: format!("top/{name}"),
+            context_note: String::new(),
             request_id: String::new(),
             has_membership_credential: false,
             has_role_credential: false,

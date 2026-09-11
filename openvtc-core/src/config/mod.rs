@@ -29,6 +29,7 @@ use std::{
 };
 
 pub mod account;
+pub mod community_context;
 pub mod context_path;
 pub mod did;
 pub mod integrity;

@@ -8,6 +8,7 @@
 //! `State.setup`; this struct only tracks the join-specific surface.
 
 use openvtc_core::config::account::{CommunityRecord, PersonaId};
+use openvtc_core::config::community_context::{ContextKind, ContextOption};
 use serde_json::Value;
 
 use crate::state_handler::setup_sequence::{Completion, MessageType};
@@ -28,8 +29,21 @@ pub enum JoinPage {
     /// Choose the identity to present (R-B-3 / D1): reuse an existing persona or
     /// mint a fresh one. Skipped when the account has no personas yet.
     IdentityChoice,
+    /// Choose the VTA context the community lives in: a new sub-context of its
+    /// own, one already in use, or the top context. Skipped when the identity
+    /// allows only one.
+    ContextChoice,
     /// Automated mint + join sequence progress / result.
     Progress,
+}
+
+/// The identity a join presents, once chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityPick {
+    /// A new persona, minted into the chosen context.
+    Mint,
+    /// An existing persona.
+    Reuse(PersonaId),
 }
 
 /// Summary of the invitation credential (VIC) actually presented with a join,
@@ -164,6 +178,16 @@ pub struct JoinState {
     /// submits an open request. Set when the invitation choice is made, or
     /// directly (false) on paths with no available invitation.
     pub present_invitation: bool,
+    /// The identity the context step is choosing for.
+    pub picked_identity: Option<IdentityPick>,
+    /// Contexts offered on the context-choice page, the default first.
+    pub context_options: Vec<ContextOption>,
+    /// Highlighted row on the context-choice page.
+    pub context_selected: usize,
+    /// The name typed for a new sub-context: its last path segment.
+    pub context_slug: String,
+    /// Display names for the communities listed under each context, by VTC DID.
+    pub context_community_names: Vec<(String, String)>,
 }
 
 impl JoinState {
@@ -194,6 +218,21 @@ impl JoinState {
     /// It is also the clamp ceiling for `invitation_use_selected`.
     pub fn invitation_without_row(&self) -> usize {
         self.invitation_options.len() + 1
+    }
+
+    /// Whether the highlighted context row is the new sub-context.
+    pub fn new_context_selected(&self) -> bool {
+        self.context_options
+            .get(self.context_selected)
+            .is_some_and(|o| o.kind == ContextKind::New)
+    }
+
+    /// The display name for a community listed under a context.
+    pub fn community_name<'a>(&'a self, vtc_did: &'a str) -> &'a str {
+        self.context_community_names
+            .iter()
+            .find(|(did, _)| did == vtc_did)
+            .map_or(vtc_did, |(_, name)| name.as_str())
     }
 
     /// Append an info message to the progress log.
@@ -249,6 +288,29 @@ mod tests {
         assert!(!js.mint_row_selected());
         js.identity_selected = 2;
         assert!(js.mint_row_selected());
+    }
+
+    #[test]
+    fn only_the_new_row_takes_a_typed_name() {
+        let option = |context_id: &str, kind| ContextOption {
+            context_id: context_id.to_string(),
+            kind,
+            communities: Vec::new(),
+            holds_persona_keys: false,
+        };
+        let mut js = JoinState {
+            context_options: vec![
+                option("openvtc/kernel", ContextKind::New),
+                option("openvtc/work", ContextKind::Existing),
+                option("openvtc", ContextKind::Top),
+            ],
+            ..JoinState::default()
+        };
+        assert!(js.new_context_selected());
+        js.context_selected = 1;
+        assert!(!js.new_context_selected());
+        js.context_selected = 2;
+        assert!(!js.new_context_selected());
     }
 
     #[test]

@@ -616,6 +616,11 @@ impl MainPageState {
                     .agent_name_for(&c.vtc_did)
                     .map(|n| sanitize_display(n, 256)),
                 sub_context_id: c.sub_context_id.clone(),
+                context_note: openvtc_core::config::community_context::isolation(
+                    &config.account,
+                    c,
+                )
+                .describe(),
                 request_id,
                 has_membership_credential: c
                     .credentials

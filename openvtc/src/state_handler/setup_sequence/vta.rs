@@ -445,27 +445,6 @@ pub async fn create_did_via_server(
     Ok((persona_keys, did, resolved.doc, mnemonic))
 }
 
-// ── State-B join seams (R-A-5 Stage 4) ──────────────────────────────────────
-//
-// Stubbed async seams: they carry the final signatures (so the real VTA/VTC
-// calls are a body swap with no call-site churn) but do not hit the network yet.
-
-/// Create the per-community sub-context under the account's top context (D9).
-///
-/// The id is already derived client-side via
-/// [`context_path::build_sub_context_id`](openvtc_core::config::context_path::build_sub_context_id);
-/// this seam is where the VTA registration call will go. STUB: echoes the id
-/// back. `parent_id` is the account's `top_context_id`.
-#[allow(clippy::unused_async)]
-pub async fn create_sub_context(
-    client: &VtaClient,
-    parent_id: &str,
-    sub_context_id: &str,
-) -> Result<String> {
-    let _ = (client, parent_id);
-    Ok(sub_context_id.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

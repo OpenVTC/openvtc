@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use dtg_credentials::DTGCredential;
 use openvtc_core::config::account::PersonaId;
+use openvtc_core::config::community_context::ContextOption;
 use vta_sdk::protocols::vetting::{DeclaredRelationship, RevocationReason, VettingMethod};
 
 /// Lazily-rendered raw credential JSON for credential detail views.
@@ -393,6 +394,8 @@ pub struct CommunitySummary {
     pub vtc_agent_name: Option<String>,
     /// The per-community sub-context id (troubleshooting detail).
     pub sub_context_id: String,
+    /// How far that context keeps this community apart from the others.
+    pub context_note: String,
     /// The join request id while `Pending`; empty otherwise.
     pub request_id: String,
     /// Whether the membership credential (VMC) has been received + stored.
@@ -1416,6 +1419,9 @@ pub enum VettingMode {
     NewApplication {
         community: String,
         persona_index: usize,
+        /// Where the application's face is worn, and the membership lives.
+        context_options: Vec<ContextOption>,
+        context_index: usize,
         field: usize,
     },
     /// Choose the face an application shows vetters.

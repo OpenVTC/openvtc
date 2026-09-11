@@ -211,7 +211,10 @@ pub fn render(
                 .into_owned(),
             ));
             if !c.sub_context_id.is_empty() {
-                lines.push(kv("Sub-context:", c.sub_context_id.clone()));
+                lines.push(kv(
+                    "Context:",
+                    format!("{}  ({})", c.sub_context_id, c.context_note),
+                ));
             }
             if !c.request_id.is_empty() {
                 lines.push(kv("Request ID:", c.request_id.clone()));
@@ -421,6 +424,7 @@ mod key_hint_tests {
             vtc_did: String::new(),
             vtc_agent_name: None,
             sub_context_id: String::new(),
+            context_note: String::new(),
             request_id: String::new(),
             has_membership_credential: false,
             has_role_credential: false,

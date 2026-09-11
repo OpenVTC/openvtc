@@ -15,7 +15,8 @@ use affinidi_tdk::secrets_resolver::secrets::Secret;
 use chrono::Utc;
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
-use openvtc_core::config::context_path::build_sub_context_id;
+use openvtc_core::config::community_context::{self, ContextKind, ContextOption};
+use openvtc_core::config::context_path::parse_sub_context_id;
 use openvtc_core::didcomm::Messaging;
 use openvtc_core::persona::disclosure::{self, PresentError};
 use openvtc_core::persona::{binding, profile};
@@ -41,6 +42,7 @@ use vta_sdk::vetting::statement::sign_statement;
 use crate::state_handler::actions::VettingAction;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
 use crate::state_handler::dispatch_util::{self, Persist, SyncLog};
+use crate::state_handler::join_flow;
 use crate::state_handler::main_page::content::{
     ApplicationRow, AttestForm, CardPreview, DeskRow, DeskStage, FaceChoice, IssuedRow, RequestRow,
     TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
@@ -414,10 +416,16 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
         }
         VettingAction::Back => page(ctx).mode = VettingMode::List,
         VettingAction::Status(message) => status(ctx, message),
-        VettingAction::Input(text) => input(&mut page(ctx).mode, text),
+        VettingAction::Input(text) => {
+            input(&mut page(ctx).mode, text);
+            refresh_application_contexts(ctx);
+        }
         VettingAction::NextField => move_field(page(ctx), true),
         VettingAction::PrevField => move_field(page(ctx), false),
-        VettingAction::Cycle(forward) => cycle(page(ctx), forward),
+        VettingAction::Cycle(forward) => {
+            cycle(page(ctx), forward);
+            refresh_application_contexts(ctx);
+        }
         VettingAction::Toggle => {
             if let VettingMode::Attest { form, .. } = &mut page(ctx).mode {
                 match form.field {
@@ -437,8 +445,11 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 page(ctx).mode = VettingMode::NewApplication {
                     community: String::new(),
                     persona_index: 0,
+                    context_options: Vec::new(),
+                    context_index: 0,
                     field: 0,
                 };
+                refresh_application_contexts(ctx);
             }
         }
         VettingAction::ChooseFace => {
@@ -591,9 +602,10 @@ fn move_field(v: &mut VettingState, forward: bool) {
         };
     };
     match &mut v.mode {
-        VettingMode::NewApplication { field, .. }
-        | VettingMode::RequestVetter { field, .. }
-        | VettingMode::NewTicket { field, .. } => step(field, 2),
+        VettingMode::NewApplication { field, .. } => step(field, 3),
+        VettingMode::RequestVetter { field, .. } | VettingMode::NewTicket { field, .. } => {
+            step(field, 2);
+        }
         VettingMode::ChooseFace { faces, index, .. } => step(index, faces.len()),
         VettingMode::Attest { form, .. } => step(&mut form.field, AttestForm::FIELDS),
         _ => {}
@@ -619,6 +631,12 @@ fn cycle(v: &mut VettingState, forward: bool) {
             field: 1,
             ..
         } => turn(persona_index, personas),
+        VettingMode::NewApplication {
+            context_options,
+            context_index,
+            field: 2,
+            ..
+        } => turn(context_index, context_options.len()),
         VettingMode::NewTicket {
             membership_index,
             field: 0,
@@ -652,8 +670,15 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
         VettingMode::NewApplication {
             community,
             persona_index,
+            context_options,
+            context_index,
             ..
-        } => start_application(ctx, community.trim(), persona_index).await,
+        } => {
+            let context = context_options
+                .get(context_index)
+                .map(|o| o.context_id.clone());
+            start_application(ctx, community.trim(), persona_index, context).await;
+        }
         VettingMode::ChooseFace {
             application_id,
             faces,
@@ -788,7 +813,60 @@ async fn refresh_requirements(ctx: &mut ActionCtx<'_>, application_id: &str) {
     }
 }
 
-async fn start_application(ctx: &mut ActionCtx<'_>, community: &str, persona_index: usize) {
+/// Recompute the contexts a new application can use, for the community and
+/// persona on the form. An application that already exists keeps its own.
+fn refresh_application_contexts(ctx: &mut ActionCtx<'_>) {
+    let (community, persona) = {
+        let v = page(ctx);
+        let VettingMode::NewApplication {
+            community,
+            persona_index,
+            ..
+        } = &v.mode
+        else {
+            return;
+        };
+        (
+            community.trim().to_string(),
+            v.personas.get(*persona_index).map(|p| p.persona),
+        )
+    };
+    let config: &Config = ctx.config;
+    let existing = persona
+        .and_then(|p| config.private.vetting.application(&community, p))
+        .and_then(|a| a.context_id.clone());
+    let options = match existing {
+        Some(context_id) => vec![ContextOption {
+            context_id,
+            kind: ContextKind::Existing,
+            communities: Vec::new(),
+            holds_persona_keys: false,
+        }],
+        None => {
+            let record = persona.and_then(|p| config.account.personas.get(&p));
+            let suggested = join_flow::suggested_context(config, &community);
+            community_context::context_options(&config.account, record, &suggested)
+        }
+    };
+    if let VettingMode::NewApplication {
+        context_options,
+        context_index,
+        ..
+    } = &mut page(ctx).mode
+    {
+        if *context_options != options {
+            *context_index = 0;
+        }
+        *context_options = options;
+    }
+}
+
+async fn start_application(
+    ctx: &mut ActionCtx<'_>,
+    community: &str,
+    persona_index: usize,
+    context: Option<String>,
+) {
     if !community.starts_with("did:") {
         return status(ctx, "Enter the community's DID (it starts with did:).");
     }
@@ -801,7 +879,12 @@ async fn start_application(ctx: &mut ActionCtx<'_>, community: &str, persona_ind
         &persona.did,
         Utc::now(),
     ) {
-        Ok(app) => app.id.clone(),
+        Ok(app) => {
+            if app.context_id.is_none() {
+                app.context_id = context;
+            }
+            app.id.clone()
+        }
         Err(e) => return status(ctx, format!("Could not start the application: {e}")),
     };
     {
@@ -913,23 +996,19 @@ fn application_context(
     if let Some(id) = &app.context_id {
         return Ok((id.clone(), join_did));
     }
-    let community = app.community.clone();
-    let name = config.agent_name_for(&community).map(ToString::to_string);
-    let id = build_sub_context_id(
-        &config.account.top_context_id,
-        name.as_deref(),
-        &community,
-        |id| {
-            config.account.memberships().any(|m| m.sub_context_id == id)
-                || config
-                    .private
-                    .vetting
-                    .applications
-                    .iter()
-                    .any(|a| a.context_id.as_deref() == Some(id))
-        },
-    )
-    .map_err(|e| e.to_string())?;
+    // A persona whose keys live in a sub-context is presented from it;
+    // otherwise the community gets a context of its own.
+    let top = config.account.top_context_id.as_str();
+    let id = match config
+        .account
+        .personas
+        .get(&app.persona)
+        .map(|p| community_context::persona_context(p, top))
+        .filter(|home| community_context::is_sub_context(home, top))
+    {
+        Some(home) => home.to_string(),
+        None => join_flow::suggested_context(config, &app.community.clone()),
+    };
     if let Some(app) = config.private.vetting.application_by_id_mut(application_id) {
         app.context_id = Some(id.clone());
     }
@@ -992,6 +1071,7 @@ fn wear_face(ctx: &mut ActionCtx<'_>, application_id: &str, face: Option<FaceCho
     status(ctx, format!("Wearing {}…", face.name));
     let job = FaceJob::Wear {
         client,
+        top_context_id: ctx.config.account.top_context_id.clone(),
         context_id,
         persona_did,
         application_id: application_id.to_string(),
@@ -1488,6 +1568,7 @@ pub(crate) enum FaceJob {
     },
     Wear {
         client: VtaClient,
+        top_context_id: String,
         context_id: String,
         persona_did: String,
         application_id: String,
@@ -1532,18 +1613,37 @@ impl FaceJob {
             }
             FaceJob::Wear {
                 client,
+                top_context_id,
                 context_id,
                 persona_did,
                 application_id,
                 face,
-            } => VettingOutcome::FaceWorn {
-                error: binding::set(&client, &context_id, &persona_did, Some(&face.profile_id))
-                    .await
-                    .err()
-                    .map(|e| e.to_string()),
-                application_id,
-                name: face.name,
-            },
+            } => {
+                // The context exists before a face is worn in it.
+                let slug =
+                    parse_sub_context_id(&context_id).map_or(context_id.as_str(), |(_, slug)| slug);
+                let error = match community_context::ensure_context(
+                    &client,
+                    &top_context_id,
+                    &context_id,
+                    slug,
+                )
+                .await
+                {
+                    Err(e) => Some(e.to_string()),
+                    Ok(_) => {
+                        binding::set(&client, &context_id, &persona_did, Some(&face.profile_id))
+                            .await
+                            .err()
+                            .map(|e| e.to_string())
+                    }
+                };
+                VettingOutcome::FaceWorn {
+                    error,
+                    application_id,
+                    name: face.name,
+                }
+            }
         }
     }
 }

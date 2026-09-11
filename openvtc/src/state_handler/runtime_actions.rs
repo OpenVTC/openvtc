@@ -1155,6 +1155,9 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::JoinReuseCancel
         | Action::JoinInvitationSelect(..)
         | Action::JoinInvitationChoose
+        | Action::JoinContextSelect(..)
+        | Action::JoinContextSlug(..)
+        | Action::JoinContextChoose
         | Action::JoinCancel
         | Action::JoinPasteVic(..)
         | Action::JoinPasteFromClipboard
