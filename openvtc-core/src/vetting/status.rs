@@ -51,6 +51,11 @@ pub struct GrantCheck {
 
 impl GrantCheck {
     /// Fetch the community's status list and read the grant's entry.
+    ///
+    /// The future is `Send`, so a caller can spawn it. That is why the fetch
+    /// hands `fetch_owned` a cloned client and an owned URL: a future that
+    /// kept the borrowed `&str` across its `.await` is not provably `Send` for
+    /// every lifetime the SDK's `AsyncFn(&str)` may be called with.
     pub async fn run(&self, resolver: &TrustTaskVmResolver) -> StatusCheck {
         let client = match status_client(true, STATUS_FETCH_TIMEOUT) {
             Ok(client) => client,
@@ -59,11 +64,19 @@ impl GrantCheck {
         check_credential_status(
             &self.credential_status,
             &self.issuer,
-            async |url: &str| fetch_status_list(&client, url).await,
+            async move |url: &str| fetch_owned(client.clone(), url.to_string()).await,
             resolver,
         )
         .await
     }
+}
+
+/// [`fetch_status_list`] over owned arguments, so its future borrows nothing.
+fn fetch_owned(
+    client: Client,
+    url: String,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>> {
+    Box::pin(async move { fetch_status_list(&client, &url).await })
 }
 
 /// The HTTP client a status fetch uses: finite connect and total timeouts, at
@@ -174,6 +187,21 @@ mod tests {
     use super::*;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// The check is spawned by the TUI, so its future must be `Send`.
+    #[test]
+    fn the_check_can_be_spawned() {
+        fn assert_send<F: std::future::Future + Send>(_: F) {}
+        let check = GrantCheck {
+            application_id: String::new(),
+            request_document_id: String::new(),
+            vetter: String::new(),
+            issuer: String::new(),
+            credential_status: Value::Null,
+        };
+        let resolver = TrustTaskVmResolver::did_key_only();
+        assert_send(check.run(&resolver));
+    }
 
     #[test]
     fn only_https_status_lists_are_fetched() {
