@@ -389,10 +389,11 @@ strip = "symbols"
 # `cargo tree`, not only the two named in a manifest: a crate left on crates.io
 # would pull its own `vti-common` beside the patched one.
 #
-# The branch is the top of the VTI vetting stack (#1425–#1429), not `main`:
-# `vta-sdk`'s `vetting` feature, which this workspace enables, exists only there
-# until that stack merges. Once it has, point these back at `main`, and remove
-# them with the release that follows.
+# The VTI entries pin a commit on VTI `main` by `rev`: 14ef89a, where the vetter
+# registry work (OpenVTC/verifiable-trust-infrastructure#1430) merged. A `rev`
+# on `main` stays fetchable, where the feature branches this used to name were
+# deleted when the vetting stack merged. Move the pin forward only to another
+# commit on VTI `main`, and remove these entries with the release that follows.
 #
 # Each block leaves when its release is published: delete its entries here and
 # its URL from `allow-git` in `deny.toml`. For VGI, also raise the `did-git-sign`
