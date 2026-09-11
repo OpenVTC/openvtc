@@ -349,7 +349,7 @@ There are three routes, from most to least social.
    maintainer). The applicant enters the vetter's agent name
    (`kernel.org/@carol`), DID, or scans their QR. The name is resolved and
    verified round-trip via `agent_name::resolve_identifier`, and the DID is
-   what gets persisted (CLAUDE.md rules).
+   what gets persisted, never the name.
 2. **Events — the key-signing party replacement.** The vetter opens a
    **vetting desk**: a multi-use ticket shown as a QR with a short expiry
    (§8.2). Applicants in the room scan it and sessions run one after another.
@@ -1263,7 +1263,7 @@ Vetter session (sketch):
 - Tell vetters exactly what they are attesting and that it is attributable
   (the RAHP persona "personal liability for vouching mistakes"). Never
   suggest they are a document-forensics expert.
-- Never render an unverified agent name (CLAUDE.md).
+- Never render an unverified agent name.
 - Every `requestMore` / `deny` reason code has plain-language text plus the
   governance link.
 - Inclusion:
@@ -1476,4 +1476,3 @@ today).
   default `join.rego` actually refers unknowns to moderators.
 - The VTI join specs claim a per-sender-DID rate limit; none was found in the
   join code.
-- `../design-docs/` (cited by CLAUDE.md in both repos) is not present locally.
