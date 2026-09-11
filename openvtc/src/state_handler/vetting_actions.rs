@@ -19,7 +19,9 @@ use openvtc_core::config::context_path::build_sub_context_id;
 use openvtc_core::didcomm::Messaging;
 use openvtc_core::persona::disclosure::{self, PresentError};
 use openvtc_core::persona::{binding, profile};
-use openvtc_core::vetting::applicant::{Application, RequestDraft, RequestState, SentCard};
+use openvtc_core::vetting::applicant::{
+    Application, RequestDraft, RequestState, SentCard, VetterEligibility,
+};
 use openvtc_core::vetting::book::FALLBACK_REQUIRED_CLAIMS;
 use openvtc_core::vetting::tickets::{DEFAULT_VALIDITY, Ticket, normalise_code};
 use openvtc_core::vetting::vetter::{Attestation, DeskState};
@@ -82,6 +84,9 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
         .account
         .memberships()
         .filter(|m| m.status.is_active())
+        // Tickets are for communities that named us a vetter: a request made
+        // with one to anyone else would be refused as not eligible.
+        .filter(|m| book.vetter_grant(&m.vtc_did, m.persona_ref, now).is_some())
         .map(|m| VettingMembership {
             community: m.vtc_did.clone(),
             name: m
@@ -188,6 +193,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                             state,
                             match_code,
                             card_session,
+                            eligibility: r.eligibility.as_ref().map(eligibility_line),
                         }
                     })
                     .collect(),
@@ -298,6 +304,31 @@ fn claim_text(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+/// What a vetter's acceptance showed, in a line, and whether it is good news.
+fn eligibility_line(eligibility: &VetterEligibility) -> (bool, String) {
+    match eligibility {
+        VetterEligibility::Shown { valid_until, .. } => (
+            true,
+            format!(
+                "named a vetter by the community until {}",
+                valid_until.format("%Y-%m-%d")
+            ),
+        ),
+        VetterEligibility::NotShown => (
+            false,
+            "did not show that the community named them a vetter — their statement may not count"
+                .to_string(),
+        ),
+        VetterEligibility::Failed { reason } => (
+            false,
+            format!(
+                "their vetter credential did not verify ({}) — their statement may not count",
+                sanitize_display(reason, 160)
+            ),
+        ),
     }
 }
 
@@ -453,7 +484,8 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             if page(ctx).memberships.is_empty() {
                 status(
                     ctx,
-                    "You can hand out tickets once you are an active member of a community.",
+                    "You can hand out tickets once a community you belong to has named you a \
+                     vetter — ask its admins for the vetter role.",
                 );
             } else {
                 page(ctx).mode = VettingMode::NewTicket {

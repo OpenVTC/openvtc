@@ -8,6 +8,7 @@
 use affinidi_tdk::didcomm::Message;
 use affinidi_tdk::secrets_resolver::secrets::Secret;
 use chrono::Utc;
+use dtg_credentials::DTGCredential;
 use serde_json::{Value, json};
 use trust_tasks_rs::TrustTask;
 use uuid::Uuid;
@@ -15,18 +16,19 @@ use vta_sdk::protocols::join_requests::{
     JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, JoinRequestManifestResponseBody, ManifestCriterion,
 };
 use vta_sdk::protocols::vetting::{
-    CardClaim, DeclaredRelationship, DeclineCode, IDENTITY_VETTING_ENDORSEMENT_TYPE,
-    RevocationReason, TicketPresentation, VETTING_DECLINE_TYPE, VETTING_REQUEST_ERR_INVALID_TICKET,
-    VETTING_REQUEST_ERR_NOT_ELIGIBLE, VETTING_REQUEST_TYPE, VETTING_SESSION_TYPE, VettingMethod,
-    VettingRequirements, VettingSessionResponseBody,
+    COMMUNITY_ROLE_ENDORSEMENT_TYPE, CardClaim, DeclaredRelationship, DeclineCode,
+    IDENTITY_VETTING_ENDORSEMENT_TYPE, RevocationReason, TicketPresentation, VETTER_ROLE,
+    VETTING_DECLINE_TYPE, VETTING_REQUEST_ERR_INVALID_TICKET, VETTING_REQUEST_ERR_NOT_ELIGIBLE,
+    VETTING_REQUEST_TYPE, VETTING_SESSION_TYPE, VettingMethod, VettingRequirements,
+    VettingSessionResponseBody,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::card::sign_card;
 use vta_sdk::vetting::statement::sign_statement;
 
 use super::VettingBook;
-use super::applicant::{ApplicantError, RequestDraft, RequestState};
-use super::inbound::{Context, Handled, Notice, handle};
+use super::applicant::{ApplicantError, RequestDraft, RequestState, VetterEligibility};
+use super::inbound::{Context, Handled, Notice, Reply, handle};
 use super::tickets::{DEFAULT_VALIDITY, Ticket};
 use super::vetter::{Attestation, DeskState};
 use super::wire::{
@@ -36,7 +38,56 @@ use super::wire::{
 use crate::config::account::{Account, CommunityRecord, PersonaId};
 use crate::persona::disclosure::ReleasedClaim;
 
-const COMMUNITY: &str = "did:web:vtc.example";
+/// The community is a `did:key` too, so the role credentials it signs verify
+/// offline. [`the_community_is_its_key`] holds the two together.
+const COMMUNITY: &str = "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p";
+const COMMUNITY_SEED: u8 = 0xC0;
+
+#[test]
+fn the_community_is_its_key() {
+    assert_eq!(did(&secret(COMMUNITY_SEED)), COMMUNITY);
+}
+
+/// A community role credential, signed by `issuer`.
+async fn role_credential(issuer: &Secret, community: &str, subject: &str, role: &str) -> Value {
+    let now = Utc::now();
+    let mut credential = DTGCredential::new_vec(
+        did(issuer),
+        subject.to_string(),
+        now - chrono::Duration::minutes(1),
+        Some(now + chrono::Duration::days(365)),
+        json!({
+            "type": COMMUNITY_ROLE_ENDORSEMENT_TYPE,
+            "role": role,
+            "communityDid": community,
+        }),
+    )
+    .with_id(wire::new_id());
+    credential.sign(issuer, None).await.unwrap();
+    serde_json::to_value(&credential).unwrap()
+}
+
+/// `credential-exchange/issue` from `from`, as a community delivers.
+fn delivery(credential: &Value, from: &str) -> Message {
+    Message::build(
+        wire::new_id(),
+        vta_sdk::protocols::credential_exchange::ISSUE.to_string(),
+        json!({ "credential_response": { "credential": credential } }),
+    )
+    .from(from.to_string())
+    .finalize()
+}
+
+/// Sign a reply the way `wire::send_reply` does: presentation first.
+async fn signed_reply(reply: Reply, signer: &Secret) -> Message {
+    let mut document = reply.document;
+    if let Some(eligibility) = reply.eligibility {
+        wire::attach_eligibility(&mut document, signer, eligibility)
+            .await
+            .unwrap();
+    }
+    signed(document, signer).await
+}
 
 struct Party {
     secret: Secret,
@@ -70,6 +121,21 @@ impl Party {
         record.activate(Utc::now());
         self.account.add_membership(record);
         self
+    }
+
+    /// The community names this party a vetter, and delivers the credential.
+    async fn named_vetter(&mut self) {
+        let credential = role_credential(
+            &secret(COMMUNITY_SEED),
+            COMMUNITY,
+            &self.did.clone(),
+            VETTER_ROLE,
+        )
+        .await;
+        let handled = self
+            .receive(&delivery(&credential, COMMUNITY), COMMUNITY)
+            .await;
+        assert!(matches!(handled.notice, Some(Notice::VetterGranted { .. })));
     }
 
     async fn receive(&mut self, message: &Message, sender: &str) -> Handled {
@@ -136,6 +202,7 @@ fn manifest_reply() -> Message {
 async fn ready() -> (Party, Party, TicketPresentation) {
     let mut applicant = Party::new(1);
     let mut vetter = Party::new(2).member_of(COMMUNITY);
+    vetter.named_vetter().await;
     let now = Utc::now();
     applicant
         .book
@@ -179,11 +246,23 @@ async fn in_session(applicant: &mut Party, vetter: &mut Party) -> (String, Trust
         panic!("the request is accepted");
     };
     let reply = handled.reply.expect("an accepted request is answered");
-    let message = signed(reply.document, &vetter.secret).await;
+    assert!(
+        reply.eligibility.is_some(),
+        "a named vetter presents the grant"
+    );
+    let message = signed_reply(reply, &vetter.secret).await;
     let handled = applicant.receive(&message, &vetter.did).await;
     assert!(matches!(
         handled.notice,
-        Some(Notice::VetterAccepted { .. })
+        Some(Notice::VetterAccepted {
+            shown_eligible: true,
+            ..
+        })
+    ));
+    let accepted = applicant.application().requests.last().unwrap().clone();
+    assert!(matches!(
+        accepted.eligibility,
+        Some(VetterEligibility::Shown { .. })
     ));
 
     let session_id = wire::new_id();
@@ -459,6 +538,115 @@ async fn someone_who_is_not_a_member_cannot_vet() {
     assert_eq!(
         handled.reply.unwrap().document.payload["code"],
         VETTING_REQUEST_ERR_NOT_ELIGIBLE
+    );
+}
+
+/// Membership is not enough: the community has to have named the member a
+/// vetter, or requests are refused before anything is recorded.
+#[tokio::test]
+async fn a_member_the_community_has_not_named_cannot_vet() {
+    let (mut applicant, _, _) = ready().await;
+    let mut member = Party::new(4).member_of(COMMUNITY);
+    let ticket = Ticket::issue(
+        COMMUNITY,
+        member.persona,
+        vec![],
+        1,
+        DEFAULT_VALIDITY,
+        Utc::now(),
+    );
+    let presented = ticket.code_presentation();
+    member.book.tickets.push(ticket);
+    let message = request(&mut applicant, &member, presented).await;
+    let handled = member.receive(&message, &applicant.did).await;
+    assert_eq!(
+        handled.reply.unwrap().document.payload["code"],
+        VETTING_REQUEST_ERR_NOT_ELIGIBLE
+    );
+    assert!(member.book.desk.is_empty());
+}
+
+/// Only the community a grant names can deliver it, and only to the persona
+/// it names. A member's ordinary role credential is left for the join handler,
+/// so it keeps its place.
+#[tokio::test]
+async fn a_vetter_grant_is_kept_only_from_its_community() {
+    let mut member = Party::new(5).member_of(COMMUNITY);
+    let impostor = secret(0xC1);
+    let forged = role_credential(&impostor, COMMUNITY, &member.did.clone(), VETTER_ROLE).await;
+    let handled = member
+        .receive(&delivery(&forged, &did(&impostor)), &did(&impostor))
+        .await;
+    assert!(handled.notice.is_none() && member.book.vetter_grants.is_empty());
+
+    let for_someone_else = role_credential(
+        &secret(COMMUNITY_SEED),
+        COMMUNITY,
+        "did:key:zSomeoneElse",
+        VETTER_ROLE,
+    )
+    .await;
+    let handled = member
+        .receive(&delivery(&for_someone_else, COMMUNITY), COMMUNITY)
+        .await;
+    assert!(handled.notice.is_none() && member.book.vetter_grants.is_empty());
+
+    let ordinary = role_credential(
+        &secret(COMMUNITY_SEED),
+        COMMUNITY,
+        &member.did.clone(),
+        "member",
+    )
+    .await;
+    let resolver = TrustTaskVmResolver::did_key_only();
+    let ctx = Context {
+        account: &member.account,
+        resolver: &resolver,
+        recipient: Some((member.persona, &member.did)),
+        now: Utc::now(),
+    };
+    assert!(
+        handle(
+            &mut member.book,
+            &ctx,
+            &delivery(&ordinary, COMMUNITY),
+            COMMUNITY
+        )
+        .await
+        .is_none(),
+        "an ordinary role credential is not vetting's"
+    );
+
+    member.named_vetter().await;
+    assert!(
+        member
+            .book
+            .vetter_grant(COMMUNITY, member.persona, Utc::now())
+            .is_some()
+    );
+}
+
+/// An acceptance that shows nothing is still an acceptance — the check is
+/// advisory — but the applicant is told.
+#[tokio::test]
+async fn an_acceptance_without_a_grant_shown_is_recorded_as_such() {
+    let (mut applicant, mut vetter, ticket) = ready().await;
+    let message = request(&mut applicant, &vetter, ticket).await;
+    let handled = vetter.receive(&message, &applicant.did).await;
+    let mut reply = handled.reply.unwrap();
+    reply.eligibility = None;
+    let message = signed_reply(reply, &vetter.secret).await;
+    let handled = applicant.receive(&message, &vetter.did).await;
+    assert!(matches!(
+        handled.notice,
+        Some(Notice::VetterAccepted {
+            shown_eligible: false,
+            ..
+        })
+    ));
+    assert_eq!(
+        applicant.application().requests[0].eligibility,
+        Some(VetterEligibility::NotShown)
     );
 }
 

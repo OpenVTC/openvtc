@@ -472,6 +472,16 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             ));
         }
         lines.push(Line::from(state));
+        if let Some((good, line)) = &request.eligibility {
+            lines.push(Line::from(Span::styled(
+                format!("    {line}"),
+                if *good {
+                    Style::new().fg(COLOR_SUCCESS)
+                } else {
+                    Style::new().fg(COLOR_ORANGE)
+                },
+            )));
+        }
     }
     lines.push(Line::from(""));
     lines.push(hint(

@@ -227,8 +227,9 @@ pub struct IncomingRequest<'a> {
     pub persona: PersonaId,
     /// The payload.
     pub body: VettingRequestBody,
-    /// `persona` is an active member of `body.community`.
-    pub is_member: bool,
+    /// `persona` is an active member of `body.community` and holds its live
+    /// vetter role credential.
+    pub eligible: bool,
 }
 
 /// What an inbound request earns.
@@ -326,7 +327,7 @@ impl VettingBook {
             sender,
             persona,
             body,
-            is_member,
+            eligible,
         } = incoming;
         if body.check_shape(sender).is_err() {
             return Intake::Silent;
@@ -367,7 +368,7 @@ impl VettingBook {
         {
             return Intake::Refused(VETTING_REQUEST_ERR_METHOD_UNAVAILABLE);
         }
-        if !is_member {
+        if !eligible {
             return Intake::Refused(VETTING_REQUEST_ERR_NOT_ELIGIBLE);
         }
         if self.open_requests(persona) >= self.policy.max_open_requests {

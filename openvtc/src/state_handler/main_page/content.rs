@@ -1549,6 +1549,9 @@ pub struct RequestRow {
     pub match_code: Option<String>,
     /// The open session still waiting for our card.
     pub card_session: Option<String>,
+    /// What their acceptance showed of their eligibility, and whether that is
+    /// good news.
+    pub eligibility: Option<(bool, String)>,
 }
 
 /// Where a desk request is, for choosing what the keys do.
