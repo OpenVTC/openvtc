@@ -129,9 +129,38 @@ cmdkey /list | findstr openvtc
 
 ## Feature Flags
 
-| Flag           | Description                               | Default |
-|----------------|-------------------------------------------|---------|
-| `openpgp-card` | OpenPGP-compatible hardware token support | Enabled |
+| Flag            | Description                                                        | Default  |
+|-----------------|--------------------------------------------------------------------|----------|
+| `openpgp-card`  | OpenPGP-compatible hardware token support                          | Enabled  |
+| `dev-overrides` | Honour trust-anchor environment overrides (development builds only) | Disabled |
+
+### Developer trust-anchor overrides
+
+`OPENVTC_VTA_URL`, `OPENVTC_VTA_DID` and `OPENVTC_MEDIATOR_DID` change which VTA
+and mediator this client authenticates to. Builds without the `dev-overrides`
+feature, which includes every release build, **ignore them**. Each one that is
+set is reported on stderr before the TUI starts and again in the Activity Log.
+
+To point a local build at a development VTA or mediator, compile the feature in:
+
+```bash
+OPENVTC_VTA_URL=http://127.0.0.1:8080 cargo run -p openvtc --features dev-overrides
+```
+
+In a `dev-overrides` build:
+
+| Variable | Effect |
+|---|---|
+| `OPENVTC_VTA_URL` | Must be an `http://` or `https://` URL with a host. The setup wizard uses it as the VTA REST endpoint and skips DID resolution; a loaded profile uses it for this run. |
+| `OPENVTC_VTA_DID` | Must parse as a DID. Replaces the profile's VTA DID for this run. |
+| `OPENVTC_MEDIATOR_DID` | Must parse as a DID. Replaces the active persona's mediator for this run. |
+
+An override applies to the running process only. Saves and exports keep writing
+the stored values, so the override is gone as soon as the variable is unset. A
+value that fails validation is ignored and logged. While an override is active,
+the bottom bar shows a red `DEV OVERRIDE` badge naming it.
+
+`OPENVTC_FRIENDLY_NAME` only changes the display name, and every build honours it.
 
 ## Troubleshooting
 

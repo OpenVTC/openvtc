@@ -73,6 +73,35 @@ fn clone_key_backend(backend: &KeyBackend) -> Result<KeyBackend, OpenVTCError> {
 }
 
 impl Config {
+    /// A deep clone of the key backend exactly as a save must write it.
+    ///
+    /// Where a runtime-only override replaced the VTA URL or DID
+    /// ([`Config::runtime_trust_overrides`]), the persisted original is put
+    /// back, so the override lives only as long as the process.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OpenVTCError::BIP32`] if a BIP32 backend's root cannot be
+    /// rebuilt from its seed.
+    pub fn key_backend_for_save(&self) -> Result<KeyBackend, OpenVTCError> {
+        let mut backend = clone_key_backend(&self.key_backend)?;
+        if let (
+            KeyBackend::Vta {
+                vta_url, vta_did, ..
+            },
+            Some(originals),
+        ) = (&mut backend, self.runtime_trust_overrides.as_ref())
+        {
+            if let Some(url) = &originals.vta_url {
+                vta_url.clone_from(url);
+            }
+            if let Some(did) = &originals.vta_did {
+                vta_did.clone_from(did);
+            }
+        }
+        Ok(backend)
+    }
+
     /// Produce an owned, `Send + 'static` snapshot of everything [`Config::save`]
     /// reads, so the (blocking) serialize + encrypt + file/keyring/card I/O can be
     /// moved off the async runtime onto a `spawn_blocking` thread (R11).
@@ -106,7 +135,8 @@ impl Config {
         Ok(Config {
             public: self.public.clone(),
             private: self.private.clone(),
-            key_backend: clone_key_backend(&self.key_backend)?,
+            // The persisted anchor, never a runtime-only override of it.
+            key_backend: self.key_backend_for_save()?,
             key_info: self.key_info.clone(),
             protection_method: self.protection_method.clone(),
             #[cfg(feature = "openpgp-card")]
@@ -129,6 +159,9 @@ impl Config {
             identities: BTreeMap::new(),
             integrity: crate::config::integrity::LoadIntegrity::default(),
             active_persona: None,
+            // `key_backend` above already carries the originals, so the
+            // snapshot has nothing left to restore.
+            runtime_trust_overrides: None,
         })
     }
 

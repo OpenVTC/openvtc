@@ -464,6 +464,7 @@ fn build_state_a_config(state: &SetupState) -> Result<Config> {
         account,
         identities: BTreeMap::new(),
         active_persona: None,
+        runtime_trust_overrides: None,
         key_backend,
         public: PublicConfig {
             config_version: openvtc_core::config::public_config::CONFIG_VERSION,
