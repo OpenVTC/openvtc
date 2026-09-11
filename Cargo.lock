@@ -9616,7 +9616,7 @@ dependencies = [
 [[package]]
 name = "vta-audit"
 version = "0.3.6"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9633,7 +9633,7 @@ dependencies = [
 [[package]]
 name = "vta-backup"
 version = "0.3.6"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "aes-gcm 0.11.1",
  "argon2 0.6.0",
@@ -9660,7 +9660,7 @@ dependencies = [
 [[package]]
 name = "vta-cli-common"
 version = "0.15.1"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "aes-gcm 0.11.1",
  "affinidi-crypto",
@@ -9687,7 +9687,7 @@ dependencies = [
 [[package]]
 name = "vta-config"
 version = "0.4.6"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "serde",
  "serde_ignored",
@@ -9703,7 +9703,7 @@ dependencies = [
 [[package]]
 name = "vta-keys"
 version = "0.4.6"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "aes-gcm 0.11.1",
  "affinidi-crypto",
@@ -9736,7 +9736,7 @@ dependencies = [
 [[package]]
 name = "vta-keyspaces"
 version = "0.2.7"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "vti-common",
 ]
@@ -9744,7 +9744,7 @@ dependencies = [
 [[package]]
 name = "vta-persona"
 version = "0.3.2"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "chrono",
  "hmac 0.13.0",
@@ -9762,7 +9762,7 @@ dependencies = [
 [[package]]
 name = "vta-policy"
 version = "0.3.6"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "hex",
  "multibase",
@@ -9781,7 +9781,7 @@ dependencies = [
 [[package]]
 name = "vta-sdk"
 version = "0.36.0"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -9834,7 +9834,7 @@ dependencies = [
 [[package]]
 name = "vta-service"
 version = "0.25.1"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "aes-gcm 0.11.1",
  "affinidi-crypto",
@@ -9931,7 +9931,7 @@ dependencies = [
 [[package]]
 name = "vta-support"
 version = "0.3.5"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "chrono",
  "ed25519-dalek 3.0.0",
@@ -9951,7 +9951,7 @@ dependencies = [
 [[package]]
 name = "vta-sweepers"
 version = "0.3.4"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "chrono",
  "serde_json",
@@ -9965,7 +9965,7 @@ dependencies = [
 [[package]]
 name = "vta-vault"
 version = "0.5.6"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -9996,7 +9996,7 @@ dependencies = [
 [[package]]
 name = "vta-webvh"
 version = "0.2.7"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "affinidi-tdk",
  "chrono",
@@ -10014,7 +10014,7 @@ dependencies = [
 [[package]]
 name = "vtc-client"
 version = "0.6.0"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "chrono",
  "reqwest",
@@ -10029,7 +10029,7 @@ dependencies = [
 [[package]]
 name = "vti-common"
 version = "0.18.3"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "aes-gcm 0.11.1",
  "affinidi-data-integrity",
@@ -10072,7 +10072,7 @@ dependencies = [
 [[package]]
 name = "vti-rooms"
 version = "0.2.1"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -10097,7 +10097,7 @@ dependencies = [
 [[package]]
 name = "vti-rooms-dtg"
 version = "0.2.1"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "affinidi-data-integrity",
  "affinidi-secrets-resolver",
@@ -10114,7 +10114,7 @@ dependencies = [
 [[package]]
 name = "vti-secrets"
 version = "0.3.5"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "hex",
  "serde",
@@ -10127,7 +10127,7 @@ dependencies = [
 [[package]]
 name = "vti-webauthn"
 version = "0.2.1"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fvtc-vetter-role-vec#68e3fb456c224ceed053aeeb0b5f25e09b30f39f"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=38ad2ed55988f9299596b8737c32d42d61131a1c#38ad2ed55988f9299596b8737c32d42d61131a1c"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
