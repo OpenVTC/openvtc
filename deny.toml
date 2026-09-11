@@ -120,4 +120,11 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Adding one back means adding it in both places, and writing down here what has
 # to happen for it to leave again. The entries that were removed each carried
 # that note, and it is the only reason the unwind was tractable six minors later.
-allow-git = []
+# Now two entries, each for as long as one release — see the patch block at the
+# foot of the root `Cargo.toml`. VGI's `chore/vta-sdk-036` carries `did-git-sign`
+# onto the vta-sdk 0.36 line; VTI's release PR publishes the `vta-service` closure
+# on that line. Each URL leaves with its patch entries when its release publishes.
+allow-git = [
+    "https://github.com/OpenVTC/verifiable-git-infrastructure",
+    "https://github.com/OpenVTC/verifiable-trust-infrastructure",
+]

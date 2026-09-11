@@ -101,19 +101,23 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # Track this with `affinidi-messaging-sdk`, for the same reason `vta-service`
 # below tracks `vta-sdk`: 0.5 is the line built on messaging-sdk 0.22 / TDK 0.12
 # / trust-tasks 0.18, and the 0.4 line declares `^0.21.0` / `^0.11` / `^0.17`.
+# 0.7 is the line built on messaging-sdk 0.24 / TDK 0.14 / trust-tasks 0.20.
 # Leaving it behind puts a second copy of each in the **dev** graph — including
 # `trust-tasks-rs`, whose types the messaging sdk carries in its own API.
-affinidi-messaging-test-mediator = "0.6"
+affinidi-messaging-test-mediator = "0.7"
 # In-process MockVta for the bootstrap e2e (VTI#406/#427 test-support seams).
 # `vta-service` is the VTA server crate; it carries the credential-vault
 # lifecycle tasks (receive/query/archive/delete/restore/purge) + the
 # `MockVta::start_provisionable` seams used by the e2e tests. Track this with
-# the vta-sdk major: 0.25 is the line built against vta-sdk 0.35, as 0.24 was
+# the vta-sdk major: on the 0.36 line this resolves from VTI `main` through the
+# root manifest's `[patch.crates-io]` — the published 0.25.1 is still built on
+# 0.35 — and the floor moves to the release that publishes it (VTI #1416). 0.25
+# was the line built against 0.35, as 0.24 was
 # against 0.34, 0.23 against 0.32, 0.19 against 0.27, 0.17 against 0.25, 0.15
 # against 0.23 and 0.14 against 0.21. An older line pulls an older sdk into the test build and the two
 # disagree about the wire types the e2e tests assert on.
 #
-# 0.25 also carries `trust-tasks-rs ^0.19.4` and `affinidi-tdk ^0.13`, which is
+# VTI `main` also carries `trust-tasks-rs ^0.20.3` and `affinidi-tdk ^0.14`, which is
 # what keeps the **dev** graph from growing the second copy of each that the
 # root manifest's notes warn about.
 #
@@ -130,7 +134,7 @@ affinidi-messaging-test-mediator = "0.6"
 # ApproveScope, ContextDirection}` as its own public API, so a graph holding two
 # sdks has two distinct `ApproveScope` types that do not unify. VTI republished
 # this crate for exactly this reason (see its Cargo.toml note on `publish`).
-vta-service = { version = "0.25", default-features = false, features = ["test-support", "rest", "didcomm"] }
+vta-service = { version = "0.25.1", default-features = false, features = ["test-support", "rest", "didcomm"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }
