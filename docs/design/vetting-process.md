@@ -1,7 +1,8 @@
 # SPEC — Vetted Admission: Peer Identity Vetting for Joining a VTC
 
-> Status: **DRAFT v2** — O1–O3 and O5 resolved 2026-09-11 (D15–D18); D1–D14
-> proposed, pending sign-off (§15). **V0 target: 5 Oct 2026.**
+> Status: **DRAFT v3** — O1–O3 and O5 resolved 2026-09-11 (D15–D18); D1–D14
+> proposed, pending sign-off; D19–D24 record choices made while building V0,
+> marked *as built* where they depart from the text (§15). **V0 target: 5 Oct 2026.**
 > Scope: end-to-end. This is an OpenVTC design doc, but most of the protocol
 > surface lands outside this repo. Each change is tagged with its home repo
 > (§14): `trustoverip/dtgwg-trust-tasks-tf`, `trustoverip/dtgwg-cred-spec`,
@@ -85,7 +86,7 @@ this design are marked ⚠.
 | **Key-signing parties**, `ksmap` | ⚠ Public YAML of names + coordinates; in-person bias; geographic exclusion | Opt-in **vetter directory** with coarse region only; tickets/QR at events; video method (§7, §8) |
 | **Public graph** | ⚠ Key submissions archived at `lore.kernel.org/keys`; SVG trust-path graphs published | Evidence held privately by the VTC; lineage never published (§10.5, §13) |
 | **Decay** | ⚠ GnuPG 2.4 drops SHA-1 sigs → strong set 358→94; re-keying loses sigs | Admission-time evaluation is recorded; membership does not depend on old statements staying valid; cryptosuite agility (§10.4) |
-| **Written identity standard** | Personal knowledge / prior contact. Government ID is signing-party custom, **not written policy** | Methods `in-person`, `video`, `prior-acquaintance`. **Each vetter decides what documentation, if any, they accept** (D16) — close to the kernel's own practice |
+| **Written identity standard** | Personal knowledge / prior contact. Government ID is signing-party custom, **not written policy** | Methods `inPerson`, `video`, `priorAcquaintance`. **Each vetter decides what documentation, if any, they accept** (D16) — close to the kernel's own practice |
 | **Affiliation** | ⚠ Not in the WoT; the Oct 2024 maintainer removals were handled by hand | Policy hook for affiliation evidence (V2) |
 | **Maintainer roles** | `MAINTAINERS` M:/R:/S: entries merged up-tree | VTC roles (custom roles `maintainer`, `reviewer`) + `git-trust/grant` for commit signing (§13.6) |
 | **Commit/tag signing** | Signed tags required by Linus; `patatt` TOFU keyrings | `did-git-sign` + `verify-trust` (`OpenVTC/verifiable-git-infrastructure`) |
@@ -172,10 +173,11 @@ sequenceDiagram
   Note over A,V: Phase 3 — Vetting session (in person or on video)
   V->>A: vetting/session/0.1 {challenge, domain, requiredClaims}
   Note over A,V: Both screens show the same match code — read it aloud
-  A->>AV: persona/disclosure/preview → present (step-up) → keys/derive-and-sign-document
+  A->>AV: persona/disclosure/preview → present (step-up)
+  Note over A: sign the card with the join persona key (D19)
   A-->>V: #response signed Vetting Card (VDS)
   Note over V: Human check — person ↔ document ↔ card
-  V->>VV: sign VEC (step-up)
+  Note over V: confirm the attestation, sign the VEC with the member persona key (D19)
   V->>A: credential-exchange/issue/0.1 {Vetting Statement}
   A->>AV: vault store (purpose: vetting, community)
   end
@@ -281,14 +283,14 @@ community demands a passport check and walk away having disclosed nothing.
     "version": "0.1",
     "statementType": "https://firstperson.network/endorsements/identity-vetting/0.1",
     "minStatements": 2,
-    "minByMethod": { "in-person": 1 },
-    "acceptedMethods": ["in-person", "video", "prior-acquaintance"],
+    "minByMethod": { "inPerson": 1 },
+    "acceptedMethods": ["inPerson", "video", "priorAcquaintance"],
     "requiredClaims": ["name.legal"],
     "optionalClaims": ["account.handle", "url.homepage"],
     "maxStatementAge": "P120D",
     "eligibleVetters": { "role": "vetter" },
     "independence": {
-      "maxByDeclaredRelationship": { "family": 0, "same-employer": 1 },
+      "maxByDeclaredRelationship": { "family": 0, "sameEmployer": 1 },
       "requireConsistentIdentityCommitment": true
     },
     "invitation": "optional",
@@ -314,8 +316,8 @@ each vetter decides what they accept (D16).
 |---|---|
 | `statementType` | Endorsement `typeUri` registered via `vtc/endorsement-types/register/0.1`, with its `claimSchema` (§9.4) |
 | `minStatements` | Distinct eligible vetters, counted by **member record**, not DID (§10.2). Set by each community; no protocol default (D15) |
-| `minByMethod` | Per-method floors (e.g. at least one `in-person`) |
-| `acceptedMethods` | Methods that count at all. `prior-acquaintance` encodes the kernel's written "worked with you" standard |
+| `minByMethod` | Per-method floors (e.g. at least one `inPerson`) |
+| `acceptedMethods` | Methods that count at all. `priorAcquaintance` encodes the kernel's written "worked with you" standard |
 | `acceptedDocumentClasses` | **Optional, absent by default.** When absent, each vetter decides what documentation they accept (D16). A community that later needs a floor can set it; statements outside it then don't count |
 | `requiredClaims` | Claim types (from the VTA claim-type registry) the Vetting Card must carry and the vetter must mark verified |
 | `maxStatementAge` | A statement older than this at submit does not count |
@@ -405,7 +407,7 @@ notification or push, and are counted, never listed individually (§12.3).
 | `expiresAt` | 14 days | Desk mode: e.g. 8 hours |
 | `boundTo` | set on first redemption | Later messages on the thread must come from the same applicant DID |
 | `note` | optional, vetter-private | e.g. "Alice, met at LPC" |
-| `methods` | optional | Restrict to `in-person` for desk tickets |
+| `methods` | optional | Restrict to `inPerson` for desk tickets |
 
 Redemption is checked in constant time and is single-use per `uses`.
 Throttling:
@@ -493,10 +495,11 @@ on a call. **Request** (vetter → applicant):
 ```
 
 **Match code (liveness + DID binding).** Both clients derive the same
-`XXXX-XXXX` code from the session document's `id`. They reuse
-`openvtc-core/src/personhood.rs::match_code`'s construction with a distinct
-domain tag, e.g. `org.openvtc.vetting.match-code.v1`. The two people read it
-to each other. This establishes that the person in front of the vetter is
+`XXXX-XXXX` code from the session document's `id`, using
+`vta_sdk::vetting::match_code::vetting_match_code`. It is the personhood
+code's construction (SHA-256, first 40 bits, Crockford base32) under its own
+domain tag, `vetting-session-match/v1\0`, so the two ceremonies never read out
+the same code (D24). The two people read it to each other. This establishes that the person in front of the vetter is
 driving the client that controls `joinDid` *in this session*. The
 applicant's client refuses to present a card until the applicant confirms
 the code, and the vetter's statement records `livenessConfirmed`.
@@ -527,11 +530,13 @@ it gets signed:
 3. `persona/disclosure/present/1.0` with renderer `rcard`. This triggers
    step-up for `release: stepUp` claims, consumes the preview, and writes a
    `DisclosureRecord`.
-4. **New:** the rendered r-card (today
-   `vta-persona/src/present.rs` emits `"unsigned": true`) is signed with the
-   join DID's assertion key via `keys/derive-and-sign-document` (exists in
-   `vta-sdk/src/protocols/key_management/derive_and_sign_document.rs`). The
-   `unsigned` marker is dropped only on this signed path.
+4. **New:** the client builds the card from the disclosed claims and signs it
+   with the join persona's own key (`vta_sdk::vetting::card::sign_card`,
+   `eddsa-jcs-2022`). *As built (D19):* this does not go through
+   `keys/derive-and-sign-document`, because that task signs as a derived
+   `did:key` rather than as the persona DID, and the card could not then be
+   bound to `joinDid`. The client already holds the persona key and signs
+   every other proof in this flow the same way.
 
 ```json
 {
@@ -558,7 +563,11 @@ it gets signed:
 ```
 
 The `claims` element shape follows the existing `rcard` renderer and is
-illustrative here.
+illustrative here. The schema bounds are enforced by `VettingCard::check_shape`,
+both before signing and on receipt:
+- `type` is exactly the three values;
+- `challenge` and `commitmentSalt` are 32 bytes of base64url (43 characters);
+- `claims` has at least one entry, and never `person.portrait`.
 
 Rules:
 - **Bound:** `audience` = vetter DID, `challenge`/`domain` from the session,
@@ -652,7 +661,7 @@ later graph analysis (§10.5).
       "livenessConfirmed": true,
       "identityCommitment": "z…",
       "cardDigestMultibase": "z…",
-      "declaredRelationship": "community-colleague",
+      "declaredRelationship": "communityColleague",
       "attestationTextDigest": "z…"
     }
   },
@@ -669,12 +678,15 @@ illustrative.
 | `credentialSubject.id` | The applicant's `joinDid` |
 | `validUntil` | = `validFrom` + the community's `maxStatementAge`. Statements are *pre-admission evidence*, not a lifelong credential |
 | `endorsement.community` | Scopes the statement. Another community MUST NOT count it without explicit recognition policy (VTI-REG "Recognition MUST NOT be transitive") |
-| `endorsement.documentClasses` | What the vetter relied on, from their own accepted list (D16); `[]` with `prior-acquaintance` |
+| `endorsement.documentClasses` | What the vetter relied on, from their own accepted list (D16); `[]` with `priorAcquaintance` |
 | `cardDigestMultibase` | Digest of the card **in the exact transmitted form** (VTI-MEM-021; `dtg_credentials::digest_multibase_json`). Used for dispute and audit. The VTC never needs the card |
 | `attestationTextDigest` | Digest of the governance text the vetter saw, so the text version is provable |
 | `credentialStatus` | Absent in V0; revocation goes to the VTC (§9.6, D18). Added in V1 with VTA-hosted status lists |
 
-Issuance goes through the vetter's VTA and requires **step-up** (§11.3).
+The vetter's client signs the statement with the vetter's member persona key
+(`vta_sdk::vetting::statement::sign_statement`) once the vetter confirms the
+attestation text. *As built (D19):* that confirmation stands in for VTA
+step-up; see §11.3.
 Delivery uses the existing `credential-exchange/issue/0.1`. The applicant's
 client verifies the statement (proof, subject, community, commitment equals
 its own, card digest equals what it sent) and stores it in the VTA vault
@@ -686,13 +698,13 @@ with `purpose: "vetting"`, tagged with the community.
 
 **Implementation note.** The VTC's issuance route
 `vtc/endorsements/issue` (Admin/Issuer only, community-issued) is **not**
-used. Statements are member-issued by the vetter's own VTA, using
+used. Statements are member-issued by the vetter's own client, using
 `DTGCredential::new_vec` from `dtg-credentials`.
 
 ### 9.5 Decline
 
 `vetting/decline/0.1`: `{ requestId, code?, message? }`, where `code` is one
-of `could-not-verify`, `document-mismatch`, `liveness-failed`, `not-comfortable`,
+of `couldNotVerify`, `documentMismatch`, `livenessFailed`, `notComfortable`,
 `other`.
 - The code is optional; a vetter never has to justify declining.
 - Declines are **not** sent to the VTC.
@@ -718,17 +730,22 @@ the VTC, so the vetter tells it directly. A per-vetter status list would be a
 poor fit anyway: a list holding a handful of one vetter's statements gives no
 herd privacy (VTI-CRD-011/012).
 
-- `vtc/vetting/revoke-statement/0.1` (vetter → VTC; proof REQUIRED; step-up at
-  the vetter's VTA): `{ statementId, statementDigestMultibase, reason? }`,
-  where `reason` is one of `mistake`, `new-information`, `key-compromise`,
+- `vtc/vetting/revoke-statement/0.1` (vetter → VTC; proof REQUIRED; client
+  confirmation in V0): `{ statementId, statementDigestMultibase, reason? }`,
+  where `reason` is one of `mistake`, `newInformation`, `keyCompromise`,
   `other`. The vetter's client also runs `credentials/revoke` locally so its
   Issued list shows the statement as revoked.
-- The VTC authenticates the sender as the statement's issuer (member DID),
-  records the notice keyed by statement id, and audits it. Notices received
-  before the applicant submits are kept for `maxStatementAge`.
+- *As built:*
+  - The VTC records the notice under the **authenticated sender**, together
+    with the statement id and digest. The sender must be a member.
+  - A notice therefore only ever matches a statement its sender signed.
+  - The first recording is audited; a repeat returns the original
+    `recordedAt`.
+  - Notices are kept, in a backed-up keyspace. There is no retention sweep
+    yet.
 - **Before admission:** the statement does not count (`revoked: true` in
-  facts). A pending application is re-evaluated; the applicant sees
-  `requestMore`.
+  facts), so the next decision returns `requestMore` if it was needed.
+  *As built*, a pending application is not re-evaluated automatically.
 - **After admission:** `on_statement_revoked` runs (§10.5) — review, not
   removal, by default.
 - The applicant is told a statement they hold was withdrawn. The reason is
@@ -780,6 +797,11 @@ The VTC's ceremony pipeline (`vtc-service/src/join/orchestrate.rs`,
    - still holds it **now**, or policy allows post-issuance lapse
      (`eligibleAtIssuanceOnly`).
 
+   *As built (D20):* the member record exists and is not removed; it joined
+   before `validFrom`; and its ACL entry holds the role `eligibleVetters.role`
+   names (`vetter` or `custom:vetter`) and is unexpired **now**. The role VEC
+   and at-issuance role history (D5) come in V1.
+
 Today `issuer_trusted` (`vtc-service/src/routes/join_requests/present.rs`)
 returns true only for the community DID or a registry-recognised issuer.
 Vetting adds a **third path that produces facts, not a boolean**, so policy
@@ -791,35 +813,42 @@ The pipeline then assembles facts:
 - **commitment consistency** — all `identityCommitment` values are equal;
 - **counts** by method and by declared relationship.
 
-Facts (`input.facts.vetting`), shape sketch:
+Facts (`input.evidence.vetting`), as built (`vtc-service/src/vetting/mod.rs`):
 
 ```json
 {
-  "requirements_version": "z…",
+  "criterion_id": "kernel-maintainer",
+  "requirements_digest": "z…",
+  "applicant_digest_matches": true,
   "statements": [
-    { "id": "urn:uuid:…", "verified": true, "issuer_member_id": "m_91", "issuer_depth": 2,
-      "eligible_at_issuance": true, "eligible_now": true, "method": "in-person",
-      "document_classes": ["passport"], "claims_verified": ["name.legal"],
-      "declared_relationship": "none", "age_days": 12, "within_max_age": true, "revoked": false,
-      "failures": [] },
-    { "id": "urn:uuid:…", "verified": true, "issuer_member_id": "m_07", "issuer_depth": 1,
-      "eligible_at_issuance": true, "eligible_now": true, "method": "video",
-      "document_classes": ["national-id"], "claims_verified": ["name.legal"],
-      "declared_relationship": "community-colleague", "age_days": 40, "within_max_age": true, "revoked": false,
-      "failures": [] }
+    { "id": "urn:uuid:…", "issuer": "did:webvh:…:carol-kernel", "verified": true,
+      "eligible": true, "revoked": false, "method": "inPerson",
+      "declared_relationship": "none", "counted": true, "failures": [] },
+    { "id": "urn:uuid:…", "issuer": "did:webvh:…:erin", "verified": true,
+      "eligible": false, "revoked": false, "method": "video",
+      "declared_relationship": "communityColleague", "counted": false,
+      "failures": ["issuer-not-vetter"] }
   ],
-  "distinct_counted_vetters": 2,
-  "by_method": { "in-person": 1, "video": 1 },
-  "by_relationship": { "none": 1, "community-colleague": 1 },
+  "distinct_counted_vetters": 1,
+  "by_method": { "inPerson": 1 },
   "commitments_consistent": true,
-  "applicant_depth": 2
+  "independence_ok": true,
+  "invitation_required": false,
+  "satisfied": false,
+  "needs": ["vetting:statements:1"]
 }
 ```
 
-A statement that fails any check stays in `statements` with a `failures[]`
-entry such as `issuer-not-vetter`, `expired`, `wrong-community`,
-`commitment-mismatch` or `revoked`. `requestMore.needs` can then explain
-exactly what didn't count.
+- **Failures.** A statement that fails any check stays in `statements` with
+  its `failures` codes, such as `unverified`, `subject-not-applicant`,
+  `wrong-statement-type`, `issuer-not-vetter` or `revoked`.
+- **Needs.** `needs` uses the grammar `vetting:statements:<n>` and
+  `vetting:method:<method>:<n>`. Policy returns the generic `vetting`, and the
+  host expands it (D22).
+- **Criterion.** The criterion is the one whose `requirementsDigest` the
+  applicant names in `extensions`, or else the first vetting criterion (D23).
+- **Not in V0 facts:** vetter and applicant depth, and per-relationship
+  counts; the independence caps are applied by the host as `independence_ok`.
 
 ### 10.3 Vetter eligibility — the `vetter` role
 
@@ -864,8 +893,19 @@ bypass rules.
 
 ### 10.4 Decision policy — vetting module in `join.rego`
 
-Sketch only — not yet validated against `regorus`. Requirements are passed
-in as `input.requirements.vetting` from the governing manifest version.
+The sketch below predates the implementation. *As built*, the default
+`vtc-service/policies/default/join.rego` reads the host's verdicts instead of
+recounting:
+
+| Rule | Decision |
+|---|---|
+| `vetting_inconsistent` | `refer`, queue `vetting-review` |
+| `vetting_incomplete` | `request_more` with the generic `vetting` need |
+| `vetting_not_independent` | `refer` |
+| `vetting_invitation_missing` | `request_more` with `vetting:invitation` |
+
+An invitation or a trusted credential admits only when `vetting_ok`. The same
+rules are expressed in the admin UI's rule IR.
 
 ```rego
 package vtc.join
@@ -942,7 +982,7 @@ needs contains {"kind": "vetting-statement", "method": m, "count": n - count(cou
 ```
 
 `needs` tells the applicant exactly what is short, e.g.
-`{"kind": "vetting-statement", "method": "in-person", "count": 1}`. A
+`{"kind": "vetting-statement", "method": "inPerson", "count": 1}`. A
 production policy should also surface each non-counted statement's
 `failures[]` (e.g. `{"kind": "replace", "statement": "urn:uuid:…", "reason": "expired"}`).
 
@@ -1039,11 +1079,11 @@ community:
 [vetting."did:webvh:…:kernel-vtc"]
 accept_requests    = "ticket"          # ticket | ticket-or-introduction | open
 max_open_requests  = 10
-methods            = ["in-person", "video"]
+methods            = ["inPerson", "video"]
 languages          = ["en"]
 region             = "EU"              # coarse only
 listed             = false             # opt into vtc/vetters/list (V1)
-accepts_documentation = ["passport", "national-id", "none"]  # this vetter's choice (D16); "none" = prior acquaintance
+accepts_documentation = ["passport", "nationalId", "none"]  # this vetter's choice (D16); "none" = prior acquaintance
 card_retention     = "P7D"             # after statement issued or declined
 request_expiry     = "P14D"            # unanswered requests auto-expire
 notify_on_admission = true             # if the VTC offers it
@@ -1056,8 +1096,8 @@ Enforced by `vta-policy` (Rego) on the Trust Task URI, not by the task specs:
 | Action | Requirement |
 |---|---|
 | Applicant presents a Vetting Card containing any `release: stepUp` claim | Step-up — existing `step_up::initiate_disclosure_step_up` |
-| Vetter signs a Vetting Statement | **Step-up always** (passkey / device). This is a high-impact, attributable act |
-| Vetter revokes a statement | Step-up |
+| Vetter signs a Vetting Statement | Target: **step-up always** (passkey / device), since this is a high-impact, attributable act. *V0 as built (D19):* an explicit client confirmation after the attestation text. The statement is signed with the persona key the client holds, so the VTA never sees the act |
+| Vetter revokes a statement | Target: step-up. *V0:* client confirmation |
 | Vetter issues a desk-mode ticket (`uses > 1`) | Step-up |
 | Inbound `vetting/request` without a valid ticket (V1) | Dropped by the inbound gate (§8.2) |
 
@@ -1210,7 +1250,7 @@ Vetter session (sketch):
   - applicants without a passport → a vetter who accepts other documentation
     (vetters list what they accept, §7 and §8.3);
   - no local vetters → video;
-  - long-standing contributors → `prior-acquaintance`, with a vetter who
+  - long-standing contributors → `priorAcquaintance`, with a vetter who
     knows them.
 
 ---
@@ -1261,7 +1301,7 @@ modern-signature subgraph only (O7).
 | Collusion: sock-puppet vetters | Vetters are members with a VTC-issued role, tenure and depth; distinct vetters counted by member record; relationship caps; cascade review | Colluding *real* eligible vetters — governance + audit |
 | Coerced / bribed vetter | Step-up to sign; velocity cap; lineage; cascade review; concern reports | Detected after the fact |
 | Impersonating a vetter | Eligibility VP in the request response; agent names verified round-trip | — |
-| Pre-recorded video | Live match code read aloud | Real-time deepfake: communities set `minByMethod.in-person ≥ 1` for high assurance |
+| Pre-recorded video | Live match code read aloud | Real-time deepfake: communities set `minByMethod.inPerson ≥ 1` for high assurance |
 | Uneven vetter standards (documentation is each vetter's choice) | Statements record method and documentation; facts expose both to policy, which can `refer`; a community can set `acceptedDocumentClasses` later | Assurance varies by vetter — deliberate for now (D16) |
 | Statement theft / replay | Subject = `joinDid` + VP proof of possession (VTI-CRD-023); `community` scoping | — |
 | Card replay to another vetter | Audience + challenge + 15-min expiry | — |
@@ -1293,7 +1333,7 @@ modern-signature subgraph only (O7).
 | `trustoverip/dtgwg-trust-tasks-tf` | New specs: `vetting/request/0.1`, `vetting/session/0.1`, `vetting/decline/0.1`, `vtc/vetting/revoke-statement/0.1`, `vetting/tickets/{issue,list,revoke}/0.1`, `vtc/vetters/list/0.1`, `vtc/vetting/concern/0.1`; `vtc/join-requests/manifest/0.2` (`vetting` object, `requirementsDigest`); ceremony `vetting/identity-vetting/0.1` | V0 (manifest, request, session, decline, revoke-statement, ceremony); V1 (rest) |
 | `trustoverip/dtgwg-cred-spec` | Profile note: `IdentityVetting` endorsement for VEC; note the vetting exchange as the edge the VEC definition presumes; cite salted commitment re #38 | V0 |
 | `trustoverip/dtgwg-vds-spec` | First VDS profile: Vetting Card (r-card profile; signing, binding, commitment) | V0 draft |
-| VTI `vta-persona` | Signed r-card path via `keys/derive-and-sign-document`; commitment helper | V0 |
+| VTI `vta-sdk` (`vetting` feature) | Card and statement signing and verification, commitment, requirements evaluation, match code — client-side signing (D19) | V0 |
 | VTI `vta-service` / `vta-policy` | Step-up on statement signing and revocation; vault `purpose: vetting`; V1: ticket store + inbound gate, push events, VTA-hosted status lists shared across issuers (§9.6) | V0 / V1 |
 | VTI `vtc-service` | Manifest `vetting` object + digest; vetting facts in the ceremony pipeline (member-issuer path beside `issuer_trusted`); `join.rego` vetting module + defaults; `vetter` role + `vetter_eligibility.rego`; record requirements/policy version on the decision; lineage store + revocation notices (§9.6); **admin notification of referred requests** (not built today); **per-DID join rate limit** (claimed in specs, not implemented); V1: `vtc/vetters/list` + `vetters.rego`, cascade review, concerns, PGP bridge | V0 / V1 |
 | VTI `vta-sdk` | Protocol types for the new tasks; manifest 0.2 types | V0 |
@@ -1352,12 +1392,12 @@ modern-signature subgraph only (O7).
 
 ## 15. Decisions and open questions
 
-### 15.1 Decisions (D1–D14 proposed; D15–D18 agreed 2026-09-11)
+### 15.1 Decisions (D1–D14 proposed; D15–D18 agreed 2026-09-11; D19–D24 taken while building V0)
 
 | # | Decision | Proposal |
 |---|---|---|
 | D1 | Statement credential type | **VEC** with a registered `IdentityVetting` endorsement type. No new DTG credential type |
-| D2 | Card format | **Signed r-card profile (VDS)**, from persona disclosure + `derive-and-sign-document` |
+| D2 | Card format | **Signed r-card profile (VDS)**, from persona disclosure, signed by the client (D19) |
 | D3 | Does the VTC see card/PII? | **No, by default.** Statements + salted commitment only |
 | D4 | Anti-spam default | **Ticket required**; introductions and `open` are vetter opt-ins |
 | D5 | Vetter eligibility | **Materialised as a VTC-issued `vetter` role VEC**, driven by `vetter_eligibility.rego` plus manual grants |
@@ -1365,7 +1405,7 @@ modern-signature subgraph only (O7).
 | D7 | Vetter identity on statements | **Vetter's member DID** (accountable within the community) |
 | D8 | VRC required between vetter and applicant? | **No** in V0; community option `requireVrc` |
 | D9 | Statement scope | **One community** (`endorsement.community`); cross-community reuse only through explicit recognition policy |
-| D10 | Liveness | **Match code required** for every method except `prior-acquaintance` with no session. Recommendation: require it there too |
+| D10 | Liveness | **Match code required** for every method except `priorAcquaintance` with no session. Recommendation: require it there too |
 | D11 | Document data | **Never transmitted or retained**; the vetter looks, attests, forgets |
 | D12 | Client requirement checker | **Advisory only**; VTC verdict is authoritative |
 | D13 | Applicant join DID timing | **Selected/minted when the application starts** (before gathering), not at submit |
@@ -1374,6 +1414,12 @@ modern-signature subgraph only (O7).
 | D16 | What documentation counts | **Each vetter decides** what they accept, including none for prior acquaintance. Statements record what was used; `acceptedDocumentClasses` is optional and absent by default *(agreed)* |
 | D17 | Portraits | **Not in V0** *(agreed)* |
 | D18 | Revocation | **Yes.** V0: vetter sends a revocation notice to the VTC; V1: VTA-hosted status lists *(agreed; mechanism proposed)* |
+| D19 | Who signs the card and the statement | **The client**, with the persona key it holds (`sign_card`, `sign_statement`). `keys/derive-and-sign-document` signs as a derived `did:key`, not as the persona DID. Step-up on signing and revocation is a client confirmation in V0 |
+| D20 | Vetter eligibility in V0 | **Membership plus ACL role at decision time.** The member is not removed, joined before `validFrom`, and holds an unexpired `vetter` role. The role VEC and at-issuance role history (D5) come in V1 |
+| D21 | Wire values | **lowerCamelCase** for every enum and documentation value (`inPerson`, `priorAcquaintance`, `nationalId`), per Trust Tasks SPEC §4.10. Host fact codes (`issuer-not-vetter`) stay kebab-case |
+| D22 | `needs` | Policy returns the generic `vetting`; the host expands it to `vetting:statements:<n>` / `vetting:method:<method>:<n>`, so visually authored policy stays static |
+| D23 | Which criterion applies | The one whose `requirementsDigest` the applicant names in `extensions`; otherwise the first vetting criterion |
+| D24 | Session binding details | Match-code tag `vetting-session-match/v1\0`, distinct from `vtc-personhood-match/v1\0`. The eligibility VP's challenge is the `vetting/request` document `id` |
 
 ### 15.2 Open questions
 
