@@ -1388,6 +1388,9 @@ pub struct VettingState {
     /// Communities a vetter has already asked for requirements this run, so a
     /// second attempt to open a session proceeds instead of asking again.
     pub requirements_requested: Vec<String>,
+    /// The face each application wears, by application id, once read or
+    /// chosen this run.
+    pub worn_faces: std::collections::HashMap<String, String>,
 }
 
 impl VettingState {
@@ -1415,11 +1418,11 @@ pub enum VettingMode {
         persona_index: usize,
         field: usize,
     },
-    /// The identity every vetter is shown, one value per claim type.
-    EditIdentity {
+    /// Choose the face an application shows vetters.
+    ChooseFace {
         application_id: String,
-        claims: Vec<(String, String)>,
-        field: usize,
+        faces: Vec<FaceChoice>,
+        index: usize,
     },
     /// Ask a vetter, with the ticket code they gave us.
     RequestVetter {
@@ -1428,10 +1431,13 @@ pub enum VettingMode {
         code: String,
         field: usize,
     },
-    /// Read the match code with the vetter, then send the card.
+    /// Read the match code with the vetter, preview what the face shows, then
+    /// send the card.
     SendCard {
         application_id: String,
         session_id: String,
+        /// What the card would show, once the VTA has said.
+        preview: Option<CardPreview>,
     },
     /// Hand out a ticket for one of our memberships.
     NewTicket {
@@ -1468,9 +1474,6 @@ impl VettingMode {
                 field: 0,
                 ..
             } => Some(community),
-            VettingMode::EditIdentity { claims, field, .. } => {
-                claims.get(*field).map(|(_, value)| value.as_str())
-            }
             VettingMode::RequestVetter {
                 vetter, field: 0, ..
             } => Some(vetter),
@@ -1478,6 +1481,27 @@ impl VettingMode {
             _ => None,
         }
     }
+}
+
+/// A face an application can wear.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaceChoice {
+    pub profile_id: String,
+    pub name: String,
+    pub entries: usize,
+    /// Worn in the application's context now.
+    pub worn: bool,
+}
+
+/// What a card would show, as the VTA previewed it. Nothing has left.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardPreview {
+    /// Single use, and short-lived.
+    pub preview_id: String,
+    /// Claim type and value, as the card would carry them.
+    pub claims: Vec<(String, String)>,
+    /// Why this face cannot make the card, when it cannot.
+    pub problem: Option<String>,
 }
 
 /// The vetter's checklist (design §9.3).
