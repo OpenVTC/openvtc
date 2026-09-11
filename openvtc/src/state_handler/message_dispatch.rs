@@ -213,6 +213,57 @@ pub async fn process_inbound_message(
         return Ok(false);
     }
 
+    // Peer identity vetting (docs/design/vetting-process.md): requests,
+    // sessions, cards, statements, declines and refusals between members, and a
+    // community's vetting requirements. Tried before the join and credential
+    // routes below because it shares two of their types; `handle` returns
+    // `None` for anything that is not vetting's, which falls through unchanged.
+    if openvtc_core::vetting::inbound::may_claim(&message.typ) {
+        let resolver =
+            vta_sdk::trust_task_proof::TrustTaskVmResolver::new(tdk.did_resolver().clone());
+        let ctx = openvtc_core::vetting::inbound::Context {
+            account: &config.account,
+            resolver: &resolver,
+            recipient: recipient_persona.map(|p| (p, recipient_did.as_str())),
+            now: chrono::Utc::now(),
+        };
+        if let Some(handled) = openvtc_core::vetting::inbound::handle(
+            &mut config.private.vetting,
+            &ctx,
+            message,
+            &from_did,
+        )
+        .await
+        {
+            if let Some(reply) = handled.reply
+                && let Err(e) = openvtc_core::vetting::wire::sign_and_send(
+                    config,
+                    tdk,
+                    service,
+                    reply.persona,
+                    reply.document,
+                )
+                .await
+            {
+                warn!(to = %from_did, error = %e, "could not send vetting reply");
+            }
+            let noticed = handled.notice.is_some();
+            if let Some(notice) = handled.notice {
+                config
+                    .public
+                    .logs
+                    .insert(LogFamily::Community, notice.describe());
+                if let Some((id, task)) = notice.task() {
+                    config
+                        .private
+                        .tasks
+                        .new_task_for(&Arc::new(id), task, recipient_persona);
+                }
+            }
+            return Ok(handled.changed || noticed);
+        }
+    }
+
     // Trust Task envelope replies (governance/capability/*): parse the body
     // document, classify it, and hand it to the state loop keyed by the
     // document's `threadId` (== our request id). Foreign trust tasks riding

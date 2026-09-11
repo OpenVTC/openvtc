@@ -37,7 +37,9 @@ use crate::errors::OpenVTCError;
 /// Submit a join request to a VTC (`vtc_did`) over DIDComm, presenting
 /// `persona_did` as the applicant.
 ///
-/// `vp` is the holder presentation the VTC's `join.rego` decides over.
+/// `presentation` is the holder presentation the VTC's `join.rego` decides
+/// over, with any submission `extensions` (a plain `Value` VP converts, with
+/// none).
 /// The message is packed authcrypt and forwarded via the persona's
 /// `mediator_did`; the VTC authenticates the applicant from the
 /// envelope's `from`.
@@ -65,14 +67,14 @@ pub async fn submit_join_request(
     persona_did: &str,
     vtc_did: &str,
     mediator_did: &str,
-    vp: Value,
+    presentation: impl Into<JoinPresentation>,
     tsp_mediator_did: Option<&str>,
 ) -> Result<Uuid, OpenVTCError> {
     // One id, used as both the document id and — on the DIDComm path — the
     // message id, so the two transports' threading conventions coincide.
     let request_id = Uuid::new_v4();
     let document_id = format!("urn:uuid:{request_id}");
-    let body = build_join_submit_document(persona_did, vtc_did, vp, &document_id)?;
+    let body = build_join_submit_document(persona_did, vtc_did, presentation, &document_id)?;
 
     match tsp_mediator_did {
         // TSP carries the Trust Task document as-is: no DIDComm envelope, and
@@ -189,13 +191,14 @@ fn build_trust_task_document<T: serde::Serialize>(
 fn build_join_submit_document(
     persona_did: &str,
     vtc_did: &str,
-    vp: Value,
+    presentation: impl Into<JoinPresentation>,
     document_id: &str,
 ) -> Result<Value, OpenVTCError> {
+    let JoinPresentation { vp, extensions } = presentation.into();
     let payload = JoinRequestSubmitBody {
         vp,
         registry_consent: false,
-        extensions: Value::Null,
+        extensions,
     };
     // `document_id` is supplied rather than minted here: on the DIDComm path this
     // same id is the message id, which is what makes the two transports' reply
@@ -288,6 +291,45 @@ pub fn build_join_vp(
         });
     }
     vp
+}
+
+/// What a join request presents: the VP, and the submission's `extensions`.
+///
+/// `extensions` is where an applicant names the `requirementsDigest` its
+/// vetting statements were gathered against, so the community evaluates them
+/// under the same criterion ([`crate::vetting::applicant::Application::join_extensions`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct JoinPresentation {
+    /// The holder presentation.
+    pub vp: Value,
+    /// Submission extensions; `Null` for none.
+    pub extensions: Value,
+}
+
+impl From<Value> for JoinPresentation {
+    fn from(vp: Value) -> Self {
+        Self {
+            vp,
+            extensions: Value::Null,
+        }
+    }
+}
+
+/// Add `credentials` to a VP's `verifiableCredential`, after anything already
+/// there. Used for the vetting statements an application gathered.
+pub fn attach_credentials(vp: &mut Value, credentials: impl IntoIterator<Item = Value>) {
+    let mut credentials = credentials.into_iter().peekable();
+    if credentials.peek().is_none() {
+        return;
+    }
+    let list = vp
+        .as_object_mut()
+        .expect("a VP is an object")
+        .entry("verifiableCredential")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Value::Array(list) = list {
+        list.extend(credentials);
+    }
 }
 
 /// Domain tag the VIC subject signs over for a subject-linkage proof. **Must
@@ -634,6 +676,44 @@ mod tests {
             "did:webvh:example.com:alice#key-0"
         );
         assert_eq!(vp["subjectLinkage"]["signature"], "deadbeef");
+    }
+
+    #[test]
+    fn vetting_statements_ride_beside_the_invitation_and_the_digest_in_extensions() {
+        let vic = sample_vic();
+        let mut vp = build_join_vp("did:webvh:example.com:alice", Some(&vic), None);
+        attach_credentials(
+            &mut vp,
+            [
+                json!({ "id": "urn:uuid:s1" }),
+                json!({ "id": "urn:uuid:s2" }),
+            ],
+        );
+        let creds = vp["verifiableCredential"].as_array().unwrap();
+        assert_eq!(creds.len(), 3);
+        assert_eq!(creds[0], vic, "the invitation stays first");
+
+        let mut bare = build_join_vp("did:webvh:example.com:alice", None, None);
+        attach_credentials(&mut bare, Vec::new());
+        assert!(
+            bare.get("verifiableCredential").is_none(),
+            "nothing to attach adds nothing"
+        );
+
+        let doc = build_join_submit_document(
+            "did:webvh:example.com:alice",
+            "did:webvh:example.com:community",
+            JoinPresentation {
+                vp,
+                extensions: json!({ "requirementsDigest": "zDigest" }),
+            },
+            "urn:uuid:submit-2",
+        )
+        .unwrap();
+        assert_eq!(
+            doc["payload"]["extensions"]["requirementsDigest"],
+            "zDigest"
+        );
     }
 
     #[test]
