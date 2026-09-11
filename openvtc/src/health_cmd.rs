@@ -16,7 +16,7 @@ use anyhow::Result;
 use console::style;
 use openvtc_core::config::{Config, KeyBackend};
 use openvtc_core::health::{
-    HealthReport, LinkOutcome, Party, Probe, ProbeGrade, Role, Step, Subject,
+    HealthReport, LinkOutcome, Party, Probe, ProbeGrade, ProbePolicy, Role, Step, Subject,
     build_report_with_progress,
 };
 
@@ -32,6 +32,7 @@ pub async fn run(
     vtc_args: &[String],
     as_json: bool,
     recoverable: bool,
+    allow_private_probes: bool,
 ) -> Result<()> {
     let local = local_report(profile);
     let access = config.and_then(vta_access);
@@ -120,11 +121,28 @@ pub async fn run(
         std::process::exit(1);
     }
 
+    // Probe URLs come from DID documents anyone can publish, so by default a
+    // plaintext or non-public one is listed rather than dialled. The opt-out is
+    // for dev stacks on loopback, and says so every time it is used.
+    let policy = if allow_private_probes {
+        eprintln!(
+            "{}",
+            style(
+                "warning: --allow-private-probes: plaintext and loopback/private/link-local \
+                 transport URLs from DID documents will be probed."
+            )
+            .themed(CLI_CAUTION)
+        );
+        ProbePolicy::AllowPrivate
+    } else {
+        ProbePolicy::PublicOnly
+    };
+
     // Progress goes to stderr, the report to stdout. That keeps
     // `openvtc health --json > report.json` piping cleanly while still showing
     // the operator what is being waited on — and progress *is* wanted under
     // `--json`, since that is the run most likely to be watched rather than read.
-    let report = build_report_with_progress(&subjects, &|step| trace(&step)).await;
+    let report = build_report_with_progress(&subjects, &|step| trace(&step), policy).await;
 
     if as_json {
         // Additive: the existing report keys stay where they are, with the
@@ -511,6 +529,11 @@ fn trace(step: &Step) {
                 style("✗").themed(CLI_ERROR).bold(),
                 dim(secs(elapsed)),
             ),
+            Probe::Blocked { url, reason } => eprintln!(
+                "    {} {url} — {} ({reason})",
+                style("!").themed(CLI_CAUTION).bold(),
+                style("not probed").themed(CLI_CAUTION),
+            ),
         },
         Step::Negotiating { pairs } => {
             if *pairs > 0 {
@@ -667,6 +690,10 @@ fn render_party(party: &Party) {
                 "    probe {url} → {} ({error})",
                 style("unreachable").themed(CLI_ERROR).bold(),
             ),
+            Probe::Blocked { url, reason } => println!(
+                "    probe {url} → {} ({reason})",
+                style("not probed").themed(CLI_CAUTION).bold(),
+            ),
         }
     }
 }
@@ -679,6 +706,9 @@ fn render_party(party: &Party) {
 /// "responding", which is exactly what it is: the host is there and that path
 /// does not serve GETs.
 fn probe_words(probe: &Probe) -> (&'static str, crate::theme::Role) {
+    if let Probe::Blocked { .. } = probe {
+        return ("not probed", CLI_CAUTION);
+    }
     match probe.grade() {
         Some(ProbeGrade::Ok) => ("ok", CLI_INFO),
         Some(ProbeGrade::Responding) => ("responding", CLI_INFO),

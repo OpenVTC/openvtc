@@ -6161,6 +6161,7 @@ dependencies = [
  "aes-gcm 0.11.1",
  "affinidi-data-integrity",
  "affinidi-did-resolver-cache-sdk",
+ "affinidi-did-web",
  "affinidi-messaging-core",
  "affinidi-messaging-delivery",
  "affinidi-messaging-sdk",

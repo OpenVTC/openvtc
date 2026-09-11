@@ -452,7 +452,16 @@ async fn main() -> Result<()> {
         let as_json = health_args.get_flag("json");
         let config = load_config_for_health(&profile, unlock_code_arg.as_deref()).await;
         let recoverable = health_args.get_flag("recoverable");
-        return health_cmd::run(&profile, config.as_ref(), &vtc_dids, as_json, recoverable).await;
+        let allow_private_probes = health_args.get_flag("allow-private-probes");
+        return health_cmd::run(
+            &profile,
+            config.as_ref(),
+            &vtc_dids,
+            as_json,
+            recoverable,
+            allow_private_probes,
+        )
+        .await;
     }
 
     // Check if profile is currently active elsewhere?

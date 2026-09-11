@@ -37,6 +37,9 @@ pub mod join;
 pub mod logs;
 pub mod members;
 pub mod messaging;
+// Crate-private stopgap: a copy of `affinidi-did-web`'s host classifier until
+// that crate exports it (see the module header).
+mod net_guard;
 #[cfg(feature = "openpgp-card")]
 pub mod openpgp_card;
 pub mod persona;
