@@ -261,6 +261,7 @@ mod setup_token_actions;
 mod setup_vta_actions;
 mod setup_wizard;
 pub mod state;
+mod vetting_actions;
 mod vic;
 mod vta_transports;
 
@@ -1568,10 +1569,29 @@ impl StateHandler {
                     }
                 }
                 _ = pending_expiry_tick.tick() => {
-                    // R-B-7: expire Pending joins unanswered for 7 days, raising
+                    // R-B-7: expire Pending joins unanswered for 7 days — or for
+                    // the `decisionSla` a vetting community publishes — raising
                     // actions-required, and tear down each one's now-dead session
                     // (R-S-3). Records are retained read-only (R-S-1).
-                    let expired = config.account.expire_stale_pending(chrono::Utc::now());
+                    let vetting = &config.private.vetting;
+                    let default_timeout = chrono::TimeDelta::days(
+                        openvtc_core::config::account::PENDING_TIMEOUT_DAYS,
+                    );
+                    let timeouts: std::collections::HashMap<_, _> = config
+                        .account
+                        .memberships()
+                        .filter_map(|c| {
+                            vetting
+                                .decision_sla(&c.vtc_did, c.persona_ref)
+                                .map(|sla| ((c.vtc_did.clone(), c.persona_ref), sla))
+                        })
+                        .collect();
+                    let expired = config.account.expire_stale_pending_with(chrono::Utc::now(), |c| {
+                        timeouts
+                            .get(&(c.vtc_did.clone(), c.persona_ref))
+                            .copied()
+                            .unwrap_or(default_timeout)
+                    });
                     if !expired.is_empty() {
                         save.mark_dirty();
                         for (vtc, persona) in &expired {
@@ -1587,7 +1607,7 @@ impl StateHandler {
                         }
                         state.main_page.sync_from_config(&config);
                         state.main_page.log(format!(
-                            "{} pending join{} expired (no response within 7 days).",
+                            "{} pending join{} expired (no decision within the time allowed).",
                             expired.len(),
                             if expired.len() == 1 { "" } else { "s" },
                         ));
@@ -2282,6 +2302,15 @@ impl StateHandler {
                     #[cfg(feature = "openpgp-card")]
                     Action::GetTokens | Action::SetAdminPin(..) | Action::SetTouchPolicy(..) |
                     Action::SetTokenName(..) | Action::FactoryReset(..) | Action::TokenWriteKeys(..) => {}
+
+                    // Vetting sends and receives peer messages as a persona, and
+                    // this loop has neither a persona nor an inbound arm.
+                    Action::Vetting(..) => {
+                        state.main_page.log(
+                            "Vetting needs a persona — create one under My Identity, then \
+                             restart OpenVTC to apply or to vet.",
+                        );
+                    }
 
                     // Genuinely unavailable: these need a live community and the
                     // messaging runtime that comes with it. Inert, but not

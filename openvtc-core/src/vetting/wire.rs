@@ -46,6 +46,10 @@ pub enum WireError {
     WrongSigner,
 }
 
+/// A Trust Task document on the peer path. Named here so callers need not
+/// depend on `trust-tasks-rs` to hold one.
+pub type Document = TrustTask<Value>;
+
 /// A fresh `urn:uuid:` document id.
 #[must_use]
 pub fn new_id() -> String {

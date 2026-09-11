@@ -13,4 +13,5 @@ pub mod panel;
 pub mod relationships_panel;
 pub mod settings_panel;
 pub mod status;
+pub mod vetting_panel;
 pub mod vta_panel;

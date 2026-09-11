@@ -83,6 +83,7 @@ impl ContentPanelState {
             MainMenu::Settings => Some(Box::new(SettingsPanel)),
             MainMenu::Vta => Some(Box::new(VtaPanel)),
             MainMenu::Identity => Some(Box::new(super::identity_panel::IdentityPanel)),
+            MainMenu::Vetting => Some(Box::new(super::vetting_panel::VettingPanel)),
             _ => None,
         };
 

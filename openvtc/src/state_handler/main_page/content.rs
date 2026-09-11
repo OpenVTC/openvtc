@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dtg_credentials::DTGCredential;
+use openvtc_core::config::account::PersonaId;
+use vta_sdk::protocols::vetting::{DeclaredRelationship, RevocationReason, VettingMethod};
 
 /// Lazily-rendered raw credential JSON for credential detail views.
 ///
@@ -72,6 +74,8 @@ pub struct ContentPanelState {
     /// The holder's own identity: personas, pool, profiles, and what each persona
     /// presents where.
     pub identity: IdentityState,
+    /// Peer identity vetting: our applications, and our desk as a vetter.
+    pub vetting: VettingState,
 }
 
 // ****************************************************************************
@@ -1269,6 +1273,323 @@ pub struct ActiveDid {
     pub agent_name: Option<String>,
     /// Human-readable label
     pub label: String,
+}
+
+// ****************************************************************************
+// Vetting State
+// ****************************************************************************
+
+/// Vetting methods, in the order the page cycles through them.
+pub const VETTING_METHODS: [VettingMethod; 3] = [
+    VettingMethod::InPerson,
+    VettingMethod::Video,
+    VettingMethod::PriorAcquaintance,
+];
+
+/// Declared relationships, in the order the page cycles through them.
+pub const VETTING_RELATIONSHIPS: [DeclaredRelationship; 5] = [
+    DeclaredRelationship::None,
+    DeclaredRelationship::CommunityColleague,
+    DeclaredRelationship::SameEmployer,
+    DeclaredRelationship::Family,
+    DeclaredRelationship::OtherPersonal,
+];
+
+/// Reasons a vetter may give for withdrawing a statement.
+pub const VETTING_WITHDRAWAL_REASONS: [RevocationReason; 4] = [
+    RevocationReason::Mistake,
+    RevocationReason::NewInformation,
+    RevocationReason::KeyCompromise,
+    RevocationReason::Other,
+];
+
+/// How many requests a new ticket admits: one person, or a conference desk.
+pub const VETTING_TICKET_USES: [u32; 4] = [1, 5, 10, 25];
+
+/// How a method reads on the page.
+#[must_use]
+pub fn method_label(method: VettingMethod) -> &'static str {
+    match method {
+        VettingMethod::InPerson => "in person",
+        VettingMethod::Video => "video call",
+        VettingMethod::PriorAcquaintance => "prior acquaintance",
+        _ => "other",
+    }
+}
+
+/// How a declared relationship reads on the page.
+#[must_use]
+pub fn relationship_label(relationship: DeclaredRelationship) -> &'static str {
+    match relationship {
+        DeclaredRelationship::None => "no prior relationship",
+        DeclaredRelationship::CommunityColleague => "we work together in the community",
+        DeclaredRelationship::SameEmployer => "same employer",
+        DeclaredRelationship::Family => "family",
+        DeclaredRelationship::OtherPersonal => "another personal relationship",
+        _ => "other",
+    }
+}
+
+/// How a withdrawal reason reads on the page.
+#[must_use]
+pub fn reason_label(reason: RevocationReason) -> &'static str {
+    match reason {
+        RevocationReason::Mistake => "I made a mistake",
+        RevocationReason::NewInformation => "I learned something new",
+        RevocationReason::KeyCompromise => "my signing key was compromised",
+        _ => "another reason",
+    }
+}
+
+/// Which list the Vetting page shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VettingTab {
+    /// Our applications to be vetted.
+    #[default]
+    Applications,
+    /// Requests people have made of us as a vetter.
+    Desk,
+    /// Tickets we have handed out.
+    Tickets,
+    /// Statements we have signed.
+    Issued,
+}
+
+impl VettingTab {
+    /// The tab after this one.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            VettingTab::Applications => VettingTab::Desk,
+            VettingTab::Desk => VettingTab::Tickets,
+            VettingTab::Tickets => VettingTab::Issued,
+            VettingTab::Issued => VettingTab::Applications,
+        }
+    }
+}
+
+/// State for the Vetting page, rebuilt from the book on every config change.
+#[derive(Clone, Debug, Default)]
+pub struct VettingState {
+    pub tab: VettingTab,
+    pub selected: usize,
+    pub mode: VettingMode,
+    pub status_message: Option<String>,
+    pub applications: Arc<[ApplicationRow]>,
+    pub desk: Arc<[DeskRow]>,
+    pub tickets: Arc<[TicketRow]>,
+    pub issued: Arc<[IssuedRow]>,
+    /// Personas an application can join with.
+    pub personas: Arc<[VettingPersona]>,
+    /// Communities we are an active member of, and so can vet for.
+    pub memberships: Arc<[VettingMembership]>,
+    /// The documentation this vetter accepts, then `none`.
+    pub documentation: Arc<[String]>,
+    /// Communities a vetter has already asked for requirements this run, so a
+    /// second attempt to open a session proceeds instead of asking again.
+    pub requirements_requested: Vec<String>,
+}
+
+impl VettingState {
+    /// Rows in the active tab.
+    #[must_use]
+    pub fn tab_len(&self) -> usize {
+        match self.tab {
+            VettingTab::Applications => self.applications.len(),
+            VettingTab::Desk => self.desk.len(),
+            VettingTab::Tickets => self.tickets.len(),
+            VettingTab::Issued => self.issued.len(),
+        }
+    }
+}
+
+/// What the Vetting page is doing.
+#[derive(Clone, Debug, Default)]
+pub enum VettingMode {
+    /// Browsing the active tab.
+    #[default]
+    List,
+    /// Start an application: which community, as which persona.
+    NewApplication {
+        community: String,
+        persona_index: usize,
+        field: usize,
+    },
+    /// The identity every vetter is shown, one value per claim type.
+    EditIdentity {
+        application_id: String,
+        claims: Vec<(String, String)>,
+        field: usize,
+    },
+    /// Ask a vetter, with the ticket code they gave us.
+    RequestVetter {
+        application_id: String,
+        vetter: String,
+        code: String,
+        field: usize,
+    },
+    /// Read the match code with the vetter, then send the card.
+    SendCard {
+        application_id: String,
+        session_id: String,
+    },
+    /// Hand out a ticket for one of our memberships.
+    NewTicket {
+        membership_index: usize,
+        uses_index: usize,
+        field: usize,
+    },
+    /// Open a session with the person in front of us.
+    OpenSession {
+        request_id: String,
+        method_index: usize,
+    },
+    /// The human check, and the statement.
+    Attest {
+        request_id: String,
+        form: AttestForm,
+    },
+    /// Confirm declining a request.
+    ConfirmDecline { request_id: String },
+    /// Withdraw a statement we signed.
+    Withdraw {
+        statement_id: String,
+        reason_index: usize,
+    },
+}
+
+impl VettingMode {
+    /// The value of the focused field, when that field takes text.
+    #[must_use]
+    pub fn focused_text(&self) -> Option<&str> {
+        match self {
+            VettingMode::NewApplication {
+                community,
+                field: 0,
+                ..
+            } => Some(community),
+            VettingMode::EditIdentity { claims, field, .. } => {
+                claims.get(*field).map(|(_, value)| value.as_str())
+            }
+            VettingMode::RequestVetter {
+                vetter, field: 0, ..
+            } => Some(vetter),
+            VettingMode::RequestVetter { code, field: 1, .. } => Some(code),
+            _ => None,
+        }
+    }
+}
+
+/// The vetter's checklist (design §9.3).
+#[derive(Clone, Debug, Default)]
+pub struct AttestForm {
+    pub field: usize,
+    pub method_index: usize,
+    pub documentation_index: usize,
+    pub relationship_index: usize,
+    /// We read the match code to each other.
+    pub liveness_confirmed: bool,
+    /// The vetter has read the attestation and stands behind it.
+    pub attested: bool,
+}
+
+impl AttestForm {
+    /// Method, documentation, relationship, match code, attestation.
+    pub const FIELDS: usize = 5;
+}
+
+/// One application, for display.
+#[derive(Clone, Debug)]
+pub struct ApplicationRow {
+    pub id: String,
+    pub community: String,
+    pub community_name: Option<String>,
+    pub join_did: String,
+    /// What the community requires, in a line; `None` until its manifest arrives.
+    pub requirements: Option<String>,
+    /// Progress against those requirements.
+    pub progress: Option<String>,
+    pub satisfied: bool,
+    /// Claim type and the value we show vetters (empty when not set).
+    pub identity: Vec<(String, String)>,
+    pub requests: Vec<RequestRow>,
+    pub statements: usize,
+}
+
+/// One request to a vetter, for display.
+#[derive(Clone, Debug)]
+pub struct RequestRow {
+    pub vetter: String,
+    pub vetter_name: Option<String>,
+    pub state: String,
+    pub match_code: Option<String>,
+    /// The open session still waiting for our card.
+    pub card_session: Option<String>,
+}
+
+/// Where a desk request is, for choosing what the keys do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeskStage {
+    Accepted,
+    Session,
+    Card,
+    Closed,
+}
+
+/// One request at our desk, for display.
+#[derive(Clone, Debug)]
+pub struct DeskRow {
+    pub request_id: String,
+    pub applicant: String,
+    pub applicant_name: Option<String>,
+    pub community: String,
+    pub state: String,
+    pub stage: DeskStage,
+    pub method: Option<String>,
+    pub match_code: Option<String>,
+    /// What their card showed, while we still hold it.
+    pub claims: Vec<(String, String)>,
+    pub required_claims: Vec<String>,
+    pub message: Option<String>,
+}
+
+/// One ticket, for display.
+#[derive(Clone, Debug)]
+pub struct TicketRow {
+    pub id: String,
+    pub code: String,
+    pub community: String,
+    pub uses_left: u32,
+    pub expires: String,
+    pub live: bool,
+}
+
+/// One statement we signed, for display.
+#[derive(Clone, Debug)]
+pub struct IssuedRow {
+    pub id: String,
+    pub applicant: String,
+    pub community: String,
+    pub method: String,
+    pub issued: String,
+    pub valid_until: String,
+    pub withdrawal: Option<String>,
+}
+
+/// A persona an application can use.
+#[derive(Clone, Debug)]
+pub struct VettingPersona {
+    pub persona: PersonaId,
+    pub did: String,
+    pub label: String,
+}
+
+/// A community we can vet for.
+#[derive(Clone, Debug)]
+pub struct VettingMembership {
+    pub community: String,
+    pub name: String,
+    pub persona: PersonaId,
 }
 
 // ****************************************************************************

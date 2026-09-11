@@ -467,3 +467,40 @@ async fn a_vetter_asks_for_the_claims_the_community_requires() {
         "the same manifest again changes nothing"
     );
 }
+
+#[tokio::test]
+async fn the_communitys_decision_sla_is_known_once_its_manifest_is() {
+    let (applicant, _, _) = ready().await;
+    let persona = applicant.persona;
+    assert_eq!(applicant.book.decision_sla(COMMUNITY, persona), None);
+
+    let mut with_sla = Party::new(4);
+    with_sla
+        .book
+        .start_application(COMMUNITY, with_sla.persona, &with_sla.did, Utc::now())
+        .unwrap();
+    let mut requirements = requirements();
+    requirements.decision_sla = Some("P21D".into());
+    let body = JoinRequestManifestResponseBody {
+        community_did: COMMUNITY.into(),
+        criteria: vec![ManifestCriterion {
+            id: "vetted".into(),
+            description: None,
+            presentation_definition: json!({}),
+            vetting: Some(requirements),
+            requirements_digest: Some("zOther".into()),
+        }],
+    };
+    let reply = Message::build(
+        wire::new_id(),
+        JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE.to_string(),
+        json!({ "type": JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, "payload": body }),
+    )
+    .from(COMMUNITY.to_string())
+    .finalize();
+    with_sla.receive(&reply, COMMUNITY).await;
+    assert_eq!(
+        with_sla.book.decision_sla(COMMUNITY, with_sla.persona),
+        chrono::Duration::try_days(21)
+    );
+}

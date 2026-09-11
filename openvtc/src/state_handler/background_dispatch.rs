@@ -109,6 +109,9 @@ pub(crate) enum DispatchDomain {
     /// the VIC list, `i` to flip the filter — and an inline await made the
     /// focus change itself wait on the round-trip, which read as a frozen key.
     Vic,
+    /// A vetting send: a request, session, card, statement, decline,
+    /// withdrawal or requirements fetch. One at a time, like every peer send.
+    Vetting,
 }
 
 impl DispatchDomain {
@@ -129,6 +132,7 @@ impl DispatchDomain {
             DispatchDomain::PersonaBinding => "Persona binding refresh",
             DispatchDomain::PersonaManage => "Identity request",
             DispatchDomain::Vic => "Invitation credential refresh",
+            DispatchDomain::Vetting => "Vetting send",
         }
     }
 }
@@ -249,6 +253,8 @@ pub(crate) enum DispatchOutcome {
     /// otherwise leave its domain busy forever) and a generic failure status is
     /// surfaced. Carries the domain to release + label.
     Panicked(DispatchDomain),
+    /// A vetting send finished (or failed, and was undone).
+    Vetting(crate::state_handler::vetting_actions::VettingOutcome),
 }
 
 impl DispatchOutcome {
@@ -273,6 +279,7 @@ impl DispatchOutcome {
             DispatchOutcome::PersonaManage(_) => DispatchDomain::PersonaManage,
             DispatchOutcome::Vic(_) => DispatchDomain::Vic,
             DispatchOutcome::VicMutation(_) => DispatchDomain::Vic,
+            DispatchOutcome::Vetting(_) => DispatchDomain::Vetting,
             DispatchOutcome::Panicked(domain) => *domain,
         }
     }
@@ -404,6 +411,7 @@ pub(crate) fn apply_outcome(
             }
         },
         DispatchOutcome::Relationship(outcome) => outcome.apply(state, config, save),
+        DispatchOutcome::Vetting(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Inbox(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Did(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::AgentName(results) => {
