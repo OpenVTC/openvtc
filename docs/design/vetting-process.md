@@ -524,19 +524,24 @@ it gets signed:
 
 1. The applicant picks a **face** (profile) — typically a "Vetting" face
    containing `name.legal` and optional handles — worn by the join persona in
-   this community's context (`persona/binding/set`).
-2. `persona/disclosure/preview/1.0` produces a summary. The client shows
-   exactly what the vetter will see.
-3. `persona/disclosure/present/1.0` with renderer `rcard`. This triggers
-   step-up for `release: stepUp` claims, consumes the preview, and writes a
-   `DisclosureRecord`.
+   this community's context (`persona/binding/set`). *As built:* the
+   application is given that context when a face is first chosen or a card
+   first sent, and the membership reuses it when the join goes through, so
+   the community sees the face the vetters checked.
+2. `persona/disclosure/preview/1.0` with `verifierDid` = the vetter and
+   `requestedClaims` = the session's required and optional claim types. The
+   client shows exactly what the vetter will see, and nothing leaves until
+   the applicant confirms.
+3. `persona/disclosure/present/1.0` with renderer `rcard` and the session's
+   `challenge`. This triggers step-up for `release: stepUp` claims, consumes
+   the preview, and writes a `DisclosureRecord`. A `stepUpRequired` refusal
+   leaves the preview intact: the applicant approves on their device and
+   presents the same preview again.
 4. **New:** the client builds the card from the disclosed claims and signs it
-   with the join persona's own key (`vta_sdk::vetting::card::sign_card`,
-   `eddsa-jcs-2022`). *As built (D19):* this does not go through
-   `keys/derive-and-sign-document`, because that task signs as a derived
-   `did:key` rather than as the persona DID, and the card could not then be
-   bound to `joinDid`. The client already holds the persona key and signs
-   every other proof in this flow the same way.
+   **as the join persona DID** (`vta_sdk::vetting::card::sign_card`,
+   `eddsa-jcs-2022`) — see D19. Every claim needs a value the vetter can read
+   (a predicate-only release is refused), and a value an earlier card showed
+   must not have changed, or the commitments would diverge.
 
 ```json
 {
@@ -683,10 +688,9 @@ illustrative.
 | `attestationTextDigest` | Digest of the governance text the vetter saw, so the text version is provable |
 | `credentialStatus` | Absent in V0; revocation goes to the VTC (§9.6, D18). Added in V1 with VTA-hosted status lists |
 
-The vetter's client signs the statement with the vetter's member persona key
-(`vta_sdk::vetting::statement::sign_statement`) once the vetter confirms the
-attestation text. *As built (D19):* that confirmation stands in for VTA
-step-up; see §11.3.
+The vetter's client signs the statement as the vetter's member persona DID
+(`vta_sdk::vetting::statement::sign_statement`, D19) once the vetter confirms
+the attestation text. That confirmation is the V0 gate; see §11.3.
 Delivery uses the existing `credential-exchange/issue/0.1`. The applicant's
 client verifies the statement (proof, subject, community, commitment equals
 its own, card digest equals what it sent) and stores it in the VTA vault
@@ -1096,7 +1100,7 @@ Enforced by `vta-policy` (Rego) on the Trust Task URI, not by the task specs:
 | Action | Requirement |
 |---|---|
 | Applicant presents a Vetting Card containing any `release: stepUp` claim | Step-up — existing `step_up::initiate_disclosure_step_up` |
-| Vetter signs a Vetting Statement | Target: **step-up always** (passkey / device), since this is a high-impact, attributable act. *V0 as built (D19):* an explicit client confirmation after the attestation text. The statement is signed with the persona key the client holds, so the VTA never sees the act |
+| Vetter signs a Vetting Statement | Target: **step-up always** (passkey / device), since this is a high-impact, attributable act. *V0 as built (D19):* an explicit client confirmation after the attestation text. OpenVTC signs as the persona DID with a key it holds, so the VTA is not asked and cannot gate the signature; a VTA-side gate needs the V1 sign-as-persona task |
 | Vetter revokes a statement | Target: step-up. *V0:* client confirmation |
 | Vetter issues a desk-mode ticket (`uses > 1`) | Step-up |
 | Inbound `vetting/request` without a valid ticket (V1) | Dropped by the inbound gate (§8.2) |
@@ -1397,7 +1401,7 @@ modern-signature subgraph only (O7).
 | # | Decision | Proposal |
 |---|---|---|
 | D1 | Statement credential type | **VEC** with a registered `IdentityVetting` endorsement type. No new DTG credential type |
-| D2 | Card format | **Signed r-card profile (VDS)**, from persona disclosure, signed by the client (D19) |
+| D2 | Card format | **Signed r-card profile (VDS)**, its claims released from the join persona's face by persona disclosure (preview shown, then present), signed as the join persona DID (D19) |
 | D3 | Does the VTC see card/PII? | **No, by default.** Statements + salted commitment only |
 | D4 | Anti-spam default | **Ticket required**; introductions and `open` are vetter opt-ins |
 | D5 | Vetter eligibility | **Materialised as a VTC-issued `vetter` role VEC**, driven by `vetter_eligibility.rego` plus manual grants |
@@ -1414,7 +1418,7 @@ modern-signature subgraph only (O7).
 | D16 | What documentation counts | **Each vetter decides** what they accept, including none for prior acquaintance. Statements record what was used; `acceptedDocumentClasses` is optional and absent by default *(agreed)* |
 | D17 | Portraits | **Not in V0** *(agreed)* |
 | D18 | Revocation | **Yes.** V0: vetter sends a revocation notice to the VTC; V1: VTA-hosted status lists *(agreed; mechanism proposed)* |
-| D19 | Who signs the card and the statement | **The client**, with the persona key it holds (`sign_card`, `sign_statement`). `keys/derive-and-sign-document` signs as a derived `did:key`, not as the persona DID. Step-up on signing and revocation is a client confirmation in V0 |
+| D19 | Who signs the card and the statement | **OpenVTC, as the persona DID.** `sign_card` and `sign_statement` use the persona's `assertionMethod` key (`did:webvh:…#key-N`), loaded like every other persona key — derived, imported or VTA-managed — and the proof names that verification method. This is the path OpenVTC already takes for reciprocal VMCs, capability grants and personhood proofs, so nothing new is asked of the VTA. (Its signing tasks would not fit anyway: `keys/derive-and-sign-document` signs as a derived `did:key`, and `keys/sign` is domain-separated.) Because OpenVTC holds the key, a VTA step-up cannot gate the signature; V0 gates signing and revocation with an explicit confirmation. A VTA sign-as-persona task over non-exportable keys would move that gate into the VTA (V1) |
 | D20 | Vetter eligibility in V0 | **Membership plus ACL role at decision time.** The member is not removed, joined before `validFrom`, and holds an unexpired `vetter` role. The role VEC and at-issuance role history (D5) come in V1 |
 | D21 | Wire values | **lowerCamelCase** for every enum and documentation value (`inPerson`, `priorAcquaintance`, `nationalId`), per Trust Tasks SPEC §4.10. Host fact codes (`issuer-not-vetter`) stay kebab-case |
 | D22 | `needs` | Policy returns the generic `vetting`; the host expands it to `vetting:statements:<n>` / `vetting:method:<method>:<n>`, so visually authored policy stays static |
