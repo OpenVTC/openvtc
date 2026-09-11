@@ -207,6 +207,26 @@ impl VettingBook {
         }
     }
 
+    /// How long `community` says it takes to decide a join (`decisionSla`),
+    /// from our application as `persona` or else what we know of its criteria.
+    /// `None` when it has not said, or said something unparseable.
+    #[must_use]
+    pub fn decision_sla(&self, community: &str, persona: PersonaId) -> Option<Duration> {
+        let from_application = self
+            .application(community, persona)
+            .and_then(|a| a.requirements.as_ref())
+            .and_then(|r| r.decision_sla.as_deref());
+        let from_criteria = || {
+            self.criteria
+                .iter()
+                .filter(|k| k.community == community)
+                .find_map(|k| k.requirements.decision_sla.as_deref())
+        };
+        from_application
+            .or_else(from_criteria)
+            .and_then(vta_sdk::protocols::vetting::parse_iso8601_duration)
+    }
+
     /// Our application to `community` as `persona`.
     #[must_use]
     pub fn application(&self, community: &str, persona: PersonaId) -> Option<&Application> {
