@@ -384,7 +384,7 @@ strip = "symbols"
 # `cargo tree`, not only the two named in a manifest: a crate left on crates.io
 # would pull its own `vti-common` beside the patched one.
 #
-# The branch is the top of the VTI vetting stack (#1425–#1428), not `main`:
+# The branch is the top of the VTI vetting stack (#1425–#1429), not `main`:
 # `vta-sdk`'s `vetting` feature, which this workspace enables, exists only there
 # until that stack merges. Once it has, point these back at `main`, and remove
 # them with the release that follows.
@@ -401,23 +401,23 @@ strip = "symbols"
 did-git-sign = { git = "https://github.com/OpenVTC/verifiable-git-infrastructure", branch = "chore/vta-sdk-036" }
 vgi-core = { git = "https://github.com/OpenVTC/verifiable-git-infrastructure", branch = "chore/vta-sdk-036" }
 
-vta-audit = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-backup = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-cli-common = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-config = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-keys = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-keyspaces = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-persona = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-policy = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-sdk = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-service = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-support = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-sweepers = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-vault = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vta-webvh = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vtc-client = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vti-common = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vti-rooms = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vti-rooms-dtg = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vti-secrets = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
-vti-webauthn = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetting-revocation" }
+vta-audit = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-backup = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-cli-common = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-config = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-keys = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-keyspaces = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-persona = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-policy = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-sdk = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-service = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-support = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-sweepers = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-vault = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vta-webvh = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vtc-client = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vti-common = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vti-rooms = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vti-rooms-dtg = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vti-secrets = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }
+vti-webauthn = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/vtc-vetter-role-vec" }

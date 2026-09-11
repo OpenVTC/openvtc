@@ -92,6 +92,36 @@ pub struct KnownCriterion {
     pub fetched_at: DateTime<Utc>,
 }
 
+/// A community naming one of our personas a vetter: the role credential it
+/// issued through `vtc/vetting/vetters/grant` (design §10.3). Presented to
+/// applicants with every acceptance, and needed to hand out tickets.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VetterGrant {
+    /// The community that issued it.
+    pub community: String,
+    /// Our persona it names.
+    pub persona: PersonaId,
+    /// The credential's `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    /// Its `validUntil`. A grant without one is never treated as live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<DateTime<Utc>>,
+    /// When it arrived.
+    pub received_at: DateTime<Utc>,
+    /// The signed credential, exactly as delivered.
+    pub credential: serde_json::Value,
+}
+
+impl VetterGrant {
+    /// Unexpired at `now`. Revocation is the community's to apply: a revoked
+    /// grant stops the vetter's statements counting there.
+    #[must_use]
+    pub fn is_live(&self, now: DateTime<Utc>) -> bool {
+        self.valid_until.is_some_and(|until| until > now)
+    }
+}
+
 /// All vetting state, for both sides.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct VettingBook {
@@ -116,6 +146,9 @@ pub struct VettingBook {
     /// Our rules as a vetter.
     #[serde(default, skip_serializing_if = "VetterPolicy::is_default")]
     pub policy: VetterPolicy,
+    /// Communities that named one of our personas a vetter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vetter_grants: Vec<VetterGrant>,
     /// Fields written by a newer build, preserved verbatim (D19).
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -132,7 +165,36 @@ impl VettingBook {
             && self.throttle.is_empty()
             && self.criteria.is_empty()
             && self.policy.is_default()
+            && self.vetter_grants.is_empty()
             && self.extra.is_empty()
+    }
+
+    /// Keep `grant`, replacing an earlier one from the same community for the
+    /// same persona. Returns whether anything changed.
+    pub fn keep_vetter_grant(&mut self, grant: VetterGrant) -> bool {
+        let same = |g: &VetterGrant| g.community == grant.community && g.persona == grant.persona;
+        if let Some(existing) = self.vetter_grants.iter_mut().find(|g| same(g)) {
+            if existing.credential == grant.credential {
+                return false;
+            }
+            *existing = grant;
+        } else {
+            self.vetter_grants.push(grant);
+        }
+        true
+    }
+
+    /// `persona`'s live vetter grant from `community`.
+    #[must_use]
+    pub fn vetter_grant(
+        &self,
+        community: &str,
+        persona: PersonaId,
+        now: DateTime<Utc>,
+    ) -> Option<&VetterGrant> {
+        self.vetter_grants
+            .iter()
+            .find(|g| g.community == community && g.persona == persona && g.is_live(now))
     }
 
     /// Remember `community`'s vetting criteria from its manifest, replacing

@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use vta_sdk::protocols::join_requests::JoinRequestManifestResponseBody;
 use vta_sdk::protocols::vetting::{
-    CardClaim, DeclaredRelationship, DeclineCode, ShapeError, TicketPresentation,
+    CardClaim, DeclaredRelationship, DeclineCode, ShapeError, TicketPresentation, VETTER_ROLE,
     VettingDeclineBody, VettingMethod, VettingRequestAcceptedBody, VettingRequestBody,
     VettingRequirements, VettingSessionBody,
 };
@@ -136,6 +136,33 @@ pub struct Application {
     pub extra: serde_json::Map<String, Value>,
 }
 
+/// What an applicant could establish about a vetter from the eligibility
+/// presentation that came with their acceptance.
+///
+/// Advisory, like the checklist: the community checks the vetter again when
+/// it decides, and does not count a statement from one it has not named.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum VetterEligibility {
+    /// The community's vetter role credential for this vetter verified, bound
+    /// to our request. Whether the community has since revoked it is not
+    /// checked here.
+    Shown {
+        /// The role credential's `id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential_id: Option<String>,
+        /// Its `validUntil`.
+        valid_until: DateTime<Utc>,
+    },
+    /// The vetter presented nothing.
+    NotShown,
+    /// What they presented did not verify.
+    Failed {
+        /// Why.
+        reason: String,
+    },
+}
+
 /// One request to one vetter.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutboundRequest {
@@ -145,6 +172,9 @@ pub struct OutboundRequest {
     pub vetter: String,
     /// Where it stands.
     pub state: RequestState,
+    /// What the vetter's acceptance showed of their eligibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligibility: Option<VetterEligibility>,
     /// When we sent it.
     pub sent_at: DateTime<Utc>,
     /// When it last moved.
@@ -380,6 +410,7 @@ impl Application {
             document_id: document_id.to_string(),
             vetter: vetter.to_string(),
             state: RequestState::Sent,
+            eligibility: None,
             sent_at: now,
             updated_at: now,
         });
@@ -432,8 +463,18 @@ impl Application {
             .ok_or(ApplicantError::NoMatchingRequest)
     }
 
+    /// The role a vetter must hold: the requirements' `eligibleVetters.role`,
+    /// or `vetter` while they are unknown.
+    #[must_use]
+    pub fn vetter_role(&self) -> &str {
+        self.requirements
+            .as_ref()
+            .map_or(VETTER_ROLE, |r| r.eligible_vetters.role.as_str())
+    }
+
     /// The vetter accepted (`vetting/request#response`, threaded on our
-    /// request). A repeat of the same acceptance is harmless.
+    /// request), and `eligibility` is what its presentation showed. A repeat
+    /// of the same acceptance is harmless.
     ///
     /// # Errors
     ///
@@ -444,6 +485,7 @@ impl Application {
         thread: &str,
         vetter: &str,
         body: VettingRequestAcceptedBody,
+        eligibility: VetterEligibility,
         now: DateTime<Utc>,
     ) -> Result<(), ApplicantError> {
         body.check_shape()?;
@@ -453,6 +495,7 @@ impl Application {
             RequestState::Accepted { request_id, .. } if *request_id == body.request_id => {}
             _ => return Err(ApplicantError::WrongState("be accepted")),
         }
+        request.eligibility = Some(eligibility);
         request.state = RequestState::Accepted {
             request_id: body.request_id,
             accepts_documentation: body.accepts_documentation,

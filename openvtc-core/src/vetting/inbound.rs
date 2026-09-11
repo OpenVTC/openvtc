@@ -4,10 +4,12 @@
 //! everything else, so the caller's existing routing is untouched. Two message
 //! types are shared, and those are claimed only when they are vetting's:
 //!
-//! - `credential-exchange/issue` carries both a community's membership
-//!   credential and a vetter's statement. Only an identity-vetting statement
-//!   is claimed ([`wire::delivered_statement`]); a membership credential still
-//!   reaches the join handler, which would refuse a vetter as its issuer.
+//! - `credential-exchange/issue` carries a community's membership and role
+//!   credentials, a community's vetter grant, and a vetter's statement. Only
+//!   the last two are claimed: a vetter grant, which would otherwise take the
+//!   member's role credential's place, and an identity-vetting statement
+//!   ([`wire::delivered_statement`]). Everything else still reaches the join
+//!   handler.
 //! - `trust-task-error` answers any Trust Task. Only one threaded on a request
 //!   or withdrawal of ours is claimed.
 //!
@@ -28,14 +30,18 @@ use vta_sdk::protocols::join_requests::{
     JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, JoinRequestManifestResponseBody,
 };
 use vta_sdk::protocols::vetting::{
-    RevokeStatementResponseBody, VETTING_DECLINE_TYPE, VETTING_REQUEST_RESPONSE_TYPE,
+    RevokeStatementResponseBody, VETTER_ROLE, VETTING_DECLINE_TYPE, VETTING_REQUEST_RESPONSE_TYPE,
     VETTING_REQUEST_TYPE, VETTING_REVOKE_STATEMENT_RESPONSE_TYPE, VETTING_SESSION_RESPONSE_TYPE,
     VETTING_SESSION_TYPE, VettingDeclineBody, VettingRequestAcceptedBody, VettingRequestBody,
-    VettingSessionBody, VettingSessionResponseBody,
+    VettingSessionBody, VettingSessionResponseBody, role_matches,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
+use vta_sdk::vetting::eligibility::{
+    EligibilityExpectations, community_role, verify_eligibility_vp,
+};
 
-use super::book::VettingBook;
+use super::applicant::VetterEligibility;
+use super::book::{VetterGrant, VettingBook};
 use super::vetter::{IncomingRequest, Intake};
 use super::wire;
 use crate::config::account::{Account, PersonaId};
@@ -72,6 +78,21 @@ pub struct Reply {
     pub persona: PersonaId,
     /// The unsigned document.
     pub document: TrustTask<Value>,
+    /// A presentation to attach as `eligibilityVp` before signing
+    /// ([`wire::send_reply`]).
+    pub eligibility: Option<EligibilityPresentation>,
+}
+
+/// The vetter role credential to present with an acceptance, bound to the
+/// request it answers (`vetting/request/0.1` rule 5).
+#[derive(Debug, Clone)]
+pub struct EligibilityPresentation {
+    /// The community's role credentials.
+    pub credentials: Vec<Value>,
+    /// The `id` of the request being answered.
+    pub nonce: String,
+    /// The applicant's `joinDid`.
+    pub domain: String,
 }
 
 /// Something that happened that a person should know about. The ones marked
@@ -93,6 +114,15 @@ pub enum Notice {
         application_id: String,
         /// The vetter.
         vetter: String,
+        /// Their presentation showed the community named them a vetter.
+        shown_eligible: bool,
+    },
+    /// Vetter: a community named us a vetter.
+    VetterGranted {
+        /// The community.
+        community: String,
+        /// Until when.
+        valid_until: Option<DateTime<Utc>>,
     },
     /// Applicant: a vetter refused our request.
     VetterRefused {
@@ -168,9 +198,25 @@ impl Notice {
                     "Vetting request from {applicant} accepted — open a session when you are together."
                 )
             }
-            Notice::VetterAccepted { vetter, .. } => {
-                format!("{vetter} accepted your vetting request.")
-            }
+            Notice::VetterAccepted {
+                vetter,
+                shown_eligible: true,
+                ..
+            } => format!("{vetter} accepted your vetting request."),
+            Notice::VetterAccepted { vetter, .. } => format!(
+                "{vetter} accepted your vetting request, but did not show that the community \
+                 named them a vetter — their statement may not count."
+            ),
+            Notice::VetterGranted {
+                community,
+                valid_until,
+            } => match valid_until {
+                Some(until) => format!(
+                    "{community} named you a vetter until {}. You can hand out tickets.",
+                    until.format("%Y-%m-%d")
+                ),
+                None => format!("{community} named you a vetter."),
+            },
             Notice::VetterRefused { vetter, code, .. } => {
                 format!("{vetter} refused your vetting request [{code}].")
             }
@@ -330,10 +376,14 @@ async fn take_request(
         return Handled::default();
     };
     let community = opened.payload.community.clone();
-    let is_member = ctx
-        .account
-        .membership(&community, persona)
-        .is_some_and(|m| m.status.is_active());
+    // A vetter is who the community named: an active member holding its live
+    // role credential (design §10.3). The community checks again.
+    let grant = book.vetter_grant(&community, persona, ctx.now).cloned();
+    let eligible = grant.is_some()
+        && ctx
+            .account
+            .membership(&community, persona)
+            .is_some_and(|m| m.status.is_active());
     let throttle = book.throttle.clone();
     let intake = book.take_request(
         IncomingRequest {
@@ -341,7 +391,7 @@ async fn take_request(
             sender,
             persona,
             body: opened.payload,
-            is_member,
+            eligible,
         },
         ctx.now,
     );
@@ -349,11 +399,20 @@ async fn take_request(
     match intake {
         Intake::Accepted(body) => {
             let request_id = body.request_id.clone();
+            let eligibility = grant.map(|g| EligibilityPresentation {
+                credentials: vec![g.credential],
+                nonce: opened.document.id.clone(),
+                domain: sender.to_string(),
+            });
             Handled {
                 changed: true,
                 reply: wire::response(&opened.document, &body)
                     .ok()
-                    .map(|document| Reply { persona, document }),
+                    .map(|document| Reply {
+                        persona,
+                        document,
+                        eligibility,
+                    }),
                 notice: Some(Notice::RequestAccepted {
                     request_id,
                     applicant: sender.to_string(),
@@ -367,7 +426,11 @@ async fn take_request(
                 changed: throttled,
                 reply: wire::refusal(&opened.document, code, None)
                     .ok()
-                    .map(|document| Reply { persona, document }),
+                    .map(|document| Reply {
+                        persona,
+                        document,
+                        eligibility: None,
+                    }),
                 notice: None,
             }
         }
@@ -398,12 +461,41 @@ async fn accepted(
         warn!(%sender, "vetting acceptance for no request of ours");
         return Handled::default();
     };
-    match application.on_accepted(thread, sender, opened.payload, ctx.now) {
+    // Bound to our request by `nonce` and to us by `domain`, so a presentation
+    // made for someone else, or before the vetter lost the role, does not pass.
+    let eligibility = match &opened.payload.eligibility_vp {
+        None => VetterEligibility::NotShown,
+        Some(vp) => {
+            let expect = EligibilityExpectations {
+                vetter: sender,
+                community: &application.community,
+                role: application.vetter_role(),
+                challenge: thread,
+                domain: &application.join_did,
+                now: ctx.now,
+            };
+            match verify_eligibility_vp(vp, &expect, ctx.resolver).await {
+                Ok(verified) => VetterEligibility::Shown {
+                    credential_id: verified.credential_id().map(str::to_string),
+                    valid_until: verified.valid_until(),
+                },
+                Err(e) => {
+                    warn!(%sender, error = %e, "vetter eligibility presentation did not verify");
+                    VetterEligibility::Failed {
+                        reason: e.to_string(),
+                    }
+                }
+            }
+        }
+    };
+    let shown_eligible = matches!(eligibility, VetterEligibility::Shown { .. });
+    match application.on_accepted(thread, sender, opened.payload, eligibility, ctx.now) {
         Ok(()) => Handled {
             changed: true,
             notice: Some(Notice::VetterAccepted {
                 application_id: application.id.clone(),
                 vetter: sender.to_string(),
+                shown_eligible,
             }),
             ..Handled::default()
         },
@@ -524,6 +616,12 @@ async fn statement(
     message: &Message,
     sender: &str,
 ) -> Option<Handled> {
+    if let Some(credential) = message.body.pointer("/credential_response/credential")
+        && let Some((community, role)) = community_role(credential)
+        && role_matches(&role, VETTER_ROLE)
+    {
+        return Some(vetter_grant(book, ctx, credential, community, sender));
+    }
     let credential = wire::delivered_statement(&message.body)?;
     let Some((persona, _)) = ctx.recipient else {
         return Some(Handled::default());
@@ -552,6 +650,63 @@ async fn statement(
         }
     }
     Some(Handled::default())
+}
+
+/// A community's vetter role credential for one of our personas.
+///
+/// Kept when the community that it names issued it, sent it (authcrypt
+/// authenticates the sender), and named the persona it was addressed to, which
+/// must hold a membership there. Its proof is not checked here: it proves
+/// nothing to us that the authenticated sender does not, and every applicant
+/// it is presented to verifies it.
+fn vetter_grant(
+    book: &mut VettingBook,
+    ctx: &Context<'_>,
+    credential: &Value,
+    community: String,
+    sender: &str,
+) -> Handled {
+    let Some((persona, our_did)) = ctx.recipient else {
+        return Handled::default();
+    };
+    let issuer = credential
+        .get("issuer")
+        .and_then(|i| i.as_str().or_else(|| i.get("id").and_then(Value::as_str)));
+    let subject = credential
+        .pointer("/credentialSubject/id")
+        .and_then(Value::as_str);
+    if community != sender || issuer != Some(sender) || subject != Some(our_did) {
+        warn!(%sender, %community, "vetter role credential not from its community, or not for us — ignored");
+        return Handled::default();
+    }
+    if ctx.account.membership(&community, persona).is_none() {
+        warn!(%community, "vetter role credential from a community we are not a member of — ignored");
+        return Handled::default();
+    }
+    let valid_until = credential
+        .get("validUntil")
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&Utc));
+    let changed = book.keep_vetter_grant(VetterGrant {
+        community: community.clone(),
+        persona,
+        credential_id: credential
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        valid_until,
+        received_at: ctx.now,
+        credential: credential.clone(),
+    });
+    Handled {
+        changed,
+        notice: changed.then_some(Notice::VetterGranted {
+            community,
+            valid_until,
+        }),
+        ..Handled::default()
+    }
 }
 
 fn refused(

@@ -236,14 +236,8 @@ pub async fn process_inbound_message(
         .await
         {
             if let Some(reply) = handled.reply
-                && let Err(e) = openvtc_core::vetting::wire::sign_and_send(
-                    config,
-                    tdk,
-                    service,
-                    reply.persona,
-                    reply.document,
-                )
-                .await
+                && let Err(e) =
+                    openvtc_core::vetting::wire::send_reply(config, tdk, service, reply).await
             {
                 warn!(to = %from_did, error = %e, "could not send vetting reply");
             }

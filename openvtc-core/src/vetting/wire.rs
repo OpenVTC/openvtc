@@ -212,9 +212,65 @@ pub async fn sign_and_send(
     tdk: &affinidi_tdk::TDK,
     service: &crate::didcomm::Messaging,
     persona: crate::config::account::PersonaId,
-    mut document: TrustTask<Value>,
+    document: TrustTask<Value>,
 ) -> Result<String, OpenVTCError> {
-    let keys = config.get_persona_keys_for(persona, tdk).await?;
+    send_reply(
+        config,
+        tdk,
+        service,
+        super::inbound::Reply {
+            persona,
+            document,
+            eligibility: None,
+        },
+    )
+    .await
+}
+
+/// Present the role credentials `eligibility` names as the acceptance's
+/// `eligibilityVp`, signed by `holder` for `authentication`. Done before the
+/// document itself is signed, so its proof covers the presentation.
+///
+/// # Errors
+///
+/// A payload that is not an object, or a presentation that cannot be signed.
+pub async fn attach_eligibility(
+    document: &mut TrustTask<Value>,
+    holder: &Secret,
+    eligibility: super::inbound::EligibilityPresentation,
+) -> Result<(), OpenVTCError> {
+    let vp = vta_sdk::vetting::eligibility::build_eligibility_vp(
+        holder,
+        eligibility.credentials,
+        &eligibility.nonce,
+        &eligibility.domain,
+    )
+    .await
+    .map_err(|e| config_error("eligibility presentation", e))?;
+    document
+        .payload
+        .as_object_mut()
+        .ok_or_else(|| OpenVTCError::Config("vetting reply payload is not an object".into()))?
+        .insert("eligibilityVp".into(), vp);
+    Ok(())
+}
+
+/// Sign a reply from [`super::inbound::handle`] as its persona — presenting
+/// the role credential it asks for with the persona's authentication key —
+/// and send it over DIDComm. Returns the document id.
+///
+/// `Ok` means handed to the transport, not delivered (R1.1).
+pub async fn send_reply(
+    config: &crate::config::Config,
+    tdk: &affinidi_tdk::TDK,
+    service: &crate::didcomm::Messaging,
+    reply: super::inbound::Reply,
+) -> Result<String, OpenVTCError> {
+    let keys = config.get_persona_keys_for(reply.persona, tdk).await?;
+    let mut document = reply.document;
+    if let Some(eligibility) = reply.eligibility {
+        attach_eligibility(&mut document, &keys.authentication.secret, eligibility).await?;
+    }
     sign(&mut document, &keys.signing.secret).await?;
     let message = to_message(&document)?;
     let (from, to) = (
