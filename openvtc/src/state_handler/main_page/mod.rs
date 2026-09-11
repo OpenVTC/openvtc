@@ -168,6 +168,8 @@ impl MainPageState {
         // Update header config
         self.config = MainMenuConfigState::from(config);
 
+        crate::state_handler::vetting_actions::sync(&mut self.content_panel.vetting, config);
+
         // The working community's persona scopes the relationship/inbox/VRC
         // panels (D10 / R-C-6): only items owned by it (plus untagged legacy
         // items in a single-persona account) are shown.

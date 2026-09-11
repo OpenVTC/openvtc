@@ -1038,6 +1038,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 credential_actions::dispatch(ca, ctx.config, ctx.state, ctx.save);
             }
         }
+        Action::Vetting(va) => vetting_actions::dispatch(ctx, va).await,
         Action::Settings(sa) => {
             match settings_actions::dispatch(
                 sa,

@@ -29,6 +29,9 @@ pub enum MainMenu {
     Inbox,
     Relationships,
     Credentials,
+    /// Peer identity vetting: applications to be vetted, and the vetter desk
+    /// (`docs/design/vetting-process.md`).
+    Vetting,
     /// The holder's own identity — personas, the attribute pool behind them, the
     /// profiles over that pool, and what each persona presents in each community.
     ///
@@ -52,6 +55,7 @@ impl Display for MainMenu {
             MainMenu::Inbox => write!(f, "Inbox"),
             MainMenu::Relationships => write!(f, "My Relationships"),
             MainMenu::Credentials => write!(f, "My Credentials"),
+            MainMenu::Vetting => write!(f, "Vetting"),
             MainMenu::Identity => write!(f, "My Identity"),
             MainMenu::Settings => write!(f, "Settings"),
             MainMenu::Vta => write!(f, "VTA Service"),
@@ -70,7 +74,8 @@ impl MainMenu {
             MainMenu::Inbox => MainMenu::Communities,
             MainMenu::Relationships => MainMenu::Inbox,
             MainMenu::Credentials => MainMenu::Relationships,
-            MainMenu::Identity => MainMenu::Credentials,
+            MainMenu::Vetting => MainMenu::Credentials,
+            MainMenu::Identity => MainMenu::Vetting,
             MainMenu::Settings => MainMenu::Identity,
             MainMenu::Vta => MainMenu::Settings,
             MainMenu::Logs => MainMenu::Vta,
@@ -85,7 +90,8 @@ impl MainMenu {
             MainMenu::Communities => MainMenu::Inbox,
             MainMenu::Inbox => MainMenu::Relationships,
             MainMenu::Relationships => MainMenu::Credentials,
-            MainMenu::Credentials => MainMenu::Identity,
+            MainMenu::Credentials => MainMenu::Vetting,
+            MainMenu::Vetting => MainMenu::Identity,
             MainMenu::Identity => MainMenu::Settings,
             MainMenu::Settings => MainMenu::Vta,
             MainMenu::Vta => MainMenu::Logs,
