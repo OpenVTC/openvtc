@@ -14,10 +14,14 @@ use chrono::{Duration, Utc};
 use openvtc_core::community_access::{
     Revoked, grant_device, list_device_grants, revoke_device_grant,
 };
+use openvtc_core::config::account::PersonaId;
 use openvtc_core::config::community_context::{
-    delete_context, ensure_context, preview_context_deletion,
+    ContextDeletion, PersonaTakenAlong, delete_community_context, delete_context, ensure_context,
+    preview_context_deletion,
 };
-use vta_sdk::client::{ClientIdentity, CreateContextRequest, VtaClient};
+use vta_sdk::client::{ClientIdentity, CreateContextRequest, CreateDidWebvhRequest, VtaClient};
+use vta_sdk::error::VtaError;
+use vta_sdk::protocols::did_management::create::WebvhPathMode;
 use vta_sdk::provision_client::EphemeralSetupKey;
 use vta_service::test_support::MockVta;
 
@@ -154,6 +158,109 @@ async fn a_community_context_grants_devices_and_is_deleted_with_its_subtree() {
     // The top context is refused before the VTA is asked.
     assert!(delete_context(&client, TOP, TOP).await.is_err());
     assert!(client.get_context(TOP).await.is_ok());
+
+    mock.shutdown().await;
+}
+
+/// A context deleted with the persona that joined from it: the persona's
+/// did:webvh is removed through `webvh/dids/delete` first — while the VTA still
+/// holds what it needs to remove it from the host — and then the context.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow: spins up a provisionable VTA + an in-process stub webvh host"]
+async fn a_context_deleted_with_its_persona_removes_the_persona_did_first() {
+    let mock = MockVta::start_with_webvh_host().await;
+    let admin = EphemeralSetupKey::generate().expect("generate admin key");
+    let token = mock.ctx.mint_token(&admin.did, "admin", vec![]).await;
+    let client = VtaClient::authenticated(
+        mock.base_url(),
+        ClientIdentity::did_key(
+            admin.did.clone(),
+            admin.private_key_multibase(),
+            mock.vta_did(),
+        ),
+        token,
+    )
+    .await;
+    client
+        .create_context(CreateContextRequest {
+            id: TOP.to_string(),
+            name: "OpenVTC Account".to_string(),
+            description: None,
+            parent: None,
+        })
+        .await
+        .expect("create the account's top context");
+    ensure_context(&client, TOP, ACME, "acme")
+        .await
+        .expect("create the community context");
+
+    // The persona the membership joined as, minted into the community's context.
+    let minted = client
+        .create_did_webvh(CreateDidWebvhRequest {
+            context_id: ACME.to_string(),
+            server_id: Some(MockVta::WEBVH_SERVER_ID.to_string()),
+            url: None,
+            path: None,
+            path_mode: Some(WebvhPathMode::AutoAssign),
+            domain: None,
+            label: None,
+            portable: false,
+            add_mediator_service: false,
+            add_tsp_service: false,
+            additional_services: None,
+            pre_rotation_count: 0,
+            did_document: None,
+            did_log: None,
+            set_primary: false,
+            signing_key_id: None,
+            ka_key_id: None,
+            template: None,
+            template_context: None,
+            template_vars: Default::default(),
+        })
+        .await
+        .expect("mint the persona DID in the community context");
+    let preview = preview_context_deletion(&client, TOP, ACME)
+        .await
+        .expect("preview the context");
+    assert!(
+        preview.contexts[0].webvh_dids.contains(&minted.did),
+        "the persona's DID lives in the context: {:?}",
+        preview.contexts[0]
+    );
+
+    let deletion = ContextDeletion {
+        context_id: ACME.to_string(),
+        persona: Some(PersonaTakenAlong {
+            persona: PersonaId::new(),
+            did: minted.did.clone(),
+            name: "Kernel me".to_string(),
+        }),
+    };
+    let report = delete_community_context(&client, TOP, &deletion).await;
+    assert!(report.persona_removed, "the persona's DID was removed");
+    report.result.expect("the context was deleted");
+
+    assert!(
+        matches!(
+            client.delete_did_webvh(&minted.did).await,
+            Err(VtaError::NotFound(_))
+        ),
+        "the VTA no longer holds the persona's DID"
+    );
+    assert!(client.get_context(ACME).await.is_err());
+
+    // The top context is still refused, before the persona's DID is touched.
+    let refused = delete_community_context(
+        &client,
+        TOP,
+        &ContextDeletion {
+            context_id: TOP.to_string(),
+            persona: deletion.persona.clone(),
+        },
+    )
+    .await;
+    assert!(!refused.persona_removed && refused.result.is_err());
 
     mock.shutdown().await;
 }

@@ -4060,6 +4060,7 @@ mod key_handler_tests {
             persona: openvtc_core::config::account::PersonaId::new(),
             community: "a".to_string(),
             context_id: "top/a".to_string(),
+            takes_persona: None,
             phase,
             typed: "DELET".to_string(),
         };

@@ -368,6 +368,18 @@ fn render_context_delete(lines: &mut Vec<Line<'static>>, view: &ContextDeleteVie
                         .style(dim),
                 );
             }
+            // What goes beyond the VTA's preview: a persona deleted with the
+            // context, and the membership record with it — or the record kept.
+            lines.push(Line::from(""));
+            let takes_persona = view.takes_persona.is_some();
+            for line in view.deletion().consequences(&view.community) {
+                let line = Line::from(format!(" {line}"));
+                lines.push(if takes_persona {
+                    line.fg(COLOR_ORANGE)
+                } else {
+                    line.style(dim)
+                });
+            }
             lines.push(Line::from(""));
             lines.push(
                 Line::from(format!(
@@ -968,6 +980,38 @@ mod key_hint_tests {
         );
     }
 
+    /// A persona deleted with the context is named with its DID, with what that
+    /// means, beside the membership record it takes along.
+    #[test]
+    fn a_deletion_that_takes_the_persona_says_so_plainly() {
+        let mut state = state_with(Some(own(true)), None);
+        let persona = PersonaId::new();
+        state.context_delete = Some(ContextDeleteView {
+            vtc_did: "did:webvh:acme".to_string(),
+            persona,
+            community: "Acme".to_string(),
+            context_id: CTX.to_string(),
+            takes_persona: Some(openvtc_core::config::community_context::PersonaTakenAlong {
+                persona,
+                did: "did:webvh:scid:host:kernel-me".to_string(),
+                name: "Kernel me".to_string(),
+            }),
+            phase: ContextDeletePhase::Ready(ContextDeletionPreview::default()),
+            typed: String::new(),
+        });
+        let shown = text(&render_for_test(&state));
+        for item in [
+            "Persona Kernel me",
+            "did:webvh:scid:host:kernel-me",
+            "can no longer be used anywhere",
+            "stays published there",
+            "finished membership of Acme",
+            "Type DELETE",
+        ] {
+            assert!(shown.contains(item), "missing {item:?}:\n{shown}");
+        }
+    }
+
     #[test]
     fn a_deletion_shows_everything_the_vta_will_remove_and_what_to_type() {
         let mut state = state_with(Some(own(true)), None);
@@ -976,6 +1020,7 @@ mod key_hint_tests {
             persona: PersonaId::new(),
             community: "Acme".to_string(),
             context_id: CTX.to_string(),
+            takes_persona: None,
             phase: ContextDeletePhase::Ready(ContextDeletionPreview {
                 context_id: CTX.to_string(),
                 contexts: vec![

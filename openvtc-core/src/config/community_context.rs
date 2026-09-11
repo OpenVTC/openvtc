@@ -434,6 +434,82 @@ pub fn context_uses(
     memberships.chain(personas).chain(applications).collect()
 }
 
+/// A persona deleted together with its community's context: its keys and DID
+/// live there, and the finished membership being cleaned up was its only use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersonaTakenAlong {
+    pub persona: PersonaId,
+    /// The persona's `did:webvh`.
+    pub did: String,
+    /// The persona's label, or its DID.
+    pub name: String,
+}
+
+/// What deleting a finished membership's context takes with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextDeletion {
+    /// The context, deleted with its subtree.
+    pub context_id: String,
+    /// The persona deleted along with the context — and, with the persona, the
+    /// membership record, which is left with nothing to act on. `None` when no
+    /// persona's keys are in the context; the membership record is then kept,
+    /// without a context.
+    pub persona: Option<PersonaTakenAlong>,
+}
+
+impl ContextDeletion {
+    /// What the deletion removes beyond the VTA's own preview of the context,
+    /// one line each, for the membership of `community`.
+    #[must_use]
+    pub fn consequences(&self, community: &str) -> Vec<String> {
+        match &self.persona {
+            Some(persona) => vec![
+                "Also deleted with it:".to_string(),
+                format!("  Persona {}", persona.name),
+                format!("    {}", persona.did),
+                "    This persona can no longer be used anywhere. Its did:webvh is removed from its"
+                    .to_string(),
+                "    host through your VTA; if the host cannot be reached, it stays published there."
+                    .to_string(),
+                format!("  Your finished membership of {community}"),
+                "    Its record is removed: nothing is left for it to act on.".to_string(),
+            ],
+            None => vec![format!(
+                "Your finished membership of {community} is kept, without a context."
+            )],
+        }
+    }
+}
+
+/// Something other than the finished membership that uses its persona, and so
+/// keeps the persona — and the context holding its keys — from being deleted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PersonaUse {
+    /// Another membership, of any status.
+    Membership {
+        /// The community's display name, or its DID.
+        name: String,
+    },
+    /// A vetting application, wherever its face is worn.
+    VettingApplication { community: String },
+    /// It is the persona OpenVTC is acting as.
+    Active,
+}
+
+impl PersonaUse {
+    /// The use, in words.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            PersonaUse::Membership { name } => format!("your membership of {name}"),
+            PersonaUse::VettingApplication { community } => {
+                format!("your vetting application to {community}")
+            }
+            PersonaUse::Active => "OpenVTC, as your active persona".to_string(),
+        }
+    }
+}
+
 /// Why a membership's context cannot be deleted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeletionRefusal {
@@ -445,6 +521,13 @@ pub enum DeletionRefusal {
     StillLive,
     /// Something else still uses the context.
     InUse(Vec<ContextUse>),
+    /// The context holds the keys of the membership's persona, and the persona
+    /// is used by something besides this membership.
+    PersonaInUse {
+        /// The persona's label, or its DID.
+        name: String,
+        uses: Vec<PersonaUse>,
+    },
 }
 
 impl DeletionRefusal {
@@ -467,16 +550,33 @@ impl DeletionRefusal {
                     what.join("; ")
                 )
             }
+            DeletionRefusal::PersonaInUse { name, uses } => {
+                let what: Vec<String> = uses.iter().map(PersonaUse::describe).collect();
+                format!(
+                    "The context holds the keys and DID of persona {name}, which is also used by \
+                     {} — it can be deleted with that persona only while this finished \
+                     membership is the persona's only use.",
+                    what.join("; ")
+                )
+            }
         }
     }
 }
 
-/// The context `membership` lives in, if it may be deleted.
+/// What deleting `membership`'s context would take with it, if it may be
+/// deleted.
 ///
 /// Only a membership that is over (left, withdrawn, rejected, removed,
 /// expired), only a sub-context of the account's own, and only when nothing
-/// else — another membership, any persona's keys, a vetting application —
+/// else — another membership, another persona's keys, a vetting application —
 /// uses it. The membership itself does not count as a use.
+///
+/// The context may hold the keys of the membership's own persona: joining
+/// mints a persona into the community's context. Then the persona goes too,
+/// with the membership record, provided this finished membership is the
+/// persona's only use — no other membership of any status, no vetting
+/// application, and not `active_persona`. Otherwise the refusal names what
+/// still uses the persona.
 ///
 /// # Errors
 ///
@@ -484,8 +584,9 @@ impl DeletionRefusal {
 pub fn deletable_context(
     account: &Account,
     applications: &[Application],
+    active_persona: Option<PersonaId>,
     membership: &CommunityRecord,
-) -> Result<String, DeletionRefusal> {
+) -> Result<ContextDeletion, DeletionRefusal> {
     let context_id = membership.sub_context_id.as_str();
     if !is_sub_context(context_id, &account.top_context_id) {
         return Err(DeletionRefusal::TopContext);
@@ -493,18 +594,60 @@ pub fn deletable_context(
     if !membership.status.is_inactive() {
         return Err(DeletionRefusal::StillLive);
     }
+    let own = membership.persona_ref;
+    let is_this = |vtc: &str, persona: PersonaId| vtc == membership.vtc_did && persona == own;
     let uses: Vec<ContextUse> = context_uses(account, applications, context_id)
         .into_iter()
         .filter(|u| {
             !matches!(u, ContextUse::Membership { vtc_did, persona, .. }
-                if *vtc_did == membership.vtc_did && *persona == membership.persona_ref)
+                if is_this(vtc_did, *persona))
         })
         .collect();
-    if uses.is_empty() {
-        Ok(context_id.to_string())
-    } else {
-        Err(DeletionRefusal::InUse(uses))
+    let own_keys =
+        |u: &ContextUse| matches!(u, ContextUse::PersonaKeys { persona, .. } if *persona == own);
+    if uses.iter().any(|u| !own_keys(u)) {
+        return Err(DeletionRefusal::InUse(uses));
     }
+    let context_id = context_id.to_string();
+    let record = match account.personas.get(&own) {
+        Some(record) if uses.iter().any(own_keys) => record,
+        _ => {
+            return Ok(ContextDeletion {
+                context_id,
+                persona: None,
+            });
+        }
+    };
+    let name = record.label.clone().unwrap_or_else(|| record.did.clone());
+    let mut persona_uses: Vec<PersonaUse> = account
+        .memberships()
+        .filter(|m| m.persona_ref == own && !is_this(&m.vtc_did, m.persona_ref))
+        .map(|m| PersonaUse::Membership {
+            name: m.display_name.clone().unwrap_or_else(|| m.vtc_did.clone()),
+        })
+        .collect();
+    persona_uses.extend(applications.iter().filter(|a| a.persona == own).map(|a| {
+        PersonaUse::VettingApplication {
+            community: a.community.clone(),
+        }
+    }));
+    if active_persona == Some(own) {
+        persona_uses.push(PersonaUse::Active);
+    }
+    if !persona_uses.is_empty() {
+        return Err(DeletionRefusal::PersonaInUse {
+            name,
+            uses: persona_uses,
+        });
+    }
+    Ok(ContextDeletion {
+        context_id,
+        persona: Some(PersonaTakenAlong {
+            persona: own,
+            did: record.did.clone(),
+            name,
+        }),
+    })
 }
 
 /// The contexts strictly beneath `context_id` among `all`, in path order.
@@ -688,6 +831,62 @@ pub async fn delete_context(
         .map_err(|e| vta_failure(&format!("delete {context_id}"), e))
 }
 
+/// What [`delete_community_context`] did.
+#[derive(Debug)]
+pub struct DeletionReport {
+    /// The persona's `did:webvh` was removed at the VTA. True even when the
+    /// context delete that follows fails: the persona is unusable either way,
+    /// and the caller must forget it.
+    pub persona_removed: bool,
+    /// Whether the whole deletion succeeded.
+    pub result: Result<(), OpenVTCError>,
+}
+
+/// Carry out `deletion`: remove the persona's `did:webvh` first, when one goes
+/// with the context, then delete the context and its subtree.
+///
+/// The DID goes through the VTA's `webvh/dids/delete` — the removal deleting a
+/// persona already uses: it revokes the credentials the VTA issued to the DID
+/// and deletes its log at the hosting server. It goes first because the
+/// context's cascade only drops the VTA's own record of the DID, after which
+/// nothing could remove it from its host. If the VTA refuses the DID, nothing
+/// is deleted.
+pub async fn delete_community_context(
+    client: &VtaClient,
+    top_context_id: &str,
+    deletion: &ContextDeletion,
+) -> DeletionReport {
+    if let Err(e) = require_sub_context(top_context_id, &deletion.context_id) {
+        return DeletionReport {
+            persona_removed: false,
+            result: Err(e),
+        };
+    }
+    let mut persona_removed = false;
+    if let Some(persona) = &deletion.persona {
+        match client.delete_did_webvh(&persona.did).await {
+            // Already gone is what was asked for.
+            Ok(()) | Err(VtaError::NotFound(_)) => persona_removed = true,
+            Err(e) => {
+                return DeletionReport {
+                    persona_removed: false,
+                    result: Err(vta_failure(
+                        &format!(
+                            "remove persona {}'s DID {} (nothing was deleted)",
+                            persona.name, persona.did
+                        ),
+                        e,
+                    )),
+                };
+            }
+        }
+    }
+    DeletionReport {
+        persona_removed,
+        result: delete_context(client, top_context_id, &deletion.context_id).await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,8 +1051,11 @@ mod tests {
         join(&mut account, &legacy, "did:webvh:k", "openvtc/kernel");
         end(&mut account, "did:webvh:k");
         assert_eq!(
-            deletable_context(&account, &[], membership(&account, "did:webvh:k")).as_deref(),
-            Ok("openvtc/kernel")
+            deletable_context(&account, &[], None, membership(&account, "did:webvh:k")),
+            Ok(ContextDeletion {
+                context_id: "openvtc/kernel".into(),
+                persona: None,
+            })
         );
     }
 
@@ -864,12 +1066,12 @@ mod tests {
         join(&mut account, &legacy, "did:webvh:k", "openvtc/kernel");
         join(&mut account, &legacy, "did:webvh:t", TOP);
         assert_eq!(
-            deletable_context(&account, &[], membership(&account, "did:webvh:k")),
+            deletable_context(&account, &[], None, membership(&account, "did:webvh:k")),
             Err(DeletionRefusal::StillLive)
         );
         end(&mut account, "did:webvh:t");
         assert_eq!(
-            deletable_context(&account, &[], membership(&account, "did:webvh:t")),
+            deletable_context(&account, &[], None, membership(&account, "did:webvh:t")),
             Err(DeletionRefusal::TopContext)
         );
     }
@@ -890,9 +1092,12 @@ mod tests {
             "openvtc/kernel",
         )];
 
-        let Err(DeletionRefusal::InUse(uses)) =
-            deletable_context(&account, &applications, membership(&account, "did:webvh:k"))
-        else {
+        let Err(DeletionRefusal::InUse(uses)) = deletable_context(
+            &account,
+            &applications,
+            None,
+            membership(&account, "did:webvh:k"),
+        ) else {
             panic!("the context is in use");
         };
         assert!(
@@ -915,6 +1120,131 @@ mod tests {
         assert!(
             text.contains("did:webvh:k2") && text.contains("did:webvh:v"),
             "{text}"
+        );
+    }
+
+    /// Joining mints the persona into the community's context. Once that
+    /// membership is over and is the persona's only use, the persona goes with
+    /// the context — and the preview says so, naming its DID.
+    #[test]
+    fn a_persona_whose_only_use_is_the_finished_membership_goes_with_its_context() {
+        let mut account = account();
+        let minted = persona("openvtc/kernel");
+        join(&mut account, &minted, "did:webvh:k", "openvtc/kernel");
+        end(&mut account, "did:webvh:k");
+
+        let deletion = deletable_context(&account, &[], None, membership(&account, "did:webvh:k"))
+            .expect("the persona has no other use");
+        assert_eq!(deletion.context_id, "openvtc/kernel");
+        assert_eq!(
+            deletion.persona,
+            Some(PersonaTakenAlong {
+                persona: minted.persona_id,
+                did: minted.did.clone(),
+                name: minted.did.clone(),
+            })
+        );
+        let text = deletion.consequences("Kernel").join("\n");
+        for item in [
+            "Persona",
+            minted.did.as_str(),
+            "can no longer be used anywhere",
+            "stays published there",
+            "finished membership of Kernel",
+            "record is removed",
+        ] {
+            assert!(text.contains(item), "missing {item:?} in\n{text}");
+        }
+    }
+
+    /// Anything else using the persona keeps it, and the context holding its
+    /// keys: another membership of any status, a vetting application wherever
+    /// its face is worn, or being the active persona. The refusal says which.
+    #[test]
+    fn a_persona_used_by_anything_else_keeps_its_context() {
+        let minted = persona("openvtc/kernel");
+        let finished = |extra: &dyn Fn(&mut Account)| {
+            let mut account = account();
+            join(&mut account, &minted, "did:webvh:k", "openvtc/kernel");
+            extra(&mut account);
+            end(&mut account, "did:webvh:k");
+            account
+        };
+
+        let another = finished(&|account| {
+            join(account, &minted, "did:webvh:w", "openvtc/work");
+            end(account, "did:webvh:w");
+        });
+        let refusal = deletable_context(&another, &[], None, membership(&another, "did:webvh:k"))
+            .unwrap_err();
+        assert_eq!(
+            refusal,
+            DeletionRefusal::PersonaInUse {
+                name: minted.did.clone(),
+                uses: vec![PersonaUse::Membership {
+                    name: "did:webvh:w".into()
+                }],
+            }
+        );
+        assert!(refusal.describe().contains("did:webvh:w"));
+
+        let alone = finished(&|_| {});
+        let applications = [application(
+            minted.persona_id,
+            "did:webvh:v",
+            "openvtc/elsewhere",
+        )];
+        assert!(matches!(
+            deletable_context(&alone, &applications, None, membership(&alone, "did:webvh:k")),
+            Err(DeletionRefusal::PersonaInUse { uses, .. })
+                if uses == [PersonaUse::VettingApplication { community: "did:webvh:v".into() }]
+        ));
+
+        let refusal = deletable_context(
+            &alone,
+            &[],
+            Some(minted.persona_id),
+            membership(&alone, "did:webvh:k"),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            &refusal,
+            DeletionRefusal::PersonaInUse { uses, .. } if uses == &[PersonaUse::Active]
+        ));
+        assert!(refusal.describe().contains("active persona"));
+    }
+
+    /// Only the membership's own persona is ever taken along; another
+    /// persona's keys in the context refuse the deletion.
+    #[test]
+    fn another_personas_keys_are_never_taken_along() {
+        let mut account = account();
+        let legacy = persona("");
+        join(&mut account, &legacy, "did:webvh:k", "openvtc/kernel");
+        end(&mut account, "did:webvh:k");
+        let other = persona("openvtc/kernel");
+        account.personas.insert(other.persona_id, other.clone());
+
+        let Err(DeletionRefusal::InUse(uses)) =
+            deletable_context(&account, &[], None, membership(&account, "did:webvh:k"))
+        else {
+            panic!("another persona's keys are a use");
+        };
+        assert!(matches!(
+            uses.as_slice(),
+            [ContextUse::PersonaKeys { persona, .. }] if *persona == other.persona_id
+        ));
+    }
+
+    #[test]
+    fn a_context_without_a_persona_keeps_the_membership() {
+        let deletion = ContextDeletion {
+            context_id: "openvtc/kernel".into(),
+            persona: None,
+        };
+        assert_eq!(
+            deletion.consequences("Kernel"),
+            ["Your finished membership of Kernel is kept, without a context."]
         );
     }
 

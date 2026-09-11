@@ -6,11 +6,14 @@
 //!   delete would remove — every key, DID, access entry and DID template, in
 //!   the context and in each sub-context the delete cascades to — and all of
 //!   it is shown; the holder types `DELETE`; then the subtree is deleted. A
-//!   context another membership, a persona's keys, or a vetting application
-//!   still uses is refused before the VTA is asked, naming what uses it
-//!   ([`community_context::deletable_context`]). The check runs again before
-//!   the delete itself, because a preview can sit on screen for as long as
-//!   the holder likes.
+//!   context another membership, another persona's keys, or a vetting
+//!   application still uses is refused before the VTA is asked, naming what
+//!   uses it ([`community_context::deletable_context`]). When the context holds
+//!   the keys of the membership's own persona and this membership is that
+//!   persona's only use, the persona and the membership record go with it,
+//!   and the preview says so; any other use of the persona refuses. The check
+//!   runs again before the delete itself, because a preview can sit on screen
+//!   for as long as the holder likes.
 //! - **Give a device access** to it: a `did:key` granted the VTA's
 //!   `application` role in that context alone, with an expiry, listed and
 //!   revocable per community ([`openvtc_core::community_access`]).
@@ -26,7 +29,9 @@ use chrono::Utc;
 use openvtc_core::community_access::{self, DeviceGrant, EXPIRY_CHOICES, Revoked};
 use openvtc_core::config::Config;
 use openvtc_core::config::account::{CommunityRecord, PersonaId};
-use openvtc_core::config::community_context::{self, ContextDeletionPreview, DELETE_CONFIRMATION};
+use openvtc_core::config::community_context::{
+    self, ContextDeletion, ContextDeletionPreview, DELETE_CONFIRMATION,
+};
 use openvtc_core::errors::OpenVTCError;
 use vta_sdk::client::VtaClient;
 
@@ -262,12 +267,13 @@ fn start_deletion(ctx: &mut ActionCtx<'_>, index: usize) {
     let Some(membership) = membership_at(ctx.state, config, index) else {
         return;
     };
-    let context_id = match community_context::deletable_context(
+    let deletion = match community_context::deletable_context(
         &config.account,
         &config.private.vetting.applications,
+        active_persona(config),
         membership,
     ) {
-        Ok(id) => id,
+        Ok(deletion) => deletion,
         Err(refusal) => {
             panel(ctx.state).status_message = Some(refusal.describe());
             return;
@@ -277,10 +283,12 @@ fn start_deletion(ctx: &mut ActionCtx<'_>, index: usize) {
         vtc_did: membership.vtc_did.clone(),
         persona: membership.persona_ref,
         community: community_name(config, membership),
-        context_id: context_id.clone(),
+        context_id: deletion.context_id.clone(),
+        takes_persona: deletion.persona,
         phase: ContextDeletePhase::Previewing,
         typed: String::new(),
     };
+    let context_id = deletion.context_id;
     let top = config.account.top_context_id.clone();
     let client = match claim(ctx, "delete a context") {
         Ok(client) => client,
@@ -326,10 +334,13 @@ fn confirm_deletion(ctx: &mut ActionCtx<'_>) {
             community_context::deletable_context(
                 &config.account,
                 &config.private.vetting.applications,
+                active_persona(config),
                 m,
             )
         }) {
-        Some(Ok(id)) if id == view.context_id => None,
+        // The same deletion the holder was shown — including whether a persona
+        // goes with it — or none at all.
+        Some(Ok(deletion)) if deletion == view.deletion() => None,
         Some(Ok(_)) | None => {
             Some("The membership changed since the preview — start the deletion again.".to_string())
         }
@@ -352,23 +363,45 @@ fn confirm_deletion(ctx: &mut ActionCtx<'_>) {
     if let Some(open) = panel(ctx.state).context_delete.as_mut() {
         open.phase = ContextDeletePhase::Deleting;
     }
+    let deletion = view.deletion();
     let ContextDeleteView {
         vtc_did,
         persona,
-        context_id,
+        community,
         ..
     } = view;
+    let service = ctx.didcomm_service.clone();
     spawn(ctx, async move {
-        let result = community_context::delete_context(&client, &top, &context_id)
-            .await
-            .map_err(|e| reason(&e));
+        let report = community_context::delete_community_context(&client, &top, &deletion).await;
+        if report.persona_removed
+            && let Some(taken) = &deletion.persona
+        {
+            // The DID is gone, so the persona's listener has nothing left to
+            // receive — the same teardown deleting a persona does.
+            service
+                .remove_listener(&openvtc_core::didcomm::persona_listener_id(&taken.did))
+                .await;
+        }
         ContextOutcome::Deleted {
             vtc_did,
             persona,
-            context_id,
-            result,
+            community,
+            persona_removed: report.persona_removed,
+            result: report.result.map_err(|e| reason(&e)),
+            deletion,
         }
     });
+}
+
+/// The persona OpenVTC is acting as — the one selected, or, with no selection,
+/// the default it falls back to. A persona in use that way is never deleted
+/// with a context. The selection is read directly as well as through
+/// [`Config::active_identity`], which only resolves a selection whose identity
+/// has been loaded.
+fn active_persona(config: &Config) -> Option<PersonaId> {
+    config
+        .active_persona
+        .or_else(|| config.active_identity().map(|identity| identity.persona_id))
 }
 
 fn open_devices(ctx: &mut ActionCtx<'_>, index: usize) {
@@ -523,11 +556,18 @@ pub(crate) enum ContextOutcome {
         context_id: String,
         result: Result<ContextDeletionPreview, String>,
     },
-    /// The context was deleted, or was not.
+    /// The context was deleted, or was not — with the persona that was to go
+    /// with it.
     Deleted {
         vtc_did: String,
+        /// The finished membership's persona.
         persona: PersonaId,
-        context_id: String,
+        /// The community's name, for the status line.
+        community: String,
+        deletion: ContextDeletion,
+        /// The persona's DID was removed at the VTA — true even when the
+        /// context delete that followed failed.
+        persona_removed: bool,
         result: Result<(), String>,
     },
     /// The context's device grants were read.
@@ -552,6 +592,23 @@ pub(crate) enum ContextOutcome {
 }
 
 impl ContextOutcome {
+    /// The finished membership whose record a deletion removed along with its
+    /// persona. Its messaging session, if any is left, belongs to the runtime
+    /// loop's session manager, so the loop is told to tear it down.
+    pub(crate) fn membership_removed(&self) -> Option<(String, PersonaId)> {
+        match self {
+            ContextOutcome::Deleted {
+                vtc_did,
+                persona,
+                deletion,
+                persona_removed: true,
+                result: Ok(()),
+                ..
+            } if deletion.persona.is_some() => Some((vtc_did.clone(), *persona)),
+            _ => None,
+        }
+    }
+
     /// Apply the result to the panel, the account and the activity log.
     pub(crate) fn apply(self, state: &mut State, config: &mut Config, save: &mut SaveScheduler) {
         match self {
@@ -582,9 +639,12 @@ impl ContextOutcome {
             ContextOutcome::Deleted {
                 vtc_did,
                 persona,
-                context_id,
+                community,
+                deletion,
+                persona_removed,
                 result,
             } => {
+                let context_id = deletion.context_id.as_str();
                 let communities = panel(state);
                 if communities
                     .context_delete
@@ -592,6 +652,24 @@ impl ContextOutcome {
                     .is_some_and(|v| v.context_id == context_id)
                 {
                     communities.context_delete = None;
+                }
+                // Once its DID is gone from the VTA the persona cannot be used,
+                // whatever became of the context, so it leaves the account now —
+                // through the same local cleanup deleting a persona does.
+                let taken = deletion.persona.as_ref().filter(|_| persona_removed);
+                if let Some(taken) = taken {
+                    let key_ids = config
+                        .account
+                        .personas
+                        .get(&taken.persona)
+                        .map(|record| record.key_refs.iter().map(|k| k.key_id.clone()).collect())
+                        .unwrap_or_default();
+                    crate::state_handler::relationship_actions::DidDeleteOutcome {
+                        did: taken.did.clone(),
+                        persona_id: taken.persona,
+                        key_ids,
+                    }
+                    .apply(state, config, save);
                 }
                 match result {
                     Ok(()) => {
@@ -610,23 +688,44 @@ impl ContextOutcome {
                             .vetting
                             .applications
                             .iter_mut()
-                            .filter(|a| a.context_id.as_deref() == Some(context_id.as_str()))
+                            .filter(|a| a.context_id.as_deref() == Some(context_id))
                         {
                             application.context_id = None;
                         }
-                        communities.device_grants.remove(&context_id);
-                        communities.status_message = Some(format!(
-                            "Deleted context {context_id} and everything in it."
-                        ));
+                        // With its persona gone the finished membership has
+                        // nothing left to act on.
+                        let membership_removed = taken.is_some()
+                            && config.account.delete_membership(&vtc_did, persona).is_ok();
+                        let communities = panel(state);
+                        communities.device_grants.remove(context_id);
+                        communities.status_message = Some(match taken {
+                            Some(t) if membership_removed => format!(
+                                "Deleted context {context_id}, persona {} and your membership of {community}.",
+                                t.name
+                            ),
+                            Some(t) => {
+                                format!("Deleted context {context_id} and persona {}.", t.name)
+                            }
+                            None => format!("Deleted context {context_id} and everything in it."),
+                        });
                         save.mark_dirty();
                         state.main_page.sync_from_config(config);
                         state.main_page.log(format!(
-                            "Deleted community context {context_id} (community {vtc_did}, persona {persona})"
+                            "Deleted community context {context_id} (community {vtc_did}, persona {persona}){}",
+                            taken
+                                .map(|t| format!(" with persona DID {}", t.did))
+                                .unwrap_or_default()
                         ));
                     }
                     Err(e) => {
-                        communities.status_message =
-                            Some(format!("Couldn't delete {context_id}: {e}"));
+                        panel(state).status_message = Some(match taken {
+                            Some(t) => format!(
+                                "Removed persona {}'s DID, but couldn't delete {context_id}: {e} \
+                                 The context can be deleted again from here.",
+                                t.name
+                            ),
+                            None => format!("Couldn't delete {context_id}: {e}"),
+                        });
                         state
                             .main_page
                             .log_error("Context deletion failed", e.as_str());
@@ -828,6 +927,7 @@ mod tests {
             persona: PersonaId::new(),
             community: "Acme".to_string(),
             context_id: CTX.to_string(),
+            takes_persona: None,
             phase,
             typed: String::new(),
         }
@@ -1055,10 +1155,20 @@ mod tests {
         ContextOutcome::Deleted {
             vtc_did: VTC.into(),
             persona,
-            context_id: CTX.into(),
+            community: "Acme".into(),
+            deletion: ContextDeletion {
+                context_id: CTX.into(),
+                persona: None,
+            },
+            persona_removed: false,
             result: Ok(()),
         }
         .apply(&mut state, &mut config, &mut save);
+        assert_eq!(
+            config.account.memberships().count(),
+            1,
+            "without a persona the membership record is kept"
+        );
 
         assert!(
             config
@@ -1087,7 +1197,12 @@ mod tests {
         ContextOutcome::Deleted {
             vtc_did: VTC.into(),
             persona: PersonaId::new(),
-            context_id: CTX.into(),
+            community: "Acme".into(),
+            deletion: ContextDeletion {
+                context_id: CTX.into(),
+                persona: None,
+            },
+            persona_removed: false,
             result: Err("your VTA refused".into()),
         }
         .apply(&mut state, &mut config, &mut save);
@@ -1098,6 +1213,135 @@ mod tests {
                 .as_deref()
                 .is_some_and(|m| m.contains("Couldn't delete"))
         );
+    }
+
+    const PERSONA_DID: &str = "did:webvh:scid:example.com:kernel";
+
+    /// A finished membership whose persona was minted into its context.
+    fn finished_membership_with_its_persona(config: &mut Config) -> PersonaId {
+        use openvtc_core::config::account::PersonaRecord;
+        let persona = PersonaId::new();
+        config.account.top_context_id = "openvtc".into();
+        config.account.personas.insert(
+            persona,
+            PersonaRecord {
+                extra: serde_json::Map::new(),
+                persona_id: persona,
+                did: PERSONA_DID.into(),
+                did_document: None,
+                key_refs: vec![],
+                mediator_did: None,
+                origin_context_id: CTX.into(),
+                created_at: Utc::now(),
+                label: Some("Kernel me".into()),
+            },
+        );
+        let mut record = CommunityRecord::new_pending(
+            VTC.into(),
+            None,
+            CTX.into(),
+            persona,
+            uuid::Uuid::new_v4(),
+            Utc::now(),
+        );
+        record.status = openvtc_core::config::account::CommunityStatus::Left;
+        config.account.add_membership(record);
+        persona
+    }
+
+    fn with_persona(
+        persona: PersonaId,
+        persona_removed: bool,
+        result: Result<(), String>,
+    ) -> ContextOutcome {
+        ContextOutcome::Deleted {
+            vtc_did: VTC.into(),
+            persona,
+            community: "Acme".into(),
+            deletion: ContextDeletion {
+                context_id: CTX.into(),
+                persona: Some(community_context::PersonaTakenAlong {
+                    persona,
+                    did: PERSONA_DID.into(),
+                    name: "Kernel me".into(),
+                }),
+            },
+            persona_removed,
+            result,
+        }
+    }
+
+    /// The context, the persona and the finished membership go together, and
+    /// the loop is asked to tear down whatever session the membership had.
+    #[test]
+    fn a_context_deleted_with_its_persona_takes_the_membership_too() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+        let persona = finished_membership_with_its_persona(&mut config);
+
+        let outcome = with_persona(persona, true, Ok(()));
+        assert_eq!(
+            outcome.membership_removed(),
+            Some((VTC.to_string(), persona))
+        );
+        outcome.apply(&mut state, &mut config, &mut save);
+
+        assert!(!config.account.personas.contains_key(&persona));
+        assert_eq!(config.account.memberships().count(), 0);
+        assert!(save.is_pending());
+        let status = panel(&mut state).status_message.clone().unwrap_or_default();
+        assert!(
+            status.contains("persona Kernel me") && status.contains("membership of Acme"),
+            "{status}"
+        );
+    }
+
+    /// A DID removed before the context delete failed still takes the persona
+    /// out of the account — it can no longer be used — while the membership
+    /// keeps its context, so the delete can be tried again.
+    #[test]
+    fn a_persona_removed_before_a_failed_context_delete_still_leaves_the_account() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+        let persona = finished_membership_with_its_persona(&mut config);
+
+        let outcome = with_persona(persona, true, Err("your VTA failed".into()));
+        assert_eq!(outcome.membership_removed(), None);
+        outcome.apply(&mut state, &mut config, &mut save);
+
+        assert!(!config.account.personas.contains_key(&persona));
+        let membership = config
+            .account
+            .memberships()
+            .next()
+            .expect("the record stays");
+        assert_eq!(membership.sub_context_id, CTX);
+        let status = panel(&mut state).status_message.clone().unwrap_or_default();
+        assert!(status.contains("can be deleted again"), "{status}");
+    }
+
+    /// A DID the VTA would not remove means nothing was deleted, and nothing
+    /// is forgotten.
+    #[test]
+    fn a_refused_persona_removal_deletes_nothing() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+        let persona = finished_membership_with_its_persona(&mut config);
+
+        let outcome = with_persona(
+            persona,
+            false,
+            Err("your VTA rejected the request to remove persona Kernel me's DID (nothing was deleted)".into()),
+        );
+        assert_eq!(outcome.membership_removed(), None);
+        outcome.apply(&mut state, &mut config, &mut save);
+
+        assert!(config.account.personas.contains_key(&persona));
+        assert_eq!(config.account.memberships().count(), 1);
+        assert!(!save.is_pending());
     }
 
     #[test]

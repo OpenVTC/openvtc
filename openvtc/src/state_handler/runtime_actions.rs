@@ -1487,12 +1487,8 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// A context holding the persona's keys is refused before the VTA is asked,
-    /// and the refusal names the persona.
-    #[tokio::test]
-    async fn a_context_holding_persona_keys_is_not_deleted() {
-        let mut h = Harness::new(true).await;
-        let persona = membership(&mut h, "openvtc/acme", CommunityStatus::Left);
+    /// The persona the membership joined as, minted into its context.
+    fn persona_in_context(h: &mut Harness, persona: PersonaId) {
         h.config.account.personas.insert(
             persona,
             PersonaRecord {
@@ -1507,12 +1503,67 @@ mod tests {
                 label: Some("Kernel me".into()),
             },
         );
+    }
+
+    /// When the finished membership is its persona's only use, the preview is
+    /// asked for with the persona marked to go too.
+    #[tokio::test]
+    async fn a_persona_whose_only_use_is_the_finished_membership_goes_with_the_context() {
+        let mut h = Harness::new(true).await;
+        let persona = membership(&mut h, "openvtc/acme", CommunityStatus::Left);
+        persona_in_context(&mut h, persona);
 
         h.handle(Action::CommunityContext(
             CommunityContextAction::DeleteStart(0),
         ))
         .await;
 
+        assert!(community_access_busy(&h), "the preview is in flight");
+        let view = h
+            .state
+            .main_page
+            .content_panel
+            .communities
+            .context_delete
+            .clone()
+            .expect("the deletion view is open");
+        let taken = view
+            .takes_persona
+            .expect("the persona goes with the context");
+        assert_eq!(taken.persona, persona);
+        assert_eq!(taken.did, "did:webvh:scid:example.com:kernel");
+    }
+
+    /// A persona used by anything else — here another membership, and being
+    /// the active persona — keeps its context: refused before the VTA is asked,
+    /// naming the persona and the use.
+    #[tokio::test]
+    async fn a_persona_used_elsewhere_keeps_its_context() {
+        let mut h = Harness::new(true).await;
+        let persona = membership(&mut h, "openvtc/acme", CommunityStatus::Left);
+        persona_in_context(&mut h, persona);
+        let mut other = CommunityRecord::new_pending(
+            "did:webvh:QmScid:example.com:other".into(),
+            Some("Other".into()),
+            "openvtc/other".into(),
+            persona,
+            uuid::Uuid::new_v4(),
+            chrono::Utc::now(),
+        );
+        other.status = CommunityStatus::Removed;
+        h.config.account.add_membership(other);
+        let acme = h
+            .config
+            .account
+            .communities_for_display(false)
+            .iter()
+            .position(|m| m.vtc_did == VTC)
+            .unwrap();
+
+        h.handle(Action::CommunityContext(
+            CommunityContextAction::DeleteStart(acme),
+        ))
+        .await;
         assert!(!community_access_busy(&h), "nothing may be sent to the VTA");
         assert!(
             h.state
@@ -1522,7 +1573,23 @@ mod tests {
                 .context_delete
                 .is_none()
         );
-        assert!(status(&h).contains("Kernel me"), "{}", status(&h));
+        assert!(
+            status(&h).contains("Kernel me") && status(&h).contains("Other"),
+            "{}",
+            status(&h)
+        );
+
+        h.config
+            .account
+            .delete_membership("did:webvh:QmScid:example.com:other", persona)
+            .unwrap();
+        h.config.set_active_persona(Some(persona));
+        h.handle(Action::CommunityContext(
+            CommunityContextAction::DeleteStart(0),
+        ))
+        .await;
+        assert!(!community_access_busy(&h));
+        assert!(status(&h).contains("active persona"), "{}", status(&h));
     }
 
     #[tokio::test]
@@ -1559,6 +1626,7 @@ mod tests {
             persona,
             community: "Acme".into(),
             context_id: "openvtc/acme".into(),
+            takes_persona: None,
             phase: ContextDeletePhase::Ready(ContextDeletionPreview::default()),
             typed: typed.into(),
         };

@@ -529,7 +529,18 @@ pub(crate) fn apply_outcome(
                 }
             }
         }
-        DispatchOutcome::CommunityContext(outcome) => outcome.apply(state, config, save),
+        DispatchOutcome::CommunityContext(outcome) => {
+            // A context deleted with its persona removes the finished
+            // membership's record too; any session it still holds belongs to
+            // the runtime loop's session manager.
+            let pending = outcome.membership_removed();
+            outcome.apply(state, config, save);
+            in_flight.finish(domain);
+            return match pending {
+                Some((vtc, persona)) => AfterApply::Deregister(vtc, persona),
+                None => AfterApply::Nothing,
+            };
+        }
         DispatchOutcome::DeviceGrantSweep(results) => {
             crate::state_handler::community_context_actions::apply_sweep(state, results);
         }

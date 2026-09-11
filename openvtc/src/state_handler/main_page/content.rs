@@ -4,7 +4,9 @@ use std::sync::Arc;
 use dtg_credentials::DTGCredential;
 use openvtc_core::community_access::{DEFAULT_EXPIRY, DeviceGrant};
 use openvtc_core::config::account::PersonaId;
-use openvtc_core::config::community_context::{ContextDeletionPreview, ContextOption};
+use openvtc_core::config::community_context::{
+    ContextDeletion, ContextDeletionPreview, ContextOption, PersonaTakenAlong,
+};
 use vta_sdk::protocols::vetting::{DeclaredRelationship, RevocationReason, VettingMethod};
 
 /// Lazily-rendered raw credential JSON for credential detail views.
@@ -213,9 +215,23 @@ pub struct ContextDeleteView {
     pub community: String,
     /// The context being deleted.
     pub context_id: String,
+    /// The persona deleted along with the context — its keys are there and
+    /// this membership was its only use — and with it the membership record.
+    pub takes_persona: Option<PersonaTakenAlong>,
     pub phase: ContextDeletePhase,
     /// What has been typed towards the confirmation.
     pub typed: String,
+}
+
+impl ContextDeleteView {
+    /// The deletion this view was opened for.
+    #[must_use]
+    pub fn deletion(&self) -> ContextDeletion {
+        ContextDeletion {
+            context_id: self.context_id.clone(),
+            persona: self.takes_persona.clone(),
+        }
+    }
 }
 
 /// Where a [`ContextDeleteView`] is.
