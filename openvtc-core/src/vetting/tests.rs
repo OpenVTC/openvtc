@@ -187,6 +187,7 @@ fn manifest_reply() -> Message {
             vetting: Some(requirements()),
             requirements_digest: Some("zRequirementsDigest".into()),
         }],
+        branding: None,
     };
     Message::build(
         wire::new_id(),
@@ -748,6 +749,7 @@ async fn the_communitys_decision_sla_is_known_once_its_manifest_is() {
             vetting: Some(requirements),
             requirements_digest: Some("zOther".into()),
         }],
+        branding: None,
     };
     let reply = Message::build(
         wire::new_id(),
