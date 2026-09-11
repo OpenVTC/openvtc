@@ -18,8 +18,9 @@ use crate::{
     ui::{
         component::{Component, ComponentRender},
         pages::join_flow::{
-            identity_choice::IdentityChoice, invitation_choice::InvitationChoice,
-            join_progress::JoinProgress, vtc_enter_did::VtcEnterDid,
+            context_choice::ContextChoice, identity_choice::IdentityChoice,
+            invitation_choice::InvitationChoice, join_progress::JoinProgress,
+            vtc_enter_did::VtcEnterDid,
         },
     },
 };
@@ -28,6 +29,7 @@ use ratatui::Frame;
 use tokio::sync::mpsc::UnboundedSender;
 use tui_input::Input;
 
+pub mod context_choice;
 pub mod identity_choice;
 pub mod invitation_choice;
 pub mod join_progress;
@@ -54,6 +56,7 @@ pub struct JoinFlow {
     pub vtc_enter_did: VtcEnterDid,
     pub invitation_choice: InvitationChoice,
     pub identity_choice: IdentityChoice,
+    pub context_choice: ContextChoice,
     pub join_progress: JoinProgress,
 
     /// State-mapped join props.
@@ -115,6 +118,7 @@ impl Component for JoinFlow {
             vtc_enter_did: VtcEnterDid,
             invitation_choice: InvitationChoice,
             identity_choice: IdentityChoice,
+            context_choice: ContextChoice,
             join_progress: JoinProgress,
             props: Props::from(state),
         }
@@ -141,6 +145,7 @@ impl Component for JoinFlow {
             JoinPage::EnterDid => VtcEnterDid::handle_key_event(self, key),
             JoinPage::InvitationChoice => InvitationChoice::handle_key_event(self, key),
             JoinPage::IdentityChoice => IdentityChoice::handle_key_event(self, key),
+            JoinPage::ContextChoice => ContextChoice::handle_key_event(self, key),
             JoinPage::Progress => JoinProgress::handle_key_event(self, key),
         }
     }
@@ -176,7 +181,13 @@ impl Component for JoinFlow {
                     .action_tx
                     .send(Action::JoinPasteVic(trimmed.to_string()));
             }
-            JoinPage::IdentityChoice | JoinPage::Progress => {}
+            // A pasted name lands in the new sub-context's name.
+            JoinPage::ContextChoice if self.props.state.new_context_selected() => {
+                let mut slug = self.props.state.context_slug.clone();
+                slug.push_str(trimmed);
+                let _ = self.action_tx.send(Action::JoinContextSlug(slug));
+            }
+            JoinPage::IdentityChoice | JoinPage::ContextChoice | JoinPage::Progress => {}
         }
     }
 }
@@ -190,6 +201,7 @@ impl ComponentRender<()> for JoinFlow {
             }
             JoinPage::InvitationChoice => self.invitation_choice.render(&self.props.state, frame),
             JoinPage::IdentityChoice => self.identity_choice.render(&self.props.state, frame),
+            JoinPage::ContextChoice => self.context_choice.render(&self.props.state, frame),
             JoinPage::Progress => self.join_progress.render(&self.props.state, frame),
         }
     }

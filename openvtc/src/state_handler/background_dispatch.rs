@@ -112,6 +112,9 @@ pub(crate) enum DispatchDomain {
     /// A vetting send: a request, session, card, statement, decline,
     /// withdrawal or requirements fetch. One at a time, like every peer send.
     Vetting,
+    /// Registering the contexts memberships already name at the VTA — the ids
+    /// joins recorded before OpenVTC created them. Read-then-create, off the loop.
+    CommunityContexts,
 }
 
 impl DispatchDomain {
@@ -133,6 +136,7 @@ impl DispatchDomain {
             DispatchDomain::PersonaManage => "Identity request",
             DispatchDomain::Vic => "Invitation credential refresh",
             DispatchDomain::Vetting => "Vetting send",
+            DispatchDomain::CommunityContexts => "Community context registration",
         }
     }
 }
@@ -255,6 +259,9 @@ pub(crate) enum DispatchOutcome {
     Panicked(DispatchDomain),
     /// A vetting send finished (or failed, and was undone).
     Vetting(crate::state_handler::vetting_actions::VettingOutcome),
+    /// Membership contexts were checked at the VTA: each context id, and
+    /// whether it had to be created or why it could not be.
+    CommunityContexts(Vec<(String, Result<bool, String>)>),
 }
 
 impl DispatchOutcome {
@@ -280,6 +287,7 @@ impl DispatchOutcome {
             DispatchOutcome::Vic(_) => DispatchDomain::Vic,
             DispatchOutcome::VicMutation(_) => DispatchDomain::Vic,
             DispatchOutcome::Vetting(_) => DispatchDomain::Vetting,
+            DispatchOutcome::CommunityContexts(_) => DispatchDomain::CommunityContexts,
             DispatchOutcome::Panicked(domain) => *domain,
         }
     }
@@ -483,6 +491,21 @@ pub(crate) fn apply_outcome(
                 .extend(results);
         }
         DispatchOutcome::PersonaManage(outcome) => outcome.apply(state),
+        // Log-only: nothing on screen depends on a context existing, and a
+        // failure is retried on the next launch.
+        DispatchOutcome::CommunityContexts(results) => {
+            for (context_id, result) in results {
+                match result {
+                    Ok(true) => state.main_page.log(format!(
+                        "Registered community context {context_id} at the VTA."
+                    )),
+                    Ok(false) => {}
+                    Err(e) => state.main_page.log(format!(
+                        "Could not register community context {context_id}: {e}"
+                    )),
+                }
+            }
+        }
         DispatchOutcome::Vic(outcome) => outcome.apply(state, config),
         DispatchOutcome::VicMutation(outcome) => outcome.apply(state),
         // Handled above, before the domain is finished. Listed because the

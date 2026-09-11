@@ -89,7 +89,11 @@ pub struct PersonaRecord {
     pub key_refs: Vec<KeyRef>,
     /// Mediator DID; defaults to the VTA mediator, optional override at mint (D7).
     pub mediator_did: Option<String>,
-    /// The sub-context the persona was minted under — provenance only (D6).
+    /// The VTA context the persona's keys and DID were minted in. A persona can
+    /// only be presented from here, so joining a community with it shares this
+    /// context ([`crate::config::community_context`]). Empty for a persona
+    /// minted before per-community contexts, whose keys are in the account's
+    /// top context.
     pub origin_context_id: String,
     /// When the persona was created.
     pub created_at: DateTime<Utc>,

@@ -1026,6 +1026,10 @@ impl StateHandler {
         let (dispatch_tx, mut dispatch_rx) =
             mpsc::unbounded_channel::<background_dispatch::DispatchOutcome>();
         let mut in_flight = background_dispatch::InFlight::default();
+        // Membership contexts already checked at the VTA this run. A failure is
+        // logged and retried on the next launch rather than every tick.
+        let mut contexts_checked: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // Coalesced + offloaded config persistence (R11). Mutation sites mark the
         // config dirty on the loop thread instead of saving inline; the
@@ -1693,6 +1697,56 @@ impl StateHandler {
                         );
                     }
 
+                    // Register the contexts memberships name. Joins before
+                    // per-community contexts recorded an id without creating it;
+                    // faces worn there worked only because nothing checked.
+                    let top_context_id = config.account.top_context_id.clone();
+                    let unchecked: Vec<String> = config
+                        .account
+                        .memberships()
+                        .map(|c| c.sub_context_id.clone())
+                        .filter(|id| {
+                            openvtc_core::config::community_context::is_sub_context(
+                                id,
+                                &top_context_id,
+                            ) && !contexts_checked.contains(id)
+                        })
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    if !unchecked.is_empty()
+                        && let Some(client) = admin_vta.as_ref()
+                        && in_flight
+                            .try_begin(background_dispatch::DispatchDomain::CommunityContexts)
+                    {
+                        contexts_checked.extend(unchecked.iter().cloned());
+                        let client = client.clone();
+                        background_dispatch::spawn_dispatch(
+                            dispatch_tx.clone(),
+                            background_dispatch::DispatchDomain::CommunityContexts,
+                            async move {
+                                let mut results = Vec::with_capacity(unchecked.len());
+                                for context_id in unchecked {
+                                    let name = openvtc_core::config::context_path::parse_sub_context_id(
+                                        &context_id,
+                                    )
+                                    .map_or(context_id.clone(), |(_, slug)| slug.to_string());
+                                    let result =
+                                        openvtc_core::config::community_context::ensure_context(
+                                            &client,
+                                            &top_context_id,
+                                            &context_id,
+                                            &name,
+                                        )
+                                        .await
+                                        .map_err(|e| e.to_string());
+                                    results.push((context_id, result));
+                                }
+                                background_dispatch::DispatchOutcome::CommunityContexts(results)
+                            },
+                        );
+                    }
+
                     // Probe what transports the VTA advertises, for the VTA
                     // panel. Runs on this tick rather than its own so the loop
                     // gains no extra timer. Re-probed only while the answer is
@@ -2294,6 +2348,8 @@ impl StateHandler {
                     Action::JoinIdentitySelect(..) | Action::JoinIdentityChoose |
                     Action::JoinReuseConfirm | Action::JoinReuseCancel |
                     Action::JoinInvitationSelect(..) | Action::JoinInvitationChoose |
+                    Action::JoinContextSelect(..) | Action::JoinContextSlug(..) |
+                    Action::JoinContextChoose |
                     Action::JoinCancel | Action::JoinPasteVic(..) | Action::JoinPasteFromClipboard |
                     Action::JoinClearVic | Action::ImportConfig(..) | Action::SetProtection(..) |
                     Action::VtaSubmitDid(..) | Action::VtaStartProvision(..) |

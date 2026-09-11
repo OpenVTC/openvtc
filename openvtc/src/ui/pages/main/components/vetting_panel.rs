@@ -18,6 +18,7 @@ use crate::state_handler::{
     },
     state::ConnectionState,
 };
+use openvtc_core::config::community_context::{ContextKind, ContextOption};
 use openvtc_core::display::display_identifier;
 use ratatui::{
     style::{Style, Stylize},
@@ -96,6 +97,23 @@ fn field(name: &str, shown: String, focused: bool, text: bool) -> Line<'static> 
     Line::from(spans)
 }
 
+/// A context choice, in a line.
+fn context_label(option: &ContextOption) -> String {
+    let id = &option.context_id;
+    match option.kind {
+        ContextKind::New => format!("{id}  (a context of its own)"),
+        ContextKind::Existing if option.holds_persona_keys => {
+            format!("{id}  (this persona's context)")
+        }
+        ContextKind::Existing => match option.communities.len() {
+            0 => format!("{id}  (in use)"),
+            1 => format!("{id}  (shared with 1 community)"),
+            n => format!("{id}  (shared with {n} communities)"),
+        },
+        ContextKind::Top => format!("{id}  (top context — nothing kept apart)"),
+    }
+}
+
 fn tick(on: bool) -> String {
     if on { "[x]" } else { "[ ]" }.to_string()
 }
@@ -150,6 +168,8 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
         VettingMode::NewApplication {
             community,
             persona_index,
+            context_options,
+            context_index,
             field: f,
         } => {
             lines.push(heading("Apply to be vetted"));
@@ -168,8 +188,21 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
                 .map(|p| format!("{}  ({})", p.label, p.did))
                 .unwrap_or_else(|| "no personas".to_string());
             lines.push(field("Join as", persona, *f == 1, false));
+            let context = context_options
+                .get(*context_index)
+                .map_or_else(|| "—".to_string(), context_label);
+            lines.push(field("Context", context, *f == 2, false));
             lines.push(Line::from(""));
-            lines.push(hint("Enter: start  Tab: next field  Esc: cancel"));
+            lines.push(hint(
+                "The context keeps this community's faces apart from your other communities. A",
+            ));
+            lines.push(hint(
+                "persona minted into a context can only be presented from it.",
+            ));
+            lines.push(Line::from(""));
+            lines.push(hint(
+                "Enter: start  Tab: next field  ←/→: choose  Esc: cancel",
+            ));
         }
         VettingMode::ChooseFace { faces, index, .. } => {
             lines.push(heading("The face vetters are shown"));

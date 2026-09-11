@@ -20,7 +20,8 @@ use chrono::Utc;
 use openvtc_core::config::{
     Config,
     account::{CommunityRecord, PersonaId, VtcDid},
-    context_path::build_sub_context_id,
+    community_context::{self, ContextKind},
+    context_path::{build_sub_context_id, parse_sub_context_id},
 };
 use openvtc_core::didcomm::Messaging;
 use openvtc_core::logs::LogFamily;
@@ -33,22 +34,15 @@ use crate::{
     state_handler::{
         StateHandler,
         actions::Action,
-        join::{AvailableVic, JoinPage, JoinState, PersonaOption, PresentedInvitation},
+        join::{
+            AvailableVic, IdentityPick, JoinPage, JoinState, PersonaOption, PresentedInvitation,
+        },
         main_page::content::{VicLifecycle, VicSummary},
         main_page::{sanitize_display, shorten_did},
         setup_sequence::{Completion, MessageType, config::ConfigExtension, vta},
         state::{ActivePage, State},
     },
 };
-
-/// Which identity to present to the community being joined (R-B-3 / D1).
-#[derive(Clone, Debug)]
-enum JoinIdentityChoice {
-    /// Mint a fresh, self-contained `did:webvh` persona (D6).
-    Mint,
-    /// Reuse an existing account persona (links the user across communities).
-    Reuse(PersonaId),
-}
 
 /// The persona + community of a just-completed join, handed back to the runtime
 /// loop so it can bring a live session up immediately (R-B-5 / D11) rather than
@@ -224,19 +218,23 @@ impl StateHandler {
                                 // A new persona can't hold an existing invitation.
                                 state.invitation_credential = None;
                                 state.join.present_invitation = false;
-                                if let Some(interrupted) = self
-                                    .launch_join_sequence(
-                                        JoinIdentityChoice::Mint,
-                                        vtc_did,
-                                        interrupt_rx,
-                                        state,
-                                        tdk,
-                                        config,
-                                        admin_vta,
-                                        profile,
-                                        messaging,
-                                    )
-                                    .await
+                                state.join.pending_vtc = Some(vtc_did.clone());
+                                if let Some(context_id) =
+                                    offer_contexts(state, config, IdentityPick::Mint, &vtc_did)
+                                    && let Some(interrupted) = self
+                                        .launch_join_sequence(
+                                            IdentityPick::Mint,
+                                            vtc_did,
+                                            context_id,
+                                            interrupt_rx,
+                                            state,
+                                            tdk,
+                                            config,
+                                            admin_vta,
+                                            profile,
+                                            messaging,
+                                        )
+                                        .await
                                 {
                                     return Ok(JoinExit::Exit(interrupted));
                                 }
@@ -264,19 +262,22 @@ impl StateHandler {
                                 // A freshly minted persona holds no invitation.
                                 state.invitation_credential = None;
                                 state.join.present_invitation = false;
-                                if let Some(interrupted) = self
-                                    .launch_join_sequence(
-                                        JoinIdentityChoice::Mint,
-                                        vtc_did,
-                                        interrupt_rx,
-                                        state,
-                                        tdk,
-                                        config,
-                                        admin_vta,
-                                        profile,
-                                        messaging,
-                                    )
-                                    .await
+                                if let Some(context_id) =
+                                    offer_contexts(state, config, IdentityPick::Mint, &vtc_did)
+                                    && let Some(interrupted) = self
+                                        .launch_join_sequence(
+                                            IdentityPick::Mint,
+                                            vtc_did,
+                                            context_id,
+                                            interrupt_rx,
+                                            state,
+                                            tdk,
+                                            config,
+                                            admin_vta,
+                                            profile,
+                                            messaging,
+                                        )
+                                        .await
                                 {
                                     return Ok(JoinExit::Exit(interrupted));
                                 }
@@ -395,10 +396,74 @@ impl StateHandler {
                                 state.invitation_credential = None;
                                 state.join.present_invitation = false;
                             }
+                            let pick = IdentityPick::Reuse(persona_id);
+                            if let Some(context_id) = offer_contexts(state, config, pick, &vtc_did)
+                                && let Some(interrupted) = self
+                                    .launch_join_sequence(
+                                        pick,
+                                        vtc_did,
+                                        context_id,
+                                        interrupt_rx,
+                                        state,
+                                        tdk,
+                                        config,
+                                        admin_vta,
+                                        profile,
+                                        messaging,
+                                    )
+                                    .await
+                            {
+                                return Ok(JoinExit::Exit(interrupted));
+                            }
+                        }
+                        Action::JoinContextSelect(i) => {
+                            let last = state.join.context_options.len().saturating_sub(1);
+                            state.join.context_selected = i.min(last);
+                            state.join.messages.clear();
+                        }
+                        Action::JoinContextSlug(slug) => {
+                            state.join.context_slug = slug;
+                            state.join.messages.clear();
+                        }
+                        Action::JoinContextChoose => {
+                            let (Some(vtc_did), Some(pick)) =
+                                (state.join.pending_vtc.clone(), state.join.picked_identity)
+                            else {
+                                continue;
+                            };
+                            let Some(option) = state
+                                .join
+                                .context_options
+                                .get(state.join.context_selected)
+                                .cloned()
+                            else {
+                                continue;
+                            };
+                            let context_id = if option.kind == ContextKind::New {
+                                match community_context::new_context_id(
+                                    &config.account.top_context_id,
+                                    &state.join.context_slug,
+                                    |id| context_taken(config, id),
+                                ) {
+                                    Ok(id) => id,
+                                    Err(e) => {
+                                        state.join.messages.clear();
+                                        state
+                                            .join
+                                            .messages
+                                            .push(MessageType::Error(e.to_string()));
+                                        let _ = self.state_tx.send(state.clone());
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                option.context_id
+                            };
                             if let Some(interrupted) = self
                                 .launch_join_sequence(
-                                    JoinIdentityChoice::Reuse(persona_id),
+                                    pick,
                                     vtc_did,
+                                    context_id,
                                     interrupt_rx,
                                     state,
                                     tdk,
@@ -430,8 +495,9 @@ impl StateHandler {
     #[allow(clippy::too_many_arguments)]
     async fn launch_join_sequence(
         &self,
-        choice: JoinIdentityChoice,
+        choice: IdentityPick,
         vtc_did: String,
+        context_id: String,
         interrupt_rx: &mut broadcast::Receiver<Interrupted>,
         state: &mut State,
         tdk: &TDK,
@@ -477,6 +543,7 @@ impl StateHandler {
             profile,
             vtc_did,
             choice,
+            context_id,
             &mut minted_persona,
             &prior_friendly_name,
             messaging,
@@ -507,6 +574,85 @@ impl StateHandler {
         let _ = self.state_tx.send(state.clone());
         None
     }
+}
+
+/// Whether `context_id` is already claimed: by a membership, a persona's keys,
+/// or a vetting application's face.
+pub(crate) fn context_taken(config: &Config, context_id: &str) -> bool {
+    community_context::context_in_use(&config.account, context_id)
+        || config
+            .private
+            .vetting
+            .applications
+            .iter()
+            .any(|a| a.context_id.as_deref() == Some(context_id))
+}
+
+/// The new sub-context to suggest for `vtc_did`: named after the community,
+/// and not yet claimed.
+pub(crate) fn suggested_context(config: &Config, vtc_did: &str) -> String {
+    let top = &config.account.top_context_id;
+    let taken = |id: &str| context_taken(config, id);
+    build_sub_context_id(top, config.agent_name_for(vtc_did), vtc_did, taken)
+        .or_else(|_| build_sub_context_id(top, Some("community"), vtc_did, taken))
+        .unwrap_or_else(|_| top.clone())
+}
+
+/// Offer the contexts `pick` can join `vtc_did` in.
+///
+/// Returns the context when there is nothing to ask — a persona whose keys
+/// live in a sub-context, or one whose vetting application already chose where
+/// its face is worn — and otherwise opens the context-choice page and returns
+/// `None`.
+fn offer_contexts(
+    state: &mut State,
+    config: &Config,
+    pick: IdentityPick,
+    vtc_did: &str,
+) -> Option<String> {
+    let persona = match pick {
+        IdentityPick::Reuse(id) => {
+            if let Some(context) = config
+                .private
+                .vetting
+                .application(vtc_did, id)
+                .and_then(|a| a.context_id.clone())
+            {
+                return Some(context);
+            }
+            config.account.personas.get(&id)
+        }
+        IdentityPick::Mint => None,
+    };
+    let suggested = suggested_context(config, vtc_did);
+    let options = community_context::context_options(&config.account, persona, &suggested);
+    if options.len() == 1 {
+        return options.into_iter().next().map(|o| o.context_id);
+    }
+    state.join.context_slug = parse_sub_context_id(&suggested)
+        .map(|(_, slug)| slug.to_string())
+        .unwrap_or_default();
+    state.join.context_community_names = options
+        .iter()
+        .flat_map(|o| o.communities.iter())
+        .map(|did| {
+            let display = config
+                .account
+                .memberships()
+                .find(|m| &m.vtc_did == did)
+                .and_then(|m| m.display_name.as_deref());
+            (
+                did.clone(),
+                crate::state_handler::community_label(config, did, display, 40),
+            )
+        })
+        .collect();
+    state.join.context_options = options;
+    state.join.context_selected = 0;
+    state.join.picked_identity = Some(pick);
+    state.join.messages.clear();
+    state.join.page = JoinPage::ContextChoice;
+    None
 }
 
 /// Build the reuse options for the identity-choice page (R-B-3): every existing
@@ -853,7 +999,8 @@ async fn run_join_sequence(
     admin_vta: Option<&VtaClient>,
     profile: &str,
     vtc_did: String,
-    choice: JoinIdentityChoice,
+    choice: IdentityPick,
+    context_id: String,
     minted_persona: &mut Option<PersonaId>,
     prior_friendly_name: &str,
     messaging: Option<&Messaging>,
@@ -909,12 +1056,31 @@ async fn run_join_sequence(
 
     let top_context_id = config.account.top_context_id.clone();
 
+    // 4. The community's context exists before anything is minted into it. A
+    // retried join reuses a context an interrupted one left behind.
+    let context_name = display_name
+        .clone()
+        .unwrap_or_else(|| shorten_did(&vtc_did, 48));
+    match community_context::ensure_context(admin_vta, &top_context_id, &context_id, &context_name)
+        .await
+    {
+        Ok(true) => state.join.info(format!("Created context {context_id}.")),
+        Ok(false) => state.join.info(format!("Using context {context_id}.")),
+        Err(e) => {
+            state.join.fail(format!(
+                "Could not prepare context {context_id}: {e}. Nothing was created."
+            ));
+            return;
+        }
+    }
+    let _ = handler.state_tx.send(state.clone());
+
     // Resolve the persona to present: reuse an existing account persona (R-B-3)
     // or mint a fresh, self-contained one (D6). Only a *minted* persona is
     // recorded in `minted_persona` for rollback — a reused persona pre-exists and
     // must never be rolled back.
     let (persona_id, persona_did) = match choice {
-        JoinIdentityChoice::Reuse(persona_id) => match config.identities.get(&persona_id) {
+        IdentityPick::Reuse(persona_id) => match config.identities.get(&persona_id) {
             Some(ident) => {
                 // Per-persona idempotency (R-B-9): block a second live membership
                 // as the *same* persona, while still allowing other personas.
@@ -923,6 +1089,19 @@ async fn run_join_sequence(
                         "Already a member of (or have a pending request for) this community as this persona.",
                     );
                     return;
+                }
+                // A persona's keys live in one context; one minted into a
+                // sub-context is only ever presented from it.
+                if let Some(record) = config.account.personas.get(&persona_id) {
+                    let home = community_context::persona_context(record, &top_context_id);
+                    if community_context::is_sub_context(home, &top_context_id)
+                        && home != context_id
+                    {
+                        state.join.fail(format!(
+                            "This persona's keys live in {home}, so it can only join from there."
+                        ));
+                        return;
+                    }
                 }
                 let did = ident.persona_did().to_string();
                 state.join.info(format!("Reusing persona {did}…"));
@@ -936,14 +1115,14 @@ async fn run_join_sequence(
                 return;
             }
         },
-        JoinIdentityChoice::Mint => {
-            // 4. Mint a fresh persona into `state.setup` (reusing the setup helpers).
-            // Persona signing/auth/encryption keys.
+        IdentityPick::Mint => {
+            // 5. Mint a fresh persona into `state.setup` (reusing the setup
+            // helpers), with every key and the DID in the community's context.
             state
                 .join
                 .info("Creating persona keys (signing, authentication, encryption)…");
             let _ = handler.state_tx.send(state.clone());
-            match vta::create_persona_keys(admin_vta, Some(&top_context_id)).await {
+            match vta::create_persona_keys(admin_vta, Some(&context_id)).await {
                 Ok(keys) => state.setup.did_keys = Some(keys),
                 Err(e) => {
                     state
@@ -955,7 +1134,7 @@ async fn run_join_sequence(
             // WebVH update keys.
             state.join.info("Creating DID update keys…");
             let _ = handler.state_tx.send(state.clone());
-            match vta::create_update_keys(admin_vta, Some(&top_context_id)).await {
+            match vta::create_update_keys(admin_vta, Some(&context_id)).await {
                 Ok((update, next_update)) => {
                     state.setup.vta.update_secret = Some(update);
                     state.setup.vta.next_update_secret = Some(next_update);
@@ -997,7 +1176,7 @@ async fn run_join_sequence(
             match vta::create_did_via_server(
                 admin_vta,
                 tdk,
-                &top_context_id,
+                &context_id,
                 &server_id,
                 WebvhPathMode::AutoAssign,
             )
@@ -1059,6 +1238,10 @@ async fn run_join_sequence(
                     }
                 };
             *minted_persona = Some(persona_id);
+            // Where its keys live, which decides every context it can join from.
+            if let Some(record) = config.account.personas.get_mut(&persona_id) {
+                record.origin_context_id = context_id.clone();
+            }
             let persona_did = state.setup.webvh_address.did.clone();
             state.join.info(format!("Persona created: {persona_did}"));
             let _ = handler.state_tx.send(state.clone());
@@ -1069,54 +1252,10 @@ async fn run_join_sequence(
     // persona pre-existed and is left intact.
     let minted = minted_persona.is_some();
 
-    // 6. Derive the per-community sub-context id (D9, collision-safe). An
-    // application to be vetted already has one — the context its face was worn
-    // in for the vetters — and the membership keeps it, so the community sees
-    // the face the vetters checked.
-    let vetted_context = config
-        .private
-        .vetting
-        .application(&vtc_did, persona_id)
-        .and_then(|a| a.context_id.clone())
-        .filter(|id| {
-            !config
-                .account
-                .memberships()
-                .any(|c| &c.sub_context_id == id)
-        });
-    let derived = match vetted_context {
-        Some(id) => Ok(id),
-        None => build_sub_context_id(&top_context_id, display_name.as_deref(), &vtc_did, |id| {
-            config.account.memberships().any(|c| c.sub_context_id == id)
-        }),
-    };
-    let sub_context_id = match derived {
-        Ok(id) => id,
-        Err(e) => {
-            state
-                .join
-                .fail(format!("Failed to derive sub-context id: {e}"));
-            if minted {
-                rollback_minted_persona(config, persona_id, state, profile, prior_friendly_name);
-            }
-            return;
-        }
-    };
-
-    // 7. Register the sub-context at the VTA.
-    state
-        .join
-        .info(format!("Creating sub-context {sub_context_id}…"));
-    let _ = handler.state_tx.send(state.clone());
-    if let Err(e) = vta::create_sub_context(admin_vta, &top_context_id, &sub_context_id).await {
-        state
-            .join
-            .fail(format!("Failed to create sub-context: {e}"));
-        if minted {
-            rollback_minted_persona(config, persona_id, state, profile, prior_friendly_name);
-        }
-        return;
-    }
+    // 6. The membership lives in the context chosen for it, prepared at step 4.
+    // A vetting application's context was offered as the only choice, so the
+    // community sees the face the vetters checked.
+    let sub_context_id = context_id;
 
     // 8. Submit the join request to the VTC over DIDComm. The persona is
     // the authcrypt sender (the VTC reads the applicant from the
@@ -1692,6 +1831,53 @@ mod tests {
     use tokio::sync::broadcast;
 
     // ---- Pure-decision tests (peeled out of the join sequence) ----
+
+    /// A persona whose keys live in a sub-context is presented from it, so
+    /// nothing is asked; a new persona is asked, with a context of its own
+    /// offered first.
+    #[test]
+    fn a_persona_bound_to_a_context_skips_the_choice_and_a_new_one_is_asked() {
+        use super::offer_contexts;
+        use crate::state_handler::join::{IdentityPick, JoinPage};
+        use openvtc_core::config::account::PersonaRecord;
+        use openvtc_core::config::community_context::ContextKind;
+
+        let mut config = test_config();
+        config.account.top_context_id = "openvtc".into();
+        let persona_id = PersonaId::new();
+        config.account.personas.insert(
+            persona_id,
+            PersonaRecord {
+                extra: serde_json::Map::new(),
+                persona_id,
+                did: "did:webvh:scid:example.com:alice".into(),
+                did_document: None,
+                key_refs: vec![],
+                mediator_did: None,
+                origin_context_id: "openvtc/work".into(),
+                created_at: chrono::Utc::now(),
+                label: None,
+            },
+        );
+        let vtc = "did:webvh:QmCommunityScid:vtc.example.com";
+        let mut state = State::default();
+
+        assert_eq!(
+            offer_contexts(&mut state, &config, IdentityPick::Reuse(persona_id), vtc).as_deref(),
+            Some("openvtc/work")
+        );
+        assert_ne!(state.join.page, JoinPage::ContextChoice);
+
+        assert!(offer_contexts(&mut state, &config, IdentityPick::Mint, vtc).is_none());
+        assert_eq!(state.join.page, JoinPage::ContextChoice);
+        let kinds: Vec<_> = state.join.context_options.iter().map(|o| o.kind).collect();
+        assert_eq!(
+            kinds,
+            [ContextKind::New, ContextKind::Existing, ContextKind::Top]
+        );
+        assert!(!state.join.context_slug.is_empty());
+        assert_eq!(state.join.picked_identity, Some(IdentityPick::Mint));
+    }
 
     /// `validate_join_input` trims and rejects empties; otherwise returns the
     /// cleaned DID. Table-driven over (raw input, expected).
