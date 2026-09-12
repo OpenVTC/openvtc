@@ -27,7 +27,7 @@ jobs:
     if: vars.TRUST_REGISTRY_URL != ''
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The verifier walks raw commit objects across base..head.
           fetch-depth: 0
@@ -41,7 +41,7 @@ jobs:
       # `authority:` input to `vtc-did:` — so the upgrade is a SHA bump plus that
       # input rename, not a drop-in. The latest VGI release is v0.4.8, which does
       # not carry the fix, so there is nothing to move to yet.
-      - uses: OpenVTC/verifiable-git-infrastructure/.github/actions/verify-trust@d4186e5d819c2cbd1247a4d0e6cbd373d25dd0b2 # v0.1.1
+      - uses: OpenVTC/verifiable-git-infrastructure/.github/actions/verify-trust@7ba4787183a80f3f7f30add81ae0ff4db00df3db # v0.4.7
         with:
           range: origin/${{ github.base_ref }}..HEAD
           registry-url: ${{ vars.TRUST_REGISTRY_URL }}
