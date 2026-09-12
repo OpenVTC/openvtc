@@ -562,7 +562,7 @@ async fn main() -> Result<()> {
     // screen. The state handler applies them (dev-overrides builds only) and
     // repeats the outcome in the Activity Log.
     if let Some(notice) = env_overrides::startup_notice(|k| env::var(k).ok()) {
-        eprintln!("{}", style(notice).color256(CLI_ORANGE));
+        eprintln!("{}", style(notice).themed(CLI_CAUTION));
     }
 
     // Setup the initial state
