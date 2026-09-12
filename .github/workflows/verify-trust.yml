@@ -4,11 +4,16 @@
 #
 #   TRUST_REGISTRY_URL   e.g. https://registry.example.com
 #   TRUST_REGISTRY_DID   DID of the registry
-#   TRUST_AUTHORITY_DID  DID of the authority governing this repo
+#   TRUST_AUTHORITY_DID  DID of the VTC whose authority commits are judged
+#                        under — passed as the action's `vtc-did:` input
 #
-# Also requires a committed `.did-signers` file (one DID per line) and,
-# for GitHub web-UI merge / Dependabot commits, a committed
-# `.github/trusted-platform-keys.asc` (GitHub's web-flow public key).
+# No signer list is committed any more: the action derives the signer set from
+# the commits themselves (each names its signer DID on its committer header),
+# and what scopes a signer to this repository is the `resource` — left at its
+# default of this repo, widened only by `fallback-resource` below. For GitHub
+# web-UI merge / Dependabot commits a committed
+# `.github/trusted-platform-keys.asc` (GitHub's web-flow public key) is still
+# required.
 #
 # The check itself now lives in OpenVTC/verifiable-git-infrastructure (VGI);
 # this workflow consumes its published Action, which downloads a prebuilt
@@ -33,20 +38,21 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Pinned to the v0.1.1 commit rather than the tag: a tag can be moved, and
-      # this action runs with the workflow's token on every pull request.
-      #
-      # TODO: move to VGI >= 0.4.9 when it is released. 0.4.9 is the fix for an
-      # input-injection issue in the composite action, and it also renames the
-      # `authority:` input to `vtc-did:` — so the upgrade is a SHA bump plus that
-      # input rename, not a drop-in. The latest VGI release is v0.4.8, which does
-      # not carry the fix, so there is nothing to move to yet.
-      - uses: OpenVTC/verifiable-git-infrastructure/.github/actions/verify-trust@d4186e5d819c2cbd1247a4d0e6cbd373d25dd0b2 # v0.1.1
+      # Pinned to the v0.4.9 commit rather than the tag: a tag can be moved, and
+      # this action runs with the workflow's token on every pull request. v0.4.9
+      # is the release in which the composite action passes every input to its
+      # run step through the environment instead of interpolating it into bash.
+      - uses: OpenVTC/verifiable-git-infrastructure/.github/actions/verify-trust@d103f98eb71dd36ee86b41f70e753578de7f0522 # v0.4.9
         with:
           range: origin/${{ github.base_ref }}..HEAD
           registry-url: ${{ vars.TRUST_REGISTRY_URL }}
           registry-did: ${{ vars.TRUST_REGISTRY_DID }}
-          authority: ${{ vars.TRUST_AUTHORITY_DID }}
+          # v0.4.x renamed `authority:` to `vtc-did:`; the value is the same DID,
+          # the community whose authority the trust tuple is evaluated under.
+          vtc-did: ${{ vars.TRUST_AUTHORITY_DID }}
           # Preserve the org-wide fallback the previous local action defaulted to.
           fallback-resource: ${{ github.repository_owner }}
           exempt-keyring: .github/trusted-platform-keys.asc
+          # Download the binary from the same release as the action pinned above,
+          # rather than whatever `latest` resolves to at run time.
+          version: v0.4.9
