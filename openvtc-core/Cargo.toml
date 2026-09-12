@@ -38,6 +38,9 @@ reqwest = { workspace = true }
 # Those transport URLs come from DID documents anyone can publish, so the probe
 # client installs the resolver's own DNS guard rather than dialling them as-is.
 affinidi-did-web.workspace = true
+# `blocked_in_chain`, so `health` can tell that guard's refusal apart from a host
+# that simply did not answer — by type, rather than by the sentence it renders.
+affinidi-net-guard.workspace = true
 # `CancellationToken`, for `start_service`'s shutdown hook.
 tokio-util = { workspace = true }
 # The delivery layer this module now runs on (#189): `-delivery` is the durable

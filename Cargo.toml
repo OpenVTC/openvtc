@@ -112,14 +112,48 @@ futures-util = "0.3"
 # this line states it. Stating it keeps the manifest honest about what the graph
 # actually resolves rather than implying 0.1.2 is still viable.
 agent-names = "0.1.3"
-affinidi-did-resolver-cache-sdk = { version = "0.8.34", features = [
+# The floor names the patch, and 0.8.37 is the one that matters: it is the
+# release where **`did:webvh` resolution stops contacting non-public hosts**,
+# which is the half of the guard this repo was missing. `did:web` has been
+# guarded since 0.8.35 (`affinidi-did-web`, below); webvh — the method every
+# persona, VTA and VTC here actually uses — was not, so a DID naming
+# `localhost%3A9099` or a public name whose A record is `169.254.169.254` was
+# fetched anyway, by `health`, by join and by messaging alike.
+#
+# `DIDCacheClient::new` now builds both its did:web and did:webvh resolvers from
+# one `HostPolicy`, defaulting to `PublicOnly`, and `health` passes the policy
+# its probes already run under so resolution and probing cannot disagree (see
+# `openvtc-core::health::build_report_with_progress`). A caret below this
+# release admits 0.8.36, where the webvh half is simply absent, so the patch is
+# the floor rather than a record of what happens to resolve today.
+affinidi-did-resolver-cache-sdk = { version = "0.8.37", features = [
   "agent-names",
 ] }
 # The SSRF guard the resolver above already applies to did:web fetches, taken
 # directly so `health` can put the same connect-time check on its own probe
 # client (`guarded_dns_resolver`). Not a new crate: the resolver pulls in this
-# exact version on the same `reqwest` line, so the types unify.
-affinidi-did-web = "0.1.4"
+# exact version on the same `reqwest` line, so the types unify — which is why
+# this line moves with the resolver rather than independently. 0.1.5 moves the
+# classifier and the DNS-pinning resolver into the shared `affinidi-net-guard`
+# 0.1.0 crate with the public API unchanged, so `guarded_dns_resolver` and the
+# `HostPolicy` this workspace hands to the resolver behave exactly as on 0.1.4.
+affinidi-did-web = "0.1.5"
+# The guard `affinidi-did-web` 0.1.5 was refactored onto, taken directly for one
+# thing only: `blocked_in_chain`, which recovers a connect-time refusal from a
+# `reqwest` error chain **by type**. `health` has to tell a refusal apart from an
+# unreachable host — the two mean opposite things in a report — and until now it
+# did that by matching the sentence the refusal rendered. 0.1.5 changed that
+# sentence (the guard moved crates), which is exactly the failure mode a string
+# match has: every refusal would have been silently downgraded to "unreachable".
+#
+# Not a new crate in the graph: `affinidi-did-web` and `affinidi-tdk-common`
+# already pull this exact version, so naming it adds a requirement and nothing
+# else. `openvtc-core::net_guard` deliberately stays as it is — it classifies a
+# host *as written in the URL*, and this crate's classifier refuses a wider set
+# (documentation, multicast and reserved space, `*.internal`, single-label
+# names), which is a behaviour change to make on its own rather than inside a
+# dependency bump.
+affinidi-net-guard = "0.1.0"
 anyhow = "1.0"
 # Structure-aware fuzzing support (issue #124). Only pulled in when a crate
 # enables its own `arbitrary` feature; the `derive` feature provides the
@@ -143,7 +177,31 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 # the stack up when the stack goes.
 dirs = "6.0"
 dialoguer = { version = "0.12", features = ["password"] }
-didwebvh-rs = "0.6"
+# 0.7 is the release that carries the resolution host policy the cache SDK above
+# now configures: `localhost`, `*.localhost`, `*.local`, `*.internal`,
+# `home.arpa` and single-label names are refused before any request, the default
+# client vets every address a name resolves to and connects only to those, and
+# it ignores `HTTP_PROXY`/`HTTPS_PROXY` (a proxy resolves the name itself, past
+# the check). This line moves with `affinidi-did-resolver-cache-sdk`, not
+# independently: the SDK's 0.8.37 requires `^0.7`, so a `"0.6"` here would put a
+# second copy in the graph for nothing.
+#
+# What this workspace uses from the crate is unaffected by the move: `WebVHURL`,
+# `create_did`/`CreateDIDConfig`, `Parameters`, `LogEntryMethods` and
+# `DIDWebVHError` are unchanged (`DIDWebVHError` is `#[non_exhaustive]` and
+# gained `BlockedHost`, which `OpenVTCError::WebVH` carries through by `#[from]`
+# rather than matching on).
+#
+# **The graph does hold a second copy, 0.6.1, and that is the VTI patch block at
+# the foot of this file rather than anything chosen here.** Every VTI crate
+# declares `didwebvh-rs = "0.6"`, and `"0.6"` excludes 0.7, so `vta-sdk`,
+# `vta-keys` and `vta-tee` keep 0.6.1 until VTI takes 0.7 and releases. Nothing
+# crosses between the two — VTI's use is minting and log-entry work behind its
+# own API, and no didwebvh-rs type appears in a signature this workspace calls
+# — so the duplicate is a `cargo tree -d` row, not a type error. It collapses
+# when the VTI entries below go. `cargo tree -i didwebvh-rs` is the check: the
+# **resolution** path (`affinidi-did-resolver-cache-sdk`) must be the 0.7 node.
+didwebvh-rs = "0.7"
 ed25519-dalek-bip32 = "0.3"
 hkdf = "0.13"
 hex = "0.4"
