@@ -1,11 +1,11 @@
 use super::panel::Panel;
 use super::status::push_status;
 use crate::colors::{
-    COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,
-    COLOR_WARNING_ACCESSIBLE_RED,
+    COLOR_BORDER, COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS,
+    COLOR_TEXT_DEFAULT, COLOR_WARNING_ACCESSIBLE_RED,
 };
 use crate::state_handler::{
-    main_page::content::{ContentPanelState, SettingsMode, SettingsState},
+    main_page::content::{ContentPanelState, SettingsMode, SettingsState, ThemeRow},
     state::ConnectionState,
 };
 use ratatui::{
@@ -57,8 +57,79 @@ pub fn render(state: &SettingsState) -> Vec<Line<'static>> {
             render_token_management(state, *selected_index)
         }
         SettingsMode::WipeConfirm { confirm_input } => render_wipe_confirm(state, confirm_input),
+        SettingsMode::ThemePicker { rows, selected, .. } => {
+            render_theme_picker(state, rows, *selected)
+        }
         SettingsMode::View => render_view(state),
     }
+}
+
+/// Index of the Theme row in the settings list.
+pub(crate) const THEME_ROW: usize = 7;
+
+/// The theme picker. The whole screen is the preview: moving through the list
+/// draws everything in the highlighted theme.
+fn render_theme_picker(
+    state: &SettingsState,
+    rows: &[ThemeRow],
+    selected: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(""),
+        Line::from("Theme").fg(COLOR_SUCCESS).bold(),
+        Line::from(""),
+    ];
+    if let Some(msg) = &state.status_message {
+        push_status(&mut lines, msg, "");
+        lines.push(Line::from(""));
+    }
+    lines.push(
+        Line::from("Moving through the list previews each theme. Enter keeps it; Esc puts back the one you had.")
+            .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+    for (i, row) in rows.iter().enumerate() {
+        let is_selected = i == selected;
+        let style = if is_selected {
+            Style::new().fg(COLOR_SUCCESS).bold()
+        } else {
+            Style::new().fg(COLOR_TEXT_DEFAULT)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if is_selected { "▸ " } else { "  " }, style),
+            Span::styled(format!("{:<32}", row.name), style),
+            Span::styled(row.source.clone(), Style::new().fg(COLOR_DARK_GRAY)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  accent ", Style::new().fg(COLOR_BORDER)),
+        Span::styled("success ", Style::new().fg(COLOR_SUCCESS)),
+        Span::styled("warning ", Style::new().fg(COLOR_ORANGE)),
+        Span::styled("danger ", Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED)),
+        Span::styled("text ", Style::new().fg(COLOR_TEXT_DEFAULT)),
+        Span::styled("muted ", Style::new().fg(COLOR_DARK_GRAY)),
+        Span::styled("highlight", Style::new().fg(COLOR_SOFT_PURPLE)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from("Add your own: c copies the highlighted theme to edit, or run")
+            .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(
+        Line::from("`openvtc theme import <scheme | Omarchy theme | nvim:colorscheme>`.")
+            .fg(COLOR_DARK_GRAY),
+    );
+    if let Some(dir) = crate::theme::catalog::Roots::from_env().themes_dir() {
+        lines
+            .push(Line::from(format!("Your themes live in {}", dir.display())).fg(COLOR_DARK_GRAY));
+    }
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from("↑/↓ preview  Enter: use  c: copy to edit  r: reload  Esc: cancel")
+            .fg(COLOR_DARK_GRAY),
+    );
+    lines
 }
 
 const WIPE_CONFIRM_TOKEN: &str = "WIPE";
@@ -280,10 +351,32 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
         Span::styled("Import Config", import_style),
     ]));
 
-    // Token management option (index 7, only with openpgp-card)
+    // Theme (index 7)
+    let theme_selected = state.selected_index == THEME_ROW;
+    let theme_style = if theme_selected {
+        Style::new().fg(COLOR_SUCCESS).bold()
+    } else {
+        Style::new().fg(COLOR_TEXT_DEFAULT)
+    };
+    let (_, theme_name) = crate::theme::active_theme();
+    lines.push(Line::from(vec![
+        Span::styled(if theme_selected { "▸ " } else { "  " }, theme_style),
+        Span::styled("Theme: ", theme_style),
+        Span::styled(theme_name, Style::new().fg(COLOR_SOFT_PURPLE)),
+        Span::styled(
+            if theme_selected {
+                " [Enter to change]"
+            } else {
+                ""
+            },
+            Style::new().fg(COLOR_DARK_GRAY),
+        ),
+    ]));
+
+    // Token management option (index 8, only with openpgp-card)
     #[cfg(feature = "openpgp-card")]
     {
-        let token_selected = state.selected_index == 7;
+        let token_selected = state.selected_index == 8;
         let token_style = if token_selected {
             Style::new().fg(COLOR_SUCCESS).bold()
         } else {
@@ -295,11 +388,11 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
         ]));
     }
 
-    // Wipe profile (index 7 without openpgp-card, 8 with).
+    // Wipe profile (index 8 without openpgp-card, 9 with).
     #[cfg(feature = "openpgp-card")]
-    let wipe_index: usize = 8;
+    let wipe_index: usize = 9;
     #[cfg(not(feature = "openpgp-card"))]
-    let wipe_index: usize = 7;
+    let wipe_index: usize = 8;
     let wipe_selected = state.selected_index == wipe_index;
     let wipe_style = if wipe_selected {
         Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED).bold()
