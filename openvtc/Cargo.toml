@@ -131,6 +131,10 @@ linux-keyutils-keyring-store.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store.workspace = true
 
+# Asking the terminal its background colour for the `auto` theme.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 # `test-util` enables tokio's paused clock (`start_paused`) used by the R11
 # save-coalescing debounce tests; test-only, not pulled into the binary build.

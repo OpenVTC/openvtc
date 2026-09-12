@@ -87,6 +87,12 @@ fn render_theme_picker(
         Line::from("Moving through the list previews each theme. Enter keeps it; Esc puts back the one you had.")
             .fg(COLOR_DARK_GRAY),
     );
+    if crate::theme::no_color() {
+        lines.push(
+            Line::from("NO_COLOR is set, so themes are not drawn. The one you choose is kept for when it is not.")
+                .fg(COLOR_ORANGE),
+        );
+    }
     lines.push(Line::from(""));
     for (i, row) in rows.iter().enumerate() {
         let is_selected = i == selected;
@@ -358,11 +364,14 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
     } else {
         Style::new().fg(COLOR_TEXT_DEFAULT)
     };
-    let (_, theme_name) = crate::theme::active_theme();
+    let (theme_id, theme_name) = crate::theme::active_theme();
     lines.push(Line::from(vec![
         Span::styled(if theme_selected { "▸ " } else { "  " }, theme_style),
         Span::styled("Theme: ", theme_style),
-        Span::styled(theme_name, Style::new().fg(COLOR_SOFT_PURPLE)),
+        Span::styled(
+            crate::theme::display_name(&theme_id, &theme_name),
+            Style::new().fg(COLOR_SOFT_PURPLE),
+        ),
         Span::styled(
             if theme_selected {
                 " [Enter to change]"

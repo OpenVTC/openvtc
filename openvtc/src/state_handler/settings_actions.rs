@@ -707,6 +707,7 @@ use crate::state_handler::main_page::content::ThemeRow;
 use crate::theme::{
     self, Theme,
     catalog::{self, Roots},
+    terminal,
 };
 
 fn theme_rows(roots: &Roots) -> Vec<ThemeRow> {
@@ -770,8 +771,19 @@ fn handle_theme_apply(state: &mut State, roots: &Roots) {
         Ok(theme) => {
             theme::set_active(&theme);
             settings.mode = SettingsMode::View;
-            settings.status_message = Some(format!("Theme set to {}.", theme.name));
-            state.main_page.log(format!("Theme set to {}", theme.name));
+            let shown = theme::display_name(&theme.id, &theme.name);
+            let mut message = format!("Theme set to {shown}.");
+            let (mode, learned) = terminal::mode();
+            if theme.id == catalog::AUTO_ID && learned != terminal::Source::Asked {
+                // The terminal can only be asked before the TUI starts.
+                message.push_str(&format!(
+                    " OpenVTC asks your terminal for its background when it starts; \
+                     until then, Auto takes it to be {}.",
+                    mode.as_str()
+                ));
+            }
+            settings.status_message = Some(message);
+            state.main_page.log(format!("Theme set to {shown}"));
         }
         Err(e) => settings.status_message = Some(format!("Could not use that theme: {e}")),
     }
@@ -978,7 +990,10 @@ mod tests {
         assert_eq!(theme::active_theme().0, "nord", "moving previews");
         handle_theme_cancel(&mut state, &roots);
         assert_eq!(theme::active_theme().0, "openvtc", "cancel puts it back");
-        assert_eq!(catalog::selected(&roots), None, "and remembers nothing");
+        assert!(
+            !roots.settings_file().unwrap().exists(),
+            "and remembers nothing"
+        );
 
         handle_theme_open(&mut state, &roots);
         handle_theme_select(&mut state, &roots, nord);
@@ -997,8 +1012,27 @@ mod tests {
             state.main_page.content_panel.settings.mode,
             SettingsMode::View
         ));
-        assert_eq!(catalog::selected(&roots).as_deref(), Some("user/nord-mine"));
+        assert_eq!(catalog::choice(&roots).theme, "user/nord-mine");
         assert_eq!(theme::active_theme().1, "Nord (mine)");
+
+        // Auto is listed first, and kept by its own id.
+        handle_theme_open(&mut state, &roots);
+        let SettingsMode::ThemePicker { rows, .. } = &state.main_page.content_panel.settings.mode
+        else {
+            panic!("the picker opens again");
+        };
+        assert_eq!(rows[0].id, catalog::AUTO_ID);
+        handle_theme_select(&mut state, &roots, 0);
+        assert_eq!(theme::active_theme().0, catalog::AUTO_ID, "auto previews");
+        handle_theme_apply(&mut state, &roots);
+        assert_eq!(catalog::choice(&roots).theme, catalog::AUTO_ID);
+        let message = state
+            .main_page
+            .content_panel
+            .settings
+            .status_message
+            .clone();
+        assert!(message.is_some_and(|m| m.starts_with("Theme set to Auto — ")));
 
         theme::set_active(&Theme::default_theme());
         let _ = std::fs::remove_dir_all(base);

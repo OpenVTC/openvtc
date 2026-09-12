@@ -160,6 +160,64 @@ mod tests {
     }
 
     #[test]
+    fn theme_set_auto_and_export_are_accepted() {
+        let matches = cli()
+            .try_get_matches_from([
+                "openvtc", "theme", "set", "auto", "--dark", "nord", "--light", "dracula",
+            ])
+            .expect("`theme set auto --dark --light` is valid");
+        let (_, theme) = matches.subcommand().expect("theme");
+        let (_, set) = theme.subcommand().expect("set");
+        assert_eq!(
+            set.get_one::<String>("dark").map(String::as_str),
+            Some("nord")
+        );
+        assert_eq!(
+            set.get_one::<String>("light").map(String::as_str),
+            Some("dracula")
+        );
+
+        let matches = cli()
+            .try_get_matches_from([
+                "openvtc",
+                "theme",
+                "export",
+                "nord",
+                "--format",
+                "kitty",
+                "-o",
+                "nord.conf",
+            ])
+            .expect("`theme export` is valid");
+        let (_, theme) = matches.subcommand().expect("theme");
+        let (_, export) = theme.subcommand().expect("export");
+        assert_eq!(
+            export.get_one::<String>("format").map(String::as_str),
+            Some("kitty")
+        );
+        assert_eq!(
+            export.get_one::<String>("output").map(String::as_str),
+            Some("nord.conf")
+        );
+
+        let matches = cli()
+            .try_get_matches_from(["openvtc", "theme", "export", "nord"])
+            .expect("the format defaults");
+        let (_, theme) = matches.subcommand().expect("theme");
+        let (_, export) = theme.subcommand().expect("export");
+        assert_eq!(
+            export.get_one::<String>("format").map(String::as_str),
+            Some("openvtc")
+        );
+        assert!(
+            cli()
+                .try_get_matches_from(["openvtc", "theme", "export", "nord", "--format", "vim"])
+                .is_err(),
+            "an unknown format is refused"
+        );
+    }
+
+    #[test]
     fn no_subcommand_is_accepted() {
         // Bare `openvtc` (launch the TUI) must still parse cleanly.
         cli()

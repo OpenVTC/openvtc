@@ -1,8 +1,16 @@
 //! Themes that ship with OpenVTC.
 //!
-//! OpenVTC's own colours, and a few widely used open palettes mapped onto
-//! OpenVTC's roles. The colour values are those the palettes publish; their
-//! projects are credited by name.
+//! OpenVTC's own colours, a few widely used open palettes mapped onto OpenVTC's
+//! roles, and four made for accessibility. The open palettes' colour values are
+//! those they publish; their projects are credited by name.
+//!
+//! The accessibility themes:
+//! - **High contrast**, dark and light: every role at least 7:1 against the
+//!   background (WCAG AAA for body text).
+//! - **Colourblind safe**, dark and light: roles in the hues of the Okabe–Ito
+//!   palette, which stay distinct under the common colour-vision deficiencies.
+//!   The dark theme uses Okabe–Ito's own colours; on white those are too pale to
+//!   read, so the light theme darkens each hue until it reaches 4.5:1.
 
 use ratatui::style::Color;
 
@@ -102,8 +110,53 @@ pub fn all() -> Vec<Theme> {
                 0x7aa2f7, 0x9ece6a, 0xff9e64, 0xf7768e, 0xc0caf5, 0x565f89, 0xbb9af7, 0x1a1b26,
             ],
         ),
+        theme(
+            "high-contrast-dark",
+            "High Contrast Dark",
+            Mode::Dark,
+            [
+                0x00d7ff, 0x00ff87, 0xffd700, 0xff6b6b, 0xffffff, 0xc6c6c6, 0xff87ff, 0x000000,
+            ],
+        ),
+        theme(
+            "high-contrast-light",
+            "High Contrast Light",
+            Mode::Light,
+            [
+                0x0033b3, 0x005c1a, 0x8a4600, 0xb3001b, 0x000000, 0x3d3d3d, 0x7a1fa2, 0xffffff,
+            ],
+        ),
+        // Okabe–Ito: sky blue, bluish green, yellow, vermillion, reddish purple.
+        theme(
+            "colourblind-dark",
+            "Colourblind Safe Dark",
+            Mode::Dark,
+            [
+                0x56b4e9, 0x009e73, 0xf0e442, 0xd55e00, 0xf0f0f0, 0xb0b0b0, 0xcc79a7, 0x101010,
+            ],
+        ),
+        // Okabe–Ito's blue, then its bluish green, yellow, vermillion and
+        // reddish purple darkened to read on white.
+        theme(
+            "colourblind-light",
+            "Colourblind Safe Light",
+            Mode::Light,
+            [
+                0x0072b2, 0x007a5a, 0x736b00, 0xb34e00, 0x000000, 0x595959, 0xa6497f, 0xffffff,
+            ],
+        ),
     ]
 }
+
+/// The ids of the themes made for accessibility, and the contrast every one
+/// of their roles reaches against the background.
+#[cfg(test)]
+const ACCESSIBLE: [(&str, f64); 4] = [
+    ("high-contrast-dark", 7.0),
+    ("high-contrast-light", 7.0),
+    ("colourblind-dark", 4.5),
+    ("colourblind-light", 4.5),
+];
 
 /// The built-in theme with `id`.
 #[must_use]
@@ -123,6 +176,61 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), themes.len());
+    }
+
+    /// Every built-in theme's text reads on its background (4.5:1, WCAG AA),
+    /// and the accessibility themes hold every role to their own bar. A theme
+    /// drawn on the terminal's background is measured on black or white.
+    #[test]
+    fn text_is_readable_on_every_built_in_background() {
+        use crate::theme::{Role, contrast, rgb};
+
+        let roles = [
+            Role::Accent,
+            Role::Success,
+            Role::Warning,
+            Role::Danger,
+            Role::Text,
+            Role::Muted,
+            Role::Highlight,
+        ];
+        let themes = all();
+        for theme in &themes {
+            let background = theme
+                .palette
+                .background
+                .and_then(rgb)
+                .unwrap_or(match theme.mode {
+                    Mode::Dark => (0, 0, 0),
+                    Mode::Light => (255, 255, 255),
+                });
+            let ratio = |role: Role| {
+                let colour = rgb(theme.palette.get(role)).expect("a solid colour");
+                contrast(colour, background)
+            };
+            assert!(
+                ratio(Role::Text) >= 4.5,
+                "{}: text is {:.2}:1 on its background",
+                theme.id,
+                ratio(Role::Text)
+            );
+            let bar = ACCESSIBLE
+                .iter()
+                .find_map(|(id, bar)| (*id == theme.id).then_some(*bar));
+            if let Some(bar) = bar {
+                for role in roles {
+                    assert!(
+                        ratio(role) >= bar,
+                        "{}: {role:?} is {:.2}:1, under {bar}:1",
+                        theme.id,
+                        ratio(role)
+                    );
+                }
+            }
+        }
+        for (id, _) in ACCESSIBLE {
+            assert!(themes.iter().any(|t| t.id == id), "{id} is built in");
+        }
     }
 
     #[test]

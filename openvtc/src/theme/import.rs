@@ -120,7 +120,7 @@ impl Roles {
         if self.is_empty() {
             bail!("no colours found");
         }
-        let mode = mode.unwrap_or_else(|| mode_of(self.background));
+        let mode = mode.unwrap_or_else(|| Mode::of_background(self.background));
         let default = Palette::DEFAULT;
         // Text a theme did not set must still be readable on the background it did.
         let text = self.text.unwrap_or(match (self.background, mode) {
@@ -142,18 +142,6 @@ impl Roles {
                 background: self.background,
             },
         })
-    }
-}
-
-/// Light when the background is.
-fn mode_of(background: Option<Color>) -> Mode {
-    match background {
-        Some(Color::Rgb(r, g, b))
-            if 0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b) > 140.0 =>
-        {
-            Mode::Light
-        }
-        _ => Mode::Dark,
     }
 }
 

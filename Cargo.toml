@@ -142,6 +142,10 @@ didwebvh-rs = "0.6"
 ed25519-dalek-bip32 = "0.3"
 hkdf = "0.13"
 hex = "0.4"
+# poll(2) with a timeout, for asking the terminal its background colour
+# (`openvtc::theme::terminal`). Already in the graph beneath crossterm and
+# console; named directly because neither exposes a timed read.
+libc = "0.2"
 # keyring split: the library API is now in keyring-core 1.0; platform
 # backends ship as separate keyring-store crates that each binary registers
 # at startup via keyring_core::set_default_store.
