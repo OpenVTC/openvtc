@@ -300,7 +300,6 @@ pub(crate) fn surface(report: &OverrideReport, main_page: &mut MainPageState) {
 mod tests {
     use super::*;
     use affinidi_tdk::messaging::profiles::{ATMProfile, ATMProfileInner};
-    #[cfg(feature = "dev-overrides")]
     use openvtc_core::config::secured_config::SecuredConfig;
     use openvtc_core::config::{
         KeyBackend,
@@ -445,6 +444,49 @@ mod tests {
         );
         assert_eq!(config.runtime_trust_overrides, None);
         assert_eq!(report.banner(), None);
+    }
+
+    /// The persistence half of the same finding, in the build that ships.
+    ///
+    /// An override did not merely point the running process at another VTA: the
+    /// next save wrote it, through `Config::save` -> `SecuredConfig::from` ->
+    /// `SecuredConfig::save` -> the keyring, so one launch with the variable set
+    /// re-anchored the profile for every launch after it. That chain is why an
+    /// unchanged live config is only half the guarantee — what a save *would*
+    /// write has to carry the legitimate anchors too.
+    ///
+    /// Asserted on the two values a save reads, the coalesced-save snapshot and
+    /// the `SecuredConfig` built from the live config, rather than on the
+    /// keyring: the keyring is the operator's, and a test has no business in it.
+    #[cfg(not(feature = "dev-overrides"))]
+    #[test]
+    fn release_build_override_never_reaches_the_save_snapshot() {
+        let mut config = vta_config(LEGIT_URL, LEGIT_DID);
+
+        let report = apply_from(
+            &mut config,
+            env_of(&[(VTA_URL_VAR, OVERRIDE_URL), (VTA_DID_VAR, OVERRIDE_DID)]),
+        );
+        assert_eq!(ignored_vars(&report), vec![VTA_URL_VAR, VTA_DID_VAR]);
+
+        let snapshot = config.clone_for_save().expect("snapshot");
+        assert_eq!(
+            vta_of(&snapshot.key_backend),
+            (LEGIT_URL.to_string(), LEGIT_DID.to_string()),
+            "a save taken after an ignored override must still write the persisted anchor"
+        );
+
+        let secured = SecuredConfig::from(&config);
+        assert_eq!(
+            secured.vta_url.as_deref(),
+            Some(LEGIT_URL),
+            "the keyring record must keep the persisted VTA URL"
+        );
+        assert_eq!(
+            secured.vta_did.as_deref(),
+            Some(LEGIT_DID),
+            "the keyring record must keep the persisted VTA DID"
+        );
     }
 
     #[cfg(not(feature = "dev-overrides"))]
