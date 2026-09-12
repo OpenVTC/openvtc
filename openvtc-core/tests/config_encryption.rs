@@ -441,6 +441,7 @@ mod export_import {
             // map type (HashMap today, BTreeMap after the determinism fix).
             identities: Default::default(),
             active_persona: None,
+            runtime_trust_overrides: None,
         }
     }
 

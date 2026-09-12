@@ -37,6 +37,9 @@ pub mod join;
 pub mod logs;
 pub mod members;
 pub mod messaging;
+// Crate-private stopgap: a copy of `affinidi-did-web`'s host classifier until
+// that crate exports it (see the module header).
+mod net_guard;
 #[cfg(feature = "openpgp-card")]
 pub mod openpgp_card;
 pub mod persona;
@@ -53,7 +56,6 @@ pub mod vetting;
 pub mod vrc;
 
 /// Primary Linux Foundation Mediator DID.
-/// Can be overridden via the `OPENVTC_MEDIATOR_DID` environment variable.
 pub const LF_PUBLIC_MEDIATOR_DID: &str =
     "did:webvh:QmetnhxzJXTJ9pyXR1BbZ2h6DomY6SB1ZbzFPrjYyaEq9V:fpp.storm.ws:public-mediator";
 
@@ -64,9 +66,10 @@ pub const LF_ORG_DID: &str =
 
 /// Resolves the mediator DID from an optional caller-supplied override.
 ///
-/// The binary is the single boundary that reads the `OPENVTC_MEDIATOR_DID`
-/// environment variable and passes its value (if any) in here; core never
-/// reads process env itself. If `override_did` is `Some` and starts with
+/// Callers pass any override explicitly; core never reads process env itself.
+/// (The `openvtc` binary does not feed `OPENVTC_MEDIATOR_DID` in here: it
+/// honours that variable only in `dev-overrides` builds, as a runtime-only
+/// change to the active persona.) If `override_did` is `Some` and starts with
 /// `"did:"`, it is returned; otherwise a warning is logged and the default
 /// [`LF_PUBLIC_MEDIATOR_DID`] is returned instead.
 pub fn mediator_did(override_did: Option<&str>) -> String {

@@ -352,6 +352,30 @@ pub struct Config {
     /// startup/setup (which run before any selection) behave exactly as before.
     /// Not persisted — a pure runtime selection pointer over `identities`.
     pub active_persona: Option<account::PersonaId>,
+
+    /// The persisted VTA trust anchor as it was before a runtime-only override
+    /// replaced it. `None` (the normal case) means `key_backend` holds exactly
+    /// what is on disk.
+    ///
+    /// Runtime-only, never serialized. Set only through
+    /// [`Config::override_vta_url_runtime`] / [`Config::override_vta_did_runtime`],
+    /// and read by every write path ([`Config::save`], [`Config::export`],
+    /// [`Config::clone_for_save`]) so an override never becomes the saved
+    /// anchor.
+    pub runtime_trust_overrides: Option<OriginalTrustAnchors>,
+}
+
+/// The VTA trust-anchor values an override displaced, kept so the save path can
+/// write them back instead of the override.
+///
+/// Each field is `Some` only when that value was overridden; the first original
+/// wins if the same value is overridden twice.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OriginalTrustAnchors {
+    /// The persisted `KeyBackend::Vta::vta_url`.
+    pub vta_url: Option<String>,
+    /// The persisted `KeyBackend::Vta::vta_did`.
+    pub vta_did: Option<String>,
 }
 
 /// Serializable bundle of public and secured config, used for import/export.
@@ -673,6 +697,84 @@ impl Config {
             ctx.mediator_did = Some(did.to_string());
         }
         true
+    }
+
+    /// Point the active persona's *runtime* identity at `did` for this process
+    /// only, leaving the persisted `account` record untouched.
+    ///
+    /// The sibling of [`Config::set_active_mediator_did`] for development
+    /// overrides: listeners and outbound sends read the runtime
+    /// `IdentityContext`, so the override takes effect, but nothing a save
+    /// writes changes, so it is gone on the next launch.
+    ///
+    /// Returns `false` when there is no active identity to set it on.
+    #[must_use = "a false return means the mediator DID was NOT set"]
+    pub fn set_active_mediator_did_runtime(&mut self, did: &str) -> bool {
+        let Some(id) = self.active_identity().map(|i| i.persona_id) else {
+            return false;
+        };
+        match self.identities.get_mut(&id) {
+            Some(ctx) => {
+                ctx.mediator_did = Some(did.to_string());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Replace the VTA REST URL for this process only, recording the persisted
+    /// value so every save keeps writing it.
+    ///
+    /// Returns `false` (and changes nothing) for a non-VTA key backend.
+    #[must_use = "a false return means the VTA URL was NOT overridden"]
+    pub fn override_vta_url_runtime(&mut self, url: &str) -> bool {
+        let KeyBackend::Vta { vta_url, .. } = &mut self.key_backend else {
+            return false;
+        };
+        let original = std::mem::replace(vta_url, url.to_string());
+        self.runtime_trust_overrides
+            .get_or_insert_with(OriginalTrustAnchors::default)
+            .vta_url
+            .get_or_insert(original);
+        true
+    }
+
+    /// Replace the VTA DID for this process only, recording the persisted value
+    /// so every save keeps writing it.
+    ///
+    /// Returns `false` (and changes nothing) for a non-VTA key backend.
+    #[must_use = "a false return means the VTA DID was NOT overridden"]
+    pub fn override_vta_did_runtime(&mut self, did: &str) -> bool {
+        let KeyBackend::Vta { vta_did, .. } = &mut self.key_backend else {
+            return false;
+        };
+        let original = std::mem::replace(vta_did, did.to_string());
+        self.runtime_trust_overrides
+            .get_or_insert_with(OriginalTrustAnchors::default)
+            .vta_did
+            .get_or_insert(original);
+        true
+    }
+
+    /// The VTA `(url, did)` a save must write: the persisted originals where a
+    /// runtime override displaced them, the live values otherwise. `None` for a
+    /// non-VTA key backend.
+    pub fn persisted_vta_anchor(&self) -> Option<(&str, &str)> {
+        let KeyBackend::Vta {
+            vta_url, vta_did, ..
+        } = &self.key_backend
+        else {
+            return None;
+        };
+        let originals = self.runtime_trust_overrides.as_ref();
+        Some((
+            originals
+                .and_then(|o| o.vta_url.as_deref())
+                .unwrap_or(vta_url),
+            originals
+                .and_then(|o| o.vta_did.as_deref())
+                .unwrap_or(vta_did),
+        ))
     }
 
     /// Whether `did` is one of our resolved persona DIDs (vs. a relationship
@@ -1651,6 +1753,7 @@ mod tests {
             account: account::Account::default(),
             identities,
             active_persona: None,
+            runtime_trust_overrides: None,
         }
     }
 
@@ -1877,6 +1980,98 @@ mod tests {
                 .and_then(|p| p.mediator_did.as_deref()),
             Some("did:webvh:example:mediator"),
             "the persisted record must move too, or the change is lost on restart"
+        );
+    }
+
+    /// The runtime-only sibling moves what listeners read and nothing a save
+    /// writes.
+    #[test]
+    fn runtime_mediator_override_leaves_the_account_record_alone() {
+        let pid = account::PersonaId(uuid::Uuid::from_u128(1));
+        let mut identities = BTreeMap::new();
+        identities.insert(pid, test_identity(pid, "did:example:persona"));
+        let mut config = test_config(identities);
+        config.account.personas.insert(
+            pid,
+            account::PersonaRecord {
+                persona_id: pid,
+                did: "did:example:persona".to_string(),
+                did_document: None,
+                key_refs: Vec::new(),
+                mediator_did: Some("did:example:persisted-mediator".to_string()),
+                origin_context_id: "openvtc/test".to_string(),
+                created_at: chrono::Utc::now(),
+                label: None,
+                extra: serde_json::Map::new(),
+            },
+        );
+
+        assert!(config.set_active_mediator_did_runtime("did:example:runtime-mediator"));
+        assert_eq!(config.mediator_did(), "did:example:runtime-mediator");
+        assert_eq!(
+            config
+                .account
+                .personas
+                .get(&pid)
+                .and_then(|p| p.mediator_did.as_deref()),
+            Some("did:example:persisted-mediator"),
+        );
+
+        assert!(
+            !test_config(BTreeMap::new()).set_active_mediator_did_runtime("did:example:m"),
+            "no persona, nothing to set"
+        );
+    }
+
+    /// Every write path keeps the persisted VTA anchor while a runtime override
+    /// is in effect, and a second override does not lose the original.
+    #[test]
+    fn runtime_vta_override_is_never_what_a_save_writes() {
+        let mut config = test_config(BTreeMap::new());
+        assert!(!config.override_vta_url_runtime("http://127.0.0.1:1"));
+        assert_eq!(config.persisted_vta_anchor(), None);
+
+        config.key_backend = KeyBackend::Vta {
+            credential_bundle: SecretString::new("".into()),
+            credential_did: String::new(),
+            credential_private_key: SecretString::new("".into()),
+            vta_did: "did:example:vta".to_string(),
+            vta_url: "https://vta.example".to_string(),
+            mediator_did: None,
+            encryption_seed: SecretBox::new(Box::new(vec![0u8; 32])),
+        };
+        assert!(config.override_vta_url_runtime("http://127.0.0.1:1"));
+        assert!(config.override_vta_url_runtime("http://127.0.0.1:2"));
+        assert!(config.override_vta_did_runtime("did:example:other"));
+
+        let KeyBackend::Vta {
+            vta_url, vta_did, ..
+        } = &config.key_backend
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (vta_url.as_str(), vta_did.as_str()),
+            ("http://127.0.0.1:2", "did:example:other")
+        );
+        assert_eq!(
+            config.persisted_vta_anchor(),
+            Some(("https://vta.example", "did:example:vta"))
+        );
+
+        let secured = secured_config::SecuredConfig::from(&config);
+        assert_eq!(secured.vta_url.as_deref(), Some("https://vta.example"));
+        assert_eq!(secured.vta_did.as_deref(), Some("did:example:vta"));
+
+        let KeyBackend::Vta {
+            vta_url, vta_did, ..
+        } = config.key_backend_for_save().expect("clone")
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (vta_url.as_str(), vta_did.as_str()),
+            ("https://vta.example", "did:example:vta")
         );
     }
 

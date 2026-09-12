@@ -47,7 +47,9 @@ pub fn cli() -> Command {
                     "Map the messaging path between this client and a community.\n\n\
                      For every DID involved — each persona, the VTA, every mediator, and \
                      each VTC — this resolves the DID document, prints its service \
-                     definitions verbatim, and probes any transport URLs. It then runs \
+                     definitions verbatim, and probes any public HTTPS transport URLs \
+                     (plaintext and non-public ones are listed, not dialled; redirects \
+                     are not followed). It then runs \
                      the same TSP > DIDComm > REST negotiation a real send performs, so \
                      the reported transport is the one that would actually be used.\n\n\
                      Parties may sit behind different mediators; that is supported and \
@@ -77,6 +79,15 @@ pub fn cli() -> Command {
                         .help(
                             "Also report whether this account could be rebuilt from its \
                              Trust Context if this machine were lost. Read-only.",
+                        ),
+                    Arg::new("allow-private-probes")
+                        .long("allow-private-probes")
+                        .action(clap::ArgAction::SetTrue)
+                        .help(
+                            "Also probe transport URLs that are plaintext or that point at \
+                             loopback, private or link-local addresses. By default those are \
+                             listed but not dialled, because the URLs come from DID documents \
+                             anyone can publish. For local development stacks only.",
                         ),
                 ]),
         )

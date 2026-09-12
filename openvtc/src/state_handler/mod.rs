@@ -423,7 +423,8 @@ impl StateHandler {
                     .await
                 {
                     Ok(SetupWizardExit::Config(mut config)) => {
-                        crate::apply_env_overrides(&mut config);
+                        let overrides = crate::env_overrides::apply_env_overrides(&mut config);
+                        crate::env_overrides::surface(&overrides, &mut state.main_page);
 
                         // Show the loading screen during the slow post-setup work
                         // (keyring read, VTA round-trip, mediator handshake)
@@ -663,7 +664,8 @@ impl StateHandler {
                 };
 
                 let mut config = config;
-                crate::apply_env_overrides(&mut config);
+                let overrides = crate::env_overrides::apply_env_overrides(&mut config);
+                crate::env_overrides::surface(&overrides, &mut state.main_page);
 
                 let config = Box::new(config);
                 // Sync all display state from the loaded config

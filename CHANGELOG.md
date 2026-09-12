@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Release builds no longer take their VTA or mediator from the environment.**
+  `OPENVTC_VTA_URL`, `OPENVTC_VTA_DID` and `OPENVTC_MEDIATOR_DID` are honoured
+  only by a build compiled with the new `dev-overrides` feature
+  (`cargo run -p openvtc --features dev-overrides`). Any other build ignores
+  them and says so, on stderr before the TUI starts and in the Activity Log.
+  This covers the setup wizard's `OPENVTC_VTA_URL` shortcut too.
+
+  In a `dev-overrides` build the values are validated (DIDs must parse, the URL
+  must be http(s)). They apply to the running process only, and a red
+  `DEV OVERRIDE` badge stays in the bottom bar while they do. Saves and exports
+  keep writing the stored VTA URL, VTA DID and persona mediator. Before this
+  change, a variable set for one launch was written into the profile by the
+  next save and outlived the environment. CI now also runs
+  `cargo test -p openvtc --features dev-overrides`.
+
 ### Fixed
 
 - **The wipe-profile screen names the context it tells you to delete.** It sent
