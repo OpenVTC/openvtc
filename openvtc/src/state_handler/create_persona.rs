@@ -11,14 +11,77 @@
 //! VTA, then persist through the shared [`ConfigExtension::mint_persona_into`].
 //! The minted persona is an orphan (no community) until a join reuses it, and
 //! shows in the identity pane's Personas list.
+//!
+//! Like a join, the mint asks where the persona lives: a new sub-context named
+//! from its label (the default), a context already in use, or the top context.
+//! Its keys and DID are minted in that context, which is recorded as the
+//! persona's origin — so a later join with this persona is presented from it
+//! ([`community_context`]).
 
 use affinidi_tdk::TDK;
 use anyhow::Result;
 use vta_sdk::{client::VtaClient, protocols::did_management::create::WebvhPathMode};
 
-use openvtc_core::config::{Config, KeyBackend, account::PersonaId};
+use openvtc_core::config::{
+    Config, KeyBackend,
+    account::PersonaId,
+    community_context::{self, ContextKind, ContextOption},
+    context_path::parse_sub_context_id,
+};
+use openvtc_core::errors::OpenVTCError;
 
+use crate::state_handler::join_flow;
 use crate::state_handler::setup_sequence::{SetupState, config::ConfigExtension, vta};
+
+/// What a new sub-context is called when the label has nothing a path segment
+/// can hold.
+const FALLBACK_SLUG: &str = "persona";
+
+/// The contexts a standalone persona can be minted into — the choice a join
+/// offers a new persona: a new sub-context named from `label` first, then every
+/// context already in use, then the top context — and the new sub-context's
+/// suggested last segment.
+pub(crate) fn context_choice(config: &Config, label: &str) -> (Vec<ContextOption>, String) {
+    let top = &config.account.top_context_id;
+    let suggested = community_context::suggested_context_id(top, label, FALLBACK_SLUG, |id| {
+        join_flow::context_taken(config, id)
+    })
+    .unwrap_or_else(|_| top.clone());
+    let slug = parse_sub_context_id(&suggested)
+        .filter(|_| suggested != *top)
+        .map(|(_, slug)| slug.to_string())
+        .unwrap_or_default();
+    (
+        community_context::context_options(&config.account, None, &suggested),
+        slug,
+    )
+}
+
+/// The context the highlighted option names. For the new sub-context that is
+/// the typed name under the top context, refused when malformed or already
+/// claimed — choosing a context in use is a different row.
+pub(crate) fn chosen_context(
+    config: &Config,
+    options: &[ContextOption],
+    selected: usize,
+    slug: &str,
+) -> Result<String, String> {
+    let option = options
+        .get(selected)
+        .ok_or_else(|| "Choose a context.".to_string())?;
+    match option.kind {
+        ContextKind::New => {
+            community_context::new_context_id(&config.account.top_context_id, slug, |id| {
+                join_flow::context_taken(config, id)
+            })
+            .map_err(|e| match e {
+                OpenVTCError::Config(message) => message,
+                other => other.to_string(),
+            })
+        }
+        ContextKind::Existing | ContextKind::Top => Ok(option.context_id.clone()),
+    }
+}
 
 /// Mint a standalone persona DID into `config` and persist it, returning its id
 /// and `did:webvh`. `progress` receives a human-readable line per network step
@@ -38,10 +101,23 @@ pub(crate) async fn mint_standalone_persona(
 ) -> Result<MintedPersona> {
     let MintInputs {
         top_context_id,
+        context_id,
         custom_mediator,
     } = inputs;
     if top_context_id.is_empty() {
         anyhow::bail!("No account context yet — finish setup before creating a persona.");
+    }
+
+    // The persona's keys and DID live in exactly one context, so it exists
+    // before anything is minted into it. A retried mint reuses a context an
+    // interrupted one created.
+    progress(&format!("Preparing context {context_id}…"));
+    match community_context::ensure_context(admin_vta, &top_context_id, &context_id, &label).await {
+        Ok(true) => progress(&format!("Created context {context_id}.")),
+        Ok(false) => {}
+        Err(e) => {
+            anyhow::bail!("Could not prepare context {context_id}: {e}. Nothing was minted.")
+        }
     }
 
     // Pick the first WebVH server (serverless mint is a deliberate follow-up,
@@ -58,12 +134,13 @@ pub(crate) async fn mint_standalone_persona(
         })?
         .id;
 
-    // Mint the persona did:webvh via the server (server-generated keys).
+    // Mint the persona did:webvh via the server (server-generated keys), in the
+    // chosen context.
     progress(&format!("Creating persona DID via {server_id}…"));
     let (keys, did, document, _mnemonic) = vta::create_did_via_server(
         admin_vta,
         tdk,
-        &top_context_id,
+        &context_id,
         &server_id,
         WebvhPathMode::AutoAssign,
     )
@@ -91,13 +168,19 @@ pub(crate) async fn mint_standalone_persona(
         ..Default::default()
     };
 
-    Ok(MintedPersona { setup, did })
+    Ok(MintedPersona {
+        setup,
+        did,
+        context_id,
+    })
 }
 
 /// The `Config` reads a mint needs, taken on the loop thread so the mint itself
 /// can run without one.
 pub(crate) struct MintInputs {
     pub(crate) top_context_id: String,
+    /// The context the persona's keys and DID are minted in.
+    pub(crate) context_id: String,
     /// The persona's mediator is the account's VTA mediator: the DID minted via
     /// the VTA's webvh server advertises that mediator, so the persona listener
     /// must use the same one (mirrors the join flow).
@@ -105,10 +188,12 @@ pub(crate) struct MintInputs {
 }
 
 impl MintInputs {
-    /// Read them. Pure — no I/O, so it stays on the loop.
-    pub(crate) fn from_config(config: &Config) -> Self {
+    /// Read them, for a mint into `context_id`. Pure — no I/O, so it stays on
+    /// the loop.
+    pub(crate) fn from_config(config: &Config, context_id: String) -> Self {
         Self {
             top_context_id: config.account.top_context_id.clone(),
+            context_id,
             custom_mediator: match &config.key_backend {
                 KeyBackend::Vta { mediator_did, .. } => mediator_did.clone(),
                 _ => None,
@@ -130,18 +215,25 @@ impl MintInputs {
 pub(crate) struct MintedPersona {
     pub(crate) setup: SetupState,
     pub(crate) did: String,
+    /// The context its keys and DID were minted in.
+    pub(crate) context_id: String,
 }
 
 impl MintedPersona {
-    /// Write the persona into the config. Runs on the loop thread, from
-    /// whichever loop is live — a first persona is minted in State A.
+    /// Write the persona into the config, recording the context it was minted
+    /// in as its origin. Runs on the loop thread, from whichever loop is live —
+    /// a first persona is minted in State A.
     pub(crate) async fn persist(
         &self,
         config: &mut Config,
         tdk: &TDK,
         profile: &str,
     ) -> Result<PersonaId> {
-        Config::mint_persona_into(config, &self.setup, tdk, profile).await
+        let persona_id = Config::mint_persona_into(config, &self.setup, tdk, profile).await?;
+        if let Some(record) = config.account.personas.get_mut(&persona_id) {
+            record.origin_context_id = self.context_id.clone();
+        }
+        Ok(persona_id)
     }
 }
 
@@ -266,6 +358,7 @@ mod mint_outcome_tests {
             minted: Some(MintedPersona {
                 setup: SetupState::default(),
                 did: "did:webvh:QmScid:example.com:new".to_string(),
+                context_id: "openvtc/new".to_string(),
             }),
             error: None,
         }
@@ -293,5 +386,72 @@ mod mint_outcome_tests {
         let o = state.main_page.create_persona.as_ref().unwrap();
         assert_eq!(o.phase, CreatePersonaPhase::Failed);
         assert!(o.messages.iter().any(|m| m.contains("no hosting server")));
+    }
+}
+
+#[cfg(test)]
+mod context_choice_tests {
+    use super::*;
+    use crate::state_handler::dispatch_util::test_config;
+    use openvtc_core::config::account::PersonaRecord;
+
+    fn config_with_work_context() -> Config {
+        let mut config = test_config();
+        config.account.top_context_id = "openvtc".into();
+        let persona_id = PersonaId::new();
+        config.account.personas.insert(
+            persona_id,
+            PersonaRecord {
+                extra: serde_json::Map::new(),
+                persona_id,
+                did: "did:webvh:scid:example.com:work".into(),
+                did_document: None,
+                key_refs: vec![],
+                mediator_did: None,
+                origin_context_id: "openvtc/work".into(),
+                created_at: chrono::Utc::now(),
+                label: Some("Work".into()),
+            },
+        );
+        config
+    }
+
+    /// The same three kinds a join offers, with the new context named from the
+    /// label and kept clear of one already in use.
+    #[test]
+    fn a_standalone_persona_is_offered_new_existing_and_top() {
+        let config = config_with_work_context();
+        let (options, slug) = context_choice(&config, "Work");
+        let kinds: Vec<_> = options.iter().map(|o| o.kind).collect();
+        assert_eq!(
+            kinds,
+            [ContextKind::New, ContextKind::Existing, ContextKind::Top]
+        );
+        assert_eq!(slug, "work-2");
+        assert_eq!(options[1].context_id, "openvtc/work");
+        assert_eq!(options[2].context_id, "openvtc");
+    }
+
+    #[test]
+    fn the_chosen_row_names_the_context_minted_into() {
+        let config = config_with_work_context();
+        let (options, _) = context_choice(&config, "Laptop");
+        assert_eq!(
+            chosen_context(&config, &options, 0, "laptop").as_deref(),
+            Ok("openvtc/laptop")
+        );
+        assert_eq!(
+            chosen_context(&config, &options, 1, "ignored").as_deref(),
+            Ok("openvtc/work")
+        );
+        assert_eq!(
+            chosen_context(&config, &options, 2, "ignored").as_deref(),
+            Ok("openvtc")
+        );
+        assert!(
+            chosen_context(&config, &options, 0, "work").is_err(),
+            "a new context must be new"
+        );
+        assert!(chosen_context(&config, &options, 0, "a/b").is_err());
     }
 }

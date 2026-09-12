@@ -109,6 +109,20 @@ pub(crate) enum DispatchDomain {
     /// the VIC list, `i` to flip the filter — and an inline await made the
     /// focus change itself wait on the round-trip, which read as a frozen key.
     Vic,
+    /// A vetting send: a request, session, card, statement, decline,
+    /// withdrawal or requirements fetch. One at a time, like every peer send.
+    Vetting,
+    /// Registering the contexts memberships already name at the VTA — the ids
+    /// joins recorded before OpenVTC created them. Read-then-create, off the loop.
+    CommunityContexts,
+    /// A holder's action on one membership's context: previewing or deleting
+    /// it, and reading, granting or revoking device access in it. Serialised
+    /// together so a listing can never overtake the grant or revoke that
+    /// changed it, and two deletions never run at once.
+    CommunityAccess,
+    /// Reading every membership context's device grants once a run, so the
+    /// communities panel's detail can show them without being asked.
+    DeviceGrantSweep,
 }
 
 impl DispatchDomain {
@@ -129,6 +143,10 @@ impl DispatchDomain {
             DispatchDomain::PersonaBinding => "Persona binding refresh",
             DispatchDomain::PersonaManage => "Identity request",
             DispatchDomain::Vic => "Invitation credential refresh",
+            DispatchDomain::Vetting => "Vetting send",
+            DispatchDomain::CommunityContexts => "Community context registration",
+            DispatchDomain::CommunityAccess => "Community context request",
+            DispatchDomain::DeviceGrantSweep => "Device access refresh",
         }
     }
 }
@@ -157,8 +175,8 @@ impl InFlight {
         self.domains.remove(&domain);
     }
 
-    /// Whether `domain` currently has a dispatch in flight (for tests / status).
-    #[cfg(test)]
+    /// Whether `domain` currently has a dispatch in flight — for tests, and for
+    /// a background job that should wait for another domain to finish first.
     pub(crate) fn is_busy(&self, domain: DispatchDomain) -> bool {
         self.domains.contains(&domain)
     }
@@ -249,6 +267,22 @@ pub(crate) enum DispatchOutcome {
     /// otherwise leave its domain busy forever) and a generic failure status is
     /// surfaced. Carries the domain to release + label.
     Panicked(DispatchDomain),
+    /// A vetting send finished (or failed, and was undone).
+    Vetting(crate::state_handler::vetting_actions::VettingOutcome),
+    /// Membership contexts were checked at the VTA: each context id, and
+    /// whether it had to be created or why it could not be.
+    CommunityContexts(Vec<(String, Result<bool, String>)>),
+    /// A holder's action on a membership's context finished — a deletion
+    /// preview or delete, or a device-access read, grant or revoke.
+    CommunityContext(crate::state_handler::community_context_actions::ContextOutcome),
+    /// Every membership context's device grants were read: each context id and
+    /// its grants, or why they could not be read.
+    DeviceGrantSweep(
+        Vec<(
+            String,
+            Result<Vec<openvtc_core::community_access::DeviceGrant>, String>,
+        )>,
+    ),
 }
 
 impl DispatchOutcome {
@@ -273,6 +307,10 @@ impl DispatchOutcome {
             DispatchOutcome::PersonaManage(_) => DispatchDomain::PersonaManage,
             DispatchOutcome::Vic(_) => DispatchDomain::Vic,
             DispatchOutcome::VicMutation(_) => DispatchDomain::Vic,
+            DispatchOutcome::Vetting(_) => DispatchDomain::Vetting,
+            DispatchOutcome::CommunityContexts(_) => DispatchDomain::CommunityContexts,
+            DispatchOutcome::CommunityContext(_) => DispatchDomain::CommunityAccess,
+            DispatchOutcome::DeviceGrantSweep(_) => DispatchDomain::DeviceGrantSweep,
             DispatchOutcome::Panicked(domain) => *domain,
         }
     }
@@ -404,6 +442,7 @@ pub(crate) fn apply_outcome(
             }
         },
         DispatchOutcome::Relationship(outcome) => outcome.apply(state, config, save),
+        DispatchOutcome::Vetting(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Inbox(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Did(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::AgentName(results) => {
@@ -475,6 +514,36 @@ pub(crate) fn apply_outcome(
                 .extend(results);
         }
         DispatchOutcome::PersonaManage(outcome) => outcome.apply(state),
+        // Log-only: nothing on screen depends on a context existing, and a
+        // failure is retried on the next launch.
+        DispatchOutcome::CommunityContexts(results) => {
+            for (context_id, result) in results {
+                match result {
+                    Ok(true) => state.main_page.log(format!(
+                        "Registered community context {context_id} at the VTA."
+                    )),
+                    Ok(false) => {}
+                    Err(e) => state.main_page.log(format!(
+                        "Could not register community context {context_id}: {e}"
+                    )),
+                }
+            }
+        }
+        DispatchOutcome::CommunityContext(outcome) => {
+            // A context deleted with its persona removes the finished
+            // membership's record too; any session it still holds belongs to
+            // the runtime loop's session manager.
+            let pending = outcome.membership_removed();
+            outcome.apply(state, config, save);
+            in_flight.finish(domain);
+            return match pending {
+                Some((vtc, persona)) => AfterApply::Deregister(vtc, persona),
+                None => AfterApply::Nothing,
+            };
+        }
+        DispatchOutcome::DeviceGrantSweep(results) => {
+            crate::state_handler::community_context_actions::apply_sweep(state, results);
+        }
         DispatchOutcome::Vic(outcome) => outcome.apply(state, config),
         DispatchOutcome::VicMutation(outcome) => outcome.apply(state),
         // Handled above, before the domain is finished. Listed because the

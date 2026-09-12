@@ -22,7 +22,7 @@ the Linux Foundation's decentralized trust infrastructure.
 | `relationships` | Peer-to-peer trust relationship lifecycle — request, accept, reject, and finalize flows over DIDComm. |
 | `vrc` | Verifiable Relationship Credentials — request, issue, and verify VRCs that attest to established relationships. |
 | `tasks` | Async task tracker for long-running DIDComm operations (message send/receive, credential issuance). |
-| `maintainers` | Community maintainer list management and DIDComm-based list exchange. |
+| `vetting` | Peer identity vetting: tickets, applications, the vetter desk, and the peer Trust Tasks between them. |
 | `bip32` | BIP32 hierarchical key derivation from a seed, with helpers to derive Ed25519 signing keys and X25519 encryption keys. |
 | `openpgp_card` | Hardware token (OpenPGP smart card) support for key storage and signing. Feature-gated behind `openpgp-card`. |
 | `errors` | Unified error type (`OpenVTCError`) used across the library. |

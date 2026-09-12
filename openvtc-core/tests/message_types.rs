@@ -34,14 +34,6 @@ const ALL_TYPES: &[(&str, &str)] = &[
         "VRCRequestRejected",
     ),
     ("https://firstperson.network/vrc/1.0/issued", "VRCIssued"),
-    (
-        "https://kernel.org/maintainers/1.0/list",
-        "MaintainersListRequest",
-    ),
-    (
-        "https://kernel.org/maintainers/1.0/list/response",
-        "MaintainersListResponse",
-    ),
 ];
 
 #[test]

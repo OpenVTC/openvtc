@@ -16,6 +16,7 @@ use std::{fmt, sync::Arc};
 pub mod agent_name;
 pub mod bip32;
 pub mod capabilities;
+pub mod community_access;
 pub mod config;
 // `didcomm` is DIDComm transport plumbing; `messaging` is the pure protocol
 // logic. Both module docs state the split. Deliberately a `//` comment, not a
@@ -36,6 +37,9 @@ pub mod join;
 pub mod logs;
 pub mod members;
 pub mod messaging;
+// Crate-private stopgap: a copy of `affinidi-did-web`'s host classifier until
+// that crate exports it (see the module header).
+mod net_guard;
 #[cfg(feature = "openpgp-card")]
 pub mod openpgp_card;
 pub mod persona;
@@ -48,6 +52,7 @@ pub mod relationships;
 pub mod secure_store;
 pub mod tasks;
 pub mod tsp;
+pub mod vetting;
 pub mod vrc;
 
 /// Primary Linux Foundation Mediator DID.
@@ -163,10 +168,6 @@ pub mod protocol_urls {
     pub const VRC_REJECTED: &str = "https://firstperson.network/vrc/1.0/rejected";
     /// URL for issuing a VRC.
     pub const VRC_ISSUED: &str = "https://firstperson.network/vrc/1.0/issued";
-    /// URL for requesting a list of known maintainers.
-    pub const MAINTAINERS_LIST_REQUEST: &str = "https://kernel.org/maintainers/1.0/list";
-    /// URL for responding with a list of known maintainers.
-    pub const MAINTAINERS_LIST_RESPONSE: &str = "https://kernel.org/maintainers/1.0/list/response";
     /// URL for a DIDComm MessagePickup 3.0 status message.
     pub const MESSAGEPICKUP_STATUS: &str = "https://didcomm.org/messagepickup/3.0/status";
 }
@@ -210,10 +211,6 @@ pub enum MessageType {
     VRCRequestRejected,
     /// A VRC has been issued and delivered.
     VRCIssued,
-    /// Request for a list of known kernel maintainers.
-    MaintainersListRequest,
-    /// Response containing a list of known kernel maintainers.
-    MaintainersListResponse,
 }
 
 impl MessageType {
@@ -229,8 +226,6 @@ impl MessageType {
             MessageType::VRCRequest => "VRC Request",
             MessageType::VRCRequestRejected => "VRC Request Rejected",
             MessageType::VRCIssued => "VRC Issued",
-            MessageType::MaintainersListRequest => "List Known Maintainers (request)",
-            MessageType::MaintainersListResponse => "List Known Maintainers (response)",
         }
         .to_string()
     }
@@ -250,8 +245,6 @@ impl From<MessageType> for String {
             MessageType::VRCRequest => VRC_REQUEST,
             MessageType::VRCRequestRejected => VRC_REJECTED,
             MessageType::VRCIssued => VRC_ISSUED,
-            MessageType::MaintainersListRequest => MAINTAINERS_LIST_REQUEST,
-            MessageType::MaintainersListResponse => MAINTAINERS_LIST_RESPONSE,
         }
         .to_string()
     }
@@ -273,8 +266,6 @@ impl TryFrom<&str> for MessageType {
             VRC_REQUEST => Ok(MessageType::VRCRequest),
             VRC_REJECTED => Ok(MessageType::VRCRequestRejected),
             VRC_ISSUED => Ok(MessageType::VRCIssued),
-            MAINTAINERS_LIST_REQUEST => Ok(MessageType::MaintainersListRequest),
-            MAINTAINERS_LIST_RESPONSE => Ok(MessageType::MaintainersListResponse),
             _ => Err(OpenVTCError::InvalidMessage(value.to_string())),
         }
     }
@@ -432,7 +423,7 @@ impl From<KeyType> for KeyPurpose {
 mod tests {
     use super::*;
 
-    fn all_message_types() -> [MessageType; 11] {
+    fn all_message_types() -> [MessageType; 9] {
         [
             MessageType::RelationshipRequest,
             MessageType::RelationshipRequestRejected,
@@ -443,8 +434,6 @@ mod tests {
             MessageType::VRCRequest,
             MessageType::VRCRequestRejected,
             MessageType::VRCIssued,
-            MessageType::MaintainersListRequest,
-            MessageType::MaintainersListResponse,
         ]
     }
 
@@ -461,8 +450,6 @@ mod tests {
             (VRC_REQUEST, "VRCRequest"),
             (VRC_REJECTED, "VRCRequestRejected"),
             (VRC_ISSUED, "VRCIssued"),
-            (MAINTAINERS_LIST_REQUEST, "MaintainersListRequest"),
-            (MAINTAINERS_LIST_RESPONSE, "MaintainersListResponse"),
         ];
 
         for (url, expected_debug_contains) in cases {
@@ -554,14 +541,6 @@ mod tests {
             (MessageType::VRCRequest, "VRC Request"),
             (MessageType::VRCRequestRejected, "VRC Request Rejected"),
             (MessageType::VRCIssued, "VRC Issued"),
-            (
-                MessageType::MaintainersListRequest,
-                "List Known Maintainers (request)",
-            ),
-            (
-                MessageType::MaintainersListResponse,
-                "List Known Maintainers (response)",
-            ),
         ];
         for (ty, want) in cases {
             assert_eq!(ty.friendly_name(), want);

@@ -230,6 +230,7 @@ mod agent_name_refresh;
 mod background_dispatch;
 mod capability_actions;
 mod community_actions;
+mod community_context_actions;
 mod create_persona;
 mod credential_actions;
 mod persona_actions;
@@ -261,6 +262,7 @@ mod setup_token_actions;
 mod setup_vta_actions;
 mod setup_wizard;
 pub mod state;
+mod vetting_actions;
 mod vic;
 mod vta_transports;
 
@@ -1027,6 +1029,14 @@ impl StateHandler {
         let (dispatch_tx, mut dispatch_rx) =
             mpsc::unbounded_channel::<background_dispatch::DispatchOutcome>();
         let mut in_flight = background_dispatch::InFlight::default();
+        // Membership contexts already checked at the VTA this run. A failure is
+        // logged and retried on the next launch rather than every tick.
+        let mut contexts_checked: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        // Whether this run has read the membership contexts' device grants for
+        // the communities panel. Once a run; the device-access view re-reads on
+        // demand.
+        let mut grants_swept = false;
 
         // Coalesced + offloaded config persistence (R11). Mutation sites mark the
         // config dirty on the loop thread instead of saving inline; the
@@ -1570,10 +1580,29 @@ impl StateHandler {
                     }
                 }
                 _ = pending_expiry_tick.tick() => {
-                    // R-B-7: expire Pending joins unanswered for 7 days, raising
+                    // R-B-7: expire Pending joins unanswered for 7 days — or for
+                    // the `decisionSla` a vetting community publishes — raising
                     // actions-required, and tear down each one's now-dead session
                     // (R-S-3). Records are retained read-only (R-S-1).
-                    let expired = config.account.expire_stale_pending(chrono::Utc::now());
+                    let vetting = &config.private.vetting;
+                    let default_timeout = chrono::TimeDelta::days(
+                        openvtc_core::config::account::PENDING_TIMEOUT_DAYS,
+                    );
+                    let timeouts: std::collections::HashMap<_, _> = config
+                        .account
+                        .memberships()
+                        .filter_map(|c| {
+                            vetting
+                                .decision_sla(&c.vtc_did, c.persona_ref)
+                                .map(|sla| ((c.vtc_did.clone(), c.persona_ref), sla))
+                        })
+                        .collect();
+                    let expired = config.account.expire_stale_pending_with(chrono::Utc::now(), |c| {
+                        timeouts
+                            .get(&(c.vtc_did.clone(), c.persona_ref))
+                            .copied()
+                            .unwrap_or(default_timeout)
+                    });
                     if !expired.is_empty() {
                         save.mark_dirty();
                         for (vtc, persona) in &expired {
@@ -1589,7 +1618,7 @@ impl StateHandler {
                         }
                         state.main_page.sync_from_config(&config);
                         state.main_page.log(format!(
-                            "{} pending join{} expired (no response within 7 days).",
+                            "{} pending join{} expired (no decision within the time allowed).",
                             expired.len(),
                             if expired.len() == 1 { "" } else { "s" },
                         ));
@@ -1673,6 +1702,78 @@ impl StateHandler {
                                 )
                             },
                         );
+                    }
+
+                    // Register the contexts memberships name. Joins before
+                    // per-community contexts recorded an id without creating it;
+                    // faces worn there worked only because nothing checked.
+                    let top_context_id = config.account.top_context_id.clone();
+                    let unchecked: Vec<String> = config
+                        .account
+                        .memberships()
+                        .map(|c| c.sub_context_id.clone())
+                        .filter(|id| {
+                            openvtc_core::config::community_context::is_sub_context(
+                                id,
+                                &top_context_id,
+                            ) && !contexts_checked.contains(id)
+                        })
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    if !unchecked.is_empty()
+                        && let Some(client) = admin_vta.as_ref()
+                        && in_flight
+                            .try_begin(background_dispatch::DispatchDomain::CommunityContexts)
+                    {
+                        contexts_checked.extend(unchecked.iter().cloned());
+                        let client = client.clone();
+                        background_dispatch::spawn_dispatch(
+                            dispatch_tx.clone(),
+                            background_dispatch::DispatchDomain::CommunityContexts,
+                            async move {
+                                let mut results = Vec::with_capacity(unchecked.len());
+                                for context_id in unchecked {
+                                    let name = openvtc_core::config::context_path::parse_sub_context_id(
+                                        &context_id,
+                                    )
+                                    .map_or(context_id.clone(), |(_, slug)| slug.to_string());
+                                    let result =
+                                        openvtc_core::config::community_context::ensure_context(
+                                            &client,
+                                            &top_context_id,
+                                            &context_id,
+                                            &name,
+                                        )
+                                        .await
+                                        .map_err(|e| e.to_string());
+                                    results.push((context_id, result));
+                                }
+                                background_dispatch::DispatchOutcome::CommunityContexts(results)
+                            },
+                        );
+                    }
+
+                    // Read each membership context's device grants, once a run,
+                    // after registration has made sure the contexts exist — a
+                    // grant listing for a context not yet created would read as
+                    // a failure.
+                    if !grants_swept
+                        && !in_flight.is_busy(background_dispatch::DispatchDomain::CommunityContexts)
+                        && let Some(client) = admin_vta.as_ref()
+                    {
+                        let targets = community_context_actions::sweep_targets(&config);
+                        if !targets.is_empty()
+                            && in_flight
+                                .try_begin(background_dispatch::DispatchDomain::DeviceGrantSweep)
+                        {
+                            grants_swept = true;
+                            background_dispatch::spawn_dispatch(
+                                dispatch_tx.clone(),
+                                background_dispatch::DispatchDomain::DeviceGrantSweep,
+                                community_context_actions::sweep(client.clone(), targets),
+                            );
+                        }
                     }
 
                     // Probe what transports the VTA advertises, for the VTA
@@ -2262,7 +2363,9 @@ impl StateHandler {
                     Action::CloseCommunitySwitcher | Action::DidSelect(..) |
                     Action::DidConfirmDelete(..) | Action::DidCancelDelete |
                     Action::StartCreatePersona | Action::CreatePersonaInput(..) |
-                    Action::CreatePersonaClose | Action::AgentNameManagerInput(..) |
+                    Action::CreatePersonaClose | Action::CreatePersonaContextSelect(..) |
+                    Action::CreatePersonaContextSlug(..) | Action::CreatePersonaBack |
+                    Action::AgentNameManagerInput(..) |
                     Action::AgentNameManagerSelect(..) | Action::AgentNameManagerConfirmRemove |
                     Action::AgentNameManagerCancelRemove | Action::AgentNameManagerClose |
                     Action::VicSelect(..) | Action::VicConfirmDelete(..) |
@@ -2276,6 +2379,8 @@ impl StateHandler {
                     Action::JoinIdentitySelect(..) | Action::JoinIdentityChoose |
                     Action::JoinReuseConfirm | Action::JoinReuseCancel |
                     Action::JoinInvitationSelect(..) | Action::JoinInvitationChoose |
+                    Action::JoinContextSelect(..) | Action::JoinContextSlug(..) |
+                    Action::JoinContextChoose |
                     Action::JoinCancel | Action::JoinPasteVic(..) | Action::JoinPasteFromClipboard |
                     Action::JoinClearVic | Action::ImportConfig(..) | Action::SetProtection(..) |
                     Action::VtaSubmitDid(..) | Action::VtaStartProvision(..) |
@@ -2284,6 +2389,15 @@ impl StateHandler {
                     #[cfg(feature = "openpgp-card")]
                     Action::GetTokens | Action::SetAdminPin(..) | Action::SetTouchPolicy(..) |
                     Action::SetTokenName(..) | Action::FactoryReset(..) | Action::TokenWriteKeys(..) => {}
+
+                    // Vetting sends and receives peer messages as a persona, and
+                    // this loop has neither a persona nor an inbound arm.
+                    Action::Vetting(..) => {
+                        state.main_page.log(
+                            "Vetting needs a persona — create one under My Identity, then \
+                             restart OpenVTC to apply or to vet.",
+                        );
+                    }
 
                     // Genuinely unavailable: these need a live community and the
                     // messaging runtime that comes with it. Inert, but not
@@ -2296,7 +2410,7 @@ impl StateHandler {
                     Action::AcknowledgeCommunity(..) | Action::LeaveCommunity(..) |
                     Action::WithdrawJoin(..) | Action::ArchiveCommunity(..) |
                     Action::ToggleShowArchived | Action::OpenCommunitySwitcher |
-                    Action::CommunitySwitcherSelect => {
+                    Action::CommunitySwitcherSelect | Action::CommunityContext(..) => {
                         debug!("action needs a community — not serviced in State A");
                         state
                             .main_page
@@ -2558,10 +2672,6 @@ fn spawn_persona_mint(
 ) {
     use main_page::content::CreatePersonaPhase;
 
-    let label = match state.main_page.create_persona.as_ref() {
-        Some(o) if o.phase == CreatePersonaPhase::Label => o.label.value().trim().to_string(),
-        _ => return,
-    };
     fn fail(state: &mut State, msg: &str, terminal: bool) {
         if let Some(o) = state.main_page.create_persona.as_mut() {
             if terminal {
@@ -2570,9 +2680,48 @@ fn spawn_persona_mint(
             o.messages = vec![msg.to_string()];
         }
     }
-    if label.is_empty() {
-        return fail(state, "Enter a label first.", false);
+    let Some(overlay) = state.main_page.create_persona.clone() else {
+        return;
+    };
+    let label = overlay.label.value().trim().to_string();
+    match overlay.phase {
+        // The label is checked, then the contexts it can live in are offered —
+        // no VTA call yet, so this stays on the loop.
+        CreatePersonaPhase::Label => {
+            if label.is_empty() {
+                return fail(state, "Enter a label first.", false);
+            }
+            if config.account.top_context_id.is_empty() {
+                return fail(
+                    state,
+                    "No account context yet — finish setup before creating a persona.",
+                    true,
+                );
+            }
+            let (options, slug) = create_persona::context_choice(config, &label);
+            if let Some(o) = state.main_page.create_persona.as_mut() {
+                o.context_options = options;
+                o.context_selected = 0;
+                o.context_slug = slug;
+                o.messages.clear();
+                o.phase = CreatePersonaPhase::Context;
+            }
+            return;
+        }
+        CreatePersonaPhase::Context => {}
+        CreatePersonaPhase::Working | CreatePersonaPhase::Done | CreatePersonaPhase::Failed => {
+            return;
+        }
     }
+    let context_id = match create_persona::chosen_context(
+        config,
+        &overlay.context_options,
+        overlay.context_selected,
+        &overlay.context_slug,
+    ) {
+        Ok(context_id) => context_id,
+        Err(e) => return fail(state, &e, false),
+    };
     let Some(admin_vta) = admin_vta else {
         return fail(
             state,
@@ -2591,13 +2740,15 @@ fn spawn_persona_mint(
 
     if let Some(o) = state.main_page.create_persona.as_mut() {
         o.phase = CreatePersonaPhase::Working;
-        o.messages = vec![format!("Creating persona \u{201c}{label}\u{201d}\u{2026}")];
+        o.messages = vec![format!(
+            "Creating persona \u{201c}{label}\u{201d} in {context_id}\u{2026}"
+        )];
     }
 
     let job = create_persona::MintJob {
         admin_vta: admin_vta.clone(),
         tdk: tdk.clone(),
-        inputs: create_persona::MintInputs::from_config(config),
+        inputs: create_persona::MintInputs::from_config(config, context_id),
         label,
         progress_tx: dispatch_tx.clone(),
     };
@@ -3320,6 +3471,37 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
         }
         Action::CreatePersonaClose => {
             state.main_page.create_persona = None;
+        }
+        Action::CreatePersonaContextSelect(i) => {
+            if let Some(o) = state.main_page.create_persona.as_mut()
+                && o.phase == main_page::content::CreatePersonaPhase::Context
+            {
+                o.context_selected = (*i).min(o.context_options.len().saturating_sub(1));
+                o.messages.clear();
+            }
+        }
+        Action::CreatePersonaContextSlug(slug) => {
+            // Only the new sub-context's row takes a typed name.
+            if let Some(o) = state.main_page.create_persona.as_mut()
+                && o.phase == main_page::content::CreatePersonaPhase::Context
+                && o.context_options.get(o.context_selected).is_some_and(|c| {
+                    c.kind == openvtc_core::config::community_context::ContextKind::New
+                })
+            {
+                o.context_slug = slug.chars().take(64).collect();
+                o.messages.clear();
+            }
+        }
+        Action::CreatePersonaBack => {
+            if let Some(o) = state.main_page.create_persona.as_mut()
+                && o.phase == main_page::content::CreatePersonaPhase::Context
+            {
+                o.phase = main_page::content::CreatePersonaPhase::Label;
+                o.messages.clear();
+            }
+        }
+        Action::CommunityContext(action) => {
+            return community_context_actions::reduce(state, action);
         }
         Action::AgentNameManagerInput(key) => {
             use tui_input::backend::crossterm::EventHandler;
@@ -4070,6 +4252,84 @@ mod tests {
             !handle_nav_action(&mut state, &Action::CreatePersonaCopy),
             "CreatePersonaCopy touches the clipboard in the loop"
         );
+    }
+
+    /// The persona context choice is view state, shared by both loops: moving
+    /// the highlight, naming a new context (on its row only), and going back.
+    /// A community-context view action is too, while one that reaches the VTA
+    /// is left to the loop.
+    #[test]
+    fn nav_reducer_moves_through_the_persona_context_choice() {
+        use crate::state_handler::actions::CommunityContextAction;
+        use crate::state_handler::main_page::content::{
+            CreatePersonaPhase, CreatePersonaState, DeviceAccessView,
+        };
+        use openvtc_core::config::community_context::{ContextKind, ContextOption};
+
+        let option = |id: &str, kind| ContextOption {
+            context_id: id.to_string(),
+            kind,
+            communities: vec![],
+            holds_persona_keys: false,
+        };
+        let mut state = State::default();
+        state.main_page.create_persona = Some(CreatePersonaState {
+            phase: CreatePersonaPhase::Context,
+            context_options: vec![
+                option("openvtc/a", ContextKind::New),
+                option("openvtc", ContextKind::Top),
+            ],
+            context_slug: "a".to_string(),
+            ..Default::default()
+        });
+        let overlay = |s: &State| s.main_page.create_persona.clone().unwrap();
+
+        assert!(handle_nav_action(
+            &mut state,
+            &Action::CreatePersonaContextSelect(9)
+        ));
+        assert_eq!(overlay(&state).context_selected, 1);
+        handle_nav_action(&mut state, &Action::CreatePersonaContextSlug("b".into()));
+        assert_eq!(
+            overlay(&state).context_slug,
+            "a",
+            "the top row takes no name"
+        );
+        handle_nav_action(&mut state, &Action::CreatePersonaContextSelect(0));
+        handle_nav_action(
+            &mut state,
+            &Action::CreatePersonaContextSlug("laptop".into()),
+        );
+        assert_eq!(overlay(&state).context_slug, "laptop");
+        assert!(handle_nav_action(&mut state, &Action::CreatePersonaBack));
+        assert_eq!(overlay(&state).phase, CreatePersonaPhase::Label);
+
+        state.main_page.content_panel.communities.device_access = Some(DeviceAccessView {
+            community: "a".into(),
+            context_id: "openvtc/a".into(),
+            can_grant: true,
+            selected: 0,
+            form: None,
+            confirm_revoke: false,
+            busy: false,
+            message: None,
+        });
+        assert!(handle_nav_action(
+            &mut state,
+            &Action::CommunityContext(CommunityContextAction::DevicesClose)
+        ));
+        assert!(
+            state
+                .main_page
+                .content_panel
+                .communities
+                .device_access
+                .is_none()
+        );
+        assert!(!handle_nav_action(
+            &mut state,
+            &Action::CommunityContext(CommunityContextAction::DeleteStart(0))
+        ));
     }
 
     /// The create-persona overlay's UI-only arms (open / edit label / close) are

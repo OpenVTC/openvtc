@@ -173,6 +173,8 @@ impl MainPageState {
         // Update header config
         self.config = MainMenuConfigState::from(config);
 
+        crate::state_handler::vetting_actions::sync(&mut self.content_panel.vetting, config);
+
         // The working community's persona scopes the relationship/inbox/VRC
         // panels (D10 / R-C-6): only items owned by it (plus untagged legacy
         // items in a single-persona account) are shown.
@@ -619,6 +621,15 @@ impl MainPageState {
                     .agent_name_for(&c.vtc_did)
                     .map(|n| sanitize_display(n, 256)),
                 sub_context_id: c.sub_context_id.clone(),
+                context_note: openvtc_core::config::community_context::isolation(
+                    &config.account,
+                    c,
+                )
+                .describe(),
+                has_own_context: openvtc_core::config::community_context::is_sub_context(
+                    &c.sub_context_id,
+                    &config.account.top_context_id,
+                ),
                 request_id,
                 has_membership_credential: c
                     .credentials

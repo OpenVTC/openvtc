@@ -700,6 +700,165 @@ fn begin_reconnect_status(state: &mut State) {
     state.main_page.log("Reconnecting to mediator...");
 }
 
+// ============================================================
+// Themes
+// ============================================================
+
+use crate::state_handler::main_page::content::ThemeRow;
+use crate::theme::{
+    self, Theme,
+    catalog::{self, Roots},
+    terminal,
+};
+
+fn theme_rows(roots: &Roots) -> Vec<ThemeRow> {
+    catalog::list(roots)
+        .into_iter()
+        .map(|entry| ThemeRow {
+            source: entry.source.label().to_string(),
+            id: entry.id,
+            name: entry.name,
+        })
+        .collect()
+}
+
+/// Open the picker on the theme in use.
+fn handle_theme_open(state: &mut State, roots: &Roots) {
+    let rows = theme_rows(roots);
+    let (original, _) = theme::active_theme();
+    let selected = rows.iter().position(|r| r.id == original).unwrap_or(0);
+    let settings = &mut state.main_page.content_panel.settings;
+    settings.status_message = None;
+    settings.mode = SettingsMode::ThemePicker {
+        rows,
+        selected,
+        original,
+    };
+}
+
+/// Highlight row `index` and preview its theme.
+fn handle_theme_select(state: &mut State, roots: &Roots, index: usize) {
+    let settings = &mut state.main_page.content_panel.settings;
+    let SettingsMode::ThemePicker { rows, selected, .. } = &mut settings.mode else {
+        return;
+    };
+    let Some(row) = rows.get(index) else {
+        return;
+    };
+    *selected = index;
+    settings.status_message = match catalog::load(roots, &row.id) {
+        Ok(theme) => {
+            theme::set_active(&theme);
+            None
+        }
+        Err(e) => Some(format!("Could not load {}: {e}", row.name)),
+    };
+}
+
+/// Keep the highlighted theme, and remember it.
+fn handle_theme_apply(state: &mut State, roots: &Roots) {
+    let settings = &mut state.main_page.content_panel.settings;
+    let SettingsMode::ThemePicker { rows, selected, .. } = &settings.mode else {
+        return;
+    };
+    let Some(id) = rows.get(*selected).map(|r| r.id.clone()) else {
+        return;
+    };
+    let kept = catalog::load(roots, &id).and_then(|theme| {
+        catalog::remember(roots, &theme.id)?;
+        Ok(theme)
+    });
+    match kept {
+        Ok(theme) => {
+            theme::set_active(&theme);
+            settings.mode = SettingsMode::View;
+            let shown = theme::display_name(&theme.id, &theme.name);
+            let mut message = format!("Theme set to {shown}.");
+            let (mode, learned) = terminal::mode();
+            if theme.id == catalog::AUTO_ID && learned != terminal::Source::Asked {
+                // The terminal can only be asked before the TUI starts.
+                message.push_str(&format!(
+                    " OpenVTC asks your terminal for its background when it starts; \
+                     until then, Auto takes it to be {}.",
+                    mode.as_str()
+                ));
+            }
+            settings.status_message = Some(message);
+            state.main_page.log(format!("Theme set to {shown}"));
+        }
+        Err(e) => settings.status_message = Some(format!("Could not use that theme: {e}")),
+    }
+}
+
+/// Put back the theme that was in use, and close the picker.
+fn handle_theme_cancel(state: &mut State, roots: &Roots) {
+    let settings = &mut state.main_page.content_panel.settings;
+    if let SettingsMode::ThemePicker { original, .. } = &settings.mode {
+        let theme = catalog::load(roots, original).unwrap_or_else(|_| Theme::default_theme());
+        theme::set_active(&theme);
+    }
+    settings.mode = SettingsMode::View;
+}
+
+/// Copy the highlighted theme into the person's themes, and highlight the copy.
+fn handle_theme_copy(state: &mut State, roots: &Roots) {
+    let settings = &mut state.main_page.content_panel.settings;
+    let SettingsMode::ThemePicker { rows, selected, .. } = &settings.mode else {
+        return;
+    };
+    let Some(id) = rows.get(*selected).map(|r| r.id.clone()) else {
+        return;
+    };
+    let copied = catalog::load(roots, &id).and_then(|mut theme| {
+        theme.name = format!("{} (mine)", theme.name);
+        catalog::install(roots, &theme)
+    });
+    match copied {
+        Ok((copy_id, path)) => {
+            reload_rows(state, roots, &copy_id);
+            state.main_page.content_panel.settings.status_message = Some(format!(
+                "Copied to {} — edit it, then press r here to see your changes.",
+                path.display()
+            ));
+        }
+        Err(e) => settings.status_message = Some(format!("Could not copy that theme: {e}")),
+    }
+}
+
+/// Re-read the themes, keeping `keep` highlighted when it is still there.
+fn reload_rows(state: &mut State, roots: &Roots, keep: &str) {
+    let rows = theme_rows(roots);
+    let index = rows.iter().position(|r| r.id == keep).unwrap_or(0);
+    if let SettingsMode::ThemePicker {
+        rows: current,
+        selected,
+        ..
+    } = &mut state.main_page.content_panel.settings.mode
+    {
+        *current = rows;
+        *selected = index;
+    }
+    handle_theme_select(state, roots, index);
+}
+
+/// Re-read the themes, so edits to a theme file show.
+fn handle_theme_reload(state: &mut State, roots: &Roots) {
+    let SettingsMode::ThemePicker { rows, selected, .. } =
+        &state.main_page.content_panel.settings.mode
+    else {
+        return;
+    };
+    let keep = rows
+        .get(*selected)
+        .map(|r| r.id.clone())
+        .unwrap_or_default();
+    reload_rows(state, roots, &keep);
+    let settings = &mut state.main_page.content_panel.settings;
+    if settings.status_message.is_none() {
+        settings.status_message = Some("Themes reloaded.".to_string());
+    }
+}
+
 /// Outcome of dispatching a `SettingsAction`.
 ///
 /// The TUI loop ignores `Continue`, breaks out with `UserInt` when the operator
@@ -788,6 +947,14 @@ pub(crate) async fn dispatch(
             begin_reconnect_status(state);
             return SettingsOutcome::ReconnectMediator;
         }
+        SettingsAction::ThemeOpen => handle_theme_open(state, &Roots::from_env()),
+        SettingsAction::ThemeSelect(index) => {
+            handle_theme_select(state, &Roots::from_env(), index);
+        }
+        SettingsAction::ThemeApply => handle_theme_apply(state, &Roots::from_env()),
+        SettingsAction::ThemeCancel => handle_theme_cancel(state, &Roots::from_env()),
+        SettingsAction::ThemeCopy => handle_theme_copy(state, &Roots::from_env()),
+        SettingsAction::ThemeReload => handle_theme_reload(state, &Roots::from_env()),
     }
     SettingsOutcome::Continue
 }
@@ -795,6 +962,82 @@ pub(crate) async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The picker previews as it moves, keeps what Enter chose, and puts back
+    /// what was in use when cancelled. One test, because the active theme is
+    /// process-wide.
+    #[test]
+    fn the_theme_picker_previews_keeps_and_cancels() {
+        let base = std::env::temp_dir().join(format!("openvtc-picker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let roots = Roots {
+            config: Some(base.join("config")),
+            home: Some(base.join("home")),
+            system_omarchy: None,
+        };
+        theme::set_active(&Theme::default_theme());
+        let mut state = State::default();
+
+        handle_theme_open(&mut state, &roots);
+        let SettingsMode::ThemePicker { rows, selected, .. } =
+            &state.main_page.content_panel.settings.mode
+        else {
+            panic!("the picker opens");
+        };
+        assert_eq!(rows[*selected].id, "openvtc", "on the theme in use");
+        let nord = rows.iter().position(|r| r.id == "nord").unwrap();
+
+        handle_theme_select(&mut state, &roots, nord);
+        assert_eq!(theme::active_theme().0, "nord", "moving previews");
+        handle_theme_cancel(&mut state, &roots);
+        assert_eq!(theme::active_theme().0, "openvtc", "cancel puts it back");
+        assert!(
+            !roots.settings_file().unwrap().exists(),
+            "and remembers nothing"
+        );
+
+        handle_theme_open(&mut state, &roots);
+        handle_theme_select(&mut state, &roots, nord);
+        handle_theme_copy(&mut state, &roots);
+        let SettingsMode::ThemePicker { rows, selected, .. } =
+            &state.main_page.content_panel.settings.mode
+        else {
+            panic!("still picking");
+        };
+        assert_eq!(
+            rows[*selected].id, "user/nord-mine",
+            "the copy is highlighted"
+        );
+        handle_theme_apply(&mut state, &roots);
+        assert!(matches!(
+            state.main_page.content_panel.settings.mode,
+            SettingsMode::View
+        ));
+        assert_eq!(catalog::choice(&roots).theme, "user/nord-mine");
+        assert_eq!(theme::active_theme().1, "Nord (mine)");
+
+        // Auto is listed first, and kept by its own id.
+        handle_theme_open(&mut state, &roots);
+        let SettingsMode::ThemePicker { rows, .. } = &state.main_page.content_panel.settings.mode
+        else {
+            panic!("the picker opens again");
+        };
+        assert_eq!(rows[0].id, catalog::AUTO_ID);
+        handle_theme_select(&mut state, &roots, 0);
+        assert_eq!(theme::active_theme().0, catalog::AUTO_ID, "auto previews");
+        handle_theme_apply(&mut state, &roots);
+        assert_eq!(catalog::choice(&roots).theme, catalog::AUTO_ID);
+        let message = state
+            .main_page
+            .content_panel
+            .settings
+            .status_message
+            .clone();
+        assert!(message.is_some_and(|m| m.starts_with("Theme set to Auto — ")));
+
+        theme::set_active(&Theme::default_theme());
+        let _ = std::fs::remove_dir_all(base);
+    }
 
     #[test]
     fn test_validate_file_path_rejects_empty() {

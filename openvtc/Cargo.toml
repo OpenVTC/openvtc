@@ -38,8 +38,13 @@ anyhow.workspace = true
 # own repo (OpenVTC/verifiable-git-infrastructure); openvtc is a downstream
 # consumer of the published crate.
 #
-# Floor is 0.4.8, and for the first time in six minors it is also where this
-# actually resolves from. 0.4.8 is published and requires `vta-sdk ^0.35`, so
+# On the vta-sdk 0.36 line this resolves from VGI's `chore/vta-sdk-036` through
+# the root manifest's `[patch.crates-io]`, until VGI publishes that move; 0.4.8
+# requires `vta-sdk ^0.35`. The floor stays 0.4.8, which the patched branch
+# satisfies, and moves to the release when the patch leaves.
+#
+# Floor is 0.4.8, and on the 0.35 line it was also where this actually resolved
+# from. 0.4.8 is published and requires `vta-sdk ^0.35`, so
 # the `[patch.crates-io]` redirect to VGI's unreleased `main` is deleted rather
 # than repointed — see the note where that block used to be, at the foot of the
 # root manifest.
@@ -100,6 +105,7 @@ strum.workspace = true
 strum_macros.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 tui-input.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -129,6 +135,10 @@ linux-keyutils-keyring-store.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store.workspace = true
+
+# Asking the terminal its background colour for the `auto` theme.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 # `test-util` enables tokio's paused clock (`start_paused`) used by the R11

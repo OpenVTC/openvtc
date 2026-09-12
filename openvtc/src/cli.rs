@@ -47,7 +47,9 @@ pub fn cli() -> Command {
                     "Map the messaging path between this client and a community.\n\n\
                      For every DID involved — each persona, the VTA, every mediator, and \
                      each VTC — this resolves the DID document, prints its service \
-                     definitions verbatim, and probes any transport URLs. It then runs \
+                     definitions verbatim, and probes any public HTTPS transport URLs \
+                     (plaintext and non-public ones are listed, not dialled; redirects \
+                     are not followed). It then runs \
                      the same TSP > DIDComm > REST negotiation a real send performs, so \
                      the reported transport is the one that would actually be used.\n\n\
                      Parties may sit behind different mediators; that is supported and \
@@ -78,8 +80,18 @@ pub fn cli() -> Command {
                             "Also report whether this account could be rebuilt from its \
                              Trust Context if this machine were lost. Read-only.",
                         ),
+                    Arg::new("allow-private-probes")
+                        .long("allow-private-probes")
+                        .action(clap::ArgAction::SetTrue)
+                        .help(
+                            "Also probe transport URLs that are plaintext or that point at \
+                             loopback, private or link-local addresses. By default those are \
+                             listed but not dialled, because the URLs come from DID documents \
+                             anyone can publish. For local development stacks only.",
+                        ),
                 ]),
         )
+        .subcommand(crate::theme_cmd::command())
 }
 
 #[cfg(feature = "openpgp-card")]
@@ -139,6 +151,81 @@ mod tests {
             .try_get_matches_from(["openvtc", "setup"])
             .expect("`setup` is a valid subcommand");
         assert_eq!(matches.subcommand_name(), Some("setup"));
+    }
+
+    #[test]
+    fn theme_subcommands_are_accepted() {
+        let matches = cli()
+            .try_get_matches_from(["openvtc", "theme", "import", "nvim:tokyonight", "--use"])
+            .expect("`theme import` is a valid subcommand");
+        let (_, theme) = matches.subcommand().expect("theme");
+        let (sub, import) = theme.subcommand().expect("import");
+        assert_eq!(sub, "import");
+        assert!(import.get_flag("use"));
+        assert!(
+            cli()
+                .try_get_matches_from(["openvtc", "theme", "set"])
+                .is_err(),
+            "`set` needs a theme id"
+        );
+    }
+
+    #[test]
+    fn theme_set_auto_and_export_are_accepted() {
+        let matches = cli()
+            .try_get_matches_from([
+                "openvtc", "theme", "set", "auto", "--dark", "nord", "--light", "dracula",
+            ])
+            .expect("`theme set auto --dark --light` is valid");
+        let (_, theme) = matches.subcommand().expect("theme");
+        let (_, set) = theme.subcommand().expect("set");
+        assert_eq!(
+            set.get_one::<String>("dark").map(String::as_str),
+            Some("nord")
+        );
+        assert_eq!(
+            set.get_one::<String>("light").map(String::as_str),
+            Some("dracula")
+        );
+
+        let matches = cli()
+            .try_get_matches_from([
+                "openvtc",
+                "theme",
+                "export",
+                "nord",
+                "--format",
+                "kitty",
+                "-o",
+                "nord.conf",
+            ])
+            .expect("`theme export` is valid");
+        let (_, theme) = matches.subcommand().expect("theme");
+        let (_, export) = theme.subcommand().expect("export");
+        assert_eq!(
+            export.get_one::<String>("format").map(String::as_str),
+            Some("kitty")
+        );
+        assert_eq!(
+            export.get_one::<String>("output").map(String::as_str),
+            Some("nord.conf")
+        );
+
+        let matches = cli()
+            .try_get_matches_from(["openvtc", "theme", "export", "nord"])
+            .expect("the format defaults");
+        let (_, theme) = matches.subcommand().expect("theme");
+        let (_, export) = theme.subcommand().expect("export");
+        assert_eq!(
+            export.get_one::<String>("format").map(String::as_str),
+            Some("openvtc")
+        );
+        assert!(
+            cli()
+                .try_get_matches_from(["openvtc", "theme", "export", "nord", "--format", "vim"])
+                .is_err(),
+            "an unknown format is refused"
+        );
     }
 
     #[test]
