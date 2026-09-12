@@ -115,6 +115,11 @@ agent-names = "0.1.3"
 affinidi-did-resolver-cache-sdk = { version = "0.8.34", features = [
   "agent-names",
 ] }
+# The SSRF guard the resolver above already applies to did:web fetches, taken
+# directly so `health` can put the same connect-time check on its own probe
+# client (`guarded_dns_resolver`). Not a new crate: the resolver pulls in this
+# exact version on the same `reqwest` line, so the types unify.
+affinidi-did-web = "0.1.4"
 anyhow = "1.0"
 # Structure-aware fuzzing support (issue #124). Only pulled in when a crate
 # enables its own `arbitrary` feature; the `derive` feature provides the
