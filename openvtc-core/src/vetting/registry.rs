@@ -173,9 +173,9 @@ impl EventDraft {
     ///
     /// # Errors
     ///
-    /// A date that does not parse, a place without a country, or anything
-    /// [`check_event`] refuses — an end before the start, a span over 31 days,
-    /// a URL that is not an absolute `https` one.
+    /// A date that does not parse, a place without a country, or anything the
+    /// event check refuses — an end before the start, a span over 31 days, a
+    /// URL that is not an absolute `https` one.
     pub fn to_event(&self) -> Result<VetterEvent, DraftError> {
         let name = profile::VetterEventName::try_from(self.name.trim()).map_err(refused)?;
         let event = VetterEvent::try_from(
