@@ -3,9 +3,14 @@ use crate::colors::{
     COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,
 };
 use crate::state_handler::{
-    main_page::content::{CommunitiesState, ContentPanelState},
+    main_page::content::{
+        CommunitiesState, ContentPanelState, ContextDeletePhase, ContextDeleteView,
+        DeviceAccessView, GrantListing,
+    },
     state::ConnectionState,
 };
+use openvtc_core::community_access::{DEVICE_ROLE, EXPIRY_CHOICES};
+use openvtc_core::config::community_context::DELETE_CONFIRMATION;
 use ratatui::{
     style::{Style, Stylize},
     text::{Line, Span},
@@ -47,6 +52,16 @@ pub fn render(
     if let Some(msg) = &state.status_message {
         super::status::push_status(&mut lines, msg, "");
         lines.push(Line::from(""));
+    }
+
+    // A context deletion or device access, while open, is the whole panel.
+    if let Some(view) = &state.context_delete {
+        render_context_delete(&mut lines, view);
+        return lines;
+    }
+    if let Some(view) = &state.device_access {
+        render_device_access(&mut lines, view, state.device_grants.get(&view.context_id));
+        return lines;
     }
 
     push_personhood_challenge(&mut lines, state);
@@ -216,6 +231,9 @@ pub fn render(
                     format!("{}  ({})", c.sub_context_id, c.context_note),
                 ));
             }
+            if c.has_own_context {
+                push_device_grants(&mut lines, state.device_grants.get(&c.sub_context_id));
+            }
             if !c.request_id.is_empty() {
                 lines.push(kv("Request ID:", c.request_id.clone()));
             }
@@ -275,6 +293,258 @@ pub fn render(
     }
 
     lines
+}
+
+/// The detail block's device-access rows for a membership's own context.
+///
+/// A context never read says so rather than reading as "no devices": not having
+/// asked is not the same answer as nobody having access.
+fn push_device_grants(lines: &mut Vec<Line<'static>>, listing: Option<&GrantListing>) {
+    let label = Style::new().fg(COLOR_DARK_GRAY);
+    let value = Style::new().fg(COLOR_TEXT_DEFAULT);
+    let row = |k: &str, v: String, style: Style| {
+        Line::from(vec![
+            Span::styled(format!("      {k:<13}"), label),
+            Span::styled(v, style),
+        ])
+    };
+    let now = chrono::Utc::now();
+    match listing {
+        None => lines.push(row(
+            "Devices:",
+            "not read yet — g to see device access".to_string(),
+            label,
+        )),
+        Some(GrantListing::Loading) => {
+            lines.push(row("Devices:", "reading…".to_string(), label));
+        }
+        Some(GrantListing::Failed(e)) => lines.push(row(
+            "Devices:",
+            format!("could not read: {e}"),
+            Style::new().fg(COLOR_ORANGE),
+        )),
+        Some(GrantListing::Loaded(grants)) if grants.is_empty() => lines.push(row(
+            "Devices:",
+            "none — g to give a device access".to_string(),
+            value,
+        )),
+        Some(GrantListing::Loaded(grants)) => {
+            for (i, grant) in grants.iter().enumerate() {
+                lines.push(row(
+                    if i == 0 { "Devices:" } else { "" },
+                    format!("{}  ({})", grant.did, grant.describe(now)),
+                    if grant.is_expired(now) { label } else { value },
+                ));
+            }
+        }
+    }
+}
+
+/// Deleting a membership's context: what the VTA will remove, and the typed
+/// confirmation.
+fn render_context_delete(lines: &mut Vec<Line<'static>>, view: &ContextDeleteView) {
+    let dim = Style::new().fg(COLOR_DARK_GRAY);
+    lines.push(
+        Line::from(format!(" Delete the context for “{}”", view.community))
+            .fg(COLOR_ORANGE)
+            .bold(),
+    );
+    lines.push(Line::from(format!("   {}", view.context_id)).fg(COLOR_TEXT_DEFAULT));
+    lines.push(Line::from(""));
+    match &view.phase {
+        ContextDeletePhase::Previewing => {
+            lines.push(Line::from("   Asking your VTA what this would remove…").style(dim));
+            lines.push(Line::from(""));
+            lines.push(Line::from("esc: cancel").style(dim));
+        }
+        ContextDeletePhase::Ready(preview) => {
+            lines.push(Line::from(" Your VTA will permanently remove:").fg(COLOR_TEXT_DEFAULT));
+            for line in preview.lines() {
+                lines.push(Line::from(format!("   {line}")).fg(COLOR_SOFT_PURPLE));
+            }
+            if preview.holds_nothing() {
+                lines.push(
+                    Line::from("   (no keys, DIDs or access entries — only the context itself)")
+                        .style(dim),
+                );
+            }
+            // What goes beyond the VTA's preview: a persona deleted with the
+            // context, and the membership record with it — or the record kept.
+            lines.push(Line::from(""));
+            let takes_persona = view.takes_persona.is_some();
+            for line in view.deletion().consequences(&view.community) {
+                let line = Line::from(format!(" {line}"));
+                lines.push(if takes_persona {
+                    line.fg(COLOR_ORANGE)
+                } else {
+                    line.style(dim)
+                });
+            }
+            lines.push(Line::from(""));
+            lines.push(
+                Line::from(format!(
+                    " This cannot be undone. Type {DELETE_CONFIRMATION} and press ⏎ to delete."
+                ))
+                .fg(COLOR_ORANGE),
+            );
+            lines.push(Line::from(vec![
+                Span::styled("   > ", dim),
+                Span::styled(
+                    format!("{}▎", view.typed),
+                    Style::new().fg(COLOR_SOFT_PURPLE).bold(),
+                ),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from("⏎ delete   esc: cancel").style(dim));
+        }
+        ContextDeletePhase::Deleting => {
+            lines.push(Line::from("   Deleting…").style(dim));
+        }
+    }
+}
+
+/// Device access for one membership's context: its grants, the new-grant form,
+/// and what the role allows.
+fn render_device_access(
+    lines: &mut Vec<Line<'static>>,
+    view: &DeviceAccessView,
+    listing: Option<&GrantListing>,
+) {
+    let dim = Style::new().fg(COLOR_DARK_GRAY);
+    let text = Style::new().fg(COLOR_TEXT_DEFAULT);
+    lines.push(
+        Line::from(format!(" Device access — {}", view.community))
+            .style(text)
+            .bold(),
+    );
+    lines.push(Line::from(format!("   Context {}", view.context_id)).style(dim));
+    lines.push(
+        Line::from(format!(
+            "   A device added here holds the {DEVICE_ROLE} role in this context only: it can sign and"
+        ))
+        .style(dim),
+    );
+    lines.push(
+        Line::from(
+            "   present as you here, but cannot mint keys, manage access, or reach your other",
+        )
+        .style(dim),
+    );
+    lines.push(Line::from("   communities. Every grant expires.").style(dim));
+    lines.push(Line::from(""));
+
+    let now = chrono::Utc::now();
+    let grants = listing.map_or(&[][..], GrantListing::grants);
+    match listing {
+        None | Some(GrantListing::Loading) => {
+            lines.push(Line::from("   Reading device access…").style(dim));
+        }
+        Some(GrantListing::Failed(e)) => {
+            lines.push(Line::from(format!("   Couldn't read device access: {e}")).fg(COLOR_ORANGE))
+        }
+        Some(GrantListing::Loaded(_)) if grants.is_empty() => {
+            lines.push(Line::from("   No device has access to this context.").style(text));
+        }
+        Some(GrantListing::Loaded(_)) => {
+            for (i, grant) in grants.iter().enumerate() {
+                let selected = i == view.selected && view.form.is_none();
+                let style = if selected {
+                    Style::new().fg(COLOR_SUCCESS).bold()
+                } else if grant.is_expired(now) {
+                    dim
+                } else {
+                    text
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{}{}", if selected { " ▸ " } else { "   " }, grant.did),
+                    style,
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!("     {}", grant.describe(now)),
+                    dim,
+                )));
+            }
+        }
+    }
+
+    if let Some(form) = &view.form {
+        lines.push(Line::from(""));
+        lines.push(Line::from(" Add a device").fg(COLOR_SUCCESS).bold());
+        let field = |index: usize, name: &str, value: String, typed: bool| {
+            let focused = form.field == index;
+            let mut spans = vec![
+                Span::styled(
+                    if focused { "   ▸ " } else { "     " },
+                    if focused {
+                        Style::new().fg(COLOR_SUCCESS).bold()
+                    } else {
+                        dim
+                    },
+                ),
+                Span::styled(format!("{name:<10}"), text),
+                Span::styled(value, Style::new().fg(COLOR_SOFT_PURPLE)),
+            ];
+            if focused {
+                spans.push(Span::styled(if typed { "▎" } else { "  ←/→" }, dim));
+            }
+            Line::from(spans)
+        };
+        lines.push(field(0, "did:key", form.did.clone(), true));
+        lines.push(field(1, "Name", form.name.clone(), true));
+        lines.push(field(
+            2,
+            "Expires",
+            EXPIRY_CHOICES
+                .get(form.expiry)
+                .map_or("—", |c| c.label)
+                .to_string(),
+            false,
+        ));
+    }
+
+    if view.confirm_revoke
+        && let Some(grant) = grants.get(view.selected)
+    {
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(format!(
+                " Revoke {}'s access to this community?   y: confirm    n: cancel",
+                grant.did
+            ))
+            .fg(COLOR_ORANGE)
+            .bold(),
+        );
+    }
+    if let Some(message) = &view.message {
+        lines.push(Line::from(""));
+        super::status::push_status(lines, message, "");
+    }
+
+    lines.push(Line::from(""));
+    let hints = if view.busy {
+        "working…   esc: close".to_string()
+    } else if view.form.is_some() {
+        "Tab: next field   ←/→: expiry   ⏎ grant   esc: cancel".to_string()
+    } else {
+        let mut hints = vec!["↑/↓ select"];
+        if view.can_grant {
+            hints.push("n: add a device");
+        }
+        if !grants.is_empty() {
+            hints.push("x: revoke");
+        }
+        hints.extend(["r: refresh", "esc: close"]);
+        hints.join("   ")
+    };
+    lines.push(Line::from(hints).style(dim));
+    if !view.can_grant {
+        lines.push(
+            Line::from(
+                "This membership is over: no device can be added, but existing access can be revoked.",
+            )
+            .style(dim),
+        );
+    }
 }
 
 /// Show the live personhood challenge, if there is one.
@@ -351,6 +621,12 @@ fn key_hints(state: &CommunitiesState) -> String {
             hints.push("x: archive".to_string());
             hints.push("d: delete".to_string());
         }
+        if community.has_own_context {
+            hints.push("g: devices".to_string());
+            if community.is_inactive {
+                hints.push("D: delete context".to_string());
+            }
+        }
     }
 
     // Gated on the challenge, not on the row — matching the key handler,
@@ -425,6 +701,7 @@ mod key_hint_tests {
             vtc_agent_name: None,
             sub_context_id: String::new(),
             context_note: String::new(),
+            has_own_context: false,
             request_id: String::new(),
             has_membership_credential: false,
             has_role_credential: false,
@@ -624,5 +901,190 @@ mod key_hint_tests {
             !rendered.iter().any(|l| l.contains("5CY1-GZEE")),
             "a dead code must not still read as answerable: {rendered:#?}"
         );
+    }
+
+    // ─── community contexts ─────────────────────────────────────────────
+
+    use crate::state_handler::main_page::content::{
+        ContextDeletePhase, ContextDeleteView, DeviceAccessView, GrantListing,
+    };
+    use openvtc_core::community_access::DeviceGrant;
+    use openvtc_core::config::community_context::ContextDeletionPreview;
+    use vta_sdk::protocols::context_management::delete::DeleteContextPreviewResultBody;
+
+    const CTX: &str = "openvtc/acme";
+
+    fn own(is_inactive: bool) -> CommunitySummary {
+        CommunitySummary {
+            has_own_context: true,
+            sub_context_id: CTX.to_string(),
+            ..row(!is_inactive, is_inactive, false)
+        }
+    }
+
+    fn grant(did: &str) -> DeviceGrant {
+        DeviceGrant {
+            did: did.to_string(),
+            role: "application".to_string(),
+            label: Some("laptop".to_string()),
+            contexts: vec![CTX.to_string()],
+            elsewhere: vec![],
+            expires_at: None,
+        }
+    }
+
+    fn text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Device access needs a community's own context, and only a finished
+    /// membership's context can be deleted — the hints follow the keys.
+    #[test]
+    fn context_keys_are_offered_only_where_they_act() {
+        let active = hints_for(own(false));
+        assert!(active.contains("g: devices"), "{active}");
+        assert!(!active.contains("D: delete context"), "{active}");
+
+        let finished = hints_for(own(true));
+        assert!(
+            finished.contains("g: devices") && finished.contains("D: delete context"),
+            "{finished}"
+        );
+
+        let top = hints_for(row(false, true, false));
+        assert!(
+            !top.contains("g: devices") && !top.contains("D: delete context"),
+            "{top}"
+        );
+    }
+
+    /// An unread context says so; "none" is only said once the VTA has answered.
+    #[test]
+    fn the_detail_says_whether_device_access_has_been_read() {
+        let mut state = state_with(Some(own(false)), None);
+        let unread = text(&render_for_test(&state));
+        assert!(unread.contains("not read yet"), "{unread}");
+
+        state.device_grants.insert(
+            CTX.to_string(),
+            GrantListing::Loaded(vec![grant("did:key:zLaptop")]),
+        );
+        let read = text(&render_for_test(&state));
+        assert!(
+            read.contains("did:key:zLaptop") && read.contains("application"),
+            "{read}"
+        );
+    }
+
+    /// A persona deleted with the context is named with its DID, with what that
+    /// means, beside the membership record it takes along.
+    #[test]
+    fn a_deletion_that_takes_the_persona_says_so_plainly() {
+        let mut state = state_with(Some(own(true)), None);
+        let persona = PersonaId::new();
+        state.context_delete = Some(ContextDeleteView {
+            vtc_did: "did:webvh:acme".to_string(),
+            persona,
+            community: "Acme".to_string(),
+            context_id: CTX.to_string(),
+            takes_persona: Some(openvtc_core::config::community_context::PersonaTakenAlong {
+                persona,
+                did: "did:webvh:scid:host:kernel-me".to_string(),
+                name: "Kernel me".to_string(),
+            }),
+            phase: ContextDeletePhase::Ready(ContextDeletionPreview::default()),
+            typed: String::new(),
+        });
+        let shown = text(&render_for_test(&state));
+        for item in [
+            "Persona Kernel me",
+            "did:webvh:scid:host:kernel-me",
+            "can no longer be used anywhere",
+            "stays published there",
+            "finished membership of Acme",
+            "Type DELETE",
+        ] {
+            assert!(shown.contains(item), "missing {item:?}:\n{shown}");
+        }
+    }
+
+    #[test]
+    fn a_deletion_shows_everything_the_vta_will_remove_and_what_to_type() {
+        let mut state = state_with(Some(own(true)), None);
+        state.context_delete = Some(ContextDeleteView {
+            vtc_did: "did:webvh:acme".to_string(),
+            persona: PersonaId::new(),
+            community: "Acme".to_string(),
+            context_id: CTX.to_string(),
+            takes_persona: None,
+            phase: ContextDeletePhase::Ready(ContextDeletionPreview {
+                context_id: CTX.to_string(),
+                contexts: vec![
+                    DeleteContextPreviewResultBody {
+                        id: CTX.to_string(),
+                        keys: vec!["key-1".to_string()],
+                        webvh_dids: vec!["did:webvh:scid:host:persona".to_string()],
+                        acl_entries_removed: vec!["did:key:zLaptop".to_string()],
+                        ..Default::default()
+                    },
+                    DeleteContextPreviewResultBody {
+                        id: format!("{CTX}/ci"),
+                        ..Default::default()
+                    },
+                ],
+            }),
+            typed: "DEL".to_string(),
+        });
+        let shown = text(&render_for_test(&state));
+        for item in [
+            "Acme",
+            "key-1",
+            "did:webvh:scid:host:persona",
+            "did:key:zLaptop",
+            "Sub-context openvtc/acme/ci",
+            "Type DELETE",
+            "> DEL",
+        ] {
+            assert!(shown.contains(item), "missing {item:?}:\n{shown}");
+        }
+    }
+
+    #[test]
+    fn device_access_names_the_role_and_what_a_finished_membership_allows() {
+        let view = DeviceAccessView {
+            community: "Acme".to_string(),
+            context_id: CTX.to_string(),
+            can_grant: true,
+            selected: 0,
+            form: None,
+            confirm_revoke: false,
+            busy: false,
+            message: None,
+        };
+        let mut state = state_with(Some(own(false)), None);
+        state.device_grants.insert(
+            CTX.to_string(),
+            GrantListing::Loaded(vec![grant("did:key:zLaptop")]),
+        );
+        state.device_access = Some(view.clone());
+        let live = text(&render_for_test(&state));
+        assert!(live.contains("application role"), "{live}");
+        assert!(live.contains("did:key:zLaptop"), "{live}");
+        assert!(
+            live.contains("n: add a device") && live.contains("x: revoke"),
+            "{live}"
+        );
+
+        state.device_access = Some(DeviceAccessView {
+            can_grant: false,
+            ..view
+        });
+        let finished = text(&render_for_test(&state));
+        assert!(!finished.contains("n: add a device"), "{finished}");
+        assert!(finished.contains("membership is over"), "{finished}");
     }
 }

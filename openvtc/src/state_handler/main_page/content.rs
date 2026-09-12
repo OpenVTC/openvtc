@@ -2,8 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dtg_credentials::DTGCredential;
+use openvtc_core::community_access::{DEFAULT_EXPIRY, DeviceGrant};
 use openvtc_core::config::account::PersonaId;
-use openvtc_core::config::community_context::ContextOption;
+use openvtc_core::config::community_context::{
+    ContextDeletion, ContextDeletionPreview, ContextOption, PersonaTakenAlong,
+};
 use vta_sdk::protocols::vetting::{DeclaredRelationship, RevocationReason, VettingMethod};
 
 /// Lazily-rendered raw credential JSON for credential detail views.
@@ -188,6 +191,135 @@ pub struct CommunitiesState {
     /// only ever be a stale one — and showing a member a match code the
     /// community has already forgotten is worse than showing none.
     pub personhood_challenge: Option<PersonhoodChallengeView>,
+    /// Deleting one membership's context: the VTA's preview, the typed
+    /// confirmation, then the delete. `None` when nothing is being deleted.
+    pub context_delete: Option<ContextDeleteView>,
+    /// Device access for one membership's context, while it is open.
+    pub device_access: Option<DeviceAccessView>,
+    /// Device grants per context id, as last read from the VTA. Kept across
+    /// `sync_from_config`, which rebuilds only `items`, so the detail block
+    /// shows them without a read per keystroke.
+    pub device_grants: HashMap<String, GrantListing>,
+}
+
+/// A context deletion in progress, for one membership.
+///
+/// The membership is named by community and persona rather than by display
+/// index: the list can re-sort while the VTA is answering, and an index would
+/// then point at a different community.
+#[derive(Clone, Debug)]
+pub struct ContextDeleteView {
+    pub vtc_did: String,
+    pub persona: PersonaId,
+    /// The community's name, for the heading.
+    pub community: String,
+    /// The context being deleted.
+    pub context_id: String,
+    /// The persona deleted along with the context — its keys are there and
+    /// this membership was its only use — and with it the membership record.
+    pub takes_persona: Option<PersonaTakenAlong>,
+    pub phase: ContextDeletePhase,
+    /// What has been typed towards the confirmation.
+    pub typed: String,
+}
+
+impl ContextDeleteView {
+    /// The deletion this view was opened for.
+    #[must_use]
+    pub fn deletion(&self) -> ContextDeletion {
+        ContextDeletion {
+            context_id: self.context_id.clone(),
+            persona: self.takes_persona.clone(),
+        }
+    }
+}
+
+/// Where a [`ContextDeleteView`] is.
+#[derive(Clone, Debug)]
+pub enum ContextDeletePhase {
+    /// Asking the VTA what the delete would remove.
+    Previewing,
+    /// Showing what would be removed and waiting for the typed confirmation.
+    Ready(ContextDeletionPreview),
+    /// The delete is running; input is locked.
+    Deleting,
+}
+
+/// A context's device grants, as far as they are known.
+#[derive(Clone, Debug)]
+pub enum GrantListing {
+    /// Being read for the first time.
+    Loading,
+    /// As the VTA last answered.
+    Loaded(Vec<DeviceGrant>),
+    /// The VTA could not be asked, and why.
+    Failed(String),
+}
+
+impl GrantListing {
+    /// The grants, when they are known.
+    #[must_use]
+    pub fn grants(&self) -> &[DeviceGrant] {
+        match self {
+            GrantListing::Loaded(grants) => grants,
+            GrantListing::Loading | GrantListing::Failed(_) => &[],
+        }
+    }
+}
+
+/// Device access for one membership's context.
+///
+/// Named by context rather than by display index, for the same reason as
+/// [`ContextDeleteView`]: grants belong to the context, and the list can
+/// re-sort while a request runs.
+#[derive(Clone, Debug)]
+pub struct DeviceAccessView {
+    /// The community's name, for the heading and the grant label.
+    pub community: String,
+    /// The context grants are scoped to.
+    pub context_id: String,
+    /// Whether new grants may be made. Only a live membership takes them; a
+    /// finished one's grants can still be read and revoked.
+    pub can_grant: bool,
+    /// Highlighted grant.
+    pub selected: usize,
+    /// The new-grant form, while open.
+    pub form: Option<GrantForm>,
+    /// Revocation of the highlighted grant is armed.
+    pub confirm_revoke: bool,
+    /// A read, grant or revoke is running.
+    pub busy: bool,
+    /// The last result or problem.
+    pub message: Option<String>,
+}
+
+/// The new-grant form.
+#[derive(Clone, Debug)]
+pub struct GrantForm {
+    /// The device's `did:key`, as typed or pasted.
+    pub did: String,
+    /// A name for the device, used in the grant's label.
+    pub name: String,
+    /// Index into [`openvtc_core::community_access::EXPIRY_CHOICES`].
+    pub expiry: usize,
+    /// Focused field: 0 = DID, 1 = name, 2 = expiry.
+    pub field: usize,
+}
+
+impl GrantForm {
+    /// How many fields the form has.
+    pub const FIELDS: usize = 3;
+}
+
+impl Default for GrantForm {
+    fn default() -> Self {
+        Self {
+            did: String::new(),
+            name: String::new(),
+            expiry: DEFAULT_EXPIRY,
+            field: 0,
+        }
+    }
 }
 
 /// A live personhood challenge, as the panel shows it.
@@ -245,6 +377,13 @@ pub struct CreatePersonaState {
     pub did: Option<String>,
     /// Whether [`did`](Self::did) was copied to the clipboard.
     pub copied: bool,
+    /// Contexts the persona can be minted into, the new sub-context first
+    /// (`Context` phase).
+    pub context_options: Vec<ContextOption>,
+    /// Highlighted row in [`context_options`](Self::context_options).
+    pub context_selected: usize,
+    /// The name typed for a new sub-context: its last path segment.
+    pub context_slug: String,
 }
 
 /// "Manage agent names" overlay for a persona. `Some` while open; floats over
@@ -315,6 +454,10 @@ pub enum CreatePersonaPhase {
     /// Awaiting the persona label (text input).
     #[default]
     Label,
+    /// Choosing the VTA context the persona's keys and DID are minted in: a
+    /// new sub-context named from the label, one already in use, or the top
+    /// context.
+    Context,
     /// The VTA mint sequence is running (input locked).
     Working,
     /// The persona was minted; show the DID + copy affordance.
@@ -396,6 +539,10 @@ pub struct CommunitySummary {
     pub sub_context_id: String,
     /// How far that context keeps this community apart from the others.
     pub context_note: String,
+    /// Whether [`Self::sub_context_id`] is a sub-context of the account's own
+    /// rather than the top context — the only kind whose device access is
+    /// scoped to this community, and the only kind that can be deleted.
+    pub has_own_context: bool,
     /// The join request id while `Pending`; empty otherwise.
     pub request_id: String,
     /// Whether the membership credential (VMC) has been received + stored.

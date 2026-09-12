@@ -16,6 +16,7 @@ use std::{fmt, sync::Arc};
 pub mod agent_name;
 pub mod bip32;
 pub mod capabilities;
+pub mod community_access;
 pub mod config;
 // `didcomm` is DIDComm transport plumbing; `messaging` is the pure protocol
 // logic. Both module docs state the split. Deliberately a `//` comment, not a

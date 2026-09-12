@@ -330,6 +330,53 @@ pub enum VettingAction {
     ArmWithdraw,
 }
 
+/// A membership's VTA context, from the communities panel: deleting a finished
+/// membership's context, and giving devices access to a community's context.
+///
+/// The `*Start`/`*Open`/`*Confirm`/`*Submit`/`Refresh` variants read the config
+/// and reach the VTA, so each loop services them; the rest only move the open
+/// view's state and are handled by the shared nav reducer.
+pub enum CommunityContextAction {
+    // ── Delete a context ─────────────────────────────────────────────────
+    /// Check whether the membership at this display index may have its
+    /// context deleted, and if so ask the VTA what deleting it would remove.
+    DeleteStart(usize),
+    /// Replace the typed confirmation.
+    DeleteInput(String),
+    /// Delete, provided the typed confirmation matches.
+    DeleteConfirm,
+    /// Close the deletion without deleting.
+    DeleteCancel,
+    // ── Device access ────────────────────────────────────────────────────
+    /// Open device access for the membership at this display index and read
+    /// its context's grants.
+    DevicesOpen(usize),
+    /// Close device access.
+    DevicesClose,
+    /// Move the grant highlight.
+    DevicesSelect(usize),
+    /// Read the context's grants again.
+    DevicesRefresh,
+    /// Open the new-grant form.
+    GrantStart,
+    /// Focus a grant-form field (0 = DID, 1 = name, 2 = expiry).
+    GrantField(usize),
+    /// Replace a grant-form text field's value.
+    GrantInput { field: usize, value: String },
+    /// Choose the grant's expiry, by index into the offered expiries.
+    GrantExpiry(usize),
+    /// Close the new-grant form.
+    GrantCancel,
+    /// Grant the device in the form.
+    GrantSubmit,
+    /// Arm revocation of the highlighted grant.
+    RevokeArm,
+    /// Disarm it.
+    RevokeCancel,
+    /// Revoke the highlighted grant.
+    RevokeConfirm,
+}
+
 // ============================================================================
 // Top-level Action enum
 // ============================================================================
@@ -362,6 +409,8 @@ pub enum Action {
     Persona(PersonaAction),
     /// Vetting page (applications / desk / tickets / issued statements).
     Vetting(VettingAction),
+    /// Communities panel: a membership's VTA context (deletion, device access).
+    CommunityContext(CommunityContextAction),
 
     /// Dismiss the startup loading screen (Enter, once loading has completed) and
     /// reveal the main page. Phase-2 connections are already running in the
@@ -559,9 +608,20 @@ pub enum Action {
     /// Enter/Esc are handled by the panel, not forwarded here).
     CreatePersonaInput(crossterm::event::KeyEvent),
 
-    /// Mint the persona with the entered label: run the VTA mint sequence, then
-    /// show + copy the new DID. Only sent from the overlay's label phase.
+    /// Advance the overlay. From the label phase: check the label and offer the
+    /// contexts the persona can be minted into. From the context phase: make
+    /// sure the chosen context exists, mint the persona's keys and DID in it,
+    /// then show + copy the new DID.
     CreatePersonaSubmit,
+
+    /// Move the create-persona context highlight to this row.
+    CreatePersonaContextSelect(usize),
+
+    /// Replace the name typed for the persona's new sub-context.
+    CreatePersonaContextSlug(String),
+
+    /// Go back from the context choice to the label.
+    CreatePersonaBack,
 
     /// Copy the minted persona DID to the clipboard again (Done phase).
     CreatePersonaCopy,

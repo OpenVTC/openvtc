@@ -115,6 +115,14 @@ pub(crate) enum DispatchDomain {
     /// Registering the contexts memberships already name at the VTA — the ids
     /// joins recorded before OpenVTC created them. Read-then-create, off the loop.
     CommunityContexts,
+    /// A holder's action on one membership's context: previewing or deleting
+    /// it, and reading, granting or revoking device access in it. Serialised
+    /// together so a listing can never overtake the grant or revoke that
+    /// changed it, and two deletions never run at once.
+    CommunityAccess,
+    /// Reading every membership context's device grants once a run, so the
+    /// communities panel's detail can show them without being asked.
+    DeviceGrantSweep,
 }
 
 impl DispatchDomain {
@@ -137,6 +145,8 @@ impl DispatchDomain {
             DispatchDomain::Vic => "Invitation credential refresh",
             DispatchDomain::Vetting => "Vetting send",
             DispatchDomain::CommunityContexts => "Community context registration",
+            DispatchDomain::CommunityAccess => "Community context request",
+            DispatchDomain::DeviceGrantSweep => "Device access refresh",
         }
     }
 }
@@ -165,8 +175,8 @@ impl InFlight {
         self.domains.remove(&domain);
     }
 
-    /// Whether `domain` currently has a dispatch in flight (for tests / status).
-    #[cfg(test)]
+    /// Whether `domain` currently has a dispatch in flight — for tests, and for
+    /// a background job that should wait for another domain to finish first.
     pub(crate) fn is_busy(&self, domain: DispatchDomain) -> bool {
         self.domains.contains(&domain)
     }
@@ -262,6 +272,17 @@ pub(crate) enum DispatchOutcome {
     /// Membership contexts were checked at the VTA: each context id, and
     /// whether it had to be created or why it could not be.
     CommunityContexts(Vec<(String, Result<bool, String>)>),
+    /// A holder's action on a membership's context finished — a deletion
+    /// preview or delete, or a device-access read, grant or revoke.
+    CommunityContext(crate::state_handler::community_context_actions::ContextOutcome),
+    /// Every membership context's device grants were read: each context id and
+    /// its grants, or why they could not be read.
+    DeviceGrantSweep(
+        Vec<(
+            String,
+            Result<Vec<openvtc_core::community_access::DeviceGrant>, String>,
+        )>,
+    ),
 }
 
 impl DispatchOutcome {
@@ -288,6 +309,8 @@ impl DispatchOutcome {
             DispatchOutcome::VicMutation(_) => DispatchDomain::Vic,
             DispatchOutcome::Vetting(_) => DispatchDomain::Vetting,
             DispatchOutcome::CommunityContexts(_) => DispatchDomain::CommunityContexts,
+            DispatchOutcome::CommunityContext(_) => DispatchDomain::CommunityAccess,
+            DispatchOutcome::DeviceGrantSweep(_) => DispatchDomain::DeviceGrantSweep,
             DispatchOutcome::Panicked(domain) => *domain,
         }
     }
@@ -505,6 +528,21 @@ pub(crate) fn apply_outcome(
                     )),
                 }
             }
+        }
+        DispatchOutcome::CommunityContext(outcome) => {
+            // A context deleted with its persona removes the finished
+            // membership's record too; any session it still holds belongs to
+            // the runtime loop's session manager.
+            let pending = outcome.membership_removed();
+            outcome.apply(state, config, save);
+            in_flight.finish(domain);
+            return match pending {
+                Some((vtc, persona)) => AfterApply::Deregister(vtc, persona),
+                None => AfterApply::Nothing,
+            };
+        }
+        DispatchOutcome::DeviceGrantSweep(results) => {
+            crate::state_handler::community_context_actions::apply_sweep(state, results);
         }
         DispatchOutcome::Vic(outcome) => outcome.apply(state, config),
         DispatchOutcome::VicMutation(outcome) => outcome.apply(state),
