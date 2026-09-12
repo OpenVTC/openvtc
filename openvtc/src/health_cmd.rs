@@ -121,22 +121,7 @@ pub async fn run(
         std::process::exit(1);
     }
 
-    // Probe URLs come from DID documents anyone can publish, so by default a
-    // plaintext or non-public one is listed rather than dialled. The opt-out is
-    // for dev stacks on loopback, and says so every time it is used.
-    let policy = if allow_private_probes {
-        eprintln!(
-            "{}",
-            style(
-                "warning: --allow-private-probes: plaintext and loopback/private/link-local \
-                 transport URLs from DID documents will be probed."
-            )
-            .themed(CLI_CAUTION)
-        );
-        ProbePolicy::AllowPrivate
-    } else {
-        ProbePolicy::PublicOnly
-    };
+    let policy = probe_policy(allow_private_probes);
 
     // Progress goes to stderr, the report to stdout. That keeps
     // `openvtc health --json > report.json` piping cleanly while still showing
@@ -448,6 +433,31 @@ fn short_tail(did: &str) -> String {
 /// took, because a chain that pauses nine seconds on one mediator and then
 /// succeeds has told you something the final report cannot: the outcome is fine
 /// and the host is struggling.
+/// Which transport URLs this run is willing to dial.
+///
+/// Probe URLs come from DID documents anyone can publish, so by default a
+/// plaintext or non-public one is listed rather than dialled. The opt-out is
+/// for dev stacks on loopback, and says so every time it is used.
+///
+/// Split out of [`run`] so the default is something a test can assert on: the
+/// guard itself lives in `openvtc_core::health`, but it only ever runs under
+/// the policy chosen here.
+fn probe_policy(allow_private_probes: bool) -> ProbePolicy {
+    if allow_private_probes {
+        eprintln!(
+            "{}",
+            style(
+                "warning: --allow-private-probes: plaintext and loopback/private/link-local \
+                 transport URLs from DID documents will be probed."
+            )
+            .themed(CLI_CAUTION)
+        );
+        ProbePolicy::AllowPrivate
+    } else {
+        ProbePolicy::PublicOnly
+    }
+}
+
 fn trace(step: &Step) {
     // `dim` rather than a palette colour: these lines are scaffolding the
     // operator reads past on a healthy run, and they must not compete with the
@@ -997,5 +1007,79 @@ mod tests {
              TSPTransport, and an operator comparing deployments must see which"
         );
         assert_eq!(fragment("no-fragment"), "no-fragment");
+    }
+
+    // ---- Probe egress policy -------------------------------------------------
+
+    /// The reproduced exploit, end to end through the command's own default.
+    ///
+    /// A `did:peer:2` carries its service inline and resolves offline, so a DID
+    /// pasted after `--vtc` is on its own enough to name an endpoint on this
+    /// machine's network — the PoC used
+    /// `{"t":"dm","s":"http://127.0.0.1:9098/latest/meta-data/"}` and watched
+    /// `health` GET it, reporting `reachable` and the status code back.
+    ///
+    /// `openvtc_core::health` refuses such a URL, but only under the policy this
+    /// command picks, so what is pinned here is the *default*: a run without
+    /// `--allow-private-probes` must report the endpoint as not probed and must
+    /// not open a connection to it. The listener is bound on an ephemeral
+    /// loopback port in-process; nothing leaves this machine.
+    #[tokio::test]
+    async fn the_default_run_never_dials_a_did_advertised_loopback_endpoint() {
+        use base64::Engine as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a stand-in internal service");
+        let port = listener.local_addr().expect("listener address").port();
+
+        let service = serde_json::json!({
+            "t": "dm",
+            "s": format!("http://127.0.0.1:{port}/latest/meta-data/"),
+        })
+        .to_string();
+        let did = format!(
+            "did:peer:2.Vz6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK.S{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(service)
+        );
+
+        assert_eq!(
+            probe_policy(false),
+            ProbePolicy::PublicOnly,
+            "the opt-out is a flag, so the flagless run must be the guarded one"
+        );
+
+        let report = build_report_with_progress(
+            &[Subject::new(Role::Vtc, "stand-in VTC", did.clone())],
+            &|_| {},
+            probe_policy(false),
+        )
+        .await;
+
+        let party = report
+            .parties
+            .iter()
+            .find(|p| p.did == did)
+            .expect("the subject is reported");
+        let resolved = party
+            .resolved
+            .as_ref()
+            .unwrap_or_else(|| panic!("did:peer resolves offline: {party:#?}"));
+        assert!(
+            matches!(resolved.probes.as_slice(), [Probe::Blocked { url, .. }]
+                if url.contains(&format!("127.0.0.1:{port}"))),
+            "the advertised internal endpoint must be listed, not dialled: {:?}",
+            resolved.probes
+        );
+
+        // The assertion the PoC's capture log is the negative of: no inbound
+        // connection at all, so the refusal happens before any I/O rather than
+        // after a connection that is then dropped.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "something connected to the stand-in internal service"
+        );
     }
 }
