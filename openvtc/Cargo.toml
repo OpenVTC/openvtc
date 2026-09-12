@@ -38,10 +38,10 @@ anyhow.workspace = true
 # own repo (OpenVTC/verifiable-git-infrastructure); openvtc is a downstream
 # consumer of the published crate.
 #
-# On the vta-sdk 0.36 line this resolves from VGI's `chore/vta-sdk-036` through
-# the root manifest's `[patch.crates-io]`, until VGI publishes that move; 0.4.8
-# requires `vta-sdk ^0.35`. The floor stays 0.4.8, which the patched branch
-# satisfies, and moves to the release when the patch leaves.
+# 0.4.9 is published and carries the vta-sdk 0.36 move, so the root manifest's
+# `[patch.crates-io]` entries for VGI are gone. Neither `did-git-sign` 0.4.9 nor
+# its `vgi-core` 0.4.9 dependency pulls `vta-sdk`, so there is no second sdk to
+# unify.
 #
 # Floor is 0.4.8, and on the 0.35 line it was also where this actually resolved
 # from. 0.4.8 is published and requires `vta-sdk ^0.35`, so
@@ -77,7 +77,7 @@ anyhow.workspace = true
 # rather than as a wall of satisfied constraints — 0.4.5 was the first release on
 # vta-sdk 0.25, 0.4.3 the first on 0.23, and 0.4.0/0.4.1 were on `^0.19` and put
 # a second vta-sdk *and* a second trust-tasks in the binary.
-did-git-sign = "0.4.8"
+did-git-sign = "0.4.9"
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true
