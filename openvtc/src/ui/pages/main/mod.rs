@@ -252,14 +252,20 @@ impl Component for MainPage {
                 }
             }
             MainMenu::Vetting => {
-                if let Some(current) = self
-                    .props
-                    .main_page
-                    .content_panel
-                    .vetting
-                    .mode
-                    .focused_text()
+                let mode = &self.props.main_page.content_panel.vetting.mode;
+                // A ticket link pasted into the request form fills the whole
+                // form, whichever field has the focus.
+                if matches!(
+                    mode,
+                    crate::state_handler::main_page::content::VettingMode::RequestVetter { .. }
+                ) && trimmed.to_ascii_lowercase().starts_with("vetting-ticket:")
                 {
+                    let _ = self.action_tx.send(Action::Vetting(
+                        crate::state_handler::actions::VettingAction::PasteTicket(
+                            trimmed.to_string(),
+                        ),
+                    ));
+                } else if let Some(current) = mode.focused_text() {
                     let updated = format!("{current}{trimmed}");
                     let _ = self.action_tx.send(Action::Vetting(
                         crate::state_handler::actions::VettingAction::Input(updated),
@@ -2464,6 +2470,11 @@ impl MainPage {
         if !matches!(vetting.mode, VettingMode::List) {
             let text = vetting.mode.focused_text().map(str::to_string);
             let confirming = matches!(vetting.mode, VettingMode::ConfirmDecline { .. });
+            let on_result = matches!(&vetting.mode, VettingMode::Directory(view) if view.result_index().is_some());
+            let on_event = matches!(
+                &vetting.mode,
+                VettingMode::Profile(form) if form.event.is_none() && form.event_index().is_some()
+            );
             let action = match key.code {
                 KeyCode::Esc => Some(V::Back),
                 KeyCode::Enter => Some(V::Submit),
@@ -2475,6 +2486,14 @@ impl MainPage {
                     Some(current) => edit_text(code, &current).map(V::Input),
                     None if code == KeyCode::Char('y') && confirming => Some(V::Submit),
                     None if code == KeyCode::Char('n') && confirming => Some(V::Back),
+                    None if on_result && code == KeyCode::Char('n') => Some(V::DirectoryPage(true)),
+                    None if on_result && code == KeyCode::Char('p') => {
+                        Some(V::DirectoryPage(false))
+                    }
+                    None if on_result && code == KeyCode::Char('a') => Some(V::AskListedVetter),
+                    None if on_event && matches!(code, KeyCode::Char('x') | KeyCode::Delete) => {
+                        Some(V::RemoveEvent)
+                    }
                     None if code == KeyCode::Char(' ') => Some(V::Toggle),
                     None => None,
                 },
@@ -2498,12 +2517,25 @@ impl MainPage {
             (VettingTab::Applications, KeyCode::Char('f')) => V::ChooseFace,
             (VettingTab::Applications, KeyCode::Char('r')) => V::RequestVetter,
             (VettingTab::Applications, KeyCode::Char('m')) => V::RefreshRequirements,
+            (VettingTab::Applications, KeyCode::Char('v')) => V::FindVetters,
             (VettingTab::Applications, KeyCode::Char('c') | KeyCode::Enter) => V::ReviewCard,
             (VettingTab::Desk, KeyCode::Char('o')) => V::OpenSession,
             (VettingTab::Desk, KeyCode::Char('a') | KeyCode::Enter) => V::StartAttest,
             (VettingTab::Desk, KeyCode::Char('x')) => V::ArmDecline,
             (VettingTab::Tickets, KeyCode::Char('t')) => V::NewTicket,
             (VettingTab::Tickets, KeyCode::Char('d')) => V::DeleteTicket,
+            (VettingTab::Tickets, KeyCode::Char('p')) => V::EditProfile,
+            (VettingTab::Tickets, KeyCode::Char('g')) => V::AskResend,
+            (VettingTab::Tickets, KeyCode::Char('u')) => {
+                let Some(uri) = vetting.tickets.get(selected).and_then(|t| t.uri.clone()) else {
+                    return true;
+                };
+                let status = match crate::clipboard::copy_to_clipboard(&uri) {
+                    Ok(method) => format!("Ticket link copied via {}.", method.label()),
+                    Err(e) => format!("Could not copy the link: {e}"),
+                };
+                V::Status(status)
+            }
             (VettingTab::Tickets, KeyCode::Char('y')) => {
                 let Some(ticket) = vetting.tickets.get(selected) else {
                     return true;
@@ -3521,6 +3553,7 @@ mod key_handler_tests {
             request_id: String::new(),
             has_membership_credential: false,
             has_role_credential: false,
+            accent: None,
         }
     }
 
@@ -3626,6 +3659,8 @@ mod key_handler_tests {
                 application_id: "a1".into(),
                 vetter: "did:key:z".into(),
                 code: String::new(),
+                ticket: None,
+                note: None,
                 field: 0,
             };
         });
@@ -3654,6 +3689,133 @@ mod key_handler_tests {
         });
         page.handle_key_event(press(KeyCode::Char('n')));
         assert!(matches!(vetting_action(&mut rx), V::Back));
+    }
+
+    #[test]
+    fn vetting_directory_results_page_and_ask_while_filters_take_text() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::{
+            DIRECTORY_FIELDS, DirectoryView, ListedVetterRow, VettingMode,
+        };
+        let row = ListedVetterRow {
+            did: "did:key:zCarol".into(),
+            name: "Carol".into(),
+            languages: "en".into(),
+            location: None,
+            methods: "in person".into(),
+            documentation: "passport".into(),
+            availability: None,
+            contact_hint: None,
+            events: vec![],
+            grant_until: "2027-09-01".into(),
+        };
+        let on = |field: usize| {
+            let row = row.clone();
+            page_for(MainMenu::Vetting, move |s| {
+                s.main_page.content_panel.vetting.mode =
+                    VettingMode::Directory(Box::new(DirectoryView {
+                        results: vec![row],
+                        searched: true,
+                        field,
+                        ..DirectoryView::default()
+                    }));
+            })
+        };
+        let (mut page, mut rx) = on(DIRECTORY_FIELDS);
+        page.handle_key_event(press(KeyCode::Char('n')));
+        assert!(matches!(vetting_action(&mut rx), V::DirectoryPage(true)));
+        page.handle_key_event(press(KeyCode::Char('p')));
+        assert!(matches!(vetting_action(&mut rx), V::DirectoryPage(false)));
+        page.handle_key_event(press(KeyCode::Char('a')));
+        assert!(matches!(vetting_action(&mut rx), V::AskListedVetter));
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(vetting_action(&mut rx), V::Submit));
+
+        // On the language filter the same letters are typing.
+        let (mut page, mut rx) = on(1);
+        page.handle_key_event(press(KeyCode::Char('n')));
+        assert!(matches!(vetting_action(&mut rx), V::Input(text) if text == "n"));
+    }
+
+    #[test]
+    fn vetting_tickets_tab_copies_the_link_and_opens_the_profile_and_resend() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::VettingTab;
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
+            s.main_page.content_panel.vetting.tab = VettingTab::Tickets;
+        });
+        page.handle_key_event(press(KeyCode::Char('p')));
+        assert!(matches!(vetting_action(&mut rx), V::EditProfile));
+        page.handle_key_event(press(KeyCode::Char('g')));
+        assert!(matches!(vetting_action(&mut rx), V::AskResend));
+        // No ticket selected: copying the link does nothing.
+        page.handle_key_event(press(KeyCode::Char('u')));
+        assert!(rx.try_recv().is_err());
+
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |_| {});
+        page.handle_key_event(press(KeyCode::Char('v')));
+        assert!(matches!(vetting_action(&mut rx), V::FindVetters));
+    }
+
+    #[test]
+    fn vetting_profile_event_rows_remove_and_ticks_toggle() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::{
+            PROFILE_FIELDS, VetterProfileForm, VettingMode,
+        };
+        use openvtc_core::vetting::book::VetterPolicy;
+        use openvtc_core::vetting::registry::{EventDraft, ProfileDraft};
+        let form = |field: usize| {
+            let mut draft = ProfileDraft::new(&VetterPolicy::default());
+            draft.events.push(EventDraft::default());
+            VetterProfileForm {
+                membership_index: 0,
+                draft,
+                field,
+                event: None,
+                error: None,
+                state_line: None,
+            }
+        };
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
+            s.main_page.content_panel.vetting.mode =
+                VettingMode::Profile(Box::new(form(PROFILE_FIELDS)));
+        });
+        page.handle_key_event(press(KeyCode::Char('x')));
+        assert!(matches!(vetting_action(&mut rx), V::RemoveEvent));
+
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
+            s.main_page.content_panel.vetting.mode = VettingMode::Profile(Box::new(form(1)));
+        });
+        page.handle_key_event(press(KeyCode::Char(' ')));
+        assert!(matches!(vetting_action(&mut rx), V::Toggle));
+        page.handle_key_event(press(KeyCode::Char('x')));
+        assert!(rx.try_recv().is_err(), "x removes nothing off an event row");
+    }
+
+    #[test]
+    fn vetting_a_pasted_ticket_link_fills_the_request_form() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::VettingMode;
+        let request = |s: &mut State| {
+            s.main_page.content_panel.vetting.mode = VettingMode::RequestVetter {
+                application_id: "a1".into(),
+                vetter: String::new(),
+                code: String::new(),
+                ticket: None,
+                note: None,
+                field: 0,
+            };
+        };
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, request);
+        page.handle_paste_event("  vetting-ticket:?v=1&community=did%3Akey%3Az&vetter=x  ");
+        assert!(matches!(
+            vetting_action(&mut rx),
+            V::PasteTicket(text) if text.starts_with("vetting-ticket:")
+        ));
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, request);
+        page.handle_paste_event("did:key:zCarol");
+        assert!(matches!(vetting_action(&mut rx), V::Input(text) if text == "did:key:zCarol"));
     }
 
     // ----- Communities -------------------------------------------------------

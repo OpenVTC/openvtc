@@ -7,7 +7,10 @@ use openvtc_core::config::account::PersonaId;
 use openvtc_core::config::community_context::{
     ContextDeletion, ContextDeletionPreview, ContextOption, PersonaTakenAlong,
 };
-use vta_sdk::protocols::vetting::{DeclaredRelationship, RevocationReason, VettingMethod};
+use openvtc_core::vetting::registry::{DirectoryFilter, EventDraft, ProfileDraft};
+use vta_sdk::protocols::vetting::{
+    DeclaredRelationship, RevocationReason, TicketPresentation, VettingMethod,
+};
 
 /// Lazily-rendered raw credential JSON for credential detail views.
 ///
@@ -549,6 +552,8 @@ pub struct CommunitySummary {
     pub has_membership_credential: bool,
     /// Whether the role endorsement credential (VEC) has been received.
     pub has_role_credential: bool,
+    /// The accent colour the community publishes in its manifest's branding.
+    pub accent: Option<(u8, u8, u8)>,
 }
 
 // ****************************************************************************
@@ -1456,6 +1461,34 @@ pub const VETTING_WITHDRAWAL_REASONS: [RevocationReason; 4] = [
 /// How many requests a new ticket admits: one person, or a conference desk.
 pub const VETTING_TICKET_USES: [u32; 4] = [1, 5, 10, 25];
 
+/// Directory filter fields, before the results: community, language, country,
+/// region, city, method, events from, events until, event name.
+pub const DIRECTORY_FIELDS: usize = 9;
+
+/// Methods a directory search can ask for: any, then each.
+pub const DIRECTORY_METHODS: [Option<VettingMethod>; 4] = [
+    None,
+    Some(VettingMethod::InPerson),
+    Some(VettingMethod::Video),
+    Some(VettingMethod::PriorAcquaintance),
+];
+
+/// Profile form fields, before its events: community, listed, display name,
+/// languages, country, region, city, the three methods, documentation,
+/// availability and how to get a ticket.
+pub const PROFILE_FIELDS: usize = 13;
+
+/// Event form fields: name, first day, last day, country, region, city, page.
+pub const EVENT_FIELDS: usize = 7;
+
+/// Whether a line is good news, worth a second look, or bad news.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineTone {
+    Good,
+    Caution,
+    Bad,
+}
+
 /// How a method reads on the page.
 #[must_use]
 pub fn method_label(method: VettingMethod) -> &'static str {
@@ -1541,6 +1574,12 @@ pub struct VettingState {
     /// The face each application wears, by application id, once read or
     /// chosen this run.
     pub worn_faces: std::collections::HashMap<String, String>,
+    /// Communities whose vetter directory can be searched: those applied to,
+    /// then those joined.
+    pub directory_communities: Arc<[DirectoryCommunity]>,
+    /// Active memberships holding no live vetter credential, which can ask for
+    /// it again.
+    pub resend_candidates: Arc<[VettingMembership]>,
 }
 
 impl VettingState {
@@ -1577,13 +1616,24 @@ pub enum VettingMode {
         faces: Vec<FaceChoice>,
         index: usize,
     },
-    /// Ask a vetter, with the ticket code they gave us.
+    /// Ask a vetter, with the ticket code they gave us or the link they showed.
     RequestVetter {
         application_id: String,
         vetter: String,
         code: String,
+        /// A scanned ticket from a pasted link, in place of the code.
+        ticket: Option<TicketPresentation>,
+        /// What the person should know before sending, e.g. how this vetter
+        /// hands out tickets.
+        note: Option<String>,
         field: usize,
     },
+    /// Search a community's vetter directory.
+    Directory(Box<DirectoryView>),
+    /// Edit and publish our vetter profile.
+    Profile(Box<VetterProfileForm>),
+    /// Ask a community to send our vetter credential again.
+    Resend { index: usize },
     /// Read the match code with the vetter, preview what the face shows, then
     /// send the card.
     SendCard {
@@ -1631,6 +1681,250 @@ impl VettingMode {
                 vetter, field: 0, ..
             } => Some(vetter),
             VettingMode::RequestVetter { code, field: 1, .. } => Some(code),
+            VettingMode::Directory(view) => view.text().map(String::as_str),
+            VettingMode::Profile(form) => match &form.event {
+                Some(event) => event.text().map(String::as_str),
+                None => form.text().map(String::as_str),
+            },
+            _ => None,
+        }
+    }
+
+    /// The focused text field, to edit.
+    pub fn focused_text_mut(&mut self) -> Option<&mut String> {
+        match self {
+            VettingMode::NewApplication {
+                community,
+                field: 0,
+                ..
+            } => Some(community),
+            VettingMode::RequestVetter {
+                vetter, field: 0, ..
+            } => Some(vetter),
+            VettingMode::RequestVetter { code, field: 1, .. } => Some(code),
+            VettingMode::Directory(view) => view.text_mut(),
+            VettingMode::Profile(form) => form.focused_text_mut(),
+            _ => None,
+        }
+    }
+}
+
+/// A community whose vetter directory can be searched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectoryCommunity {
+    pub community: String,
+    pub name: String,
+    pub accent: Option<(u8, u8, u8)>,
+    /// The persona the list request is sent as: the application's, else the
+    /// membership's.
+    pub persona: PersonaId,
+    /// Our application to it, if any — the one a request from here goes into.
+    pub application_id: Option<String>,
+}
+
+/// The vetter directory, while it is open. Results are page state only: they
+/// describe other people and go stale, so none of it is saved.
+#[derive(Clone, Debug, Default)]
+pub struct DirectoryView {
+    /// Index into [`VettingState::directory_communities`].
+    pub community_index: usize,
+    pub filter: DirectoryFilter,
+    /// Index into [`DIRECTORY_METHODS`].
+    pub method_index: usize,
+    /// `0..DIRECTORY_FIELDS` are the filters; past them, a result row.
+    pub field: usize,
+    pub results: Vec<ListedVetterRow>,
+    /// The cursor each page shown so far was fetched with; the last is the
+    /// current page's. Its length is the page number.
+    pub cursors: Vec<Option<String>>,
+    /// The community's cursor for the page after this one.
+    pub next_cursor: Option<String>,
+    /// The list request waiting for its answer.
+    pub pending: Option<String>,
+    /// What `cursors` becomes when that answer arrives.
+    pub pending_cursors: Option<Vec<Option<String>>>,
+    /// A search has been answered at least once.
+    pub searched: bool,
+    /// Why the last search failed.
+    pub error: Option<String>,
+}
+
+impl DirectoryView {
+    /// The highlighted result, when a result row has the focus.
+    #[must_use]
+    pub fn result_index(&self) -> Option<usize> {
+        self.field
+            .checked_sub(DIRECTORY_FIELDS)
+            .filter(|i| *i < self.results.len())
+    }
+
+    /// Rows the focus moves through: the filters, then the results.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        DIRECTORY_FIELDS + self.results.len()
+    }
+
+    fn text(&self) -> Option<&String> {
+        let f = &self.filter;
+        match self.field {
+            1 => Some(&f.language),
+            2 => Some(&f.country),
+            3 => Some(&f.region),
+            4 => Some(&f.city),
+            6 => Some(&f.event_from),
+            7 => Some(&f.event_to),
+            8 => Some(&f.event_name),
+            _ => None,
+        }
+    }
+
+    fn text_mut(&mut self) -> Option<&mut String> {
+        let f = &mut self.filter;
+        match self.field {
+            1 => Some(&mut f.language),
+            2 => Some(&mut f.country),
+            3 => Some(&mut f.region),
+            4 => Some(&mut f.city),
+            6 => Some(&mut f.event_from),
+            7 => Some(&mut f.event_to),
+            8 => Some(&mut f.event_name),
+            _ => None,
+        }
+    }
+}
+
+/// One listed vetter, ready to show. Every string is already sanitised.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedVetterRow {
+    pub did: String,
+    /// The name they published, or their DID when they published none.
+    pub name: String,
+    pub languages: String,
+    pub location: Option<String>,
+    pub methods: String,
+    pub documentation: String,
+    pub availability: Option<String>,
+    /// How to get a ticket from them.
+    pub contact_hint: Option<String>,
+    /// Upcoming events, one line each.
+    pub events: Vec<String>,
+    /// When their grant runs out.
+    pub grant_until: String,
+}
+
+/// The vetter profile form.
+#[derive(Clone, Debug)]
+pub struct VetterProfileForm {
+    /// Index into [`VettingState::memberships`] — communities that named us a
+    /// vetter.
+    pub membership_index: usize,
+    pub draft: ProfileDraft,
+    /// `0..PROFILE_FIELDS` are the fields; then one row per event; then "add an
+    /// event".
+    pub field: usize,
+    /// The event being added or edited, while its form is open.
+    pub event: Option<EventForm>,
+    /// Why the profile cannot be sent as it stands.
+    pub error: Option<String>,
+    /// Where the community stands on what was last sent, and whether that is
+    /// good news.
+    pub state_line: Option<(LineTone, String)>,
+}
+
+impl VetterProfileForm {
+    /// Rows the focus moves through.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        PROFILE_FIELDS + self.draft.events.len() + 1
+    }
+
+    /// The event under the focus.
+    #[must_use]
+    pub fn event_index(&self) -> Option<usize> {
+        self.field
+            .checked_sub(PROFILE_FIELDS)
+            .filter(|i| *i < self.draft.events.len())
+    }
+
+    /// Whether the focus is on "add an event".
+    #[must_use]
+    pub fn on_add_event(&self) -> bool {
+        self.field == PROFILE_FIELDS + self.draft.events.len()
+    }
+
+    fn text(&self) -> Option<&String> {
+        let d = &self.draft;
+        match self.field {
+            2 => Some(&d.display_name),
+            3 => Some(&d.languages),
+            4 => Some(&d.country),
+            5 => Some(&d.region),
+            6 => Some(&d.city),
+            10 => Some(&d.accepts_documentation),
+            11 => Some(&d.availability),
+            12 => Some(&d.contact_hint),
+            _ => None,
+        }
+    }
+
+    /// The focused text field: the open event's, else the profile's.
+    fn focused_text_mut(&mut self) -> Option<&mut String> {
+        if self.event.is_some() {
+            return self.event.as_mut().and_then(EventForm::text_mut);
+        }
+        self.text_mut()
+    }
+
+    fn text_mut(&mut self) -> Option<&mut String> {
+        let d = &mut self.draft;
+        match self.field {
+            2 => Some(&mut d.display_name),
+            3 => Some(&mut d.languages),
+            4 => Some(&mut d.country),
+            5 => Some(&mut d.region),
+            6 => Some(&mut d.city),
+            10 => Some(&mut d.accepts_documentation),
+            11 => Some(&mut d.availability),
+            12 => Some(&mut d.contact_hint),
+            _ => None,
+        }
+    }
+}
+
+/// An event being added (`index` is `None`) or edited.
+#[derive(Clone, Debug, Default)]
+pub struct EventForm {
+    pub index: Option<usize>,
+    pub draft: EventDraft,
+    pub field: usize,
+    pub error: Option<String>,
+}
+
+impl EventForm {
+    fn text(&self) -> Option<&String> {
+        let d = &self.draft;
+        match self.field {
+            0 => Some(&d.name),
+            1 => Some(&d.start_date),
+            2 => Some(&d.end_date),
+            3 => Some(&d.country),
+            4 => Some(&d.region),
+            5 => Some(&d.city),
+            6 => Some(&d.url),
+            _ => None,
+        }
+    }
+
+    fn text_mut(&mut self) -> Option<&mut String> {
+        let d = &mut self.draft;
+        match self.field {
+            0 => Some(&mut d.name),
+            1 => Some(&mut d.start_date),
+            2 => Some(&mut d.end_date),
+            3 => Some(&mut d.country),
+            4 => Some(&mut d.region),
+            5 => Some(&mut d.city),
+            6 => Some(&mut d.url),
             _ => None,
         }
     }
@@ -1681,6 +1975,10 @@ pub struct ApplicationRow {
     pub id: String,
     pub community: String,
     pub community_name: Option<String>,
+    /// The community's published accent colour.
+    pub accent: Option<(u8, u8, u8)>,
+    /// What to do next, with the key that does it.
+    pub next_step: Option<String>,
     pub join_did: String,
     /// What the community requires, in a line; `None` until its manifest arrives.
     pub requirements: Option<String>,
@@ -1705,6 +2003,8 @@ pub struct RequestRow {
     /// What their acceptance showed of their eligibility, and whether that is
     /// good news.
     pub eligibility: Option<(bool, String)>,
+    /// Whether the community has since revoked their grant.
+    pub grant: Option<(LineTone, String)>,
 }
 
 /// Where a desk request is, for choosing what the keys do.
@@ -1742,6 +2042,9 @@ pub struct TicketRow {
     pub uses_left: u32,
     pub expires: String,
     pub live: bool,
+    /// The `vetting-ticket:` link its QR code carries, when the persona it
+    /// admits requests to is available.
+    pub uri: Option<String>,
 }
 
 /// One statement we signed, for display.
@@ -1770,6 +2073,7 @@ pub struct VettingMembership {
     pub community: String,
     pub name: String,
     pub persona: PersonaId,
+    pub accent: Option<(u8, u8, u8)>,
 }
 
 // ****************************************************************************

@@ -35,6 +35,78 @@ pub enum JoinPage {
     ContextChoice,
     /// Automated mint + join sequence progress / result.
     Progress,
+    /// A community that vets its members: what it requires, in plain words,
+    /// before anything about the applicant is sent — with the persona's
+    /// application if there is one, and the ways on (apply, join anyway,
+    /// cancel). Also the page shown while the community is being asked.
+    Vetting,
+}
+
+/// A community that vets, as the join flow's vetting page shows it.
+#[derive(Clone, Debug)]
+pub struct JoinVettingView {
+    /// The community's VTC DID.
+    pub community: String,
+    /// Its name, already sanitised.
+    pub name: String,
+    /// The accent colour it publishes.
+    pub accent: Option<(u8, u8, u8)>,
+    pub phase: VettingPhase,
+}
+
+/// How much is known of what a community requires.
+#[derive(Clone, Debug)]
+pub enum VettingPhase {
+    /// The community is being asked. The runtime loop, which hears the
+    /// answer, draws the page while it waits.
+    Asking,
+    /// Its requirements could not be learned; why.
+    Unknown { reason: String },
+    /// It vets, and this is what it asks.
+    Known(Box<KnownVetting>),
+}
+
+/// A vetting community's requirements and where this persona stands.
+#[derive(Clone, Debug, Default)]
+pub struct KnownVetting {
+    /// What it requires, one sentence each.
+    pub requirements: Vec<String>,
+    /// Where it says how it decides.
+    pub governance_url: Option<String>,
+    /// Our application to it, when there is one.
+    pub application: Option<JoinApplication>,
+    /// Personas a new application can be made as.
+    pub personas: Vec<ApplyAs>,
+    pub persona_index: usize,
+    /// Where a new application's face is worn.
+    pub context_options: Vec<ContextOption>,
+    pub context_index: usize,
+    /// 0 = persona, 1 = context.
+    pub field: usize,
+}
+
+/// A persona an application can be made as.
+#[derive(Clone, Debug)]
+pub struct ApplyAs {
+    pub persona: PersonaId,
+    pub label: String,
+    pub did: String,
+}
+
+/// An application already under way, as the join page shows it.
+#[derive(Clone, Debug)]
+pub struct JoinApplication {
+    pub id: String,
+    pub persona: PersonaId,
+    pub persona_label: String,
+    /// Statements that would be presented now.
+    pub statements: usize,
+    /// Progress against the published requirements.
+    pub progress: Option<String>,
+    /// What to do next, with its key on the Vetting page.
+    pub next_step: String,
+    /// It meets the published requirements.
+    pub satisfied: bool,
 }
 
 /// The identity a join presents, once chosen.
@@ -188,6 +260,8 @@ pub struct JoinState {
     pub context_slug: String,
     /// Display names for the communities listed under each context, by VTC DID.
     pub context_community_names: Vec<(String, String)>,
+    /// The vetting page, while the community being joined vets its members.
+    pub vetting: Option<JoinVettingView>,
 }
 
 impl JoinState {

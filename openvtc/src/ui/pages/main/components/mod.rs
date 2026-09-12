@@ -10,6 +10,7 @@ pub mod inbox_panel;
 pub mod logs_panel;
 pub mod menu_panel;
 pub mod panel;
+pub mod qr;
 pub mod relationships_panel;
 pub mod settings_panel;
 pub mod status;

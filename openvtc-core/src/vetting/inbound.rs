@@ -15,7 +15,11 @@
 //!
 //! Handling never sends. A reply comes back unsigned in [`Handled::reply`] for
 //! the caller to sign as the named persona and send ([`wire::sign_and_send`]);
-//! anything a person should see comes back as a [`Notice`].
+//! anything a person should see comes back as a [`Notice`]. An answer to a
+//! question we put to a community — a directory page, a stored profile, a
+//! resent grant — comes back as a [`CommunityAnswer`] for whoever is waiting.
+//! A vetter's grant to check for revocation comes back as a [`GrantCheck`],
+//! because the check fetches over HTTPS and the caller owns the network.
 
 use std::sync::Arc;
 
@@ -32,7 +36,9 @@ use vta_sdk::protocols::join_requests::{
 use vta_sdk::protocols::vetting::{
     RevokeStatementResponseBody, VETTER_ROLE, VETTING_DECLINE_TYPE, VETTING_REQUEST_RESPONSE_TYPE,
     VETTING_REQUEST_TYPE, VETTING_REVOKE_STATEMENT_RESPONSE_TYPE, VETTING_SESSION_RESPONSE_TYPE,
-    VETTING_SESSION_TYPE, VettingDeclineBody, VettingRequestAcceptedBody, VettingRequestBody,
+    VETTING_SESSION_TYPE, VETTING_VETTER_LIST_RESPONSE_TYPE, VETTING_VETTER_PROFILE_RESPONSE_TYPE,
+    VETTING_VETTER_RESEND_RESPONSE_TYPE, VetterListResponseBody, VetterProfileResponseBody,
+    VetterResendResponseBody, VettingDeclineBody, VettingRequestAcceptedBody, VettingRequestBody,
     VettingSessionBody, VettingSessionResponseBody, role_matches,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
@@ -40,8 +46,10 @@ use vta_sdk::vetting::eligibility::{
     EligibilityExpectations, community_role, verify_eligibility_vp,
 };
 
-use super::applicant::VetterEligibility;
+use super::applicant::{GrantStatus, VetterEligibility};
 use super::book::{VetterGrant, VettingBook};
+use super::queries::{CommunityAnswer, CommunityQuery, QueryKind, refusal_words};
+use super::status::GrantCheck;
 use super::vetter::{IncomingRequest, Intake};
 use super::wire;
 use crate::config::account::{Account, PersonaId};
@@ -69,6 +77,10 @@ pub struct Handled {
     pub reply: Option<Reply>,
     /// Something a person should see.
     pub notice: Option<Notice>,
+    /// An answer to a question we put to a community.
+    pub answer: Option<CommunityAnswer>,
+    /// A vetter's grant to check for revocation, off the handler.
+    pub grant_check: Option<GrantCheck>,
 }
 
 /// A reply to sign as `persona` and send to the document's recipient.
@@ -186,6 +198,34 @@ pub enum Notice {
         /// The error code.
         code: String,
     },
+    /// Vetter: the community stored our vetter profile.
+    ProfilePublished {
+        /// The community.
+        community: String,
+        /// Whether it lists us in its directory.
+        listed: bool,
+    },
+    /// Vetter: the community refused our vetter profile.
+    ProfileRefused {
+        /// The community.
+        community: String,
+        /// The error code, e.g. `notEligible`.
+        code: String,
+    },
+    /// Vetter: the community is delivering our grant credential again.
+    GrantResent {
+        /// The community.
+        community: String,
+        /// The credential's `validUntil`.
+        valid_until: DateTime<Utc>,
+    },
+    /// Vetter: the community refused to resend our grant credential.
+    ResendRefused {
+        /// The community.
+        community: String,
+        /// The error code, e.g. `notGranted`.
+        code: String,
+    },
 }
 
 impl Notice {
@@ -243,6 +283,30 @@ impl Notice {
             Notice::WithdrawalRefused { statement_id, code } => format!(
                 "The community refused the withdrawal of statement {statement_id} [{code}]."
             ),
+            Notice::ProfilePublished {
+                community,
+                listed: true,
+            } => format!(
+                "{community} published your vetter profile — applicants can find you in its \
+                 directory."
+            ),
+            Notice::ProfilePublished { community, .. } => format!(
+                "{community} stored your vetter profile. It is not listed, so only people you \
+                 give a ticket to can reach you."
+            ),
+            Notice::ProfileRefused { community, code } => {
+                refusal_words(QueryKind::VetterProfile, community, code)
+            }
+            Notice::GrantResent {
+                community,
+                valid_until,
+            } => format!(
+                "{community} is sending your vetter credential again (valid until {}).",
+                valid_until.format("%Y-%m-%d")
+            ),
+            Notice::ResendRefused { community, code } => {
+                refusal_words(QueryKind::VetterResend, community, code)
+            }
         }
     }
 }
@@ -301,6 +365,9 @@ pub fn may_claim(typ: &str) -> bool {
         || matches!(
             typ,
             VETTING_REVOKE_STATEMENT_RESPONSE_TYPE
+                | VETTING_VETTER_LIST_RESPONSE_TYPE
+                | VETTING_VETTER_PROFILE_RESPONSE_TYPE
+                | VETTING_VETTER_RESEND_RESPONSE_TYPE
                 | JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE
                 | CREDENTIAL_ISSUE_TYPE
         )
@@ -321,7 +388,10 @@ pub async fn handle(
         VETTING_SESSION_RESPONSE_TYPE => card(book, ctx, message, sender).await,
         VETTING_DECLINE_TYPE => declined(book, ctx, message, sender).await,
         VETTING_REVOKE_STATEMENT_RESPONSE_TYPE => withdrawal_recorded(book, message, sender),
-        JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE => manifest(book, message, sender),
+        VETTING_VETTER_LIST_RESPONSE_TYPE => vetter_list(book, message, sender),
+        VETTING_VETTER_PROFILE_RESPONSE_TYPE => profile_stored(book, message, sender),
+        VETTING_VETTER_RESEND_RESPONSE_TYPE => resent(book, message, sender),
+        JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE => manifest(book, ctx, message, sender),
         CREDENTIAL_ISSUE_TYPE => return statement(book, ctx, message, sender).await,
         t if is_trust_task_error_type(t) => return refused(book, ctx, message, sender),
         _ => return None,
@@ -343,24 +413,66 @@ async fn opened<P: DeserializeOwned>(
     }
 }
 
-/// A document from a community, whose replies are authenticated by transport
-/// and not always signed: read the payload without requiring a proof.
-fn community_reply<P: DeserializeOwned>(message: &Message) -> Option<(Option<String>, P)> {
-    let thread = message.thid.clone().or_else(|| {
+/// The thread a community's reply names: the envelope's, or the document's.
+fn community_thread(message: &Message) -> Option<String> {
+    message.thid.clone().or_else(|| {
         message
             .body
             .get("threadId")
             .and_then(Value::as_str)
             .map(str::to_string)
-    });
+    })
+}
+
+/// A community reply's payload. Replies are authenticated by transport and not
+/// always signed, so no proof is required.
+fn community_payload<P: DeserializeOwned>(message: &Message) -> Result<P, String> {
     let payload = message.body.get("payload").cloned().unwrap_or(Value::Null);
-    match serde_json::from_value(payload) {
-        Ok(p) => Some((thread, p)),
+    serde_json::from_value(payload).map_err(|e| e.to_string())
+}
+
+/// A document from a community, whose replies are authenticated by transport
+/// and not always signed: read the payload without requiring a proof.
+fn community_reply<P: DeserializeOwned>(message: &Message) -> Option<(Option<String>, P)> {
+    match community_payload(message) {
+        Ok(p) => Some((community_thread(message), p)),
         Err(e) => {
             warn!(typ = %message.typ, error = %e, "malformed community reply");
             None
         }
     }
+}
+
+/// A community's answer to a question of ours of `kind`, with the question.
+///
+/// `None` when it answers nothing we asked. A payload this client cannot read,
+/// for a question we did ask, becomes [`CommunityAnswer::Unreadable`]. The
+/// person waiting then hears that the community and this client disagree,
+/// rather than waiting out the timeout and being told nobody answered.
+fn answer_to<P: DeserializeOwned>(
+    book: &mut VettingBook,
+    message: &Message,
+    sender: &str,
+    kind: QueryKind,
+) -> Option<(CommunityQuery, Result<P, CommunityAnswer>)> {
+    let Some(thread) = community_thread(message) else {
+        debug!(typ = %message.typ, %sender, "community answer with no thread — ignored");
+        return None;
+    };
+    let Some(query) = book.take_query(sender, &thread, Some(kind)) else {
+        debug!(typ = %message.typ, %sender, "community answer to nothing we asked — ignored");
+        return None;
+    };
+    let payload = community_payload::<P>(message).map_err(|detail| {
+        warn!(typ = %message.typ, %sender, error = %detail, "unreadable community answer");
+        CommunityAnswer::Unreadable {
+            query: query.document_id.clone(),
+            community: sender.to_string(),
+            kind,
+            detail,
+        }
+    });
+    Some((query, payload))
 }
 
 async fn take_request(
@@ -418,6 +530,7 @@ async fn take_request(
                     applicant: sender.to_string(),
                     community,
                 }),
+                ..Handled::default()
             }
         }
         Intake::Refused(code) => {
@@ -431,7 +544,7 @@ async fn take_request(
                         document,
                         eligibility: None,
                     }),
-                notice: None,
+                ..Handled::default()
             }
         }
         Intake::Silent => {
@@ -463,6 +576,8 @@ async fn accepted(
     };
     // Bound to our request by `nonce` and to us by `domain`, so a presentation
     // made for someone else, or before the vetter lost the role, does not pass.
+    // A verified grant's `credentialStatus` is kept for the revocation check.
+    let mut grant_status_entry: Option<Option<Value>> = None;
     let eligibility = match &opened.payload.eligibility_vp {
         None => VetterEligibility::NotShown,
         Some(vp) => {
@@ -475,10 +590,13 @@ async fn accepted(
                 now: ctx.now,
             };
             match verify_eligibility_vp(vp, &expect, ctx.resolver).await {
-                Ok(verified) => VetterEligibility::Shown {
-                    credential_id: verified.credential_id().map(str::to_string),
-                    valid_until: verified.valid_until(),
-                },
+                Ok(verified) => {
+                    grant_status_entry = Some(verified.credential_status().cloned());
+                    VetterEligibility::Shown {
+                        credential_id: verified.credential_id().map(str::to_string),
+                        valid_until: verified.valid_until(),
+                    }
+                }
                 Err(e) => {
                     warn!(%sender, error = %e, "vetter eligibility presentation did not verify");
                     VetterEligibility::Failed {
@@ -490,15 +608,40 @@ async fn accepted(
     };
     let shown_eligible = matches!(eligibility, VetterEligibility::Shown { .. });
     match application.on_accepted(thread, sender, opened.payload, eligibility, ctx.now) {
-        Ok(()) => Handled {
-            changed: true,
-            notice: Some(Notice::VetterAccepted {
-                application_id: application.id.clone(),
-                vetter: sender.to_string(),
-                shown_eligible,
-            }),
-            ..Handled::default()
-        },
+        Ok(()) => {
+            let grant_check = match grant_status_entry {
+                Some(Some(credential_status)) => {
+                    let checking = GrantStatus::Checking { since: ctx.now };
+                    let _ = application.record_grant_status(thread, sender, checking);
+                    Some(GrantCheck {
+                        application_id: application.id.clone(),
+                        request_document_id: thread.to_string(),
+                        vetter: sender.to_string(),
+                        issuer: application.community.clone(),
+                        credential_status,
+                    })
+                }
+                Some(None) => {
+                    let unknown = GrantStatus::Unknown {
+                        reason: "the vetter's credential names no status list to check".into(),
+                        checked_at: ctx.now,
+                    };
+                    let _ = application.record_grant_status(thread, sender, unknown);
+                    None
+                }
+                None => None,
+            };
+            Handled {
+                changed: true,
+                notice: Some(Notice::VetterAccepted {
+                    application_id: application.id.clone(),
+                    vetter: sender.to_string(),
+                    shown_eligible,
+                }),
+                grant_check,
+                ..Handled::default()
+            }
+        }
         Err(e) => {
             warn!(%sender, error = %e, "vetting acceptance not applied");
             Handled::default()
@@ -750,6 +893,38 @@ fn refused(
             },
         );
     }
+    if let Some(query) = book.take_query(sender, thread, None) {
+        info!(community = %sender, %code, kind = ?query.kind, "community refused a question of ours");
+        let (changed, notice) = match query.kind {
+            QueryKind::VetterProfile => (
+                book.on_profile_refused(sender, query.persona, &code, ctx.now),
+                Some(Notice::ProfileRefused {
+                    community: sender.to_string(),
+                    code: code.clone(),
+                }),
+            ),
+            QueryKind::VetterResend => (
+                false,
+                Some(Notice::ResendRefused {
+                    community: sender.to_string(),
+                    code: code.clone(),
+                }),
+            ),
+            QueryKind::Manifest | QueryKind::VetterList => (false, None),
+        };
+        return Some(Handled {
+            changed,
+            notice,
+            answer: Some(CommunityAnswer::Refused {
+                query: query.document_id,
+                community: sender.to_string(),
+                kind: query.kind,
+                code,
+                message: detail,
+            }),
+            ..Handled::default()
+        });
+    }
     let statement_id = book
         .issued
         .iter()
@@ -784,12 +959,31 @@ fn withdrawal_recorded(book: &mut VettingBook, message: &Message, sender: &str) 
     }
 }
 
-fn manifest(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
-    let Some((_, body)) = community_reply::<JoinRequestManifestResponseBody>(message) else {
-        return Handled::default();
+fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender: &str) -> Handled {
+    let thread = community_thread(message);
+    let body = match community_payload::<JoinRequestManifestResponseBody>(message) {
+        Ok(body) => body,
+        Err(detail) => {
+            warn!(typ = %message.typ, error = %detail, "malformed community reply");
+            // Whoever is waiting on this manifest hears why, now.
+            let answer = book
+                .take_manifest_queries(sender, thread.as_deref())
+                .into_iter()
+                .next()
+                .map(|q| CommunityAnswer::Unreadable {
+                    query: q.document_id,
+                    community: sender.to_string(),
+                    kind: QueryKind::Manifest,
+                    detail,
+                });
+            return Handled {
+                answer,
+                ..Handled::default()
+            };
+        }
     };
     let mut handled = Handled {
-        changed: book.learn_manifest(sender, &body, chrono::Utc::now()),
+        changed: book.learn_manifest(sender, &body, ctx.now),
         ..Handled::default()
     };
     for application in book
@@ -809,5 +1003,84 @@ fn manifest(book: &mut VettingBook, message: &Message, sender: &str) -> Handled 
             Err(e) => warn!(community = %sender, error = %e, "community manifest not adopted"),
         }
     }
+    if !book
+        .take_manifest_queries(sender, thread.as_deref())
+        .is_empty()
+    {
+        handled.answer = Some(CommunityAnswer::Manifest {
+            community: sender.to_string(),
+        });
+    }
     handled
+}
+
+fn vetter_list(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
+    let Some((query, page)) =
+        answer_to::<VetterListResponseBody>(book, message, sender, QueryKind::VetterList)
+    else {
+        return Handled::default();
+    };
+    Handled {
+        answer: Some(match page {
+            Ok(page) => CommunityAnswer::Vetters {
+                query: query.document_id,
+                community: sender.to_string(),
+                page,
+            },
+            Err(unreadable) => unreadable,
+        }),
+        ..Handled::default()
+    }
+}
+
+fn profile_stored(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
+    let Some((query, body)) =
+        answer_to::<VetterProfileResponseBody>(book, message, sender, QueryKind::VetterProfile)
+    else {
+        return Handled::default();
+    };
+    match body {
+        Ok(body) => Handled {
+            changed: book.on_profile_stored(sender, query.persona, &body),
+            notice: Some(Notice::ProfilePublished {
+                community: sender.to_string(),
+                listed: body.listed,
+            }),
+            answer: Some(CommunityAnswer::ProfileStored {
+                community: sender.to_string(),
+                listed: body.listed,
+                updated_at: body.updated_at,
+            }),
+            ..Handled::default()
+        },
+        Err(unreadable) => Handled {
+            answer: Some(unreadable),
+            ..Handled::default()
+        },
+    }
+}
+
+fn resent(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
+    let Some((_, body)) =
+        answer_to::<VetterResendResponseBody>(book, message, sender, QueryKind::VetterResend)
+    else {
+        return Handled::default();
+    };
+    match body {
+        Ok(body) => Handled {
+            notice: Some(Notice::GrantResent {
+                community: sender.to_string(),
+                valid_until: body.valid_until,
+            }),
+            answer: Some(CommunityAnswer::Resent {
+                community: sender.to_string(),
+                valid_until: body.valid_until,
+            }),
+            ..Handled::default()
+        },
+        Err(unreadable) => Handled {
+            answer: Some(unreadable),
+            ..Handled::default()
+        },
+    }
 }

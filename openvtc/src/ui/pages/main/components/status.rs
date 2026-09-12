@@ -43,6 +43,12 @@ fn wrap_width() -> usize {
     WRAP_WIDTH.get()
 }
 
+/// The content panel's usable width this frame, for a panel that has to fit
+/// something that cannot wrap — a QR code.
+pub fn content_width() -> usize {
+    WRAP_WIDTH.get()
+}
+
 /// Push a status message as one or more wrapped lines (no trailing blank).
 ///
 /// Messages that look like errors are rendered in the warning (red) color;
