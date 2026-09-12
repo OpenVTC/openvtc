@@ -85,6 +85,11 @@ pub struct MainPageState {
     /// entries by pointer rather than deep-copying each entry's summary and
     /// detail strings. Entries are immutable once written.
     pub activity_log: VecDeque<Arc<ActivityLogEntry>>,
+
+    /// `Some` for the whole session when a development build applied a
+    /// trust-anchor override (see `crate::env_overrides`). Rendered at the front
+    /// of the bottom bar, so the run cannot be mistaken for a normal one.
+    pub dev_override: Option<String>,
 }
 
 impl MainPageState {

@@ -2821,13 +2821,25 @@ impl ComponentRender<()> for MainPage {
             .collect();
         frame.render_widget(Paragraph::new(log_lines), log_inner);
 
-        // Bottom key hints (single line)
+        // Bottom key hints (single line). A development trust-anchor override
+        // takes the front of the line for the whole session, so an overridden
+        // run cannot be mistaken for a normal one.
+        let hints = " <TAB> switch panels  <Ctrl+K> switch community  <PgUp/PgDn/Home/End> scroll  <F10> quit";
+        let bottom_line = match &self.props.main_page.dev_override {
+            Some(banner) => Line::from(vec![
+                Span::styled(
+                    format!(" {banner} "),
+                    ratatui::style::Style::default()
+                        .fg(ratatui::style::Color::Black)
+                        .bg(COLOR_WARNING_ACCESSIBLE_RED)
+                        .bold(),
+                ),
+                Span::from(hints).dark_gray(),
+            ]),
+            None => Line::from(hints).dark_gray(),
+        };
         frame.render_widget(
-            Paragraph::new(
-                " <TAB> switch panels  <Ctrl+K> switch community  <PgUp/PgDn/Home/End> scroll  <F10> quit",
-            )
-            .dark_gray()
-            .alignment(Alignment::Left),
+            Paragraph::new(bottom_line).alignment(Alignment::Left),
             main_bottom,
         );
 

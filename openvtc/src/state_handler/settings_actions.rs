@@ -32,9 +32,10 @@ pub fn update_friendly_name(config: &mut Config, name: &str) {
 
 // There is deliberately no `update_mediator_did`. A persona's mediator is chosen
 // when the persona is minted and published in its DID document, so the Settings
-// row is read-only (see `settings_panel::MEDIATOR_ROW`). The one remaining write
-// path is the `OPENVTC_MEDIATOR_DID` override in `main.rs`, which calls
-// `Config::set_active_mediator_did` directly and warns when it does not apply.
+// row is read-only (see `settings_panel::MEDIATOR_ROW`). The `OPENVTC_MEDIATOR_DID`
+// override in `env_overrides.rs` is not a write path: it exists only in
+// `dev-overrides` builds and calls `Config::set_active_mediator_did_runtime`,
+// which never touches the persisted account record.
 
 /// Update the organization DID.
 ///

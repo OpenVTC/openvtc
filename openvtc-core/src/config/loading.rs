@@ -681,6 +681,7 @@ impl Config {
                 integrity,
                 protected_key,
                 active_persona: None,
+                runtime_trust_overrides: None,
                 key_backend,
                 public: public_config,
                 private: private_cfg,

@@ -474,24 +474,28 @@ impl From<&Config> for SecuredConfig {
             },
             KeyBackend::Vta {
                 credential_bundle,
-                vta_did,
-                vta_url,
                 mediator_did,
                 ..
-            } => SecuredConfig {
-                bip32_seed: None,
-                credential_bundle: Some(credential_bundle.clone()),
-                protected_key: cfg.protected_key.clone(),
-                vta_url: if vta_url.is_empty() {
-                    None
-                } else {
-                    Some(vta_url.clone())
-                },
-                vta_did: Some(vta_did.clone()),
-                mediator_did: mediator_did.clone(),
-                key_info: cfg.key_info.clone(),
-                protection_method: cfg.protection_method.clone(),
-            },
+            } => {
+                // The persisted anchor, not the live one: a runtime-only
+                // override (see `Config::runtime_trust_overrides`) must never
+                // reach disk through `save` or `export`.
+                let (vta_url, vta_did) = cfg.persisted_vta_anchor().unwrap_or_default();
+                SecuredConfig {
+                    bip32_seed: None,
+                    credential_bundle: Some(credential_bundle.clone()),
+                    protected_key: cfg.protected_key.clone(),
+                    vta_url: if vta_url.is_empty() {
+                        None
+                    } else {
+                        Some(vta_url.to_string())
+                    },
+                    vta_did: Some(vta_did.to_string()),
+                    mediator_did: mediator_did.clone(),
+                    key_info: cfg.key_info.clone(),
+                    protection_method: cfg.protection_method.clone(),
+                }
+            }
         }
     }
 }
