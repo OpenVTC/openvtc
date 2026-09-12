@@ -1,6 +1,7 @@
 /*! Command Line Interface configuration
 */
 
+use anyhow::Context;
 use clap::{Arg, Command};
 #[cfg(feature = "openpgp-card")]
 use dialoguer::{Password, theme::ColorfulTheme};
@@ -16,11 +17,23 @@ pub fn cli() -> Command {
         .arg_required_else_help(false)
         .args([
             Arg::new("unlock-code").short('u').long("unlock-code").help(
-                "Unlock passphrase for the encrypted config. \
-                     WARNING: command-line arguments are visible to other \
-                     local users via the process list (`ps`, /proc); prefer \
-                     the interactive prompt on shared systems.",
+                "DEPRECATED: use --unlock-code-file instead. Unlock passphrase \
+                     for the encrypted config. WARNING: command-line arguments \
+                     are visible to other local users via the process list \
+                     (`ps`, /proc); prefer --unlock-code-file or the \
+                     interactive prompt on shared systems.",
             ),
+            Arg::new("unlock-code-file")
+                .long("unlock-code-file")
+                .value_name("PATH")
+                // One passphrase, one source. Taking both and silently
+                // preferring one is how the wrong one gets used quietly.
+                .conflicts_with("unlock-code")
+                .help(
+                    "Read the unlock passphrase from the first line of PATH, or \
+                     from standard input when PATH is `-`. Unlike --unlock-code \
+                     this keeps the passphrase out of the process list.",
+                ),
             Arg::new("profile")
                 .short('p')
                 .long("profile")
@@ -92,6 +105,41 @@ pub fn cli() -> Command {
                 ]),
         )
         .subcommand(crate::theme_cmd::command())
+}
+
+/// Read an unlock passphrase from `path`, or from standard input when `path` is
+/// `-`.
+///
+/// Only the first line is taken, and it is trimmed. A trailing newline is what
+/// every editor and every `echo` leaves behind, and a passphrase whose ends are
+/// whitespace cannot be told from one whose ends are not by the person typing it
+/// at the prompt — so both ends go, and anything after the first line is not
+/// part of the passphrase.
+///
+/// An empty first line is an error rather than an empty passphrase: it almost
+/// always means the file was not written, or was written somewhere else.
+pub fn read_unlock_code_file(path: &str) -> anyhow::Result<String> {
+    use std::io::BufRead;
+
+    let mut first_line = String::new();
+    if path == "-" {
+        std::io::stdin()
+            .lock()
+            .read_line(&mut first_line)
+            .context("failed to read the unlock passphrase from standard input")?;
+    } else {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("failed to open unlock passphrase file `{path}`"))?;
+        std::io::BufReader::new(file)
+            .read_line(&mut first_line)
+            .with_context(|| format!("failed to read unlock passphrase file `{path}`"))?;
+    }
+
+    let passphrase = first_line.trim().to_string();
+    if passphrase.is_empty() {
+        anyhow::bail!("no unlock passphrase on the first line of `{path}`");
+    }
+    Ok(passphrase)
 }
 
 #[cfg(feature = "openpgp-card")]
@@ -226,6 +274,68 @@ mod tests {
                 .is_err(),
             "an unknown format is refused"
         );
+    }
+
+    #[test]
+    fn unlock_code_file_accepts_stdin() {
+        let matches = cli()
+            .try_get_matches_from(["openvtc", "--unlock-code-file", "-"])
+            .expect("`--unlock-code-file -` is valid");
+        assert_eq!(
+            matches
+                .get_one::<String>("unlock-code-file")
+                .map(String::as_str),
+            Some("-"),
+            "`-` reaches the reader as-is, which is how it means standard input"
+        );
+    }
+
+    #[test]
+    fn unlock_code_and_unlock_code_file_conflict() {
+        let err = cli()
+            .try_get_matches_from([
+                "openvtc",
+                "--unlock-code",
+                "from-argv",
+                "--unlock-code-file",
+                "-",
+            ])
+            .expect_err("two sources for one passphrase must be refused");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "expected an ArgumentConflict, got: {err}"
+        );
+    }
+
+    #[test]
+    fn unlock_code_file_reads_the_first_line_trimmed() {
+        let dir = std::env::temp_dir().join(format!("openvtc-unlockfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the test directory");
+
+        let path = dir.join("passphrase");
+        // The trailing newline an editor leaves, surrounding whitespace, and a
+        // second line that is not part of the passphrase.
+        std::fs::write(&path, b"  correct horse battery staple  \nignored\n")
+            .expect("write the passphrase file");
+        assert_eq!(
+            read_unlock_code_file(&path.to_string_lossy()).expect("the file reads"),
+            "correct horse battery staple"
+        );
+
+        let empty = dir.join("empty");
+        std::fs::write(&empty, b"\n").expect("write the empty file");
+        assert!(
+            read_unlock_code_file(&empty.to_string_lossy()).is_err(),
+            "an empty first line is an error, not an empty passphrase"
+        );
+
+        assert!(
+            read_unlock_code_file(&dir.join("missing").to_string_lossy()).is_err(),
+            "a path that does not exist is an error"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

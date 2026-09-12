@@ -43,7 +43,10 @@ mod ui;
 /// command reads DID documents, and holding a live mediator connection open for
 /// that would add a second socket for the profile the running TUI may already
 /// own.
-async fn load_config_for_health(profile: &str, unlock_code_arg: Option<&str>) -> Option<Config> {
+async fn load_config_for_health(
+    profile: &str,
+    unlock_code_arg: Option<&SuppliedUnlockCode>,
+) -> Option<Config> {
     let deferred = match load_fast(profile, unlock_code_arg) {
         Ok(deferred) => deferred,
         Err(OpenVTCError::ConfigNotFound(_, _)) => return None,
@@ -425,7 +428,23 @@ async fn main() -> Result<()> {
         .get_one::<String>("profile")
         .cloned()
         .unwrap_or_else(|| "default".to_string());
-    let unlock_code_arg = matches.get_one::<String>("unlock-code").cloned();
+    // `--unlock-code-file` (a path, or `-` for standard input) takes the place of
+    // `--unlock-code`, which clap refuses alongside it. Read eagerly so a bad
+    // path fails here, with a clear message, rather than after the profile has
+    // been opened.
+    let unlock_code_arg = match matches.get_one::<String>("unlock-code-file") {
+        Some(path) => Some(SuppliedUnlockCode {
+            passphrase: cli::read_unlock_code_file(path)?,
+            from_argv: false,
+        }),
+        None => matches
+            .get_one::<String>("unlock-code")
+            .cloned()
+            .map(|passphrase| SuppliedUnlockCode {
+                passphrase,
+                from_argv: true,
+            }),
+    };
     let setup_requested = matches!(matches.subcommand(), Some(("setup", _)));
 
     // Optional invitation credential (VIC) to present when joining a community.
@@ -510,7 +529,7 @@ async fn main() -> Result<()> {
             .map(|values| values.cloned().collect())
             .unwrap_or_default();
         let as_json = health_args.get_flag("json");
-        let config = load_config_for_health(&profile, unlock_code_arg.as_deref()).await;
+        let config = load_config_for_health(&profile, unlock_code_arg.as_ref()).await;
         let recoverable = health_args.get_flag("recoverable");
         let allow_private_probes = health_args.get_flag("allow-private-probes");
         return health_cmd::run(
@@ -535,7 +554,7 @@ async fn main() -> Result<()> {
     }
 
     if let StartingMode::NotSet = starting_mode {
-        match load_fast(&profile, unlock_code_arg.as_deref()) {
+        match load_fast(&profile, unlock_code_arg.as_ref()) {
             Ok(deferred) => {
                 starting_mode = StartingMode::MainPageDeferred(deferred);
             }
@@ -740,24 +759,42 @@ pub fn apply_env_overrides(config: &mut Config) {
 /// Maximum number of interactive unlock attempts before aborting.
 const MAX_UNLOCK_ATTEMPTS: usize = 5;
 
+/// A non-interactive unlock passphrase, and where it came from.
+///
+/// The source is carried because only one of the two routes earns the
+/// process-list warning: `--unlock-code` puts the passphrase in argv, where any
+/// local user can read it out of `ps`, and `--unlock-code-file` exists precisely
+/// to avoid that. Warning about the safe route as well is how a warning gets
+/// trained out of people.
+struct SuppliedUnlockCode {
+    passphrase: String,
+    from_argv: bool,
+}
+
 /// Fast, synchronous load — only does local config read + terminal prompts.
 /// Network-heavy work (TDK init, DID resolution, VTA auth) is deferred to the state handler.
-fn load_fast(profile: &str, unlock_code_arg: Option<&str>) -> Result<DeferredLoad, OpenVTCError> {
+fn load_fast(
+    profile: &str,
+    unlock_code_arg: Option<&SuppliedUnlockCode>,
+) -> Result<DeferredLoad, OpenVTCError> {
     let public_config = Config::load_step1(profile)?;
 
     let unlock_passphrase = match &public_config.protection {
         ConfigProtectionType::Token { .. } => None,
         ConfigProtectionType::Encrypted => {
-            if let Some(passphrase) = unlock_code_arg {
-                eprintln!(
-                    "{}",
-                    style(
-                        "WARNING: --unlock-code exposes the passphrase in the process list; \
-                         prefer the interactive prompt on shared systems."
-                    )
-                    .themed(CLI_CAUTION)
-                );
-                Some(UnlockCode::from_string(passphrase)?)
+            if let Some(supplied) = unlock_code_arg {
+                if supplied.from_argv {
+                    eprintln!(
+                        "{}",
+                        style(
+                            "WARNING: --unlock-code exposes the passphrase in the process list; \
+                             prefer --unlock-code-file or the interactive prompt on shared \
+                             systems."
+                        )
+                        .themed(CLI_CAUTION)
+                    );
+                }
+                Some(UnlockCode::from_string(&supplied.passphrase)?)
             } else {
                 let mut result = None;
                 for attempt in 1..=MAX_UNLOCK_ATTEMPTS {
