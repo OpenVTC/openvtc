@@ -8,6 +8,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The vetting wire types are the published, generated ones.** `vta-sdk` 0.37
+  deleted its hand-written copies of the peer-vetting payloads and re-exports
+  the generated `trust_tasks_rs::specs` types in their place, so what this
+  client puts on the wire is what the specifications state. Every vetting call
+  site moved with them: the generated structs are `#[non_exhaustive]` and are
+  built through `X::builder()`, constrained strings are newtypes, and
+  `check_shape()` arrives as the `CheckShape` trait.
+
+  The generated types **validate what the hand-written ones accepted**, and
+  three values this client used to send are now refused where they are built
+  rather than by the community:
+
+  - a vetter who accepts no documentation sent `acceptsDocumentation: []`. The
+    published response requires at least one entry, so the member is omitted
+    instead — a vetter may still accept nothing, which is what V0 intends for
+    someone they already know.
+  - a ticket code went out as it was typed. The published short code is
+    upper-case Crockford base32, so a typed code is normalised into that form
+    before the request is built, and a code that cannot be is refused with the
+    same sentence as before.
+  - a statement could list `none` among its document classes. No document is
+    the empty list, so `none` is dropped — and a documentary method left with
+    nothing to rely on is refused rather than attested.
+
+  The vocabulary is generated **per specification**, so `VettingMethod` exists
+  five times over (the manifest's, the request's, the session's, the profile's
+  and the listing's) with the same wire tokens and no relation between the Rust
+  types. This client keeps the community's copy in its own state and carries a
+  value across each task boundary by the token both spell.
+
+- **Every dependency resolves from crates.io again.** The `[patch.crates-io]`
+  block carrying twenty VTI crates and two VGI ones is deleted, and with it both
+  `allow-git` entries in `deny.toml`: `vta-sdk` 0.37, `vta-service` 0.26,
+  `vti-common` 0.18.4 and `did-git-sign` 0.4.9 are published. One thing the
+  unwind did not buy: `did-git-sign` 0.4.9 requires `vta-sdk ^0.36` against this
+  workspace's 0.37, so the graph still carries a second sdk — and no patch can
+  close it, because 0.4.9 is the commit VGI `main` is on. It closes when VGI
+  releases on 0.37.
+
 - **A `did:webvh` DID on a non-public host no longer resolves.** Resolving a
   `did:webvh` DID fetches `did.jsonl` from the host the DID itself names, so
   until now a DID such as `did:webvh:<scid>:localhost%3A9099` — or a public name
