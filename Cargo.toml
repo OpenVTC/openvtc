@@ -366,19 +366,20 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # ContextDirection}` as its own public API, so the two copies carry types that
 # cannot unify, and in practice the build fails outright rather than mis-typing.
 #
-# There are two such edges, and both move here:
+# There are two such edges. One still moves here; the other has stopped.
 #
 # - `vta-service`, which `openvtc-core` dev-depends on for `MockVta`. The
 #   published 0.25.1 is still built on 0.35, so on this line it resolves from VTI
 #   `main` through the patch block at the foot of this file. Dev-only, which is exactly why it gets forgotten —
 #   the *shipped* graph looks clean while the harness tests this client against
 #   a server it is no longer paired with.
-# - `did-git-sign`, the standing obligation, **back again on this line**. It
-#   blocked six consecutive minors (0.23, 0.25, 0.27, 0.31, 0.32, 0.34); 0.35 was
-#   the one it did not, because 0.4.8 resolved from crates.io. 0.36 reintroduces
-#   it — 0.4.8 requires `vta-sdk ^0.35` — so until VGI releases on 0.36 it
-#   resolves from VGI's `chore/vta-sdk-036` through the patch block at the foot
-#   of this file, which also says what makes it leave.
+# - `did-git-sign`, the standing obligation — **settled, and no longer an sdk
+#   obligation at all**. It blocked six consecutive minors (0.23, 0.25, 0.27,
+#   0.31, 0.32, 0.34); 0.35 was the one it did not, because 0.4.8 resolved from
+#   crates.io. 0.36 reintroduced it briefly, since 0.4.8 required `vta-sdk
+#   ^0.35`. That ended with 0.4.9: neither it nor its `vgi-core` 0.4.9
+#   dependency pulls `vta-sdk`, so it resolves from crates.io and an sdk bump
+#   cannot block on VGI again.
 #
 # `trql-client`, the third git-pinned edge in this ecosystem, does **not**
 # depend on `vta-sdk` at all, so the trust registry needs no release for an sdk
