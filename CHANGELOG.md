@@ -8,6 +8,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **A `did:webvh` DID on a non-public host no longer resolves.** Resolving a
+  `did:webvh` DID fetches `did.jsonl` from the host the DID itself names, so
+  until now a DID such as `did:webvh:<scid>:localhost%3A9099` — or a public name
+  whose A record points at `169.254.169.254` — was fetched, on this machine's
+  own network, by `openvtc health`, by join and by messaging alike. The DID is
+  enough; no config had to be wrong.
+
+  `affinidi-did-resolver-cache-sdk` 0.8.37 (`didwebvh-rs` 0.7) now refuses
+  `localhost`, `*.localhost`, `*.local`, `*.internal`, `home.arpa` and
+  single-label names before any request, refuses a name whose resolved
+  addresses include a loopback, private, carrier-grade-NAT or link-local one,
+  connects only to the addresses it checked, follows no redirect and ignores
+  `HTTP_PROXY`/`HTTPS_PROXY`. `did:web` has been refused this way since the
+  probe hardening; this is the other half of it. A refused DID reports
+  `BlockedHost`.
+
+  **If your VTA, VTC or mediator DIDs genuinely live on loopback or a private
+  network**, `openvtc health --allow-private` now opts *resolution* in as well
+  as probing — the two run under one policy, so the report can no longer say
+  the endpoints may be dialled while refusing the documents that name them.
+  Everything else, including every default run, contacts public hosts only.
+
+  `openvtc health` also still distinguishes "we declined to dial this" from
+  "this host did not answer" when the refusal comes from the probe client's DNS
+  guard rather than from the URL. That guard moved into the shared
+  `affinidi-net-guard` crate and its refusals now read `blocked address <addr>
+  (<class>) for host <host>`; they are recognised by type rather than by that
+  wording, so the message is free to change again without a refusal being
+  reported as an unreachable host.
+
 - **Release builds no longer take their VTA or mediator from the environment.**
   `OPENVTC_VTA_URL`, `OPENVTC_VTA_DID` and `OPENVTC_MEDIATOR_DID` are honoured
   only by a build compiled with the new `dev-overrides` feature

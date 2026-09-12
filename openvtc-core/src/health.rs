@@ -355,8 +355,25 @@ pub async fn build_report_with_progress(
 ) -> HealthReport {
     let started = std::time::Instant::now();
     progress(Step::ResolverStarting);
+    // Resolution runs under the same policy as the probes, because resolving a
+    // `did:web`/`did:webvh` DID *is* an outbound fetch of a host the DID names.
+    // Since `affinidi-did-resolver-cache-sdk` 0.8.37 both methods refuse a
+    // non-public host by default, so without this line a `--allow-private` run
+    // against a development stack on loopback would be allowed to dial the
+    // endpoints while being refused the documents that name them — the report
+    // would read as "nothing resolves" rather than as a policy decision.
+    //
+    // The default stays `PublicOnly` on both halves: `ProbePolicy::default()`
+    // is `PublicOnly`, and the only caller that asks for `AllowPrivate` is the
+    // operator's explicit `health --allow-private`.
+    let host_policy = match policy {
+        ProbePolicy::PublicOnly => affinidi_did_web::HostPolicy::PublicOnly,
+        ProbePolicy::AllowPrivate => affinidi_did_web::HostPolicy::AllowPrivate,
+    };
     let resolver = match DIDCacheClient::new(
-        affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+        affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default()
+            .with_host_policy(host_policy)
+            .build(),
     )
     .await
     {
@@ -729,27 +746,25 @@ fn send_failure(url: &str, error: &reqwest::Error) -> Probe {
     }
 }
 
-/// The refusal `affinidi_did_web::guarded_dns_resolver` raised, if one is
+/// The refusal the probe client's guarded DNS resolver raised, if one is
 /// anywhere in `error`'s source chain.
 ///
-/// That crate keeps its error type private, so the refusal is recognised by the
-/// message it renders (`"<host> resolves to non-routable <addr>"`), walking the
-/// chain the way the crate does internally. The innermost match wins, since
-/// wrappers may repeat it with their own prefix.
-/// `probe_client_dns_guard_refuses_localhost_name` pins the text, so an upstream
-/// change to it fails a test rather than quietly turning refusals back into
-/// "unreachable".
+/// Recognised **by type**: `affinidi_net_guard::blocked_in_chain` downcasts each
+/// link of the chain to that crate's own `EgressError` and hands back the
+/// refusal itself. It is the same helper `affinidi-did-web` uses internally to
+/// turn one of these into `BlockedHost`, so probing and resolution agree on what
+/// counts as a refusal rather than each deciding for itself.
+///
+/// This replaced a match on the sentence the refusal used to render,
+/// `"<host> resolves to non-routable <addr>"`. `affinidi-did-web` 0.1.5 moved
+/// the guard into `affinidi-net-guard`, which renders
+/// `"blocked address <addr> (<class>) for host <host>"` instead — and a string
+/// match is precisely how that move would otherwise have turned every refusal
+/// quietly back into `Probe::Unreachable`, which reads as "the host did not
+/// answer" when what happened is "we declined to ask".
+/// `probe_client_dns_guard_refuses_localhost_name` covers the recovery.
 fn dns_refusal_in_chain(error: &(dyn std::error::Error + 'static)) -> Option<String> {
-    let mut found = None;
-    let mut next = Some(error);
-    while let Some(e) = next {
-        let message = e.to_string();
-        if message.contains(" resolves to non-routable ") {
-            found = Some(message);
-        }
-        next = e.source();
-    }
-    found
+    affinidi_net_guard::blocked_in_chain(error).map(ToString::to_string)
 }
 
 /// Negotiate the pairs that decide whether a join can complete: each persona
@@ -1490,6 +1505,12 @@ mod tests {
     /// literal, so the literal check above cannot be the whole guard; this goes
     /// straight to the client, past `vet_probe_url`, to prove the DNS guard is
     /// installed. `localhost` resolves to loopback everywhere without a network.
+    ///
+    /// What it pins is that the refusal is still *recoverable* from the error
+    /// chain, so a refusal keeps grading as [`Probe::Blocked`] rather than as an
+    /// unreachable host. It asserts on the host and the refusal's shape, not on
+    /// a whole sentence: the wording is the upstream crate's to change, and it
+    /// did change when the guard moved into `affinidi-net-guard`.
     #[tokio::test]
     async fn probe_client_dns_guard_refuses_localhost_name() {
         let (listener, port) = loopback_listener().await;
@@ -1505,12 +1526,56 @@ mod tests {
         assert!(
             refusal
                 .as_deref()
-                .is_some_and(|r| r.contains("localhost resolves to non-routable")),
-            "affinidi-did-web's refusal must be recoverable from the error chain: {error:?}"
+                .is_some_and(|r| r.contains("blocked address") && r.contains("localhost")),
+            "the guard's refusal must be recoverable from the error chain, and must \
+             name the host it refused: {error:?}"
         );
         assert!(
             matches!(send_failure(&url, &error), Probe::Blocked { .. }),
             "a DNS refusal is a block, not an unreachable host"
+        );
+        assert_never_dialled(&listener).await;
+    }
+
+    // ---- Resolution egress policy -------------------------------------------
+    //
+    // The probe tests above cover the URLs a *document* names. These cover the
+    // host the *DID* names, which is earlier and broader: resolving
+    // `did:webvh:<scid>:<host>` fetches `did.jsonl` from `<host>`, so a DID on
+    // its own — nothing misconfigured, no document served — is enough to point
+    // this machine at a service on its own network, and the resolution error
+    // then says whether it answered.
+
+    /// The resolver `build_report` builds must refuse a `did:webvh` DID on
+    /// loopback, and refuse it *before* connecting.
+    ///
+    /// Asserted through `build_report`, the entry point every caller actually
+    /// uses, rather than through a resolver the test configured itself — the
+    /// thing worth pinning is that this module's default is the guarded one.
+    #[tokio::test]
+    async fn health_report_refuses_a_localhost_webvh_did_without_dialing() {
+        let (listener, port) = loopback_listener().await;
+        let did = format!("did:webvh:QmStandInScidAAAAAAAAAAAAAAAAAAAA:localhost%3A{port}:agent");
+
+        let report = build_report(&[Subject::new(Role::Vta, "stand-in VTA", did.clone())]).await;
+
+        let party = report
+            .parties
+            .iter()
+            .find(|p| p.did == did)
+            .expect("a subject is reported whether or not it resolves");
+        assert!(
+            party.resolved.is_none(),
+            "a refused host must not yield a resolved party: {party:?}"
+        );
+        assert!(
+            party
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("BlockedHost")),
+            "the refusal must be reported as a blocked host, not as a timeout or \
+             an unreachable one: {:?}",
+            party.error
         );
         assert_never_dialled(&listener).await;
     }

@@ -193,9 +193,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-did-resolver-cache-sdk"
-version = "0.8.36"
+version = "0.8.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15d261ce9e5886c890492a1ed7ae6f0b286f8c8c2c711af96eb1bdf1eee9efa6"
+checksum = "be0b2e768c75df1d0bca72f51ecb6bbb37fccc13e16bf9c093f8fc04e429e952"
 dependencies = [
  "affinidi-did-common",
  "affinidi-did-resolver-traits",
@@ -205,7 +205,7 @@ dependencies = [
  "ahash",
  "base64 0.23.1",
  "did-scid",
- "didwebvh-rs",
+ "didwebvh-rs 0.7.0",
  "highway",
  "moka",
  "rand 0.10.2",
@@ -237,16 +237,16 @@ dependencies = [
 
 [[package]]
 name = "affinidi-did-web"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d8fc4d44f666b034f50cd753afc1bdfef6d7801cccc35672518ab2e2fda007c"
+checksum = "08ba8e331d31ff1c6bf9f5684d71471779e5f9fbf7167d93a4a34f2daece202b"
 dependencies = [
  "affinidi-did-common",
+ "affinidi-net-guard",
  "percent-encoding",
  "reqwest",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
  "tracing",
 ]
 
@@ -386,7 +386,7 @@ dependencies = [
  "chrono",
  "clap",
  "dashmap",
- "didwebvh-rs",
+ "didwebvh-rs 0.6.1",
  "futures-util",
  "governor",
  "hostname",
@@ -533,6 +533,19 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "affinidi-net-guard"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43736e64c051b4689d39c08e781dae750a79fee9bbf44e4eb7ed93e081485184"
+dependencies = [
+ "reqwest",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -2792,12 +2805,12 @@ dependencies = [
 
 [[package]]
 name = "did-scid"
-version = "0.2.6"
+version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73c7754d192a630118d5fa3353f1cce5c291187762b0e493f397d3e0328b407d"
+checksum = "32bb54e6769f547fc641bbe63bb06f253fe41ad552e47e24cbd6c62a7b6436d8"
 dependencies = [
  "affinidi-did-common",
- "didwebvh-rs",
+ "didwebvh-rs 0.7.0",
  "regex",
  "serde_json",
  "thiserror 2.0.20",
@@ -2809,6 +2822,33 @@ name = "didwebvh-rs"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "87a6d8803724264019c1b1dda174b4f666b833e9ac05acd45e87e9fecef2c67b"
+dependencies = [
+ "affinidi-data-integrity",
+ "affinidi-did-common",
+ "affinidi-secrets-resolver",
+ "ahash",
+ "async-trait",
+ "base58",
+ "chrono",
+ "getrandom 0.4.3",
+ "percent-encoding",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "serde_with",
+ "sha2 0.11.0",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "didwebvh-rs"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aa08dc5af02f6bc159c10271195f467a894b3b4fe67da9796009ee2da785043"
 dependencies = [
  "affinidi-data-integrity",
  "affinidi-did-common",
@@ -6114,7 +6154,7 @@ dependencies = [
  "dbus-secret-service-keyring-store",
  "dialoguer",
  "did-git-sign",
- "didwebvh-rs",
+ "didwebvh-rs 0.7.0",
  "dirs",
  "dtg-credentials 0.6.0",
  "ed25519-dalek-bip32",
@@ -6167,6 +6207,7 @@ dependencies = [
  "affinidi-messaging-delivery",
  "affinidi-messaging-sdk",
  "affinidi-messaging-test-mediator",
+ "affinidi-net-guard",
  "affinidi-tdk",
  "agent-names",
  "anyhow",
@@ -6178,7 +6219,7 @@ dependencies = [
  "card-backend-pcsc",
  "chrono",
  "criterion",
- "didwebvh-rs",
+ "didwebvh-rs 0.7.0",
  "dirs",
  "dtg-credentials 0.6.0",
  "ed25519-dalek-bip32",
@@ -9816,7 +9857,7 @@ dependencies = [
  "ciborium",
  "curve25519-dalek 5.0.0",
  "dbus-secret-service-keyring-store",
- "didwebvh-rs",
+ "didwebvh-rs 0.6.1",
  "dirs",
  "dtg-credentials 0.9.1",
  "ed25519-dalek 3.0.0",
@@ -9873,7 +9914,7 @@ dependencies = [
  "ciborium",
  "clap",
  "dialoguer",
- "didwebvh-rs",
+ "didwebvh-rs 0.6.1",
  "dirs",
  "dtg-credentials 0.9.1",
  "ed25519-dalek 3.0.0",
