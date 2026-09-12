@@ -453,13 +453,17 @@ codegen-units = 1
 strip = "symbols"
 
 
-# `[patch.crates-io]` is back, for two repositories and one release each.
+# `[patch.crates-io]` is back, for one repository and one release.
 #
-# VGI. `did-git-sign` 0.4.8 — the latest published — requires `vta-sdk ^0.35`, so
-# on the 0.36 line it would put a second sdk in this binary (the `vta-sdk` note
-# above says why two do not unify). VGI's `chore/vta-sdk-036` moves it to 0.36;
-# until that is released, `did-git-sign` and its path dependency `vgi-core`
-# resolve from that branch.
+# VGI is out. `did-git-sign` 0.4.9 and `vgi-core` 0.4.9 are published, and
+# neither depends on `vta-sdk` at all any more, so the second-sdk problem the
+# patch existed to avoid is gone with it. The floor in `openvtc/Cargo.toml` is
+# 0.4.9 and both crates resolve from crates.io.
+#
+# That block is also the cautionary tale for the paragraph below: it named a
+# *branch*, `chore/vta-sdk-036`, which was deleted once its work merged, and
+# every `cargo install` then failed with "failed to find branch". Pin a `rev`,
+# never a branch.
 #
 # VTI. `vta-sdk` 0.36.0 is published but the `vta-service` built on it is not:
 # 0.25.1 on crates.io still pulls `vta-sdk ^0.35` through its whole subsystem
@@ -486,9 +490,6 @@ strip = "symbols"
 # `trql-client` 0.17 were all published. As then, a patch here needs its entry in
 # `deny.toml` — `unknown-git = "deny"` — and a note on what makes it leave.
 [patch.crates-io]
-did-git-sign = { git = "https://github.com/OpenVTC/verifiable-git-infrastructure", branch = "chore/vta-sdk-036" }
-vgi-core = { git = "https://github.com/OpenVTC/verifiable-git-infrastructure", branch = "chore/vta-sdk-036" }
-
 vta-audit = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
 vta-backup = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
 vta-cli-common = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }

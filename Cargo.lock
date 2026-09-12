@@ -2516,7 +2516,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -2775,8 +2775,9 @@ dependencies = [
 
 [[package]]
 name = "did-git-sign"
-version = "0.4.8"
-source = "git+https://github.com/OpenVTC/verifiable-git-infrastructure?branch=chore%2Fvta-sdk-036#05daabc76251ea3cce343a8c031f1122b6c78efa"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "669c60cff3a6fdb9ce9b21253be80e37814dae8f13d07b1fd0deeb43a12d954c"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -9636,8 +9637,9 @@ dependencies = [
 
 [[package]]
 name = "vgi-core"
-version = "0.4.8"
-source = "git+https://github.com/OpenVTC/verifiable-git-infrastructure?branch=chore%2Fvta-sdk-036#05daabc76251ea3cce343a8c031f1122b6c78efa"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d0964e051cc46fdf01fcb28f017bf2a1e2677d2ae6e78f9f7ac920a00809dbb"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

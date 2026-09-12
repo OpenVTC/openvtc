@@ -125,6 +125,5 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # onto the vta-sdk 0.36 line; VTI's release PR publishes the `vta-service` closure
 # on that line. Each URL leaves with its patch entries when its release publishes.
 allow-git = [
-    "https://github.com/OpenVTC/verifiable-git-infrastructure",
     "https://github.com/OpenVTC/verifiable-trust-infrastructure",
 ]
