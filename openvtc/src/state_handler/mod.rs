@@ -270,8 +270,10 @@ pub struct DeferredLoad {
     pub profile: String,
     pub public_config: PublicConfig,
     pub unlock_passphrase: Option<UnlockCode>,
+    /// The card's User PIN, or `None` when the profile is not Token-protected
+    /// and no card is involved. Never a placeholder PIN.
     #[cfg(feature = "openpgp-card")]
-    pub user_pin: SecretString,
+    pub user_pin: Option<SecretString>,
 }
 
 pub enum StartingMode {
@@ -552,6 +554,12 @@ impl StateHandler {
                     #[cfg(not(feature = "openpgp-card"))]
                     drop(token_touch_tx);
 
+                    // No card in play means no PIN; `load_step2` still takes the
+                    // argument it will not read, so it gets an empty secret
+                    // rather than a literal PIN standing in for one.
+                    #[cfg(feature = "openpgp-card")]
+                    let no_token_pin = SecretString::new(String::new().into());
+
                     // PERF #1: load_step2 returns its live admin VTA session for
                     // reuse downstream instead of opening a second one here.
                     let (config, admin_session) = Config::load_step2(
@@ -560,7 +568,7 @@ impl StateHandler {
                         deferred.public_config,
                         deferred.unlock_passphrase.as_ref(),
                         #[cfg(feature = "openpgp-card")]
-                        &deferred.user_pin,
+                        deferred.user_pin.as_ref().unwrap_or(&no_token_pin),
                         #[cfg(feature = "openpgp-card")]
                         &token_notifier,
                         Some(&on_progress),

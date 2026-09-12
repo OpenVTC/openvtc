@@ -89,13 +89,19 @@ async fn load_config_for_health(
         fn touch_completed(&self) {}
     }
 
+    // `load_fast` hands back `None` when no card is in play, and `load_step2`
+    // still takes the argument it will not read: an empty secret, rather than a
+    // literal PIN standing in for one.
+    #[cfg(feature = "openpgp-card")]
+    let no_token_pin = SecretString::new(String::new().into());
+
     match Config::load_step2(
         &mut tdk,
         profile,
         deferred.public_config,
         deferred.unlock_passphrase.as_ref(),
         #[cfg(feature = "openpgp-card")]
-        &deferred.user_pin,
+        deferred.user_pin.as_ref().unwrap_or(&no_token_pin),
         #[cfg(feature = "openpgp-card")]
         &TouchPrompt,
         None,
@@ -841,11 +847,18 @@ fn load_fast(
         ConfigProtectionType::Plaintext => None,
     };
 
+    // Only a Token-protected profile ever talks to a card, so only that one asks
+    // for a PIN. There used to be a literal placeholder PIN here for every other
+    // protection type; `None` says the same thing without compiling a PIN into
+    // the binary.
     #[cfg(feature = "openpgp-card")]
     let user_pin = if matches!(&public_config.protection, ConfigProtectionType::Token(_)) {
-        get_user_pin().map_err(|e| OpenVTCError::Config(format!("Failed to get user PIN: {e}")))?
+        Some(
+            get_user_pin()
+                .map_err(|e| OpenVTCError::Config(format!("Failed to get user PIN: {e}")))?,
+        )
     } else {
-        SecretString::new("123456".into())
+        None
     };
 
     Ok(DeferredLoad {
