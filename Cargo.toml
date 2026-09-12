@@ -238,7 +238,7 @@ qrcode = { version = "0.14", default-features = false }
 # latest release. aes-gcm no longer holds this pin — it moved to 0.11 and its
 # one RNG call site now fills the nonce from `rand`'s OsRng directly rather
 # than going through `AeadCore::generate_nonce`.
-rand = "0.8"
+rand = "0.10"
 ratatui = "0.30"
 regex = "1.12"
 secrecy = { version = "0.10", features = ["serde"] }
@@ -425,7 +425,7 @@ reqwest = { version = "0.13", features = ["json"] }
 # `StaticSecret` is handed to. `cargo tree -i x25519-dalek@2.0.1` is where that
 # is checked. It collapses when `pgp` releases on 3.x; 0.20.0 is still its
 # latest and still declares `^2`.
-x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+x25519-dalek = { version = "3.0", features = ["static_secrets"] }
 zeroize = "1.8"
 
 # Openpgp-Card Support

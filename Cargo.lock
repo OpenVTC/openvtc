@@ -2516,7 +2516,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.5",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -6168,7 +6168,7 @@ dependencies = [
  "openvtc-core",
  "pgp",
  "qrcode",
- "rand 0.8.8",
+ "rand 0.10.2",
  "ratatui",
  "regex",
  "secrecy",
@@ -6191,7 +6191,7 @@ dependencies = [
  "uuid",
  "vta-sdk",
  "windows-native-keyring-store",
- "x25519-dalek 2.0.1",
+ "x25519-dalek 3.0.0",
  "zeroize",
 ]
 
@@ -6232,7 +6232,7 @@ dependencies = [
  "openpgp-card-rpgp",
  "openssl-sys",
  "pgp",
- "rand 0.8.8",
+ "rand 0.10.2",
  "regex",
  "reqwest",
  "secrecy",
@@ -6253,7 +6253,7 @@ dependencies = [
  "vta-sdk",
  "vta-service",
  "wiremock",
- "x25519-dalek 2.0.1",
+ "x25519-dalek 3.0.0",
  "zeroize",
 ]
 
