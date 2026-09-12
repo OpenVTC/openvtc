@@ -27,12 +27,21 @@ jobs:
     if: vars.TRUST_REGISTRY_URL != ''
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The verifier walks raw commit objects across base..head.
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: OpenVTC/verifiable-git-infrastructure/.github/actions/verify-trust@v0.1.1
+      # Pinned to the v0.1.1 commit rather than the tag: a tag can be moved, and
+      # this action runs with the workflow's token on every pull request.
+      #
+      # TODO: move to VGI >= 0.4.9 when it is released. 0.4.9 is the fix for an
+      # input-injection issue in the composite action, and it also renames the
+      # `authority:` input to `vtc-did:` — so the upgrade is a SHA bump plus that
+      # input rename, not a drop-in. The latest VGI release is v0.4.8, which does
+      # not carry the fix, so there is nothing to move to yet.
+      - uses: OpenVTC/verifiable-git-infrastructure/.github/actions/verify-trust@d4186e5d819c2cbd1247a4d0e6cbd373d25dd0b2 # v0.1.1
         with:
           range: origin/${{ github.base_ref }}..HEAD
           registry-url: ${{ vars.TRUST_REGISTRY_URL }}
