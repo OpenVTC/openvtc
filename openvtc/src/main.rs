@@ -44,7 +44,10 @@ mod ui;
 /// command reads DID documents, and holding a live mediator connection open for
 /// that would add a second socket for the profile the running TUI may already
 /// own.
-async fn load_config_for_health(profile: &str, unlock_code_arg: Option<&str>) -> Option<Config> {
+async fn load_config_for_health(
+    profile: &str,
+    unlock_code_arg: Option<&SuppliedUnlockCode>,
+) -> Option<Config> {
     let deferred = match load_fast(profile, unlock_code_arg) {
         Ok(deferred) => deferred,
         Err(OpenVTCError::ConfigNotFound(_, _)) => return None,
@@ -87,13 +90,19 @@ async fn load_config_for_health(profile: &str, unlock_code_arg: Option<&str>) ->
         fn touch_completed(&self) {}
     }
 
+    // `load_fast` hands back `None` when no card is in play, and `load_step2`
+    // still takes the argument it will not read: an empty secret, rather than a
+    // literal PIN standing in for one.
+    #[cfg(feature = "openpgp-card")]
+    let no_token_pin = SecretString::new(String::new().into());
+
     match Config::load_step2(
         &mut tdk,
         profile,
         deferred.public_config,
         deferred.unlock_passphrase.as_ref(),
         #[cfg(feature = "openpgp-card")]
-        &deferred.user_pin,
+        deferred.user_pin.as_ref().unwrap_or(&no_token_pin),
         #[cfg(feature = "openpgp-card")]
         &TouchPrompt,
         None,
@@ -302,6 +311,60 @@ fn redact_paths(msg: &str) -> String {
     }
 }
 
+/// Open the `OPENVTC_DEBUG_LOG` file for appending, owner-only on unix.
+///
+/// Append, never truncate. `File::create` truncated on every launch, so the
+/// evidence from a failed run was destroyed by the restart used to reproduce it
+/// — the exact workflow this variable exists to serve. Each run announces
+/// itself, so runs stay separable in one file.
+///
+/// Two things beyond a plain append:
+///
+/// * **Mode 0600.** Created with the process umask otherwise, which on a
+///   default `022` leaves a world-readable trace of DIDs, profile names and
+///   message metadata in whatever directory the operator named — often a shared
+///   `/tmp`. An already-existing file is tightened through the open handle, so
+///   a log left behind by an earlier, looser run does not stay readable.
+/// * **A symlink is refused.** Creating through a link planted in a
+///   world-writable directory would append this process's log to a file of the
+///   planter's choosing, so a symlink at `path` is an error, not a target.
+fn open_debug_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    // `symlink_metadata` does not follow the final component, so this sees the
+    // link itself rather than what it points at. A missing path is the normal
+    // case: it is about to be created.
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to write the debug log through a symlink",
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+
+    // `mode` above applies only when the file is created. Tighten an existing
+    // one too, through the handle rather than the path, so there is no window
+    // between the check and the change.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(file)
+}
+
 // ****************************************************************************
 // MAIN Function
 // ****************************************************************************
@@ -311,20 +374,19 @@ async fn main() -> Result<()> {
     // Optional file-based debug logging.
     // Set OPENVTC_DEBUG_LOG to a file path to enable, e.g.:
     //   OPENVTC_DEBUG_LOG=/tmp/openvtc.log cargo run -p openvtc
-    // Log level defaults to "debug" but can be overridden with RUST_LOG.
+    // Log level defaults to this workspace's own crates but can be overridden
+    // with RUST_LOG.
     if let Ok(log_path) = env::var("OPENVTC_DEBUG_LOG") {
-        // Append, never truncate. `File::create` truncated on every launch, so
-        // the evidence from a failed run was destroyed by the restart used to
-        // reproduce it — the exact workflow this variable exists to serve.
-        // Each run announces itself below, so runs stay separable in one file.
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
+        match open_debug_log(std::path::Path::new(&log_path)) {
             Ok(log_file) => {
-                let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"));
+                // Default to this workspace's own spans. The previous default
+                // was a bare "debug", which also turned on every dependency —
+                // hyper, the SDKs — and buried the openvtc trace in transport
+                // noise while widening what lands in the file. RUST_LOG wins.
+                let filter =
+                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                        tracing_subscriber::EnvFilter::new("info,openvtc=debug,openvtc_core=debug")
+                    });
                 tracing_subscriber::fmt()
                     .with_env_filter(filter)
                     .with_writer(std::sync::Mutex::new(log_file))
@@ -336,6 +398,13 @@ async fn main() -> Result<()> {
                 tracing::info!(
                     version = env!("CARGO_PKG_VERSION"),
                     "───── openvtc run started ─────  (appending to {log_path})"
+                );
+                // Say where it is and what is in it. The file carries DIDs,
+                // profile names and message metadata, so an operator about to
+                // attach it to a bug report should be told before they do.
+                eprintln!(
+                    "debug log enabled at {log_path}; it may contain identifiers and message \
+                     metadata — do not share it."
                 );
             }
             Err(e) => {
@@ -366,7 +435,23 @@ async fn main() -> Result<()> {
         .get_one::<String>("profile")
         .cloned()
         .unwrap_or_else(|| "default".to_string());
-    let unlock_code_arg = matches.get_one::<String>("unlock-code").cloned();
+    // `--unlock-code-file` (a path, or `-` for standard input) takes the place of
+    // `--unlock-code`, which clap refuses alongside it. Read eagerly so a bad
+    // path fails here, with a clear message, rather than after the profile has
+    // been opened.
+    let unlock_code_arg = match matches.get_one::<String>("unlock-code-file") {
+        Some(path) => Some(SuppliedUnlockCode {
+            passphrase: cli::read_unlock_code_file(path)?,
+            from_argv: false,
+        }),
+        None => matches
+            .get_one::<String>("unlock-code")
+            .cloned()
+            .map(|passphrase| SuppliedUnlockCode {
+                passphrase,
+                from_argv: true,
+            }),
+    };
     let setup_requested = matches!(matches.subcommand(), Some(("setup", _)));
 
     // Optional invitation credential (VIC) to present when joining a community.
@@ -451,7 +536,7 @@ async fn main() -> Result<()> {
             .map(|values| values.cloned().collect())
             .unwrap_or_default();
         let as_json = health_args.get_flag("json");
-        let config = load_config_for_health(&profile, unlock_code_arg.as_deref()).await;
+        let config = load_config_for_health(&profile, unlock_code_arg.as_ref()).await;
         let recoverable = health_args.get_flag("recoverable");
         let allow_private_probes = health_args.get_flag("allow-private-probes");
         return health_cmd::run(
@@ -476,7 +561,7 @@ async fn main() -> Result<()> {
     }
 
     if let StartingMode::NotSet = starting_mode {
-        match load_fast(&profile, unlock_code_arg.as_deref()) {
+        match load_fast(&profile, unlock_code_arg.as_ref()) {
             Ok(deferred) => {
                 starting_mode = StartingMode::MainPageDeferred(deferred);
             }
@@ -655,24 +740,42 @@ pub fn create_termination() -> (Terminator, broadcast::Receiver<Interrupted>) {
 /// Maximum number of interactive unlock attempts before aborting.
 const MAX_UNLOCK_ATTEMPTS: usize = 5;
 
+/// A non-interactive unlock passphrase, and where it came from.
+///
+/// The source is carried because only one of the two routes earns the
+/// process-list warning: `--unlock-code` puts the passphrase in argv, where any
+/// local user can read it out of `ps`, and `--unlock-code-file` exists precisely
+/// to avoid that. Warning about the safe route as well is how a warning gets
+/// trained out of people.
+struct SuppliedUnlockCode {
+    passphrase: String,
+    from_argv: bool,
+}
+
 /// Fast, synchronous load — only does local config read + terminal prompts.
 /// Network-heavy work (TDK init, DID resolution, VTA auth) is deferred to the state handler.
-fn load_fast(profile: &str, unlock_code_arg: Option<&str>) -> Result<DeferredLoad, OpenVTCError> {
+fn load_fast(
+    profile: &str,
+    unlock_code_arg: Option<&SuppliedUnlockCode>,
+) -> Result<DeferredLoad, OpenVTCError> {
     let public_config = Config::load_step1(profile)?;
 
     let unlock_passphrase = match &public_config.protection {
         ConfigProtectionType::Token { .. } => None,
         ConfigProtectionType::Encrypted => {
-            if let Some(passphrase) = unlock_code_arg {
-                eprintln!(
-                    "{}",
-                    style(
-                        "WARNING: --unlock-code exposes the passphrase in the process list; \
-                         prefer the interactive prompt on shared systems."
-                    )
-                    .themed(CLI_CAUTION)
-                );
-                Some(UnlockCode::from_string(passphrase)?)
+            if let Some(supplied) = unlock_code_arg {
+                if supplied.from_argv {
+                    eprintln!(
+                        "{}",
+                        style(
+                            "WARNING: --unlock-code exposes the passphrase in the process list; \
+                             prefer --unlock-code-file or the interactive prompt on shared \
+                             systems."
+                        )
+                        .themed(CLI_CAUTION)
+                    );
+                }
+                Some(UnlockCode::from_string(&supplied.passphrase)?)
             } else {
                 let mut result = None;
                 for attempt in 1..=MAX_UNLOCK_ATTEMPTS {
@@ -719,11 +822,18 @@ fn load_fast(profile: &str, unlock_code_arg: Option<&str>) -> Result<DeferredLoa
         ConfigProtectionType::Plaintext => None,
     };
 
+    // Only a Token-protected profile ever talks to a card, so only that one asks
+    // for a PIN. There used to be a literal placeholder PIN here for every other
+    // protection type; `None` says the same thing without compiling a PIN into
+    // the binary.
     #[cfg(feature = "openpgp-card")]
     let user_pin = if matches!(&public_config.protection, ConfigProtectionType::Token(_)) {
-        get_user_pin().map_err(|e| OpenVTCError::Config(format!("Failed to get user PIN: {e}")))?
+        Some(
+            get_user_pin()
+                .map_err(|e| OpenVTCError::Config(format!("Failed to get user PIN: {e}")))?,
+        )
     } else {
-        SecretString::new("123456".into())
+        None
     };
 
     Ok(DeferredLoad {
@@ -733,4 +843,99 @@ fn load_fast(profile: &str, unlock_code_arg: Option<&str>) -> Result<DeferredLoa
         #[cfg(feature = "openpgp-card")]
         user_pin,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A private directory under the system temp dir, following the convention
+    /// the rest of this crate's tests use.
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("openvtc-debuglog-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the test directory");
+        dir
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn debug_log_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("mode");
+        let path = dir.join("openvtc.log");
+        let file = open_debug_log(&path).expect("a fresh path opens");
+        drop(file);
+
+        let mode = std::fs::metadata(&path)
+            .expect("the log exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the debug log carries identifiers, so it must not be readable by other local users"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn debug_log_tightens_a_loose_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("tighten");
+        let path = dir.join("openvtc.log");
+        std::fs::write(&path, b"from an earlier run\n").expect("seed the log");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen the log");
+
+        let file = open_debug_log(&path).expect("an existing path opens");
+        drop(file);
+
+        let mode = std::fs::metadata(&path)
+            .expect("the log exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a log left loose by an earlier run is tightened"
+        );
+        // Tightening must not cost the earlier run's evidence.
+        assert_eq!(
+            std::fs::read(&path).expect("read the log"),
+            b"from an earlier run\n",
+            "the existing contents are appended to, not truncated"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn debug_log_refuses_a_symlink() {
+        let dir = temp_dir("symlink");
+        let target = dir.join("target.log");
+        let link = dir.join("link.log");
+        std::fs::write(&target, b"").expect("create the target");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&target, &link).expect("create the symlink");
+
+        let err = open_debug_log(&link).expect_err("a symlink must be refused");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "a pre-planted link is an error, not a target: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("read the target").len(),
+            0,
+            "nothing was written through the link"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
