@@ -202,6 +202,54 @@ pub fn manifest_request(
     )
 }
 
+/// A `vtc/vetting/vetters/list/0.1` request for one page of `community_did`'s
+/// vetter directory. The community refuses a caller it cannot identify, so this
+/// is signed and sent as one of our personas like every other vetting task.
+pub fn vetter_list_request(
+    issuer: &str,
+    community_did: &str,
+    body: &vta_sdk::protocols::vetting::VetterListBody,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    document(
+        vta_sdk::protocols::vetting::VETTING_VETTER_LIST_TYPE,
+        issuer,
+        community_did,
+        new_id(),
+        body,
+    )
+}
+
+/// A `vtc/vetting/vetters/profile/0.1` request publishing (replacing) our
+/// vetter profile at `community_did`.
+pub fn vetter_profile_request(
+    vetter_did: &str,
+    community_did: &str,
+    body: &vta_sdk::protocols::vetting::VetterProfileBody,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    document(
+        vta_sdk::protocols::vetting::VETTING_VETTER_PROFILE_TYPE,
+        vetter_did,
+        community_did,
+        new_id(),
+        body,
+    )
+}
+
+/// A `vtc/vetting/vetters/resend/0.1` request asking `community_did` to
+/// deliver our live vetter grant credential again.
+pub fn vetter_resend_request(
+    vetter_did: &str,
+    community_did: &str,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    document(
+        vta_sdk::protocols::vetting::VETTING_VETTER_RESEND_TYPE,
+        vetter_did,
+        community_did,
+        new_id(),
+        &vta_sdk::protocols::vetting::VetterResendBody::default(),
+    )
+}
+
 /// Sign `document` with `persona`'s key and send it over DIDComm to its
 /// recipient. Returns the document id — what a reply threads on.
 ///

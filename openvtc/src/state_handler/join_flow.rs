@@ -20,11 +20,16 @@ use chrono::Utc;
 use openvtc_core::config::{
     Config,
     account::{CommunityRecord, PersonaId, VtcDid},
-    community_context::{self, ContextKind},
+    community_context::{self, ContextKind, ContextOption},
     context_path::{build_sub_context_id, parse_sub_context_id},
 };
 use openvtc_core::didcomm::Messaging;
 use openvtc_core::logs::LogFamily;
+use openvtc_core::vetting::applicant::Application;
+use openvtc_core::vetting::book::Knowledge;
+use openvtc_core::vetting::guide::describe_requirements;
+use openvtc_core::vetting::queries::{CommunityAnswer, CommunityQuery, QueryKind};
+use openvtc_core::vetting::wire;
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
 use tracing::debug;
 use vta_sdk::{client::VtaClient, protocols::did_management::create::WebvhPathMode};
@@ -35,14 +40,370 @@ use crate::{
         StateHandler,
         actions::Action,
         join::{
-            AvailableVic, IdentityPick, JoinPage, JoinState, PersonaOption, PresentedInvitation,
+            ApplyAs, AvailableVic, IdentityPick, JoinApplication, JoinPage, JoinState,
+            JoinVettingView, KnownVetting, PersonaOption, PresentedInvitation, VettingPhase,
         },
         main_page::content::{VicLifecycle, VicSummary},
         main_page::{sanitize_display, shorten_did},
         setup_sequence::{Completion, MessageType, config::ConfigExtension, vta},
         state::{ActivePage, State},
+        vetting_actions,
     },
 };
+
+/// How the join flow is entered.
+pub(crate) enum JoinEntry {
+    /// From the Communities panel. `hears_replies` says whether the calling
+    /// loop reads inbound messages: only then can the flow ask a community for
+    /// its requirements and hand the wait for the answer to that loop.
+    Fresh { hears_replies: bool },
+    /// Back from waiting for a community's requirements.
+    Resume {
+        vtc_did: String,
+        outcome: RequirementsOutcome,
+    },
+}
+
+/// How a wait for a community's requirements ended.
+pub(crate) enum RequirementsOutcome {
+    /// Its manifest arrived; the book knows whether it vets.
+    Learned,
+    /// No usable answer, and why.
+    Unanswered(String),
+    /// The person chose to join without waiting.
+    Skipped,
+}
+
+/// A join waiting for a community's manifest. The join flow cannot wait
+/// itself: its loop selects only on actions and interrupts, and the answer
+/// arrives on the runtime loop's inbound arm. So the flow asks, returns this,
+/// and the runtime loop keeps the join screen up, hears the answer — or gives
+/// up after [`REQUIREMENTS_WAIT`] — and enters the flow again.
+pub(crate) struct AwaitingRequirements {
+    pub vtc_did: String,
+    /// The manifest request's document id.
+    pub document_id: String,
+    pub asked_at: std::time::Instant,
+}
+
+/// How long the join screen waits for a community's requirements before
+/// offering to go on without them.
+pub(crate) const REQUIREMENTS_WAIT: Duration = Duration::from_secs(15);
+
+/// How long sending the question may take before the page says so.
+const ASK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The entry a community's answer makes for the join waiting on it, if the
+/// answer is about that community's requirements.
+pub(crate) fn resume_for(
+    awaiting: &AwaitingRequirements,
+    answer: &CommunityAnswer,
+) -> Option<JoinEntry> {
+    if answer.community() != awaiting.vtc_did {
+        return None;
+    }
+    let outcome = match answer {
+        CommunityAnswer::Manifest { .. } => RequirementsOutcome::Learned,
+        CommunityAnswer::Refused {
+            kind: QueryKind::Manifest,
+            code,
+            ..
+        } => RequirementsOutcome::Unanswered(format!("it refused to say ({code})")),
+        CommunityAnswer::Unreadable {
+            kind: QueryKind::Manifest,
+            detail,
+            ..
+        } => RequirementsOutcome::Unanswered(format!(
+            "its answer is in a form this client cannot read ({detail})"
+        )),
+        _ => return None,
+    };
+    Some(JoinEntry::Resume {
+        vtc_did: awaiting.vtc_did.clone(),
+        outcome,
+    })
+}
+
+/// The contexts a new application by `persona` to `vtc_did` can use.
+fn application_contexts(
+    config: &Config,
+    vtc_did: &str,
+    persona: Option<PersonaId>,
+) -> Vec<ContextOption> {
+    let record = persona.and_then(|p| config.account.personas.get(&p));
+    community_context::context_options(&config.account, record, &suggested_context(config, vtc_did))
+}
+
+/// What the join flow shows for `vtc_did`, when the book knows it vets.
+pub(crate) fn vetting_view(
+    config: &Config,
+    vtc_did: &str,
+    now: chrono::DateTime<Utc>,
+) -> Option<JoinVettingView> {
+    let book = &config.private.vetting;
+    let Knowledge::Vetting(criterion) = book.knowledge(vtc_did) else {
+        return None;
+    };
+    let label =
+        |persona: PersonaId| sanitize_display(&config.persona_profile_label_for(persona), 128);
+    let applications: Vec<&Application> = book
+        .applications
+        .iter()
+        .filter(|a| a.community == vtc_did)
+        .collect();
+    let chosen = applications
+        .iter()
+        .find(|a| a.checklist(now).is_some_and(|e| e.satisfied()))
+        .or_else(|| applications.first())
+        .copied();
+    let application = chosen.map(|app| {
+        let evaluation = app.checklist(now);
+        JoinApplication {
+            id: app.id.clone(),
+            persona: app.persona,
+            persona_label: label(app.persona),
+            statements: app.presentable_statements(now).len(),
+            progress: evaluation.as_ref().map(vetting_actions::progress_line),
+            satisfied: evaluation.as_ref().is_some_and(|e| e.satisfied()),
+            next_step: vetting_actions::next_step_words(&app.next_step(now)),
+        }
+    });
+    let mut personas: Vec<ApplyAs> = config
+        .identities
+        .iter()
+        .map(|(id, identity)| ApplyAs {
+            persona: *id,
+            label: label(*id),
+            did: identity.persona_did().to_string(),
+        })
+        .collect();
+    personas.sort_by(|a, b| a.label.cmp(&b.label));
+    let context_options =
+        application_contexts(config, vtc_did, personas.first().map(|p| p.persona));
+    Some(JoinVettingView {
+        community: vtc_did.to_string(),
+        name: vetting_actions::community_display(config, vtc_did),
+        accent: book.branding(vtc_did).and_then(|b| b.accent_rgb()),
+        phase: VettingPhase::Known(Box::new(KnownVetting {
+            requirements: describe_requirements(&criterion.requirements)
+                .iter()
+                .map(|line| sanitize_display(line, 300))
+                .collect(),
+            governance_url: criterion
+                .requirements
+                .governance_framework_url
+                .as_deref()
+                .map(|u| sanitize_display(u, 300)),
+            application,
+            personas,
+            persona_index: 0,
+            context_options,
+            context_index: 0,
+            field: 0,
+        })),
+    })
+}
+
+/// Open the vetting page for `vtc_did` when the book knows it vets. Returns
+/// whether it did.
+fn show_vetting(state: &mut State, config: &Config, vtc_did: &str) -> bool {
+    let Some(view) = vetting_view(config, vtc_did, Utc::now()) else {
+        return false;
+    };
+    state.join.pending_vtc = Some(vtc_did.to_string());
+    state.join.vetting = Some(view);
+    state.join.messages.clear();
+    state.join.page = JoinPage::Vetting;
+    true
+}
+
+/// Open the vetting page saying the requirements could not be learned.
+fn show_unknown(state: &mut State, config: &Config, vtc_did: &str, reason: String) {
+    state.join.pending_vtc = Some(vtc_did.to_string());
+    state.join.vetting = Some(JoinVettingView {
+        community: vtc_did.to_string(),
+        name: vetting_actions::community_display(config, vtc_did),
+        accent: config
+            .private
+            .vetting
+            .branding(vtc_did)
+            .and_then(|b| b.accent_rgb()),
+        phase: VettingPhase::Unknown {
+            reason: sanitize_display(&reason, 300),
+        },
+    });
+    state.join.page = JoinPage::Vetting;
+}
+
+/// Ask `vtc_did` for its manifest, as the active persona, and show the page
+/// that waits for the answer. The answer reaches the caller's loop, not this
+/// one. `Err` means the page now says why the question could not be asked.
+async fn ask_requirements(
+    state: &mut State,
+    config: &mut Config,
+    tdk: &TDK,
+    messaging: Option<&Messaging>,
+    vtc_did: &str,
+) -> Result<AwaitingRequirements, ()> {
+    let sent: Result<(PersonaId, String), String> = async {
+        let service = messaging.ok_or_else(|| {
+            "messaging is not running, so its answer could not be heard".to_string()
+        })?;
+        let identity = config.active_identity().ok_or_else(|| {
+            "there is no persona to ask as — create one under My Identity".to_string()
+        })?;
+        let persona = identity.persona_id;
+        let document =
+            wire::manifest_request(identity.persona_did(), vtc_did).map_err(|e| e.to_string())?;
+        match tokio::time::timeout(
+            ASK_TIMEOUT,
+            wire::sign_and_send(config, tdk, service, persona, document),
+        )
+        .await
+        {
+            Ok(Ok(document_id)) => Ok((persona, document_id)),
+            Ok(Err(e)) => Err(format!("the question could not be sent: {e}")),
+            Err(_) => Err(format!(
+                "the question was not sent within {} seconds — your mediator may be unreachable",
+                ASK_TIMEOUT.as_secs()
+            )),
+        }
+    }
+    .await;
+    match sent {
+        Ok((persona, document_id)) => {
+            config.private.vetting.ask(CommunityQuery {
+                document_id: document_id.clone(),
+                community: vtc_did.to_string(),
+                persona,
+                kind: QueryKind::Manifest,
+                sent_at: Utc::now(),
+            });
+            state.join.pending_vtc = Some(vtc_did.to_string());
+            state.join.vetting = Some(JoinVettingView {
+                community: vtc_did.to_string(),
+                name: vetting_actions::community_display(config, vtc_did),
+                accent: None,
+                phase: VettingPhase::Asking,
+            });
+            state.join.messages.clear();
+            state.join.page = JoinPage::Vetting;
+            Ok(AwaitingRequirements {
+                vtc_did: vtc_did.to_string(),
+                document_id,
+                asked_at: std::time::Instant::now(),
+            })
+        }
+        Err(reason) => {
+            show_unknown(state, config, vtc_did, reason);
+            Err(())
+        }
+    }
+}
+
+fn known_vetting(state: &mut State) -> Option<&mut KnownVetting> {
+    match state.join.vetting.as_mut().map(|v| &mut v.phase) {
+        Some(VettingPhase::Known(known)) => Some(known),
+        _ => None,
+    }
+}
+
+/// The persona of an application that meets the published requirements.
+fn satisfied_application_persona(state: &State) -> Option<PersonaId> {
+    match state.join.vetting.as_ref().map(|v| &v.phase) {
+        Some(VettingPhase::Known(known)) => known
+            .application
+            .as_ref()
+            .filter(|a| a.satisfied)
+            .map(|a| a.persona),
+        _ => None,
+    }
+}
+
+fn cycle_vetting_choice(config: &Config, vtc_did: &str, known: &mut KnownVetting, forward: bool) {
+    let turn = |i: usize, n: usize| match n {
+        0 => 0,
+        n if forward => (i + 1) % n,
+        n => (i + n - 1) % n,
+    };
+    if known.field == 0 {
+        known.persona_index = turn(known.persona_index, known.personas.len());
+        known.context_options = application_contexts(
+            config,
+            vtc_did,
+            known.personas.get(known.persona_index).map(|p| p.persona),
+        );
+        known.context_index = 0;
+    } else {
+        known.context_index = turn(known.context_index, known.context_options.len());
+    }
+}
+
+/// Start (or continue) a vetting application to `vtc_did` from the join page,
+/// then show it on the Vetting page with its next step.
+fn apply_for_vetting(
+    state: &mut State,
+    config: &mut Config,
+    profile: &str,
+    vtc_did: &str,
+) -> Result<(), String> {
+    let Some(JoinVettingView {
+        name,
+        phase: VettingPhase::Known(known),
+        ..
+    }) = state.join.vetting.clone()
+    else {
+        return Err("The community's requirements are not known yet.".to_string());
+    };
+    if let Some(app) = &known.application {
+        let message = format!(
+            "Your application to {name}, as {}. Next: {}",
+            app.persona_label, app.next_step
+        );
+        vetting_actions::focus_application(state, config, &app.id, message);
+        return Ok(());
+    }
+    let Some(persona) = known.personas.get(known.persona_index).cloned() else {
+        return Err(
+            "Applying needs a persona: every card is signed by the DID you join with. Create one \
+             under My Identity, or join anyway (j), which makes one."
+                .to_string(),
+        );
+    };
+    let context = known
+        .context_options
+        .get(known.context_index)
+        .map(|o| o.context_id.clone());
+    let now = Utc::now();
+    let book = &mut config.private.vetting;
+    let id = match book.start_application(vtc_did, persona.persona, &persona.did, now) {
+        Ok(app) => {
+            if app.context_id.is_none() {
+                app.context_id = context;
+            }
+            app.id.clone()
+        }
+        Err(e) => return Err(format!("Could not start the application: {e}")),
+    };
+    book.adopt_known_requirements(&id);
+    let next = book
+        .applications
+        .iter()
+        .find(|a| a.id == id)
+        .map(|a| vetting_actions::next_step_words(&a.next_step(now)))
+        .unwrap_or_default();
+    save_config(config, profile).map_err(|e| format!("Could not save the application: {e}"))?;
+    vetting_actions::focus_application(
+        state,
+        config,
+        &id,
+        format!(
+            "Application to {name} started as {}. Next: {next}",
+            persona.label
+        ),
+    );
+    Ok(())
+}
 
 /// The persona + community of a just-completed join, handed back to the runtime
 /// loop so it can bring a live session up immediately (R-B-5 / D11) rather than
@@ -88,6 +449,7 @@ impl StateHandler {
         admin_vta: Option<&VtaClient>,
         profile: &str,
         messaging: Option<&Messaging>,
+        entry: JoinEntry,
     ) -> Result<JoinExit> {
         // Enter the flow on a fresh EnterDid page.
         state.join.reset();
@@ -95,6 +457,37 @@ impl StateHandler {
         // the transient join sub-state, so mirror the flag back in afterwards).
         state.join.has_invitation = state.invitation_credential.is_some();
         state.active_page = ActivePage::Join;
+        let hears_replies = match &entry {
+            JoinEntry::Fresh { hears_replies } => *hears_replies,
+            JoinEntry::Resume { .. } => true,
+        };
+        if let JoinEntry::Resume { vtc_did, outcome } = entry {
+            match outcome {
+                RequirementsOutcome::Unanswered(reason) => {
+                    show_unknown(state, config, &vtc_did, reason);
+                }
+                outcome => {
+                    let shown = matches!(outcome, RequirementsOutcome::Learned)
+                        && show_vetting(state, config, &vtc_did);
+                    if !shown
+                        && let Some(interrupted) = self
+                            .continue_join(
+                                vtc_did,
+                                interrupt_rx,
+                                state,
+                                tdk,
+                                config,
+                                admin_vta,
+                                profile,
+                                messaging,
+                            )
+                            .await
+                    {
+                        return Ok(JoinExit::Exit(interrupted));
+                    }
+                }
+            }
+        }
         let _ = self.state_tx.send(state.clone());
 
         loop {
@@ -200,32 +593,34 @@ impl StateHandler {
                             } else {
                                 vtc_did
                             };
-                            // Idempotency is now per-persona (R-B-9): a community may
-                            // be joined as more than one persona, so the duplicate
-                            // check happens once the identity is chosen (in the
-                            // sequence) rather than at the community level here.
-                            // Identity first: collect the invitations available for
-                            // this community so each persona can be badged with its
-                            // usable-invitation count, then let the operator pick the
-                            // identity to present (the invitation choice, if any,
-                            // follows for the chosen persona).
-                            state.join.available_vics =
-                                collect_available_vics(state, admin_vta, &vtc_did).await;
-                            let options =
-                                build_persona_options(config, &state.join.available_vics);
-                            if options.is_empty() {
-                                // First join — nothing to reuse; mint a fresh identity.
-                                // A new persona can't hold an existing invitation.
-                                state.invitation_credential = None;
-                                state.join.present_invitation = false;
-                                state.join.pending_vtc = Some(vtc_did.clone());
-                                if let Some(context_id) =
-                                    offer_contexts(state, config, IdentityPick::Mint, &vtc_did)
-                                    && let Some(interrupted) = self
-                                        .launch_join_sequence(
-                                            IdentityPick::Mint,
+                            // Peer identity vetting: a community that vets says what
+                            // it requires before anything about the applicant is sent
+                            // (vetting-process.md §6.1). What the book already knows
+                            // decides at once. Otherwise the community is asked, and
+                            // the wait happens in the caller's loop — the one that
+                            // hears the answer — which enters this flow again.
+                            let knowledge = match config.private.vetting.knowledge(&vtc_did) {
+                                Knowledge::Vetting(_) => Some(true),
+                                Knowledge::NoVetting => Some(false),
+                                Knowledge::Unknown => None,
+                            };
+                            match knowledge {
+                                Some(true) => {
+                                    show_vetting(state, config, &vtc_did);
+                                }
+                                None if hears_replies => {
+                                    if let Ok(awaiting) =
+                                        ask_requirements(state, config, tdk, messaging, &vtc_did)
+                                            .await
+                                    {
+                                        let _ = self.state_tx.send(state.clone());
+                                        return Ok(JoinExit::AwaitRequirements(awaiting));
+                                    }
+                                }
+                                _ => {
+                                    if let Some(interrupted) = self
+                                        .continue_join(
                                             vtc_did,
-                                            context_id,
                                             interrupt_rx,
                                             state,
                                             tdk,
@@ -235,16 +630,10 @@ impl StateHandler {
                                             messaging,
                                         )
                                         .await
-                                {
-                                    return Ok(JoinExit::Exit(interrupted));
+                                    {
+                                        return Ok(JoinExit::Exit(interrupted));
+                                    }
                                 }
-                            } else {
-                                state.join.pending_vtc = Some(vtc_did);
-                                state.join.persona_options = options;
-                                state.join.identity_selected = 0;
-                                state.join.reuse_confirm = None;
-                                state.join.page = JoinPage::IdentityChoice;
-                                let _ = self.state_tx.send(state.clone());
                             }
                         }
                         Action::JoinIdentitySelect(i) => {
@@ -299,49 +688,7 @@ impl StateHandler {
                                 continue;
                             }
                             state.join.reuse_confirm = None;
-                            // Invitations already known for the chosen persona:
-                            // this community's valid VICs whose subject is that
-                            // persona's DID.
-                            let persona_did = config
-                                .account
-                                .personas
-                                .get(&persona_id)
-                                .map(|p| p.did.clone());
-                            // …plus one the operator loaded for this join by hand
-                            // (`--invitation` / a paste on the entry page) whatever
-                            // its subject. Filtering that by subject too was how a
-                            // deliberately supplied invitation could disappear
-                            // between the entry page and the submit; a subject that
-                            // is not the presenting persona is what
-                            // `build_linkage_proof` exists for, not a reason to
-                            // drop it.
-                            let loaded = state
-                                .invitation_credential
-                                .as_ref()
-                                .and_then(|v| openvtc_core::join::invitation_id(v))
-                                .map(str::to_string);
-                            let invitations: Vec<AvailableVic> = state
-                                .join
-                                .available_vics
-                                .iter()
-                                .filter(|v| {
-                                    (persona_did.is_some() && v.subject == persona_did)
-                                        || loaded.as_deref() == Some(v.id.as_str())
-                                })
-                                .cloned()
-                                .collect();
-                            // Always offer the choice, including with none found.
-                            // The step carries a paste row, so an empty list is a
-                            // question ("do you have one?") rather than a reason
-                            // to skip. It used to launch straight into an open
-                            // request here, which is why an operator holding an
-                            // invitation was never asked for it.
-                            state.join.invitation_options = invitations;
-                            state.join.invitation_for_persona = Some(persona_id);
-                            state.join.invitation_persona_did = persona_did;
-                            state.join.invitation_use_selected = 0;
-                            state.join.messages.clear();
-                            state.join.page = JoinPage::InvitationChoice;
+                            open_invitation_choice(state, config, persona_id);
                             let _ = self.state_tx.send(state.clone());
                         }
                         Action::JoinReuseCancel => {
@@ -477,6 +824,79 @@ impl StateHandler {
                                 return Ok(JoinExit::Exit(interrupted));
                             }
                         }
+                        Action::JoinVettingField(forward) => {
+                            if let Some(known) = known_vetting(state) {
+                                let fields = if known.application.is_some() { 1 } else { 2 };
+                                known.field = if forward {
+                                    (known.field + 1) % fields
+                                } else {
+                                    (known.field + fields - 1) % fields
+                                };
+                            }
+                        }
+                        Action::JoinVettingCycle(forward) => {
+                            let vtc_did = state.join.pending_vtc.clone().unwrap_or_default();
+                            if let Some(known) = known_vetting(state) {
+                                cycle_vetting_choice(config, &vtc_did, known, forward);
+                            }
+                        }
+                        Action::JoinVettingApply => {
+                            let Some(vtc_did) = state.join.pending_vtc.clone() else {
+                                continue;
+                            };
+                            state.join.messages.clear();
+                            match apply_for_vetting(state, config, profile, &vtc_did) {
+                                Ok(()) => {
+                                    state.active_page = ActivePage::Main;
+                                    return Ok(JoinExit::Returned(None));
+                                }
+                                Err(why) => state.join.messages.push(MessageType::Error(why)),
+                            }
+                        }
+                        Action::JoinVettingJoin => {
+                            let Some(vtc_did) = state.join.pending_vtc.clone() else {
+                                continue;
+                            };
+                            state.join.messages.clear();
+                            // An application that meets the requirements joins as
+                            // its own persona, so its statements are presented.
+                            match satisfied_application_persona(state) {
+                                Some(persona_id) => {
+                                    state.join.available_vics =
+                                        collect_available_vics(state, admin_vta, &vtc_did).await;
+                                    open_invitation_choice(state, config, persona_id);
+                                }
+                                None => {
+                                    if let Some(interrupted) = self
+                                        .continue_join(
+                                            vtc_did,
+                                            interrupt_rx,
+                                            state,
+                                            tdk,
+                                            config,
+                                            admin_vta,
+                                            profile,
+                                            messaging,
+                                        )
+                                        .await
+                                    {
+                                        return Ok(JoinExit::Exit(interrupted));
+                                    }
+                                }
+                            }
+                        }
+                        Action::JoinVettingAskAgain => {
+                            let Some(vtc_did) = state.join.pending_vtc.clone() else {
+                                continue;
+                            };
+                            if hears_replies
+                                && let Ok(awaiting) =
+                                    ask_requirements(state, config, tdk, messaging, &vtc_did).await
+                            {
+                                let _ = self.state_tx.send(state.clone());
+                                return Ok(JoinExit::AwaitRequirements(awaiting));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -486,6 +906,66 @@ impl StateHandler {
             }
             let _ = self.state_tx.send(state.clone());
         }
+    }
+
+    /// Go on with a join once any vetting has been dealt with: collect the
+    /// community's invitations, then choose the identity to present, or mint
+    /// one on a first join. `Some` when the person cancelled mid-sequence.
+    #[allow(clippy::too_many_arguments)]
+    async fn continue_join(
+        &self,
+        vtc_did: String,
+        interrupt_rx: &mut broadcast::Receiver<Interrupted>,
+        state: &mut State,
+        tdk: &TDK,
+        config: &mut Config,
+        admin_vta: Option<&VtaClient>,
+        profile: &str,
+        messaging: Option<&Messaging>,
+    ) -> Option<Interrupted> {
+        state.join.vetting = None;
+        // Idempotency is now per-persona (R-B-9): a community may
+        // be joined as more than one persona, so the duplicate
+        // check happens once the identity is chosen (in the
+        // sequence) rather than at the community level here.
+        // Identity first: collect the invitations available for
+        // this community so each persona can be badged with its
+        // usable-invitation count, then let the operator pick the
+        // identity to present (the invitation choice, if any,
+        // follows for the chosen persona).
+        state.join.available_vics = collect_available_vics(state, admin_vta, &vtc_did).await;
+        let options = build_persona_options(config, &state.join.available_vics);
+        if options.is_empty() {
+            // First join — nothing to reuse; mint a fresh identity.
+            // A new persona can't hold an existing invitation.
+            state.invitation_credential = None;
+            state.join.present_invitation = false;
+            state.join.pending_vtc = Some(vtc_did.clone());
+            if let Some(context_id) = offer_contexts(state, config, IdentityPick::Mint, &vtc_did) {
+                return self
+                    .launch_join_sequence(
+                        IdentityPick::Mint,
+                        vtc_did,
+                        context_id,
+                        interrupt_rx,
+                        state,
+                        tdk,
+                        config,
+                        admin_vta,
+                        profile,
+                        messaging,
+                    )
+                    .await;
+            }
+        } else {
+            state.join.pending_vtc = Some(vtc_did);
+            state.join.persona_options = options;
+            state.join.identity_selected = 0;
+            state.join.reuse_confirm = None;
+            state.join.page = JoinPage::IdentityChoice;
+        }
+        let _ = self.state_tx.send(state.clone());
+        None
     }
 
     /// Move to the progress page and run [`run_join_sequence`] for the chosen
@@ -574,6 +1054,54 @@ impl StateHandler {
         let _ = self.state_tx.send(state.clone());
         None
     }
+}
+
+/// Open the invitation step for a join as `persona_id`: this community's valid
+/// invitations bound to that persona, plus one loaded by hand.
+fn open_invitation_choice(state: &mut State, config: &Config, persona_id: PersonaId) {
+    // Invitations already known for the chosen persona:
+    // this community's valid VICs whose subject is that
+    // persona's DID.
+    let persona_did = config
+        .account
+        .personas
+        .get(&persona_id)
+        .map(|p| p.did.clone());
+    // …plus one the operator loaded for this join by hand
+    // (`--invitation` / a paste on the entry page) whatever
+    // its subject. Filtering that by subject too was how a
+    // deliberately supplied invitation could disappear
+    // between the entry page and the submit; a subject that
+    // is not the presenting persona is what
+    // `build_linkage_proof` exists for, not a reason to
+    // drop it.
+    let loaded = state
+        .invitation_credential
+        .as_ref()
+        .and_then(|v| openvtc_core::join::invitation_id(v))
+        .map(str::to_string);
+    let invitations: Vec<AvailableVic> = state
+        .join
+        .available_vics
+        .iter()
+        .filter(|v| {
+            (persona_did.is_some() && v.subject == persona_did)
+                || loaded.as_deref() == Some(v.id.as_str())
+        })
+        .cloned()
+        .collect();
+    // Always offer the choice, including with none found.
+    // The step carries a paste row, so an empty list is a
+    // question ("do you have one?") rather than a reason
+    // to skip. It used to launch straight into an open
+    // request here, which is why an operator holding an
+    // invitation was never asked for it.
+    state.join.invitation_options = invitations;
+    state.join.invitation_for_persona = Some(persona_id);
+    state.join.invitation_persona_did = persona_did;
+    state.join.invitation_use_selected = 0;
+    state.join.messages.clear();
+    state.join.page = JoinPage::InvitationChoice;
 }
 
 /// Whether `context_id` is already claimed: by a membership, a persona's keys,
@@ -779,6 +1307,10 @@ pub(crate) enum JoinExit {
     /// caller's loop. Carries the just-joined session when a join succeeded, so
     /// the runtime loop can register it + start its listener live (R-B-5).
     Returned(Option<JoinedSession>),
+    /// The community was asked what it requires. The caller keeps the join
+    /// screen up, waits for the answer, and enters the flow again
+    /// ([`AwaitingRequirements`]).
+    AwaitRequirements(AwaitingRequirements),
     /// Application is exiting (Exit / UXError / interrupt).
     Exit(Interrupted),
 }
@@ -2290,5 +2822,150 @@ mod tests {
             "an uninstalled listener must never be claimed"
         );
         service.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod vetting_tests {
+    use super::*;
+    use crate::state_handler::dispatch_util::test_config;
+    use vta_sdk::protocols::join_requests::{JoinRequestManifestResponseBody, ManifestCriterion};
+
+    const VTC: &str = "did:web:kernel.example";
+
+    fn manifest(vets: bool) -> JoinRequestManifestResponseBody {
+        let requirements = serde_json::from_value(serde_json::json!({
+            "version": "0.1",
+            "statementType": vta_sdk::protocols::vetting::IDENTITY_VETTING_ENDORSEMENT_TYPE,
+            "minStatements": 2,
+            "acceptedMethods": ["inPerson", "video"],
+            "requiredClaims": ["name.legal"],
+            "maxStatementAge": "P120D",
+            "eligibleVetters": { "role": "vetter" }
+        }))
+        .unwrap();
+        JoinRequestManifestResponseBody {
+            community_did: VTC.into(),
+            criteria: vec![ManifestCriterion {
+                id: "vetted".into(),
+                description: None,
+                presentation_definition: serde_json::json!({}),
+                vetting: vets.then_some(requirements),
+                requirements_digest: Some("zDigest".into()),
+            }],
+            branding: None,
+        }
+    }
+
+    fn awaiting() -> AwaitingRequirements {
+        AwaitingRequirements {
+            vtc_did: VTC.into(),
+            document_id: "urn:uuid:m1".into(),
+            asked_at: std::time::Instant::now(),
+        }
+    }
+
+    /// Only an answer about the community being joined, and about its
+    /// requirements, resumes the join.
+    #[test]
+    fn only_the_awaited_manifest_resumes_the_join() {
+        let waiting = awaiting();
+        assert!(matches!(
+            resume_for(
+                &waiting,
+                &CommunityAnswer::Manifest {
+                    community: VTC.into()
+                }
+            ),
+            Some(JoinEntry::Resume {
+                outcome: RequirementsOutcome::Learned,
+                ..
+            })
+        ));
+        assert!(
+            resume_for(
+                &waiting,
+                &CommunityAnswer::Manifest {
+                    community: "did:web:other".into()
+                }
+            )
+            .is_none()
+        );
+        assert!(matches!(
+            resume_for(
+                &waiting,
+                &CommunityAnswer::Refused {
+                    query: "urn:uuid:m1".into(),
+                    community: VTC.into(),
+                    kind: QueryKind::Manifest,
+                    code: "permissionDenied".into(),
+                    message: None,
+                }
+            ),
+            Some(JoinEntry::Resume { outcome: RequirementsOutcome::Unanswered(reason), .. })
+                if reason.contains("permissionDenied")
+        ));
+        assert!(
+            resume_for(
+                &waiting,
+                &CommunityAnswer::Refused {
+                    query: "q".into(),
+                    community: VTC.into(),
+                    kind: QueryKind::VetterList,
+                    code: "permissionDenied".into(),
+                    message: None,
+                }
+            )
+            .is_none(),
+            "a directory refusal is not about joining"
+        );
+    }
+
+    /// The page says what the community requires in words, and shows the
+    /// application under way with its next step.
+    #[test]
+    fn a_vetting_community_is_explained_before_joining() {
+        let mut config = test_config();
+        let now = Utc::now();
+        assert!(vetting_view(&config, VTC, now).is_none(), "not known yet");
+
+        config
+            .private
+            .vetting
+            .learn_manifest(VTC, &manifest(false), now);
+        assert!(vetting_view(&config, VTC, now).is_none(), "does not vet");
+
+        config
+            .private
+            .vetting
+            .learn_manifest(VTC, &manifest(true), now);
+        let view = vetting_view(&config, VTC, now).unwrap();
+        let VettingPhase::Known(known) = &view.phase else {
+            panic!("known");
+        };
+        assert!(known.requirements[0].starts_with("2 vetting statements"));
+        assert!(known.requirements.iter().any(|l| l.contains("120 days")));
+        assert!(known.application.is_none());
+
+        let persona = PersonaId::new();
+        let id = config
+            .private
+            .vetting
+            .start_application(VTC, persona, "did:key:zA", now)
+            .unwrap()
+            .id
+            .clone();
+        config.private.vetting.adopt_known_requirements(&id);
+        let view = vetting_view(&config, VTC, now).unwrap();
+        let VettingPhase::Known(known) = &view.phase else {
+            panic!("known");
+        };
+        let app = known
+            .application
+            .as_ref()
+            .expect("the application under way");
+        assert_eq!(app.persona, persona);
+        assert!(!app.satisfied);
+        assert!(app.next_step.starts_with("f —"), "{}", app.next_step);
     }
 }

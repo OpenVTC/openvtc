@@ -6,24 +6,28 @@
 //! decides (D12).
 
 use super::panel::Panel;
+use super::qr::{QrError, qr_lines};
 use crate::colors::{
     COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,
     COLOR_WARNING_ACCESSIBLE_RED,
 };
 use crate::state_handler::{
     main_page::content::{
-        AttestForm, CardPreview, ContentPanelState, DeskStage, VETTING_METHODS,
-        VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VettingMode,
+        AttestForm, CardPreview, ContentPanelState, DIRECTORY_FIELDS, DIRECTORY_METHODS, DeskStage,
+        DirectoryView, EventForm, LineTone, PROFILE_FIELDS, VETTING_METHODS, VETTING_RELATIONSHIPS,
+        VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VettingMode,
         VettingState, VettingTab, method_label, reason_label, relationship_label,
     },
     state::ConnectionState,
 };
 use openvtc_core::config::community_context::ContextOption;
 use openvtc_core::display::display_identifier;
+use openvtc_core::vetting::registry::event_line;
 use ratatui::{
-    style::{Style, Stylize},
+    style::{Color, Style, Stylize},
     text::{Line, Span},
 };
+use vta_sdk::protocols::vetting::VettingMethod;
 
 /// Vetting content panel.
 pub struct VettingPanel;
@@ -49,6 +53,10 @@ pub fn mode_id(state: &VettingState) -> &'static str {
         (VettingMode::NewApplication { .. }, _) => "new-application",
         (VettingMode::ChooseFace { .. }, _) => "face",
         (VettingMode::RequestVetter { .. }, _) => "request",
+        (VettingMode::Directory(_), _) => "directory",
+        (VettingMode::Profile(form), _) if form.event.is_some() => "profile-event",
+        (VettingMode::Profile(_), _) => "profile",
+        (VettingMode::Resend { .. }, _) => "resend",
         (VettingMode::SendCard { .. }, _) => "card",
         (VettingMode::NewTicket { .. }, _) => "new-ticket",
         (VettingMode::OpenSession { .. }, _) => "session",
@@ -99,6 +107,27 @@ fn field(name: &str, shown: String, focused: bool, text: bool) -> Line<'static> 
 
 fn tick(on: bool) -> String {
     if on { "[x]" } else { "[ ]" }.to_string()
+}
+
+fn tone(tone: LineTone) -> Style {
+    match tone {
+        LineTone::Good => Style::new().fg(COLOR_SUCCESS),
+        LineTone::Caution => Style::new().fg(COLOR_ORANGE),
+        LineTone::Bad => Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+    }
+}
+
+/// A community's accent as a swatch before its name, or nothing.
+///
+/// The colour is data about the community — the accent it publishes in its
+/// branding — so it is drawn as that literal colour rather than mapped through
+/// the theme. It identifies; it carries no meaning a person has to read, and the
+/// name beside it is always shown.
+pub(crate) fn accent_swatch(accent: Option<(u8, u8, u8)>) -> Span<'static> {
+    match accent {
+        Some((r, g, b)) => Span::styled("● ", Style::new().fg(Color::Rgb(r, g, b))),
+        None => Span::raw(""),
+    }
 }
 
 /// Render the Vetting page.
@@ -230,19 +259,64 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
         VettingMode::RequestVetter {
             vetter,
             code,
+            ticket,
+            note,
             field: f,
             ..
         } => {
             lines.push(heading("Ask a vetter"));
             lines.push(Line::from(""));
             lines.push(hint(
-                "A vetter only answers a request carrying their ticket code — ask them for one first.",
+                "A vetter only answers a request carrying their ticket: a code they read to you, or",
             ));
+            lines.push(hint(
+                "the link in their QR code. Pasting that link fills in both fields.",
+            ));
+            if let Some(note) = note {
+                lines.push(Line::from(""));
+                lines.push(Line::from(note.clone()).fg(COLOR_ORANGE));
+            }
             lines.push(Line::from(""));
             lines.push(field("Vetter DID", vetter.clone(), *f == 0, true));
-            lines.push(field("Ticket code", code.clone(), *f == 1, true));
+            let shown = if ticket.is_some() && code.is_empty() {
+                "scanned ticket, from the link".to_string()
+            } else {
+                code.clone()
+            };
+            lines.push(field("Ticket code", shown, *f == 1, true));
             lines.push(Line::from(""));
             lines.push(hint("Enter: send  Tab: next field  Esc: cancel"));
+        }
+        VettingMode::Directory(view) => directory(&mut lines, v, view),
+        VettingMode::Profile(form) => match &form.event {
+            Some(event) => event_form(&mut lines, event),
+            None => profile(&mut lines, v, form),
+        },
+        VettingMode::Resend { index } => {
+            lines.push(heading("Ask for your vetter credential again"));
+            lines.push(Line::from(""));
+            lines.push(hint(
+                "If a community named you a vetter but the credential never reached you, or you lost",
+            ));
+            lines.push(hint(
+                "it, the community can send it again. It refuses if it has not named you a vetter.",
+            ));
+            lines.push(Line::from(""));
+            let mut line = field(
+                "Community",
+                v.resend_candidates
+                    .get(*index)
+                    .map(|m| m.name.clone())
+                    .unwrap_or_default(),
+                true,
+                false,
+            );
+            if let Some(m) = v.resend_candidates.get(*index) {
+                line.spans.insert(2, accent_swatch(m.accent));
+            }
+            lines.push(line);
+            lines.push(Line::from(""));
+            lines.push(hint("Enter: ask  ←/→: choose  Esc: cancel"));
         }
         VettingMode::SendCard {
             application_id,
@@ -401,6 +475,7 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             .unwrap_or_else(|| app.community.clone());
         lines.push(Line::from(vec![
             Span::styled(if selected { "▸ " } else { "  " }, style),
+            accent_swatch(app.accent),
             Span::styled(name, style),
             Span::styled(
                 format!("  {} statement(s)", app.statements),
@@ -441,6 +516,12 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                     Style::new().fg(COLOR_ORANGE)
                 },
             ),
+        ]));
+    }
+    if let Some(next) = &app.next_step {
+        lines.push(Line::from(vec![
+            Span::styled("Next         ", label()),
+            Span::styled(next.clone(), Style::new().fg(COLOR_SUCCESS).bold()),
         ]));
     }
     lines.push(Line::from(""));
@@ -498,11 +579,306 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 },
             )));
         }
+        if let Some((line_tone, line)) = &request.grant {
+            lines.push(Line::from(Span::styled(
+                format!("    {line}"),
+                tone(*line_tone),
+            )));
+        }
     }
     lines.push(Line::from(""));
     lines.push(hint(
-        "n: new  f: face  r: ask a vetter  c: send card  m: refresh requirements  Tab: next tab",
+        "n: new  f: face  r: ask a vetter  v: find vetters  c: send card  m: refresh requirements",
     ));
+    lines.push(hint("Tab: next tab"));
+}
+
+fn directory(lines: &mut Vec<Line<'static>>, v: &VettingState, view: &DirectoryView) {
+    lines.push(heading("Find a vetter"));
+    lines.push(Line::from(""));
+    lines.push(hint(
+        "Vetters who chose to be listed, narrowed to what suits you. Finding one is not enough:",
+    ));
+    lines.push(hint(
+        "ask them for a ticket (each says how), then send your request with it.",
+    ));
+    lines.push(Line::from(""));
+    let f = view.field;
+    let community = v.directory_communities.get(view.community_index);
+    let mut line = field(
+        "Community",
+        community.map(|c| c.name.clone()).unwrap_or_default(),
+        f == 0,
+        false,
+    );
+    if let Some(c) = community {
+        line.spans.insert(2, accent_swatch(c.accent));
+    }
+    lines.push(line);
+    lines.push(field(
+        "Language",
+        view.filter.language.clone(),
+        f == 1,
+        true,
+    ));
+    lines.push(field("Country", view.filter.country.clone(), f == 2, true));
+    lines.push(field("Region", view.filter.region.clone(), f == 3, true));
+    lines.push(field("City", view.filter.city.clone(), f == 4, true));
+    let method = DIRECTORY_METHODS[view.method_index.min(DIRECTORY_METHODS.len() - 1)];
+    lines.push(field(
+        "Method",
+        method.map_or("any", method_label).to_string(),
+        f == 5,
+        false,
+    ));
+    lines.push(field(
+        "Events from",
+        view.filter.event_from.clone(),
+        f == 6,
+        true,
+    ));
+    lines.push(field(
+        "Events until",
+        view.filter.event_to.clone(),
+        f == 7,
+        true,
+    ));
+    lines.push(field(
+        "Event name",
+        view.filter.event_name.clone(),
+        f == 8,
+        true,
+    ));
+    lines.push(hint(
+        "  Language is a tag such as en or de, country a code such as CZ, dates YYYY-MM-DD.",
+    ));
+    lines.push(hint("  Leave a filter empty for any."));
+    lines.push(Line::from(""));
+
+    if view.pending.is_some() {
+        lines.push(Line::from("Asking the community…").fg(COLOR_ORANGE));
+    }
+    if let Some(error) = &view.error {
+        lines.push(Line::from(error.clone()).fg(COLOR_WARNING_ACCESSIBLE_RED));
+    }
+    if view.searched && view.pending.is_none() && view.error.is_none() && view.results.is_empty() {
+        lines.push(hint("No listed vetter matches. Fewer filters find more."));
+    }
+    for (i, row) in view.results.iter().enumerate() {
+        let selected = view.result_index() == Some(i);
+        let style = if selected {
+            Style::new().fg(COLOR_SUCCESS).bold()
+        } else {
+            label()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if selected { "▸ " } else { "  " }, style),
+            Span::styled(row.name.clone(), style),
+            Span::styled(
+                format!("  {}", display_identifier(None, &row.did, 48)),
+                dim(),
+            ),
+        ]));
+        let mut about = vec![format!("speaks {}", row.languages)];
+        about.extend(row.location.clone());
+        about.push(row.methods.clone());
+        lines.push(Line::from(Span::styled(
+            format!("    {}", about.join(" · ")),
+            value(),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("    accepts {}", row.documentation),
+            value(),
+        )));
+        if let Some(availability) = &row.availability {
+            lines.push(Line::from(Span::styled(
+                format!("    available {availability}"),
+                value(),
+            )));
+        }
+        for event in &row.events {
+            lines.push(Line::from(Span::styled(format!("    at {event}"), value())));
+        }
+        lines.push(Line::from(Span::styled(
+            format!(
+                "    getting a ticket: {}",
+                row.contact_hint
+                    .as_deref()
+                    .unwrap_or("they have not said — ask them in person or through the community")
+            ),
+            Style::new().fg(COLOR_TEXT_DEFAULT),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("    named a vetter until {}", row.grant_until),
+            dim(),
+        )));
+    }
+    lines.push(Line::from(""));
+    if view.searched {
+        let more = if view.next_cursor.is_some() {
+            "  n: next page"
+        } else {
+            "  last page"
+        };
+        let back = if view.cursors.len() > 1 {
+            "  p: previous page"
+        } else {
+            ""
+        };
+        lines.push(hint(format!(
+            "Page {}{more}{back}",
+            view.cursors.len().max(1)
+        )));
+    }
+    lines.push(hint(if f >= DIRECTORY_FIELDS {
+        "Enter or a: ask this vetter  ↑/↓: move  Esc: back"
+    } else {
+        "Enter: search  ↑/↓ or Tab: move  ←/→: choose  Esc: back"
+    }));
+}
+
+fn profile(lines: &mut Vec<Line<'static>>, v: &VettingState, form: &VetterProfileForm) {
+    lines.push(heading("Your vetter profile"));
+    lines.push(Line::from(""));
+    lines.push(hint(
+        "What applicants see when they look for a vetter. Being listed is your choice: unlisted,",
+    ));
+    lines.push(hint(
+        "the community keeps the profile, and only people you give a ticket can reach you.",
+    ));
+    if let Some((line_tone, line)) = &form.state_line {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(line.clone(), tone(*line_tone))));
+    }
+    lines.push(Line::from(""));
+    let f = form.field;
+    let d = &form.draft;
+    let membership = v.memberships.get(form.membership_index);
+    let mut line = field(
+        "Community",
+        membership.map(|m| m.name.clone()).unwrap_or_default(),
+        f == 0,
+        false,
+    );
+    if let Some(m) = membership {
+        line.spans.insert(2, accent_swatch(m.accent));
+    }
+    lines.push(line);
+    lines.push(field(
+        "Listed",
+        format!("{}  show me in the directory", tick(d.listed)),
+        f == 1,
+        false,
+    ));
+    lines.push(field("Display name", d.display_name.clone(), f == 2, true));
+    lines.push(field("Languages", d.languages.clone(), f == 3, true));
+    lines.push(field("Country", d.country.clone(), f == 4, true));
+    lines.push(field("Region", d.region.clone(), f == 5, true));
+    lines.push(field("City", d.city.clone(), f == 6, true));
+    for (i, method) in [
+        VettingMethod::InPerson,
+        VettingMethod::Video,
+        VettingMethod::PriorAcquaintance,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        lines.push(field(
+            if i == 0 { "I vet" } else { "" },
+            format!(
+                "{}  {}",
+                tick(d.methods.contains(&method)),
+                method_label(method)
+            ),
+            f == 7 + i,
+            false,
+        ));
+    }
+    lines.push(field(
+        "Documents I accept",
+        d.accepts_documentation.clone(),
+        f == 10,
+        true,
+    ));
+    lines.push(field("Availability", d.availability.clone(), f == 11, true));
+    lines.push(field(
+        "How to get a ticket",
+        d.contact_hint.clone(),
+        f == 12,
+        true,
+    ));
+    lines.push(Line::from(""));
+    lines.push(Line::from(" Events you will vet at").fg(COLOR_SUCCESS));
+    for (i, event) in d.events.iter().enumerate() {
+        let selected = f == PROFILE_FIELDS + i;
+        let shown = match event.to_event() {
+            Ok(e) => event_line(&e),
+            Err(e) => format!("{} — {e}", event.name),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                if selected { "▸ " } else { "  " },
+                Style::new().fg(COLOR_SUCCESS).bold(),
+            ),
+            Span::styled(
+                shown,
+                if selected {
+                    Style::new().fg(COLOR_SUCCESS).bold()
+                } else {
+                    value()
+                },
+            ),
+        ]));
+    }
+    let add = form.on_add_event();
+    lines.push(Line::from(Span::styled(
+        format!("{}+ add an event", if add { "▸ " } else { "  " }),
+        if add {
+            Style::new().fg(COLOR_SUCCESS).bold()
+        } else {
+            dim()
+        },
+    )));
+    if let Some(error) = &form.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(error.clone()).fg(COLOR_WARNING_ACCESSIBLE_RED));
+    }
+    lines.push(Line::from(""));
+    lines.push(hint(
+        "↑/↓: move  type to edit  Space: tick  Enter on an event: edit  x: remove it",
+    ));
+    lines.push(hint(
+        "Enter elsewhere: publish  ←/→: community  Esc: cancel",
+    ));
+}
+
+fn event_form(lines: &mut Vec<Line<'static>>, event: &EventForm) {
+    lines.push(heading(if event.index.is_some() {
+        "Edit an event"
+    } else {
+        "Add an event you will vet at"
+    }));
+    lines.push(Line::from(""));
+    lines.push(hint(
+        "Applicants find vetters by event, so they can meet you there. At most 31 days long.",
+    ));
+    lines.push(Line::from(""));
+    let d = &event.draft;
+    let f = event.field;
+    lines.push(field("Name", d.name.clone(), f == 0, true));
+    lines.push(field("First day", d.start_date.clone(), f == 1, true));
+    lines.push(field("Last day", d.end_date.clone(), f == 2, true));
+    lines.push(field("Country", d.country.clone(), f == 3, true));
+    lines.push(field("Region", d.region.clone(), f == 4, true));
+    lines.push(field("City", d.city.clone(), f == 5, true));
+    lines.push(field("Web page", d.url.clone(), f == 6, true));
+    lines.push(hint("  Days are YYYY-MM-DD; the page must be https."));
+    if let Some(error) = &event.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(error.clone()).fg(COLOR_WARNING_ACCESSIBLE_RED));
+    }
+    lines.push(Line::from(""));
+    lines.push(hint("Enter: keep it  ↑/↓: move  Esc: back to the profile"));
 }
 
 fn send_card(
@@ -763,7 +1139,10 @@ fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         lines.push(hint("You have no tickets out."));
         lines.push(Line::from(""));
         lines.push(hint(
-            "t: hand out a ticket — read the code to someone, or copy it to send them",
+            "t: hand out a ticket — read the code to someone, or show them its QR code",
+        ));
+        lines.push(hint(
+            "p: your vetter profile  g: ask a community to resend your vetter credential",
         ));
         return;
     }
@@ -795,9 +1174,42 @@ fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             ),
         ]));
     }
+    if let Some(row) = v.tickets.get(v.selected)
+        && row.live
+        && let Some(uri) = &row.uri
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Read aloud   ", label()),
+            Span::styled(row.code.clone(), Style::new().fg(COLOR_SUCCESS).bold()),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(hint(
+            "Or let them scan this. It carries the ticket and your DID, so they can ask you at once:",
+        ));
+        lines.push(Line::from(""));
+        match qr_lines(uri, super::status::content_width()) {
+            Ok(code) => lines.extend(code),
+            Err(QrError::TooNarrow { needed }) => lines.push(
+                Line::from(format!(
+                    "Widen the window to {needed} columns to show the QR code, or copy the link with u."
+                ))
+                .fg(COLOR_ORANGE),
+            ),
+            Err(QrError::TooLong) => lines.push(
+                Line::from("This ticket's link is too long for a QR code — copy it with u instead.")
+                    .fg(COLOR_ORANGE),
+            ),
+        }
+        lines.push(Line::from(""));
+        lines.push(hint(uri.clone()));
+    }
     lines.push(Line::from(""));
     lines.push(hint(
-        "t: new ticket  y: copy code  d: delete  Tab: next tab",
+        "t: new ticket  y: copy code  u: copy link  d: delete  Tab: next tab",
+    ));
+    lines.push(hint(
+        "p: your vetter profile  g: ask a community to resend your vetter credential",
     ));
 }
 

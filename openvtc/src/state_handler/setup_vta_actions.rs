@@ -1,3 +1,4 @@
+use crate::env_overrides::WizardUrlOverride;
 use crate::state_handler::{
     setup_sequence::{Completion, MessageType, RebuildOutcome, SetupPage},
     state::State,
@@ -11,17 +12,20 @@ use vta_sdk::provision_client::{
 };
 
 /// Env var that pins the VTA's REST base URL, bypassing `did:webvh`/DIDComm
-/// resolution. Set it (e.g. `http://127.0.0.1:8080`) to point the bootstrap at
-/// a local/loopback VTA whose DID does not resolve back to that URL — the
-/// integration-test seam (and a handy "talk to my dev VTA" override). When set,
-/// bootstrap talks plain REST to this URL and provisions URL-direct via
-/// `provision_admin_rotated_via_rest` (which never re-resolves the VTA DID).
-const VTA_URL_OVERRIDE_ENV: &str = "OPENVTC_VTA_URL";
+/// resolution. Honoured only by a `dev-overrides` build: set it (e.g.
+/// `http://127.0.0.1:8080`) to point the bootstrap at a local/loopback VTA whose
+/// DID does not resolve back to that URL — the integration-test seam. When
+/// honoured, bootstrap talks plain REST to this URL and provisions URL-direct
+/// via `provision_admin_rotated_via_rest` (which never re-resolves the VTA DID).
+/// A release build ignores it and says so on the enter-DID page.
+const VTA_URL_OVERRIDE_ENV: &str = crate::env_overrides::VTA_URL_VAR;
 
-/// The trimmed, non-empty value of [`VTA_URL_OVERRIDE_ENV`], or `None`. A blank
-/// or whitespace-only value is treated as unset.
-fn vta_url_override() -> Option<String> {
-    normalize_url_override(std::env::var(VTA_URL_OVERRIDE_ENV).ok())
+/// [`VTA_URL_OVERRIDE_ENV`] after trimming (blank reads as unset) and the
+/// `dev-overrides` gate.
+fn vta_url_override() -> WizardUrlOverride {
+    crate::env_overrides::wizard_vta_url_override(normalize_url_override(
+        std::env::var(VTA_URL_OVERRIDE_ENV).ok(),
+    ))
 }
 
 /// How the post-bootstrap `VtaClient` must authenticate, given the transport
@@ -85,13 +89,24 @@ pub(crate) async fn handle_vta_submit_did(
     state.setup.vta.completed = Completion::NotFinished;
     state.setup.vta.vta_did = vta_did.clone();
 
-    // OPENVTC_VTA_URL override: skip DID resolution and talk plain REST to the
-    // pinned URL. Lets bootstrap target a loopback/dev VTA whose DID can't be
-    // resolved back to its URL (the integration-test seam). DIDComm is not used
-    // on this path — provisioning goes URL-direct in `handle_vta_start_provision`.
-    if let Some(url) = vta_url_override() {
+    // OPENVTC_VTA_URL override (dev-overrides builds only): skip DID resolution
+    // and talk plain REST to the pinned URL. Lets bootstrap target a
+    // loopback/dev VTA whose DID can't be resolved back to its URL (the
+    // integration-test seam). DIDComm is not used on this path — provisioning
+    // goes URL-direct in `handle_vta_start_provision`. A release build ignores
+    // the variable, says so here, and resolves the DID as normal.
+    let url_override = vta_url_override();
+    if let WizardUrlOverride::Ignored(message) = &url_override {
+        state
+            .setup
+            .vta
+            .messages
+            .push(MessageType::Info(format!("Warning: {message}")));
+    }
+    if let WizardUrlOverride::Active(url) = url_override {
         state.setup.vta.messages.push(MessageType::Info(format!(
-            "{VTA_URL_OVERRIDE_ENV} set — using REST endpoint {url} (skipping DID resolution)."
+            "DEV OVERRIDE: {VTA_URL_OVERRIDE_ENV} set — using REST endpoint {url} \
+             (skipping DID resolution)."
         )));
         let _ = state_tx.send(state.clone());
         state.setup.vta.vta_url = url;
@@ -229,7 +244,7 @@ pub(crate) async fn handle_vta_start_provision(
     let mut connect_mediator_did: Option<String> = None;
     let mut connect_protocol: Option<Protocol> = None;
 
-    if let Some(url) = vta_url_override() {
+    if let WizardUrlOverride::Active(url) = vta_url_override() {
         // URL-direct: one REST round-trip to the pinned URL via the SDK's
         // URL-direct AdminRotated entry — no DID resolution, no DIDComm, no
         // diagnostics stream (it never re-resolves the VTA DID). The REST

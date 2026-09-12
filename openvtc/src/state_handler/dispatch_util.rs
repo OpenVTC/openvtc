@@ -148,5 +148,6 @@ pub(crate) fn test_config() -> Config {
         account: Account::default(),
         identities: std::collections::BTreeMap::new(),
         active_persona: None,
+        runtime_trust_overrides: None,
     }
 }

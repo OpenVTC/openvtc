@@ -18,6 +18,11 @@ openpgp-card = [
   "dep:openpgp-card-rpgp",
   "openvtc-core/openpgp-card",
 ]
+# Development builds only. Honours OPENVTC_VTA_URL, OPENVTC_VTA_DID and
+# OPENVTC_MEDIATOR_DID for the current run (validated, never saved, with a
+# DEV OVERRIDE indicator). Without it those variables are ignored and the user
+# is told so. Never enable this for a build you distribute.
+dev-overrides = []
 
 [dependencies]
 openvtc-core.workspace = true
@@ -89,6 +94,7 @@ hex.workspace = true
 keyring-core.workspace = true
 multibase.workspace = true
 pgp.workspace = true
+qrcode.workspace = true
 rand.workspace = true
 regex.workspace = true
 secrecy.workspace = true

@@ -74,6 +74,22 @@ jobs:
           cargo check -p openvtc-core --no-default-features --features arbitrary
           cargo test -p openvtc-core --features arbitrary --lib
 
+  test-dev-overrides:
+    name: Test (dev-overrides)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libdbus-1-dev
+      # The trust-anchor env overrides compile only under this feature, so the
+      # default jobs never see that code. Lint and test it explicitly.
+      - run: cargo clippy -p openvtc --all-targets --features dev-overrides -- -D warnings
+      - run: cargo test -p openvtc --features dev-overrides
+
   doc:
     name: Documentation
     runs-on: ubuntu-latest

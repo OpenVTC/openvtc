@@ -167,6 +167,11 @@ linux-keyutils-keyring-store = "1"
 windows-native-keyring-store = "1"
 multibase = "0.9"
 pgp = "0.20"
+# Ticket QR codes on the Vetting page. Default features off: they pull `image`
+# for PNG/SVG output, and all the page needs is the module matrix, drawn with
+# Unicode half-blocks. MIT OR Apache-2.0 with no dependencies of its own, so
+# `deny.toml` needs nothing new.
+qrcode = { version = "0.14", default-features = false }
 # Stays on 0.8 because pgp 0.20 does: it takes an `R: Rng + CryptoRng` from
 # the rand_core 0.6 trait set for key signing / `set_password` / ESK
 # encryption, and we hand it our `OsRng` directly, so the two must agree.
@@ -394,10 +399,11 @@ strip = "symbols"
 # `cargo tree`, not only the two named in a manifest: a crate left on crates.io
 # would pull its own `vti-common` beside the patched one.
 #
-# The branch is the top of the VTI vetting stack (#1425–#1429), not `main`:
-# `vta-sdk`'s `vetting` feature, which this workspace enables, exists only there
-# until that stack merges. Once it has, point these back at `main`, and remove
-# them with the release that follows.
+# The VTI entries pin a commit on VTI `main` by `rev`: 14ef89a, where the vetter
+# registry work (OpenVTC/verifiable-trust-infrastructure#1430) merged. A `rev`
+# on `main` stays fetchable, where the feature branches this used to name were
+# deleted when the vetting stack merged. Move the pin forward only to another
+# commit on VTI `main`, and remove these entries with the release that follows.
 #
 # Each block leaves when its release is published: delete its entries here and
 # its URL from `allow-git` in `deny.toml`. For VGI, also raise the `did-git-sign`
@@ -411,23 +417,23 @@ strip = "symbols"
 did-git-sign = { git = "https://github.com/OpenVTC/verifiable-git-infrastructure", branch = "chore/vta-sdk-036" }
 vgi-core = { git = "https://github.com/OpenVTC/verifiable-git-infrastructure", branch = "chore/vta-sdk-036" }
 
-vta-audit = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-backup = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-cli-common = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-config = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-keys = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-keyspaces = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-persona = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-policy = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-sdk = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-service = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-support = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-sweepers = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-vault = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vta-webvh = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vtc-client = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vti-common = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vti-rooms = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vti-rooms-dtg = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vti-secrets = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
-vti-webauthn = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "38ad2ed55988f9299596b8737c32d42d61131a1c" }
+vta-audit = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-backup = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-cli-common = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-config = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-keys = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-keyspaces = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-persona = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-policy = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-sdk = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-service = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-support = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-sweepers = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-vault = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vta-webvh = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vtc-client = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vti-common = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vti-rooms = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vti-rooms-dtg = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vti-secrets = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }
+vti-webauthn = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "14ef89a6ef9b330f7544414134d4818a6e2c7bfb" }

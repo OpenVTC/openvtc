@@ -20,7 +20,7 @@ use crate::{
         pages::join_flow::{
             context_choice::ContextChoice, identity_choice::IdentityChoice,
             invitation_choice::InvitationChoice, join_progress::JoinProgress,
-            vtc_enter_did::VtcEnterDid,
+            vetting_requirements::VettingPage, vtc_enter_did::VtcEnterDid,
         },
     },
 };
@@ -33,6 +33,7 @@ pub mod context_choice;
 pub mod identity_choice;
 pub mod invitation_choice;
 pub mod join_progress;
+pub mod vetting_requirements;
 pub mod vtc_enter_did;
 
 /// Handles the join flow sequence.
@@ -58,6 +59,7 @@ pub struct JoinFlow {
     pub identity_choice: IdentityChoice,
     pub context_choice: ContextChoice,
     pub join_progress: JoinProgress,
+    pub vetting: VettingPage,
 
     /// State-mapped join props.
     pub props: Props,
@@ -120,6 +122,7 @@ impl Component for JoinFlow {
             identity_choice: IdentityChoice,
             context_choice: ContextChoice,
             join_progress: JoinProgress,
+            vetting: VettingPage,
             props: Props::from(state),
         }
         .move_with_state(state)
@@ -147,6 +150,7 @@ impl Component for JoinFlow {
             JoinPage::IdentityChoice => IdentityChoice::handle_key_event(self, key),
             JoinPage::ContextChoice => ContextChoice::handle_key_event(self, key),
             JoinPage::Progress => JoinProgress::handle_key_event(self, key),
+            JoinPage::Vetting => VettingPage::handle_key_event(self, key),
         }
     }
 
@@ -187,7 +191,10 @@ impl Component for JoinFlow {
                 slug.push_str(trimmed);
                 let _ = self.action_tx.send(Action::JoinContextSlug(slug));
             }
-            JoinPage::IdentityChoice | JoinPage::ContextChoice | JoinPage::Progress => {}
+            JoinPage::IdentityChoice
+            | JoinPage::ContextChoice
+            | JoinPage::Progress
+            | JoinPage::Vetting => {}
         }
     }
 }
@@ -203,6 +210,7 @@ impl ComponentRender<()> for JoinFlow {
             JoinPage::IdentityChoice => self.identity_choice.render(&self.props.state, frame),
             JoinPage::ContextChoice => self.context_choice.render(&self.props.state, frame),
             JoinPage::Progress => self.join_progress.render(&self.props.state, frame),
+            JoinPage::Vetting => self.vetting.render(&self.props.state, frame),
         }
     }
 }

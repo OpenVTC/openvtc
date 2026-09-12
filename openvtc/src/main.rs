@@ -25,6 +25,7 @@ use tokio::sync::broadcast;
 mod cli;
 mod clipboard;
 mod colors;
+mod env_overrides;
 mod health_cmd;
 mod state_handler;
 mod theme;
@@ -641,6 +642,14 @@ async fn main() -> Result<()> {
         bail!("Starting mode not set correctly!");
     }
 
+    // Trust-anchor env overrides are announced here, while stderr is still
+    // readable: once the TUI owns the terminal a stray write would corrupt the
+    // screen. The state handler applies them (dev-overrides builds only) and
+    // repeats the outcome in the Activity Log.
+    if let Some(notice) = env_overrides::startup_notice(|k| env::var(k).ok()) {
+        eprintln!("{}", style(notice).themed(CLI_CAUTION));
+    }
+
     // Setup the initial state
     let (terminator, mut interrupt_rx) = create_termination();
     let (mut state, state_rx) = StateHandler::new(&profile, starting_mode);
@@ -726,40 +735,6 @@ pub fn create_termination() -> (Terminator, broadcast::Receiver<Interrupted>) {
     tokio::spawn(terminate_by_unix_signal(terminator.clone()));
 
     (terminator, rx)
-}
-
-/// Applies OPENVTC_* environment variable overrides to a loaded Config.
-pub fn apply_env_overrides(config: &mut Config) {
-    use openvtc_core::config::KeyBackend;
-
-    if let Ok(val) = std::env::var("OPENVTC_MEDIATOR_DID")
-        && !config.set_active_mediator_did(&val)
-    {
-        // The override hangs off the active persona, so a State-A profile has
-        // nowhere to put it. Silently dropping an override the operator set on
-        // purpose is how it becomes a mystery later.
-        tracing::warn!(
-            did = %val,
-            "OPENVTC_MEDIATOR_DID ignored: this profile has no persona to set a mediator on"
-        );
-    }
-    if let Ok(val) = std::env::var("OPENVTC_VTA_URL")
-        && let KeyBackend::Vta {
-            ref mut vta_url, ..
-        } = config.key_backend
-    {
-        *vta_url = val;
-    }
-    if let Ok(val) = std::env::var("OPENVTC_VTA_DID")
-        && let KeyBackend::Vta {
-            ref mut vta_did, ..
-        } = config.key_backend
-    {
-        *vta_did = val;
-    }
-    if let Ok(val) = std::env::var("OPENVTC_FRIENDLY_NAME") {
-        config.public.friendly_name = val;
-    }
 }
 
 /// Maximum number of interactive unlock attempts before aborting.
