@@ -1,8 +1,8 @@
 # SPEC — Vetted Admission: Peer Identity Vetting for Joining a VTC
 
 > Status: **DRAFT v3** — O1–O3 and O5 resolved 2026-09-11 (D15–D18); D1–D14
-> proposed, pending sign-off; D19–D24 record choices made while building V0,
-> marked *as built* where they depart from the text (§15). **V0 target: 5 Oct 2026.**
+> proposed, pending sign-off; D19–D29 record choices made while building V0
+> and the vetter registry, marked *as built* where they depart from the text (§15). **V0 target: 5 Oct 2026.**
 > Scope: end-to-end. This is an OpenVTC design doc, but most of the protocol
 > surface lands outside this repo. Each change is tagged with its home repo
 > (§14): `trustoverip/dtgwg-trust-tasks-tf`, `trustoverip/dtgwg-cred-spec`,
@@ -267,6 +267,20 @@ task specs **do not** declare consent or step-up; that is VTA policy (§11.3).
    unauthenticated at `GET /v1/community/public-profile` so a web page or
    `openvtc` can show it before any Trust Task is sent.
 
+*As built (branding, D29):*
+- `manifest/0.2` also carries the community's optional `branding`
+  (`displayName`, `accentColor`, `logoUrl`).
+- OpenVTC keeps the display name and accent from every manifest it reads,
+  whether or not the community vets, in `VettingBook::communities`. A branding
+  that breaks its schema is dropped whole.
+- The accent is drawn as a swatch (●) beside the community's name on the
+  Vetting page, the Communities panel and the join page. It is data about the
+  community, so it uses the literal colour rather than the theme.
+- The display name is a fallback. It is used only when there is neither a
+  membership name nor a verified agent name.
+- It is presentation only: nothing is trusted because of it, and the logo is
+  not fetched.
+
 `manifest` is the one join-family task that leaves no trace of an applicant.
 That keeps **informed non-application** possible: a person can learn that a
 community demands a passport check and walk away having disclosed nothing.
@@ -373,6 +387,44 @@ There are three routes, from most to least social.
    - Governed by a new `vetters.rego` projection policy, capped by the
      community's PII boundary like `directory.rego`.
 
+*As built (the vetter registry, VTI #1430):* the tasks are
+`vtc/vetting/vetters/profile/0.1` and `…/list/0.1`, not the sampled
+`vtc/vetters/list` sketched above.
+
+The community's side:
+- A vetter holding a live grant publishes a whole profile: listed or not, a
+  display name, languages, and a location (country, region, city).
+- The profile also lists methods, accepted documentation, availability, a
+  contact hint saying how to get a ticket, and up to 32 events.
+- The list filters by language, place, method, event dates and event name,
+  pages by cursor, and answers only callers it can identify.
+
+In OpenVTC:
+- **Find vetters** (`v` on an application) searches a community the persona is
+  applying to or has joined. It asks as the application's persona, else the
+  membership's.
+- Results are page state only: they describe other people and go stale.
+- **Ask this vetter** fills the request form with the vetter's DID and says a
+  ticket is still needed, quoting their contact hint.
+- **Your vetter profile** (`p` on Tickets) opens on the profile last sent to
+  that community. With none, it starts unlisted (listing is opt-in) and accepts
+  what the vetter's `VetterPolicy` accepts.
+- Typed text becomes the body in `vetting::registry`, and the SDK's
+  `check_shape` is the only validator. The client therefore never disagrees
+  with the community about what is valid; event dates are checked before
+  anything is sent.
+- The last profile sent is kept in the book as JSON, with the community's
+  answer: stored (listed or not), or refused with `notEligible`. JSON rather
+  than the SDK type, because that type refuses unknown members, and a profile a
+  newer build wrote must not stop an older build opening its config (D27).
+- Questions to a community (manifest, list, profile, resend) are remembered in
+  memory by document id (`vetting::queries`, D25).
+- An answer or a `trust-task-error` is claimed only when it threads on one of
+  those questions. Every other error still reaches the join handler.
+- A question unanswered after 30 seconds is reported as unanswered (R1.2).
+- An answer this client cannot read is reported as a disagreement about the
+  task, not as a refusal (R6.4).
+
 ### 7.1 Confirming a vetter is eligible before spending effort
 
 The vetter's `vetting/request` `#response` carries an **eligibility VP**: the
@@ -384,6 +436,25 @@ the `requestId` as the challenge. The applicant's client verifies:
 
 This works for unlisted vetters and needs no VTC round-trip. The VTC still
 re-checks eligibility at decision time (§10.2), so this is advisory.
+
+*As built (the revocation check, D28):*
+- Once the eligibility presentation verifies, the grant's `credentialStatus`
+  is checked with `vta_sdk::vetting::status::check_credential_status`, as a
+  background job in a dispatch domain of its own, so it never holds up a
+  vetting send.
+- OpenVTC supplies the fetch (`openvtc_core::vetting::status`):
+  - `https` only, including redirects, at most three of them;
+  - 5 seconds to connect and 10 seconds in all (R1.2);
+  - at most 6 MiB;
+  - error text that tells an unreachable host from an HTTP error from a body
+    that is not a status list (R6.4).
+- The result is recorded on the request and shown as one of:
+  - *named a vetter until …* with *not revoked when checked on …*;
+  - *the community has revoked this vetter's grant — their statement will not
+    count*;
+  - *could not check whether the grant was revoked (…)*. This covers a grant
+    that names no status list, and is never read as unrevoked.
+- The check is advisory, like the rest of this section.
 
 ---
 
@@ -427,6 +498,24 @@ Throttling:
 
 The mediator cannot see payloads (authcrypt), so it contributes only
 per-sender transport rate limiting.
+
+*As built (ticket link and QR code):*
+- The Tickets tab shows the selected ticket as a QR code of its
+  `vetting-ticket:` link (`vta_sdk::vetting::ticket_uri`).
+- The link carries the vetter's DID and the scanned form: the ticket id and its
+  32-byte secret. The short code stays beside it for reading aloud.
+- The code is drawn with Unicode half-blocks, black on white whatever the theme.
+  It uses error correction M (L if M does not fit) and a quiet zone of four
+  modules, narrowed to two or one to fit the window.
+- If it still does not fit, the page names the width needed.
+- `u` copies the link.
+- When asking a vetter, pasting a link fills in the vetter's DID and the
+  scanned ticket.
+- A link for another community is refused with a plain message: the vetter
+  would refuse it, and sending it would tie the application's DID to that
+  community.
+- The QR encoder is the `qrcode` crate 0.14 with default features off:
+  MIT OR Apache-2.0, with no dependencies of its own.
 
 ### 8.3 `vetting/request/0.1` payload
 
@@ -911,6 +1000,16 @@ Admins can also grant or revoke `vetter` directly
 (`governance/capability/*`). The policy decides whether manual grants may
 bypass rules.
 
+*As built (resend):*
+- A member who is active but holds no live vetter credential can ask the
+  community to deliver it again, with `vtc/vetting/vetters/resend/0.1` (`g` on
+  Tickets). That covers a grant issued while they were offline, and one they
+  lost.
+- The credential arrives through `credential-exchange/issue` as usual. The
+  answer says until when it is valid.
+- A `notGranted` refusal reads: the community holds no live vetter credential
+  for you — it has not named you a vetter, or the grant expired or was revoked.
+
 ### 10.4 Decision policy — vetting module in `join.rego`
 
 The sketch below predates the implementation. *As built*, the default
@@ -1216,6 +1315,41 @@ Following the existing patterns in
 - **Join flow** (`JoinPage`): after `EnterDid`, when the manifest has
   `vetting`, show the requirements in plain language and offer **Start
   application** (→ Vetting tab), replacing the submit step.
+
+  *As built (the guided path, D26):*
+  - After the community's DID, the join flow decides from what the book knows
+    (`VettingBook::knowledge`): it vets, it does not, or it was never asked.
+  - A community that vets gets a page with:
+    - its requirements in plain words (`vetting::guide`), with its DID under
+      its name;
+    - this persona's application, if there is one, with its progress and next
+      step;
+    - three ways on.
+  - The three ways on:
+    - **start the application**, choosing the persona and the context its face
+      is worn in. This opens the Vetting page on the application, with its next
+      step highlighted.
+    - **join anyway**, which the community refers to its moderators.
+    - **cancel**.
+  - An application that meets the published requirements joins as its own
+    persona, and the page says its statements are presented with the join.
+  - When the book does not know, the community is asked. The join flow cannot
+    hear the answer itself: its loop selects only on actions and interrupts, and
+    inbound messages are read by the runtime loop's own arm, which is parked
+    while the flow runs.
+  - So the flow sends `manifest/0.2` as the active persona, with the send
+    bounded at 15 seconds, and returns `JoinExit::AwaitRequirements`.
+  - The runtime loop keeps the join screen up in an *asking* state and goes on
+    reading inbound messages. It enters the flow again when one of these
+    happens:
+    - the manifest arrives;
+    - the community refuses, or answers in a form this client cannot read;
+    - 15 seconds pass with no answer.
+  - While it asks, `j` joins without waiting and Esc cancels.
+  - Nothing can hang: every wait ends on an inbound message or on a sweep with
+    a deadline.
+  - The degraded loop has no inbound arm, so there the flow uses only what the
+    book already knows.
 - Keys: choose from the unused set when implementing. The Communities panel
   already binds `⏎ f a m c p P l x d j v`.
 
@@ -1412,7 +1546,7 @@ modern-signature subgraph only (O7).
 
 ## 15. Decisions and open questions
 
-### 15.1 Decisions (D1–D14 proposed; D15–D18 agreed 2026-09-11; D19–D24 taken while building V0)
+### 15.1 Decisions (D1–D14 proposed; D15–D18 agreed 2026-09-11; D19–D29 taken while building)
 
 | # | Decision | Proposal |
 |---|---|---|
@@ -1440,6 +1574,11 @@ modern-signature subgraph only (O7).
 | D22 | `needs` | Policy returns the generic `vetting`; the host expands it to `vetting:statements:<n>` / `vetting:method:<method>:<n>`, so visually authored policy stays static |
 | D23 | Which criterion applies | The one whose `requirementsDigest` the applicant names in `extensions`; otherwise the first vetting criterion |
 | D24 | Session binding details | Match-code tag `vetting-session-match/v1\0`, distinct from `vtc-personhood-match/v1\0`. `eligibilityVp` carries `nonce` = the `vetting/request` document `id` and `domain` = the applicant's `joinDid` |
+| D25 | Answers to questions put to a community | **Matched by request document id, in memory only.** A directory page, a stored profile, a resent grant or a manifest reaches whoever asked. A `trust-task-error` is claimed only when it answers one of these questions, so the join handler keeps every other error. A question unanswered after 30 s is reported (R1.2) |
+| D26 | How the join flow learns whether a community vets | **From the book, else by asking and handing the wait to the runtime loop** (`JoinExit::AwaitRequirements`, 15 s). The flow's own loop cannot hear inbound messages, so it never waits there, and every wait ends on a message or a deadline |
+| D27 | Vetter profile | **Opt-in listing; the last profile sent is kept as JSON with the community's answer.** A first profile is unlisted and accepts what `VetterPolicy` accepts. The SDK's `check_shape` is the only validator |
+| D28 | Checking a vetter's grant for revocation | **After a verified acceptance, as a background job, https-only with finite timeouts.** Recorded per request as active, revoked or unknown, and unknown is never shown as unrevoked. Advisory; the community checks again when it decides |
+| D29 | Community branding | **Kept from every manifest; presentation only.** The accent is drawn as a literal-colour swatch. The display name is used only when there is no membership name or verified agent name. The logo is not fetched |
 
 ### 15.2 Open questions
 

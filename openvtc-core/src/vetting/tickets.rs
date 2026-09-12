@@ -25,6 +25,7 @@ use uuid::Uuid;
 use vta_sdk::protocols::vetting::{
     TicketPresentation, VETTING_REQUEST_ERR_INVALID_TICKET, VettingMethod,
 };
+use vta_sdk::vetting::ticket_uri::{self, TicketUri};
 
 use crate::config::account::PersonaId;
 
@@ -129,6 +130,21 @@ impl Ticket {
             ticket_id: self.id.clone(),
             secret: self.secret.clone(),
         }
+    }
+
+    /// The ticket as a link — what its QR code carries. `vetter` is the DID of
+    /// the persona the ticket admits requests to.
+    ///
+    /// The link carries the scanned form: full-entropy, so it is refused
+    /// outright when wrong rather than silently throttled, and nobody guesses
+    /// it. The short code stays for reading aloud.
+    #[must_use]
+    pub fn uri(&self, vetter: &str) -> String {
+        ticket_uri::encode(&TicketUri {
+            community: self.community.clone(),
+            vetter: vetter.to_string(),
+            presentation: self.scanned_presentation(),
+        })
     }
 }
 
@@ -329,6 +345,15 @@ mod tests {
             };
             body.check_shape("did:key:zApplicant").unwrap();
         }
+    }
+
+    #[test]
+    fn a_ticket_link_carries_the_scanned_form() {
+        let t = ticket(PersonaId::new(), Utc::now());
+        let decoded = ticket_uri::decode(&t.uri("did:key:zVetter")).unwrap();
+        assert_eq!(decoded.community, COMMUNITY);
+        assert_eq!(decoded.vetter, "did:key:zVetter");
+        assert_eq!(decoded.presentation, t.scanned_presentation());
     }
 
     #[test]

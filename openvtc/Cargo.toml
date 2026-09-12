@@ -94,6 +94,7 @@ hex.workspace = true
 keyring-core.workspace = true
 multibase.workspace = true
 pgp.workspace = true
+qrcode.workspace = true
 rand.workspace = true
 regex.workspace = true
 secrecy.workspace = true

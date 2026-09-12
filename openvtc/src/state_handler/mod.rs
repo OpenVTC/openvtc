@@ -1080,6 +1080,10 @@ impl StateHandler {
         let mut join_status_tick = tokio::time::interval(std::time::Duration::from_secs(60));
         let mut join_status_pacer = join_status_poll::PollPacer::default();
 
+        // The join flow to enter at the end of this iteration, and a join
+        // waiting on a community's requirements (see `join_flow::AwaitingRequirements`).
+        let mut join_entry: Option<join_flow::JoinEntry> = None;
+        let mut awaiting_requirements: Option<join_flow::AwaitingRequirements> = None;
         let result = loop {
             tokio::select! {
                 Some(action) = action_rx.recv() => match action {
@@ -1104,45 +1108,27 @@ impl StateHandler {
                         // State-B join from the live runtime: reuse the always-on
                         // admin VTA session. The DIDComm service keeps running in
                         // the background; the join flow owns the screen until the
-                        // user returns. Restart is required to activate the new
-                        // community (hot-start is a deliberate follow-up).
-                        match self
-                            .join_flow(
-                                &mut action_rx,
-                                &mut interrupt_rx,
-                                &mut state,
-                                &tdk,
-                                &mut config,
-                                admin_vta.as_ref(),
-                                self.profile.as_str(),
-                                Some(&didcomm_service),
-                            )
-                            .await
-                        {
-                            Ok(join_flow::JoinExit::Returned(joined)) => {
-                                state.active_page = state::ActivePage::Main;
-                                // R-B-5 / D11: bring the new community's session up
-                                // live so the VTC's async receipt is received now,
-                                // not only after a restart.
-                                if let Some(joined) = joined {
-                                    register_joined_session(
-                                        &mut session_manager,
-                                        &didcomm_service,
-                                        &tdk,
-                                        &config,
-                                        joined,
-                                        &mut state,
-                                    )
-                                    .await;
-                                }
-                            }
-                            Ok(join_flow::JoinExit::Exit(interrupted)) => {
-                                break interrupted;
-                            }
-                            Err(e) => {
-                                state.main_page.log_error("Join flow failed", &e);
-                                state.active_page = state::ActivePage::Main;
-                            }
+                        // user returns. Entered at the loop's tail, which is also
+                        // where a join waiting on a community's requirements is
+                        // entered again.
+                        join_entry = Some(join_flow::JoinEntry::Fresh { hears_replies: true });
+                    },
+                    // A join waiting on a community's requirements keeps its screen
+                    // up while this loop hears the answer, so the two keys that
+                    // page offers land here rather than in the join flow.
+                    Action::JoinCancel if awaiting_requirements.is_some() => {
+                        if let Some(awaiting) = awaiting_requirements.take() {
+                            config.private.vetting.forget_query(&awaiting.document_id);
+                        }
+                        state.active_page = state::ActivePage::Main;
+                    },
+                    Action::JoinVettingJoin if awaiting_requirements.is_some() => {
+                        if let Some(awaiting) = awaiting_requirements.take() {
+                            config.private.vetting.forget_query(&awaiting.document_id);
+                            join_entry = Some(join_flow::JoinEntry::Resume {
+                                vtc_did: awaiting.vtc_did,
+                                outcome: join_flow::RequirementsOutcome::Skipped,
+                            });
                         }
                     },
                     // Everything else acts on state and the resources below,
@@ -1203,6 +1189,8 @@ impl StateHandler {
                                 inactivated,
                                 capability_replies,
                                 personhood_challenges,
+                                vetting_answers,
+                                vetting_grant_checks,
                             } = effects;
 
                             // A live challenge is display state, not account
@@ -1301,6 +1289,27 @@ impl StateHandler {
                                 }
                             }
                             apply_capability_replies(&mut state, capability_replies);
+                            // A vetter's grant is checked for revocation off the
+                            // loop: the check fetches the community's status list.
+                            for check in vetting_grant_checks {
+                                vetting_actions::spawn_grant_check(&dispatch_tx, &tdk, check);
+                            }
+                            // The manifest a waiting join asked for resumes it; every
+                            // other answer goes to the Vetting page.
+                            let mut answers = Vec::with_capacity(vetting_answers.len());
+                            for answer in vetting_answers {
+                                match awaiting_requirements
+                                    .as_ref()
+                                    .and_then(|a| join_flow::resume_for(a, &answer))
+                                {
+                                    Some(entry) => {
+                                        awaiting_requirements = None;
+                                        join_entry = Some(entry);
+                                    }
+                                    None => answers.push(answer),
+                                }
+                            }
+                            vetting_actions::apply_answers(&mut state, &config, answers);
                         }
                         didcomm::DIDCommEvent::TrustPingReceived { from, listener_id, message_id } => {
                             let sender = from.as_deref().unwrap_or("unknown");
@@ -1559,6 +1568,22 @@ impl StateHandler {
                 // that lands while a save runs is re-scheduled on completion.
                 // When nothing is scheduled the arm parks forever (no busy-wait).
                 _ = capabilities_sweep.tick() => {
+                    // Questions to communities have a reply window too (R1.2).
+                    vetting_actions::expire_queries(&mut state, &mut config, chrono::Utc::now());
+                    if awaiting_requirements
+                        .as_ref()
+                        .is_some_and(|a| a.asked_at.elapsed() >= join_flow::REQUIREMENTS_WAIT)
+                        && let Some(awaiting) = awaiting_requirements.take()
+                    {
+                        config.private.vetting.forget_query(&awaiting.document_id);
+                        join_entry = Some(join_flow::JoinEntry::Resume {
+                            vtc_did: awaiting.vtc_did,
+                            outcome: join_flow::RequirementsOutcome::Unanswered(format!(
+                                "no answer within {} seconds — its service may be offline",
+                                join_flow::REQUIREMENTS_WAIT.as_secs()
+                            )),
+                        });
+                    }
                     // R4.3: a capability query has a defined reply window. The
                     // send was fire-and-forget; if no correlated reply arrived,
                     // fail the view closed with a distinct, actionable message.
@@ -1848,6 +1873,52 @@ impl StateHandler {
                     break interrupted;
                 }
             }
+            // Enter the join flow: from the Communities panel, or back from waiting
+            // on a community's requirements. Here rather than in an arm so every
+            // way in is handled the same.
+            if let Some(entry) = join_entry.take() {
+                awaiting_requirements = None;
+                match self
+                    .join_flow(
+                        &mut action_rx,
+                        &mut interrupt_rx,
+                        &mut state,
+                        &tdk,
+                        &mut config,
+                        admin_vta.as_ref(),
+                        self.profile.as_str(),
+                        Some(&didcomm_service),
+                        entry,
+                    )
+                    .await
+                {
+                    Ok(join_flow::JoinExit::Returned(joined)) => {
+                        state.active_page = state::ActivePage::Main;
+                        // R-B-5 / D11: bring the new community's session up live
+                        // so the VTC's async receipt is received now, not only
+                        // after a restart.
+                        if let Some(joined) = joined {
+                            register_joined_session(
+                                &mut session_manager,
+                                &didcomm_service,
+                                &tdk,
+                                &config,
+                                joined,
+                                &mut state,
+                            )
+                            .await;
+                        }
+                    }
+                    Ok(join_flow::JoinExit::AwaitRequirements(awaiting)) => {
+                        awaiting_requirements = Some(awaiting);
+                    }
+                    Ok(join_flow::JoinExit::Exit(interrupted)) => break interrupted,
+                    Err(e) => {
+                        state.main_page.log_error("Join flow failed", &e);
+                        state.active_page = state::ActivePage::Main;
+                    }
+                }
+            }
             // Keep the working-context selection valid against any account change
             // this iteration applied (join/leave/status transition) before the UI
             // re-renders from the broadcast (D10 / R-C-6), then point the runtime
@@ -2035,6 +2106,10 @@ impl StateHandler {
                                     // the early load-failure callers, which
                                     // cannot reach a join anyway.
                                     messaging,
+                                    // This loop has no inbound arm, so the flow
+                                    // cannot wait here for a community's
+                                    // requirements; it uses what the book knows.
+                                    join_flow::JoinEntry::Fresh { hears_replies: false },
                                 )
                                 .await
                             {
@@ -2062,6 +2137,10 @@ impl StateHandler {
                                     // the SDK, deleted at the mediator, and dropped.
                                     joined_a_community =
                                         joined.is_some() && ctx.config.active_identity().is_some();
+                                }
+                                // Not returned without `hears_replies`.
+                                Ok(join_flow::JoinExit::AwaitRequirements(_)) => {
+                                    state.active_page = state::ActivePage::Main;
                                 }
                                 Ok(join_flow::JoinExit::Exit(interrupted)) => {
                                     if let Err(e) = terminator.terminate(interrupted.clone()) {
@@ -2380,7 +2459,9 @@ impl StateHandler {
                     Action::JoinReuseConfirm | Action::JoinReuseCancel |
                     Action::JoinInvitationSelect(..) | Action::JoinInvitationChoose |
                     Action::JoinContextSelect(..) | Action::JoinContextSlug(..) |
-                    Action::JoinContextChoose |
+                    Action::JoinContextChoose | Action::JoinVettingApply | Action::JoinVettingJoin |
+                    Action::JoinVettingAskAgain | Action::JoinVettingField(..) |
+                    Action::JoinVettingCycle(..) |
                     Action::JoinCancel | Action::JoinPasteVic(..) | Action::JoinPasteFromClipboard |
                     Action::JoinClearVic | Action::ImportConfig(..) | Action::SetProtection(..) |
                     Action::VtaSubmitDid(..) | Action::VtaStartProvision(..) |
