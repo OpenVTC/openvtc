@@ -2556,4 +2556,20 @@ pub enum SettingsMode {
         /// Live text the operator is typing into the confirm field.
         confirm_input: String,
     },
+    /// Choosing a theme. The highlighted theme is previewed on the whole
+    /// screen; `original` is put back if the choice is cancelled.
+    ThemePicker {
+        rows: Vec<ThemeRow>,
+        selected: usize,
+        original: String,
+    },
+}
+
+/// A theme on the picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThemeRow {
+    pub id: String,
+    pub name: String,
+    /// Where it comes from, in a word or two.
+    pub source: String,
 }

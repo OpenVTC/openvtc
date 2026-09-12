@@ -80,6 +80,7 @@ pub fn cli() -> Command {
                         ),
                 ]),
         )
+        .subcommand(crate::theme_cmd::command())
 }
 
 #[cfg(feature = "openpgp-card")]
@@ -139,6 +140,81 @@ mod tests {
             .try_get_matches_from(["openvtc", "setup"])
             .expect("`setup` is a valid subcommand");
         assert_eq!(matches.subcommand_name(), Some("setup"));
+    }
+
+    #[test]
+    fn theme_subcommands_are_accepted() {
+        let matches = cli()
+            .try_get_matches_from(["openvtc", "theme", "import", "nvim:tokyonight", "--use"])
+            .expect("`theme import` is a valid subcommand");
+        let (_, theme) = matches.subcommand().expect("theme");
+        let (sub, import) = theme.subcommand().expect("import");
+        assert_eq!(sub, "import");
+        assert!(import.get_flag("use"));
+        assert!(
+            cli()
+                .try_get_matches_from(["openvtc", "theme", "set"])
+                .is_err(),
+            "`set` needs a theme id"
+        );
+    }
+
+    #[test]
+    fn theme_set_auto_and_export_are_accepted() {
+        let matches = cli()
+            .try_get_matches_from([
+                "openvtc", "theme", "set", "auto", "--dark", "nord", "--light", "dracula",
+            ])
+            .expect("`theme set auto --dark --light` is valid");
+        let (_, theme) = matches.subcommand().expect("theme");
+        let (_, set) = theme.subcommand().expect("set");
+        assert_eq!(
+            set.get_one::<String>("dark").map(String::as_str),
+            Some("nord")
+        );
+        assert_eq!(
+            set.get_one::<String>("light").map(String::as_str),
+            Some("dracula")
+        );
+
+        let matches = cli()
+            .try_get_matches_from([
+                "openvtc",
+                "theme",
+                "export",
+                "nord",
+                "--format",
+                "kitty",
+                "-o",
+                "nord.conf",
+            ])
+            .expect("`theme export` is valid");
+        let (_, theme) = matches.subcommand().expect("theme");
+        let (_, export) = theme.subcommand().expect("export");
+        assert_eq!(
+            export.get_one::<String>("format").map(String::as_str),
+            Some("kitty")
+        );
+        assert_eq!(
+            export.get_one::<String>("output").map(String::as_str),
+            Some("nord.conf")
+        );
+
+        let matches = cli()
+            .try_get_matches_from(["openvtc", "theme", "export", "nord"])
+            .expect("the format defaults");
+        let (_, theme) = matches.subcommand().expect("theme");
+        let (_, export) = theme.subcommand().expect("export");
+        assert_eq!(
+            export.get_one::<String>("format").map(String::as_str),
+            Some("openvtc")
+        );
+        assert!(
+            cli()
+                .try_get_matches_from(["openvtc", "theme", "export", "nord", "--format", "vim"])
+                .is_err(),
+            "an unknown format is refused"
+        );
     }
 
     #[test]
