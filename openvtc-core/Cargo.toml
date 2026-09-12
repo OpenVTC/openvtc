@@ -115,7 +115,7 @@ affinidi-messaging-test-mediator = "0.7"
 # `vta-service` is the VTA server crate; it carries the credential-vault
 # lifecycle tasks (receive/query/archive/delete/restore/purge) + the
 # `MockVta::start_provisionable` seams used by the e2e tests. Track this with
-# the vta-sdk major: **0.26 is the line built against 0.37**, and it is published,
+# the vta-sdk major: **0.27 is the line built against 0.38**, and it is published,
 # so this resolves from crates.io again rather than through the patch block the
 # 0.36 line needed. 0.25 was the line built against 0.35, as 0.24 was
 # against 0.34, 0.23 against 0.32, 0.19 against 0.27, 0.17 against 0.25, 0.15
@@ -124,9 +124,17 @@ affinidi-messaging-test-mediator = "0.7"
 # wire types are generated, so a mismatch is a type error rather than a silent
 # shape difference.
 #
-# 0.26 also declares `trust-tasks-rs ^0.20.4` and `affinidi-tdk ^0.14`, which is
+# 0.27 also declares `trust-tasks-rs ^0.20.4` and `affinidi-tdk ^0.14`, which is
 # what keeps the **dev** graph from growing the second copy of each that the
 # root manifest's notes warn about.
+#
+# The move from 0.26 to 0.27 is that warning coming true rather than a routine
+# refresh. 0.26 requires `vta-sdk ^0.37` and `didwebvh-rs ^0.6`; with the
+# workspace on `vta-sdk` 0.38 that dev edge alone held a third sdk node (0.37.0)
+# in the graph and kept `didwebvh-rs` 0.6.1 beside the 0.7 the resolver uses.
+# 0.27 requires `^0.38` and `^0.7`, so raising this floor is what collapses both.
+# The shipped graph looked clean throughout — this is exactly the dev-only edge
+# the note above says gets forgotten.
 #
 # Its `affinidi-messaging-sdk` edge is still on `^0.21` upstream, one line
 # behind the runtime graph — but it sits behind the non-default `tsp` feature,
@@ -141,7 +149,7 @@ affinidi-messaging-test-mediator = "0.7"
 # ApproveScope, ContextDirection}` as its own public API, so a graph holding two
 # sdks has two distinct `ApproveScope` types that do not unify. VTI republished
 # this crate for exactly this reason (see its Cargo.toml note on `publish`).
-vta-service = { version = "0.26", default-features = false, features = ["test-support", "rest", "didcomm"] }
+vta-service = { version = "0.27", default-features = false, features = ["test-support", "rest", "didcomm"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }

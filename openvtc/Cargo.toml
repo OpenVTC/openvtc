@@ -41,13 +41,13 @@ anyhow.workspace = true
 # Floor is 0.4.9 — the release VGI cut from `chore/vta-sdk-036`, and the newest
 # there is. It resolves from crates.io, which is what let the patch block go.
 #
-# **It is still a minor behind this workspace, and that cannot be fixed here.**
-# 0.4.9 requires `vta-sdk ^0.36` while the workspace is on 0.37, so the graph
-# holds two sdks. A `[patch]` is not the lever this time: 0.4.9 was cut from VGI
-# `main`, so there is no newer commit to redirect to. It closes when VGI takes
-# 0.37 and releases, and this floor moves to that release. See the `vta-sdk` note
-# in the root manifest for why two sdks are normally a build failure and why this
-# one is not.
+# **It is still behind this workspace, and that cannot be fixed here.**
+# 0.4.9 requires `vta-sdk ^0.36` while the workspace is on 0.38, so the graph
+# holds two sdks. A `[patch]` is not the lever: 0.4.9 was cut from VGI `main`,
+# so there is no newer commit to redirect to. VGI `main` has since taken 0.38
+# (VGI #51), so the remaining step is a VGI *release* — when one is cut, this
+# floor moves to it and the second sdk goes. See the `vta-sdk` note in the root
+# manifest for why two sdks are normally a build failure and why this one is not.
 #
 # Naming 0.4.9 rather than a bare `"0.4"` is what stops a clean checkout
 # resolving further back and adding a *third* sdk line.
