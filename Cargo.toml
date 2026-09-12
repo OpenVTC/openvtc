@@ -238,7 +238,16 @@ qrcode = { version = "0.14", default-features = false }
 # latest release. aes-gcm no longer holds this pin — it moved to 0.11 and its
 # one RNG call site now fills the nonce from `rand`'s OsRng directly rather
 # than going through `AeadCore::generate_nonce`.
-rand = "0.10"
+#
+# Dependabot proposed 0.10 anyway and it merged (#314), which stopped `main`
+# compiling: 0.10 replaces `OsRng` with the fallible `rngs::SysRng` and splits
+# `RngCore` into `Rng`/`TryRng`, so all four call sites here fail to resolve,
+# and `pgp`'s `encrypt` still wants a rand 0.8 `CryptoRng + Rng` regardless.
+# There is no newer `pgp` to move to — 0.20.0 is the latest release and
+# declares `rand ^0.8.6`, and `openpgp-card-rpgp` 0.8.1 pins `pgp ^0.20` —
+# so the pin stays until the OpenPGP stack moves. `rand` is in Dependabot's
+# ignore list for that reason; delete both together, not this line alone.
+rand = "0.8"
 ratatui = "0.30"
 regex = "1.12"
 secrecy = { version = "0.10", features = ["serde"] }
@@ -425,7 +434,12 @@ reqwest = { version = "0.13", features = ["json"] }
 # `StaticSecret` is handed to. `cargo tree -i x25519-dalek@2.0.1` is where that
 # is checked. It collapses when `pgp` releases on 3.x; 0.20.0 is still its
 # latest and still declares `^2`.
-x25519-dalek = { version = "3.0", features = ["static_secrets"] }
+#
+# Dependabot proposed 3.0 and it merged alongside the `rand` bump (#314),
+# which stopped the binary compiling exactly as described above: `expected
+# x25519_dalek::x25519::StaticSecret, found StaticSecret`. It is in
+# Dependabot's ignore list with `rand`; lift both when `pgp` moves.
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 zeroize = "1.8"
 
 # Openpgp-Card Support

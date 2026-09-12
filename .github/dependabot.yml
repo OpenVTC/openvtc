@@ -29,3 +29,16 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      # `rand` is held at 0.8 by the OpenPGP stack, not by inattention: `pgp`
+      # 0.20 (the latest release) declares `rand ^0.8.6` and takes an
+      # `R: CryptoRng + Rng` from that trait set, and `openpgp-card-rpgp` pins
+      # `pgp ^0.20`. A 0.10 bump merged once and stopped `main` compiling,
+      # because 0.10 removes `OsRng` and splits `RngCore`. The manifest entry
+      # explains the pin; lift both together when the OpenPGP stack moves.
+      - dependency-name: "rand"
+      # Held at 2.x for the same reason, and bumped to 3.0 in the same commit:
+      # our `StaticSecret` goes straight to pgp's `ecdh::Curve25519Legacy`, and
+      # a 3.x secret is a different type there. The graph carries a 3.x copy
+      # too, reached only through the vta-sdk crypto stack, and no type crosses.
+      - dependency-name: "x25519-dalek"

@@ -6168,7 +6168,7 @@ dependencies = [
  "openvtc-core",
  "pgp",
  "qrcode",
- "rand 0.10.2",
+ "rand 0.8.8",
  "ratatui",
  "regex",
  "secrecy",
@@ -6191,7 +6191,7 @@ dependencies = [
  "uuid",
  "vta-sdk",
  "windows-native-keyring-store",
- "x25519-dalek 3.0.0",
+ "x25519-dalek 2.0.1",
  "zeroize",
 ]
 
@@ -6232,7 +6232,7 @@ dependencies = [
  "openpgp-card-rpgp",
  "openssl-sys",
  "pgp",
- "rand 0.10.2",
+ "rand 0.8.8",
  "regex",
  "reqwest",
  "secrecy",
@@ -6253,7 +6253,7 @@ dependencies = [
  "vta-sdk",
  "vta-service",
  "wiremock",
- "x25519-dalek 3.0.0",
+ "x25519-dalek 2.0.1",
  "zeroize",
 ]
 
