@@ -13,18 +13,13 @@ use dtg_credentials::DTGCredential;
 use serde_json::{Value, json};
 use trust_tasks_rs::TrustTask;
 use uuid::Uuid;
-use vta_sdk::protocols::join_requests::{
-    CommunityBranding, JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, JoinRequestManifestResponseBody,
-    ManifestCriterion,
-};
+use vta_sdk::protocols::join_requests::{JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, manifest};
 use vta_sdk::protocols::vetting::{
-    COMMUNITY_ROLE_ENDORSEMENT_TYPE, CardClaim, DeclaredRelationship, DeclineCode,
-    IDENTITY_VETTING_ENDORSEMENT_TYPE, ListedVetter, RevocationReason, TicketPresentation,
-    VETTER_ROLE, VETTING_DECLINE_TYPE, VETTING_REQUEST_ERR_INVALID_TICKET,
-    VETTING_REQUEST_ERR_NOT_ELIGIBLE, VETTING_REQUEST_TYPE, VETTING_SESSION_TYPE,
-    VETTING_VETTER_PROFILE_ERR_NOT_ELIGIBLE, VETTING_VETTER_RESEND_ERR_NOT_GRANTED, VetterListBody,
-    VetterListResponseBody, VetterProfileBody, VetterProfileResponseBody, VetterResendResponseBody,
-    VettingMethod, VettingRequirements, VettingSessionResponseBody,
+    COMMUNITY_ROLE_ENDORSEMENT_TYPE, IDENTITY_VETTING_ENDORSEMENT_TYPE, VETTER_ROLE,
+    VETTING_DECLINE_TYPE, VETTING_REQUEST_ERR_INVALID_TICKET, VETTING_REQUEST_ERR_NOT_ELIGIBLE,
+    VETTING_REQUEST_TYPE, VETTING_SESSION_TYPE, VETTING_VETTER_PROFILE_ERR_NOT_ELIGIBLE,
+    VETTING_VETTER_RESEND_ERR_NOT_GRANTED, VettingMethod, VettingRelationship, VettingRequirements,
+    decline, request, revoke_statement, session, vetters,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::card::sign_card;
@@ -53,6 +48,24 @@ use crate::persona::disclosure::ReleasedClaim;
 /// offline. [`the_community_is_its_key`] holds the two together.
 const COMMUNITY: &str = "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p";
 const COMMUNITY_SEED: u8 = 0xC0;
+/// A `requirementsDigest` the published criterion accepts: base58btc, at least
+/// 16 characters.
+const DIGEST: &str = "zQmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR";
+
+/// A listing request with no filters at all.
+fn unfiltered_list() -> vetters::list::v0_1::Payload {
+    vetters::list::v0_1::Payload::try_from(vetters::list::v0_1::Payload::builder()).unwrap()
+}
+
+/// A spoken ticket in the published form — upper-case Crockford base32.
+fn code_ticket(code: &str) -> request::v0_1::Ticket {
+    request::v0_1::Ticket::ShortCodeTicket(
+        request::v0_1::ShortCodeTicket::try_from(
+            request::v0_1::ShortCodeTicket::builder().code(code),
+        )
+        .expect("a Crockford code"),
+    )
+}
 
 #[test]
 fn the_community_is_its_key() {
@@ -188,18 +201,32 @@ fn requirements() -> VettingRequirements {
 }
 
 /// The community's manifest 0.2 body.
-fn manifest_body() -> JoinRequestManifestResponseBody {
-    JoinRequestManifestResponseBody {
-        community_did: COMMUNITY.into(),
-        criteria: vec![ManifestCriterion {
-            id: "vetted".into(),
-            description: None,
-            presentation_definition: json!({}),
-            vetting: Some(requirements()),
-            requirements_digest: Some("zRequirementsDigest".into()),
-        }],
-        branding: None,
-    }
+fn manifest_body() -> manifest::v0_2::Response {
+    manifest_with(Some(requirements()), None)
+}
+
+/// A manifest 0.2 body carrying `vetting` and `branding`.
+fn manifest_with(
+    vetting: Option<VettingRequirements>,
+    branding: Option<manifest::v0_2::CommunityBranding>,
+) -> manifest::v0_2::Response {
+    let criterion = manifest::v0_2::Criterion::try_from(
+        manifest::v0_2::Criterion::builder()
+            .id("vetted")
+            .presentation_definition(serde_json::Map::new())
+            .vetting(vetting)
+            .requirements_digest(Some(
+                manifest::v0_2::DigestMultibase::try_from(DIGEST).unwrap(),
+            )),
+    )
+    .unwrap();
+    manifest::v0_2::Response::try_from(
+        manifest::v0_2::Response::builder()
+            .community_did(COMMUNITY)
+            .criteria(vec![criterion])
+            .branding(branding),
+    )
+    .unwrap()
 }
 
 /// The community's manifest 0.2 reply, as its dispatcher sends it.
@@ -216,7 +243,7 @@ fn manifest_reply() -> Message {
 }
 
 /// An applicant with requirements in hand, and a vetter with a ticket for them.
-async fn ready() -> (Party, Party, TicketPresentation) {
+async fn ready() -> (Party, Party, request::v0_1::Ticket) {
     let mut applicant = Party::new(1);
     let mut vetter = Party::new(2).member_of(COMMUNITY);
     vetter.named_vetter().await;
@@ -231,12 +258,12 @@ async fn ready() -> (Party, Party, TicketPresentation) {
         Some(Notice::RequirementsUpdated { .. })
     ));
     let ticket = Ticket::issue(COMMUNITY, vetter.persona, vec![], 1, DEFAULT_VALIDITY, now);
-    let presented = ticket.code_presentation();
+    let presented = ticket.code_presentation().unwrap();
     vetter.book.tickets.push(ticket);
     (applicant, vetter, presented)
 }
 
-async fn request(applicant: &mut Party, vetter: &Party, ticket: TicketPresentation) -> Message {
+async fn request(applicant: &mut Party, vetter: &Party, ticket: request::v0_1::Ticket) -> Message {
     let id = wire::new_id();
     let vetter_did = vetter.did.clone();
     let body = applicant
@@ -256,7 +283,7 @@ async fn request(applicant: &mut Party, vetter: &Party, ticket: TicketPresentati
 /// Request, accept and open a session. Returns the vetter's request id and the
 /// session document.
 async fn in_session(applicant: &mut Party, vetter: &mut Party) -> (String, TrustTask<Value>) {
-    let ticket = vetter.book.tickets[0].code_presentation();
+    let ticket = vetter.book.tickets[0].code_presentation().unwrap();
     let message = request(applicant, vetter, ticket).await;
     let handled = vetter.receive(&message, &applicant.did).await;
     let Some(Notice::RequestAccepted { request_id, .. }) = handled.notice.clone() else {
@@ -336,11 +363,15 @@ async fn an_applicant_is_vetted_end_to_end() {
         .application()
         .card_draft(
             &session_id,
-            vec![CardClaim {
-                claim_type: "name.legal".into(),
-                value: json!("Alice Example"),
-                provenance: "selfAsserted".into(),
-            }],
+            vec![
+                session::v0_1::VettingCardClaim::try_from(
+                    session::v0_1::VettingCardClaim::builder()
+                        .type_("name.legal")
+                        .value(json!("Alice Example"))
+                        .provenance("selfAsserted"),
+                )
+                .unwrap(),
+            ],
             Utc::now(),
         )
         .unwrap();
@@ -350,11 +381,8 @@ async fn an_applicant_is_vetted_end_to_end() {
         .record_card(&session_id, &card, &resolver, Utc::now())
         .await
         .unwrap();
-    let doc = wire::response(
-        &session_doc,
-        &VettingSessionResponseBody { card, ext: None },
-    )
-    .unwrap();
+    // The card travels as it was signed: its digest is what the statement names.
+    let doc = wire::response(&session_doc, &json!({ "card": card })).unwrap();
     let message = signed(doc, &applicant.secret).await;
     let handled = vetter.receive(&message, &applicant.did).await;
     assert!(matches!(handled.notice, Some(Notice::CardReceived { .. })));
@@ -370,7 +398,7 @@ async fn an_applicant_is_vetted_end_to_end() {
                 document_classes: vec!["passport".into()],
                 claims_verified: vec!["name.legal".into()],
                 liveness_confirmed: true,
-                declared_relationship: DeclaredRelationship::None,
+                declared_relationship: VettingRelationship::None,
                 attestation_text_digest: None,
             },
             Utc::now(),
@@ -398,10 +426,7 @@ async fn an_applicant_is_vetted_end_to_end() {
     let application = applicant.application();
     assert!(application.checklist(Utc::now()).unwrap().satisfied());
     assert_eq!(application.presentable_statements(Utc::now()).len(), 1);
-    assert_eq!(
-        application.join_extensions()["requirementsDigest"],
-        "zRequirementsDigest"
-    );
+    assert_eq!(application.join_extensions()["requirementsDigest"], DIGEST);
 
     // Later, the vetter withdraws it.
     let notice_id = wire::new_id();
@@ -409,12 +434,15 @@ async fn an_applicant_is_vetted_end_to_end() {
         .book
         .withdrawal(
             &issued.id,
-            Some(RevocationReason::Mistake),
+            Some(revoke_statement::v0_1::PayloadReason::Mistake),
             &notice_id,
             Utc::now(),
         )
         .unwrap();
-    assert_eq!(body.statement_digest_multibase, issued.digest_multibase);
+    assert_eq!(
+        body.statement_digest_multibase.as_str(),
+        issued.digest_multibase
+    );
     assert!(
         vetter
             .book
@@ -483,7 +511,12 @@ async fn cards_come_from_the_face_and_keep_showing_the_same_identity() {
         .unwrap();
     app.record_sent_card(&session_id, sent, &claims, Utc::now())
         .unwrap();
-    assert_eq!(app.identity_claims, claims);
+    // The generated card claim has no `PartialEq`; what was kept is compared as
+    // what it serialises to.
+    assert_eq!(
+        serde_json::to_value(&app.identity_claims).unwrap(),
+        serde_json::to_value(&claims).unwrap()
+    );
 
     // The face has changed since: the next card is refused before it is signed.
     assert!(matches!(
@@ -495,14 +528,7 @@ async fn cards_come_from_the_face_and_keep_showing_the_same_identity() {
 #[tokio::test]
 async fn without_a_ticket_there_is_no_answer_at_all() {
     let (mut applicant, mut vetter, _) = ready().await;
-    let message = request(
-        &mut applicant,
-        &vetter,
-        TicketPresentation::Code {
-            code: "0000-0000".into(),
-        },
-    )
-    .await;
+    let message = request(&mut applicant, &vetter, code_ticket("0000-0000")).await;
     let handled = vetter.receive(&message, &applicant.did).await;
     assert!(handled.reply.is_none() && handled.notice.is_none());
     assert!(vetter.book.desk.is_empty());
@@ -512,15 +538,15 @@ async fn without_a_ticket_there_is_no_answer_at_all() {
 async fn a_bad_scanned_ticket_is_refused_and_the_applicant_hears_why() {
     let (mut applicant, mut vetter, _) = ready().await;
     let ticket_id = vetter.book.tickets[0].id.clone();
-    let message = request(
-        &mut applicant,
-        &vetter,
-        TicketPresentation::Scanned {
-            ticket_id,
-            secret: "A".repeat(43),
-        },
-    )
-    .await;
+    let scanned = request::v0_1::Ticket::QrTicket(
+        request::v0_1::QrTicket::try_from(
+            request::v0_1::QrTicket::builder()
+                .ticket_id(ticket_id)
+                .secret("A".repeat(43)),
+        )
+        .unwrap(),
+    );
+    let message = request(&mut applicant, &vetter, scanned).await;
     let handled = vetter.receive(&message, &applicant.did).await;
     let reply = handled.reply.expect("a scanned ticket is answered");
     assert_eq!(
@@ -548,7 +574,7 @@ async fn someone_who_is_not_a_member_cannot_vet() {
         DEFAULT_VALIDITY,
         Utc::now(),
     );
-    let presented = ticket.code_presentation();
+    let presented = ticket.code_presentation().unwrap();
     outsider.book.tickets.push(ticket);
     let message = request(&mut applicant, &outsider, presented).await;
     let handled = outsider.receive(&message, &applicant.did).await;
@@ -572,7 +598,7 @@ async fn a_member_the_community_has_not_named_cannot_vet() {
         DEFAULT_VALIDITY,
         Utc::now(),
     );
-    let presented = ticket.code_presentation();
+    let presented = ticket.code_presentation().unwrap();
     member.book.tickets.push(ticket);
     let message = request(&mut applicant, &member, presented).await;
     let handled = member.receive(&message, &applicant.did).await;
@@ -675,7 +701,7 @@ async fn a_vetter_can_decline_without_a_reason() {
         .book
         .decline(
             &request_id,
-            Some(DeclineCode::NotComfortable),
+            Some(decline::v0_1::PayloadCode::NotComfortable),
             None,
             Utc::now(),
         )
@@ -732,11 +758,17 @@ async fn a_vetter_asks_for_the_claims_the_community_requires() {
     );
     let handled = vetter.receive(&manifest_reply(), COMMUNITY).await;
     assert!(handled.changed, "the criteria are remembered");
-    let (claims, known) = vetter
-        .book
-        .required_claims_for(COMMUNITY, Some("zRequirementsDigest"));
+    let (claims, known) = vetter.book.required_claims_for(COMMUNITY, Some(DIGEST));
     assert!(known);
-    assert_eq!(claims, requirements().required_claims);
+    assert_eq!(
+        claims,
+        requirements()
+            .required_claims
+            .iter()
+            .flatten()
+            .map(|c| c.as_str().to_string())
+            .collect::<Vec<_>>()
+    );
     assert!(
         !vetter.receive(&manifest_reply(), COMMUNITY).await.changed,
         "the same manifest again changes nothing"
@@ -755,18 +787,8 @@ async fn the_communitys_decision_sla_is_known_once_its_manifest_is() {
         .start_application(COMMUNITY, with_sla.persona, &with_sla.did, Utc::now())
         .unwrap();
     let mut requirements = requirements();
-    requirements.decision_sla = Some("P21D".into());
-    let body = JoinRequestManifestResponseBody {
-        community_did: COMMUNITY.into(),
-        criteria: vec![ManifestCriterion {
-            id: "vetted".into(),
-            description: None,
-            presentation_definition: json!({}),
-            vetting: Some(requirements),
-            requirements_digest: Some("zOther".into()),
-        }],
-        branding: None,
-    };
+    requirements.decision_sla = Some("P21D".try_into().unwrap());
+    let body = manifest_with(Some(requirements), None);
     let reply = Message::build(
         wire::new_id(),
         JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE.to_string(),
@@ -806,7 +828,7 @@ fn asked(request: &TrustTask<Value>, persona: PersonaId, kind: QueryKind) -> Com
     }
 }
 
-fn listed_vetter() -> ListedVetter {
+fn listed_vetter() -> vetters::list::v0_1::ListedVetter {
     serde_json::from_value(json!({
         "vetterDid": "did:key:zCarol",
         "displayName": "Carol",
@@ -835,14 +857,19 @@ async fn a_vetter_publishes_a_profile_and_hears_the_communitys_answer() {
     // What the community receives is signed by the vetter and opens as a profile.
     let mut request = wire::vetter_profile_request(&vetter.did, COMMUNITY, &body).unwrap();
     wire::sign(&mut request, &vetter.secret).await.unwrap();
-    let opened: wire::Opened<VetterProfileBody> = wire::open(
+    let opened: wire::Opened<vetters::profile::v0_1::Payload> = wire::open(
         &wire::to_message(&request).unwrap(),
         &vetter.did,
         &TrustTaskVmResolver::did_key_only(),
     )
     .await
     .unwrap();
-    assert_eq!(opened.payload, body);
+    // The generated payload has no `PartialEq`; what was sent is compared as
+    // what it serialises to.
+    assert_eq!(
+        serde_json::to_value(&opened.payload).unwrap(),
+        serde_json::to_value(&body).unwrap()
+    );
 
     vetter
         .book
@@ -850,10 +877,12 @@ async fn a_vetter_publishes_a_profile_and_hears_the_communitys_answer() {
     vetter
         .book
         .ask(asked(&request, vetter.persona, QueryKind::VetterProfile));
-    let stored = VetterProfileResponseBody {
-        listed: true,
-        updated_at: now,
-    };
+    let stored = vetters::profile::v0_1::Response::try_from(
+        vetters::profile::v0_1::Response::builder()
+            .listed(true)
+            .updated_at(now),
+    )
+    .unwrap();
     let handled = vetter
         .receive(&community_answer(&request, &stored), COMMUNITY)
         .await;
@@ -909,12 +938,15 @@ async fn a_vetter_publishes_a_profile_and_hears_the_communitys_answer() {
 #[tokio::test]
 async fn the_directory_answers_only_what_was_asked() {
     let mut applicant = Party::new(1);
-    let page = VetterListResponseBody {
-        vetters: vec![listed_vetter()],
-        next_cursor: Some("page-2".into()),
-    };
-    let request =
-        wire::vetter_list_request(&applicant.did, COMMUNITY, &VetterListBody::default()).unwrap();
+    let page = vetters::list::v0_1::Response::try_from(
+        vetters::list::v0_1::Response::builder()
+            .vetters(vec![listed_vetter()])
+            .next_cursor(Some(
+                vetters::list::v0_1::ResponseNextCursor::try_from("page-2").unwrap(),
+            )),
+    )
+    .unwrap();
+    let request = wire::vetter_list_request(&applicant.did, COMMUNITY, &unfiltered_list()).unwrap();
 
     // Nobody asked: the page answers nothing.
     let handled = applicant
@@ -941,12 +973,14 @@ async fn the_directory_answers_only_what_was_asked() {
         panic!("the page is handed to whoever asked");
     };
     assert_eq!(query, request.id);
-    assert_eq!(got, page);
+    assert_eq!(
+        serde_json::to_value(&got).unwrap(),
+        serde_json::to_value(&page).unwrap()
+    );
     assert!(!handled.changed, "a directory page is never saved");
 
     // Refused: the community would not answer this caller.
-    let request =
-        wire::vetter_list_request(&applicant.did, COMMUNITY, &VetterListBody::default()).unwrap();
+    let request = wire::vetter_list_request(&applicant.did, COMMUNITY, &unfiltered_list()).unwrap();
     applicant
         .book
         .ask(asked(&request, applicant.persona, QueryKind::VetterList));
@@ -960,8 +994,7 @@ async fn the_directory_answers_only_what_was_asked() {
     ));
 
     // An error that answers nothing we asked is left for the join handler.
-    let stray =
-        wire::vetter_list_request(&applicant.did, COMMUNITY, &VetterListBody::default()).unwrap();
+    let stray = wire::vetter_list_request(&applicant.did, COMMUNITY, &unfiltered_list()).unwrap();
     let resolver = TrustTaskVmResolver::did_key_only();
     let ctx = Context {
         account: &applicant.account,
@@ -981,8 +1014,7 @@ async fn the_directory_answers_only_what_was_asked() {
     );
 
     // An answer this client cannot read says so, rather than timing out.
-    let request =
-        wire::vetter_list_request(&applicant.did, COMMUNITY, &VetterListBody::default()).unwrap();
+    let request = wire::vetter_list_request(&applicant.did, COMMUNITY, &unfiltered_list()).unwrap();
     applicant
         .book
         .ask(asked(&request, applicant.persona, QueryKind::VetterList));
@@ -1009,10 +1041,12 @@ async fn a_resend_is_answered_or_refused_in_plain_words() {
     member
         .book
         .ask(asked(&request, member.persona, QueryKind::VetterResend));
-    let resent = VetterResendResponseBody {
-        credential_id: "urn:uuid:grant".into(),
-        valid_until: Utc::now() + Duration::days(300),
-    };
+    let resent = vetters::resend::v0_1::Response::try_from(
+        vetters::resend::v0_1::Response::builder()
+            .credential_id("urn:uuid:grant")
+            .valid_until(Utc::now() + Duration::days(300)),
+    )
+    .unwrap();
     let handled = member
         .receive(&community_answer(&request, &resent), COMMUNITY)
         .await;
@@ -1050,12 +1084,18 @@ async fn a_manifest_answers_whoever_asked_and_brings_the_communitys_branding() {
     applicant
         .book
         .ask(asked(&request, applicant.persona, QueryKind::Manifest));
-    let mut body = manifest_body();
-    body.branding = Some(CommunityBranding {
-        display_name: Some("Kernel Developers".into()),
-        accent_color: Some("#336699".into()),
-        ..CommunityBranding::default()
-    });
+    let branding = manifest::v0_2::CommunityBranding::try_from(
+        manifest::v0_2::CommunityBranding::builder()
+            .display_name(Some(
+                manifest::v0_2::CommunityBrandingDisplayName::try_from("Kernel Developers")
+                    .unwrap(),
+            ))
+            .accent_color(Some(
+                manifest::v0_2::CommunityBrandingAccentColor::try_from("#336699").unwrap(),
+            )),
+    )
+    .unwrap();
+    let body = manifest_with(Some(requirements()), Some(branding));
     let handled = applicant
         .receive(&community_answer(&request, &body), COMMUNITY)
         .await;
@@ -1175,7 +1215,7 @@ async fn a_grant_that_names_no_status_list_is_not_called_unrevoked() {
 #[tokio::test]
 async fn a_scanned_ticket_link_is_enough_to_ask_and_another_communitys_is_refused() {
     let (mut applicant, mut vetter, _) = ready().await;
-    let link = vetter.book.tickets[0].uri(&vetter.did);
+    let link = vetter.book.tickets[0].uri(&vetter.did).unwrap();
     let ticket = applicant.application().ticket_from_uri(&link).unwrap();
     assert_eq!(ticket.vetter, vetter.did);
     let message = request(&mut applicant, &vetter, ticket.presentation).await;
@@ -1194,7 +1234,9 @@ async fn a_scanned_ticket_link_is_enough_to_ask_and_another_communitys_is_refuse
         Utc::now(),
     );
     assert!(matches!(
-        applicant.application().ticket_from_uri(&elsewhere.uri(&vetter.did)),
+        applicant
+            .application()
+            .ticket_from_uri(&elsewhere.uri(&vetter.did).unwrap()),
         Err(TicketUriError::OtherCommunity(c)) if c == "did:key:zOtherCommunity"
     ));
     assert!(matches!(

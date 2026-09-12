@@ -22,9 +22,8 @@ use chrono::{DateTime, Duration, Utc};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vta_sdk::protocols::vetting::{
-    TicketPresentation, VETTING_REQUEST_ERR_INVALID_TICKET, VettingMethod,
-};
+use vta_sdk::protocols::vetting::request::v0_1 as request;
+use vta_sdk::protocols::vetting::{VETTING_REQUEST_ERR_INVALID_TICKET, VettingMethod};
 use vta_sdk::vetting::ticket_uri::{self, TicketUri};
 
 use crate::config::account::PersonaId;
@@ -116,20 +115,33 @@ impl Ticket {
     }
 
     /// The spoken form, as an applicant presents it.
-    #[must_use]
-    pub fn code_presentation(&self) -> TicketPresentation {
-        TicketPresentation::Code {
-            code: self.code.clone(),
-        }
+    ///
+    /// # Errors
+    ///
+    /// The published ticket refuses a code that breaks its pattern. Every code
+    /// [`Ticket::issue`] mints satisfies it, so this fails only for a ticket
+    /// read from a config some other build wrote.
+    pub fn code_presentation(&self) -> Result<request::Ticket, String> {
+        let code = request::ShortCodeTicket::try_from(
+            request::ShortCodeTicket::builder().code(self.code.clone()),
+        )
+        .map_err(|e| format!("ticket code: {e}"))?;
+        Ok(request::Ticket::ShortCodeTicket(code))
     }
 
     /// The scanned form, as an applicant presents it.
-    #[must_use]
-    pub fn scanned_presentation(&self) -> TicketPresentation {
-        TicketPresentation::Scanned {
-            ticket_id: self.id.clone(),
-            secret: self.secret.clone(),
-        }
+    ///
+    /// # Errors
+    ///
+    /// As [`Ticket::code_presentation`], for the ticket id and secret.
+    pub fn scanned_presentation(&self) -> Result<request::Ticket, String> {
+        let ticket = request::QrTicket::try_from(
+            request::QrTicket::builder()
+                .ticket_id(self.id.clone())
+                .secret(self.secret.clone()),
+        )
+        .map_err(|e| format!("scanned ticket: {e}"))?;
+        Ok(request::Ticket::QrTicket(ticket))
     }
 
     /// The ticket as a link — what its QR code carries. `vetter` is the DID of
@@ -138,13 +150,18 @@ impl Ticket {
     /// The link carries the scanned form: full-entropy, so it is refused
     /// outright when wrong rather than silently throttled, and nobody guesses
     /// it. The short code stays for reading aloud.
-    #[must_use]
-    pub fn uri(&self, vetter: &str) -> String {
+    ///
+    /// # Errors
+    ///
+    /// As [`Ticket::scanned_presentation`], or a ticket form the URI has no
+    /// members for — `ticket_uri::encode` returns a `Result` on this line.
+    pub fn uri(&self, vetter: &str) -> Result<String, String> {
         ticket_uri::encode(&TicketUri {
             community: self.community.clone(),
             vetter: vetter.to_string(),
-            presentation: self.scanned_presentation(),
+            presentation: self.scanned_presentation()?,
         })
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -252,14 +269,15 @@ pub enum Redemption {
 pub fn check(
     tickets: &[Ticket],
     throttle: &mut GuessThrottle,
-    presented: &TicketPresentation,
+    presented: &request::Ticket,
     sender: &str,
     community: &str,
     persona: PersonaId,
     now: DateTime<Utc>,
 ) -> Redemption {
     match presented {
-        TicketPresentation::Code { code } => {
+        request::Ticket::ShortCodeTicket(spoken) => {
+            let code = spoken.code.as_str();
             throttle.prune(now);
             if !throttle.allows(sender) {
                 return Redemption::Silent;
@@ -282,10 +300,11 @@ pub fn check(
                 }
             }
         }
-        TicketPresentation::Scanned { ticket_id, secret } => {
+        request::Ticket::QrTicket(scanned) => {
+            let (ticket_id, secret) = (scanned.ticket_id.as_str(), scanned.secret.as_str());
             match tickets
                 .iter()
-                .find(|t| &t.id == ticket_id && t.persona == persona)
+                .find(|t| t.id == ticket_id && t.persona == persona)
             {
                 Some(ticket)
                     if ticket.community == community
@@ -299,6 +318,9 @@ pub fn check(
                 _ => Redemption::Refused(VETTING_REQUEST_ERR_INVALID_TICKET),
             }
         }
+        // The published ticket is `#[non_exhaustive]`: a form added by a later
+        // `vetting/request` is refused rather than silently admitted.
+        _ => Redemption::Refused(VETTING_REQUEST_ERR_INVALID_TICKET),
     }
 }
 
@@ -319,7 +341,7 @@ pub fn consume(tickets: &mut [Ticket], ticket_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vta_sdk::protocols::vetting::VettingRequestBody;
+    use vta_sdk::protocols::vetting::check_request;
 
     const COMMUNITY: &str = "did:web:vtc.example";
 
@@ -327,33 +349,55 @@ mod tests {
         Ticket::issue(COMMUNITY, persona, vec![], 1, DEFAULT_VALIDITY, now)
     }
 
+    /// A spoken ticket carrying `code`, which the published type refuses unless
+    /// it is Crockford base32 in upper case.
+    fn code_ticket(code: &str) -> Result<request::Ticket, String> {
+        request::ShortCodeTicket::try_from(request::ShortCodeTicket::builder().code(code))
+            .map(request::Ticket::ShortCodeTicket)
+            .map_err(|e| e.to_string())
+    }
+
     #[test]
     fn both_forms_satisfy_the_request_schema() {
         let t = ticket(PersonaId::new(), Utc::now());
-        for presented in [t.code_presentation(), t.scanned_presentation()] {
-            let body = VettingRequestBody {
-                community: COMMUNITY.into(),
-                requirements_digest: None,
-                join_did: "did:key:zApplicant".into(),
-                ticket: Some(presented),
-                introduction: None,
-                preferred_method: None,
-                languages: vec![],
-                message: None,
-                availability: None,
-                ext: None,
-            };
-            body.check_shape("did:key:zApplicant").unwrap();
+        for presented in [
+            t.code_presentation().unwrap(),
+            t.scanned_presentation().unwrap(),
+        ] {
+            let body = request::Payload::try_from(
+                request::Payload::builder()
+                    .community(COMMUNITY)
+                    .join_did("did:key:zApplicant")
+                    .ticket(Some(presented)),
+            )
+            .unwrap();
+            check_request(&body, "did:key:zApplicant").unwrap();
         }
+    }
+
+    /// The published code is upper-case Crockford base32. A code as a person
+    /// typed it is normalised before it is put on the wire; the type refuses it
+    /// otherwise, where the hand-written ticket carried whatever it was given.
+    #[test]
+    fn a_spoken_ticket_carries_the_code_in_the_published_form() {
+        let t = ticket(PersonaId::new(), Utc::now());
+        assert!(code_ticket(&t.code).is_ok());
+        assert!(code_ticket(&t.code.to_lowercase()).is_err());
+        assert!(code_ticket("K7QF2M9X").is_err(), "the dash is part of it");
     }
 
     #[test]
     fn a_ticket_link_carries_the_scanned_form() {
         let t = ticket(PersonaId::new(), Utc::now());
-        let decoded = ticket_uri::decode(&t.uri("did:key:zVetter")).unwrap();
+        let decoded = ticket_uri::decode(&t.uri("did:key:zVetter").unwrap()).unwrap();
         assert_eq!(decoded.community, COMMUNITY);
         assert_eq!(decoded.vetter, "did:key:zVetter");
-        assert_eq!(decoded.presentation, t.scanned_presentation());
+        // The published ticket has no `PartialEq`; its members are compared.
+        let request::Ticket::QrTicket(scanned) = &decoded.presentation else {
+            panic!("a link carries the scanned form");
+        };
+        assert_eq!(scanned.ticket_id.as_str(), t.id);
+        assert_eq!(scanned.secret.as_str(), t.secret);
     }
 
     #[test]
@@ -371,9 +415,7 @@ mod tests {
         let now = Utc::now();
         let mut tickets = vec![ticket(persona, now)];
         let mut throttle = GuessThrottle::default();
-        let presented = TicketPresentation::Code {
-            code: tickets[0].code.to_lowercase(),
-        };
+        let presented = code_ticket(&tickets[0].code).unwrap();
         let r = check(
             &tickets,
             &mut throttle,
@@ -409,9 +451,7 @@ mod tests {
         let now = Utc::now();
         let tickets = vec![ticket(persona, now)];
         let mut throttle = GuessThrottle::default();
-        let wrong = TicketPresentation::Code {
-            code: "0000-0000".into(),
-        };
+        let wrong = code_ticket("0000-0000").unwrap();
         for _ in 0..MAX_WRONG_CODES_PER_SENDER {
             assert_eq!(
                 check(
@@ -427,7 +467,7 @@ mod tests {
             );
         }
         // The throttled sender now gets silence even for the right code…
-        let right = tickets[0].code_presentation();
+        let right = tickets[0].code_presentation().unwrap();
         assert_eq!(
             check(
                 &tickets,
@@ -473,10 +513,14 @@ mod tests {
         let now = Utc::now();
         let tickets = vec![ticket(persona, now)];
         let mut throttle = GuessThrottle::default();
-        let presented = TicketPresentation::Scanned {
-            ticket_id: tickets[0].id.clone(),
-            secret: "A".repeat(43),
-        };
+        let presented = request::Ticket::QrTicket(
+            request::QrTicket::try_from(
+                request::QrTicket::builder()
+                    .ticket_id(tickets[0].id.clone())
+                    .secret("A".repeat(43)),
+            )
+            .unwrap(),
+        );
         assert_eq!(
             check(
                 &tickets,
@@ -497,7 +541,7 @@ mod tests {
         let persona = PersonaId::new();
         let now = Utc::now();
         let tickets = vec![ticket(persona, now)];
-        let right = tickets[0].scanned_presentation();
+        let right = tickets[0].scanned_presentation().unwrap();
         let mut throttle = GuessThrottle::default();
         let refused = Redemption::Refused(VETTING_REQUEST_ERR_INVALID_TICKET);
         let run = |throttle: &mut GuessThrottle, community, persona, at| {

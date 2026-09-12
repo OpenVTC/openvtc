@@ -8,9 +8,7 @@ use openvtc_core::config::community_context::{
     ContextDeletion, ContextDeletionPreview, ContextOption, PersonaTakenAlong,
 };
 use openvtc_core::vetting::registry::{DirectoryFilter, EventDraft, ProfileDraft};
-use vta_sdk::protocols::vetting::{
-    DeclaredRelationship, RevocationReason, TicketPresentation, VettingMethod,
-};
+use vta_sdk::protocols::vetting::{VettingMethod, VettingRelationship, request, revoke_statement};
 
 /// Lazily-rendered raw credential JSON for credential detail views.
 ///
@@ -1442,20 +1440,20 @@ pub const VETTING_METHODS: [VettingMethod; 3] = [
 ];
 
 /// Declared relationships, in the order the page cycles through them.
-pub const VETTING_RELATIONSHIPS: [DeclaredRelationship; 5] = [
-    DeclaredRelationship::None,
-    DeclaredRelationship::CommunityColleague,
-    DeclaredRelationship::SameEmployer,
-    DeclaredRelationship::Family,
-    DeclaredRelationship::OtherPersonal,
+pub const VETTING_RELATIONSHIPS: [VettingRelationship; 5] = [
+    VettingRelationship::None,
+    VettingRelationship::CommunityColleague,
+    VettingRelationship::SameEmployer,
+    VettingRelationship::Family,
+    VettingRelationship::OtherPersonal,
 ];
 
 /// Reasons a vetter may give for withdrawing a statement.
-pub const VETTING_WITHDRAWAL_REASONS: [RevocationReason; 4] = [
-    RevocationReason::Mistake,
-    RevocationReason::NewInformation,
-    RevocationReason::KeyCompromise,
-    RevocationReason::Other,
+pub const VETTING_WITHDRAWAL_REASONS: [revoke_statement::v0_1::PayloadReason; 4] = [
+    revoke_statement::v0_1::PayloadReason::Mistake,
+    revoke_statement::v0_1::PayloadReason::NewInformation,
+    revoke_statement::v0_1::PayloadReason::KeyCompromise,
+    revoke_statement::v0_1::PayloadReason::Other,
 ];
 
 /// How many requests a new ticket admits: one person, or a conference desk.
@@ -1502,24 +1500,24 @@ pub fn method_label(method: VettingMethod) -> &'static str {
 
 /// How a declared relationship reads on the page.
 #[must_use]
-pub fn relationship_label(relationship: DeclaredRelationship) -> &'static str {
+pub fn relationship_label(relationship: VettingRelationship) -> &'static str {
     match relationship {
-        DeclaredRelationship::None => "no prior relationship",
-        DeclaredRelationship::CommunityColleague => "we work together in the community",
-        DeclaredRelationship::SameEmployer => "same employer",
-        DeclaredRelationship::Family => "family",
-        DeclaredRelationship::OtherPersonal => "another personal relationship",
+        VettingRelationship::None => "no prior relationship",
+        VettingRelationship::CommunityColleague => "we work together in the community",
+        VettingRelationship::SameEmployer => "same employer",
+        VettingRelationship::Family => "family",
+        VettingRelationship::OtherPersonal => "another personal relationship",
         _ => "other",
     }
 }
 
 /// How a withdrawal reason reads on the page.
 #[must_use]
-pub fn reason_label(reason: RevocationReason) -> &'static str {
+pub fn reason_label(reason: revoke_statement::v0_1::PayloadReason) -> &'static str {
     match reason {
-        RevocationReason::Mistake => "I made a mistake",
-        RevocationReason::NewInformation => "I learned something new",
-        RevocationReason::KeyCompromise => "my signing key was compromised",
+        revoke_statement::v0_1::PayloadReason::Mistake => "I made a mistake",
+        revoke_statement::v0_1::PayloadReason::NewInformation => "I learned something new",
+        revoke_statement::v0_1::PayloadReason::KeyCompromise => "my signing key was compromised",
         _ => "another reason",
     }
 }
@@ -1622,7 +1620,7 @@ pub enum VettingMode {
         vetter: String,
         code: String,
         /// A scanned ticket from a pasted link, in place of the code.
-        ticket: Option<TicketPresentation>,
+        ticket: Option<request::v0_1::Ticket>,
         /// What the person should know before sending, e.g. how this vetter
         /// hands out tickets.
         note: Option<String>,

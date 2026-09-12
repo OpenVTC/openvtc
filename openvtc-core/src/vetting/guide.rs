@@ -7,7 +7,7 @@
 //! and the Vetting page, so they are made in one place.
 
 use vta_sdk::protocols::vetting::{
-    InvitationRequirement, VettingMethod, VettingRequirements, parse_iso8601_duration,
+    VettingMethod, VettingRequirements, VettingRequirementsInvitation, parse_iso8601_duration,
 };
 
 /// How a vetter meets an applicant, as the end of "a vetter can check you …".
@@ -64,7 +64,7 @@ fn join_words(items: &[String]) -> String {
 #[must_use]
 pub fn describe_requirements(requirements: &VettingRequirements) -> Vec<String> {
     let mut lines = Vec::new();
-    let n = requirements.min_statements;
+    let n = requirements.min_statements.get();
     lines.push(format!(
         "{n} vetting statement{}, each from a different vetter the community has named",
         if n == 1 { "" } else { "s" }
@@ -95,17 +95,21 @@ pub fn describe_requirements(requirements: &VettingRequirements) -> Vec<String> 
         (true, true) => "only vetters who already know you can vouch for you".to_string(),
         (true, false) => "the community names no way to be vetted".to_string(),
     });
-    if !requirements.required_claims.is_empty() {
-        let claims: Vec<String> = requirements
-            .required_claims
+    let required_claims = requirements.required_claims.as_deref().unwrap_or_default();
+    if !required_claims.is_empty() {
+        let claims: Vec<String> = required_claims
             .iter()
-            .map(|c| claim_words(c))
+            .map(|c| claim_words(c.as_str()))
             .collect();
         lines.push(match &requirements.accepted_document_classes {
             Some(classes) if !classes.is_empty() => format!(
                 "each vetter checks your {} against a document — one of: {}",
                 join_words(&claims),
-                classes.join(", ")
+                classes
+                    .iter()
+                    .map(|c| c.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             _ => format!(
                 "each vetter checks your {} — against whichever documents that vetter accepts",
@@ -116,19 +120,19 @@ pub fn describe_requirements(requirements: &VettingRequirements) -> Vec<String> 
     if let Some(age) = &requirements.max_statement_age {
         lines.push(format!(
             "a statement counts for {} after it is signed",
-            duration_words(age)
+            duration_words(age.as_str())
         ));
     }
     if matches!(
         requirements.invitation,
-        Some(InvitationRequirement::Required)
+        Some(VettingRequirementsInvitation::Required)
     ) {
         lines.push("you also need an invitation from the community".to_string());
     }
     if let Some(sla) = &requirements.decision_sla {
         lines.push(format!(
             "the community says it decides within {}",
-            duration_words(sla)
+            duration_words(sla.as_str())
         ));
     }
     lines
@@ -175,8 +179,10 @@ mod tests {
     #[test]
     fn a_documentation_floor_is_named_when_the_community_sets_one() {
         let mut r = requirements();
-        r.accepted_document_classes = Some(vec!["passport".into()]);
-        r.required_claims.push("email.work".into());
+        r.accepted_document_classes = Some(vec!["passport".try_into().unwrap()]);
+        r.required_claims
+            .get_or_insert_with(Vec::new)
+            .push("email.work".try_into().unwrap());
         assert!(describe_requirements(&r).iter().any(|l| l
             == "each vetter checks your legal name and work email against a document — one of: \
                 passport"));

@@ -15,8 +15,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use vta_sdk::protocols::vetting::{
-    VETTING_VETTER_PROFILE_ERR_NOT_ELIGIBLE, VETTING_VETTER_RESEND_ERR_NOT_GRANTED,
-    VetterListResponseBody,
+    VETTING_VETTER_PROFILE_ERR_NOT_ELIGIBLE, VETTING_VETTER_RESEND_ERR_NOT_GRANTED, vetters,
 };
 
 use super::book::VettingBook;
@@ -69,7 +68,12 @@ pub struct CommunityQuery {
 
 /// An answer to a [`CommunityQuery`], for whoever asked. Nothing here is
 /// persisted; a published profile's record is updated by the handler itself.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// No `PartialEq`: a directory page is the generated
+/// `vtc/vetting/vetters/list/0.1` response, and the generated wire types derive
+/// only `Serialize`, `Deserialize`, `Clone` and `Debug`. Comparing two answers
+/// means comparing what they carry.
+#[derive(Clone, Debug)]
 pub enum CommunityAnswer {
     /// The community's manifest arrived and its requirements are now known.
     Manifest {
@@ -83,7 +87,7 @@ pub enum CommunityAnswer {
         /// The community.
         community: String,
         /// The page.
-        page: VetterListResponseBody,
+        page: vetters::list::v0_1::Response,
     },
     /// The community stored our vetter profile.
     ProfileStored {

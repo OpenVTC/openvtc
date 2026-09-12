@@ -208,7 +208,7 @@ pub fn manifest_request(
 pub fn vetter_list_request(
     issuer: &str,
     community_did: &str,
-    body: &vta_sdk::protocols::vetting::VetterListBody,
+    body: &vta_sdk::protocols::vetting::vetters::list::v0_1::Payload,
 ) -> Result<TrustTask<Value>, OpenVTCError> {
     document(
         vta_sdk::protocols::vetting::VETTING_VETTER_LIST_TYPE,
@@ -224,7 +224,7 @@ pub fn vetter_list_request(
 pub fn vetter_profile_request(
     vetter_did: &str,
     community_did: &str,
-    body: &vta_sdk::protocols::vetting::VetterProfileBody,
+    body: &vta_sdk::protocols::vetting::vetters::profile::v0_1::Payload,
 ) -> Result<TrustTask<Value>, OpenVTCError> {
     document(
         vta_sdk::protocols::vetting::VETTING_VETTER_PROFILE_TYPE,
@@ -246,7 +246,7 @@ pub fn vetter_resend_request(
         vetter_did,
         community_did,
         new_id(),
-        &vta_sdk::protocols::vetting::VetterResendBody::default(),
+        &vta_sdk::protocols::vetting::vetters::resend::v0_1::Payload::default(),
     )
 }
 
@@ -362,8 +362,7 @@ pub fn delivered_statement(body: &Value) -> Option<&Value> {
 pub(crate) mod tests {
     use super::*;
     use vta_sdk::protocols::vetting::{
-        VETTING_DECLINE_TYPE, VETTING_REQUEST_ERR_CAPACITY, VETTING_REQUEST_TYPE,
-        VettingDeclineBody,
+        VETTING_DECLINE_TYPE, VETTING_REQUEST_ERR_CAPACITY, VETTING_REQUEST_TYPE, decline, session,
     };
 
     /// A `did:key` Ed25519 secret from a fixed seed, `id` = `<did>#<multibase>`.
@@ -417,11 +416,15 @@ pub(crate) mod tests {
             domain: "did:webvh:QmScid:example.com:vtc".to_string(),
             issued_at: Utc::now(),
             validity: chrono::Duration::minutes(10),
-            claims: vec![vta_sdk::protocols::vetting::CardClaim {
-                claim_type: "name.legal".into(),
-                value: json!("Alice Example"),
-                provenance: "selfAsserted".into(),
-            }],
+            claims: vec![
+                session::v0_1::VettingCardClaim::try_from(
+                    session::v0_1::VettingCardClaim::builder()
+                        .type_("name.legal")
+                        .value(json!("Alice Example"))
+                        .provenance("selfAsserted"),
+                )
+                .unwrap(),
+            ],
             identity_types: vec!["name.legal".into()],
             salt: vta_sdk::vetting::card::new_commitment_salt().unwrap(),
         };
@@ -434,13 +437,9 @@ pub(crate) mod tests {
         );
     }
 
-    fn decline() -> VettingDeclineBody {
-        VettingDeclineBody {
-            request_id: "r1".into(),
-            code: None,
-            message: None,
-            ext: None,
-        }
+    fn decline() -> decline::v0_1::Payload {
+        decline::v0_1::Payload::try_from(decline::v0_1::Payload::builder().request_id("r1"))
+            .unwrap()
     }
 
     #[tokio::test]
@@ -459,12 +458,12 @@ pub(crate) mod tests {
         assert_eq!(message.id, doc.id);
 
         let resolver = TrustTaskVmResolver::did_key_only();
-        let opened: Opened<VettingDeclineBody> =
+        let opened: Opened<decline::v0_1::Payload> =
             open(&message, &did(&vetter), &resolver).await.unwrap();
-        assert_eq!(opened.payload.request_id, "r1");
+        assert_eq!(opened.payload.request_id.as_str(), "r1");
 
         assert!(matches!(
-            open::<VettingDeclineBody>(&message, &did(&other), &resolver).await,
+            open::<decline::v0_1::Payload>(&message, &did(&other), &resolver).await,
             Err(WireError::IssuerNotSender)
         ));
     }
@@ -482,7 +481,7 @@ pub(crate) mod tests {
         .unwrap();
         let message = to_message(&doc).unwrap();
         assert!(matches!(
-            open::<VettingDeclineBody>(
+            open::<decline::v0_1::Payload>(
                 &message,
                 &did(&vetter),
                 &TrustTaskVmResolver::did_key_only()
