@@ -21,12 +21,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use vta_sdk::protocols::vetting::{
-    CardClaim, DeclaredRelationship, DeclineCode, IDENTITY_VETTING_ENDORSEMENT_TYPE,
-    IdentityVettingEndorsement, RevocationReason, RevokeStatementBody, ShapeError,
-    VETTING_REQUEST_ERR_CAPACITY, VETTING_REQUEST_ERR_DECLINED,
-    VETTING_REQUEST_ERR_METHOD_UNAVAILABLE, VETTING_REQUEST_ERR_NOT_ELIGIBLE, VettingDeclineBody,
-    VettingMethod, VettingRequestAcceptedBody, VettingRequestBody, VettingSessionBody,
-    VettingSessionResponseBody,
+    CheckShape, ClaimType, IDENTITY_VETTING_ENDORSEMENT_TYPE, IdentityVettingEndorsement,
+    ShapeError, VETTING_REQUEST_ERR_CAPACITY, VETTING_REQUEST_ERR_DECLINED,
+    VETTING_REQUEST_ERR_METHOD_UNAVAILABLE, VETTING_REQUEST_ERR_NOT_ELIGIBLE, VettingDocumentation,
+    VettingMethod, VettingRelationship, check_request, decline, documentation, request,
+    revoke_statement, session,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::VettingError;
@@ -74,7 +73,11 @@ pub enum VetterError {
 }
 
 /// One request at the desk.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// No `PartialEq`: it keeps the applicant's request as the generated
+/// `vetting/request/0.1` payload, and the generated wire types derive only
+/// `Serialize`, `Deserialize`, `Clone` and `Debug`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeskEntry {
     /// Our handle, sent to the applicant.
     pub request_id: String,
@@ -90,7 +93,7 @@ pub struct DeskEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket_id: Option<String>,
     /// What they asked.
-    pub request: VettingRequestBody,
+    pub request: request::v0_1::Payload,
     /// Where it stands.
     pub state: DeskState,
     /// When it arrived.
@@ -100,7 +103,9 @@ pub struct DeskEntry {
 }
 
 /// Where a desk request stands.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// No `PartialEq`: a received card carries the generated card claims.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum DeskState {
     /// Waiting for the vetter to open a session.
@@ -130,7 +135,7 @@ pub enum DeskState {
     Declined {
         /// The reason code we gave, if any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<DeclineCode>,
+        code: Option<decline::v0_1::PayloadCode>,
         /// When.
         at: DateTime<Utc>,
         /// The card, if one had arrived.
@@ -161,7 +166,9 @@ pub struct DeskSession {
 
 /// A verified card. The claims and the card itself are forgotten after
 /// [`VetterPolicy::card_retention_days`]; the digest and commitment remain.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// No `PartialEq`: the claims are the generated card's.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReceivedCard {
     /// `digestMultibase` of the card.
     pub digest_multibase: String,
@@ -169,7 +176,7 @@ pub struct ReceivedCard {
     pub identity_commitment: String,
     /// What the card showed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub claims: Vec<CardClaim>,
+    pub claims: Vec<session::v0_1::VettingCardClaim>,
     /// The signed card, exactly as received.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card: Option<Value>,
@@ -208,7 +215,7 @@ pub struct Withdrawal {
     pub document_id: String,
     /// The reason we gave, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<RevocationReason>,
+    pub reason: Option<revoke_statement::v0_1::PayloadReason>,
     /// When we sent it.
     pub sent_at: DateTime<Utc>,
     /// When the community recorded it.
@@ -226,17 +233,23 @@ pub struct IncomingRequest<'a> {
     /// Our persona it was addressed to.
     pub persona: PersonaId,
     /// The payload.
-    pub body: VettingRequestBody,
+    pub body: request::v0_1::Payload,
     /// `persona` is an active member of `body.community` and holds its live
     /// vetter role credential.
     pub eligible: bool,
 }
 
 /// What an inbound request earns.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// No `PartialEq`: the acceptance is the generated `#response`.
+///
+/// The acceptance is boxed because it dwarfs the other two: the generated
+/// response carries an optional eligibility presentation, and a refusal is one
+/// `&'static str`.
+#[derive(Clone, Debug)]
 pub enum Intake {
     /// Accepted; answer with this `#response`.
-    Accepted(VettingRequestAcceptedBody),
+    Accepted(Box<request::v0_1::Response>),
     /// Refused; answer with a `trust-task-error` carrying this code.
     Refused(&'static str),
     /// No answer at all.
@@ -255,7 +268,7 @@ pub struct Attestation {
     /// The two people read the match code to each other.
     pub liveness_confirmed: bool,
     /// The vetter's declared relationship to the applicant.
-    pub declared_relationship: DeclaredRelationship,
+    pub declared_relationship: VettingRelationship,
     /// Digest of the attestation text the vetter was shown.
     pub attestation_text_digest: Option<String>,
 }
@@ -305,13 +318,41 @@ impl DeskEntry {
     }
 }
 
-fn accepted_reply(entry: &DeskEntry, policy: &VetterPolicy) -> VettingRequestAcceptedBody {
-    VettingRequestAcceptedBody {
-        request_id: entry.request_id.clone(),
-        eligibility_vp: None,
-        accepts_documentation: policy.accepts_documentation.clone(),
-        session_hint: None,
-        ext: None,
+/// The `#response` accepting `entry`.
+///
+/// `acceptsDocumentation` is `minItems: 1` and unique on this line, where it
+/// used to accept `[]`. A vetter who accepts no documentation at all — which V0
+/// allows, for someone they already know (D16) — therefore **omits** the member
+/// rather than sending an empty list the published response refuses, and a
+/// token repeated in the vetter's own policy is listed once.
+fn accepted_reply(
+    entry: &DeskEntry,
+    policy: &VetterPolicy,
+) -> Result<request::v0_1::Response, ShapeError> {
+    let schema = |e: &dyn std::fmt::Display| ShapeError::Schema(e.to_string());
+    let mut accepted: Vec<request::v0_1::VettingDocumentation> = Vec::new();
+    for token in &policy.accepts_documentation {
+        let parsed = request::v0_1::VettingDocumentation::try_from(token.as_str())
+            .map_err(|e| schema(&e))?;
+        if !accepted.iter().any(|d| d.as_str() == parsed.as_str()) {
+            accepted.push(parsed);
+        }
+    }
+    request::v0_1::Response::try_from(
+        request::v0_1::Response::builder()
+            .request_id(entry.request_id.as_str())
+            .accepts_documentation((!accepted.is_empty()).then_some(accepted)),
+    )
+    .map_err(|e| schema(&e))
+}
+
+/// [`accepted_reply`] as an [`Intake`]. A vetter whose own documentation list
+/// the published response cannot carry answers `declined` rather than going
+/// silent: the applicant learns their request arrived and was not taken.
+fn accept(entry: &DeskEntry, policy: &VetterPolicy) -> Intake {
+    match accepted_reply(entry, policy) {
+        Ok(body) => Intake::Accepted(Box::new(body)),
+        Err(_) => Intake::Refused(VETTING_REQUEST_ERR_DECLINED),
     }
 }
 
@@ -329,7 +370,7 @@ impl VettingBook {
             body,
             eligible,
         } = incoming;
-        if body.check_shape(sender).is_err() {
+        if check_request(&body, sender).is_err() {
             return Intake::Silent;
         }
         if let Some(existing) = self
@@ -337,14 +378,16 @@ impl VettingBook {
             .iter()
             .find(|e| e.request_document_id == document_id && e.applicant == sender)
         {
-            return Intake::Accepted(accepted_reply(existing, &self.policy));
+            return accept(existing, &self.policy);
         }
         let Some(ticket) = body.ticket.as_ref() else {
-            // Introductions are a vetter opt-in that V0 does not offer.
-            return if body.introduction.is_some() {
-                Intake::Refused(VETTING_REQUEST_ERR_DECLINED)
-            } else {
+            // Introductions are a vetter opt-in that V0 does not offer. The
+            // published payload makes `introduction` an object rather than an
+            // optional value, so "they sent one" is "it is not empty".
+            return if body.introduction.is_empty() {
                 Intake::Silent
+            } else {
+                Intake::Refused(VETTING_REQUEST_ERR_DECLINED)
             };
         };
         let ticket_id = match tickets::check(
@@ -352,7 +395,7 @@ impl VettingBook {
             &mut self.throttle,
             ticket,
             sender,
-            &body.community,
+            body.community.as_str(),
             persona,
             now,
         ) {
@@ -360,11 +403,17 @@ impl VettingBook {
             Redemption::Silent => return Intake::Silent,
             Redemption::Refused(code) => return Intake::Refused(code),
         };
+        // The request task has its own copy of the method vocabulary; a ticket
+        // holds the community's (see `super::same_token`).
+        let preferred = body
+            .preferred_method
+            .as_ref()
+            .and_then(|m| super::same_token::<_, VettingMethod>(m).ok());
         if !self
             .tickets
             .iter()
             .find(|t| t.id == ticket_id)
-            .is_some_and(|t| t.offers(body.preferred_method))
+            .is_some_and(|t| t.offers(preferred))
         {
             return Intake::Refused(VETTING_REQUEST_ERR_METHOD_UNAVAILABLE);
         }
@@ -379,7 +428,7 @@ impl VettingBook {
             request_id: Uuid::new_v4().to_string(),
             request_document_id: document_id.to_string(),
             applicant: sender.to_string(),
-            community: body.community.clone(),
+            community: body.community.as_str().to_string(),
             persona,
             ticket_id: Some(ticket_id),
             request: body,
@@ -387,9 +436,9 @@ impl VettingBook {
             received_at: now,
             updated_at: now,
         };
-        let reply = accepted_reply(&entry, &self.policy);
+        let reply = accept(&entry, &self.policy);
         self.desk.push(entry);
-        Intake::Accepted(reply)
+        reply
     }
 
     /// Open a session for `request_id` — with the person in front of us or on
@@ -407,7 +456,7 @@ impl VettingBook {
         optional_claims: Vec<String>,
         session_document_id: &str,
         now: DateTime<Utc>,
-    ) -> Result<VettingSessionBody, VetterError> {
+    ) -> Result<session::v0_1::Payload, VetterError> {
         let length = self.policy.session_length();
         let entry = self
             .desk_entry_mut(request_id)
@@ -415,24 +464,46 @@ impl VettingBook {
         if !entry.state.is_open() {
             return Err(VetterError::WrongState("open a session"));
         }
-        let body = VettingSessionBody {
-            request_id: request_id.to_string(),
-            challenge: new_commitment_salt()?,
-            domain: entry.community.clone(),
-            method,
-            required_claims,
-            optional_claims,
-            expires_at: now + length,
-            ext: None,
-        };
+        let schema = |e: &dyn std::fmt::Display| ShapeError::Schema(e.to_string());
+        let challenge = new_commitment_salt()?;
+        // The session task has its own copy of the method vocabulary and its
+        // own claim-type newtype, which is what refuses a claim that is not a
+        // claim type at all.
+        let task_method = super::same_token::<_, session::v0_1::VettingMethod>(&method)
+            .map_err(|e| schema(&e))?;
+        let required = required_claims
+            .iter()
+            .map(|c| {
+                session::v0_1::PayloadRequiredClaimsItem::try_from(c.as_str())
+                    .map_err(|e| schema(&e))
+            })
+            .collect::<Result<Vec<_>, ShapeError>>()?;
+        let optional = optional_claims
+            .iter()
+            .map(|c| {
+                session::v0_1::PayloadOptionalClaimsItem::try_from(c.as_str())
+                    .map_err(|e| schema(&e))
+            })
+            .collect::<Result<Vec<_>, ShapeError>>()?;
+        let body = session::v0_1::Payload::try_from(
+            session::v0_1::Payload::builder()
+                .request_id(request_id)
+                .challenge(challenge.as_str())
+                .domain(entry.community.as_str())
+                .method(task_method)
+                .required_claims(required)
+                .optional_claims((!optional.is_empty()).then_some(optional))
+                .expires_at(now + length),
+        )
+        .map_err(|e| schema(&e))?;
         body.check_shape()?;
         entry.state = DeskState::Session {
             session: DeskSession {
                 id: session_document_id.to_string(),
-                challenge: body.challenge.clone(),
+                challenge,
                 method,
-                required_claims: body.required_claims.clone(),
-                optional_claims: body.optional_claims.clone(),
+                required_claims: required_claims.clone(),
+                optional_claims: optional_claims.clone(),
                 expires_at: body.expires_at,
                 match_code: vetting_match_code(session_document_id),
             },
@@ -449,12 +520,15 @@ impl VettingBook {
     ///
     /// No open session from this applicant, a closed one, or a card that does
     /// not verify.
+    /// `card` is the card **as received** rather than a re-serialised one: its
+    /// `digestMultibase` is what the statement names, and a parsed card written
+    /// back out is not guaranteed to be the same bytes.
     pub async fn receive_card(
         &mut self,
         vetter_did: &str,
         applicant: &str,
         session_id: &str,
-        body: VettingSessionResponseBody,
+        card: &Value,
         resolver: &TrustTaskVmResolver,
         now: DateTime<Utc>,
     ) -> Result<&DeskEntry, VetterError> {
@@ -476,7 +550,7 @@ impl VettingBook {
             ));
         }
         let verified = verify_card(
-            &body.card,
+            card,
             &CardExpectations {
                 audience: vetter_did,
                 publisher: applicant,
@@ -489,14 +563,17 @@ impl VettingBook {
             resolver,
         )
         .await?;
-        let card = ReceivedCard {
+        let received = ReceivedCard {
             digest_multibase: verified.digest_multibase().to_string(),
-            identity_commitment: verified.card().identity_commitment.clone(),
+            identity_commitment: verified.card().identity_commitment.as_str().to_string(),
             claims: verified.card().claims.clone(),
-            card: Some(body.card),
+            card: Some(card.clone()),
             received_at: now,
         };
-        entry.state = DeskState::CardReceived { session, card };
+        entry.state = DeskState::CardReceived {
+            session,
+            card: received,
+        };
         entry.updated_at = now;
         Ok(entry)
     }
@@ -520,17 +597,27 @@ impl VettingBook {
         let DeskState::CardReceived { session, card } = &entry.state else {
             return Err(VetterError::WrongState("be attested"));
         };
+        let schema = |e: &dyn std::fmt::Display| ShapeError::Schema(e.to_string());
         let documentary = attestation.method != VettingMethod::PriorAcquaintance;
         if documentary && !attestation.liveness_confirmed {
             return Err(VetterError::LivenessNotConfirmed);
         }
-        if documentary && attestation.document_classes.is_empty() {
+        // The shared endorsement never lists `none`: no document is the empty
+        // list. So `none` is dropped here, and a documentary method left with
+        // nothing to rely on is the same as naming no documentation at all.
+        let document_classes = attestation
+            .document_classes
+            .iter()
+            .filter(|d| d.as_str() != documentation::NONE)
+            .map(|d| VettingDocumentation::try_from(d.as_str()).map_err(|e| schema(&e)))
+            .collect::<Result<Vec<_>, ShapeError>>()?;
+        if documentary && document_classes.is_empty() {
             return Err(VetterError::NoDocumentation);
         }
         if let Some(missing) = attestation
             .claims_verified
             .iter()
-            .find(|t| !card.claims.iter().any(|c| &c.claim_type == *t))
+            .find(|t| !card.claims.iter().any(|c| c.type_.as_str() == t.as_str()))
         {
             return Err(VetterError::ClaimNotOnCard(missing.clone()));
         }
@@ -541,12 +628,17 @@ impl VettingBook {
         {
             return Err(VetterError::RequiredClaimNotVerified(unverified.clone()));
         }
+        let claims_verified = attestation
+            .claims_verified
+            .iter()
+            .map(|c| ClaimType::try_from(c.as_str()).map_err(|e| schema(&e)))
+            .collect::<Result<Vec<_>, ShapeError>>()?;
         let endorsement = IdentityVettingEndorsement {
             endorsement_type: IDENTITY_VETTING_ENDORSEMENT_TYPE.into(),
             community: entry.community.clone(),
             method: attestation.method,
-            document_classes: attestation.document_classes,
-            claims_verified: attestation.claims_verified,
+            document_classes,
+            claims_verified,
             liveness_confirmed: attestation.liveness_confirmed,
             identity_commitment: card.identity_commitment.clone(),
             card_digest_multibase: card.digest_multibase.clone(),
@@ -614,22 +706,27 @@ impl VettingBook {
     pub fn decline(
         &mut self,
         request_id: &str,
-        code: Option<DeclineCode>,
+        code: Option<decline::v0_1::PayloadCode>,
         message: Option<String>,
         now: DateTime<Utc>,
-    ) -> Result<VettingDeclineBody, VetterError> {
+    ) -> Result<decline::v0_1::Payload, VetterError> {
         let entry = self
             .desk_entry_mut(request_id)
             .ok_or(VetterError::NoSuchRequest)?;
         if !entry.state.is_open() {
             return Err(VetterError::WrongState("be declined"));
         }
-        let body = VettingDeclineBody {
-            request_id: request_id.to_string(),
-            code,
-            message,
-            ext: None,
-        };
+        let schema = |e: &dyn std::fmt::Display| ShapeError::Schema(e.to_string());
+        let message = message
+            .map(|m| decline::v0_1::PayloadMessage::try_from(m).map_err(|e| schema(&e)))
+            .transpose()?;
+        let body = decline::v0_1::Payload::try_from(
+            decline::v0_1::Payload::builder()
+                .request_id(request_id)
+                .code(code)
+                .message(message),
+        )
+        .map_err(|e| schema(&e))?;
         body.check_shape()?;
         let card = match &entry.state {
             DeskState::CardReceived { card, .. } => Some(card.clone()),
@@ -654,10 +751,10 @@ impl VettingBook {
     pub fn withdrawal(
         &mut self,
         statement_id: &str,
-        reason: Option<RevocationReason>,
+        reason: Option<revoke_statement::v0_1::PayloadReason>,
         document_id: &str,
         now: DateTime<Utc>,
-    ) -> Result<(RevokeStatementBody, IssuedStatement), VetterError> {
+    ) -> Result<(revoke_statement::v0_1::Payload, IssuedStatement), VetterError> {
         let issued = self
             .issued
             .iter_mut()
@@ -670,12 +767,14 @@ impl VettingBook {
         {
             return Err(VetterError::AlreadyWithdrawn);
         }
-        let body = RevokeStatementBody {
-            statement_id: issued.id.clone(),
-            statement_digest_multibase: issued.digest_multibase.clone(),
-            reason,
-            ext: None,
-        };
+        let schema = |e: &dyn std::fmt::Display| ShapeError::Schema(e.to_string());
+        let body = revoke_statement::v0_1::Payload::try_from(
+            revoke_statement::v0_1::Payload::builder()
+                .statement_id(issued.id.as_str())
+                .statement_digest_multibase(issued.digest_multibase.as_str())
+                .reason(reason),
+        )
+        .map_err(|e| schema(&e))?;
         body.check_shape()?;
         issued.withdrawal = Some(Withdrawal {
             document_id: document_id.to_string(),

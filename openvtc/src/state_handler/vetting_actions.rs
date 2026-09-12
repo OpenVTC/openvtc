@@ -29,7 +29,8 @@ use openvtc_core::vetting::queries::{
     CommunityAnswer, CommunityQuery, QUERY_TIMEOUT, QueryKind, refusal_words,
 };
 use openvtc_core::vetting::registry::{
-    EventDraft, ProfileDraft, ProfileState, VetterProfileRecord, event_line, location_line,
+    EventDraft, ProfileDraft, ProfileState, VetterProfileRecord, listed_event_line,
+    listed_location_line,
 };
 use openvtc_core::vetting::status::GrantCheck;
 use openvtc_core::vetting::tickets::{DEFAULT_VALIDITY, Ticket, normalise_code};
@@ -38,9 +39,9 @@ use openvtc_core::vetting::wire::{self, Document};
 use serde_json::Value;
 use vta_sdk::client::VtaClient;
 use vta_sdk::protocols::vetting::{
-    CardClaim, ListedVetter, TicketPresentation, VETTING_DECLINE_TYPE, VETTING_REQUEST_TYPE,
-    VETTING_REVOKE_STATEMENT_TYPE, VETTING_SESSION_RESPONSE_TYPE, VETTING_SESSION_TYPE,
-    VettingMethod, VettingRequirements, VettingSessionResponseBody, documentation,
+    VETTING_DECLINE_TYPE, VETTING_REQUEST_TYPE, VETTING_REVOKE_STATEMENT_TYPE,
+    VETTING_SESSION_RESPONSE_TYPE, VETTING_SESSION_TYPE, VettingMethod, VettingRequirements,
+    documentation, request, session, vetters,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::card::sign_card;
@@ -170,7 +171,13 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
             let required: Vec<String> = app
                 .requirements
                 .as_ref()
-                .map(|r| r.required_claims.clone())
+                .map(|r| {
+                    r.required_claims
+                        .iter()
+                        .flatten()
+                        .map(|c| c.as_str().to_string())
+                        .collect::<Vec<_>>()
+                })
                 .filter(|claims| !claims.is_empty())
                 .unwrap_or_else(|| {
                     FALLBACK_REQUIRED_CLAIMS
@@ -184,7 +191,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                     let value = app
                         .identity_claims
                         .iter()
-                        .find(|c| &c.claim_type == claim_type)
+                        .find(|c| c.type_.as_str() == claim_type.as_str())
                         .map(|c| claim_text(&c.value))
                         .unwrap_or_default();
                     (claim_type.clone(), value)
@@ -306,7 +313,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                             .iter()
                             .map(|claim| {
                                 (
-                                    sanitize_display(&claim.claim_type, 64),
+                                    sanitize_display(claim.type_.as_str(), 64),
                                     sanitize_display(&claim_text(&claim.value), 256),
                                 )
                             })
@@ -336,7 +343,9 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
             uses_left: t.uses_left,
             expires: t.expires_at.format("%Y-%m-%d").to_string(),
             live: t.is_live(now),
-            uri: persona_did(config, t.persona).map(|did| t.uri(&did)),
+            // A ticket whose link the published URI cannot carry simply has no
+            // link; its code still reads aloud.
+            uri: persona_did(config, t.persona).and_then(|did| t.uri(&did).ok()),
         })
         .collect();
 
@@ -456,16 +465,19 @@ pub(crate) fn community_display(config: &Config, did: &str) -> String {
 }
 
 fn requirements_line(r: &VettingRequirements) -> String {
+    let n = r.min_statements.get();
     let mut line = format!(
-        "{} statement{} from distinct vetters",
-        r.min_statements,
-        if r.min_statements == 1 { "" } else { "s" }
+        "{n} statement{} from distinct vetters",
+        if n == 1 { "" } else { "s" }
     );
-    for (method, n) in &r.min_by_method {
-        line.push_str(&format!(", at least {n} {}", method_label(*method)));
+    for (method, floor) in &r.min_by_method {
+        line.push_str(&format!(", at least {floor} {}", method_label(*method)));
     }
     if let Some(age) = &r.max_statement_age {
-        line.push_str(&format!(", none older than {}", sanitize_display(age, 32)));
+        line.push_str(&format!(
+            ", none older than {}",
+            sanitize_display(age.as_str(), 32)
+        ));
     }
     line
 }
@@ -1138,7 +1150,7 @@ async fn request_vetter(
     application_id: &str,
     vetter: &str,
     code: &str,
-    ticket: Option<TicketPresentation>,
+    ticket: Option<request::v0_1::Ticket>,
 ) {
     // A link typed into the DID field is read the same as a pasted one.
     if vetter.to_ascii_lowercase().starts_with("vetting-ticket:") {
@@ -1149,8 +1161,16 @@ async fn request_vetter(
     }
     let presentation = match ticket {
         Some(ticket) if code.is_empty() => ticket,
-        _ => match normalise_code(code) {
-            Some(code) => TicketPresentation::Code { code },
+        // The published short code is upper-case Crockford base32, so the code
+        // is normalised into that form before the ticket is built rather than
+        // sent as it was typed.
+        _ => match normalise_code(code).and_then(|code| {
+            request::v0_1::ShortCodeTicket::try_from(
+                request::v0_1::ShortCodeTicket::builder().code(code),
+            )
+            .ok()
+        }) {
+            Some(code) => request::v0_1::Ticket::ShortCodeTicket(code),
             None => {
                 return status(
                     ctx,
@@ -1901,7 +1921,11 @@ async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, method_index: u
     };
     let (required, known) = ctx.config.private.vetting.required_claims_for(
         &entry.community,
-        entry.request.requirements_digest.as_deref(),
+        entry
+            .request
+            .requirements_digest
+            .as_ref()
+            .map(|d| d.as_str()),
     );
     let asked = page(ctx).requirements_requested.contains(&entry.community);
     if !known && !asked {
@@ -2008,9 +2032,10 @@ async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
         .get(form.documentation_index)
         .cloned()
         .unwrap_or_else(|| documentation::NONE.to_string());
-    let document_classes = if method == VettingMethod::PriorAcquaintance
-        && documentation_choice == documentation::NONE
-    {
+    // `none` is never listed in a statement: no document is the empty list. So
+    // choosing it means relying on nothing, whichever method was used — and a
+    // documentary method with nothing to rely on is refused by the desk.
+    let document_classes = if documentation_choice == documentation::NONE {
         Vec::new()
     } else {
         vec![documentation_choice]
@@ -2473,12 +2498,16 @@ impl CardJob {
                         .record_card(&session_id, &card, &resolver, now)
                         .await
                         .map_err(|e| failed(format!("the card did not verify: {e}")))?;
+                    // The card travels as it was signed. Parsing it into the
+                    // published response and writing it back out is not
+                    // guaranteed to be the same bytes, and its digest is what
+                    // the vetter's statement names.
                     let mut document = wire::document(
                         VETTING_SESSION_RESPONSE_TYPE,
                         &application.join_did,
                         &vetter,
                         wire::new_id(),
-                        &VettingSessionResponseBody { card, ext: None },
+                        &serde_json::json!({ "card": card }),
                     )
                     .map_err(failed)?;
                     document.thread_id = Some(session_id.clone());
@@ -2534,7 +2563,7 @@ pub(crate) enum VettingOutcome {
     CardSent {
         application_id: String,
         session_id: String,
-        result: Result<(SentCard, Vec<CardClaim>), CardFailure>,
+        result: Result<(SentCard, Vec<session::v0_1::VettingCardClaim>), CardFailure>,
     },
 }
 
@@ -2868,7 +2897,7 @@ pub(crate) fn apply_answers(state: &mut State, config: &Config, answers: Vec<Com
                         view.cursors = cursors;
                     }
                     view.results = page.vetters.iter().map(|l| listed_row(config, l)).collect();
-                    view.next_cursor = page.next_cursor;
+                    view.next_cursor = page.next_cursor.map(|c| c.as_str().to_string());
                     view.searched = true;
                     view.error = None;
                     view.field = if view.results.is_empty() {
@@ -2947,49 +2976,66 @@ fn directory_failed(v: &mut VettingState, query: &str, why: &str) {
 
 /// One listed vetter, ready to show. The name is the one they published — it
 /// is shown beside their DID, never instead of it.
-fn listed_row(config: &Config, listed: &ListedVetter) -> ListedVetterRow {
-    let join = |items: &[String], none: &str| {
+fn listed_row(config: &Config, listed: &vetters::list::v0_1::ListedVetter) -> ListedVetterRow {
+    let join = |items: Vec<String>, none: &str| {
         if items.is_empty() {
             none.to_string()
         } else {
             sanitize_display(&items.join(", "), 300)
         }
     };
+    let did = listed.vetter_did.as_str();
     ListedVetterRow {
-        did: listed.vetter_did.clone(),
+        did: did.to_string(),
         name: listed
             .display_name
-            .as_deref()
-            .or_else(|| config.agent_name_for(&listed.vetter_did))
+            .as_ref()
+            .map(|n| n.as_str())
+            .or_else(|| config.agent_name_for(did))
             .map(|n| sanitize_display(n, 128))
-            .unwrap_or_else(|| shorten_did(&listed.vetter_did, 48)),
-        languages: join(&listed.languages, "no language listed"),
+            .unwrap_or_else(|| shorten_did(did, 48)),
+        languages: join(
+            listed
+                .languages
+                .iter()
+                .map(|l| l.as_str().to_string())
+                .collect(),
+            "no language listed",
+        ),
         location: listed
             .location
             .as_ref()
-            .map(|l| sanitize_display(&location_line(l), 300)),
+            .map(|l| sanitize_display(&listed_location_line(l), 300)),
+        // The listing carries its own copy of the method vocabulary, so each is
+        // labelled by the token it spells.
         methods: listed
             .methods
+            .0
             .iter()
-            .map(|m| method_label(*m))
+            .map(|m| m.to_string())
             .collect::<Vec<_>>()
             .join(", "),
         documentation: join(
-            &listed.accepts_documentation,
+            listed
+                .accepts_documentation
+                .0
+                .iter()
+                .map(|d| d.as_str().to_string())
+                .collect(),
             "no documentation listed — ask them",
         ),
         availability: listed
             .availability
-            .as_deref()
-            .map(|a| sanitize_display(a, 500)),
+            .as_ref()
+            .map(|a| sanitize_display(a.as_str(), 500)),
         contact_hint: listed
             .contact_hint
-            .as_deref()
-            .map(|h| sanitize_display(h, 300)),
+            .as_ref()
+            .map(|h| sanitize_display(h.as_str(), 300)),
         events: listed
             .events
             .iter()
-            .map(|e| sanitize_display(&event_line(e), 300))
+            .map(|e| sanitize_display(&listed_event_line(e), 300))
             .collect(),
         grant_until: listed.grant_valid_until.format("%Y-%m-%d").to_string(),
     }
@@ -3127,11 +3173,9 @@ mod tests {
     use super::*;
     use crate::state_handler::dispatch_util::test_config;
     use openvtc_core::vetting::applicant::Application;
-    use vta_sdk::protocols::vetting::{
-        VETTING_VETTER_RESEND_ERR_NOT_GRANTED, VetterListResponseBody,
-    };
+    use vta_sdk::protocols::vetting::VETTING_VETTER_RESEND_ERR_NOT_GRANTED;
 
-    fn listed(did: &str) -> ListedVetter {
+    fn listed(did: &str) -> vetters::list::v0_1::ListedVetter {
         serde_json::from_value(serde_json::json!({
             "vetterDid": did,
             "displayName": "Carol",
@@ -3164,10 +3208,10 @@ mod tests {
     fn a_directory_page_lands_only_where_it_was_asked_for() {
         let config = test_config();
         let mut state = directory_waiting_on("q1");
-        let page = VetterListResponseBody {
-            vetters: vec![listed("did:key:zCarol")],
-            next_cursor: None,
-        };
+        let page = vetters::list::v0_1::Response::try_from(
+            vetters::list::v0_1::Response::builder().vetters(vec![listed("did:key:zCarol")]),
+        )
+        .unwrap();
         apply_answers(
             &mut state,
             &config,
@@ -3289,9 +3333,12 @@ mod tests {
         app.prepare_request(
             "urn:uuid:r1",
             "did:key:zVetter",
-            TicketPresentation::Code {
-                code: "K7QF-2M9X".into(),
-            },
+            request::v0_1::Ticket::ShortCodeTicket(
+                request::v0_1::ShortCodeTicket::try_from(
+                    request::v0_1::ShortCodeTicket::builder().code("K7QF-2M9X"),
+                )
+                .unwrap(),
+            ),
             RequestDraft::default(),
             Utc::now(),
         )
@@ -3458,9 +3505,12 @@ mod tests {
         app.prepare_request(
             "urn:uuid:r1",
             "did:key:zVetter",
-            TicketPresentation::Code {
-                code: "K7QF-2M9X".into(),
-            },
+            request::v0_1::Ticket::ShortCodeTicket(
+                request::v0_1::ShortCodeTicket::try_from(
+                    request::v0_1::ShortCodeTicket::builder().code("K7QF-2M9X"),
+                )
+                .unwrap(),
+            ),
             RequestDraft::default(),
             Utc::now(),
         )

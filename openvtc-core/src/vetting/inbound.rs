@@ -31,15 +31,14 @@ use tracing::{debug, info, warn};
 use trust_tasks_rs::TrustTask;
 use vta_sdk::protocols::credential_exchange::ISSUE as CREDENTIAL_ISSUE_TYPE;
 use vta_sdk::protocols::join_requests::{
-    JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, JoinRequestManifestResponseBody,
+    JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, manifest as join_manifest,
 };
 use vta_sdk::protocols::vetting::{
-    RevokeStatementResponseBody, VETTER_ROLE, VETTING_DECLINE_TYPE, VETTING_REQUEST_RESPONSE_TYPE,
-    VETTING_REQUEST_TYPE, VETTING_REVOKE_STATEMENT_RESPONSE_TYPE, VETTING_SESSION_RESPONSE_TYPE,
-    VETTING_SESSION_TYPE, VETTING_VETTER_LIST_RESPONSE_TYPE, VETTING_VETTER_PROFILE_RESPONSE_TYPE,
-    VETTING_VETTER_RESEND_RESPONSE_TYPE, VetterListResponseBody, VetterProfileResponseBody,
-    VetterResendResponseBody, VettingDeclineBody, VettingRequestAcceptedBody, VettingRequestBody,
-    VettingSessionBody, VettingSessionResponseBody, role_matches,
+    VETTER_ROLE, VETTING_DECLINE_TYPE, VETTING_REQUEST_RESPONSE_TYPE, VETTING_REQUEST_TYPE,
+    VETTING_REVOKE_STATEMENT_RESPONSE_TYPE, VETTING_SESSION_RESPONSE_TYPE, VETTING_SESSION_TYPE,
+    VETTING_VETTER_LIST_RESPONSE_TYPE, VETTING_VETTER_PROFILE_RESPONSE_TYPE,
+    VETTING_VETTER_RESEND_RESPONSE_TYPE, decline, request, revoke_statement, role_matches, session,
+    vetters,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::eligibility::{
@@ -484,10 +483,10 @@ async fn take_request(
     let Some((persona, _)) = ctx.recipient else {
         return Handled::default();
     };
-    let Some(opened) = opened::<VettingRequestBody>(message, sender, ctx.resolver).await else {
+    let Some(opened) = opened::<request::v0_1::Payload>(message, sender, ctx.resolver).await else {
         return Handled::default();
     };
-    let community = opened.payload.community.clone();
+    let community = opened.payload.community.as_str().to_string();
     // A vetter is who the community named: an active member holding its live
     // role credential (design §10.3). The community checks again.
     let grant = book.vetter_grant(&community, persona, ctx.now).cloned();
@@ -510,7 +509,7 @@ async fn take_request(
     let throttled = book.throttle != throttle;
     match intake {
         Intake::Accepted(body) => {
-            let request_id = body.request_id.clone();
+            let request_id = body.request_id.as_str().to_string();
             let eligibility = grant.map(|g| EligibilityPresentation {
                 credentials: vec![g.credential],
                 nonce: opened.document.id.clone(),
@@ -563,7 +562,7 @@ async fn accepted(
     message: &Message,
     sender: &str,
 ) -> Handled {
-    let Some(opened) = opened::<VettingRequestAcceptedBody>(message, sender, ctx.resolver).await
+    let Some(opened) = opened::<request::v0_1::Response>(message, sender, ctx.resolver).await
     else {
         return Handled::default();
     };
@@ -578,7 +577,11 @@ async fn accepted(
     // made for someone else, or before the vetter lost the role, does not pass.
     // A verified grant's `credentialStatus` is kept for the revocation check.
     let mut grant_status_entry: Option<Option<Value>> = None;
-    let eligibility = match &opened.payload.eligibility_vp {
+    // The presentation is verified **as received** rather than re-serialised
+    // from the parsed response: it carries its own proof, and a parsed value
+    // written back out is not guaranteed to be the same bytes.
+    let presented = opened.document.payload.get("eligibilityVp");
+    let eligibility = match presented {
         None => VetterEligibility::NotShown,
         Some(vp) => {
             let expect = EligibilityExpectations {
@@ -658,10 +661,10 @@ async fn session(
     let Some((persona, _)) = ctx.recipient else {
         return Handled::default();
     };
-    let Some(opened) = opened::<VettingSessionBody>(message, sender, ctx.resolver).await else {
+    let Some(opened) = opened::<session::v0_1::Payload>(message, sender, ctx.resolver).await else {
         return Handled::default();
     };
-    let Some(application) = book.application_mut(&opened.payload.domain, persona) else {
+    let Some(application) = book.application_mut(opened.payload.domain.as_str(), persona) else {
         warn!(%sender, "vetting session for a community we are not applying to");
         return Handled::default();
     };
@@ -692,22 +695,21 @@ async fn card(
     let Some((_, our_did)) = ctx.recipient else {
         return Handled::default();
     };
-    let Some(opened) = opened::<VettingSessionResponseBody>(message, sender, ctx.resolver).await
-    else {
+    // Opened as the payload it arrived as: the card's `digestMultibase` — what
+    // the statement names — is taken over the bytes the applicant signed, so the
+    // card is never parsed and written back out on the way to verification.
+    let Some(opened) = opened::<Value>(message, sender, ctx.resolver).await else {
         return Handled::default();
     };
     let Some(session_id) = opened.document.thread_id.clone() else {
         return Handled::default();
     };
+    let Some(card) = opened.payload.get("card") else {
+        warn!(%sender, "vetting session response carries no card");
+        return Handled::default();
+    };
     match book
-        .receive_card(
-            our_did,
-            sender,
-            &session_id,
-            opened.payload,
-            ctx.resolver,
-            ctx.now,
-        )
+        .receive_card(our_did, sender, &session_id, card, ctx.resolver, ctx.now)
         .await
     {
         Ok(entry) => Handled {
@@ -731,7 +733,7 @@ async fn declined(
     message: &Message,
     sender: &str,
 ) -> Handled {
-    let Some(opened) = opened::<VettingDeclineBody>(message, sender, ctx.resolver).await else {
+    let Some(opened) = opened::<decline::v0_1::Payload>(message, sender, ctx.resolver).await else {
         return Handled::default();
     };
     for application in &mut book.applications {
@@ -944,7 +946,8 @@ fn refused(
 }
 
 fn withdrawal_recorded(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
-    let Some((Some(thread), body)) = community_reply::<RevokeStatementResponseBody>(message) else {
+    let Some((Some(thread), body)) = community_reply::<revoke_statement::v0_1::Response>(message)
+    else {
         return Handled::default();
     };
     match book.on_withdrawal_recorded(sender, &thread, body.recorded_at) {
@@ -961,7 +964,7 @@ fn withdrawal_recorded(book: &mut VettingBook, message: &Message, sender: &str) 
 
 fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender: &str) -> Handled {
     let thread = community_thread(message);
-    let body = match community_payload::<JoinRequestManifestResponseBody>(message) {
+    let body = match community_payload::<join_manifest::v0_2::Response>(message) {
         Ok(body) => body,
         Err(detail) => {
             warn!(typ = %message.typ, error = %detail, "malformed community reply");
@@ -1016,7 +1019,7 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
 
 fn vetter_list(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
     let Some((query, page)) =
-        answer_to::<VetterListResponseBody>(book, message, sender, QueryKind::VetterList)
+        answer_to::<vetters::list::v0_1::Response>(book, message, sender, QueryKind::VetterList)
     else {
         return Handled::default();
     };
@@ -1034,9 +1037,12 @@ fn vetter_list(book: &mut VettingBook, message: &Message, sender: &str) -> Handl
 }
 
 fn profile_stored(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
-    let Some((query, body)) =
-        answer_to::<VetterProfileResponseBody>(book, message, sender, QueryKind::VetterProfile)
-    else {
+    let Some((query, body)) = answer_to::<vetters::profile::v0_1::Response>(
+        book,
+        message,
+        sender,
+        QueryKind::VetterProfile,
+    ) else {
         return Handled::default();
     };
     match body {
@@ -1061,9 +1067,12 @@ fn profile_stored(book: &mut VettingBook, message: &Message, sender: &str) -> Ha
 }
 
 fn resent(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
-    let Some((_, body)) =
-        answer_to::<VetterResendResponseBody>(book, message, sender, QueryKind::VetterResend)
-    else {
+    let Some((_, body)) = answer_to::<vetters::resend::v0_1::Response>(
+        book,
+        message,
+        sender,
+        QueryKind::VetterResend,
+    ) else {
         return Handled::default();
     };
     match body {

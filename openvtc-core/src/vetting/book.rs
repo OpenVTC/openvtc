@@ -9,8 +9,8 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use vta_sdk::protocols::join_requests::{CommunityBranding, JoinRequestManifestResponseBody};
-use vta_sdk::protocols::vetting::{VettingRequirements, documentation};
+use vta_sdk::protocols::join_requests::manifest;
+use vta_sdk::protocols::vetting::{CheckShape, VettingRequirements, documentation};
 
 use super::applicant::{Application, RequestState};
 use super::queries::CommunityQuery;
@@ -79,7 +79,13 @@ impl VetterPolicy {
 pub const FALLBACK_REQUIRED_CLAIMS: &[&str] = &["name.legal"];
 
 /// A community's vetting criterion, as last read from its manifest.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// No `PartialEq`: it carries the generated [`VettingRequirements`], and the
+/// generated wire types derive only `Serialize`, `Deserialize`, `Clone` and
+/// `Debug`. Two criteria are compared by what they serialise to
+/// ([`same_requirements`]), which is what "the community changed what it asks"
+/// actually means.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KnownCriterion {
     /// The community.
     pub community: String,
@@ -145,13 +151,19 @@ impl Branding {
     }
 
     /// What of `branding` this client keeps: nothing, if it breaks its schema.
-    fn from_manifest(branding: &CommunityBranding) -> Self {
+    fn from_manifest(branding: &manifest::v0_2::CommunityBranding) -> Self {
         if branding.check_shape().is_err() {
             return Self::default();
         }
         Self {
-            display_name: branding.display_name.clone(),
-            accent_color: branding.accent_color.clone(),
+            display_name: branding
+                .display_name
+                .as_ref()
+                .map(|n| n.as_str().to_string()),
+            accent_color: branding
+                .accent_color
+                .as_ref()
+                .map(|c| c.as_str().to_string()),
         }
     }
 
@@ -190,7 +202,10 @@ pub struct KnownCommunity {
 }
 
 /// What this book knows of whether a community vets its members.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// No `PartialEq`: [`Knowledge::Vetting`] borrows a [`KnownCriterion`], which
+/// carries the generated requirements. Match on it rather than compare it.
+#[derive(Clone, Copy, Debug)]
 pub enum Knowledge<'a> {
     /// Its manifest has not been read.
     Unknown,
@@ -200,8 +215,21 @@ pub enum Knowledge<'a> {
     Vetting(&'a KnownCriterion),
 }
 
+/// Whether two published requirements are the same value.
+///
+/// The generated [`VettingRequirements`] derives no `PartialEq`, so they are
+/// compared as what they serialise to — the wire value, which is what a
+/// community actually changed.
+#[must_use]
+pub fn same_requirements(a: &VettingRequirements, b: &VettingRequirements) -> bool {
+    serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
+}
+
 /// All vetting state, for both sides.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+///
+/// No `PartialEq`: it holds applications, desk entries and criteria, and those
+/// carry generated wire types that derive none.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VettingBook {
     /// Our applications, one per community and persona.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -292,7 +320,7 @@ impl VettingBook {
     pub fn learn_manifest(
         &mut self,
         community: &str,
-        manifest: &JoinRequestManifestResponseBody,
+        manifest: &manifest::v0_2::Response,
         now: DateTime<Utc>,
     ) -> bool {
         let fresh: Vec<KnownCriterion> = manifest
@@ -300,11 +328,14 @@ impl VettingBook {
             .iter()
             .filter_map(|c| {
                 let requirements = c.vetting.clone()?;
-                requirements.validate().ok()?;
+                requirements.check_shape().ok()?;
                 Some(KnownCriterion {
                     community: community.to_string(),
-                    criterion_id: c.id.clone(),
-                    requirements_digest: c.requirements_digest.clone(),
+                    criterion_id: c.id.as_str().to_string(),
+                    requirements_digest: c
+                        .requirements_digest
+                        .as_ref()
+                        .map(|d| d.as_str().to_string()),
                     requirements,
                     fetched_at: now,
                 })
@@ -319,7 +350,7 @@ impl VettingBook {
             && known.iter().zip(&fresh).all(|(a, b)| {
                 a.criterion_id == b.criterion_id
                     && a.requirements_digest == b.requirements_digest
-                    && a.requirements == b.requirements
+                    && same_requirements(&a.requirements, &b.requirements)
             });
         self.criteria.retain(|k| k.community != community);
         self.criteria.extend(fresh);
@@ -406,7 +437,10 @@ impl VettingBook {
         else {
             return false;
         };
-        let changed = app.requirements.as_ref() != Some(&criterion.requirements)
+        let changed = !app
+            .requirements
+            .as_ref()
+            .is_some_and(|r| same_requirements(r, &criterion.requirements))
             || app.requirements_digest != criterion.requirements_digest
             || app.criterion_id.as_deref() != Some(criterion.criterion_id.as_str());
         app.criterion_id = Some(criterion.criterion_id);
@@ -450,10 +484,17 @@ impl VettingBook {
             })
             .or_else(|| ours.next());
         match chosen {
-            Some(k) if !k.requirements.required_claims.is_empty() => {
-                (k.requirements.required_claims.clone(), true)
-            }
-            Some(_) => (Vec::new(), true),
+            // `requiredClaims` is an optional list of the generated `ClaimType`
+            // on this line, so an absent list and an empty one are one case.
+            Some(k) => (
+                k.requirements
+                    .required_claims
+                    .iter()
+                    .flatten()
+                    .map(|c| c.as_str().to_string())
+                    .collect(),
+                true,
+            ),
             None => (
                 FALLBACK_REQUIRED_CLAIMS
                     .iter()
@@ -472,16 +513,16 @@ impl VettingBook {
         let from_application = self
             .application(community, persona)
             .and_then(|a| a.requirements.as_ref())
-            .and_then(|r| r.decision_sla.as_deref());
+            .and_then(|r| r.decision_sla.clone());
         let from_criteria = || {
             self.criteria
                 .iter()
                 .filter(|k| k.community == community)
-                .find_map(|k| k.requirements.decision_sla.as_deref())
+                .find_map(|k| k.requirements.decision_sla.clone())
         };
         from_application
             .or_else(from_criteria)
-            .and_then(vta_sdk::protocols::vetting::parse_iso8601_duration)
+            .and_then(|sla| vta_sdk::protocols::vetting::parse_iso8601_duration(sla.as_str()))
     }
 
     /// Our application to `community` as `persona`.
@@ -637,10 +678,14 @@ mod tests {
         assert_eq!(book.applications.len(), 2);
     }
 
+    /// A `requirementsDigest` the published criterion accepts: base58btc, and
+    /// at least 16 characters. The old `"zDigest"` is refused on this line.
+    const DIGEST: &str = "zQmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR";
+
     fn manifest(
-        branding: Option<CommunityBranding>,
+        branding: Option<manifest::v0_2::CommunityBranding>,
         vetting: bool,
-    ) -> JoinRequestManifestResponseBody {
+    ) -> manifest::v0_2::Response {
         let requirements: VettingRequirements = serde_json::from_value(serde_json::json!({
             "version": "0.1",
             "statementType": vta_sdk::protocols::vetting::IDENTITY_VETTING_ENDORSEMENT_TYPE,
@@ -650,30 +695,41 @@ mod tests {
             "eligibleVetters": { "role": "vetter" }
         }))
         .unwrap();
-        JoinRequestManifestResponseBody {
-            community_did: "did:web:vtc".into(),
-            criteria: vec![vta_sdk::protocols::join_requests::ManifestCriterion {
-                id: "c1".into(),
-                description: None,
-                presentation_definition: serde_json::json!({}),
-                vetting: vetting.then_some(requirements),
-                requirements_digest: Some("zDigest".into()),
-            }],
-            branding,
-        }
+        let criterion = manifest::v0_2::Criterion::try_from(
+            manifest::v0_2::Criterion::builder()
+                .id("c1")
+                .presentation_definition(serde_json::Map::new())
+                .vetting(vetting.then_some(requirements))
+                .requirements_digest(Some(
+                    manifest::v0_2::DigestMultibase::try_from(DIGEST).unwrap(),
+                )),
+        )
+        .unwrap();
+        manifest::v0_2::Response::try_from(
+            manifest::v0_2::Response::builder()
+                .community_did("did:web:vtc")
+                .criteria(vec![criterion])
+                .branding(branding),
+        )
+        .unwrap()
     }
 
     #[test]
     fn a_manifest_says_whether_a_community_vets_and_how_it_looks() {
         let mut book = VettingBook::default();
         let now = Utc::now();
-        assert_eq!(book.knowledge("did:web:vtc"), Knowledge::Unknown);
+        assert!(matches!(book.knowledge("did:web:vtc"), Knowledge::Unknown));
 
-        let branding = CommunityBranding {
-            display_name: Some("Kernel".into()),
-            accent_color: Some("#1a2B3c".into()),
-            ..CommunityBranding::default()
-        };
+        let branding = manifest::v0_2::CommunityBranding::try_from(
+            manifest::v0_2::CommunityBranding::builder()
+                .display_name(Some(
+                    manifest::v0_2::CommunityBrandingDisplayName::try_from("Kernel").unwrap(),
+                ))
+                .accent_color(Some(
+                    manifest::v0_2::CommunityBrandingAccentColor::try_from("#1a2B3c").unwrap(),
+                )),
+        )
+        .unwrap();
         assert!(book.learn_manifest("did:web:vtc", &manifest(Some(branding.clone()), true), now));
         assert!(matches!(
             book.knowledge("did:web:vtc"),
@@ -688,13 +744,22 @@ mod tests {
         );
 
         assert!(book.learn_manifest("did:web:open", &manifest(None, false), now));
-        assert_eq!(book.knowledge("did:web:open"), Knowledge::NoVetting);
+        assert!(matches!(
+            book.knowledge("did:web:open"),
+            Knowledge::NoVetting
+        ));
         assert!(book.branding("did:web:open").is_none());
 
-        let broken = CommunityBranding {
-            accent_color: Some("red".into()),
-            ..CommunityBranding::default()
-        };
+        // An accent the published type refuses cannot be built at all now, so
+        // what still reaches this client is branding the schema admits and
+        // `check_shape` refuses by hand: a `logoUrl` that is not an absolute
+        // https URI.
+        assert!(manifest::v0_2::CommunityBrandingAccentColor::try_from("red").is_err());
+        let broken: manifest::v0_2::CommunityBranding = serde_json::from_value(serde_json::json!({
+            "displayName": "Elsewhere",
+            "logoUrl": "http://vtc.example/logo.png"
+        }))
+        .expect("the schema admits it");
         book.learn_manifest("did:web:broken", &manifest(Some(broken), false), now);
         assert!(
             book.branding("did:web:broken").is_none(),
@@ -723,7 +788,7 @@ mod tests {
         assert!(book.adopt_known_requirements(&id));
         let app = book.application_by_id_mut(&id).unwrap();
         assert_eq!(app.criterion_id.as_deref(), Some("c1"));
-        assert_eq!(app.requirements_digest.as_deref(), Some("zDigest"));
+        assert_eq!(app.requirements_digest.as_deref(), Some(DIGEST));
         assert!(
             !book.adopt_known_requirements(&id),
             "nothing new the second time"

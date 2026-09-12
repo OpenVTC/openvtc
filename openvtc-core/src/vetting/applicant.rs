@@ -20,11 +20,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
-use vta_sdk::protocols::join_requests::JoinRequestManifestResponseBody;
+use vta_sdk::protocols::join_requests::manifest;
 use vta_sdk::protocols::vetting::{
-    CardClaim, DeclaredRelationship, DeclineCode, ShapeError, TicketPresentation, VETTER_ROLE,
-    VettingDeclineBody, VettingMethod, VettingRequestAcceptedBody, VettingRequestBody,
-    VettingRequirements, VettingSessionBody,
+    CheckShape, ShapeError, VETTER_ROLE, VettingMethod, VettingRelationship, VettingRequirements,
+    check_request, decline, request, session,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::VettingError;
@@ -124,7 +123,12 @@ pub enum NextStep {
 }
 
 /// One application.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// No `PartialEq`: it carries the community's generated requirements and the
+/// generated card claims, and the generated wire types derive only
+/// `Serialize`, `Deserialize`, `Clone` and `Debug`. Requirements are compared
+/// with [`super::book::same_requirements`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Application {
     /// Local handle.
     pub id: String,
@@ -157,7 +161,7 @@ pub struct Application {
     /// name differently commit to different identities, and the community
     /// refers the application.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub identity_claims: Vec<CardClaim>,
+    pub identity_claims: Vec<session::v0_1::VettingCardClaim>,
     /// Requests to vetters, newest last.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requests: Vec<OutboundRequest>,
@@ -302,7 +306,7 @@ pub enum RequestState {
     Declined {
         /// Their reason code, if they gave one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<DeclineCode>,
+        code: Option<decline::v0_1::PayloadCode>,
         /// Their note, if any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
@@ -362,7 +366,7 @@ pub struct HeldStatement {
     /// How they vetted us.
     pub method: VettingMethod,
     /// The relationship they declared.
-    pub declared_relationship: DeclaredRelationship,
+    pub declared_relationship: VettingRelationship,
     /// What they relied on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub document_classes: Vec<String>,
@@ -434,10 +438,9 @@ impl Application {
     /// [`ApplicantError::InvalidRequirements`].
     pub fn adopt_manifest(
         &mut self,
-        manifest: &JoinRequestManifestResponseBody,
+        manifest: &manifest::v0_2::Response,
     ) -> Result<bool, ApplicantError> {
-        let with_vetting =
-            |c: &&vta_sdk::protocols::join_requests::ManifestCriterion| c.vetting.is_some();
+        let with_vetting = |c: &&manifest::v0_2::Criterion| c.vetting.is_some();
         let chosen = self
             .criterion_id
             .as_deref()
@@ -446,19 +449,26 @@ impl Application {
                     .criteria
                     .iter()
                     .filter(with_vetting)
-                    .find(|c| c.id == id)
+                    .find(|c| c.id.as_str() == id)
             })
             .or_else(|| manifest.criteria.iter().find(with_vetting))
             .ok_or(ApplicantError::NoVettingCriterion)?;
         let requirements = chosen.vetting.clone().expect("filtered on vetting");
         requirements
-            .validate()
-            .map_err(|e| ApplicantError::InvalidRequirements(e.0))?;
-        let changed = self.requirements.as_ref() != Some(&requirements)
-            || self.requirements_digest != chosen.requirements_digest;
-        self.criterion_id = Some(chosen.id.clone());
+            .check_shape()
+            .map_err(|e| ApplicantError::InvalidRequirements(e.to_string()))?;
+        let digest = chosen
+            .requirements_digest
+            .as_ref()
+            .map(|d| d.as_str().to_string());
+        let changed = !self
+            .requirements
+            .as_ref()
+            .is_some_and(|r| super::book::same_requirements(r, &requirements))
+            || self.requirements_digest != digest;
+        self.criterion_id = Some(chosen.id.as_str().to_string());
         self.requirements = Some(requirements);
-        self.requirements_digest = chosen.requirements_digest.clone();
+        self.requirements_digest = digest;
         Ok(changed)
     }
 
@@ -472,23 +482,53 @@ impl Application {
         &mut self,
         document_id: &str,
         vetter: &str,
-        ticket: TicketPresentation,
+        ticket: request::v0_1::Ticket,
         draft: RequestDraft,
         now: DateTime<Utc>,
-    ) -> Result<VettingRequestBody, ShapeError> {
-        let body = VettingRequestBody {
-            community: self.community.clone(),
-            requirements_digest: self.requirements_digest.clone(),
-            join_did: self.join_did.clone(),
-            ticket: Some(ticket),
-            introduction: None,
-            preferred_method: draft.preferred_method,
-            languages: draft.languages,
-            message: draft.message,
-            availability: draft.availability,
-            ext: None,
-        };
-        body.check_shape(&self.join_did)?;
+    ) -> Result<request::v0_1::Payload, ShapeError> {
+        let schema = |e: &dyn std::fmt::Display| ShapeError::Schema(e.to_string());
+        let languages = draft
+            .languages
+            .iter()
+            .map(|l| {
+                request::v0_1::PayloadLanguagesItem::try_from(l.as_str()).map_err(|e| schema(&e))
+            })
+            .collect::<Result<Vec<_>, ShapeError>>()?;
+        let message = draft
+            .message
+            .map(|m| request::v0_1::PayloadMessage::try_from(m).map_err(|e| schema(&e)))
+            .transpose()?;
+        let availability = draft
+            .availability
+            .map(|a| request::v0_1::PayloadAvailability::try_from(a).map_err(|e| schema(&e)))
+            .transpose()?;
+        // The request task carries its own copy of the method vocabulary.
+        let preferred = draft
+            .preferred_method
+            .map(|m| {
+                super::same_token::<_, request::v0_1::VettingMethod>(&m).map_err(|e| schema(&e))
+            })
+            .transpose()?;
+        let digest = self
+            .requirements_digest
+            .as_deref()
+            .map(|d| request::v0_1::DigestMultibase::try_from(d).map_err(|e| schema(&e)))
+            .transpose()?;
+        let body = request::v0_1::Payload::try_from(
+            request::v0_1::Payload::builder()
+                .community(self.community.as_str())
+                .join_did(self.join_did.as_str())
+                .ticket(Some(ticket))
+                .requirements_digest(digest)
+                .preferred_method(preferred)
+                // An empty `languages` is sent as `[]` on this line where it
+                // used to be omitted, so "no preference" stays absent.
+                .languages((!languages.is_empty()).then_some(languages))
+                .message(message)
+                .availability(availability),
+        )
+        .map_err(|e| schema(&e))?;
+        check_request(&body, &self.join_did)?;
         self.requests.push(OutboundRequest {
             document_id: document_id.to_string(),
             vetter: vetter.to_string(),
@@ -568,7 +608,7 @@ impl Application {
         &mut self,
         thread: &str,
         vetter: &str,
-        body: VettingRequestAcceptedBody,
+        body: request::v0_1::Response,
         eligibility: VetterEligibility,
         now: DateTime<Utc>,
     ) -> Result<(), ApplicantError> {
@@ -576,15 +616,23 @@ impl Application {
         let request = self.by_thread(thread, vetter)?;
         match &request.state {
             RequestState::Sent => {}
-            RequestState::Accepted { request_id, .. } if *request_id == body.request_id => {}
+            RequestState::Accepted { request_id, .. }
+                if request_id.as_str() == body.request_id.as_str() => {}
             _ => return Err(ApplicantError::WrongState("be accepted")),
         }
         request.eligibility = Some(eligibility);
         request.grant_status = None;
         request.state = RequestState::Accepted {
-            request_id: body.request_id,
-            accepts_documentation: body.accepts_documentation,
-            session_hint: body.session_hint,
+            request_id: body.request_id.as_str().to_string(),
+            // `acceptsDocumentation` is absent rather than empty when a vetter
+            // accepts none, so an absent list and an empty one are one case.
+            accepts_documentation: body
+                .accepts_documentation
+                .iter()
+                .flatten()
+                .map(|d| d.as_str().to_string())
+                .collect(),
+            session_hint: body.session_hint.map(|h| h.as_str().to_string()),
         };
         request.updated_at = now;
         Ok(())
@@ -696,32 +744,47 @@ impl Application {
         &mut self,
         session_document_id: &str,
         vetter: &str,
-        body: VettingSessionBody,
+        body: session::v0_1::Payload,
         now: DateTime<Utc>,
     ) -> Result<OpenSession, ApplicantError> {
         body.check_shape()?;
-        if body.domain != self.community {
+        if body.domain.as_str() != self.community {
             return Err(ApplicantError::WrongCommunity);
         }
         if body.expires_at <= now {
             return Err(ApplicantError::SessionExpired);
         }
-        let request = self.by_request_id(&body.request_id, vetter)?;
+        let request = self.by_request_id(body.request_id.as_str(), vetter)?;
         if matches!(request.state, RequestState::Attested { .. }) {
             return Err(ApplicantError::WrongState("open another session"));
         }
+        // The session task has its own copy of the method vocabulary.
+        let method = super::same_token(&body.method).map_err(
+            |e: <VettingMethod as std::str::FromStr>::Err| {
+                ApplicantError::Shape(ShapeError::Schema(e.to_string()))
+            },
+        )?;
         let session = OpenSession {
             id: session_document_id.to_string(),
-            challenge: body.challenge,
-            domain: body.domain,
-            method: body.method,
-            required_claims: body.required_claims,
-            optional_claims: body.optional_claims,
+            challenge: body.challenge.as_str().to_string(),
+            domain: body.domain.as_str().to_string(),
+            method,
+            required_claims: body
+                .required_claims
+                .iter()
+                .map(|c| c.as_str().to_string())
+                .collect(),
+            optional_claims: body
+                .optional_claims
+                .iter()
+                .flatten()
+                .map(|c| c.as_str().to_string())
+                .collect(),
             expires_at: body.expires_at,
             match_code: vetting_match_code(session_document_id),
         };
         request.state = RequestState::Session {
-            request_id: body.request_id,
+            request_id: body.request_id.as_str().to_string(),
             session: session.clone(),
             card: None,
         };
@@ -769,7 +832,7 @@ impl Application {
         &self,
         session_id: &str,
         released: &[ReleasedClaim],
-    ) -> Result<Vec<CardClaim>, ApplicantError> {
+    ) -> Result<Vec<session::v0_1::VettingCardClaim>, ApplicantError> {
         let (_, session) = self
             .session(session_id)
             .ok_or(ApplicantError::NoMatchingRequest)?;
@@ -788,23 +851,29 @@ impl Application {
             if self
                 .identity_claims
                 .iter()
-                .any(|shown| shown.claim_type == claim.claim_type && shown.value != value)
+                .any(|shown| shown.type_.as_str() == claim.claim_type && shown.value != value)
             {
                 return Err(ApplicantError::IdentityChanged(claim.claim_type.clone()));
             }
-            claims.push(CardClaim {
-                claim_type: claim.claim_type.clone(),
-                value,
-                provenance: claim
-                    .provenance
-                    .clone()
-                    .unwrap_or_else(|| "unstated".to_string()),
-            });
+            claims.push(
+                session::v0_1::VettingCardClaim::try_from(
+                    session::v0_1::VettingCardClaim::builder()
+                        .type_(claim.claim_type.as_str())
+                        .value(value)
+                        .provenance(
+                            claim
+                                .provenance
+                                .clone()
+                                .unwrap_or_else(|| "unstated".to_string()),
+                        ),
+                )
+                .map_err(|e| ApplicantError::Shape(ShapeError::Schema(e.to_string())))?,
+            );
         }
         if let Some(missing) = session
             .required_claims
             .iter()
-            .find(|t| !claims.iter().any(|c| &c.claim_type == *t))
+            .find(|t| !claims.iter().any(|c| c.type_.as_str() == t.as_str()))
         {
             return Err(ApplicantError::MissingClaim(missing.clone()));
         }
@@ -821,15 +890,17 @@ impl Application {
         &mut self,
         session_id: &str,
         card: SentCard,
-        claims: &[CardClaim],
+        claims: &[session::v0_1::VettingCardClaim],
         now: DateTime<Utc>,
     ) -> Result<(), ApplicantError> {
         if let Some(changed) = claims.iter().find(|c| {
             self.identity_claims
                 .iter()
-                .any(|shown| shown.claim_type == c.claim_type && shown.value != c.value)
+                .any(|shown| shown.type_.as_str() == c.type_.as_str() && shown.value != c.value)
         }) {
-            return Err(ApplicantError::IdentityChanged(changed.claim_type.clone()));
+            return Err(ApplicantError::IdentityChanged(
+                changed.type_.as_str().to_string(),
+            ));
         }
         let request = self
             .requests
@@ -844,7 +915,7 @@ impl Application {
             if !self
                 .identity_claims
                 .iter()
-                .any(|shown| shown.claim_type == claim.claim_type)
+                .any(|shown| shown.type_.as_str() == claim.type_.as_str())
             {
                 self.identity_claims.push(claim.clone());
             }
@@ -862,7 +933,7 @@ impl Application {
     pub fn card_draft(
         &self,
         session_id: &str,
-        claims: Vec<CardClaim>,
+        claims: Vec<session::v0_1::VettingCardClaim>,
         now: DateTime<Utc>,
     ) -> Result<CardDraft, ApplicantError> {
         let (vetter, session) = self
@@ -871,17 +942,18 @@ impl Application {
         if session.expires_at <= now {
             return Err(ApplicantError::SessionExpired);
         }
-        let claims: Vec<CardClaim> = claims
+        let claims: Vec<session::v0_1::VettingCardClaim> = claims
             .into_iter()
             .filter(|c| {
-                session.required_claims.contains(&c.claim_type)
-                    || session.optional_claims.contains(&c.claim_type)
+                let wanted = |t: &String| t.as_str() == c.type_.as_str();
+                session.required_claims.iter().any(wanted)
+                    || session.optional_claims.iter().any(wanted)
             })
             .collect();
         if let Some(missing) = session
             .required_claims
             .iter()
-            .find(|t| !claims.iter().any(|c| &c.claim_type == *t))
+            .find(|t| !claims.iter().any(|c| c.type_.as_str() == t.as_str()))
         {
             return Err(ApplicantError::MissingClaim(missing.clone()));
         }
@@ -944,9 +1016,9 @@ impl Application {
         )
         .await?;
         let recorded = SentCard {
-            id: verified.card().id.clone(),
+            id: verified.card().id.as_str().to_string(),
             digest_multibase: verified.digest_multibase().to_string(),
-            identity_commitment: verified.card().identity_commitment.clone(),
+            identity_commitment: verified.card().identity_commitment.as_str().to_string(),
             sent_at: now,
         };
         *sent = Some(recorded.clone());
@@ -1012,8 +1084,16 @@ impl Application {
             vetter: vetter.to_string(),
             method: endorsement.method,
             declared_relationship: endorsement.declared_relationship,
-            document_classes: endorsement.document_classes.clone(),
-            claims_verified: endorsement.claims_verified.clone(),
+            document_classes: endorsement
+                .document_classes
+                .iter()
+                .map(|d| d.as_str().to_string())
+                .collect(),
+            claims_verified: endorsement
+                .claims_verified
+                .iter()
+                .map(|c| c.as_str().to_string())
+                .collect(),
             identity_commitment: endorsement.identity_commitment.clone(),
             valid_from: verified.valid_from(),
             valid_until: verified.valid_until(),
@@ -1037,17 +1117,17 @@ impl Application {
     pub fn on_decline(
         &mut self,
         vetter: &str,
-        body: VettingDeclineBody,
+        body: decline::v0_1::Payload,
         now: DateTime<Utc>,
     ) -> Result<(), ApplicantError> {
         body.check_shape()?;
-        let request = self.by_request_id(&body.request_id, vetter)?;
+        let request = self.by_request_id(body.request_id.as_str(), vetter)?;
         if matches!(request.state, RequestState::Attested { .. }) {
             return Err(ApplicantError::WrongState("be declined after attesting"));
         }
         request.state = RequestState::Declined {
             code: body.code,
-            message: body.message,
+            message: body.message.map(|m| m.as_str().to_string()),
         };
         request.updated_at = now;
         Ok(())

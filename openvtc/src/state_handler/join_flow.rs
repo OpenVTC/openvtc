@@ -2829,11 +2829,13 @@ mod tests {
 mod vetting_tests {
     use super::*;
     use crate::state_handler::dispatch_util::test_config;
-    use vta_sdk::protocols::join_requests::{JoinRequestManifestResponseBody, ManifestCriterion};
+    use vta_sdk::protocols::join_requests::manifest;
 
     const VTC: &str = "did:web:kernel.example";
+    /// Base58btc and at least 16 characters, as the published criterion asks.
+    const DIGEST: &str = "zQmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR";
 
-    fn manifest(vets: bool) -> JoinRequestManifestResponseBody {
+    fn manifest(vets: bool) -> manifest::v0_2::Response {
         let requirements = serde_json::from_value(serde_json::json!({
             "version": "0.1",
             "statementType": vta_sdk::protocols::vetting::IDENTITY_VETTING_ENDORSEMENT_TYPE,
@@ -2844,17 +2846,22 @@ mod vetting_tests {
             "eligibleVetters": { "role": "vetter" }
         }))
         .unwrap();
-        JoinRequestManifestResponseBody {
-            community_did: VTC.into(),
-            criteria: vec![ManifestCriterion {
-                id: "vetted".into(),
-                description: None,
-                presentation_definition: serde_json::json!({}),
-                vetting: vets.then_some(requirements),
-                requirements_digest: Some("zDigest".into()),
-            }],
-            branding: None,
-        }
+        let criterion = manifest::v0_2::Criterion::try_from(
+            manifest::v0_2::Criterion::builder()
+                .id("vetted")
+                .presentation_definition(serde_json::Map::new())
+                .vetting(vets.then_some(requirements))
+                .requirements_digest(Some(
+                    manifest::v0_2::DigestMultibase::try_from(DIGEST).unwrap(),
+                )),
+        )
+        .unwrap();
+        manifest::v0_2::Response::try_from(
+            manifest::v0_2::Response::builder()
+                .community_did(VTC)
+                .criteria(vec![criterion]),
+        )
+        .unwrap()
     }
 
     fn awaiting() -> AwaitingRequirements {

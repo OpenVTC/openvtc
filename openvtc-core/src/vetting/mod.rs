@@ -30,6 +30,31 @@
 //! module owns state and sequencing only; it never re-implements a check the
 //! SDK makes.
 
+/// Carry a generated vocabulary value into another specification's copy of it.
+///
+/// `trust-tasks-codegen` generates the vetting vocabulary **per specification**:
+/// `VettingMethod` exists in `join-requests/manifest/0.2`, `vetting/request/0.1`,
+/// `vetting/session/0.1`, `vetters/profile/0.1` and `vetters/list/0.1` as five
+/// distinct Rust types with the same variants and the same wire tokens, and
+/// `VettingDocumentation`, `ClaimType`, `CountryCode`, `PlaceName`,
+/// `LanguageTag` and `CalendarDate` are duplicated the same way. They do not
+/// unify, so a method chosen on the Vetting page cannot be handed straight to a
+/// session payload.
+///
+/// This carries a value across by the token both spell — the only thing the two
+/// copies agree on, and the thing that actually travels. It converts between
+/// two generated types; it does not restate either of them.
+///
+/// This repo keeps one of each in its own state (the manifest's, which is the
+/// vocabulary a community publishes) and converts at each task boundary.
+pub(crate) fn same_token<A, B>(value: &A) -> Result<B, B::Err>
+where
+    A: std::fmt::Display,
+    B: std::str::FromStr,
+{
+    value.to_string().parse()
+}
+
 pub mod applicant;
 pub mod book;
 pub mod guide;

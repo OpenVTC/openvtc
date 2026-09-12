@@ -1,8 +1,8 @@
 //! The vetter registry: a vetter's published profile, the directory applicants
 //! search, and the forms both are typed into.
 //!
-//! A person types text; the community takes a `VetterProfileBody` or a
-//! `VetterListBody` and refuses anything that breaks its schema. This module
+//! A person types text; the community takes a `vetters/profile/0.1` payload or
+//! a `vetters/list/0.1` one and refuses anything that breaks its schema. This module
 //! sits between the two. It turns the text into the body, names the field a
 //! person got wrong in their own terms, and leaves every schema bound to the
 //! SDK's `check_shape`, so this client never disagrees with the community about
@@ -16,10 +16,12 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vta_sdk::protocols::vetting::{
-    ShapeError, VetterEvent, VetterListBody, VetterLocation, VetterProfileBody,
-    VetterProfileResponseBody, VettingMethod,
+use vta_sdk::protocols::vetting::vetters::list::v0_1 as list;
+use vta_sdk::protocols::vetting::vetters::profile::v0_1::{
+    self as profile, CalendarDate, CountryCode, LanguageTag, PlaceName, VetterAcceptsDocumentation,
+    VetterEvent, VetterLocation, VetterMethods, VettingDocumentation,
 };
+use vta_sdk::protocols::vetting::{CheckShape, ShapeError, VettingMethod};
 
 use super::book::{VetterPolicy, VettingBook};
 use crate::config::account::PersonaId;
@@ -69,6 +71,20 @@ fn date(field: &'static str, text: &str) -> Result<NaiveDate, DraftError> {
     NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").map_err(|_| DraftError::Date(field))
 }
 
+/// A value the published type refuses outright — a country that is not two
+/// letters, a place name past its bound, a documentation token that is not
+/// lowerCamelCase. The community refuses the same value, so it reads as a
+/// schema failure here too.
+fn refused(e: impl std::fmt::Display) -> DraftError {
+    DraftError::Shape(ShapeError::Schema(e.to_string()))
+}
+
+fn place(text: &str) -> Result<Option<PlaceName>, DraftError> {
+    optional(text)
+        .map(|t| PlaceName::try_from(t).map_err(refused))
+        .transpose()
+}
+
 fn location(
     what: &'static str,
     country: &str,
@@ -76,16 +92,45 @@ fn location(
     city: &str,
 ) -> Result<Option<VetterLocation>, DraftError> {
     match optional(country) {
-        Some(country) => Ok(Some(VetterLocation {
-            country: country.to_uppercase(),
-            region: optional(region),
-            city: optional(city),
-        })),
+        Some(country) => {
+            let country = CountryCode::try_from(country.to_uppercase()).map_err(refused)?;
+            let built = VetterLocation::try_from(
+                VetterLocation::builder()
+                    .country(country)
+                    .region(place(region)?)
+                    .city(place(city)?),
+            )
+            .map_err(refused)?;
+            Ok(Some(built))
+        }
         None if optional(region).is_some() || optional(city).is_some() => {
             Err(DraftError::LocationWithoutCountry(what))
         }
         None => Ok(None),
     }
+}
+
+/// Check one event the way the community checks it.
+///
+/// The published `VetterEvent` carries no check of its own: the rules no schema
+/// can state — `endDate` on or after `startDate`, a span of at most 31 days —
+/// and its `url` as an absolute https URI are checked over the whole profile.
+/// The event form runs one event through a profile that carries only it, so a
+/// bad date is still named while the form is open rather than at publish.
+fn check_event(event: &VetterEvent) -> Result<(), DraftError> {
+    let passport =
+        VettingDocumentation::try_from(vta_sdk::protocols::vetting::documentation::PASSPORT)
+            .map_err(refused)?;
+    let probe = profile::Payload::try_from(
+        profile::Payload::builder()
+            .listed(false)
+            .languages(Vec::new())
+            .methods(VetterMethods(vec![profile::VettingMethod::InPerson]))
+            .accepts_documentation(VetterAcceptsDocumentation(vec![passport]))
+            .events(vec![event.clone()]),
+    )
+    .map_err(refused)?;
+    probe.check_shape().map_err(DraftError::Shape)
 }
 
 /// One event, as typed.
@@ -106,12 +151,20 @@ impl EventDraft {
     pub fn from_event(event: &VetterEvent) -> Self {
         let place = event.location.as_ref();
         Self {
-            name: event.name.clone(),
-            start_date: event.start_date.format("%Y-%m-%d").to_string(),
-            end_date: event.end_date.format("%Y-%m-%d").to_string(),
-            country: place.map(|l| l.country.clone()).unwrap_or_default(),
-            region: place.and_then(|l| l.region.clone()).unwrap_or_default(),
-            city: place.and_then(|l| l.city.clone()).unwrap_or_default(),
+            name: event.name.as_str().to_string(),
+            start_date: event.start_date.0.format("%Y-%m-%d").to_string(),
+            end_date: event.end_date.0.format("%Y-%m-%d").to_string(),
+            country: place
+                .map(|l| l.country.as_str().to_string())
+                .unwrap_or_default(),
+            region: place
+                .and_then(|l| l.region.as_ref())
+                .map(|r| r.as_str().to_string())
+                .unwrap_or_default(),
+            city: place
+                .and_then(|l| l.city.as_ref())
+                .map(|c| c.as_str().to_string())
+                .unwrap_or_default(),
             url: event.url.clone().unwrap_or_default(),
         }
     }
@@ -120,18 +173,26 @@ impl EventDraft {
     ///
     /// # Errors
     ///
-    /// A date that does not parse, a place without a country, or anything
-    /// `VetterEvent::check_shape` refuses — an end before the start, a span
-    /// over 31 days, a URL that is not `https`.
+    /// A date that does not parse, a place without a country, or anything the
+    /// event check refuses — an end before the start, a span over 31 days, a
+    /// URL that is not an absolute `https` one.
     pub fn to_event(&self) -> Result<VetterEvent, DraftError> {
-        let event = VetterEvent {
-            name: self.name.trim().to_string(),
-            start_date: date("the start date", &self.start_date)?,
-            end_date: date("the end date", &self.end_date)?,
-            location: location("the event", &self.country, &self.region, &self.city)?,
-            url: optional(&self.url),
-        };
-        event.check_shape()?;
+        let name = profile::VetterEventName::try_from(self.name.trim()).map_err(refused)?;
+        let event = VetterEvent::try_from(
+            VetterEvent::builder()
+                .name(name)
+                .start_date(CalendarDate(date("the start date", &self.start_date)?))
+                .end_date(CalendarDate(date("the end date", &self.end_date)?))
+                .location(location(
+                    "the event",
+                    &self.country,
+                    &self.region,
+                    &self.city,
+                )?)
+                .url(optional(&self.url)),
+        )
+        .map_err(refused)?;
+        check_event(&event)?;
         Ok(event)
     }
 }
@@ -189,22 +250,59 @@ impl ProfileDraft {
 
     /// The fields of a published profile, for editing.
     #[must_use]
-    pub fn from_body(body: &VetterProfileBody) -> Self {
+    pub fn from_body(body: &profile::Payload) -> Self {
         let place = body.location.as_ref();
+        let join = |items: Vec<String>| items.join(", ");
         Self {
             listed: body.listed,
-            display_name: body.display_name.clone().unwrap_or_default(),
-            languages: body.languages.join(", "),
-            country: place.map(|l| l.country.clone()).unwrap_or_default(),
-            region: place.and_then(|l| l.region.clone()).unwrap_or_default(),
-            city: place.and_then(|l| l.city.clone()).unwrap_or_default(),
+            display_name: body
+                .display_name
+                .as_ref()
+                .map(|n| n.as_str().to_string())
+                .unwrap_or_default(),
+            languages: join(
+                body.languages
+                    .iter()
+                    .map(|l| l.as_str().to_string())
+                    .collect(),
+            ),
+            country: place
+                .map(|l| l.country.as_str().to_string())
+                .unwrap_or_default(),
+            region: place
+                .and_then(|l| l.region.as_ref())
+                .map(|r| r.as_str().to_string())
+                .unwrap_or_default(),
+            city: place
+                .and_then(|l| l.city.as_ref())
+                .map(|c| c.as_str().to_string())
+                .unwrap_or_default(),
             methods: METHOD_ORDER
                 .into_iter()
-                .filter(|m| body.methods.contains(m))
+                .filter(|m| {
+                    body.methods
+                        .0
+                        .iter()
+                        .any(|published| published.to_string() == m.to_string())
+                })
                 .collect(),
-            accepts_documentation: body.accepts_documentation.join(", "),
-            availability: body.availability.clone().unwrap_or_default(),
-            contact_hint: body.contact_hint.clone().unwrap_or_default(),
+            accepts_documentation: join(
+                body.accepts_documentation
+                    .0
+                    .iter()
+                    .map(|d| d.as_str().to_string())
+                    .collect(),
+            ),
+            availability: body
+                .availability
+                .as_ref()
+                .map(|a| a.as_str().to_string())
+                .unwrap_or_default(),
+            contact_hint: body
+                .contact_hint
+                .as_ref()
+                .map(|c| c.as_str().to_string())
+                .unwrap_or_default(),
             events: body.events.iter().map(EventDraft::from_event).collect(),
         }
     }
@@ -227,28 +325,60 @@ impl ProfileDraft {
     ///
     /// # Errors
     ///
-    /// No method, a place without a country, a bad event, or anything
-    /// `VetterProfileBody::check_shape` refuses.
-    pub fn to_body(&self) -> Result<VetterProfileBody, DraftError> {
+    /// No method, a place without a country, a bad event, or anything the
+    /// published profile's `check_shape` refuses.
+    pub fn to_body(&self) -> Result<profile::Payload, DraftError> {
         if self.methods.is_empty() {
             return Err(DraftError::NoMethods);
         }
-        let body = VetterProfileBody {
-            listed: self.listed,
-            display_name: optional(&self.display_name),
-            languages: split_list(&self.languages),
-            location: location("your location", &self.country, &self.region, &self.city)?,
-            methods: self.methods.clone(),
-            accepts_documentation: split_list(&self.accepts_documentation),
-            availability: optional(&self.availability),
-            contact_hint: optional(&self.contact_hint),
-            events: self
-                .events
-                .iter()
-                .map(EventDraft::to_event)
-                .collect::<Result<_, _>>()?,
-            ext: None,
-        };
+        let languages = split_list(&self.languages)
+            .into_iter()
+            .map(|l| LanguageTag::try_from(l).map_err(refused))
+            .collect::<Result<Vec<_>, _>>()?;
+        let documentation = split_list(&self.accepts_documentation)
+            .into_iter()
+            .map(|d| VettingDocumentation::try_from(d).map_err(refused))
+            .collect::<Result<Vec<_>, _>>()?;
+        // The profile task has its own copy of the method vocabulary (see
+        // `super::same_token`), so the ticked methods are carried across by the
+        // token they both spell.
+        let methods = self
+            .methods
+            .iter()
+            .map(|m| super::same_token::<_, profile::VettingMethod>(m).map_err(refused))
+            .collect::<Result<Vec<_>, _>>()?;
+        let display_name = optional(&self.display_name)
+            .map(|n| profile::VetterDisplayName::try_from(n).map_err(refused))
+            .transpose()?;
+        let availability = optional(&self.availability)
+            .map(|a| profile::VetterAvailability::try_from(a).map_err(refused))
+            .transpose()?;
+        let contact_hint = optional(&self.contact_hint)
+            .map(|c| profile::VetterContactHint::try_from(c).map_err(refused))
+            .transpose()?;
+        let body = profile::Payload::try_from(
+            profile::Payload::builder()
+                .listed(self.listed)
+                .display_name(display_name)
+                .languages(languages)
+                .location(location(
+                    "your location",
+                    &self.country,
+                    &self.region,
+                    &self.city,
+                )?)
+                .methods(VetterMethods(methods))
+                .accepts_documentation(VetterAcceptsDocumentation(documentation))
+                .availability(availability)
+                .contact_hint(contact_hint)
+                .events(
+                    self.events
+                        .iter()
+                        .map(EventDraft::to_event)
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+        )
+        .map_err(refused)?;
         body.check_shape()?;
         Ok(body)
     }
@@ -273,26 +403,55 @@ impl DirectoryFilter {
     ///
     /// # Errors
     ///
-    /// A date that does not parse, or anything `VetterListBody::check_shape`
-    /// refuses — an end before the start, a country that is not two letters.
-    pub fn to_body(&self, cursor: Option<String>) -> Result<VetterListBody, DraftError> {
-        let body = VetterListBody {
-            language: optional(&self.language),
-            country: optional(&self.country).map(|c| c.to_uppercase()),
-            region: optional(&self.region),
-            city: optional(&self.city),
-            method: self.method,
-            event_from: optional(&self.event_from)
-                .map(|d| date("the first event date", &d))
-                .transpose()?,
-            event_to: optional(&self.event_to)
-                .map(|d| date("the last event date", &d))
-                .transpose()?,
-            event_name: optional(&self.event_name),
-            limit: None,
-            cursor,
-            ext: None,
+    /// A date that does not parse, or anything the published list request's
+    /// `check_shape` refuses — an end before the start, a country that is not
+    /// two letters.
+    pub fn to_body(&self, cursor: Option<String>) -> Result<list::Payload, DraftError> {
+        // The listing task carries its own copy of every constrained string —
+        // `LanguageTag`, `CountryCode`, `PlaceName`, `CalendarDate` are all
+        // generated per specification (see `super::same_token`) — so these are
+        // the listing's, not the profile's.
+        let list_place = |text: &str| -> Result<Option<list::PlaceName>, DraftError> {
+            optional(text)
+                .map(|t| list::PlaceName::try_from(t).map_err(refused))
+                .transpose()
         };
+        let language = optional(&self.language)
+            .map(|l| list::LanguageTag::try_from(l).map_err(refused))
+            .transpose()?;
+        let country = optional(&self.country)
+            .map(|c| list::CountryCode::try_from(c.to_uppercase()).map_err(refused))
+            .transpose()?;
+        let event_name = optional(&self.event_name)
+            .map(|n| list::PayloadEventName::try_from(n).map_err(refused))
+            .transpose()?;
+        let cursor = cursor
+            .map(|c| list::PayloadCursor::try_from(c).map_err(refused))
+            .transpose()?;
+        // The listing task has its own copy of the method vocabulary.
+        let method = self
+            .method
+            .map(|m| super::same_token::<_, list::VettingMethod>(&m).map_err(refused))
+            .transpose()?;
+        let day =
+            |what: &'static str, text: &str| -> Result<Option<list::CalendarDate>, DraftError> {
+                optional(text)
+                    .map(|d| date(what, &d).map(list::CalendarDate))
+                    .transpose()
+            };
+        let body = list::Payload::try_from(
+            list::Payload::builder()
+                .language(language)
+                .country(country)
+                .region(list_place(&self.region)?)
+                .city(list_place(&self.city)?)
+                .method(method)
+                .event_from(day("the first event date", &self.event_from)?)
+                .event_to(day("the last event date", &self.event_to)?)
+                .event_name(event_name)
+                .cursor(cursor),
+        )
+        .map_err(refused)?;
         body.check_shape()?;
         Ok(body)
     }
@@ -330,7 +489,8 @@ pub struct VetterProfileRecord {
     pub community: String,
     /// Our member persona there.
     pub persona: PersonaId,
-    /// The `VetterProfileBody` we sent, as JSON (see the module docs).
+    /// The `vtc/vetting/vetters/profile/0.1` payload we sent, as JSON (see the
+    /// module docs).
     pub profile: Value,
     /// Where it stands.
     pub state: ProfileState,
@@ -341,7 +501,7 @@ impl VetterProfileRecord {
     /// by a newer one — starts from a first profile rather than failing.
     #[must_use]
     pub fn draft(&self, policy: &VetterPolicy) -> ProfileDraft {
-        serde_json::from_value::<VetterProfileBody>(self.profile.clone()).map_or_else(
+        serde_json::from_value::<profile::Payload>(self.profile.clone()).map_or_else(
             |_| ProfileDraft::new(policy),
             |b| ProfileDraft::from_body(&b),
         )
@@ -377,7 +537,7 @@ impl VettingBook {
         &mut self,
         community: &str,
         persona: PersonaId,
-        body: &VetterProfileBody,
+        body: &profile::Payload,
         now: DateTime<Utc>,
     ) -> Option<VetterProfileRecord> {
         let record = VetterProfileRecord {
@@ -412,7 +572,7 @@ impl VettingBook {
         &mut self,
         community: &str,
         persona: PersonaId,
-        response: &VetterProfileResponseBody,
+        response: &profile::Response,
     ) -> bool {
         match self.vetter_profile_mut(community, persona) {
             Some(record) => {
@@ -450,38 +610,76 @@ impl VettingBook {
 /// A place in a line: `Prague, Central Bohemia, CZ`.
 #[must_use]
 pub fn location_line(location: &VetterLocation) -> String {
-    [
-        location.city.as_deref(),
-        location.region.as_deref(),
-        Some(location.country.as_str()),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(", ")
+    place_line(
+        location.city.as_ref().map(|c| c.as_str()),
+        location.region.as_ref().map(|r| r.as_str()),
+        location.country.as_str(),
+    )
+}
+
+/// [`location_line`] for a place as the **listing** publishes it.
+///
+/// The listing specification generates its own `VetterLocation`, distinct from
+/// the profile's (see `super::same_token`), so the same line is written from
+/// both rather than one being converted into the other to be displayed.
+#[must_use]
+pub fn listed_location_line(location: &list::VetterLocation) -> String {
+    place_line(
+        location.city.as_ref().map(|c| c.as_str()),
+        location.region.as_ref().map(|r| r.as_str()),
+        location.country.as_str(),
+    )
+}
+
+fn place_line(city: Option<&str>, region: Option<&str>, country: &str) -> String {
+    [city, region, Some(country)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// An event in a line: `LPC — 2026-10-05 to 2026-10-07, Prague, CZ`.
 #[must_use]
 pub fn event_line(event: &VetterEvent) -> String {
-    let dates = if event.start_date == event.end_date {
-        event.start_date.format("%Y-%m-%d").to_string()
+    event_line_parts(
+        event.name.as_str(),
+        event.start_date.0,
+        event.end_date.0,
+        event.location.as_ref().map(location_line),
+    )
+}
+
+/// [`event_line`] for an event as the **listing** publishes it, which generates
+/// its own `VetterEvent`.
+#[must_use]
+pub fn listed_event_line(event: &list::VetterEvent) -> String {
+    event_line_parts(
+        event.name.as_str(),
+        event.start_date.0,
+        event.end_date.0,
+        event.location.as_ref().map(listed_location_line),
+    )
+}
+
+fn event_line_parts(name: &str, start: NaiveDate, end: NaiveDate, place: Option<String>) -> String {
+    let dates = if start == end {
+        start.format("%Y-%m-%d").to_string()
     } else {
-        format!(
-            "{} to {}",
-            event.start_date.format("%Y-%m-%d"),
-            event.end_date.format("%Y-%m-%d")
-        )
+        format!("{} to {}", start.format("%Y-%m-%d"), end.format("%Y-%m-%d"))
     };
-    match &event.location {
-        Some(place) => format!("{} — {dates}, {}", event.name, location_line(place)),
-        None => format!("{} — {dates}", event.name),
+    match place {
+        Some(place) => format!("{name} — {dates}, {place}"),
+        None => format!("{name} — {dates}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Whether a listing request filters on events at all is a free function on
+    // this line rather than a method on the request.
+    use vta_sdk::protocols::vetting::has_event_filter;
 
     fn event() -> EventDraft {
         EventDraft {
@@ -501,7 +699,13 @@ mod tests {
         let draft = ProfileDraft::new(&policy);
         assert!(!draft.listed, "being listed is opt-in");
         let body = draft.to_body().unwrap();
-        assert_eq!(body.accepts_documentation, policy.accepts_documentation);
+        let accepted: Vec<String> = body
+            .accepts_documentation
+            .0
+            .iter()
+            .map(|d| d.as_str().to_string())
+            .collect();
+        assert_eq!(accepted, policy.accepts_documentation);
         assert!(body.location.is_none());
     }
 
@@ -515,18 +719,39 @@ mod tests {
         draft.city = "Berlin".into();
         draft.events = vec![event()];
         let body = draft.to_body().unwrap();
-        assert_eq!(body.display_name.as_deref(), Some("Carol"));
-        assert_eq!(body.languages, vec!["en", "de-AT"]);
-        assert_eq!(body.location.as_ref().unwrap().country, "DE");
-        assert_eq!(body.events[0].location.as_ref().unwrap().country, "CZ");
-        assert_eq!(ProfileDraft::from_body(&body).to_body().unwrap(), body);
+        assert_eq!(
+            body.display_name.as_ref().map(|n| n.as_str()),
+            Some("Carol")
+        );
+        assert_eq!(
+            body.languages
+                .iter()
+                .map(|l| l.as_str())
+                .collect::<Vec<_>>(),
+            vec!["en", "de-AT"]
+        );
+        assert_eq!(body.location.as_ref().unwrap().country.as_str(), "DE");
+        assert_eq!(
+            body.events[0].location.as_ref().unwrap().country.as_str(),
+            "CZ"
+        );
+        // The generated payload has no `PartialEq`; a round trip is compared as
+        // what it puts on the wire.
+        assert_eq!(
+            serde_json::to_value(ProfileDraft::from_body(&body).to_body().unwrap()).unwrap(),
+            serde_json::to_value(&body).unwrap()
+        );
     }
 
     #[test]
     fn event_dates_are_checked_before_anything_is_sent() {
         let mut bad = event();
         bad.start_date = "5 Oct".into();
-        assert_eq!(bad.to_event(), Err(DraftError::Date("the start date")));
+        // The published event has no `PartialEq`, so the error is matched.
+        assert!(matches!(
+            bad.to_event(),
+            Err(DraftError::Date("the start date"))
+        ));
 
         let mut backwards = event();
         backwards.end_date = "2026-10-01".into();
@@ -545,14 +770,14 @@ mod tests {
     fn a_place_needs_a_country_and_a_method_is_required() {
         let mut draft = ProfileDraft::new(&VetterPolicy::default());
         draft.city = "Berlin".into();
-        assert_eq!(
+        assert!(matches!(
             draft.to_body(),
             Err(DraftError::LocationWithoutCountry("your location"))
-        );
+        ));
         let mut draft = ProfileDraft::new(&VetterPolicy::default());
         draft.toggle_method(VettingMethod::InPerson);
         draft.toggle_method(VettingMethod::Video);
-        assert_eq!(draft.to_body(), Err(DraftError::NoMethods));
+        assert!(matches!(draft.to_body(), Err(DraftError::NoMethods)));
         draft.toggle_method(VettingMethod::PriorAcquaintance);
         draft.toggle_method(VettingMethod::InPerson);
         assert_eq!(
@@ -564,9 +789,11 @@ mod tests {
 
     #[test]
     fn directory_filters_are_optional_and_checked() {
+        // Every filter empty is every member absent, which is the whole of an
+        // unfiltered listing request.
         assert_eq!(
-            DirectoryFilter::default().to_body(None).unwrap(),
-            VetterListBody::default()
+            serde_json::to_value(DirectoryFilter::default().to_body(None).unwrap()).unwrap(),
+            serde_json::json!({})
         );
         let filter = DirectoryFilter {
             country: "cz".into(),
@@ -575,9 +802,9 @@ mod tests {
             ..DirectoryFilter::default()
         };
         let body = filter.to_body(Some("next".into())).unwrap();
-        assert_eq!(body.country.as_deref(), Some("CZ"));
-        assert!(body.has_event_filter());
-        assert_eq!(body.cursor.as_deref(), Some("next"));
+        assert_eq!(body.country.as_ref().map(|c| c.as_str()), Some("CZ"));
+        assert!(has_event_filter(&body));
+        assert_eq!(body.cursor.as_ref().map(|c| c.as_str()), Some("next"));
 
         let backwards = DirectoryFilter {
             event_from: "2026-10-10".into(),
@@ -589,10 +816,10 @@ mod tests {
             event_to: "soon".into(),
             ..DirectoryFilter::default()
         };
-        assert_eq!(
+        assert!(matches!(
             bad_date.to_body(None),
             Err(DraftError::Date("the last event date"))
-        );
+        ));
     }
 
     #[test]
@@ -616,14 +843,10 @@ mod tests {
             "edited later from what was sent"
         );
 
-        assert!(book.on_profile_stored(
-            "did:web:a",
-            persona,
-            &VetterProfileResponseBody {
-                listed: false,
-                updated_at: now,
-            }
-        ));
+        let stored =
+            profile::Response::try_from(profile::Response::builder().listed(false).updated_at(now))
+                .unwrap();
+        assert!(book.on_profile_stored("did:web:a", persona, &stored));
         assert!(matches!(
             book.vetter_profile("did:web:a", persona).unwrap().state,
             ProfileState::Stored { listed: false, .. }

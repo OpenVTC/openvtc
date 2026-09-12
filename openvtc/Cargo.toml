@@ -38,16 +38,19 @@ anyhow.workspace = true
 # own repo (OpenVTC/verifiable-git-infrastructure); openvtc is a downstream
 # consumer of the published crate.
 #
-# 0.4.9 is published and carries the vta-sdk 0.36 move, so the root manifest's
-# `[patch.crates-io]` entries for VGI are gone. Neither `did-git-sign` 0.4.9 nor
-# its `vgi-core` 0.4.9 dependency pulls `vta-sdk`, so there is no second sdk to
-# unify.
+# Floor is 0.4.9 — the release VGI cut from `chore/vta-sdk-036`, and the newest
+# there is. It resolves from crates.io, which is what let the patch block go.
 #
-# Floor is 0.4.8, and on the 0.35 line it was also where this actually resolved
-# from. 0.4.8 is published and requires `vta-sdk ^0.35`, so
-# the `[patch.crates-io]` redirect to VGI's unreleased `main` is deleted rather
-# than repointed — see the note where that block used to be, at the foot of the
-# root manifest.
+# **It is still behind this workspace, and that cannot be fixed here.**
+# 0.4.9 requires `vta-sdk ^0.36` while the workspace is on 0.38, so the graph
+# holds two sdks. A `[patch]` is not the lever: 0.4.9 was cut from VGI `main`,
+# so there is no newer commit to redirect to. VGI `main` has since taken 0.38
+# (VGI #51), so the remaining step is a VGI *release* — when one is cut, this
+# floor moves to it and the second sdk goes. See the `vta-sdk` note in the root
+# manifest for why two sdks are normally a build failure and why this one is not.
+#
+# Naming 0.4.9 rather than a bare `"0.4"` is what stops a clean checkout
+# resolving further back and adding a *third* sdk line.
 #
 # Read the rule rather than the version, because the rule has not changed: when
 # the workspace's vta-sdk minor moves, VGI has to move with it, and until it
