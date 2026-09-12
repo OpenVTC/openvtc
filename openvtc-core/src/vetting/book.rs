@@ -9,13 +9,15 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use vta_sdk::protocols::join_requests::JoinRequestManifestResponseBody;
+use vta_sdk::protocols::join_requests::{CommunityBranding, JoinRequestManifestResponseBody};
 use vta_sdk::protocols::vetting::{VettingRequirements, documentation};
 
 use super::applicant::{Application, RequestState};
+use super::queries::CommunityQuery;
+use super::registry::VetterProfileRecord;
 use super::tickets::{GuessThrottle, Ticket};
 use super::vetter::{DeskEntry, DeskState, IssuedStatement};
-use crate::config::account::PersonaId;
+use crate::config::account::{Account, CommunityRecord, PersonaId};
 
 /// A vetter's own rules (design §11.2). Every number is the vetter's choice;
 /// the community decides what counts, not what a vetter must accept.
@@ -122,6 +124,82 @@ impl VetterGrant {
     }
 }
 
+/// How a community presents itself, from its manifest's `branding`.
+///
+/// Presentation only: nothing is trusted because of it. Kept as this crate's
+/// own type rather than the SDK's, which refuses unknown members — a config
+/// written by a newer build must still open.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Branding {
+    /// The name the community gives itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// `#rrggbb`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent_color: Option<String>,
+}
+
+impl Branding {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// What of `branding` this client keeps: nothing, if it breaks its schema.
+    fn from_manifest(branding: &CommunityBranding) -> Self {
+        if branding.check_shape().is_err() {
+            return Self::default();
+        }
+        Self {
+            display_name: branding.display_name.clone(),
+            accent_color: branding.accent_color.clone(),
+        }
+    }
+
+    /// The accent colour as RGB.
+    #[must_use]
+    pub fn accent_rgb(&self) -> Option<(u8, u8, u8)> {
+        self.accent_color.as_deref().and_then(parse_accent)
+    }
+}
+
+/// `#rrggbb` as RGB; `None` for anything else.
+#[must_use]
+pub fn parse_accent(color: &str) -> Option<(u8, u8, u8)> {
+    let hex = color.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some((channel(0)?, channel(2)?, channel(4)?))
+}
+
+/// A community whose manifest we have read — whether or not it vets.
+///
+/// The criteria alone cannot say "this community does not vet": a manifest
+/// with no vetting criterion leaves none behind. This record is what tells
+/// "does not vet" apart from "never asked".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownCommunity {
+    /// The community.
+    pub community: String,
+    /// Its branding, if it publishes any.
+    #[serde(default, skip_serializing_if = "Branding::is_default")]
+    pub branding: Branding,
+    /// When its manifest was last read.
+    pub fetched_at: DateTime<Utc>,
+}
+
+/// What this book knows of whether a community vets its members.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Knowledge<'a> {
+    /// Its manifest has not been read.
+    Unknown,
+    /// Its manifest names no vetting.
+    NoVetting,
+    /// It vets: its first vetting criterion.
+    Vetting(&'a KnownCriterion),
+}
+
 /// All vetting state, for both sides.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct VettingBook {
@@ -149,6 +227,16 @@ pub struct VettingBook {
     /// Communities that named one of our personas a vetter.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vetter_grants: Vec<VetterGrant>,
+    /// Communities whose manifests we have read, with their branding.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub communities: Vec<KnownCommunity>,
+    /// The vetter profile we last sent each community, per persona.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vetter_profiles: Vec<VetterProfileRecord>,
+    /// Questions put to communities and not yet answered. Memory only — see
+    /// [`super::queries`].
+    #[serde(skip)]
+    pub queries: Vec<CommunityQuery>,
     /// Fields written by a newer build, preserved verbatim (D19).
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -166,6 +254,8 @@ impl VettingBook {
             && self.criteria.is_empty()
             && self.policy.is_default()
             && self.vetter_grants.is_empty()
+            && self.communities.is_empty()
+            && self.vetter_profiles.is_empty()
             && self.extra.is_empty()
     }
 
@@ -233,7 +323,112 @@ impl VettingBook {
             });
         self.criteria.retain(|k| k.community != community);
         self.criteria.extend(fresh);
-        !unchanged
+
+        let branding = manifest
+            .branding
+            .as_ref()
+            .map(Branding::from_manifest)
+            .unwrap_or_default();
+        // A re-read refreshes `fetched_at` without counting as a change: the
+        // same manifest again is not worth a save.
+        let branding_changed = match self
+            .communities
+            .iter_mut()
+            .find(|c| c.community == community)
+        {
+            Some(known) => {
+                known.fetched_at = now;
+                let changed = known.branding != branding;
+                known.branding = branding;
+                changed
+            }
+            None => {
+                self.communities.push(KnownCommunity {
+                    community: community.to_string(),
+                    branding,
+                    fetched_at: now,
+                });
+                true
+            }
+        };
+        !unchanged || branding_changed
+    }
+
+    /// Whether `community` vets its members, as far as this book knows.
+    ///
+    /// Criteria recorded before communities were ([`KnownCommunity`]) still
+    /// count as knowing that it vets.
+    #[must_use]
+    pub fn knowledge(&self, community: &str) -> Knowledge<'_> {
+        if let Some(criterion) = self.criteria.iter().find(|k| k.community == community) {
+            return Knowledge::Vetting(criterion);
+        }
+        if self.communities.iter().any(|c| c.community == community) {
+            Knowledge::NoVetting
+        } else {
+            Knowledge::Unknown
+        }
+    }
+
+    /// `community`'s branding, if it publishes any.
+    #[must_use]
+    pub fn branding(&self, community: &str) -> Option<&Branding> {
+        self.communities
+            .iter()
+            .find(|c| c.community == community)
+            .map(|c| &c.branding)
+            .filter(|b| !b.is_default())
+    }
+
+    /// Give application `application_id` the requirements already known for
+    /// its community — the criterion it chose, else the first — so a new
+    /// application shows them before its own manifest request is answered.
+    /// Returns whether anything changed.
+    pub fn adopt_known_requirements(&mut self, application_id: &str) -> bool {
+        let Some(app) = self.applications.iter().find(|a| a.id == application_id) else {
+            return false;
+        };
+        let mut known = self
+            .criteria
+            .iter()
+            .filter(|k| k.community == app.community);
+        let chosen = app
+            .criterion_id
+            .as_deref()
+            .and_then(|id| {
+                self.criteria
+                    .iter()
+                    .find(|k| k.community == app.community && k.criterion_id == id)
+            })
+            .or_else(|| known.next())
+            .cloned();
+        let (Some(criterion), Some(app)) = (chosen, self.application_by_id_mut(application_id))
+        else {
+            return false;
+        };
+        let changed = app.requirements.as_ref() != Some(&criterion.requirements)
+            || app.requirements_digest != criterion.requirements_digest
+            || app.criterion_id.as_deref() != Some(criterion.criterion_id.as_str());
+        app.criterion_id = Some(criterion.criterion_id);
+        app.requirements = Some(criterion.requirements);
+        app.requirements_digest = criterion.requirements_digest;
+        changed
+    }
+
+    /// Active memberships holding no live vetter grant — where a member the
+    /// community did name a vetter may simply never have received the
+    /// credential, and can ask for it again.
+    #[must_use]
+    pub fn resend_candidates<'a>(
+        &self,
+        account: &'a Account,
+        now: DateTime<Utc>,
+    ) -> Vec<&'a CommunityRecord> {
+        account
+            .memberships()
+            .filter(|m| m.status.is_active())
+            .filter(|m| self.vetter_grant(&m.vtc_did, m.persona_ref, now).is_none())
+            .collect()
     }
 
     /// The claim types a session for `community` should require: those of the
@@ -440,6 +635,139 @@ mod tests {
         book.start_application("did:web:other", persona, "did:key:zA", now)
             .unwrap();
         assert_eq!(book.applications.len(), 2);
+    }
+
+    fn manifest(
+        branding: Option<CommunityBranding>,
+        vetting: bool,
+    ) -> JoinRequestManifestResponseBody {
+        let requirements: VettingRequirements = serde_json::from_value(serde_json::json!({
+            "version": "0.1",
+            "statementType": vta_sdk::protocols::vetting::IDENTITY_VETTING_ENDORSEMENT_TYPE,
+            "minStatements": 1,
+            "acceptedMethods": ["inPerson"],
+            "requiredClaims": ["name.legal"],
+            "eligibleVetters": { "role": "vetter" }
+        }))
+        .unwrap();
+        JoinRequestManifestResponseBody {
+            community_did: "did:web:vtc".into(),
+            criteria: vec![vta_sdk::protocols::join_requests::ManifestCriterion {
+                id: "c1".into(),
+                description: None,
+                presentation_definition: serde_json::json!({}),
+                vetting: vetting.then_some(requirements),
+                requirements_digest: Some("zDigest".into()),
+            }],
+            branding,
+        }
+    }
+
+    #[test]
+    fn a_manifest_says_whether_a_community_vets_and_how_it_looks() {
+        let mut book = VettingBook::default();
+        let now = Utc::now();
+        assert_eq!(book.knowledge("did:web:vtc"), Knowledge::Unknown);
+
+        let branding = CommunityBranding {
+            display_name: Some("Kernel".into()),
+            accent_color: Some("#1a2B3c".into()),
+            ..CommunityBranding::default()
+        };
+        assert!(book.learn_manifest("did:web:vtc", &manifest(Some(branding.clone()), true), now));
+        assert!(matches!(
+            book.knowledge("did:web:vtc"),
+            Knowledge::Vetting(_)
+        ));
+        let known = book.branding("did:web:vtc").unwrap();
+        assert_eq!(known.display_name.as_deref(), Some("Kernel"));
+        assert_eq!(known.accent_rgb(), Some((0x1a, 0x2b, 0x3c)));
+        assert!(
+            !book.learn_manifest("did:web:vtc", &manifest(Some(branding), true), now),
+            "the same manifest again is not a change"
+        );
+
+        assert!(book.learn_manifest("did:web:open", &manifest(None, false), now));
+        assert_eq!(book.knowledge("did:web:open"), Knowledge::NoVetting);
+        assert!(book.branding("did:web:open").is_none());
+
+        let broken = CommunityBranding {
+            accent_color: Some("red".into()),
+            ..CommunityBranding::default()
+        };
+        book.learn_manifest("did:web:broken", &manifest(Some(broken), false), now);
+        assert!(
+            book.branding("did:web:broken").is_none(),
+            "a bad branding is dropped whole"
+        );
+    }
+
+    #[test]
+    fn only_rrggbb_is_an_accent() {
+        assert_eq!(parse_accent("#ff0080"), Some((255, 0, 128)));
+        for bad in ["ff0080", "#ff008", "#ff00800", "#gg0080", "#ff0 80"] {
+            assert_eq!(parse_accent(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_new_application_takes_the_requirements_already_known() {
+        let mut book = VettingBook::default();
+        let now = Utc::now();
+        book.learn_manifest("did:web:vtc", &manifest(None, true), now);
+        let id = book
+            .start_application("did:web:vtc", PersonaId::new(), "did:key:zA", now)
+            .unwrap()
+            .id
+            .clone();
+        assert!(book.adopt_known_requirements(&id));
+        let app = book.application_by_id_mut(&id).unwrap();
+        assert_eq!(app.criterion_id.as_deref(), Some("c1"));
+        assert_eq!(app.requirements_digest.as_deref(), Some("zDigest"));
+        assert!(
+            !book.adopt_known_requirements(&id),
+            "nothing new the second time"
+        );
+    }
+
+    #[test]
+    fn a_member_without_a_live_grant_can_ask_for_it_again() {
+        let now = Utc::now();
+        let mut account = Account::default();
+        let persona = PersonaId::new();
+        for (vtc, active) in [
+            ("did:web:a", true),
+            ("did:web:b", true),
+            ("did:web:c", false),
+        ] {
+            let mut record = CommunityRecord::new_pending(
+                vtc.to_string(),
+                None,
+                "openvtc/test".to_string(),
+                persona,
+                uuid::Uuid::new_v4(),
+                now,
+            );
+            if active {
+                record.activate(now);
+            }
+            account.add_membership(record);
+        }
+        let mut book = VettingBook::default();
+        book.keep_vetter_grant(VetterGrant {
+            community: "did:web:a".into(),
+            persona,
+            credential_id: None,
+            valid_until: Some(now + Duration::days(30)),
+            received_at: now,
+            credential: serde_json::json!({}),
+        });
+        let candidates: Vec<&str> = book
+            .resend_candidates(&account, now)
+            .into_iter()
+            .map(|m| m.vtc_did.as_str())
+            .collect();
+        assert_eq!(candidates, vec!["did:web:b"]);
     }
 
     #[test]

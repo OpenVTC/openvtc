@@ -36,6 +36,8 @@ use vta_sdk::vetting::requirements::{
     Evaluation, REQUIREMENTS_DIGEST_MEMBER, StatementFacts, evaluate,
 };
 use vta_sdk::vetting::statement::verify_statement;
+use vta_sdk::vetting::status::StatusCheck;
+use vta_sdk::vetting::ticket_uri::{self, TicketUri};
 
 use crate::config::account::PersonaId;
 use crate::persona::disclosure::ReleasedClaim;
@@ -86,6 +88,39 @@ pub enum ApplicantError {
     /// The community's requirements cannot be evaluated.
     #[error("the community's vetting requirements are unusable: {0}")]
     InvalidRequirements(String),
+}
+
+/// Why a pasted ticket link cannot be used for this application.
+#[derive(Debug, thiserror::Error)]
+pub enum TicketUriError {
+    /// Not a ticket link this client can read.
+    #[error("that is not a vetting ticket link this client can read: {0}")]
+    Unreadable(VettingError),
+    /// A ticket for vetting in another community.
+    #[error(
+        "that ticket is for vetting in another community ({0}), not the one this application is to"
+    )]
+    OtherCommunity(String),
+}
+
+/// What an applicant should do next, from where the application stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NextStep {
+    /// A vetter opened a session and is waiting for the card.
+    SendCard {
+        /// The session.
+        session_id: String,
+    },
+    /// The community's requirements are not known yet.
+    LearnRequirements,
+    /// The published requirements are met: join.
+    Join,
+    /// Nothing has been shown to a vetter yet: choose the face they see.
+    ChooseFace,
+    /// More statements are needed and no vetter is working on one.
+    AskVetter,
+    /// Vetters have the request; wait for them.
+    WaitForVetters,
 }
 
 /// One application.
@@ -163,6 +198,51 @@ pub enum VetterEligibility {
     },
 }
 
+/// Whether the community has revoked the grant a vetter presented, as far as
+/// this client could find out (design §7.1). Advisory, like
+/// [`VetterEligibility`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum GrantStatus {
+    /// The status list is being fetched.
+    Checking {
+        /// Since when.
+        since: DateTime<Utc>,
+    },
+    /// The community's signed status list shows the grant unrevoked.
+    Active {
+        /// When.
+        checked_at: DateTime<Utc>,
+    },
+    /// The community has revoked (or suspended) the grant.
+    Revoked {
+        /// When this was learned.
+        checked_at: DateTime<Utc>,
+    },
+    /// It could not be established; never read as active.
+    Unknown {
+        /// Why, for the person and the log.
+        reason: String,
+        /// When the check gave up.
+        checked_at: DateTime<Utc>,
+    },
+}
+
+impl GrantStatus {
+    /// The result of a status check made at `now`.
+    #[must_use]
+    pub fn from_check(check: StatusCheck, now: DateTime<Utc>) -> Self {
+        match check {
+            StatusCheck::Active => GrantStatus::Active { checked_at: now },
+            StatusCheck::Revoked => GrantStatus::Revoked { checked_at: now },
+            StatusCheck::Unknown(reason) => GrantStatus::Unknown {
+                reason,
+                checked_at: now,
+            },
+        }
+    }
+}
+
 /// One request to one vetter.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutboundRequest {
@@ -175,6 +255,9 @@ pub struct OutboundRequest {
     /// What the vetter's acceptance showed of their eligibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eligibility: Option<VetterEligibility>,
+    /// Whether the community has since revoked the grant they showed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_status: Option<GrantStatus>,
     /// When we sent it.
     pub sent_at: DateTime<Utc>,
     /// When it last moved.
@@ -411,6 +494,7 @@ impl Application {
             vetter: vetter.to_string(),
             state: RequestState::Sent,
             eligibility: None,
+            grant_status: None,
             sent_at: now,
             updated_at: now,
         });
@@ -496,6 +580,7 @@ impl Application {
             _ => return Err(ApplicantError::WrongState("be accepted")),
         }
         request.eligibility = Some(eligibility);
+        request.grant_status = None;
         request.state = RequestState::Accepted {
             request_id: body.request_id,
             accepts_documentation: body.accepts_documentation,
@@ -503,6 +588,79 @@ impl Application {
         };
         request.updated_at = now;
         Ok(())
+    }
+
+    /// Record what is known of whether the community revoked the grant the
+    /// vetter showed on request `request_document_id`.
+    ///
+    /// # Errors
+    ///
+    /// No request of ours to that vetter with that id.
+    pub fn record_grant_status(
+        &mut self,
+        request_document_id: &str,
+        vetter: &str,
+        status: GrantStatus,
+    ) -> Result<(), ApplicantError> {
+        let request = self.by_thread(request_document_id, vetter)?;
+        request.grant_status = Some(status);
+        Ok(())
+    }
+
+    /// Read a pasted ticket link (what a vetter's QR code carries): the vetter
+    /// to ask, and the ticket to present.
+    ///
+    /// # Errors
+    ///
+    /// Not a ticket link, or a ticket for vetting in another community — which
+    /// the vetter would refuse, and which would tie this application's DID to
+    /// that community if it were sent.
+    pub fn ticket_from_uri(&self, input: &str) -> Result<TicketUri, TicketUriError> {
+        let ticket = ticket_uri::decode(input).map_err(TicketUriError::Unreadable)?;
+        if ticket.community != self.community {
+            return Err(TicketUriError::OtherCommunity(ticket.community));
+        }
+        Ok(ticket)
+    }
+
+    /// What to do next.
+    ///
+    /// A waiting session comes first: it closes in minutes. Then, in order, the
+    /// requirements have to be known, the application may already be enough,
+    /// the first card needs a face, and a request that needs more statements
+    /// needs a vetter working on one.
+    #[must_use]
+    pub fn next_step(&self, now: DateTime<Utc>) -> NextStep {
+        if let Some(session_id) = self.requests.iter().find_map(|r| match &r.state {
+            RequestState::Session {
+                session,
+                card: None,
+                ..
+            } if session.expires_at > now => Some(session.id.clone()),
+            _ => None,
+        }) {
+            return NextStep::SendCard { session_id };
+        }
+        let Some(evaluation) = self.checklist(now) else {
+            return NextStep::LearnRequirements;
+        };
+        if evaluation.satisfied() {
+            return NextStep::Join;
+        }
+        if self.identity_claims.is_empty() && self.requests.is_empty() {
+            return NextStep::ChooseFace;
+        }
+        let in_progress = self.requests.iter().any(|r| {
+            matches!(
+                r.state,
+                RequestState::Sent | RequestState::Accepted { .. } | RequestState::Session { .. }
+            )
+        });
+        if in_progress {
+            NextStep::WaitForVetters
+        } else {
+            NextStep::AskVetter
+        }
     }
 
     /// The vetter refused the request (`trust-task-error`, threaded on it).
