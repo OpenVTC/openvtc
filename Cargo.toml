@@ -192,18 +192,17 @@ dialoguer = { version = "0.12", features = ["password"] }
 # gained `BlockedHost`, which `OpenVTCError::WebVH` carries through by `#[from]`
 # rather than matching on).
 #
-# **The second copy has narrowed to one cause, the same one as the second sdk.**
-# It was 0.6.1, held by every VTI crate declaring `didwebvh-rs = "0.6"`, which
-# excludes 0.7. `vta-sdk` 0.38 declares `^0.7` and `vta-service` 0.27 does too,
-# so the published closure no longer holds it. What remains is `vta-sdk` 0.36.0,
-# and the only thing pulling *that* is `did-git-sign` 0.4.9 — so this row and the
-# second sdk are now the same obligation with two names, and both close on a VGI
-# release. Nothing crosses between the two copies (VTI's use is minting and
-# log-entry work behind its own API, and no didwebvh-rs type appears in a
-# signature this workspace calls), so it costs a `cargo tree -d` row rather than
-# a build failure. `cargo tree -i didwebvh-rs` is the check: the **resolution**
-# path (`affinidi-did-resolver-cache-sdk`) must be the 0.7 node, and after the
-# VGI release there should be no other.
+# **The second copy is gone.** It was 0.6.1, held by every VTI crate declaring
+# `didwebvh-rs = "0.6"`, which excludes 0.7. `vta-sdk` 0.38 and `vta-service`
+# 0.27 both declare `^0.7`, which cleared the published closure; the last holder
+# was the older `vta-sdk` 0.36.0 that `did-git-sign` 0.4.9 pulled, and taking
+# 0.4.10 removed it. So this row and the second sdk were one obligation with two
+# names, and the VGI release closed both. Nothing crossed between the copies
+# while they existed (VTI's use is minting and log-entry work behind its own
+# API, and no didwebvh-rs type appears in a signature this workspace calls), so
+# the cost was a `cargo tree -d` row rather than a build failure.
+# `cargo tree -i didwebvh-rs` remains the check: one node, and the **resolution**
+# path (`affinidi-did-resolver-cache-sdk`) must be it.
 didwebvh-rs = "0.7"
 ed25519-dalek-bip32 = "0.3"
 hkdf = "0.13"
@@ -395,20 +394,20 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 #   again. Dev-only, which is exactly why it gets forgotten — the *shipped*
 #   graph looks clean while the harness tests this client against a server it is
 #   no longer paired with.
-# - `did-git-sign`, the standing obligation, **unsatisfied on this line and not
-#   fixable from here**. 0.4.9 is the newest release and requires `vta-sdk
-#   ^0.36`, so the graph carries a second sdk: 0.38.0 for this workspace, 0.36.x
-#   beneath `did-git-sign`. A `[patch]` cannot close it — 0.4.9 was cut from VGI
-#   `main`, so there is no newer commit to point at. It blocked six consecutive
-#   minors before this one (0.23, 0.25, 0.27, 0.31, 0.32, 0.34) and 0.35 was the
-#   only line it did not.
+# - `did-git-sign`, the standing obligation, **satisfied on this line for the
+#   first time since 0.35**. 0.4.10 requires `vta-sdk ^0.38` — the line this
+#   workspace is on — so the second sdk is gone. It had blocked six consecutive
+#   minors (0.23, 0.25, 0.27, 0.31, 0.32, 0.34), each carried by a rev-pin or
+#   tolerated as a duplicate, because VGI could not publish while it held a git
+#   dependency of its own; `trql-client` 0.17 shipping is what unstuck it.
 #
-#   The duplicate costs a `cargo tree -d` row rather than a build failure, and
-#   the reason is narrow enough to be worth stating: we use
-#   `did_git_sign::{config, init}` only, so no sdk type crosses that boundary.
-#   One new import is all it would take. **VGI `main` is already on 0.38** (VGI
-#   #51), so what remains is a VGI *release*: when one is cut, the floor in
-#   `openvtc/Cargo.toml` moves to it and this row disappears.
+#   While it lasted the duplicate cost a `cargo tree -d` row rather than a build
+#   failure, for a narrow reason worth keeping in view now that it no longer
+#   applies: we use `did_git_sign::{config, init}` only, so no sdk type crossed
+#   that boundary. One new import would have turned it into a type error, since
+#   `vti-common` re-exports `vta_sdk::acl` types that cannot unify across copies.
+#   The floor names the exact release for the same reason — a bare `"0.4"` would
+#   let a clean checkout resolve back to 0.4.9 and reintroduce the second sdk.
 #
 # `trql-client`, the third git-pinned edge in this ecosystem, does **not**
 # depend on `vta-sdk` at all, so the trust registry needs no release for an sdk
@@ -487,17 +486,19 @@ strip = "symbols"
 # No `[patch.crates-io]`.
 #
 # The block that stood here carried two repositories across one release each, and
-# both releases have landed: VTI published `vta-sdk` 0.37 with the whole
-# `vta-service` 0.26 closure behind it — since superseded by 0.38 and 0.27, which
-# is what these floors now name — and VGI published `did-git-sign` 0.4.9.
+# both releases have landed: VTI published `vta-sdk` 0.38 with the whole
+# `vta-service` 0.27 closure behind it, and VGI published `did-git-sign` 0.4.10.
 # So every dependency resolves from crates.io and the block is deleted rather
 # than left empty, so that adding one back is a visible decision.
 #
-# What the unwind did *not* buy is the thing a patch block is usually kept for.
-# `did-git-sign` 0.4.9 requires `vta-sdk ^0.36` against this workspace's 0.38, so
-# the graph still holds two sdks — and a patch is no longer the lever, because
-# VGI `main` is the commit 0.4.9 was cut from. The `vta-sdk` note above has the
-# detail; the fix is a VGI release, not an entry here.
+# It took two steps to buy the thing a patch block is usually kept for. The
+# first unwind landed while `did-git-sign` 0.4.9 still required `vta-sdk ^0.36`,
+# so the graph carried two sdks and — beneath the older one — two `didwebvh-rs`.
+# No patch could close that: 0.4.9 was cut from VGI `main`, so there was no
+# newer commit to point at, and the lever was a VGI release rather than an entry
+# here. VGI took 0.38 and cut 0.4.10, and this floor followed. The graph now
+# resolves one `vta-sdk` and one `didwebvh-rs`, which is the state the unwind was
+# for. `cargo tree -d` is the check that it stays that way.
 #
 # `deny.toml`'s `allow-git` list is the other half of every entry, and is empty
 # again too. The two are edited together: `unknown-git = "deny"` means a patch

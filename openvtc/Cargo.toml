@@ -38,19 +38,18 @@ anyhow.workspace = true
 # own repo (OpenVTC/verifiable-git-infrastructure); openvtc is a downstream
 # consumer of the published crate.
 #
-# Floor is 0.4.9 — the release VGI cut from `chore/vta-sdk-036`, and the newest
-# there is. It resolves from crates.io, which is what let the patch block go.
+# Floor is 0.4.10 — the release VGI cut from `main` once it had taken `vta-sdk`
+# 0.38 (VGI #51), and the newest there is.
 #
-# **It is still behind this workspace, and that cannot be fixed here.**
-# 0.4.9 requires `vta-sdk ^0.36` while the workspace is on 0.38, so the graph
-# holds two sdks. A `[patch]` is not the lever: 0.4.9 was cut from VGI `main`,
-# so there is no newer commit to redirect to. VGI `main` has since taken 0.38
-# (VGI #51), so the remaining step is a VGI *release* — when one is cut, this
-# floor moves to it and the second sdk goes. See the `vta-sdk` note in the root
-# manifest for why two sdks are normally a build failure and why this one is not.
+# **This is the line where the obligation below is finally satisfied.** 0.4.10
+# requires `vta-sdk ^0.38`, the same line this workspace is on, so the graph
+# holds one sdk rather than two for the first time since 0.35. The `didwebvh-rs`
+# duplicate went with it: 0.6.1 was reachable only through the older sdk this
+# edge used to pull. See the `vta-sdk` note in the root manifest for why two
+# sdks are normally a build failure and why the one we carried was not.
 #
-# Naming 0.4.9 rather than a bare `"0.4"` is what stops a clean checkout
-# resolving further back and adding a *third* sdk line.
+# Naming 0.4.10 rather than a bare `"0.4"` is what stops a clean checkout
+# resolving further back and adding a *second* sdk line again.
 #
 # Read the rule rather than the version, because the rule has not changed: when
 # the workspace's vta-sdk minor moves, VGI has to move with it, and until it
@@ -61,6 +60,12 @@ anyhow.workspace = true
 # VGI held a git dependency of its own. What changed is not the rule but the
 # cadence: `trql-client` 0.17 shipped, VGI's manifest went back to a version
 # requirement, and `publish.yml` could get past the manifest again.
+#
+# This line is the first time the rule is met on the same day the sdk moved.
+# VGI took 0.38 in its #51 and cut 0.4.10 from `main`; the bump here followed
+# within the hour. Worth recording because the failure mode was never the rule
+# being unknown — it was the gap between the sdk moving and VGI shipping, and
+# what closed the gap was VGI having no git dependency left to block `publish`.
 #
 # The floor must name the exact release, never a lower caret. `"0.4.3"` admitted
 # 0.4.5, which requires `vta-sdk ^0.25` — so while this workspace was already on
@@ -80,7 +85,7 @@ anyhow.workspace = true
 # rather than as a wall of satisfied constraints — 0.4.5 was the first release on
 # vta-sdk 0.25, 0.4.3 the first on 0.23, and 0.4.0/0.4.1 were on `^0.19` and put
 # a second vta-sdk *and* a second trust-tasks in the binary.
-did-git-sign = "0.4.9"
+did-git-sign = "0.4.10"
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true
