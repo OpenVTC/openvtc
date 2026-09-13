@@ -205,7 +205,7 @@ dependencies = [
  "ahash",
  "base64 0.23.1",
  "did-scid",
- "didwebvh-rs 0.7.0",
+ "didwebvh-rs",
  "highway",
  "moka",
  "rand 0.10.2",
@@ -386,7 +386,7 @@ dependencies = [
  "chrono",
  "clap",
  "dashmap",
- "didwebvh-rs 0.7.0",
+ "didwebvh-rs",
  "futures-util",
  "governor",
  "hostname",
@@ -2776,9 +2776,9 @@ dependencies = [
 
 [[package]]
 name = "did-git-sign"
-version = "0.4.9"
+version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "669c60cff3a6fdb9ce9b21253be80e37814dae8f13d07b1fd0deeb43a12d954c"
+checksum = "c31b009838a13319a0421aaef278e43aed5c36b3843ee03e58ef10f78576a2e9"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -2800,7 +2800,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vgi-core",
- "vta-sdk 0.36.0",
+ "vta-sdk",
  "windows-native-keyring-store",
  "zeroize",
 ]
@@ -2812,38 +2812,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32bb54e6769f547fc641bbe63bb06f253fe41ad552e47e24cbd6c62a7b6436d8"
 dependencies = [
  "affinidi-did-common",
- "didwebvh-rs 0.7.0",
+ "didwebvh-rs",
  "regex",
  "serde_json",
  "thiserror 2.0.20",
  "tracing",
-]
-
-[[package]]
-name = "didwebvh-rs"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87a6d8803724264019c1b1dda174b4f666b833e9ac05acd45e87e9fecef2c67b"
-dependencies = [
- "affinidi-data-integrity",
- "affinidi-did-common",
- "affinidi-secrets-resolver",
- "ahash",
- "async-trait",
- "base58",
- "chrono",
- "getrandom 0.4.3",
- "percent-encoding",
- "reqwest",
- "serde",
- "serde_json",
- "serde_json_canonicalizer",
- "serde_with",
- "sha2 0.11.0",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "url",
 ]
 
 [[package]]
@@ -3314,9 +3287,9 @@ dependencies = [
 
 [[package]]
 name = "fancy-regex"
-version = "0.19.1"
+version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52e0387578e845beb7a1acff126228499f26cb18edf12919cc513bb863266464"
+checksum = "d301f5bf187b3c295fce6468d3875037a0bccc5f6b151c63cac2f85babf21912"
 dependencies = [
  "bit-set 0.8.0",
  "regex-automata",
@@ -4700,7 +4673,7 @@ dependencies = [
  "bytecount",
  "data-encoding",
  "email_address",
- "fancy-regex 0.19.1",
+ "fancy-regex 0.19.2",
  "fraction",
  "getrandom 0.3.4",
  "idna",
@@ -6157,7 +6130,7 @@ dependencies = [
  "dbus-secret-service-keyring-store",
  "dialoguer",
  "did-git-sign",
- "didwebvh-rs 0.7.0",
+ "didwebvh-rs",
  "dirs",
  "dtg-credentials 0.6.0",
  "ed25519-dalek-bip32",
@@ -6192,7 +6165,7 @@ dependencies = [
  "tui-input",
  "url",
  "uuid",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "windows-native-keyring-store",
  "x25519-dalek 2.0.1",
  "zeroize",
@@ -6222,7 +6195,7 @@ dependencies = [
  "card-backend-pcsc",
  "chrono",
  "criterion",
- "didwebvh-rs 0.7.0",
+ "didwebvh-rs",
  "dirs",
  "dtg-credentials 0.6.0",
  "ed25519-dalek-bip32",
@@ -6253,7 +6226,7 @@ dependencies = [
  "trust-tasks-rs",
  "url",
  "uuid",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "vta-service",
  "wiremock",
  "x25519-dalek 2.0.1",
@@ -9639,9 +9612,9 @@ dependencies = [
 
 [[package]]
 name = "vgi-core"
-version = "0.4.9"
+version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d0964e051cc46fdf01fcb28f017bf2a1e2677d2ae6e78f9f7ac920a00809dbb"
+checksum = "56813b34bf2fd659934a0472dc47210db5da300ba2dd410889cc6a1f0840901c"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -9683,7 +9656,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "vti-common",
 ]
 
@@ -9709,7 +9682,7 @@ dependencies = [
  "vta-config",
  "vta-keys",
  "vta-keyspaces",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "vta-support",
  "vti-common",
  "zeroize",
@@ -9737,7 +9710,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.20",
  "tokio",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "vtc-client",
  "vti-common",
  "x25519-dalek 3.0.0",
@@ -9755,7 +9728,7 @@ dependencies = [
  "sha2 0.11.0",
  "toml",
  "tracing",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "vti-common",
  "vti-secrets",
 ]
@@ -9787,7 +9760,7 @@ dependencies = [
  "uuid",
  "vta-config",
  "vta-keyspaces",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "vti-common",
  "vti-secrets",
  "x25519-dalek 3.0.0",
@@ -9838,54 +9811,8 @@ dependencies = [
  "tracing",
  "vta-config",
  "vta-keyspaces",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "vti-common",
-]
-
-[[package]]
-name = "vta-sdk"
-version = "0.36.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ba4a57d063ed5ccae8c8dd582d7e975b0d3fcd38aee5097bb852b4850e4010b"
-dependencies = [
- "affinidi-crypto",
- "affinidi-data-integrity",
- "affinidi-did-common",
- "affinidi-did-resolver-cache-sdk",
- "affinidi-did-resolver-traits",
- "affinidi-messaging-core",
- "affinidi-messaging-delivery",
- "affinidi-messaging-didcomm",
- "affinidi-openid4vci",
- "affinidi-openid4vp",
- "affinidi-secrets-resolver",
- "affinidi-tdk",
- "affinidi-vc",
- "agent-names",
- "async-trait",
- "base64 0.23.1",
- "chrono",
- "ciborium",
- "curve25519-dalek 5.0.0",
- "didwebvh-rs 0.6.1",
- "dirs",
- "ed25519-dalek 3.0.0",
- "futures-util",
- "getrandom 0.4.3",
- "hpke",
- "multibase",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "trust-tasks-rs",
- "url",
- "uuid",
- "x25519-dalek 3.0.0",
- "zeroize",
 ]
 
 [[package]]
@@ -9909,6 +9836,7 @@ dependencies = [
  "affinidi-status-list",
  "affinidi-tdk",
  "affinidi-vc",
+ "agent-names",
  "apple-native-keyring-store",
  "async-trait",
  "base64 0.23.1",
@@ -9916,7 +9844,7 @@ dependencies = [
  "ciborium",
  "curve25519-dalek 5.0.0",
  "dbus-secret-service-keyring-store",
- "didwebvh-rs 0.7.0",
+ "didwebvh-rs",
  "dirs",
  "dtg-credentials 0.9.1",
  "ed25519-dalek 3.0.0",
@@ -9974,7 +9902,7 @@ dependencies = [
  "ciborium",
  "clap",
  "dialoguer",
- "didwebvh-rs 0.7.0",
+ "didwebvh-rs",
  "dirs",
  "dtg-credentials 0.9.1",
  "ed25519-dalek 3.0.0",
@@ -10024,7 +9952,7 @@ dependencies = [
  "vta-keyspaces",
  "vta-persona",
  "vta-policy",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "vta-support",
  "vta-sweepers",
  "vta-vault",
@@ -10057,7 +9985,7 @@ dependencies = [
  "tracing",
  "vta-config",
  "vta-keyspaces",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "vti-common",
 ]
 
@@ -10103,7 +10031,7 @@ dependencies = [
  "tracing",
  "uuid",
  "vta-keyspaces",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "vti-common",
  "x509-parser 0.18.1",
 ]
@@ -10122,7 +10050,7 @@ dependencies = [
  "tracing",
  "url",
  "vta-keyspaces",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "vti-common",
  "zeroize",
 ]
@@ -10139,7 +10067,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "trust-tasks-rs",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "vti-rooms",
 ]
 
@@ -10182,7 +10110,7 @@ dependencies = [
  "utoipa",
  "utoipa-axum",
  "uuid",
- "vta-sdk 0.38.0",
+ "vta-sdk",
  "webauthn-rs",
  "zeroize",
 ]
