@@ -2568,6 +2568,7 @@ impl MainPage {
             }
             (VettingTab::Desk, KeyCode::Char('x')) if view == DeskView::Requests => V::ArmDecline,
             (VettingTab::Desk, KeyCode::Char('t')) if view == DeskView::Tickets => V::NewTicket,
+            (VettingTab::Desk, KeyCode::Enter) if view == DeskView::Tickets => V::ShowTicket,
             (VettingTab::Desk, KeyCode::Char('d')) if view == DeskView::Tickets => V::DeleteTicket,
             (VettingTab::Desk, KeyCode::Char('u')) if view == DeskView::Tickets => {
                 let Some(uri) = vetting.tickets.get(selected).and_then(|t| t.uri.clone()) else {
@@ -3912,11 +3913,23 @@ mod key_handler_tests {
         let (mut page, mut rx) = desk_on(DeskView::Tickets);
         page.handle_key_event(press(KeyCode::Char('t')));
         assert!(matches!(vetting_action(&mut rx), V::NewTicket));
+        // A QR code has to be whole on screen to scan, so it gets a view of its
+        // own rather than a share of the desk.
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(vetting_action(&mut rx), V::ShowTicket));
         page.handle_key_event(press(KeyCode::Char('x')));
         assert!(rx.try_recv().is_err(), "declining is the Requests view's");
         // No ticket selected: copying the link does nothing.
         page.handle_key_event(press(KeyCode::Char('u')));
         assert!(rx.try_recv().is_err());
+
+        let (mut page, mut rx) = desk_on(DeskView::Requests);
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(
+            matches!(vetting_action(&mut rx), V::StartAttest),
+            "Enter on a request still attests — the ticket view is the Tickets \
+             view's Enter, not the desk's"
+        );
 
         let (mut page, mut rx) = desk_on(DeskView::Issued);
         page.handle_key_event(press(KeyCode::Char('w')));

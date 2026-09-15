@@ -18,6 +18,10 @@ const DEFAULT_STATUS_WRAP_WIDTH: usize = 76;
 /// word per line, which is less readable than letting it run.
 const MIN_STATUS_WRAP_WIDTH: usize = 24;
 
+/// Fallback content height, used only before the first frame has recorded a
+/// real one. A conservative 24-row terminal minus the surrounding chrome.
+const DEFAULT_CONTENT_HEIGHT: usize = 16;
+
 thread_local! {
     /// Visible width of the content panel, recorded by [`set_wrap_width`] at the
     /// top of each frame.
@@ -30,6 +34,11 @@ thread_local! {
     /// set-then-render within a frame, so a thread-local carries it instead.
     static WRAP_WIDTH: std::cell::Cell<usize> =
         const { std::cell::Cell::new(DEFAULT_STATUS_WRAP_WIDTH) };
+
+    /// Visible height of the content panel, recorded by [`set_content_height`]
+    /// alongside the width. Carried the same way and for the same reason.
+    static CONTENT_HEIGHT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(DEFAULT_CONTENT_HEIGHT) };
 }
 
 /// Record the content panel's visible width for this frame. Called by the
@@ -47,6 +56,20 @@ fn wrap_width() -> usize {
 /// something that cannot wrap — a QR code.
 pub fn content_width() -> usize {
     WRAP_WIDTH.get()
+}
+
+/// Record the content panel's visible height for this frame, the companion to
+/// [`set_wrap_width`].
+///
+/// Only one thing needs it, and it is the one thing that cannot be scrolled
+/// into view: a QR code has to be whole on the screen to be scanned at all.
+pub fn set_content_height(height: usize) {
+    CONTENT_HEIGHT.set(height);
+}
+
+/// The content panel's usable height this frame, in text rows.
+pub fn content_height() -> usize {
+    CONTENT_HEIGHT.get()
 }
 
 /// Push a status message as one or more wrapped lines (no trailing blank).

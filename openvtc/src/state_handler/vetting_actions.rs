@@ -604,6 +604,15 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             v.mode = VettingMode::List;
             v.status_message = None;
         }
+        VettingAction::ShowTicket => {
+            let v = page(ctx);
+            // Only a ticket that can still be redeemed is worth holding up to a
+            // camera; a spent one would scan and then be refused.
+            if v.tickets.get(v.selected).is_some_and(|t| t.live) {
+                v.mode = VettingMode::ShowTicket { index: v.selected };
+                v.status_message = None;
+            }
+        }
         VettingAction::SwitchDeskView(forward) => {
             let v = page(ctx);
             // The desk view is remembered across a tab switch, so this only
@@ -968,6 +977,10 @@ fn cycle(v: &mut VettingState, forward: bool) {
 async fn submit(ctx: &mut ActionCtx<'_>) {
     match page(ctx).mode.clone() {
         VettingMode::List => {}
+        // Nothing to submit — it is a code being held up to a phone. Enter
+        // closes it, the same as Esc, because both are what a hand reaches for
+        // when the scan is done.
+        VettingMode::ShowTicket { .. } => back(page(ctx)),
         VettingMode::NewApplication {
             community,
             persona_index,

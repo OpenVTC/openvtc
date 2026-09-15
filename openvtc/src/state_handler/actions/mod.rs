@@ -299,6 +299,9 @@ pub enum VettingAction {
     SwitchTab,
     /// Move one desk view along (`true` forward): requests → tickets → issued.
     SwitchDeskView(bool),
+    /// Show the selected ticket's QR code with the whole panel to itself, for
+    /// someone to scan off the screen.
+    ShowTicket,
     /// Move the selection.
     Select(usize),
     /// Leave the open form.
