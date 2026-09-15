@@ -1243,6 +1243,26 @@ fn tsp_document_to_message(
     recipient: &str,
     fallback_id: &str,
 ) -> Option<Message> {
+    // Carriage comes off before anything reads the document.
+    //
+    // A TSP payload carries the Trust Task inside the binding envelope, and the
+    // envelope's own `type` is the *binding's* — so the `doc["type"]` read
+    // below would see `…/binding/tsp/0.1/envelope`, dispatch every reply on a
+    // type no handler knows, and drop it. That failure is silent in the way
+    // this whole class is: the send succeeds, the peer answers, and the answer
+    // evaporates on arrival.
+    //
+    // Liberal on the way in, deliberately. This is a client reading whatever a
+    // community sends it, and a VTC that predates the binding still sends the
+    // bare document; the two shapes are unambiguous, so accepting both costs
+    // nothing. Being strict here would turn "an older peer" into "a silent
+    // drop", which is the thing being fixed.
+    let opened = vta_sdk::tsp_binding::open_envelope(payload);
+    let payload: &[u8] = match &opened {
+        Ok(document) => document,
+        Err(_) => payload,
+    };
+
     let doc: serde_json::Value = match serde_json::from_slice(payload) {
         Ok(doc) => doc,
         Err(e) => {
@@ -2365,6 +2385,87 @@ mod supervisor_policy_tests {
     #[test]
     fn the_grace_period_outlasts_the_backoff_ceiling() {
         assert!(REBUILD_GRACE > REBUILD_BACKOFF_CAP);
+    }
+}
+
+#[cfg(test)]
+mod tsp_carriage_tests {
+    use super::tsp_document_to_message;
+
+    /// A Trust Task document, as a peer would put one on the wire.
+    fn document(type_uri: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "urn:uuid:11111111-1111-4111-8111-111111111111",
+            "type": type_uri,
+            "issuer": "did:webvh:example.com:community",
+            "recipient": "did:key:zPersona",
+            "issuedAt": "2026-01-01T00:00:00Z",
+            "payload": { "status": "accepted" },
+        })
+    }
+
+    const REPLY_TYPE: &str = "https://trusttasks.org/spec/vtc/join-requests/submit/0.1#response";
+
+    fn to_message(payload: &[u8]) -> Option<affinidi_tdk::didcomm::Message> {
+        tsp_document_to_message(
+            payload,
+            Some("did:webvh:example.com:community"),
+            "did:key:zPersona",
+            "fallback-frame-hash",
+        )
+    }
+
+    /// The shape every VTI peer now sends: the document sealed in the binding
+    /// envelope. The `type` that reaches routing must be the **task's**, not the
+    /// binding's.
+    ///
+    /// This is the test that matters, because getting it wrong is silent. The
+    /// envelope has a `type` of its own, so a mapper that reads `type` without
+    /// opening it still finds a string, still builds a message, and routes every
+    /// reply to a handler that does not exist — the send succeeded, the peer
+    /// answered, and the answer evaporated on arrival.
+    #[test]
+    fn a_binding_envelope_yields_the_task_type_not_the_bindings() {
+        let payload = vta_sdk::tsp_binding::wrap_envelope(
+            &serde_json::to_vec(&document(REPLY_TYPE)).unwrap(),
+        );
+
+        let msg = to_message(&payload).expect("an enveloped reply must map to a message");
+
+        assert_eq!(
+            msg.typ, REPLY_TYPE,
+            "routing must see the task type; `{}` means the envelope was never opened",
+            msg.typ
+        );
+    }
+
+    /// And the older shape still works. A VTC that predates the binding sends
+    /// the bare document, and this is a client reading whatever a community
+    /// sends it — being strict here would turn "an older peer" into a silent
+    /// drop, which is the failure being fixed, not a stricter version of it.
+    #[test]
+    fn a_bare_document_is_still_accepted() {
+        let payload = serde_json::to_vec(&document(REPLY_TYPE)).unwrap();
+
+        let msg = to_message(&payload).expect("a bare reply must still map to a message");
+
+        assert_eq!(msg.typ, REPLY_TYPE);
+    }
+
+    /// Both carriages must produce the *same* message, or a peer's choice of
+    /// wrapper would quietly change how its reply is handled.
+    #[test]
+    fn the_two_carriages_agree() {
+        let doc = document(REPLY_TYPE);
+        let bare = serde_json::to_vec(&doc).unwrap();
+        let wrapped = vta_sdk::tsp_binding::wrap_envelope(&bare);
+
+        let from_bare = to_message(&bare).expect("bare maps");
+        let from_wrapped = to_message(&wrapped).expect("wrapped maps");
+
+        assert_eq!(from_bare.typ, from_wrapped.typ);
+        assert_eq!(from_bare.id, from_wrapped.id);
+        assert_eq!(from_bare.body, from_wrapped.body);
     }
 }
 
