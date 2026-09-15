@@ -51,6 +51,72 @@ parts of the family are deliberately not on it, each for a reason worth keeping:
 
 ---
 
+## Blocked on an upstream release
+
+Items whose OpenVTC side is understood and whose prerequisite is a crate being
+published elsewhere. Recorded together because they interlocked: the dependency
+unwind gated the rest, and it closed on 2026-09-10. The two that remain both
+wait on one thing — a `vtc-client` release carrying VTI #1399 — and the second
+falls out for free if the first lands, since the session transports verify reply
+proofs through the SDK.
+
+### [x] Drop every `[patch.crates-io]` entry and take the 0.35 line
+Both of these — the `vta-sdk` facet pin and the two VGI entries — closed
+together in **#291** (`c7f751e`, 2026-09-10), because their prerequisites landed
+within hours of each other: `vta-sdk` 0.35.0 published carrying
+`persona/facet/*`, and `did-git-sign` 0.4.8 published requiring `^0.35`.
+
+The patch block is **deleted rather than emptied**, and `deny.toml`'s
+`allow-git` list with it, so reintroducing one is a visible decision. Both keep
+a note saying what they were for.
+
+**The constraint that outlived the merge:** `vta-sdk` 0.35 refuses an unsigned
+trust-task reply *by default*, so any VTA this build talks to needs
+`vta-service` **0.25.0+** — 0.24.1 was published hours before VTI #1334/#1335
+merged and does not sign. A client upgraded ahead of its agent refuses every
+answer it gets, which reads as a total outage and is invisible to CI. Recorded
+beside the `vta-sdk` line in the root manifest;
+`VtaClient::trusting_unsigned_replies()` is the staging hatch if the order ever
+has to be reversed.
+
+### [ ] Consume `vtc-client` for VTC interactions and delete the hand-built path
+`openvtc-core/src/join.rs` builds the join-ceremony Trust Task documents itself
+and sends them over ATM or `tsp::send_trust_task`, because the library offered a
+transport we could not use and a signature we could not satisfy. **VTI #1399
+fixed both** (`vtc-client` gained `submit_join_as` for any DID method, and
+`connect_didcomm` / `connect_tsp` behind off-by-default features), so this is now
+a consumer change waiting on a `vtc-client` release carrying it — and on the
+0.35 line above, since `vtc-client` on `main` declares `vta-sdk` 0.35.
+
+What goes when it lands: `submit_join_request`, the status poll and self-remove
+in `join.rs`, our half of `tsp.rs`, and the DIDComm-vs-TSP thread-id
+reconciliation — the comment explaining that the two transports thread on
+different UUIDs stops being a consumer's problem. `message_dispatch.rs` stays
+for inbound, and gets a library-verified reply to work with.
+
+**A correction worth keeping**, because it was wrong in this repo's own prose
+first: `join.rs`'s header says REST is unusable for a `did:webvh` persona
+because "the VTC's REST holder-binding verification accepts `did:key` applicants
+only". That describes `holder_signature.rs`, the *legacy per-verb* binding whose
+routes no longer exist. The current document endpoint resolves the proof's
+`verificationMethod` through a DID resolver and has accepted `did:webvh` since
+the vm-resolver work. Fix that comment when this is done.
+
+### [ ] Verify VTC trust-task reply proofs
+OpenVTC verifies VRC *credential* proofs (`verify_vrc_proof` in
+`message_dispatch.rs`) and nothing else on the VTC path, so a join accept or
+reject is acted on as unauthenticated bytes. VTI #1334 made VTCs sign their
+success responses, which makes verifying them newly possible — the console did
+the equivalent in its own #215.
+
+Gated on a `vtc-service` release carrying #1334: `main` is still at **0.11.58**,
+the same version published 2026-08-11, a month before the fix. Built today it
+would have to ship default-off, which is a switch with nothing to switch on.
+Falls out for free if the item above lands first, since `vtc-client`'s session
+transports verify reply proofs through the SDK.
+
+---
+
 ## Small / unscheduled
 
 ### [ ] Honour `include_sensitive` as a real second escalation
