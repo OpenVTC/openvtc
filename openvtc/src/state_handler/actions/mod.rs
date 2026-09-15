@@ -636,11 +636,20 @@ pub enum Action {
     /// Enter/Esc are handled by the panel, not forwarded here).
     CreatePersonaInput(crossterm::event::KeyEvent),
 
-    /// Advance the overlay. From the label phase: check the label and offer the
-    /// contexts the persona can be minted into. From the context phase: make
-    /// sure the chosen context exists, mint the persona's keys and DID in it,
-    /// then show + copy the new DID.
+    /// Advance the overlay. From the label phase: check the label and ask where
+    /// the DID should live on the host. From the path phase: check the path and
+    /// offer the contexts the persona can be minted into. From the context
+    /// phase: make sure the chosen context exists, mint the persona's keys and
+    /// DID in it, then show + copy the new DID.
     CreatePersonaSubmit,
+
+    /// Choose whether the hosting server names the persona's DID path or the
+    /// operator does (path phase).
+    CreatePersonaPathChoice(crate::state_handler::main_page::content::PersonaPathChoice),
+
+    /// Forward a key event to the create-persona custom-path input. Sent only
+    /// while the custom row is chosen; Enter/Esc are handled by the panel.
+    CreatePersonaPathInput(crossterm::event::KeyEvent),
 
     /// Move the create-persona context highlight to this row.
     CreatePersonaContextSelect(usize),
@@ -648,7 +657,7 @@ pub enum Action {
     /// Replace the name typed for the persona's new sub-context.
     CreatePersonaContextSlug(String),
 
-    /// Go back from the context choice to the label.
+    /// Step back one phase: context → path → label.
     CreatePersonaBack,
 
     /// Copy the minted persona DID to the clipboard again (Done phase).

@@ -13,8 +13,9 @@ use crate::colors::{
 };
 use crate::state_handler::{
     main_page::content::{
-        AttestForm, CardPreview, ContentPanelState, DIRECTORY_FIELDS, DIRECTORY_METHODS, DeskStage,
-        DirectoryView, EventForm, LineTone, PROFILE_FIELDS, VETTING_METHODS, VETTING_RELATIONSHIPS,
+        AttestForm, CardPreview, ContentPanelState, DIRECTORY_FIELDS, DIRECTORY_LABELS,
+        DIRECTORY_METHODS, DeskStage, DirectoryView, EVENT_LABELS, EventForm, LineTone,
+        PROFILE_FIELDS, PROFILE_LABELS, VETTING_METHODS, VETTING_RELATIONSHIPS,
         VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VettingMode,
         VettingState, VettingTab, method_label, reason_label, relationship_label,
     },
@@ -605,8 +606,9 @@ fn directory(lines: &mut Vec<Line<'static>>, v: &VettingState, view: &DirectoryV
     lines.push(Line::from(""));
     let f = view.field;
     let community = v.directory_communities.get(view.community_index);
+    let row = |i: usize| DIRECTORY_LABELS[i];
     let mut line = field(
-        "Community",
+        row(0),
         community.map(|c| c.name.clone()).unwrap_or_default(),
         f == 0,
         false,
@@ -615,40 +617,20 @@ fn directory(lines: &mut Vec<Line<'static>>, v: &VettingState, view: &DirectoryV
         line.spans.insert(2, accent_swatch(c.accent));
     }
     lines.push(line);
-    lines.push(field(
-        "Language",
-        view.filter.language.clone(),
-        f == 1,
-        true,
-    ));
-    lines.push(field("Country", view.filter.country.clone(), f == 2, true));
-    lines.push(field("Region", view.filter.region.clone(), f == 3, true));
-    lines.push(field("City", view.filter.city.clone(), f == 4, true));
+    lines.push(field(row(1), view.filter.language.clone(), f == 1, true));
+    lines.push(field(row(2), view.filter.country.clone(), f == 2, true));
+    lines.push(field(row(3), view.filter.region.clone(), f == 3, true));
+    lines.push(field(row(4), view.filter.city.clone(), f == 4, true));
     let method = DIRECTORY_METHODS[view.method_index.min(DIRECTORY_METHODS.len() - 1)];
     lines.push(field(
-        "Method",
+        row(5),
         method.map_or("any", method_label).to_string(),
         f == 5,
         false,
     ));
-    lines.push(field(
-        "Events from",
-        view.filter.event_from.clone(),
-        f == 6,
-        true,
-    ));
-    lines.push(field(
-        "Events until",
-        view.filter.event_to.clone(),
-        f == 7,
-        true,
-    ));
-    lines.push(field(
-        "Event name",
-        view.filter.event_name.clone(),
-        f == 8,
-        true,
-    ));
+    lines.push(field(row(6), view.filter.event_from.clone(), f == 6, true));
+    lines.push(field(row(7), view.filter.event_to.clone(), f == 7, true));
+    lines.push(field(row(8), view.filter.event_name.clone(), f == 8, true));
     lines.push(hint(
         "  Language is a tag such as en or de, country a code such as CZ, dates YYYY-MM-DD.",
     ));
@@ -754,8 +736,11 @@ fn profile(lines: &mut Vec<Line<'static>>, v: &VettingState, form: &VetterProfil
     let f = form.field;
     let d = &form.draft;
     let membership = v.memberships.get(form.membership_index);
+    // Each row's label comes from `PROFILE_LABELS`, the same array a refused
+    // draft names its row in and the cursor jump resolves against.
+    let row = |i: usize| PROFILE_LABELS[i];
     let mut line = field(
-        "Community",
+        row(0),
         membership.map(|m| m.name.clone()).unwrap_or_default(),
         f == 0,
         false,
@@ -765,16 +750,16 @@ fn profile(lines: &mut Vec<Line<'static>>, v: &VettingState, form: &VetterProfil
     }
     lines.push(line);
     lines.push(field(
-        "Listed",
+        row(1),
         format!("{}  show me in the directory", tick(d.listed)),
         f == 1,
         false,
     ));
-    lines.push(field("Display name", d.display_name.clone(), f == 2, true));
-    lines.push(field("Languages", d.languages.clone(), f == 3, true));
-    lines.push(field("Country", d.country.clone(), f == 4, true));
-    lines.push(field("Region", d.region.clone(), f == 5, true));
-    lines.push(field("City", d.city.clone(), f == 6, true));
+    lines.push(field(row(2), d.display_name.clone(), f == 2, true));
+    lines.push(field(row(3), d.languages.clone(), f == 3, true));
+    lines.push(field(row(4), d.country.clone(), f == 4, true));
+    lines.push(field(row(5), d.region.clone(), f == 5, true));
+    lines.push(field(row(6), d.city.clone(), f == 6, true));
     for (i, method) in [
         VettingMethod::InPerson,
         VettingMethod::Video,
@@ -784,7 +769,7 @@ fn profile(lines: &mut Vec<Line<'static>>, v: &VettingState, form: &VetterProfil
     .enumerate()
     {
         lines.push(field(
-            if i == 0 { "I vet" } else { "" },
+            row(7 + i),
             format!(
                 "{}  {}",
                 tick(d.methods.contains(&method)),
@@ -795,18 +780,13 @@ fn profile(lines: &mut Vec<Line<'static>>, v: &VettingState, form: &VetterProfil
         ));
     }
     lines.push(field(
-        "Documents I accept",
+        row(10),
         d.accepts_documentation.clone(),
         f == 10,
         true,
     ));
-    lines.push(field("Availability", d.availability.clone(), f == 11, true));
-    lines.push(field(
-        "How to get a ticket",
-        d.contact_hint.clone(),
-        f == 12,
-        true,
-    ));
+    lines.push(field(row(11), d.availability.clone(), f == 11, true));
+    lines.push(field(row(12), d.contact_hint.clone(), f == 12, true));
     lines.push(Line::from(""));
     lines.push(Line::from(" Events you will vet at").fg(COLOR_SUCCESS));
     for (i, event) in d.events.iter().enumerate() {
@@ -865,13 +845,14 @@ fn event_form(lines: &mut Vec<Line<'static>>, event: &EventForm) {
     lines.push(Line::from(""));
     let d = &event.draft;
     let f = event.field;
-    lines.push(field("Name", d.name.clone(), f == 0, true));
-    lines.push(field("First day", d.start_date.clone(), f == 1, true));
-    lines.push(field("Last day", d.end_date.clone(), f == 2, true));
-    lines.push(field("Country", d.country.clone(), f == 3, true));
-    lines.push(field("Region", d.region.clone(), f == 4, true));
-    lines.push(field("City", d.city.clone(), f == 5, true));
-    lines.push(field("Web page", d.url.clone(), f == 6, true));
+    let row = |i: usize| EVENT_LABELS[i];
+    lines.push(field(row(0), d.name.clone(), f == 0, true));
+    lines.push(field(row(1), d.start_date.clone(), f == 1, true));
+    lines.push(field(row(2), d.end_date.clone(), f == 2, true));
+    lines.push(field(row(3), d.country.clone(), f == 3, true));
+    lines.push(field(row(4), d.region.clone(), f == 4, true));
+    lines.push(field(row(5), d.city.clone(), f == 5, true));
+    lines.push(field(row(6), d.url.clone(), f == 6, true));
     lines.push(hint("  Days are YYYY-MM-DD; the page must be https."));
     if let Some(error) = &event.error {
         lines.push(Line::from(""));

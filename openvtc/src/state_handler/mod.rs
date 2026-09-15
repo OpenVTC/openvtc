@@ -2452,6 +2452,7 @@ impl StateHandler {
                     Action::StartCreatePersona | Action::CreatePersonaInput(..) |
                     Action::CreatePersonaClose | Action::CreatePersonaContextSelect(..) |
                     Action::CreatePersonaContextSlug(..) | Action::CreatePersonaBack |
+                    Action::CreatePersonaPathChoice(..) | Action::CreatePersonaPathInput(..) |
                     Action::AgentNameManagerInput(..) |
                     Action::AgentNameManagerSelect(..) | Action::AgentNameManagerConfirmRemove |
                     Action::AgentNameManagerCancelRemove | Action::AgentNameManagerClose |
@@ -2742,6 +2743,28 @@ async fn settle_after_apply(
     }
 }
 
+/// The path mode the overlay's path phase is asking for, or why what was typed
+/// cannot be sent.
+///
+/// The server-assigned row is `WebvhPathMode::AutoAssign` — the behaviour
+/// every persona had before this choice existed, and still the default. A typed
+/// path goes through
+/// [`openvtc_core::config::did::explicit_path_mode`], which maps it with the
+/// SDK and checks it against the hosting server's naming rules.
+fn chosen_path_mode(
+    overlay: &main_page::content::CreatePersonaState,
+) -> Result<vta_sdk::protocols::did_management::create::WebvhPathMode, String> {
+    use main_page::content::PersonaPathChoice;
+    use vta_sdk::protocols::did_management::create::WebvhPathMode;
+
+    match overlay.path_choice {
+        PersonaPathChoice::Auto => Ok(WebvhPathMode::AutoAssign),
+        PersonaPathChoice::Custom => {
+            openvtc_core::config::did::explicit_path_mode(overlay.path.value())
+        }
+    }
+}
+
 /// Start a standalone persona mint off the loop, shared by both loops.
 ///
 /// The label is validated here — empty is an instant, local rejection that
@@ -2774,7 +2797,7 @@ fn spawn_persona_mint(
     };
     let label = overlay.label.value().trim().to_string();
     match overlay.phase {
-        // The label is checked, then the contexts it can live in are offered —
+        // The label is checked, then where the DID sits on the host is asked —
         // no VTA call yet, so this stays on the loop.
         CreatePersonaPhase::Label => {
             if label.is_empty() {
@@ -2786,6 +2809,19 @@ fn spawn_persona_mint(
                     "No account context yet — finish setup before creating a persona.",
                     true,
                 );
+            }
+            if let Some(o) = state.main_page.create_persona.as_mut() {
+                o.messages.clear();
+                o.phase = CreatePersonaPhase::Path;
+            }
+            return;
+        }
+        // The path is checked against the hosting server's naming rules before
+        // the contexts are offered, so a typo is caught here rather than after
+        // a context has been created for a mint that was never going to land.
+        CreatePersonaPhase::Path => {
+            if let Err(e) = chosen_path_mode(&overlay) {
+                return fail(state, &e, false);
             }
             let (options, slug) = create_persona::context_choice(config, &label);
             if let Some(o) = state.main_page.create_persona.as_mut() {
@@ -2802,6 +2838,12 @@ fn spawn_persona_mint(
             return;
         }
     }
+    // Re-checked rather than carried from the path phase: Esc goes back to it,
+    // so the answer can change after it was first accepted.
+    let path_mode = match chosen_path_mode(&overlay) {
+        Ok(mode) => mode,
+        Err(e) => return fail(state, &e, false),
+    };
     let context_id = match create_persona::chosen_context(
         config,
         &overlay.context_options,
@@ -2837,7 +2879,7 @@ fn spawn_persona_mint(
     let job = create_persona::MintJob {
         admin_vta: admin_vta.clone(),
         tdk: tdk.clone(),
-        inputs: create_persona::MintInputs::from_config(config, context_id),
+        inputs: create_persona::MintInputs::from_config(config, context_id, path_mode),
         label,
         progress_tx: dispatch_tx.clone(),
     };
@@ -3561,6 +3603,28 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
         Action::CreatePersonaClose => {
             state.main_page.create_persona = None;
         }
+        Action::CreatePersonaPathChoice(choice) => {
+            if let Some(o) = state.main_page.create_persona.as_mut()
+                && o.phase == main_page::content::CreatePersonaPhase::Path
+            {
+                o.path_choice = *choice;
+                o.messages.clear();
+            }
+        }
+        Action::CreatePersonaPathInput(key) => {
+            use tui_input::backend::crossterm::EventHandler;
+            if let Some(o) = state.main_page.create_persona.as_mut()
+                && o.phase == main_page::content::CreatePersonaPhase::Path
+            {
+                // Typing is itself the choice: a key pressed while the
+                // server-assigned row is highlighted means the operator has
+                // started naming the path, and making them select the row
+                // first would swallow the character they just typed.
+                o.path_choice = main_page::content::PersonaPathChoice::Custom;
+                o.path.handle_event(&crossterm::event::Event::Key(*key));
+                o.messages.clear();
+            }
+        }
         Action::CreatePersonaContextSelect(i) => {
             if let Some(o) = state.main_page.create_persona.as_mut()
                 && o.phase == main_page::content::CreatePersonaPhase::Context
@@ -3582,11 +3646,25 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
             }
         }
         Action::CreatePersonaBack => {
-            if let Some(o) = state.main_page.create_persona.as_mut()
-                && o.phase == main_page::content::CreatePersonaPhase::Context
-            {
-                o.phase = main_page::content::CreatePersonaPhase::Label;
-                o.messages.clear();
+            use main_page::content::CreatePersonaPhase;
+            if let Some(o) = state.main_page.create_persona.as_mut() {
+                // One phase at a time, and only the steps that are still a
+                // question: a mint that is running or finished has nothing to
+                // go back to.
+                match o.phase {
+                    CreatePersonaPhase::Context => {
+                        o.phase = CreatePersonaPhase::Path;
+                        o.messages.clear();
+                    }
+                    CreatePersonaPhase::Path => {
+                        o.phase = CreatePersonaPhase::Label;
+                        o.messages.clear();
+                    }
+                    CreatePersonaPhase::Label
+                    | CreatePersonaPhase::Working
+                    | CreatePersonaPhase::Done
+                    | CreatePersonaPhase::Failed => {}
+                }
             }
         }
         Action::CommunityContext(action) => {
@@ -4390,7 +4468,16 @@ mod tests {
             &Action::CreatePersonaContextSlug("laptop".into()),
         );
         assert_eq!(overlay(&state).context_slug, "laptop");
+        // Back walks one phase at a time: the path choice sits between the
+        // context and the label.
         assert!(handle_nav_action(&mut state, &Action::CreatePersonaBack));
+        assert_eq!(overlay(&state).phase, CreatePersonaPhase::Path);
+        assert!(handle_nav_action(&mut state, &Action::CreatePersonaBack));
+        assert_eq!(overlay(&state).phase, CreatePersonaPhase::Label);
+        assert!(
+            handle_nav_action(&mut state, &Action::CreatePersonaBack),
+            "the label is the first phase — back from it is a no-op, not a close"
+        );
         assert_eq!(overlay(&state).phase, CreatePersonaPhase::Label);
 
         state.main_page.content_panel.communities.device_access = Some(DeviceAccessView {
@@ -4419,6 +4506,93 @@ mod tests {
             &mut state,
             &Action::CommunityContext(CommunityContextAction::DeleteStart(0))
         ));
+    }
+
+    /// The DID path choice: server-assigned by default, typing picks the typed
+    /// row (and keeps the character that picked it), and the typed text
+    /// survives a look at the other row.
+    #[test]
+    fn nav_reducer_moves_through_the_persona_path_choice() {
+        use crate::state_handler::main_page::content::{
+            CreatePersonaPhase, CreatePersonaState, PersonaPathChoice,
+        };
+        use crossterm::event::{KeyCode, KeyEvent};
+        use vta_sdk::protocols::did_management::create::WebvhPathMode;
+
+        let mut state = State::default();
+        state.main_page.create_persona = Some(CreatePersonaState {
+            phase: CreatePersonaPhase::Path,
+            ..Default::default()
+        });
+        let overlay = |s: &State| s.main_page.create_persona.clone().unwrap();
+        assert_eq!(
+            overlay(&state).path_choice,
+            PersonaPathChoice::Auto,
+            "a server-assigned path is what every persona got before this choice \
+             existed, so it stays the default"
+        );
+
+        // Typing is the choice — the row need not be selected first, or the
+        // character that started the name would be swallowed.
+        for c in "alice".chars() {
+            assert!(handle_nav_action(
+                &mut state,
+                &Action::CreatePersonaPathInput(KeyEvent::from(KeyCode::Char(c)))
+            ));
+        }
+        assert_eq!(overlay(&state).path_choice, PersonaPathChoice::Custom);
+        assert_eq!(overlay(&state).path.value(), "alice");
+
+        // Going back up to the server-assigned row must not discard it: the
+        // rows are a choice, not a mode switch that clears the field.
+        handle_nav_action(
+            &mut state,
+            &Action::CreatePersonaPathChoice(PersonaPathChoice::Auto),
+        );
+        assert_eq!(overlay(&state).path.value(), "alice");
+        assert_eq!(
+            chosen_path_mode(&overlay(&state)),
+            Ok(WebvhPathMode::AutoAssign),
+            "the chosen row decides, not the leftover text"
+        );
+
+        handle_nav_action(
+            &mut state,
+            &Action::CreatePersonaPathChoice(PersonaPathChoice::Custom),
+        );
+        assert_eq!(
+            chosen_path_mode(&overlay(&state)),
+            Ok(WebvhPathMode::Explicit("alice".to_string()))
+        );
+    }
+
+    /// A path the hosting server would refuse is refused here, while the
+    /// overlay is open. The mint creates the VTA context *before* the DID, so a
+    /// path rejected at the server costs an orphan context — and the operator
+    /// finds out after the overlay has closed on a failure.
+    #[test]
+    fn a_refused_path_is_caught_before_anything_is_minted() {
+        use crate::state_handler::main_page::content::{
+            CreatePersonaPhase, CreatePersonaState, PersonaPathChoice,
+        };
+        use vta_sdk::protocols::did_management::create::WebvhPathMode;
+
+        let overlay = |typed: &str| CreatePersonaState {
+            phase: CreatePersonaPhase::Path,
+            path_choice: PersonaPathChoice::Custom,
+            path: tui_input::Input::new(typed.to_string()),
+            ..Default::default()
+        };
+
+        let err = chosen_path_mode(&overlay("Alice")).unwrap_err();
+        assert!(err.contains("lowercase"), "got: {err}");
+        assert!(chosen_path_mode(&overlay("")).is_err(), "nothing typed");
+        assert!(chosen_path_mode(&overlay("api")).is_err(), "reserved");
+        assert_eq!(
+            chosen_path_mode(&overlay("team/alice")),
+            Ok(WebvhPathMode::Explicit("team/alice".to_string())),
+            "a multi-segment path is the host's own grammar"
+        );
     }
 
     /// The create-persona overlay's UI-only arms (open / edit label / close) are

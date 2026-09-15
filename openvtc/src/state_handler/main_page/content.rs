@@ -362,16 +362,24 @@ pub struct CommunitySwitcherState {
 }
 
 /// "Create a new persona DID" overlay. `Some` while open; floats over the main
-/// page like the switcher. Walks `Label` (enter a label) → `Working` (the VTA
-/// mint runs) → `Done` (show + copy the DID) or `Failed`. The minted persona is
-/// standalone (orphan) — handing its DID to a VTC lets the VTC issue a VIC bound
-/// to it, which a later join then redeems on the clean join-as-subject path.
+/// page like the switcher. Walks `Label` (enter a label) → `Path` (where the DID
+/// lives on the host) → `Context` (which VTA context holds its keys) →
+/// `Working` (the VTA mint runs) → `Done` (show + copy the DID) or `Failed`. The
+/// minted persona is standalone (orphan) — handing its DID to a VTC lets the VTC
+/// issue a VIC bound to it, which a later join then redeems on the clean
+/// join-as-subject path.
 #[derive(Clone, Debug, Default)]
 pub struct CreatePersonaState {
     /// Which step of the overlay is showing.
     pub phase: CreatePersonaPhase,
     /// Label/username input, used while in the `Label` phase.
     pub label: tui_input::Input,
+    /// Whether the DID's path on the hosting server is the server's to choose
+    /// or the operator's to type (`Path` phase).
+    pub path_choice: PersonaPathChoice,
+    /// The path typed for [`PersonaPathChoice::Custom`]. Kept across a toggle
+    /// back to `Auto`, so glancing at the other row does not lose it.
+    pub path: tui_input::Input,
     /// Progress / error lines shown in the `Working` and `Failed` phases.
     pub messages: Vec<String>,
     /// The minted persona `did:webvh`, set in the `Done` phase.
@@ -455,6 +463,9 @@ pub enum CreatePersonaPhase {
     /// Awaiting the persona label (text input).
     #[default]
     Label,
+    /// Choosing where the DID sits on the hosting server: a path the server
+    /// allocates (a random mnemonic), or one the operator types.
+    Path,
     /// Choosing the VTA context the persona's keys and DID are minted in: a
     /// new sub-context named from the label, one already in use, or the top
     /// context.
@@ -465,6 +476,24 @@ pub enum CreatePersonaPhase {
     Done,
     /// The mint failed; show the error.
     Failed,
+}
+
+/// Who names the new persona's DID path on the hosting server.
+///
+/// The DID's last components are that path: `did:webvh:{SCID}:host:alice` is
+/// hosted at `host/alice/did.jsonl`. Left to the server it is a fresh random
+/// mnemonic, which is unguessable and says nothing; typed, it is a name the
+/// operator can hand out and recognise — at the cost of being a name, so it can
+/// already be taken and it is public forever.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PersonaPathChoice {
+    /// The hosting server allocates the path (`WebvhPathMode::AutoAssign`).
+    /// The default, and what every persona minted before this choice existed
+    /// got.
+    #[default]
+    Auto,
+    /// The operator types it (`WebvhPathMode::Explicit`).
+    Custom,
 }
 
 /// One entry in the community switcher overlay.
@@ -1459,9 +1488,70 @@ pub const VETTING_WITHDRAWAL_REASONS: [revoke_statement::v0_1::PayloadReason; 4]
 /// How many requests a new ticket admits: one person, or a conference desk.
 pub const VETTING_TICKET_USES: [u32; 4] = [1, 5, 10, 25];
 
+/// The label on each row of a vetting form, in the order the form shows them.
+///
+/// These are the rows' names in three senses at once: what the panel prints in
+/// the left column, what a [`DraftError`](openvtc_core::vetting::registry::DraftError)
+/// calls the row it refused, and — through [`row_of`] — which row the cursor
+/// jumps to when it does. One array rather than three copies, because a label
+/// that drifts between the message and the renderer would move the cursor to
+/// the wrong row, which is worse than not moving it at all.
+///
+/// Directory filter rows, before the results.
+pub const DIRECTORY_LABELS: [&str; 9] = [
+    "Community",
+    "Language",
+    "Country",
+    "Region",
+    "City",
+    "Method",
+    "Events from",
+    "Events until",
+    "Event name",
+];
+
+/// Vetter profile rows, before its events. The three method ticks share one
+/// label, printed against the first of them — so "I vet" resolves to that row,
+/// which is where the cursor belongs when no method is ticked.
+pub const PROFILE_LABELS: [&str; 13] = [
+    "Community",
+    "Listed",
+    "Display name",
+    "Languages",
+    "Country",
+    "Region",
+    "City",
+    "I vet",
+    "",
+    "",
+    "Documents I accept",
+    "Availability",
+    "How to get a ticket",
+];
+
+/// Event form rows.
+pub const EVENT_LABELS: [&str; 7] = [
+    "Name",
+    "First day",
+    "Last day",
+    "Country",
+    "Region",
+    "City",
+    "Web page",
+];
+
+/// The row `label` names, for moving the cursor to it. `None` when the label
+/// belongs to no row on this form — an error about a row a different form owns,
+/// which leaves the cursor where it is rather than moving it somewhere
+/// arbitrary.
+#[must_use]
+pub fn row_of(labels: &[&str], label: &str) -> Option<usize> {
+    labels.iter().position(|l| *l == label && !l.is_empty())
+}
+
 /// Directory filter fields, before the results: community, language, country,
 /// region, city, method, events from, events until, event name.
-pub const DIRECTORY_FIELDS: usize = 9;
+pub const DIRECTORY_FIELDS: usize = DIRECTORY_LABELS.len();
 
 /// Methods a directory search can ask for: any, then each.
 pub const DIRECTORY_METHODS: [Option<VettingMethod>; 4] = [
@@ -1474,10 +1564,10 @@ pub const DIRECTORY_METHODS: [Option<VettingMethod>; 4] = [
 /// Profile form fields, before its events: community, listed, display name,
 /// languages, country, region, city, the three methods, documentation,
 /// availability and how to get a ticket.
-pub const PROFILE_FIELDS: usize = 13;
+pub const PROFILE_FIELDS: usize = PROFILE_LABELS.len();
 
 /// Event form fields: name, first day, last day, country, region, city, page.
-pub const EVENT_FIELDS: usize = 7;
+pub const EVENT_FIELDS: usize = EVENT_LABELS.len();
 
 /// Whether a line is good news, worth a second look, or bad news.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2570,4 +2660,82 @@ pub struct ThemeRow {
     pub name: String,
     /// Where it comes from, in a word or two.
     pub source: String,
+}
+
+#[cfg(test)]
+mod vetting_label_tests {
+    use super::*;
+    use openvtc_core::vetting::book::VetterPolicy;
+    use openvtc_core::vetting::registry::{DraftError, EventDraft, ProfileDraft};
+
+    /// The rows a refused profile can name all resolve, and to the row the form
+    /// actually draws there. Pinned by index: these tables are what both the
+    /// renderer and the cursor jump read, so a row inserted without moving the
+    /// form's own `f == n` comparisons would put the cursor one row off.
+    #[test]
+    fn every_profile_row_a_refusal_names_resolves_to_its_own_row() {
+        assert_eq!(row_of(&PROFILE_LABELS, "Display name"), Some(2));
+        assert_eq!(row_of(&PROFILE_LABELS, "Languages"), Some(3));
+        assert_eq!(row_of(&PROFILE_LABELS, "Country"), Some(4));
+        assert_eq!(row_of(&PROFILE_LABELS, "Region"), Some(5));
+        assert_eq!(row_of(&PROFILE_LABELS, "City"), Some(6));
+        assert_eq!(
+            row_of(&PROFILE_LABELS, "I vet"),
+            Some(7),
+            "the three method ticks share one label, printed against the first"
+        );
+        assert_eq!(row_of(&PROFILE_LABELS, "Documents I accept"), Some(10));
+        assert_eq!(row_of(&PROFILE_LABELS, "Availability"), Some(11));
+        assert_eq!(row_of(&PROFILE_LABELS, "How to get a ticket"), Some(12));
+
+        assert_eq!(row_of(&EVENT_LABELS, "Name"), Some(0));
+        assert_eq!(row_of(&EVENT_LABELS, "First day"), Some(1));
+        assert_eq!(row_of(&EVENT_LABELS, "Last day"), Some(2));
+        assert_eq!(row_of(&EVENT_LABELS, "Web page"), Some(6));
+
+        assert_eq!(row_of(&DIRECTORY_LABELS, "Language"), Some(1));
+        assert_eq!(row_of(&DIRECTORY_LABELS, "Country"), Some(2));
+        assert_eq!(row_of(&DIRECTORY_LABELS, "Events from"), Some(6));
+        assert_eq!(row_of(&DIRECTORY_LABELS, "Events until"), Some(7));
+        assert_eq!(row_of(&DIRECTORY_LABELS, "Event name"), Some(8));
+
+        assert_eq!(
+            row_of(&PROFILE_LABELS, ""),
+            None,
+            "the unlabelled method rows are not a row anything can jump to"
+        );
+    }
+
+    /// What the form would actually do with a real refusal: the message names a
+    /// row, and that row resolves. The pair is the whole feature — a message
+    /// naming a row the cursor cannot find is the bug this pins shut.
+    #[test]
+    fn a_refused_profile_names_a_row_the_form_can_find() {
+        let mut draft = ProfileDraft::new(&VetterPolicy::default());
+        draft.toggle_method(VettingMethod::InPerson);
+        draft.country = "USA".into();
+        let e = draft.to_body().unwrap_err();
+        assert_eq!(e.row().and_then(|l| row_of(&PROFILE_LABELS, l)), Some(4));
+        assert!(e.to_string().starts_with("Country:"));
+
+        // An event's rows are the event form's. Resolving its label against the
+        // profile would land on the profile's own "Country" — a different row
+        // than the message is about, and the reason events are wrapped.
+        let mut draft = ProfileDraft::new(&VetterPolicy::default());
+        draft.toggle_method(VettingMethod::InPerson);
+        draft.events = vec![EventDraft {
+            name: "Linux Plumbers".into(),
+            start_date: "2026-10-05".into(),
+            end_date: "2026-10-07".into(),
+            country: "Czechia".into(),
+            ..EventDraft::default()
+        }];
+        let e = draft.to_body().unwrap_err();
+        assert_eq!(e.event(), Some(0), "the profile's first event row");
+        assert_eq!(e.row(), None, "no profile row is at fault");
+        assert!(
+            matches!(&e, DraftError::Event { source, .. } if source.row() == Some("Country")),
+            "the event form still gets its own row: {e}"
+        );
+    }
 }

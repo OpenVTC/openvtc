@@ -27,20 +27,92 @@ use super::book::{VetterPolicy, VettingBook};
 use crate::config::account::PersonaId;
 
 /// Why typed text is not yet a body the community would accept.
+///
+/// Every variant that can name the row it came from does, in the form's own
+/// label for it, and [`row`](DraftError::row) hands that label back so the form
+/// can put the cursor there. The labels are the strings in
+/// `content::PROFILE_LABELS` and its two siblings; a label that matches no row
+/// simply leaves the cursor where it was, so a mismatch reads as a message
+/// without a jump rather than as a jump to the wrong row.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DraftError {
-    /// A date is not `YYYY-MM-DD`.
+    /// A date is not `YYYY-MM-DD`. Carries the row's label.
     #[error("{0} must be a date written YYYY-MM-DD, like 2026-10-05")]
     Date(&'static str),
-    /// A region or city without a country.
-    #[error("{0}: a region or city needs a country, as a two-letter code such as CZ")]
-    LocationWithoutCountry(&'static str),
+    /// A region or city without a country. Reported against the country row,
+    /// because that is the row with something missing from it.
+    #[error("Country: a region or city needs a country too — a two-letter code such as CZ")]
+    LocationWithoutCountry,
     /// No method ticked.
-    #[error("choose at least one way you vet: in person, on video, or people you already know")]
+    #[error("I vet: choose at least one way — in person, on video, or people you already know")]
     NoMethods,
-    /// The community's schema refuses it.
+    /// A country written as anything but a two-letter code.
+    ///
+    /// Its own variant rather than a [`Field`](DraftError::Field) carrying the
+    /// schema's wording, because the schema's wording for this one is
+    /// `doesn't match pattern "^[A-Z]{2}$"` — true, and no help at all to
+    /// someone who wrote "USA" and has to work out that the rule wants "US".
+    #[error("Country: write it as a two-letter code, like US or CZ — not the country's name")]
+    Country,
+    /// The community's schema refuses one field's value.
+    #[error("{field}: the community would refuse this: {problem}")]
+    Field {
+        /// The row it came from, labelled as the form labels it.
+        field: &'static str,
+        /// What the published type or schema said about the value.
+        problem: ShapeError,
+    },
+    /// One of the profile's events is not yet a body, wrapping the event
+    /// form's own refusal.
+    ///
+    /// Kept apart from the refusal it carries because the two forms share row
+    /// labels: an event's "Country" and the profile's "Country" are different
+    /// rows, and a profile that resolved the inner label against its own rows
+    /// would move the cursor to the wrong one. The profile knows which of its
+    /// event rows this is — see [`event`](DraftError::event) — and the event's
+    /// own rows are the event form's business.
+    #[error("event {}: {source}", .index + 1)]
+    Event {
+        /// Which event, counted from zero as the profile holds them.
+        index: usize,
+        /// Why that event was refused.
+        source: Box<DraftError>,
+    },
+    /// The community's schema refuses the payload as a whole — a rule about
+    /// more than one field, so there is no single row to point at.
     #[error("the community would refuse this: {0}")]
     Shape(ShapeError),
+}
+
+impl DraftError {
+    /// The label of the row this is about, for a form that wants to put the
+    /// cursor on it. `None` when no single row is at fault — a rule spanning
+    /// fields, or a value the client built rather than one that was typed.
+    ///
+    /// Naming the row in the message and moving the cursor to it are the same
+    /// answer given twice, so they come from the same place: a message that
+    /// says "Country:" cannot send the cursor somewhere else.
+    #[must_use]
+    pub fn row(&self) -> Option<&'static str> {
+        match self {
+            DraftError::Date(field) | DraftError::Field { field, .. } => Some(field),
+            DraftError::LocationWithoutCountry | DraftError::Country => Some("Country"),
+            DraftError::NoMethods => Some("I vet"),
+            // An event's rows belong to the event form, not to the form
+            // holding this error.
+            DraftError::Event { .. } | DraftError::Shape(_) => None,
+        }
+    }
+
+    /// Which of the profile's events this is about, for a form that lists them
+    /// as rows of its own. `None` when it is not about an event.
+    #[must_use]
+    pub fn event(&self) -> Option<usize> {
+        match self {
+            DraftError::Event { index, .. } => Some(*index),
+            _ => None,
+        }
+    }
 }
 
 impl From<ShapeError> for DraftError {
@@ -71,40 +143,53 @@ fn date(field: &'static str, text: &str) -> Result<NaiveDate, DraftError> {
     NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").map_err(|_| DraftError::Date(field))
 }
 
-/// A value the published type refuses outright — a country that is not two
-/// letters, a place name past its bound, a documentation token that is not
-/// lowerCamelCase. The community refuses the same value, so it reads as a
-/// schema failure here too.
-fn refused(e: impl std::fmt::Display) -> DraftError {
+/// A value the published type refuses outright — a place name past its bound, a
+/// documentation token that is not lowerCamelCase, a display name too long. The
+/// community refuses the same value, so it reads as a schema failure here too.
+///
+/// It is reported against `field`, the form's own label for the row it was
+/// typed into. The schema's wording says what is wrong with the value but
+/// never which value it was: a profile is thirteen rows and four of them are
+/// free text, so "breaks its published schema" on its own leaves the person
+/// re-reading all of them. The label is the only part of the sentence they can
+/// act on.
+fn refused<E: std::fmt::Display>(field: &'static str) -> impl Fn(E) -> DraftError {
+    move |e| DraftError::Field {
+        field,
+        problem: ShapeError::Schema(e.to_string()),
+    }
+}
+
+/// The payload as a whole was refused — a rule spanning fields, or a value this
+/// client built rather than one that was typed. No row to name.
+fn refused_payload(e: impl std::fmt::Display) -> DraftError {
     DraftError::Shape(ShapeError::Schema(e.to_string()))
 }
 
-fn place(text: &str) -> Result<Option<PlaceName>, DraftError> {
+fn place(field: &'static str, text: &str) -> Result<Option<PlaceName>, DraftError> {
     optional(text)
-        .map(|t| PlaceName::try_from(t).map_err(refused))
+        .map(|t| PlaceName::try_from(t).map_err(refused(field)))
         .transpose()
 }
 
-fn location(
-    what: &'static str,
-    country: &str,
-    region: &str,
-    city: &str,
-) -> Result<Option<VetterLocation>, DraftError> {
+/// The three location rows as one value. Both forms that have them label them
+/// "Country" / "Region" / "City", so a refusal names the same row in either.
+fn location(country: &str, region: &str, city: &str) -> Result<Option<VetterLocation>, DraftError> {
     match optional(country) {
         Some(country) => {
-            let country = CountryCode::try_from(country.to_uppercase()).map_err(refused)?;
+            let country =
+                CountryCode::try_from(country.to_uppercase()).map_err(|_| DraftError::Country)?;
             let built = VetterLocation::try_from(
                 VetterLocation::builder()
                     .country(country)
-                    .region(place(region)?)
-                    .city(place(city)?),
+                    .region(place("Region", region)?)
+                    .city(place("City", city)?),
             )
-            .map_err(refused)?;
+            .map_err(refused_payload)?;
             Ok(Some(built))
         }
         None if optional(region).is_some() || optional(city).is_some() => {
-            Err(DraftError::LocationWithoutCountry(what))
+            Err(DraftError::LocationWithoutCountry)
         }
         None => Ok(None),
     }
@@ -120,7 +205,7 @@ fn location(
 fn check_event(event: &VetterEvent) -> Result<(), DraftError> {
     let passport =
         VettingDocumentation::try_from(vta_sdk::protocols::vetting::documentation::PASSPORT)
-            .map_err(refused)?;
+            .map_err(refused_payload)?;
     let probe = profile::Payload::try_from(
         profile::Payload::builder()
             .listed(false)
@@ -129,7 +214,7 @@ fn check_event(event: &VetterEvent) -> Result<(), DraftError> {
             .accepts_documentation(VetterAcceptsDocumentation(vec![passport]))
             .events(vec![event.clone()]),
     )
-    .map_err(refused)?;
+    .map_err(refused_payload)?;
     probe.check_shape().map_err(DraftError::Shape)
 }
 
@@ -177,21 +262,16 @@ impl EventDraft {
     /// event check refuses — an end before the start, a span over 31 days, a
     /// URL that is not an absolute `https` one.
     pub fn to_event(&self) -> Result<VetterEvent, DraftError> {
-        let name = profile::VetterEventName::try_from(self.name.trim()).map_err(refused)?;
+        let name = profile::VetterEventName::try_from(self.name.trim()).map_err(refused("Name"))?;
         let event = VetterEvent::try_from(
             VetterEvent::builder()
                 .name(name)
-                .start_date(CalendarDate(date("the start date", &self.start_date)?))
-                .end_date(CalendarDate(date("the end date", &self.end_date)?))
-                .location(location(
-                    "the event",
-                    &self.country,
-                    &self.region,
-                    &self.city,
-                )?)
+                .start_date(CalendarDate(date("First day", &self.start_date)?))
+                .end_date(CalendarDate(date("Last day", &self.end_date)?))
+                .location(location(&self.country, &self.region, &self.city)?)
                 .url(optional(&self.url)),
         )
-        .map_err(refused)?;
+        .map_err(refused_payload)?;
         check_event(&event)?;
         Ok(event)
     }
@@ -333,11 +413,11 @@ impl ProfileDraft {
         }
         let languages = split_list(&self.languages)
             .into_iter()
-            .map(|l| LanguageTag::try_from(l).map_err(refused))
+            .map(|l| LanguageTag::try_from(l).map_err(refused("Languages")))
             .collect::<Result<Vec<_>, _>>()?;
         let documentation = split_list(&self.accepts_documentation)
             .into_iter()
-            .map(|d| VettingDocumentation::try_from(d).map_err(refused))
+            .map(|d| VettingDocumentation::try_from(d).map_err(refused("Documents I accept")))
             .collect::<Result<Vec<_>, _>>()?;
         // The profile task has its own copy of the method vocabulary (see
         // `super::same_token`), so the ticked methods are carried across by the
@@ -345,28 +425,25 @@ impl ProfileDraft {
         let methods = self
             .methods
             .iter()
-            .map(|m| super::same_token::<_, profile::VettingMethod>(m).map_err(refused))
+            .map(|m| super::same_token::<_, profile::VettingMethod>(m).map_err(refused("I vet")))
             .collect::<Result<Vec<_>, _>>()?;
         let display_name = optional(&self.display_name)
-            .map(|n| profile::VetterDisplayName::try_from(n).map_err(refused))
+            .map(|n| profile::VetterDisplayName::try_from(n).map_err(refused("Display name")))
             .transpose()?;
         let availability = optional(&self.availability)
-            .map(|a| profile::VetterAvailability::try_from(a).map_err(refused))
+            .map(|a| profile::VetterAvailability::try_from(a).map_err(refused("Availability")))
             .transpose()?;
         let contact_hint = optional(&self.contact_hint)
-            .map(|c| profile::VetterContactHint::try_from(c).map_err(refused))
+            .map(|c| {
+                profile::VetterContactHint::try_from(c).map_err(refused("How to get a ticket"))
+            })
             .transpose()?;
         let body = profile::Payload::try_from(
             profile::Payload::builder()
                 .listed(self.listed)
                 .display_name(display_name)
                 .languages(languages)
-                .location(location(
-                    "your location",
-                    &self.country,
-                    &self.region,
-                    &self.city,
-                )?)
+                .location(location(&self.country, &self.region, &self.city)?)
                 .methods(VetterMethods(methods))
                 .accepts_documentation(VetterAcceptsDocumentation(documentation))
                 .availability(availability)
@@ -374,11 +451,17 @@ impl ProfileDraft {
                 .events(
                     self.events
                         .iter()
-                        .map(EventDraft::to_event)
+                        .enumerate()
+                        .map(|(index, event)| {
+                            event.to_event().map_err(|source| DraftError::Event {
+                                index,
+                                source: Box::new(source),
+                            })
+                        })
                         .collect::<Result<Vec<_>, _>>()?,
                 ),
         )
-        .map_err(refused)?;
+        .map_err(refused_payload)?;
         body.check_shape()?;
         Ok(body)
     }
@@ -411,27 +494,31 @@ impl DirectoryFilter {
         // `LanguageTag`, `CountryCode`, `PlaceName`, `CalendarDate` are all
         // generated per specification (see `super::same_token`) — so these are
         // the listing's, not the profile's.
-        let list_place = |text: &str| -> Result<Option<list::PlaceName>, DraftError> {
-            optional(text)
-                .map(|t| list::PlaceName::try_from(t).map_err(refused))
-                .transpose()
-        };
+        let list_place =
+            |field: &'static str, text: &str| -> Result<Option<list::PlaceName>, DraftError> {
+                optional(text)
+                    .map(|t| list::PlaceName::try_from(t).map_err(refused(field)))
+                    .transpose()
+            };
         let language = optional(&self.language)
-            .map(|l| list::LanguageTag::try_from(l).map_err(refused))
+            .map(|l| list::LanguageTag::try_from(l).map_err(refused("Language")))
             .transpose()?;
         let country = optional(&self.country)
-            .map(|c| list::CountryCode::try_from(c.to_uppercase()).map_err(refused))
-            .transpose()?;
+            .map(|c| list::CountryCode::try_from(c.to_uppercase()))
+            .transpose()
+            .map_err(|_| DraftError::Country)?;
         let event_name = optional(&self.event_name)
-            .map(|n| list::PayloadEventName::try_from(n).map_err(refused))
+            .map(|n| list::PayloadEventName::try_from(n).map_err(refused("Event name")))
             .transpose()?;
+        // Not a field on any form: the cursor is the previous page's, handed
+        // straight back to the community.
         let cursor = cursor
-            .map(|c| list::PayloadCursor::try_from(c).map_err(refused))
+            .map(|c| list::PayloadCursor::try_from(c).map_err(refused_payload))
             .transpose()?;
         // The listing task has its own copy of the method vocabulary.
         let method = self
             .method
-            .map(|m| super::same_token::<_, list::VettingMethod>(&m).map_err(refused))
+            .map(|m| super::same_token::<_, list::VettingMethod>(&m).map_err(refused("Method")))
             .transpose()?;
         let day =
             |what: &'static str, text: &str| -> Result<Option<list::CalendarDate>, DraftError> {
@@ -443,15 +530,15 @@ impl DirectoryFilter {
             list::Payload::builder()
                 .language(language)
                 .country(country)
-                .region(list_place(&self.region)?)
-                .city(list_place(&self.city)?)
+                .region(list_place("Region", &self.region)?)
+                .city(list_place("City", &self.city)?)
                 .method(method)
-                .event_from(day("the first event date", &self.event_from)?)
-                .event_to(day("the last event date", &self.event_to)?)
+                .event_from(day("Events from", &self.event_from)?)
+                .event_to(day("Events until", &self.event_to)?)
                 .event_name(event_name)
                 .cursor(cursor),
         )
-        .map_err(refused)?;
+        .map_err(refused_payload)?;
         body.check_shape()?;
         Ok(body)
     }
@@ -748,10 +835,7 @@ mod tests {
         let mut bad = event();
         bad.start_date = "5 Oct".into();
         // The published event has no `PartialEq`, so the error is matched.
-        assert!(matches!(
-            bad.to_event(),
-            Err(DraftError::Date("the start date"))
-        ));
+        assert!(matches!(bad.to_event(), Err(DraftError::Date("First day"))));
 
         let mut backwards = event();
         backwards.end_date = "2026-10-01".into();
@@ -766,13 +850,88 @@ mod tests {
         assert!(matches!(http.to_event(), Err(DraftError::Shape(_))));
     }
 
+    /// Every refusal of a typed value names the row it came from, labelled the
+    /// way the form labels it.
+    ///
+    /// The profile is thirteen rows, four of them free text, and the schema's
+    /// own wording describes the value without ever identifying it: a country
+    /// written "USA" was refused as `doesn't match pattern "^[A-Z]{2}$"`
+    /// under a cursor sitting on "How to get a ticket", with nothing tying the
+    /// two together. The label is the part of the sentence a person can act on.
+    #[test]
+    fn a_refusal_names_the_row_it_came_from() {
+        let profile = |edit: fn(&mut ProfileDraft)| {
+            let mut draft = ProfileDraft::new(&VetterPolicy::default());
+            draft.toggle_method(VettingMethod::InPerson);
+            edit(&mut draft);
+            draft.to_body().unwrap_err().to_string()
+        };
+
+        // The one in hand: a country's name where a code belongs. It says the
+        // rule, not the pattern the schema spells the rule with.
+        let err = profile(|d| d.country = "USA".into());
+        assert_eq!(
+            err,
+            "Country: write it as a two-letter code, like US or CZ — not the country's name"
+        );
+        assert_eq!(
+            DraftError::Country.row(),
+            Some("Country"),
+            "the row the message names is the row the cursor is sent to"
+        );
+
+        for (row, edit) in [
+            (
+                "Languages",
+                (|d: &mut ProfileDraft| d.languages = "english".into()) as fn(&mut ProfileDraft),
+            ),
+            ("Documents I accept", |d: &mut ProfileDraft| {
+                d.accepts_documentation = "Passport!".into()
+            }),
+            ("Display name", |d: &mut ProfileDraft| {
+                d.display_name = "x".repeat(500)
+            }),
+            ("City", |d: &mut ProfileDraft| {
+                d.country = "de".into();
+                d.city = "x".repeat(500);
+            }),
+        ] {
+            let err = profile(edit);
+            assert!(
+                err.starts_with(&format!("{row}:")),
+                "a refusal must name its row: {err}"
+            );
+        }
+
+        // Nothing ticked names the row the ticks are on, so the cursor lands
+        // where the fix is made rather than wherever it happened to be.
+        assert_eq!(DraftError::NoMethods.row(), Some("I vet"));
+        assert!(DraftError::NoMethods.to_string().starts_with("I vet:"));
+        assert_eq!(DraftError::LocationWithoutCountry.row(), Some("Country"));
+
+        // An event is its own form, with its own rows.
+        let mut bad_name = event();
+        bad_name.name = String::new();
+        let err = bad_name.to_event().unwrap_err().to_string();
+        assert!(err.starts_with("Name:"), "got: {err}");
+
+        // And so is the directory filter.
+        let err = DirectoryFilter {
+            country: "Czechia".into(),
+            ..DirectoryFilter::default()
+        }
+        .to_body(None)
+        .unwrap_err();
+        assert_eq!(err, DraftError::Country);
+    }
+
     #[test]
     fn a_place_needs_a_country_and_a_method_is_required() {
         let mut draft = ProfileDraft::new(&VetterPolicy::default());
         draft.city = "Berlin".into();
         assert!(matches!(
             draft.to_body(),
-            Err(DraftError::LocationWithoutCountry("your location"))
+            Err(DraftError::LocationWithoutCountry)
         ));
         let mut draft = ProfileDraft::new(&VetterPolicy::default());
         draft.toggle_method(VettingMethod::InPerson);
@@ -818,7 +977,7 @@ mod tests {
         };
         assert!(matches!(
             bad_date.to_body(None),
-            Err(DraftError::Date("the last event date"))
+            Err(DraftError::Date("Events until"))
         ));
     }
 

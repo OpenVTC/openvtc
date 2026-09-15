@@ -1151,10 +1151,12 @@ impl MainPage {
         handled
     }
 
-    /// Create-persona overlay keys. Label phase: Enter goes on to the context
-    /// choice, Esc cancels, other keys edit the label. Context phase: ↑/↓
-    /// choose, typing names a new sub-context, Enter mints, Esc goes back to the
-    /// label. Working phase swallows input. Done/Failed:
+    /// Create-persona overlay keys. Label phase: Enter goes on to the path
+    /// choice, Esc cancels, other keys edit the label. Path phase: ↑/↓ choose
+    /// server-assigned or typed, typing edits the path (and picks the typed
+    /// row), Enter goes on to the context choice, Esc goes back. Context phase:
+    /// ↑/↓ choose, typing names a new sub-context, Enter mints, Esc goes back to
+    /// the path. Working phase swallows input. Done/Failed:
     /// `c` re-copies the DID (Done only), Enter/Esc close. Called only while the
     /// overlay is open, where it owns all input.
     fn handle_create_persona_key(&mut self, key: KeyEvent) {
@@ -1174,6 +1176,19 @@ impl MainPage {
                     let _ = self.action_tx.send(Action::CreatePersonaInput(key));
                 }
             },
+            CreatePersonaPhase::Path => {
+                use crate::state_handler::main_page::content::PersonaPathChoice;
+                let action = match key.code {
+                    KeyCode::Up => Action::CreatePersonaPathChoice(PersonaPathChoice::Auto),
+                    KeyCode::Down => Action::CreatePersonaPathChoice(PersonaPathChoice::Custom),
+                    KeyCode::Enter => Action::CreatePersonaSubmit,
+                    KeyCode::Esc => Action::CreatePersonaBack,
+                    // Everything else edits the path, which is also how the
+                    // typed row gets chosen — see `CreatePersonaPathInput`.
+                    _ => Action::CreatePersonaPathInput(key),
+                };
+                let _ = self.action_tx.send(action);
+            }
             CreatePersonaPhase::Context => {
                 let selected = overlay.context_selected;
                 let last = overlay.context_options.len().saturating_sub(1);
@@ -2981,11 +2996,18 @@ impl MainPage {
         };
 
         let area = frame.area();
-        // The context choice lists paths, so it is wider and grows with them.
+        // The context and path choices both carry full paths, so they are wider
+        // and grow with what they list.
         let choosing = overlay.phase == CreatePersonaPhase::Context;
-        let popup_width = if choosing { 84u16 } else { 64u16 }.min(area.width.saturating_sub(4));
+        let path = overlay.phase == CreatePersonaPhase::Path;
+        let popup_width =
+            if choosing || path { 84u16 } else { 64u16 }.min(area.width.saturating_sub(4));
         let popup_height = if choosing {
             (overlay.context_options.len() + overlay.messages.len()) as u16 + 9
+        } else if path {
+            // Two rows, two explanatory lines, the charset hint, the key line,
+            // and whatever the path was refused for.
+            overlay.messages.len() as u16 + 13
         } else {
             11u16
         }
@@ -3027,6 +3049,63 @@ impl MainPage {
                 }
                 lines.push(Line::from(Span::styled(
                     "⏎ next   esc cancel",
+                    Style::new().fg(COLOR_BORDER),
+                )));
+            }
+            CreatePersonaPhase::Path => {
+                use crate::state_handler::main_page::content::PersonaPathChoice;
+                let custom = overlay.path_choice == PersonaPathChoice::Custom;
+                lines.push(Line::from(Span::styled(
+                    "Where should this persona's DID live on the hosting server?",
+                    Style::new().fg(COLOR_TEXT_DEFAULT),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "The path is part of the DID, and cannot be changed afterwards.",
+                    Style::new().fg(COLOR_BORDER),
+                )));
+                lines.push(Line::default());
+
+                let row = |selected: bool, text: String| {
+                    let style = if selected {
+                        Style::new().fg(COLOR_SUCCESS).bold()
+                    } else {
+                        Style::new().fg(COLOR_TEXT_DEFAULT)
+                    };
+                    Line::from(Span::styled(
+                        format!("{}{text}", if selected { "▸ " } else { "  " }),
+                        style,
+                    ))
+                };
+                lines.push(row(
+                    !custom,
+                    "Server-assigned  (a random, unguessable path)".to_string(),
+                ));
+                lines.push(row(
+                    custom,
+                    format!(
+                        "My own path:  {}{}",
+                        overlay.path.value(),
+                        if custom { "▎" } else { "" }
+                    ),
+                ));
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    if custom {
+                        "Lowercase letters, digits and hyphens; '/' separates segments."
+                    } else {
+                        "A typed path is public and memorable — and may already be taken."
+                    },
+                    Style::new().fg(COLOR_BORDER),
+                )));
+                for msg in &overlay.messages {
+                    lines.push(Line::from(Span::styled(
+                        msg.clone(),
+                        Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+                    )));
+                }
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    "↑/↓ choose   type: name the path   ⏎ next   esc back",
                     Style::new().fg(COLOR_BORDER),
                 )));
             }
@@ -4390,6 +4469,83 @@ mod key_handler_tests {
         assert!(
             context_action(&mut rx).is_none(),
             "the expiry is chosen, not typed"
+        );
+    }
+
+    /// Both path rows, the typed path and the key line are all on screen. The
+    /// overlay sizes itself per phase, so a phase whose height was not counted
+    /// loses its last lines silently — here that would be the very choice the
+    /// phase exists to offer.
+    #[test]
+    fn create_persona_path_overlay_shows_both_rows() {
+        use crate::state_handler::main_page::content::{
+            CreatePersonaPhase, CreatePersonaState, PersonaPathChoice,
+        };
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (page, _rx) = page_for(MainMenu::Identity, |s: &mut State| {
+            s.main_page.create_persona = Some(CreatePersonaState {
+                phase: CreatePersonaPhase::Path,
+                path_choice: PersonaPathChoice::Custom,
+                path: tui_input::Input::new("alice".to_string()),
+                ..Default::default()
+            });
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| page.render(frame, ()))
+            .expect("render");
+        let drawn: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+
+        assert!(drawn.contains("Server-assigned"), "{drawn}");
+        assert!(drawn.contains("My own path:  alice"), "{drawn}");
+        assert!(
+            drawn.contains("⏎ next   esc back"),
+            "the key line is the last line: {drawn}"
+        );
+    }
+
+    /// Path phase: ↑/↓ pick who names the path, any other key edits it (which
+    /// is also what picks the typed row), Enter goes on and Esc steps back.
+    #[test]
+    fn create_persona_path_phase_keys() {
+        use crate::state_handler::main_page::content::{
+            CreatePersonaPhase, CreatePersonaState, PersonaPathChoice,
+        };
+        let (mut page, mut rx) = page_for(MainMenu::Identity, |s: &mut State| {
+            s.main_page.create_persona = Some(CreatePersonaState {
+                phase: CreatePersonaPhase::Path,
+                ..Default::default()
+            });
+        });
+
+        page.handle_key_event(press(KeyCode::Char('a')));
+        assert!(
+            matches!(rx.try_recv(), Ok(Action::CreatePersonaPathInput(k)) if k.code == KeyCode::Char('a')),
+            "the key that starts the name must reach the input, not just select the row"
+        );
+        page.handle_key_event(press(KeyCode::Down));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::CreatePersonaPathChoice(PersonaPathChoice::Custom))
+        ));
+        page.handle_key_event(press(KeyCode::Up));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::CreatePersonaPathChoice(PersonaPathChoice::Auto))
+        ));
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(rx.try_recv(), Ok(Action::CreatePersonaSubmit)));
+        page.handle_key_event(press(KeyCode::Esc));
+        assert!(
+            matches!(rx.try_recv(), Ok(Action::CreatePersonaBack)),
+            "Esc steps back to the label, it does not close the overlay"
         );
     }
 
