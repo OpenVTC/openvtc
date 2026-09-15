@@ -1322,6 +1322,15 @@ pub const OPENVTC_CATCH_ALL_PATTERN: &str = concat!(
     r"|https://trusttasks\.org/spec/credential-exchange/.*",
     r"|https://trusttasks\.org/spec/vetting/.*",
     r"|https://trusttasks\.org/spec/trust-task-error/.*",
+    // The **binding envelopes**, whose type says "a Trust Task is inside" and
+    // names no task. A peer built on `trust-tasks-didcomm` types every message
+    // this way, and so does this crate's own `capabilities::
+    // send_capability_document` — which is how the hole showed up: we sent the
+    // envelope type, the VTC replied in kind, and the reply was dropped *here*,
+    // before `process_inbound_message` could reach the handler it already has
+    // for it. A gate keyed on task URIs cannot see a carriage that deliberately
+    // does not name one.
+    r"|https://trusttasks\.org/binding/.*",
     r"|https://didcomm\.org/report-problem/.*",
 );
 
@@ -2681,6 +2690,36 @@ mod catch_all_tests {
         ] {
             assert!(matches(uri), "{uri} must reach the handler");
         }
+    }
+
+    /// The binding envelopes reach the handler.
+    ///
+    /// This is the one the gate was missing, and missing it was silent in both
+    /// directions: `capabilities::send_capability_document` sends with
+    /// `TRUST_TASK_ENVELOPE_TYPE`, `message_dispatch::process_inbound_message`
+    /// has a branch for it — and every such reply was dropped in between,
+    /// because a gate keyed on task URIs cannot see a carriage that names no
+    /// task. A handler that exists and is unreachable looks exactly like a peer
+    /// that never answered.
+    #[test]
+    fn the_binding_envelopes_are_routed() {
+        for uri in [
+            "https://trusttasks.org/binding/didcomm/0.1/envelope",
+            "https://trusttasks.org/binding/tsp/0.1/envelope",
+        ] {
+            assert!(matches(uri), "{uri} must reach the OpenVTC handler");
+        }
+    }
+
+    /// And specifically the constant this crate sends with, read from the crate
+    /// that defines it rather than retyped here — so the gate cannot drift from
+    /// what `send_capability_document` puts on the wire.
+    #[test]
+    fn the_envelope_type_this_crate_sends_is_routed() {
+        assert!(
+            matches(crate::capabilities::TRUST_TASK_ENVELOPE_TYPE),
+            "the type we send must be one we accept back"
+        );
     }
 
     /// The pattern is a routing gate, not a catch-everything: an
