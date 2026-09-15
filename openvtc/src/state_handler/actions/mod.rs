@@ -297,6 +297,8 @@ pub enum PersonaAction {
 pub enum VettingAction {
     /// Show the next tab.
     SwitchTab,
+    /// Move one desk view along (`true` forward): requests → tickets → issued.
+    SwitchDeskView(bool),
     /// Move the selection.
     Select(usize),
     /// Leave the open form.

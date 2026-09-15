@@ -2479,7 +2479,7 @@ impl MainPage {
     /// commits and `Esc` leaves.
     fn handle_vetting_key(&mut self, key: KeyEvent) -> bool {
         use crate::state_handler::actions::VettingAction as V;
-        use crate::state_handler::main_page::content::{VettingMode, VettingTab};
+        use crate::state_handler::main_page::content::{DeskView, VettingMode, VettingTab};
 
         let vetting = &self.props.main_page.content_panel.vetting;
         if !matches!(vetting.mode, VettingMode::List) {
@@ -2522,10 +2522,32 @@ impl MainPage {
             };
         }
 
+        // The desk's views take ←/→, which everywhere else on the main page is
+        // how focus returns to the menu (they fall through to the page-level
+        // handler). Consuming them without offering another way out would make
+        // the desk a room whose door is bound to something else, so Esc is that
+        // way out — and it is bound for the whole page, not just the desk, so
+        // it means one thing here.
+        if key.code == KeyCode::Esc {
+            let _ = self
+                .action_tx
+                .send(Action::MainPanelSwitch(MainPanel::MainMenu));
+            return true;
+        }
+
         let selected = vetting.selected;
         let len = vetting.tab_len();
+        let view = vetting.desk_view;
+        // The desk's three views share one key space: the arms match on the tab
+        // and guard on the view. A key bound on the desk generally (`p`, `g`)
+        // has no guard, which is the point of the header — the profile and the
+        // vetter credential belong to the whole desk, not to whichever list is
+        // open. `p` used to exist only on Tickets, where it had nothing to do
+        // with tickets.
         let action = match (vetting.tab, key.code) {
             (_, KeyCode::Tab) => V::SwitchTab,
+            (VettingTab::Desk, KeyCode::Left) => V::SwitchDeskView(false),
+            (VettingTab::Desk, KeyCode::Right) => V::SwitchDeskView(true),
             (_, KeyCode::Up) if selected > 0 => V::Select(selected - 1),
             (_, KeyCode::Down) if selected + 1 < len => V::Select(selected + 1),
             (VettingTab::Applications, KeyCode::Char('n')) => V::StartApplication,
@@ -2534,14 +2556,20 @@ impl MainPage {
             (VettingTab::Applications, KeyCode::Char('m')) => V::RefreshRequirements,
             (VettingTab::Applications, KeyCode::Char('v')) => V::FindVetters,
             (VettingTab::Applications, KeyCode::Char('c') | KeyCode::Enter) => V::ReviewCard,
-            (VettingTab::Desk, KeyCode::Char('o')) => V::OpenSession,
-            (VettingTab::Desk, KeyCode::Char('a') | KeyCode::Enter) => V::StartAttest,
-            (VettingTab::Desk, KeyCode::Char('x')) => V::ArmDecline,
-            (VettingTab::Tickets, KeyCode::Char('t')) => V::NewTicket,
-            (VettingTab::Tickets, KeyCode::Char('d')) => V::DeleteTicket,
-            (VettingTab::Tickets, KeyCode::Char('p')) => V::EditProfile,
-            (VettingTab::Tickets, KeyCode::Char('g')) => V::AskResend,
-            (VettingTab::Tickets, KeyCode::Char('u')) => {
+            // Anywhere on the desk: the profile the communities hold, and
+            // asking one to reissue a grant that has lapsed.
+            (VettingTab::Desk, KeyCode::Char('p')) => V::EditProfile,
+            (VettingTab::Desk, KeyCode::Char('g')) => V::AskResend,
+            (VettingTab::Desk, KeyCode::Char('o')) if view == DeskView::Requests => V::OpenSession,
+            (VettingTab::Desk, KeyCode::Char('a') | KeyCode::Enter)
+                if view == DeskView::Requests =>
+            {
+                V::StartAttest
+            }
+            (VettingTab::Desk, KeyCode::Char('x')) if view == DeskView::Requests => V::ArmDecline,
+            (VettingTab::Desk, KeyCode::Char('t')) if view == DeskView::Tickets => V::NewTicket,
+            (VettingTab::Desk, KeyCode::Char('d')) if view == DeskView::Tickets => V::DeleteTicket,
+            (VettingTab::Desk, KeyCode::Char('u')) if view == DeskView::Tickets => {
                 let Some(uri) = vetting.tickets.get(selected).and_then(|t| t.uri.clone()) else {
                     return true;
                 };
@@ -2551,7 +2579,7 @@ impl MainPage {
                 };
                 V::Status(status)
             }
-            (VettingTab::Tickets, KeyCode::Char('y')) => {
+            (VettingTab::Desk, KeyCode::Char('y')) if view == DeskView::Tickets => {
                 let Some(ticket) = vetting.tickets.get(selected) else {
                     return true;
                 };
@@ -2561,7 +2589,7 @@ impl MainPage {
                 };
                 V::Status(status)
             }
-            (VettingTab::Issued, KeyCode::Char('w')) => V::ArmWithdraw,
+            (VettingTab::Desk, KeyCode::Char('w')) if view == DeskView::Issued => V::ArmWithdraw,
             _ => return false,
         };
         let _ = self.action_tx.send(Action::Vetting(action));
@@ -3828,24 +3856,109 @@ mod key_handler_tests {
         assert!(matches!(vetting_action(&mut rx), V::Input(text) if text == "n"));
     }
 
+    /// The profile and the vetter credential belong to the desk, not to one of
+    /// its views: `p` and `g` work from all three. They used to exist only on
+    /// Tickets, which is how the profile came to be hidden under a list it has
+    /// nothing to do with.
     #[test]
-    fn vetting_tickets_tab_copies_the_link_and_opens_the_profile_and_resend() {
+    fn vetting_desk_opens_the_profile_and_resend_from_every_view() {
         use crate::state_handler::actions::VettingAction as V;
-        use crate::state_handler::main_page::content::VettingTab;
-        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
-            s.main_page.content_panel.vetting.tab = VettingTab::Tickets;
-        });
-        page.handle_key_event(press(KeyCode::Char('p')));
-        assert!(matches!(vetting_action(&mut rx), V::EditProfile));
-        page.handle_key_event(press(KeyCode::Char('g')));
-        assert!(matches!(vetting_action(&mut rx), V::AskResend));
+        use crate::state_handler::main_page::content::{DeskView, VettingTab};
+
+        for view in DeskView::ALL {
+            let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
+                s.main_page.content_panel.vetting.tab = VettingTab::Desk;
+                s.main_page.content_panel.vetting.desk_view = view;
+            });
+            page.handle_key_event(press(KeyCode::Char('p')));
+            assert!(
+                matches!(vetting_action(&mut rx), V::EditProfile),
+                "p must open the profile from {view:?}"
+            );
+            page.handle_key_event(press(KeyCode::Char('g')));
+            assert!(
+                matches!(vetting_action(&mut rx), V::AskResend),
+                "g must ask for the credential again from {view:?}"
+            );
+        }
+    }
+
+    /// A view's own keys stay its own, and ←/→ move between them.
+    #[test]
+    fn vetting_desk_views_own_their_keys() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::{DeskView, VettingTab};
+
+        let desk_on = |view: DeskView| {
+            page_for(MainMenu::Vetting, move |s| {
+                s.main_page.content_panel.vetting.tab = VettingTab::Desk;
+                s.main_page.content_panel.vetting.desk_view = view;
+            })
+        };
+
+        let (mut page, mut rx) = desk_on(DeskView::Requests);
+        page.handle_key_event(press(KeyCode::Char('x')));
+        assert!(matches!(vetting_action(&mut rx), V::ArmDecline));
+        page.handle_key_event(press(KeyCode::Char('t')));
+        assert!(
+            rx.try_recv().is_err(),
+            "a ticket is handed out from the Tickets view"
+        );
+        page.handle_key_event(press(KeyCode::Right));
+        assert!(matches!(vetting_action(&mut rx), V::SwitchDeskView(true)));
+        page.handle_key_event(press(KeyCode::Left));
+        assert!(matches!(vetting_action(&mut rx), V::SwitchDeskView(false)));
+
+        let (mut page, mut rx) = desk_on(DeskView::Tickets);
+        page.handle_key_event(press(KeyCode::Char('t')));
+        assert!(matches!(vetting_action(&mut rx), V::NewTicket));
+        page.handle_key_event(press(KeyCode::Char('x')));
+        assert!(rx.try_recv().is_err(), "declining is the Requests view's");
         // No ticket selected: copying the link does nothing.
         page.handle_key_event(press(KeyCode::Char('u')));
         assert!(rx.try_recv().is_err());
 
+        let (mut page, mut rx) = desk_on(DeskView::Issued);
+        page.handle_key_event(press(KeyCode::Char('w')));
+        assert!(matches!(vetting_action(&mut rx), V::ArmWithdraw));
+
+        // Applications has no desk views, so ←/→ fall through to the page and
+        // move panel focus, as they do on every other panel.
         let (mut page, mut rx) = page_for(MainMenu::Vetting, |_| {});
+        page.handle_key_event(press(KeyCode::Right));
+        assert!(
+            matches!(rx.try_recv(), Ok(Action::MainPanelSwitch(_))),
+            "on Applications the arrows still move panel focus"
+        );
         page.handle_key_event(press(KeyCode::Char('v')));
         assert!(matches!(vetting_action(&mut rx), V::FindVetters));
+    }
+
+    /// Esc leaves the content panel. The desk consumes ←/→ for its views, so
+    /// without this there would be no way back to the menu from it.
+    #[test]
+    fn vetting_esc_returns_focus_to_the_menu() {
+        use crate::state_handler::main_page::content::{DeskView, VettingTab};
+
+        for (tab, view) in [
+            (VettingTab::Applications, DeskView::Requests),
+            (VettingTab::Desk, DeskView::Requests),
+            (VettingTab::Desk, DeskView::Tickets),
+            (VettingTab::Desk, DeskView::Issued),
+        ] {
+            let (mut page, mut rx) = page_for(MainMenu::Vetting, move |s| {
+                s.main_page.content_panel.vetting.tab = tab;
+                s.main_page.content_panel.vetting.desk_view = view;
+            });
+            page.handle_key_event(press(KeyCode::Esc));
+            assert!(
+                matches!(
+                    rx.try_recv(),
+                    Ok(Action::MainPanelSwitch(MainPanel::MainMenu))
+                ),
+                "Esc must leave the panel from {tab:?}/{view:?}"
+            );
+        }
     }
 
     #[test]

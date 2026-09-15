@@ -1,9 +1,17 @@
-//! The Vetting page (`docs/design/vetting-process.md` §12).
+//! The Vetting page (`docs/design/vetting-process.md` §12.3).
 //!
-//! Four tabs: our applications to be vetted, requests at our vetter desk, the
-//! tickets we have handed out, and the statements we have signed. Copy says
-//! "meets the published requirements", never "approved": only the community
-//! decides (D12).
+//! Two tabs, for the two roles a person holds here: **Applications**, where
+//! they are being vetted, and the **Vetting desk**, where they vet. The desk
+//! has three views — the requests that have arrived, the tickets handed out
+//! that let them arrive, and the statements signed — under a header saying
+//! which communities made this persona a vetter and until when.
+//!
+//! That header is the only place a vetter's own `vetter` role credential is
+//! visible. It gates every ticket and is presented to every applicant, and
+//! before it existed the applicant could see it and its holder could not.
+//!
+//! Copy says "meets the published requirements", never "approved": only the
+//! community decides (D12).
 
 use super::panel::Panel;
 use super::qr::{QrError, qr_lines};
@@ -14,7 +22,7 @@ use crate::colors::{
 use crate::state_handler::{
     main_page::content::{
         AttestForm, CardPreview, ContentPanelState, DIRECTORY_FIELDS, DIRECTORY_LABELS,
-        DIRECTORY_METHODS, DeskStage, DirectoryView, EVENT_LABELS, EventForm, LineTone,
+        DIRECTORY_METHODS, DeskStage, DeskView, DirectoryView, EVENT_LABELS, EventForm, LineTone,
         PROFILE_FIELDS, PROFILE_LABELS, VETTING_METHODS, VETTING_RELATIONSHIPS,
         VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VettingMode,
         VettingState, VettingTab, method_label, reason_label, relationship_label,
@@ -48,9 +56,14 @@ impl Panel for VettingPanel {
 pub fn mode_id(state: &VettingState) -> &'static str {
     match (&state.mode, state.tab) {
         (VettingMode::List, VettingTab::Applications) => "applications",
-        (VettingMode::List, VettingTab::Desk) => "desk",
-        (VettingMode::List, VettingTab::Tickets) => "tickets",
-        (VettingMode::List, VettingTab::Issued) => "issued",
+        // Each desk view scrolls on its own: they are different lists of
+        // different lengths, and carrying one's offset into the next lands
+        // somewhere arbitrary.
+        (VettingMode::List, VettingTab::Desk) => match state.desk_view {
+            DeskView::Requests => "desk",
+            DeskView::Tickets => "tickets",
+            DeskView::Issued => "issued",
+        },
         (VettingMode::NewApplication { .. }, _) => "new-application",
         (VettingMode::ChooseFace { .. }, _) => "face",
         (VettingMode::RequestVetter { .. }, _) => "request",
@@ -143,6 +156,8 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
         }
     };
     let sep = || Span::styled(" | ", dim());
+    // Two tabs, for the two roles: being vetted, and vetting. The desk's own
+    // count is the one that wants attention — requests waiting on us.
     lines.push(Line::from(vec![
         Span::styled(
             format!(" Applications ({}) ", v.applications.len()),
@@ -150,18 +165,8 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
         ),
         sep(),
         Span::styled(
-            format!(" Vetter desk ({}) ", v.desk.len()),
+            format!(" Vetting desk ({}) ", v.desk.len()),
             tab_style(VettingTab::Desk),
-        ),
-        sep(),
-        Span::styled(
-            format!(" Tickets ({}) ", v.tickets.len()),
-            tab_style(VettingTab::Tickets),
-        ),
-        sep(),
-        Span::styled(
-            format!(" Issued ({}) ", v.issued.len()),
-            tab_style(VettingTab::Issued),
         ),
     ]));
     lines.push(Line::from(""));
@@ -174,9 +179,15 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
     match &v.mode {
         VettingMode::List => match v.tab {
             VettingTab::Applications => applications(&mut lines, v),
-            VettingTab::Desk => desk(&mut lines, v),
-            VettingTab::Tickets => tickets(&mut lines, v),
-            VettingTab::Issued => issued(&mut lines, v),
+            VettingTab::Desk => {
+                standing(&mut lines, v);
+                desk_views(&mut lines, v);
+                match v.desk_view {
+                    DeskView::Requests => desk(&mut lines, v),
+                    DeskView::Tickets => tickets(&mut lines, v),
+                    DeskView::Issued => issued(&mut lines, v),
+                }
+            }
         },
         VettingMode::NewApplication {
             community,
@@ -591,7 +602,7 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     lines.push(hint(
         "n: new  f: face  r: ask a vetter  v: find vetters  c: send card  m: refresh requirements",
     ));
-    lines.push(hint("Tab: next tab"));
+    lines.push(hint("Tab: your vetting desk"));
 }
 
 fn directory(lines: &mut Vec<Line<'static>>, v: &VettingState, view: &DirectoryView) {
@@ -947,13 +958,84 @@ fn send_card(
     lines.push(hint("Enter: approve, sign and send  Esc: not now"));
 }
 
+/// The desk's header: what each community has made us, and what it holds of our
+/// profile.
+///
+/// This is the only place a vetter can see their own vetter credential. It is a
+/// real VC (`vtc/vetting/vetters/grant`, design §10.3) — it gates every ticket
+/// and is presented to every applicant we accept — and until this header it was
+/// visible to applicants and to nobody else, least of all its holder.
+fn standing(lines: &mut Vec<Line<'static>>, v: &VettingState) {
+    if v.standing.is_empty() {
+        lines.push(hint(
+            "No community has named you a vetter yet. A community's admins grant the role;",
+        ));
+        lines.push(hint(
+            "until one does, you can hold no tickets and requests to you are refused.",
+        ));
+        lines.push(Line::from(""));
+        return;
+    }
+    for (i, row) in v.standing.iter().enumerate() {
+        let mut spans = vec![
+            Span::styled(
+                if i == 0 {
+                    "You vet for  "
+                } else {
+                    "             "
+                },
+                label(),
+            ),
+            accent_swatch(row.accent),
+            Span::styled(format!("{:<30}", row.community), value()),
+            Span::styled(
+                row.grant.clone(),
+                if row.grant_warns {
+                    Style::new().fg(COLOR_ORANGE)
+                } else {
+                    dim()
+                },
+            ),
+        ];
+        // The profile only makes sense alongside a grant that works: an
+        // applicant cannot find a vetter the community will not list.
+        spans.push(Span::styled(format!("   {}", row.profile), dim()));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(""));
+}
+
+/// The desk's sub-view line: inbound, outbound, and what came of it.
+fn desk_views(lines: &mut Vec<Line<'static>>, v: &VettingState) {
+    let count = |view: DeskView| match view {
+        DeskView::Requests => v.desk.len(),
+        DeskView::Tickets => v.tickets.len(),
+        DeskView::Issued => v.issued.len(),
+    };
+    let mut spans = vec![Span::styled("  ", dim())];
+    for view in DeskView::ALL {
+        spans.push(Span::styled(
+            format!(" {} ({}) ", view.label(), count(view)),
+            if v.desk_view == view {
+                Style::new().fg(COLOR_SUCCESS).bold()
+            } else {
+                dim()
+            },
+        ));
+    }
+    spans.push(Span::styled("   ←/→", dim()));
+    lines.push(Line::from(spans));
+    lines.push(Line::from(""));
+}
+
 fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     if v.desk.is_empty() {
         lines.push(hint("No one has asked you to vet them."));
         lines.push(Line::from(""));
         lines.push(hint(
-            "Requests arrive only with one of your tickets — hand them out from the Tickets tab.",
+            "Requests arrive only with one of your tickets — hand them out under Tickets (→).",
         ));
+        lines.push(hint("p: your vetter profile"));
         return;
     }
     for (i, row) in v.desk.iter().enumerate() {
@@ -1010,13 +1092,21 @@ fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     }
     lines.push(Line::from(""));
     let keys = match row.stage {
-        DeskStage::Accepted => "o: open session  x: decline  Tab: next tab",
-        DeskStage::Session => "o: reopen session  x: decline  Tab: next tab",
-        DeskStage::Card => "a: check and attest  x: decline  Tab: next tab",
-        DeskStage::Closed => "Tab: next tab",
+        DeskStage::Accepted => "o: open session  x: decline",
+        DeskStage::Session => "o: reopen session  x: decline",
+        DeskStage::Card => "a: check and attest  x: decline",
+        DeskStage::Closed => "",
     };
-    lines.push(hint(keys));
+    lines.push(hint(
+        format!("{keys}  {DESK_KEYS}").trim_start().to_string(),
+    ));
 }
+
+/// The keys every desk view carries, on its last line. `p` and `g` are the
+/// desk's, not any one view's — the profile and the vetter credential belong to
+/// the whole desk — and `←/→` is how the views are reached at all.
+const DESK_KEYS: &str = "p: your vetter profile  g: ask for your vetter credential again  \
+                         ←/→: Requests · Tickets · Issued  Tab: Applications";
 
 fn attest(lines: &mut Vec<Line<'static>>, v: &VettingState, request_id: &str, form: &AttestForm) {
     lines.push(heading("Check the person, then attest"));
@@ -1122,9 +1212,7 @@ fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         lines.push(hint(
             "t: hand out a ticket — read the code to someone, or show them its QR code",
         ));
-        lines.push(hint(
-            "p: your vetter profile  g: ask a community to resend your vetter credential",
-        ));
+        lines.push(hint(DESK_KEYS));
         return;
     }
     for (i, row) in v.tickets.iter().enumerate() {
@@ -1186,17 +1274,15 @@ fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         lines.push(hint(uri.clone()));
     }
     lines.push(Line::from(""));
-    lines.push(hint(
-        "t: new ticket  y: copy code  u: copy link  d: delete  Tab: next tab",
-    ));
-    lines.push(hint(
-        "p: your vetter profile  g: ask a community to resend your vetter credential",
-    ));
+    lines.push(hint("t: new ticket  y: copy code  u: copy link  d: delete"));
+    lines.push(hint(DESK_KEYS));
 }
 
 fn issued(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     if v.issued.is_empty() {
         lines.push(hint("You have not signed any vetting statements."));
+        lines.push(Line::from(""));
+        lines.push(hint(DESK_KEYS));
         return;
     }
     for (i, row) in v.issued.iter().enumerate() {
@@ -1225,5 +1311,140 @@ fn issued(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(hint("w: withdraw  Tab: next tab"));
+    lines.push(hint("w: withdraw"));
+    lines.push(hint(DESK_KEYS));
+}
+
+#[cfg(test)]
+mod desk_tests {
+    use super::*;
+    use crate::state_handler::main_page::content::VetterStandingRow;
+
+    fn drawn(v: &VettingState) -> String {
+        render(v)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn standing_row(community: &str, grant: &str, warns: bool, profile: &str) -> VetterStandingRow {
+        VetterStandingRow {
+            community: community.to_string(),
+            accent: None,
+            grant: grant.to_string(),
+            grant_warns: warns,
+            profile: profile.to_string(),
+        }
+    }
+
+    /// The desk answers "am I a vetter, for whom, and until when" on the screen
+    /// a vetter works from. Before this header the `vetter` role credential was
+    /// shown to every applicant and to nobody else — least of all its holder.
+    #[test]
+    fn the_desk_header_shows_the_vetter_credential_and_the_profile() {
+        let v = VettingState {
+            tab: VettingTab::Desk,
+            standing: vec![
+                standing_row(
+                    "Kernel Developers",
+                    "until 2027-01-18",
+                    false,
+                    "listed in the directory",
+                ),
+                standing_row(
+                    "first-vtc",
+                    "expires in 12 days, 2026-09-27",
+                    true,
+                    "no profile sent",
+                ),
+            ]
+            .into(),
+            ..VettingState::default()
+        };
+        let text = drawn(&v);
+
+        assert!(text.contains("You vet for"), "{text}");
+        assert!(text.contains("Kernel Developers"), "{text}");
+        assert!(text.contains("until 2027-01-18"), "{text}");
+        assert!(text.contains("expires in 12 days"), "{text}");
+        assert!(text.contains("listed in the directory"), "{text}");
+        assert!(
+            text.contains("p: your vetter profile"),
+            "the profile is reachable from the desk itself: {text}"
+        );
+    }
+
+    /// Someone no community has named. The page must say so rather than simply
+    /// listing nothing — an empty desk looks identical to a quiet one.
+    #[test]
+    fn a_desk_with_no_grant_explains_itself() {
+        let v = VettingState {
+            tab: VettingTab::Desk,
+            ..VettingState::default()
+        };
+        let text = drawn(&v);
+        assert!(
+            text.contains("No community has named you a vetter"),
+            "{text}"
+        );
+        assert!(text.contains("requests to you are refused"), "{text}");
+    }
+
+    /// Two tabs, and the desk's three views on one screen under them.
+    #[test]
+    fn the_desk_carries_its_three_views() {
+        let v = VettingState {
+            tab: VettingTab::Desk,
+            standing: vec![standing_row(
+                "VTC",
+                "until 2027-01-18",
+                false,
+                "listed in the directory",
+            )]
+            .into(),
+            ..VettingState::default()
+        };
+        let text = drawn(&v);
+        assert!(text.contains("Applications (0)"), "{text}");
+        assert!(text.contains("Vetting desk (0)"), "{text}");
+        for view in DeskView::ALL {
+            assert!(text.contains(view.label()), "{view:?} missing from {text}");
+        }
+        assert!(
+            !text.contains("Vetter desk"),
+            "the tab is the whole desk now: {text}"
+        );
+    }
+
+    /// Each view keeps the header, including the one thing no other view shows:
+    /// a grant that has lapsed.
+    #[test]
+    fn every_desk_view_keeps_the_header() {
+        for view in DeskView::ALL {
+            let v = VettingState {
+                tab: VettingTab::Desk,
+                desk_view: view,
+                standing: vec![standing_row(
+                    "VTC",
+                    "expired 2026-09-01",
+                    true,
+                    "no profile sent",
+                )]
+                .into(),
+                ..VettingState::default()
+            };
+            let text = drawn(&v);
+            assert!(
+                text.contains("expired 2026-09-01"),
+                "a lapsed grant must show on {view:?}, which is the view that explains \
+                 why nothing is arriving: {text}"
+            );
+        }
+    }
 }

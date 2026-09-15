@@ -1305,11 +1305,35 @@ Following the existing patterns in
     community. Sub-views: *Requests* (queue), *Session* (guided checklist),
     *Tickets* (issue / desk mode QR / revoke), *Issued* (statements;
     revoke).
+
+  *As built:* two tabs, **Applications** and **Vetting desk**, the desk
+  carrying *Requests* / *Tickets* / *Issued* as sub-views (`←`/`→`); a session
+  is a mode the desk enters rather than a fourth view. The desk is **always
+  shown**, not only to a holder of the role — hiding it would take the "ask
+  for it again" action away at exactly the moment a grant lapses, which is
+  when it is needed. Instead its header says where this persona stands with
+  each community that has named them: the grant, its expiry, and what that
+  community holds of their profile. That header is the only surface on which a
+  vetter can see their own `vetter` credential; it is also the only one that
+  keeps a **lapsed** grant, since everything else on the vetter side filters to
+  a live one and so goes silent rather than explaining itself.
 - **Inbox** gains `TaskType`s: `VettingRequestInbound`, `VettingRequestAccepted`,
   `VettingRequestRefused`, `VettingSessionOpened`, `VettingStatementReceived`,
   `VettingDeclined`, `VettingRequirementsChanged`, `VettingReviewRequired`.
 - **My Credentials** gains a **Vetting** `CredentialTab` (held statements,
   with expiry).
+
+  *As built, in part:* the **Membership** tab now lists the `vetter` role
+  credential beside the VMC and role VEC from the same community, with its
+  validity window and its raw JSON — it is stored apart from them (§10.3) but
+  is a credential from that community like the others. Held *statements* still
+  have no tab of their own.
+- **Inbox**, *as built*, also carries `VetterGrantExpiring`: our own `vetter`
+  credential lapsed, or about to. Raised by the hourly sweep, because nothing
+  arrives to announce it — the first sign is an applicant's request refused at
+  *their* end as `notEligible`. Said once per grant per state (approaching,
+  then lapsed) and recorded in the book, so a dismissed warning stays
+  dismissed.
 - **Identity → Profiles** gets a "Create vetting face" preset (`name.legal`
   + optional handles).
 - **Join flow** (`JoinPage`): after `EnterDid`, when the manifest has
