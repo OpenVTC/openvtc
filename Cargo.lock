@@ -2786,7 +2786,7 @@ dependencies = [
  "chrono",
  "clap",
  "dialoguer",
- "dirs",
+ "dirs 6.0.0",
  "ed25519-dalek 3.0.0",
  "hex",
  "keyring-core",
@@ -2876,6 +2876,15 @@ name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
 dependencies = [
  "dirs-sys",
 ]
@@ -6131,7 +6140,7 @@ dependencies = [
  "dialoguer",
  "did-git-sign",
  "didwebvh-rs",
- "dirs",
+ "dirs 6.0.0",
  "dtg-credentials 0.6.0",
  "ed25519-dalek-bip32",
  "hex",
@@ -6196,7 +6205,7 @@ dependencies = [
  "chrono",
  "criterion",
  "didwebvh-rs",
- "dirs",
+ "dirs 6.0.0",
  "dtg-credentials 0.6.0",
  "ed25519-dalek-bip32",
  "futures-util",
@@ -6571,7 +6580,7 @@ dependencies = [
  "aes-gcm 0.10.3",
  "aes-kw",
  "argon2 0.5.3",
- "base64 0.22.1",
+ "base64 0.21.7",
  "bitfields",
  "block-padding 0.3.3",
  "blowfish",
@@ -8603,7 +8612,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -9237,9 +9246,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-rs"
-version = "0.20.4"
+version = "0.20.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2f308a570035bc810d285c264a202e267c553ec67a32dacbd79da8e304f7c89"
+checksum = "24b738bae7fa4570ac353a9413702061bbc4ddd21d29f8677dca80a52bff0aff"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9249,6 +9258,20 @@ dependencies = [
  "serde_json",
  "serde_with",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "trust-tasks-tsp"
+version = "0.20.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14bfa0ffbf2ae113d34e7cf05ba6e950da8cad1f189fcbb63b16bc6151b7ee19"
+dependencies = [
+ "affinidi-tsp",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "trust-tasks-rs",
 ]
 
 [[package]]
@@ -9817,9 +9840,9 @@ dependencies = [
 
 [[package]]
 name = "vta-sdk"
-version = "0.38.0"
+version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75232f010392bd234dab89bcdc15e7edf47677b4591e941860013a1d5e81bc7a"
+checksum = "18a055be6fccb2513edd389526a76acd81ded7164321d56208e7247b7a8de3ae"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -9845,7 +9868,7 @@ dependencies = [
  "curve25519-dalek 5.0.0",
  "dbus-secret-service-keyring-store",
  "didwebvh-rs",
- "dirs",
+ "dirs 7.0.0",
  "dtg-credentials 0.9.1",
  "ed25519-dalek 3.0.0",
  "futures-util",
@@ -9862,6 +9885,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trust-tasks-rs",
+ "trust-tasks-tsp",
  "url",
  "utoipa",
  "uuid",
@@ -9903,7 +9927,7 @@ dependencies = [
  "clap",
  "dialoguer",
  "didwebvh-rs",
- "dirs",
+ "dirs 6.0.0",
  "dtg-credentials 0.9.1",
  "ed25519-dalek 3.0.0",
  "fjall",

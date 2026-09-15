@@ -1,6 +1,14 @@
 /*!
  * The TSP send leg for VTC-facing ceremonies (#185 item 2f).
  *
+ * ## Carriage
+ *
+ * A Trust Task goes out in the TSP binding envelope
+ * (`{"type": ".../binding/tsp/0.1/envelope", "document": …}`), applied by
+ * `vta_sdk::tsp_binding::wrap_envelope` — the same function `vta-service` and
+ * the VTI SDK's own sessions use, so there is one implementation of the
+ * binding rather than one per sender. See [`send_trust_task`].
+ *
  * ## Why this is send-only
  *
  * Inbound TSP is **already arriving**. `DidCommTransport` owns the one mediator
@@ -144,8 +152,23 @@ pub async fn send_trust_task(
             ))
         })?;
 
-    let payload = serde_json::to_vec(document)
+    // Sealed in the TSP **binding envelope**, not as the bare document.
+    //
+    // The binding (`https://trusttasks.org/binding/tsp/0.1`) is how a TSP
+    // payload says "this is a Trust Task": TSP carries a sender VID, a
+    // recipient VID and opaque bytes, with no message `type` and no request
+    // path to say it in, so the JSON wrapper is the only place it can go. The
+    // wrapper comes from `vta_sdk::tsp_binding`, which is the one
+    // implementation both ends of the VTI workspace use, rather than a fourth
+    // local spelling of the same JSON.
+    //
+    // This module sent the bare document until now. It reached the VTC only
+    // because that service accepts both shapes; a conformant peer refuses it,
+    // and the VTA does — `refused a TSP frame that is not a binding envelope`,
+    // which the sender experiences as a reply that never comes (VTI #1488).
+    let document = serde_json::to_vec(document)
         .map_err(|e| OpenVTCError::Config(format!("serialise Trust Task document for TSP: {e}")))?;
+    let payload = vta_sdk::tsp_binding::wrap_envelope(&document);
     let route = hops(&our_mediator, tsp_mediator_did, to_did);
 
     atm.tsp()
