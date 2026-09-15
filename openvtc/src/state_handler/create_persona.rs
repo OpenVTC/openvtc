@@ -103,6 +103,7 @@ pub(crate) async fn mint_standalone_persona(
         top_context_id,
         context_id,
         custom_mediator,
+        path_mode,
     } = inputs;
     if top_context_id.is_empty() {
         anyhow::bail!("No account context yet — finish setup before creating a persona.");
@@ -135,16 +136,25 @@ pub(crate) async fn mint_standalone_persona(
         .id;
 
     // Mint the persona did:webvh via the server (server-generated keys), in the
-    // chosen context.
-    progress(&format!("Creating persona DID via {server_id}…"));
-    let (keys, did, document, _mnemonic) = vta::create_did_via_server(
-        admin_vta,
-        tdk,
-        &context_id,
-        &server_id,
-        WebvhPathMode::AutoAssign,
-    )
-    .await?;
+    // chosen context, at the path the operator chose — or one the server picks.
+    match path_mode.to_request_path() {
+        Some(path) => progress(&format!("Creating persona DID at /{path} via {server_id}…")),
+        None => progress(&format!("Creating persona DID via {server_id}…")),
+    }
+    let (keys, did, document, _mnemonic) =
+        vta::create_did_via_server(admin_vta, tdk, &context_id, &server_id, path_mode.clone())
+            .await
+            // A path the operator typed is the likeliest thing to be refused
+            // here, and the refusal is theirs to act on: the name may simply be
+            // taken. Say which path, since the overlay is closing on this
+            // message and it is the only place the answer survives.
+            .map_err(|e| match path_mode.to_request_path() {
+                Some(path) => anyhow::anyhow!(
+                    "{e}\nThe path was \u{201c}{path}\u{201d}. If it is already in use, create \
+                     the persona again with another path, or let the server assign one."
+                ),
+                None => e,
+            })?;
 
     // The VTA may have declined the `#tsp` service we asked for. Report it
     // through the same progress channel the caller is already showing, so a
@@ -185,12 +195,20 @@ pub(crate) struct MintInputs {
     /// the VTA's webvh server advertises that mediator, so the persona listener
     /// must use the same one (mirrors the join flow).
     pub(crate) custom_mediator: Option<String>,
+    /// Where the DID sits on the hosting server: a path the server allocates
+    /// (the default, a fresh mnemonic) or one the operator typed. Already
+    /// checked against the host's naming rules by the time it gets here.
+    pub(crate) path_mode: WebvhPathMode,
 }
 
 impl MintInputs {
-    /// Read them, for a mint into `context_id`. Pure — no I/O, so it stays on
-    /// the loop.
-    pub(crate) fn from_config(config: &Config, context_id: String) -> Self {
+    /// Read them, for a mint into `context_id` at `path_mode`. Pure — no I/O,
+    /// so it stays on the loop.
+    pub(crate) fn from_config(
+        config: &Config,
+        context_id: String,
+        path_mode: WebvhPathMode,
+    ) -> Self {
         Self {
             top_context_id: config.account.top_context_id.clone(),
             context_id,
@@ -198,6 +216,7 @@ impl MintInputs {
                 KeyBackend::Vta { mediator_did, .. } => mediator_did.clone(),
                 _ => None,
             },
+            path_mode,
         }
     }
 }

@@ -1135,6 +1135,8 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::CreatePersonaContextSelect(..)
         | Action::CreatePersonaContextSlug(..)
         | Action::CreatePersonaBack
+        | Action::CreatePersonaPathChoice(..)
+        | Action::CreatePersonaPathInput(..)
         | Action::AgentNameManagerInput(..)
         | Action::AgentNameManagerSelect(..)
         | Action::AgentNameManagerConfirmRemove

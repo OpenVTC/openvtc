@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use url::Url;
 
+use vta_sdk::protocols::did_management::create::WebvhPathMode;
+
 use crate::{config::PersonaDIDKeys, errors::OpenVTCError};
 
 /// Extract the mediator DID from a persona's DID document.
@@ -97,6 +99,134 @@ pub fn tsp_advertisement_warning(document: &Document) -> Option<String> {
          configured) and mint a new persona if you need one."
             .to_string(),
     )
+}
+
+/// Path segments the hosting service refuses as the **first** segment of an
+/// operator-chosen path, because each one collides with one of its own routes.
+///
+/// Mirrors `RESERVED_NAMES` in the hosting service (`did-hosting-common`
+/// `server::mnemonic`) — see [`validate_custom_path`] for why this is a copy.
+const RESERVED_FIRST_SEGMENTS: &[&str] = &[
+    ".well-known",
+    "api",
+    "auth",
+    "dids",
+    "stats",
+    "acl",
+    "health",
+];
+
+/// Check an operator-chosen `did:webvh` path against the hosting service's
+/// naming rules, returning the reason it would be refused.
+///
+/// The rules, all of them the hosting service's:
+///
+/// - not empty, at most 255 characters, no leading or trailing `/`
+/// - no empty segments (`a//b`)
+/// - each `/`-separated segment is 2–63 characters of `[a-z0-9-]` and starts
+///   and ends with an alphanumeric
+/// - the first segment is not one the hosting server reserves for its own
+///   routes (`.well-known`, `api`, `auth`, `dids`, `stats`, `acl`, `health`)
+///
+/// # Why this is a copy rather than a call
+///
+/// The rules live in `did-hosting-common::server::mnemonic::validate_custom_path`
+/// and that crate is published — but it pins its own, older `vta-sdk`, so
+/// depending on it here would put two `vta-sdk` copies in the tree and fail the
+/// build on the shared auth types. So this is a deliberate mirror, and the
+/// hosting service stays authoritative: a path this accepts can still be
+/// refused at mint time — most obviously when it is already taken, which no
+/// local check can know.
+///
+/// What it buys is the failure that matters most. A standalone mint *creates
+/// the VTA context first*, so a path the server was always going to refuse
+/// would otherwise cost an empty orphan context before the operator is told
+/// about a typo. Rejecting it in the overlay, before anything is minted, keeps
+/// the cursor in the field.
+///
+/// The one drift that would hurt is this copy being *stricter* than the
+/// service — that refuses a path the host would have granted. Looser is
+/// harmless: the host says no and the error is surfaced.
+pub fn validate_custom_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("Enter a path, or choose a server-assigned one.".to_string());
+    }
+    if path.len() > 255 {
+        return Err("A path must be at most 255 characters.".to_string());
+    }
+    if path.starts_with('/') || path.ends_with('/') {
+        return Err("A path must not start or end with '/'.".to_string());
+    }
+
+    for (i, segment) in path.split('/').enumerate() {
+        if segment.is_empty() {
+            return Err("A path must not contain empty segments (//).".to_string());
+        }
+        validate_path_segment(segment)?;
+        if i == 0 && RESERVED_FIRST_SEGMENTS.contains(&segment) {
+            return Err(format!(
+                "'{segment}' is reserved by the hosting server and cannot start a path."
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// One `/`-separated segment of an operator-chosen path.
+///
+/// The lowercase-only rule is the hosting service's, and it is worth keeping in
+/// the client's mouth too: it makes two slots that differ only by case
+/// impossible, so a hosted path cannot be shadowed by a confusable twin.
+fn validate_path_segment(segment: &str) -> Result<(), String> {
+    if segment.len() < 2 || segment.len() > 63 {
+        return Err(format!(
+            "'{segment}': each path segment must be 2 to 63 characters."
+        ));
+    }
+    if !segment
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(format!(
+            "'{segment}': a path may use only lowercase letters, digits and hyphens."
+        ));
+    }
+    let bytes = segment.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric() || !bytes[segment.len() - 1].is_ascii_alphanumeric() {
+        return Err(format!(
+            "'{segment}': each path segment must start and end with a letter or digit."
+        ));
+    }
+    Ok(())
+}
+
+/// Turn what the operator typed into the path mode the mint requests.
+///
+/// The empty / `.well-known` / explicit mapping is shared `did:webvh`
+/// vocabulary, so it comes from the SDK's `From<String>` rather than being
+/// re-derived here — the same discipline the `didwebvh-rs` rule applies to
+/// DID ⇄ URL conversions.
+///
+/// Two of the three modes are then refused, because this is the *persona* mint:
+///
+/// - empty → the operator asked to type a path and typed nothing. Taking the
+///   server-assigned one is a different answer, and it is one row up.
+/// - `.well-known` → the host's own root DID slot: admin-gated, one per host.
+///   A persona minted there would claim the whole domain's identity.
+pub fn explicit_path_mode(typed: &str) -> Result<WebvhPathMode, String> {
+    match WebvhPathMode::from(typed.trim().to_string()) {
+        WebvhPathMode::AutoAssign => Err("Enter a path, or choose a server-assigned one.".into()),
+        WebvhPathMode::WellKnown => Err(
+            "'.well-known' is the hosting server's own root DID, not a persona path — \
+             choose another name."
+                .into(),
+        ),
+        WebvhPathMode::Explicit(path) => {
+            validate_custom_path(&path)?;
+            Ok(WebvhPathMode::Explicit(path))
+        }
+    }
 }
 
 /// Creates a new `did:webvh` DID with key pre-rotation enabled.
@@ -620,5 +750,74 @@ mod tests {
             placeholder_did_for("http://localhost:8080/test"),
             "did:webvh:{SCID}:localhost%3A8080:test"
         );
+    }
+
+    /// The shapes an operator actually types, and which the hosting service
+    /// grants.
+    #[test]
+    fn a_plain_name_is_a_valid_path() {
+        assert_eq!(validate_custom_path("alice"), Ok(()));
+        assert_eq!(validate_custom_path("alice-2"), Ok(()));
+        assert_eq!(validate_custom_path("a1"), Ok(()));
+        assert_eq!(validate_custom_path("team/alice"), Ok(()));
+    }
+
+    /// Each rule refused names the segment at fault. A path is typed one
+    /// segment at a time, and "invalid path" would leave the operator guessing
+    /// which of `team/Alice` the service objected to.
+    #[test]
+    fn each_refusal_names_the_offending_segment() {
+        let err = validate_custom_path("team/Alice").unwrap_err();
+        assert!(err.contains("Alice"), "got: {err}");
+        assert!(err.contains("lowercase"), "got: {err}");
+
+        let err = validate_custom_path("team/a").unwrap_err();
+        assert!(err.contains("'a'"), "got: {err}");
+        assert!(err.contains("2 to 63"), "got: {err}");
+
+        let err = validate_custom_path("-alice").unwrap_err();
+        assert!(err.contains("start and end"), "got: {err}");
+        assert!(validate_custom_path("alice-").is_err());
+    }
+
+    /// Structural refusals, all of them the hosting service's.
+    #[test]
+    fn empty_bounding_and_double_slashes_are_refused() {
+        assert!(validate_custom_path("").is_err());
+        assert!(validate_custom_path("/alice").is_err());
+        assert!(validate_custom_path("alice/").is_err());
+        assert!(validate_custom_path("team//alice").is_err());
+        assert!(validate_custom_path(&"a".repeat(256)).is_err());
+        assert!(validate_custom_path("alice_bob").is_err(), "no underscores");
+        assert!(validate_custom_path("alice.bob").is_err(), "no dots");
+    }
+
+    /// Reserved only as the *first* segment — the service's own rule. `api` is
+    /// one of its routes; `team/api` collides with nothing.
+    #[test]
+    fn a_reserved_name_is_refused_only_in_first_position() {
+        let err = validate_custom_path("api").unwrap_err();
+        assert!(err.contains("reserved"), "got: {err}");
+        assert!(validate_custom_path("health").is_err());
+        assert_eq!(validate_custom_path("team/api"), Ok(()));
+    }
+
+    /// The mode a typed path resolves to, including the two answers this
+    /// overlay refuses to send.
+    #[test]
+    fn a_typed_path_resolves_to_an_explicit_mode() {
+        assert_eq!(
+            explicit_path_mode("  alice  "),
+            Ok(WebvhPathMode::Explicit("alice".to_string())),
+            "surrounding whitespace is trimmed, not sent"
+        );
+
+        let err = explicit_path_mode("   ").unwrap_err();
+        assert!(err.contains("server-assigned"), "got: {err}");
+
+        // `.well-known` is the one input that would otherwise resolve to a
+        // *valid* mode and mint the host's root DID as a persona.
+        let err = explicit_path_mode(".well-known").unwrap_err();
+        assert!(err.contains("root DID"), "got: {err}");
     }
 }

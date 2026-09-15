@@ -54,11 +54,12 @@ use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOu
 use crate::state_handler::dispatch_util::{self, Persist, SyncLog};
 use crate::state_handler::join_flow;
 use crate::state_handler::main_page::content::{
-    ApplicationRow, AttestForm, CardPreview, DIRECTORY_FIELDS, DIRECTORY_METHODS, DeskRow,
-    DeskStage, DirectoryCommunity, DirectoryView, EVENT_FIELDS, EventForm, FaceChoice, IssuedRow,
-    LineTone, ListedVetterRow, PROFILE_FIELDS, RequestRow, TicketRow, VETTING_METHODS,
-    VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm,
-    VettingMembership, VettingMode, VettingPersona, VettingState, VettingTab, method_label,
+    ApplicationRow, AttestForm, CardPreview, DIRECTORY_FIELDS, DIRECTORY_LABELS, DIRECTORY_METHODS,
+    DeskRow, DeskStage, DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS, EventForm,
+    FaceChoice, IssuedRow, LineTone, ListedVetterRow, PROFILE_FIELDS, PROFILE_LABELS, RequestRow,
+    TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
+    VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VettingMembership, VettingMode, VettingPersona,
+    VettingState, VettingTab, method_label, row_of,
 };
 use crate::state_handler::main_page::menu::MainMenu;
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
@@ -1322,6 +1323,12 @@ async fn search_directory(ctx: &mut ActionCtx<'_>, cursors: Vec<Option<String>>)
         match filter.to_body(cursors.last().cloned().flatten()) {
             Ok(body) => (target, body),
             Err(e) => {
+                // The cursor goes to the row the message names — the filters
+                // are nine rows, and a search is run from whichever one the
+                // cursor happens to be on.
+                if let Some(row) = e.row().and_then(|l| row_of(&DIRECTORY_LABELS, l)) {
+                    view.field = row;
+                }
                 view.error = Some(e.to_string());
                 return;
             }
@@ -1541,6 +1548,9 @@ async fn profile_submit(ctx: &mut ActionCtx<'_>, form: VetterProfileForm) {
                 }
                 Err(e) => {
                     if let Some(open_event) = &mut open.event {
+                        if let Some(row) = e.row().and_then(|l| row_of(&EVENT_LABELS, l)) {
+                            open_event.field = row;
+                        }
                         open_event.error = Some(e.to_string());
                     }
                 }
@@ -1581,6 +1591,15 @@ async fn publish_profile(ctx: &mut ActionCtx<'_>, form: &VetterProfileForm) {
         Ok(body) => body,
         Err(e) => {
             if let VettingMode::Profile(open) = &mut page(ctx).mode {
+                // Put the cursor on the row the message names, so a refusal
+                // read at the bottom of thirteen rows says where to go and
+                // then goes there. An event's rows are the event form's, so a
+                // refusal from one lands on the event's row here instead.
+                if let Some(index) = e.event() {
+                    open.field = PROFILE_FIELDS + index;
+                } else if let Some(row) = e.row().and_then(|l| row_of(&PROFILE_LABELS, l)) {
+                    open.field = row;
+                }
                 open.error = Some(e.to_string());
             }
             return;

@@ -307,8 +307,20 @@ pub async fn create_did_via_server(
     let created = Utc::now();
 
     // `path_mode` is the authoritative path selector (WellKnown / Explicit /
-    // AutoAssign). The legacy `path` field is left `None` — the server rejects a
-    // present-but-empty path with `e.p.did.path-invalid`.
+    // AutoAssign). The legacy `path` field carries the same answer, from
+    // `to_request_path()` — which is `None` for auto-assign, so the field is
+    // still omitted there (the server rejects a present-but-empty path with
+    // `e.p.did.path-invalid`, and an omitted one *is* the auto-assign
+    // contract).
+    //
+    // Sending both is not belt-and-braces for its own sake: a VTA that predates
+    // `path_mode` ignores the field it does not know, and silently auto-assigns
+    // a mnemonic — so an operator who typed a path would get a random one and
+    // no error. With the legacy field carrying it too, such a VTA honours the
+    // path instead. A VTA that does know `path_mode` prefers it (see
+    // `WebvhPathMode::resolve`), and the two never disagree because both come
+    // from the same value.
+    let legacy_path = path_mode.to_request_path().map(str::to_string);
 
     // Use the VTA's built-in mediator service rather than additional_services,
     // because the VTA formats the service ID as a full DID URL (e.g. "did:...#vta-didcomm")
@@ -320,7 +332,7 @@ pub async fn create_did_via_server(
             context_id: context_id.to_string(),
             server_id: Some(server_id.to_string()),
             url: None,
-            path: None,
+            path: legacy_path.clone(),
             path_mode: Some(path_mode.clone()),
             // No explicit hosting-domain override: the server determines the
             // domain from the selected `server_id`.
