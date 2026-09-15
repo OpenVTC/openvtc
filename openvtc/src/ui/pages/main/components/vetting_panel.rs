@@ -73,6 +73,7 @@ pub fn mode_id(state: &VettingState) -> &'static str {
         (VettingMode::Resend { .. }, _) => "resend",
         (VettingMode::SendCard { .. }, _) => "card",
         (VettingMode::NewTicket { .. }, _) => "new-ticket",
+        (VettingMode::ShowTicket { .. }, _) => "show-ticket",
         (VettingMode::OpenSession { .. }, _) => "session",
         (VettingMode::Attest { .. }, _) => "attest",
         (VettingMode::ConfirmDecline { .. }, _) => "decline",
@@ -363,6 +364,7 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.push(hint("Enter: issue  Tab: next field  Esc: cancel"));
         }
+        VettingMode::ShowTicket { index } => show_ticket(&mut lines, v, *index),
         VettingMode::OpenSession {
             request_id,
             method_index,
@@ -958,6 +960,81 @@ fn send_card(
     lines.push(hint("Enter: approve, sign and send  Esc: not now"));
 }
 
+/// Draw `uri` as a QR code into `lines`, given the rows still unspent.
+///
+/// `above` is what has already been pushed and `tail` what is still to come;
+/// the code gets what is left. A code that does not fit is not drawn at all —
+/// a scanner needs the whole thing, so a clipped code is not a smaller code but
+/// a picture of nothing — and the message names the direction that is short.
+fn push_qr(lines: &mut Vec<Line<'static>>, uri: &str, above: usize, tail: usize) {
+    let width = super::status::content_width();
+    let height = super::status::content_height().saturating_sub(above + tail);
+    match qr_lines(uri, width, height) {
+        Ok(code) => lines.extend(code),
+        Err(QrError::TooBig {
+            needed_width,
+            needed_height,
+        }) => {
+            // Name the direction that is actually short. "Make the window
+            // bigger" on a window already wide enough is the kind of advice
+            // that gets followed once and then ignored.
+            let short_of_width = needed_width > width;
+            let taller_by = needed_height.saturating_sub(height).max(1);
+            let what = if short_of_width && needed_height > height {
+                format!("{needed_width} columns wide and {taller_by} rows taller")
+            } else if short_of_width {
+                format!("{needed_width} columns wide")
+            } else {
+                // Rows the *window* needs, not rows the code needs: the code is
+                // competing with everything else on the panel.
+                format!("{taller_by} rows taller")
+            };
+            lines.push(
+                Line::from(format!(
+                    "The QR code needs a window {what} — or copy the link with u."
+                ))
+                .fg(COLOR_ORANGE),
+            );
+        }
+        Err(QrError::TooLong) => lines.push(
+            Line::from("This ticket's link is too long for a QR code — copy it with u instead.")
+                .fg(COLOR_ORANGE),
+        ),
+    }
+}
+
+/// One ticket's code, with the whole panel to itself.
+///
+/// This is a screen someone else is pointing a phone at, so it holds the code,
+/// the six characters to read aloud if the scan fails, and nothing else. The
+/// panel's full height is what makes a real code fit at all: sharing it with
+/// the desk header, the view tabs and two key lines leaves roughly half, and
+/// half is not enough for the codes these links produce.
+fn show_ticket(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize) {
+    let Some(row) = v.tickets.get(index) else {
+        lines.push(hint("That ticket is gone."));
+        return;
+    };
+    lines.push(Line::from(vec![
+        Span::styled("Ticket   ", label()),
+        Span::styled(row.code.clone(), Style::new().fg(COLOR_SUCCESS).bold()),
+        Span::styled(format!("   {}", row.community), dim()),
+    ]));
+    lines.push(Line::from(""));
+    match &row.uri {
+        // `lines` already holds the page's own heading rows, so ask it rather
+        // than counting the two pushed here. Below: a blank and the key line.
+        Some(uri) if row.live => {
+            let above = lines.len();
+            push_qr(lines, uri, above, 2);
+        }
+        Some(_) => lines.push(Line::from("This ticket is spent or expired.").fg(COLOR_ORANGE)),
+        None => lines.push(hint("This ticket has no link to scan.")),
+    }
+    lines.push(Line::from(""));
+    lines.push(hint("Esc or Enter: back  (y: copy code  u: copy link)"));
+}
+
 /// The desk's header: what each community has made us, and what it holds of our
 /// profile.
 ///
@@ -1254,27 +1331,22 @@ fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         ]));
         lines.push(Line::from(""));
         lines.push(hint(
-            "Or let them scan this. It carries the ticket and your DID, so they can ask you at once:",
+            "Or let them scan this — ⏎ shows it full-screen. It carries the ticket and your DID:",
         ));
         lines.push(Line::from(""));
-        match qr_lines(uri, super::status::content_width()) {
-            Ok(code) => lines.extend(code),
-            Err(QrError::TooNarrow { needed }) => lines.push(
-                Line::from(format!(
-                    "Widen the window to {needed} columns to show the QR code, or copy the link with u."
-                ))
-                .fg(COLOR_ORANGE),
-            ),
-            Err(QrError::TooLong) => lines.push(
-                Line::from("This ticket's link is too long for a QR code — copy it with u instead.")
-                    .fg(COLOR_ORANGE),
-            ),
-        }
+        // The tail below the code: a blank, the link (which wraps on a narrow
+        // panel), a blank, and two key lines.
+        let width = super::status::content_width();
+        let tail = 4 + uri.chars().count().div_ceil(width.max(1));
+        let above = lines.len();
+        push_qr(lines, uri, above, tail);
         lines.push(Line::from(""));
         lines.push(hint(uri.clone()));
     }
     lines.push(Line::from(""));
-    lines.push(hint("t: new ticket  y: copy code  u: copy link  d: delete"));
+    lines.push(hint(
+        "⏎: show the code full-screen  t: new ticket  y: copy code  u: copy link  d: delete",
+    ));
     lines.push(hint(DESK_KEYS));
 }
 
@@ -1420,6 +1492,84 @@ mod desk_tests {
             !text.contains("Vetter desk"),
             "the tab is the whole desk now: {text}"
         );
+    }
+
+    /// A real ticket link on a real terminal: 132×41, which is what a maximised
+    /// window gives. The list view has to share those rows with the desk header,
+    /// the view tabs, the ticket row and two key lines; the full-screen view
+    /// does not, and that difference is the whole point of it.
+    ///
+    /// This is the case that shipped broken — the code was sized by width
+    /// alone, so a wide, short panel got the tallest code and it ran off the
+    /// bottom, where no amount of scrolling would have made it scannable.
+    #[test]
+    fn a_ticket_code_that_does_not_fit_the_list_fits_the_full_screen_view() {
+        use crate::state_handler::main_page::content::TicketRow;
+
+        const LINK: &str = "vetting-ticket:?v=1&community=did%3Awebvh%3AQmCommunity%3Avtc.example.com\
+                            &vetter=did%3Awebvh%3AQmVetter%3Aexample.com%3Acarol\
+                            &ticket=vt-0123456789abcdef0123456789abcdef\
+                            &secret=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+
+        super::super::status::set_wrap_width(130);
+        super::super::status::set_content_height(41);
+
+        let ticket = TicketRow {
+            id: "t1".into(),
+            code: "9ENN-8R76".into(),
+            community: "webvh.storm.ws/@first-vtc".into(),
+            uses_left: 1,
+            expires: "2026-09-29".into(),
+            live: true,
+            uri: Some(LINK.to_string()),
+        };
+        let base = VettingState {
+            tab: VettingTab::Desk,
+            desk_view: DeskView::Tickets,
+            tickets: vec![ticket].into(),
+            standing: vec![standing_row(
+                "webvh.storm.ws/@first-vtc",
+                "until 2027-09-15",
+                false,
+                "listed in the directory",
+            )]
+            .into(),
+            ..VettingState::default()
+        };
+
+        // In the list, the code cannot have the rows, so it is not drawn — and
+        // the message says which way to grow the window.
+        let listed = drawn(&base);
+        assert!(
+            listed.contains("rows taller"),
+            "the list says what is short rather than drawing half a code: {listed}"
+        );
+        assert!(
+            listed.contains("⏎ shows it full-screen"),
+            "and points at the view that does fit: {listed}"
+        );
+
+        // Full-screen, the same code fits, and the panel holds it whole.
+        let full = VettingState {
+            mode: VettingMode::ShowTicket { index: 0 },
+            ..base
+        };
+        let lines = render(&full);
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.content.contains("rows taller"))),
+            "the full-screen view has the rows for it"
+        );
+        assert!(
+            lines.len() <= 41,
+            "and the whole code is on the panel — a QR that needs scrolling \
+             cannot be scanned at all ({} rows)",
+            lines.len()
+        );
+        let text = drawn(&full);
+        assert!(text.contains("9ENN-8R76"), "the code to read aloud: {text}");
+        assert!(text.contains("Esc or Enter: back"), "{text}");
     }
 
     /// Each view keeps the header, including the one thing no other view shows:

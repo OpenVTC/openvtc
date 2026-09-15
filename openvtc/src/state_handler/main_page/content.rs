@@ -1806,6 +1806,19 @@ pub enum VettingMode {
         uses_index: usize,
         field: usize,
     },
+    /// One ticket's QR code, with the whole panel to itself.
+    ///
+    /// A QR code is the one thing on this page that cannot be scrolled into
+    /// view: a scanner needs the whole code at once, so half of it is not a
+    /// degraded code but nothing at all. Sharing the panel with the desk
+    /// header, the view tabs, the ticket list and two key lines leaves a real
+    /// code too little room on an ordinary terminal — and this is a screen
+    /// someone else is pointing a phone at, so it should be the only thing on
+    /// it anyway.
+    ShowTicket {
+        /// Which ticket, indexed into the tickets list.
+        index: usize,
+    },
     /// Open a session with the person in front of us.
     OpenSession {
         request_id: String,

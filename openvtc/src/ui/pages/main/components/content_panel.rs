@@ -68,6 +68,8 @@ impl ContentPanelState {
         // status messages wrap to the terminal rather than a fixed 76 columns.
         // Two columns come off for the panel's own leading indentation.
         super::status::set_wrap_width(content_block.inner(rect).width.saturating_sub(2) as usize);
+        // And its height, for the one thing that cannot be scrolled into view.
+        super::status::set_content_height(content_block.inner(rect).height as usize);
 
         let panel: Option<Box<dyn Panel>> = match menu.selected_menu {
             MainMenu::Communities => {
