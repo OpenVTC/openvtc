@@ -233,6 +233,21 @@ impl MainPageState {
                     TaskType::VRCRequestRejected => {
                         TaskKind::Informational("VRC Rejected".to_string())
                     }
+                    // Says what it costs, not just that a date passed: a lapsed
+                    // grant means requests are being refused at the applicant's
+                    // end, which is the part nobody can see from here.
+                    TaskType::VetterGrantExpiring {
+                        community,
+                        expired,
+                        valid_until,
+                    } => TaskKind::Informational(if *expired {
+                        format!(
+                            "Your vetter credential from {community} expired {valid_until} — \
+                             requests to you there are refused until it is reissued"
+                        )
+                    } else {
+                        format!("Your vetter credential from {community} expires {valid_until}")
+                    }),
                     _ => TaskKind::Informational("Unknown".to_string()),
                 };
                 let remote_did = match &task.type_ {
@@ -1013,6 +1028,93 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
             });
         }
     }
+
+    // The `vetter` role credential, for the communities that issued one.
+    //
+    // It is a third credential from the same community, and it is stored apart
+    // from the other two — design §10.3 keeps it out of `CommunityRecord`,
+    // because it grants a role rather than membership and is presented on its
+    // own to applicants. That separation is right, and it also meant the one
+    // credential a vetter is asked to act on was the one they could not look
+    // at: it gated their whole desk, was presented to every applicant they
+    // accepted, and appeared nowhere. Lapsed grants are listed too — the
+    // validity window says which is which.
+    for grant in &config.private.vetting.vetter_grants {
+        let vc = &grant.credential;
+        let issuer = vc
+            .get("issuer")
+            .and_then(|i| {
+                i.as_str()
+                    .map(str::to_string)
+                    .or_else(|| i.get("id").and_then(|x| x.as_str()).map(str::to_string))
+            })
+            .unwrap_or_else(|| grant.community.clone());
+        let subject = vc
+            .pointer("/credentialSubject/id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let valid_from = vc
+            .get("validFrom")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let valid_until = vc
+            .get("validUntil")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            // The book's own `valid_until` is the value the rest of the client
+            // decides on, so fall back to it rather than showing no window for
+            // a credential whose `validUntil` this build could not read.
+            .or_else(|| grant.valid_until.map(|u| u.to_rfc3339()));
+        let (validity, status) =
+            format_validity(&valid_from, valid_until.as_deref(), chrono::Utc::now());
+        // Labelled the way the membership rows above label the same community —
+        // its own display name first — so the three credentials from one
+        // community sit under one name rather than two.
+        let display_name = config
+            .account
+            .memberships()
+            .find(|m| m.vtc_did == grant.community)
+            .and_then(|m| m.display_name.clone());
+        let community = crate::state_handler::community_label(
+            config,
+            &grant.community,
+            display_name.as_deref(),
+            64,
+        );
+        result.push(VrcSummary {
+            vrc_id: grant
+                .credential_id
+                .clone()
+                .or_else(|| {
+                    vc.get("id")
+                        .and_then(|v| v.as_str())
+                        .map(std::string::ToString::to_string)
+                })
+                .unwrap_or_default(),
+            remote_p_did: sanitize_display(&grant.community, 256),
+            remote_agent_name: config
+                .agent_name_for(&grant.community)
+                .map(|n| sanitize_display(n, 256)),
+            raw_json: content::RawCredential::Value(Arc::new(vc.clone())),
+            alias: Some(community),
+            issuer: sanitize_display(&issuer, 256),
+            issuer_agent_name: config
+                .agent_name_for(&issuer)
+                .map(|n| sanitize_display(n, 256)),
+            subject: sanitize_display(&subject, 256),
+            subject_agent_name: config
+                .agent_name_for(&subject)
+                .map(|n| sanitize_display(n, 256)),
+            validity,
+            status,
+            kind: Some("Vetter".to_string()),
+            subject_is_self: config.is_persona_did(&subject),
+            valid_from,
+            valid_until,
+        });
+    }
     result
 }
 
@@ -1352,6 +1454,97 @@ mod tests {
             }],
         );
         config
+    }
+
+    /// The `vetter` role credential is listed with the membership credentials
+    /// from the same community.
+    ///
+    /// It is stored apart from them (design §10.3 keeps it out of
+    /// `CommunityRecord`, since it grants a role rather than membership), and
+    /// that separation had a cost this closes: the one credential a vetter is
+    /// asked to act on was the one they could not look at. Lapsed grants are
+    /// listed too — the validity window says which is which.
+    #[test]
+    fn a_vetter_grant_is_listed_with_the_communitys_other_credentials() {
+        use openvtc_core::vetting::book::VetterGrant;
+
+        let mut config = config_with_membership(
+            "did:webvh:scid:example.com:me",
+            Some("Me"),
+            "did:web:vtc",
+            Some("Kernel Developers"),
+        );
+        let persona = *config.account.personas.keys().next().unwrap();
+        let until = chrono::Utc::now() + chrono::Duration::days(200);
+        config.private.vetting.keep_vetter_grant(VetterGrant {
+            community: "did:web:vtc".into(),
+            persona,
+            credential_id: Some("urn:uuid:grant-1".into()),
+            valid_until: Some(until),
+            received_at: chrono::Utc::now(),
+            credential: serde_json::json!({
+                "id": "urn:uuid:grant-1",
+                "issuer": { "id": "did:web:vtc" },
+                "validFrom": chrono::Utc::now().to_rfc3339(),
+                "validUntil": until.to_rfc3339(),
+                "credentialSubject": { "id": "did:webvh:scid:example.com:me" },
+            }),
+        });
+
+        let creds = collect_membership_creds(&config);
+        let grant = creds
+            .iter()
+            .find(|c| c.kind.as_deref() == Some("Vetter"))
+            .expect("the vetter credential is listed");
+        assert_eq!(grant.vrc_id, "urn:uuid:grant-1");
+        assert_eq!(grant.alias.as_deref(), Some("Kernel Developers"));
+        assert_eq!(
+            grant.subject, "did:webvh:scid:example.com:me",
+            "it names the persona the community made a vetter"
+        );
+        assert!(
+            grant.validity.contains("left"),
+            "the window is what says whether it still works: {}",
+            grant.validity
+        );
+    }
+
+    /// A grant whose stored credential this build cannot read still shows a
+    /// window: the book's own `valid_until` is what the rest of the client
+    /// decides on, so it is the fallback rather than a blank.
+    #[test]
+    fn a_grant_with_an_unreadable_credential_still_shows_its_window() {
+        use openvtc_core::vetting::book::VetterGrant;
+
+        let mut config = config_with_membership(
+            "did:webvh:scid:example.com:me",
+            None,
+            "did:web:vtc",
+            Some("VTC"),
+        );
+        let persona = *config.account.personas.keys().next().unwrap();
+        config.private.vetting.keep_vetter_grant(VetterGrant {
+            community: "did:web:vtc".into(),
+            persona,
+            credential_id: None,
+            valid_until: Some(chrono::Utc::now() - chrono::Duration::days(1)),
+            received_at: chrono::Utc::now(),
+            credential: serde_json::json!({ "shape": "from a newer build" }),
+        });
+
+        let creds = collect_membership_creds(&config);
+        let grant = creds
+            .iter()
+            .find(|c| c.kind.as_deref() == Some("Vetter"))
+            .expect("listed even when its body is unreadable");
+        assert!(
+            grant.valid_until.is_some(),
+            "the book's date is the fallback"
+        );
+        assert_eq!(
+            grant.issuer, "did:web:vtc",
+            "and the community is the issuer when the credential does not say"
+        );
     }
 
     /// With no explicit label and no cached name, both halves of the row fall

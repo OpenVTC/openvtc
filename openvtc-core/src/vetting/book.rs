@@ -121,12 +121,85 @@ pub struct VetterGrant {
     pub credential: serde_json::Value,
 }
 
+/// Where one community has put us as a vetter: its grant, and the profile we
+/// last sent it. One row of the vetting desk's header.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VetterStanding {
+    /// The community that named us.
+    pub community: String,
+    /// Our persona it named.
+    pub persona: PersonaId,
+    /// When the grant lapses, if it says.
+    pub valid_until: Option<DateTime<Utc>>,
+    /// Whether it is live now. A lapsed row is still shown — see
+    /// [`VettingBook::vetter_standing`].
+    pub live: bool,
+    /// Live, but not for much longer.
+    pub expiring: bool,
+    /// Where the profile we last sent this community stands, if we sent one.
+    pub profile: Option<super::registry::ProfileState>,
+}
+
+/// A vetter grant that has lapsed, or is about to, and whose holder has not
+/// been told.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantWarning {
+    /// The community whose grant it is.
+    pub community: String,
+    /// Our persona it names.
+    pub persona: PersonaId,
+    /// Whether it has lapsed already, as opposed to being about to.
+    pub expired: bool,
+    /// When it lapses, or lapsed.
+    pub valid_until: DateTime<Utc>,
+}
+
+impl GrantWarning {
+    /// Its identity, for saying a thing once.
+    ///
+    /// Carries the expiry, so a *reissued* grant is a different warning rather
+    /// than one already given — a renewal moves `validUntil`, and without it in
+    /// the identity the next lapse would be silently treated as said.
+    #[must_use]
+    pub fn id(&self) -> String {
+        format!(
+            "vetter-grant:{}:{}:{}:{}",
+            self.community,
+            self.persona,
+            self.valid_until.to_rfc3339(),
+            if self.expired { "expired" } else { "expiring" }
+        )
+    }
+}
+
+/// How long before a vetter grant lapses the holder is told.
+///
+/// A lapsed grant is not a warning in the moment it matters: it is an
+/// applicant's request refused as `notEligible`, at their end, for a reason
+/// they cannot fix. Fourteen days is enough for the community to be asked and
+/// answer — asking is `AskResend`, and the community has to act — without the
+/// warning standing so long it becomes part of the furniture.
+pub const GRANT_EXPIRY_WARNING_DAYS: i64 = 14;
+
 impl VetterGrant {
     /// Unexpired at `now`. Revocation is the community's to apply: a revoked
     /// grant stops the vetter's statements counting there.
     #[must_use]
     pub fn is_live(&self, now: DateTime<Utc>) -> bool {
         self.valid_until.is_some_and(|until| until > now)
+    }
+
+    /// Live, but lapsing within [`GRANT_EXPIRY_WARNING_DAYS`].
+    ///
+    /// False once it has lapsed — an expired grant is not "expiring", and the
+    /// two are different things to say. Use [`is_live`](Self::is_live) for
+    /// that.
+    #[must_use]
+    pub fn is_expiring(&self, now: DateTime<Utc>) -> bool {
+        self.is_live(now)
+            && self.valid_until.is_some_and(|until| {
+                until <= now + chrono::TimeDelta::days(GRANT_EXPIRY_WARNING_DAYS)
+            })
     }
 }
 
@@ -255,6 +328,17 @@ pub struct VettingBook {
     /// Communities that named one of our personas a vetter.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vetter_grants: Vec<VetterGrant>,
+    /// Grant lapses we have already warned about, by
+    /// [`GrantWarning::id`](GrantWarning::id).
+    ///
+    /// Persisted so the warning is raised **once** and stays dismissed. The
+    /// inbox task itself cannot answer "have we said this yet?": dismissing a
+    /// task removes it, so an absent task means either never-raised or
+    /// read-and-dismissed, and re-deciding hourly would put a warning the
+    /// operator has already dealt with back every hour until the community
+    /// acts — which is not in their gift.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_warnings: Vec<String>,
     /// Communities whose manifests we have read, with their branding.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub communities: Vec<KnownCommunity>,
@@ -313,6 +397,95 @@ impl VettingBook {
         self.vetter_grants
             .iter()
             .find(|g| g.community == community && g.persona == persona && g.is_live(now))
+    }
+
+    /// Where we stand as a vetter with every community that has ever named us
+    /// one — the grant it issued, live or lapsed, and where the profile we last
+    /// sent it got to.
+    ///
+    /// **Lapsed grants are included, deliberately.** Everything else on the
+    /// vetter side filters to a *live* grant, which is right — a lapsed vetter
+    /// cannot hand out tickets and their requests would be refused. But that
+    /// makes a lapse invisible exactly when it needs explaining: the communities
+    /// simply stop being listed, with nothing saying why or that asking for the
+    /// grant again (`AskResend`) is the fix. This is the one view that shows the
+    /// lapse.
+    ///
+    /// Ordered by community, so the rows do not reshuffle between frames.
+    #[must_use]
+    pub fn vetter_standing(&self, now: DateTime<Utc>) -> Vec<VetterStanding> {
+        let mut standing: Vec<VetterStanding> = self
+            .vetter_grants
+            .iter()
+            .map(|grant| VetterStanding {
+                community: grant.community.clone(),
+                persona: grant.persona,
+                valid_until: grant.valid_until,
+                live: grant.is_live(now),
+                expiring: grant.is_expiring(now),
+                profile: self
+                    .vetter_profile(&grant.community, grant.persona)
+                    .map(|record| record.state.clone()),
+            })
+            .collect();
+        standing.sort_by(|a, b| {
+            a.community
+                .cmp(&b.community)
+                .then(a.persona.cmp(&b.persona))
+        });
+        standing
+    }
+
+    /// Grants that have lapsed or are about to, for warning their holder.
+    ///
+    /// A grant with no `validUntil` is skipped: it is never live, so there is
+    /// nothing to lose, and a standing warning about a credential that never
+    /// worked helps nobody.
+    #[must_use]
+    pub fn grants_needing_attention(&self, now: DateTime<Utc>) -> Vec<&VetterGrant> {
+        self.vetter_grants
+            .iter()
+            .filter(|g| g.valid_until.is_some() && (!g.is_live(now) || g.is_expiring(now)))
+            .collect()
+    }
+
+    /// The grant warnings owed right now and not yet given, recording them as
+    /// given. Also forgets warnings whose grant no longer needs one, so a
+    /// reissued grant that later lapses is warned about again.
+    ///
+    /// Returns what to raise. Empty is the common case and writes nothing, so
+    /// an hourly caller costs a scan of a short list.
+    ///
+    /// The identity includes the *state*, so the step from "about to lapse" to
+    /// "lapsed" is a second, different warning rather than a repeat of the
+    /// first — they say different things and the second is the one that
+    /// explains a desk gone quiet.
+    pub fn take_grant_warnings(&mut self, now: DateTime<Utc>) -> Vec<GrantWarning> {
+        let owed: Vec<GrantWarning> = self
+            .grants_needing_attention(now)
+            .into_iter()
+            .map(|g| GrantWarning {
+                community: g.community.clone(),
+                persona: g.persona,
+                expired: !g.is_live(now),
+                valid_until: g.valid_until.unwrap_or(now),
+            })
+            .collect();
+
+        // Forget anything no longer owed: a renewed grant, or one whose
+        // "expiring" warning has been superseded by its "expired" one.
+        let live_ids: Vec<String> = owed.iter().map(GrantWarning::id).collect();
+        self.grant_warnings.retain(|id| live_ids.contains(id));
+
+        let mut new = Vec::new();
+        for warning in owed {
+            let id = warning.id();
+            if !self.grant_warnings.contains(&id) {
+                self.grant_warnings.push(id);
+                new.push(warning);
+            }
+        }
+        new
     }
 
     /// Remember `community`'s vetting criteria from its manifest, replacing
@@ -833,6 +1006,118 @@ mod tests {
             .map(|m| m.vtc_did.as_str())
             .collect();
         assert_eq!(candidates, vec!["did:web:b"]);
+    }
+
+    /// A grant is warned about once as it approaches, once more when it
+    /// actually lapses, and never again — a warning the operator has read and
+    /// dismissed must not come back every hour for something only the community
+    /// can fix.
+    #[test]
+    fn a_lapsing_grant_is_warned_about_once_per_state() {
+        let now = Utc::now();
+        let persona = PersonaId::new();
+        let mut book = VettingBook::default();
+        book.keep_vetter_grant(VetterGrant {
+            community: "did:web:a".into(),
+            persona,
+            credential_id: None,
+            valid_until: Some(now + Duration::days(3)),
+            received_at: now,
+            credential: serde_json::json!({}),
+        });
+
+        let first = book.take_grant_warnings(now);
+        assert_eq!(first.len(), 1, "about to lapse");
+        assert!(!first[0].expired);
+        assert!(
+            book.take_grant_warnings(now).is_empty(),
+            "said once, not every sweep"
+        );
+
+        // It lapses. That is a second warning, and a different sentence: the
+        // desk has stopped working rather than being about to.
+        let later = now + Duration::days(4);
+        let second = book.take_grant_warnings(later);
+        assert_eq!(second.len(), 1);
+        assert!(second[0].expired);
+        assert!(book.take_grant_warnings(later).is_empty());
+        assert_eq!(
+            book.grant_warnings.len(),
+            1,
+            "the superseded 'expiring' warning is forgotten, not accumulated"
+        );
+    }
+
+    /// A healthy grant says nothing, and a reissued one is warned about again
+    /// when its own expiry comes round — the identity carries the expiry, so a
+    /// renewal is not mistaken for something already said.
+    #[test]
+    fn a_renewed_grant_can_be_warned_about_again() {
+        let now = Utc::now();
+        let persona = PersonaId::new();
+        let mut book = VettingBook::default();
+        // A reissue is a different credential, not the same one with a new
+        // date — `keep_vetter_grant` ignores a re-delivery of the identical
+        // body, so the `validUntil` has to travel in the credential too.
+        let grant = |until: DateTime<Utc>| VetterGrant {
+            community: "did:web:a".into(),
+            persona,
+            credential_id: None,
+            valid_until: Some(until),
+            received_at: now,
+            credential: serde_json::json!({ "validUntil": until.to_rfc3339() }),
+        };
+
+        book.keep_vetter_grant(grant(now + Duration::days(90)));
+        assert!(
+            book.take_grant_warnings(now).is_empty(),
+            "a grant with months to run is not news"
+        );
+
+        book.keep_vetter_grant(grant(now + Duration::days(2)));
+        assert_eq!(book.take_grant_warnings(now).len(), 1);
+
+        // Reissued, then allowed to lapse again.
+        book.keep_vetter_grant(grant(now + Duration::days(400)));
+        assert!(book.take_grant_warnings(now).is_empty());
+        assert!(
+            book.grant_warnings.is_empty(),
+            "the old warning is forgotten once the grant no longer needs it"
+        );
+        let much_later = now + Duration::days(395);
+        assert_eq!(book.take_grant_warnings(much_later).len(), 1);
+    }
+
+    /// The desk header keeps a lapsed grant, alone among the vetter-side reads.
+    /// Everything else filters to a live one, which is right and which is
+    /// exactly why a lapse would otherwise be invisible: the communities simply
+    /// stop being listed.
+    #[test]
+    fn the_standing_keeps_a_lapsed_grant_that_every_other_read_drops() {
+        let now = Utc::now();
+        let persona = PersonaId::new();
+        let mut book = VettingBook::default();
+        book.keep_vetter_grant(VetterGrant {
+            community: "did:web:gone".into(),
+            persona,
+            credential_id: None,
+            valid_until: Some(now - Duration::days(1)),
+            received_at: now - Duration::days(400),
+            credential: serde_json::json!({}),
+        });
+
+        assert!(
+            book.vetter_grant("did:web:gone", persona, now).is_none(),
+            "a lapsed grant is not a live one"
+        );
+        let standing = book.vetter_standing(now);
+        assert_eq!(standing.len(), 1, "but the desk still shows it");
+        assert!(!standing[0].live);
+        assert!(
+            !standing[0].expiring,
+            "already gone is not 'about to go' — they are different sentences"
+        );
+        assert!(standing[0].profile.is_none(), "no profile was ever sent");
     }
 
     #[test]

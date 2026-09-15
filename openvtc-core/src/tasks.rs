@@ -105,6 +105,21 @@ pub enum TaskType {
         /// The applicant's join DID.
         applicant: Arc<String>,
     },
+    /// Vetter: our `vetter` role credential from a community has lapsed, or is
+    /// about to.
+    ///
+    /// Raised by the hourly sweep rather than by anything arriving, because
+    /// nothing does arrive: a grant lapses by the passage of time, and the
+    /// first sign is an applicant's request refused at *their* end as
+    /// `notEligible`, for a reason they cannot act on and we never see.
+    VetterGrantExpiring {
+        /// The community that issued it.
+        community: Arc<String>,
+        /// Whether it has lapsed already, as opposed to being about to.
+        expired: bool,
+        /// When it lapses or lapsed, as the page shows it.
+        valid_until: String,
+    },
 }
 
 impl Display for TaskType {
@@ -124,6 +139,8 @@ impl Display for TaskType {
             TaskType::VettingRequestInbound { .. } => "Vetting Request (Inbound)",
             TaskType::VettingSessionInbound { .. } => "Vetting Session (Send Card)",
             TaskType::VettingCardReceived { .. } => "Vetting Card Received",
+            TaskType::VetterGrantExpiring { expired: true, .. } => "Vetter Credential Expired",
+            TaskType::VetterGrantExpiring { .. } => "Vetter Credential Expiring",
         };
         write!(f, "{}", friendly_name)
     }

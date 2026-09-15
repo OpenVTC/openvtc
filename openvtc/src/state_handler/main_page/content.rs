@@ -1613,17 +1613,20 @@ pub fn reason_label(reason: revoke_statement::v0_1::PayloadReason) -> &'static s
 }
 
 /// Which list the Vetting page shows.
+///
+/// Two tabs, because the page holds two roles and they are not peers: being
+/// vetted, and vetting. Design §12.3 asks for exactly this — "Applications" and
+/// a "Vetter Desk" whose sub-views are the queue, tickets and issued
+/// statements — and the flat four-tab layout this replaced put a vetter's own
+/// inbound queue beside their outbound tickets as if they were separate
+/// concerns rather than two halves of one desk.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VettingTab {
     /// Our applications to be vetted.
     #[default]
     Applications,
-    /// Requests people have made of us as a vetter.
+    /// Everything we do as a vetter, in [`DeskView`]s.
     Desk,
-    /// Tickets we have handed out.
-    Tickets,
-    /// Statements we have signed.
-    Issued,
 }
 
 impl VettingTab {
@@ -1632,9 +1635,49 @@ impl VettingTab {
     pub fn next(self) -> Self {
         match self {
             VettingTab::Applications => VettingTab::Desk,
-            VettingTab::Desk => VettingTab::Tickets,
-            VettingTab::Tickets => VettingTab::Issued,
-            VettingTab::Issued => VettingTab::Applications,
+            VettingTab::Desk => VettingTab::Applications,
+        }
+    }
+}
+
+/// Which part of the vetting desk is showing: inbound, outbound, and the record
+/// of what we signed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeskView {
+    /// Requests people have made of us as a vetter.
+    #[default]
+    Requests,
+    /// Tickets we have handed out — how those requests are able to arrive.
+    Tickets,
+    /// Statements we have signed.
+    Issued,
+}
+
+impl DeskView {
+    /// Every view, in the order the desk shows them: what has arrived, what we
+    /// sent out to let it arrive, then what came of it.
+    pub const ALL: [DeskView; 3] = [DeskView::Requests, DeskView::Tickets, DeskView::Issued];
+
+    /// The view `step` places along, wrapping. `←`/`→` move by one.
+    #[must_use]
+    pub fn shifted(self, forward: bool) -> Self {
+        let at = Self::ALL.iter().position(|v| *v == self).unwrap_or(0);
+        let len = Self::ALL.len();
+        let next = if forward {
+            (at + 1) % len
+        } else {
+            (at + len - 1) % len
+        };
+        Self::ALL[next]
+    }
+
+    /// Its name on the sub-view line.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            DeskView::Requests => "Requests",
+            DeskView::Tickets => "Tickets",
+            DeskView::Issued => "Issued",
         }
     }
 }
@@ -1643,6 +1686,10 @@ impl VettingTab {
 #[derive(Clone, Debug, Default)]
 pub struct VettingState {
     pub tab: VettingTab,
+    /// Which part of the desk is showing, while [`tab`](Self::tab) is
+    /// [`VettingTab::Desk`]. Kept across a switch to Applications and back, so
+    /// returning to the desk returns to the view left open.
+    pub desk_view: DeskView,
     pub selected: usize,
     pub mode: VettingMode,
     pub status_message: Option<String>,
@@ -1668,19 +1715,42 @@ pub struct VettingState {
     /// Active memberships holding no live vetter credential, which can ask for
     /// it again.
     pub resend_candidates: Arc<[VettingMembership]>,
+    /// Where we stand as a vetter with each community that has named us one —
+    /// the desk's header. Includes lapsed grants, which nothing else does.
+    pub standing: Arc<[VetterStandingRow]>,
 }
 
 impl VettingState {
-    /// Rows in the active tab.
+    /// Rows in the list currently showing.
     #[must_use]
     pub fn tab_len(&self) -> usize {
         match self.tab {
             VettingTab::Applications => self.applications.len(),
-            VettingTab::Desk => self.desk.len(),
-            VettingTab::Tickets => self.tickets.len(),
-            VettingTab::Issued => self.issued.len(),
+            VettingTab::Desk => match self.desk_view {
+                DeskView::Requests => self.desk.len(),
+                DeskView::Tickets => self.tickets.len(),
+                DeskView::Issued => self.issued.len(),
+            },
         }
     }
+}
+
+/// One community's line in the vetting desk header: what it made us, until
+/// when, and what it holds of our profile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VetterStandingRow {
+    /// The community, named as the rest of the page names it.
+    pub community: String,
+    /// Its accent swatch, if it publishes one.
+    pub accent: Option<(u8, u8, u8)>,
+    /// The grant's standing in a few words — "until 2027-01-18", "expires in
+    /// 12 days", "expired".
+    pub grant: String,
+    /// Whether [`grant`](Self::grant) is bad news, and should read as such.
+    pub grant_warns: bool,
+    /// What the community holds of our profile — "listed", "not listed",
+    /// "sent, no answer yet", "refused: notEligible", or that we sent none.
+    pub profile: String,
 }
 
 /// What the Vetting page is doing.

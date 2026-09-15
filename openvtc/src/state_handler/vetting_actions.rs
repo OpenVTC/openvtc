@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use affinidi_tdk::didcomm::Message;
 use affinidi_tdk::secrets_resolver::secrets::Secret;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
 use openvtc_core::config::community_context::{self, ContextKind, ContextOption};
@@ -55,11 +55,11 @@ use crate::state_handler::dispatch_util::{self, Persist, SyncLog};
 use crate::state_handler::join_flow;
 use crate::state_handler::main_page::content::{
     ApplicationRow, AttestForm, CardPreview, DIRECTORY_FIELDS, DIRECTORY_LABELS, DIRECTORY_METHODS,
-    DeskRow, DeskStage, DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS, EventForm,
-    FaceChoice, IssuedRow, LineTone, ListedVetterRow, PROFILE_FIELDS, PROFILE_LABELS, RequestRow,
-    TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
-    VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VettingMembership, VettingMode, VettingPersona,
-    VettingState, VettingTab, method_label, row_of,
+    DeskRow, DeskStage, DeskView, DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS,
+    EventForm, FaceChoice, IssuedRow, LineTone, ListedVetterRow, PROFILE_FIELDS, PROFILE_LABELS,
+    RequestRow, TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
+    VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VetterStandingRow, VettingMembership,
+    VettingMode, VettingPersona, VettingState, VettingTab, method_label, row_of,
 };
 use crate::state_handler::main_page::menu::MainMenu;
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
@@ -70,6 +70,50 @@ use crate::state_handler::state::State;
 // ============================================================================
 // Config → display
 // ============================================================================
+
+/// A grant's standing in a few words.
+///
+/// The three cases say different things on purpose. `until <date>` is the
+/// answer to "am I a vetter, and for how long" — the question the page exists
+/// to answer and could not before. "expires in N days" is a prompt to ask for
+/// it again while there is still time. "expired" is the explanation for a desk
+/// that has gone quiet: requests made to a lapsed vetter are refused at the
+/// applicant's end, so nothing arrives to hint at it.
+fn grant_standing(
+    standing: &openvtc_core::vetting::book::VetterStanding,
+    now: DateTime<Utc>,
+) -> String {
+    let Some(until) = standing.valid_until else {
+        // A grant with no `validUntil` is never live (`VetterGrant::is_live`),
+        // so it is a credential that does nothing. Say that, rather than
+        // leaving a blank where a date belongs.
+        return "no expiry date — the community must reissue it".to_string();
+    };
+    if !standing.live {
+        return format!("expired {}", until.format("%Y-%m-%d"));
+    }
+    if standing.expiring {
+        let days = until.signed_duration_since(now).num_days();
+        return match days {
+            0 => format!("expires today, {}", until.format("%Y-%m-%d")),
+            1 => format!("expires tomorrow, {}", until.format("%Y-%m-%d")),
+            n => format!("expires in {n} days, {}", until.format("%Y-%m-%d")),
+        };
+    }
+    format!("until {}", until.format("%Y-%m-%d"))
+}
+
+/// What a community holds of our vetter profile.
+fn profile_standing(state: Option<&openvtc_core::vetting::registry::ProfileState>) -> String {
+    use openvtc_core::vetting::registry::ProfileState;
+    match state {
+        None => "no profile sent".to_string(),
+        Some(ProfileState::Sent { .. }) => "sent, no answer yet".to_string(),
+        Some(ProfileState::Stored { listed: true, .. }) => "listed in the directory".to_string(),
+        Some(ProfileState::Stored { listed: false, .. }) => "kept, not listed".to_string(),
+        Some(ProfileState::Refused { code, .. }) => format!("refused: {code}"),
+    }
+}
 
 /// Rebuild the page's rows from the book.
 pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
@@ -122,6 +166,22 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
             name: community_name(&m.vtc_did).unwrap_or_else(|| shorten_did(&m.vtc_did, 48)),
             persona: m.persona_ref,
             accent: accent(&m.vtc_did),
+        })
+        .collect();
+
+    // The desk's header. Built from `vetter_standing`, which — alone among the
+    // vetter-side reads — keeps lapsed grants, so a vetter who has quietly
+    // stopped being one can see that rather than infer it from an empty page.
+    vetting.standing = book
+        .vetter_standing(now)
+        .into_iter()
+        .map(|s| VetterStandingRow {
+            community: community_name(&s.community)
+                .unwrap_or_else(|| shorten_did(&s.community, 48)),
+            accent: accent(&s.community),
+            grant: grant_standing(&s, now),
+            grant_warns: !s.live || s.expiring,
+            profile: profile_standing(s.profile.as_ref()),
         })
         .collect();
 
@@ -542,6 +602,15 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             v.tab = v.tab.next();
             v.selected = 0;
             v.mode = VettingMode::List;
+            v.status_message = None;
+        }
+        VettingAction::SwitchDeskView(forward) => {
+            let v = page(ctx);
+            // The desk view is remembered across a tab switch, so this only
+            // has to reset the cursor — the lists are different lengths and a
+            // carried index would point at a different row, or at none.
+            v.desk_view = v.desk_view.shifted(forward);
+            v.selected = 0;
             v.status_message = None;
         }
         VettingAction::Select(i) => {
@@ -1632,7 +1701,9 @@ async fn publish_profile(ctx: &mut ActionCtx<'_>, form: &VetterProfileForm) {
     {
         let v = page(ctx);
         v.mode = VettingMode::List;
-        v.tab = VettingTab::Tickets;
+        // Back to the desk, on whichever view it was left on: what happened to
+        // the profile shows in the desk header, which every view carries.
+        v.tab = VettingTab::Desk;
     }
     persist(ctx, format!("Sending your profile to {}…", membership.name));
     let sent = Sent::Profile {
@@ -1913,7 +1984,10 @@ fn issue_ticket(ctx: &mut ActionCtx<'_>, membership_index: usize, uses_index: us
     {
         let v = page(ctx);
         v.mode = VettingMode::List;
-        v.tab = VettingTab::Tickets;
+        // The new ticket's own view: the message below names `y`, which is a
+        // key of that view.
+        v.tab = VettingTab::Desk;
+        v.desk_view = DeskView::Tickets;
     }
     persist(
         ctx,

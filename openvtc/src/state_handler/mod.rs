@@ -1657,6 +1657,57 @@ impl StateHandler {
                         ));
                         let _ = self.state_tx.send(state.clone());
                     }
+
+                    // The other thing that lapses by the clock: our own `vetter`
+                    // role credential. Nothing arrives to announce it — the first
+                    // sign is an applicant's request refused at their end — so
+                    // this sweep is where it gets noticed. Said once per grant
+                    // per state; see `take_grant_warnings`.
+                    let warnings = config.private.vetting.take_grant_warnings(chrono::Utc::now());
+                    if !warnings.is_empty() {
+                        for warning in &warnings {
+                            let community = crate::state_handler::community_label(
+                                &config,
+                                &warning.community,
+                                None,
+                                64,
+                            );
+                            state.main_page.log(if warning.expired {
+                                format!(
+                                    "Your vetter credential from {community} expired on {}. \
+                                     Requests to you there are refused until it is reissued — \
+                                     ask for it again from your vetting desk (g).",
+                                    warning.valid_until.format("%Y-%m-%d"),
+                                )
+                            } else {
+                                format!(
+                                    "Your vetter credential from {community} expires on {}. \
+                                     Ask for it again from your vetting desk (g).",
+                                    warning.valid_until.format("%Y-%m-%d"),
+                                )
+                            });
+                            let id = warning.id();
+                            config.private.tasks.tasks.insert(
+                                id.clone().into(),
+                                openvtc_core::tasks::Task {
+                                    id: std::sync::Arc::new(id),
+                                    type_: openvtc_core::tasks::TaskType::VetterGrantExpiring {
+                                        community: std::sync::Arc::new(community),
+                                        expired: warning.expired,
+                                        valid_until: warning
+                                            .valid_until
+                                            .format("%Y-%m-%d")
+                                            .to_string(),
+                                    },
+                                    created: chrono::Utc::now(),
+                                    our_persona: Some(warning.persona),
+                                },
+                            );
+                        }
+                        save.mark_dirty();
+                        state.main_page.sync_from_config(&config);
+                        let _ = self.state_tx.send(state.clone());
+                    }
                 },
                 _ = join_status_tick.tick() => {
                     // Ask each community about a join it has not resolved.
