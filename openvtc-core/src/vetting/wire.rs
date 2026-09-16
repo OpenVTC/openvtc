@@ -15,7 +15,6 @@ use std::str::FromStr;
 
 use affinidi_tdk::didcomm::Message;
 use affinidi_tdk::secrets_resolver::secrets::Secret;
-use chrono::Utc;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use trust_tasks_rs::{ErrorPayload, TrustTask, TrustTaskCode};
@@ -68,15 +67,7 @@ pub fn document<P: Serialize>(
     id: String,
     payload: &P,
 ) -> Result<TrustTask<Value>, OpenVTCError> {
-    let type_uri = type_uri
-        .parse()
-        .map_err(|e| config_error("vetting type URI", e))?;
-    let payload = serde_json::to_value(payload).map_err(|e| config_error("vetting payload", e))?;
-    let mut doc = TrustTask::new(id, type_uri, payload);
-    doc.issuer = Some(issuer.to_string());
-    doc.recipient = Some(recipient.to_string());
-    doc.issued_at = Some(Utc::now());
-    Ok(doc)
+    crate::trust_task_doc::build(type_uri, issuer, recipient, id, payload)
 }
 
 /// The `#response` to `request`, threaded on it.
@@ -414,7 +405,7 @@ pub(crate) mod tests {
             community: "did:webvh:QmScid:example.com:vtc".to_string(),
             challenge: "c".repeat(43),
             domain: "did:webvh:QmScid:example.com:vtc".to_string(),
-            issued_at: Utc::now(),
+            issued_at: chrono::Utc::now(),
             validity: chrono::Duration::minutes(10),
             claims: vec![
                 session::v0_1::VettingCardClaim::try_from(

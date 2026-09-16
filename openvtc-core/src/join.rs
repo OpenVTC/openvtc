@@ -25,7 +25,6 @@ use affinidi_tdk::{
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use trust_tasks_rs::TrustTask;
 use uuid::Uuid;
 use vta_sdk::protocols::join_requests::{
     JOIN_REQUEST_STATUS_TYPE, JOIN_REQUEST_SUBMIT_TYPE, JoinRequestStatusBody,
@@ -167,15 +166,7 @@ fn build_trust_task_document<T: serde::Serialize>(
     document_id: &str,
     payload: T,
 ) -> Result<Value, OpenVTCError> {
-    let type_uri = type_uri
-        .parse()
-        .map_err(|e| OpenVTCError::Config(format!("trust task type URI parse: {e}")))?;
-    let mut doc = TrustTask::new(document_id.to_string(), type_uri, payload);
-    doc.issuer = Some(issuer_did.to_string());
-    doc.recipient = Some(recipient_did.to_string());
-    doc.issued_at = Some(Utc::now());
-    serde_json::to_value(&doc)
-        .map_err(|e| OpenVTCError::Config(format!("trust task document serialize: {e}")))
+    crate::trust_task_doc::build_value(type_uri, issuer_did, recipient_did, document_id, payload)
 }
 
 /// Build the DIDComm body for a join-request submit: a Trust Task *document*

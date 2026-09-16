@@ -54,7 +54,6 @@ use affinidi_tdk::{
 use chrono::Utc;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use trust_tasks_rs::TrustTask;
 use uuid::Uuid;
 
 use crate::errors::OpenVTCError;
@@ -168,15 +167,7 @@ fn build_document<T: serde::Serialize>(
     document_id: &str,
     payload: T,
 ) -> Result<Value, OpenVTCError> {
-    let type_uri = type_uri
-        .parse()
-        .map_err(|e| OpenVTCError::Config(format!("trust task type URI parse: {e}")))?;
-    let mut doc = TrustTask::new(document_id.to_string(), type_uri, payload);
-    doc.issuer = Some(issuer_did.to_string());
-    doc.recipient = Some(recipient_did.to_string());
-    doc.issued_at = Some(Utc::now());
-    serde_json::to_value(&doc)
-        .map_err(|e| OpenVTCError::Config(format!("trust task document serialize: {e}")))
+    crate::trust_task_doc::build_value(type_uri, issuer_did, recipient_did, document_id, payload)
 }
 
 /// Everything needed to get a document from this member to that community.
