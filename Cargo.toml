@@ -55,8 +55,8 @@ aes-gcm = "0.11"
 # `affinidi-messaging-sdk`, and no line we control moves it. The bump puts us on
 # the same copy as `vta-service` rather than on the older one.
 argon2 = "0.6"
-# The floor is set by the graph, not chosen here: `vta-sdk` 0.38 and
-# `vta-service` 0.27 both declare `^0.14`, and `affinidi-messaging-test-mediator`
+# The floor is set by the graph, not chosen here: `vta-sdk` 0.39 and
+# `vta-service` 0.29 both declare `^0.14`, and `affinidi-messaging-test-mediator`
 # 0.7 does too. This line only records it.
 affinidi-tdk = "0.14"
 affinidi-data-integrity = "0.7"
@@ -85,7 +85,7 @@ affinidi-messaging-core = "0.1.6"
 # `atm.trust_tasks().account_update`), so its line is not independent of the one
 # below: a copy left on an older trust-tasks is a *second* semver-incompatible
 # `trust-tasks-rs` whose types do not unify. 0.24 is the line built on
-# trust-tasks 0.20, and it is also what `vta-sdk` 0.38 and
+# trust-tasks 0.20, and it is also what `vta-sdk` 0.39 and
 # `affinidi-messaging-test-mediator` 0.7 declare — so it is the graph's floor
 # whether or not this line states it.
 #
@@ -193,8 +193,8 @@ dialoguer = { version = "0.12", features = ["password"] }
 # rather than matching on).
 #
 # **The second copy is gone.** It was 0.6.1, held by every VTI crate declaring
-# `didwebvh-rs = "0.6"`, which excludes 0.7. `vta-sdk` 0.38 and `vta-service`
-# 0.27 both declare `^0.7`, which cleared the published closure; the last holder
+# `didwebvh-rs = "0.6"`, which excludes 0.7. `vta-sdk` 0.39 and `vta-service`
+# 0.29 both declare `^0.7`, which cleared the published closure; the last holder
 # was the older `vta-sdk` 0.36.0 that `did-git-sign` 0.4.9 pulled, and taking
 # 0.4.10 removed it. So this row and the second sdk were one obligation with two
 # names, and the VGI release closed both. Nothing crossed between the copies
@@ -282,12 +282,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # rows means this pin has drifted from vta-sdk's again, whichever direction it
 # drifted.
 #
-# The patch is named because vta-sdk 0.38 declares `^0.20.4`, not a bare `^0.20`
-# — a floor below what the sdk itself requires is a floor that does nothing.
-# 0.20.4 is the release the whole published VTI stack is built on (`vta-sdk`
-# 0.38, `vta-service` 0.27, `vtc-client` 0.6.2, `vti-common` 0.18.5 all declare
-# it), and it is the release that *generates* the vetting wire types the sdk now
-# re-exports. So this line is forced by the graph rather than chosen here: the
+# The patch is named because vta-sdk 0.39 declares `^0.20.7`, not a bare `^0.20`
+# — a floor below what the sdk itself requires is a floor that does nothing, and
+# 0.20.4 became exactly that when the sdk moved. 0.20.7 is the release the whole
+# published VTI stack is now built on (`vta-sdk` 0.39, `vta-service` 0.29,
+# `vtc-client` 0.6.4, `vti-common` 0.18.7), and it is the release that
+# *generates* the vetting wire types the sdk re-exports. So this line is forced by the graph rather than chosen here: the
 # generated types reach this repo through `vta_sdk::protocols::vetting`, and a
 # `trust-tasks-rs` a patch behind would re-export a different set of them.
 #
@@ -305,8 +305,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # messaging stack carries `trust-tasks-rs` types in its own API, so
 # `affinidi-messaging-sdk` (above) and the `affinidi-messaging-test-mediator`
 # dev-dependency both have to sit on the line built against it.
-trust-tasks-rs = "0.20.4"
-trust-tasks-capability-client = "0.20.4"
+trust-tasks-rs = "0.20.7"
+trust-tasks-capability-client = "0.20.7"
 tui-input = "0.15"
 url = "2.5"
 uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
@@ -389,14 +389,17 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 #
 # There are two such edges, and on this line they do not move together:
 #
-# - `vta-service`, which `openvtc-core` dev-depends on for `MockVta`. **0.27 is
-#   published and built on 0.38**, so the dev graph resolves from crates.io
+# - `vta-service`, which `openvtc-core` dev-depends on for `MockVta`. **0.29 is
+#   published and built on 0.39**, so the dev graph resolves from crates.io
 #   again. Dev-only, which is exactly why it gets forgotten — the *shipped*
 #   graph looks clean while the harness tests this client against a server it is
-#   no longer paired with.
-# - `did-git-sign`, the standing obligation, **satisfied on this line for the
-#   first time since 0.35**. 0.4.10 requires `vta-sdk ^0.38` — the line this
-#   workspace is on — so the second sdk is gone. It had blocked six consecutive
+#   no longer paired with. It was forgotten again on the 0.39 move: bumping
+#   `did-git-sign` alone left the second sdk in place, held by `vta-service`
+#   0.27 and the eleven VTI crates in its closure. `cargo tree -d` is what
+#   caught it; the `did-git-sign` bump on its own looked like it had worked.
+# - `did-git-sign`, the standing obligation, **satisfied on this line since
+#   0.35**. 0.4.11 requires `vta-sdk ^0.39` — the line this workspace is on — so
+#   the second sdk is gone. It had blocked six consecutive
 #   minors (0.23, 0.25, 0.27, 0.31, 0.32, 0.34), each carried by a rev-pin or
 #   tolerated as a duplicate, because VGI could not publish while it held a git
 #   dependency of its own; `trql-client` 0.17 shipping is what unstuck it.
@@ -426,7 +429,7 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # pane now calls both. On 0.34.0 the pane compiles and then cannot find the
 # constants; naming the patch is what turns that into a resolver error at the
 # point where it can be read.
-vta-sdk = { version = "0.38", features = [
+vta-sdk = { version = "0.39", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
