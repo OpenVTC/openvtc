@@ -435,7 +435,7 @@ pub(crate) fn secret_from_vta_response(
     resp: &vta_sdk::client::GetKeySecretResponse,
     _purpose: KeyPurpose,
 ) -> Result<Secret, OpenVTCError> {
-    match resp.key_type {
+    match &resp.key_type {
         vta_sdk::keys::KeyType::Ed25519 => {
             let seed = vta_sdk::did_key::decode_private_key_multibase(&resp.private_key_multibase)
                 .map_err(|e| {
@@ -452,8 +452,17 @@ pub(crate) fn secret_from_vta_response(
                     "Failed to create X25519 secret from multibase: {e}"
                 ))
             }),
-        vta_sdk::keys::KeyType::P256 => Err(OpenVTCError::Secret(
-            "P256 key type is not supported for OpenVTC secrets".to_string(),
-        )),
+        // Everything else, including the ML-DSA variants vta-sdk 0.39 added
+        // (VTI #1502). A catch-all rather than an arm per variant: this function
+        // converts a VTA key into a TDK `Secret`, and a key type TDK has no
+        // `Secret` for is unsupported here whatever it is called. `KeyType` is
+        // `#[non_exhaustive]`, so enumerating would mean editing this every time
+        // the SDK learns a key type, in order to keep saying the same thing.
+        //
+        // The message names the type it refused, so an operator who hits it
+        // learns which key they asked for rather than that "a" key failed.
+        other => Err(OpenVTCError::Secret(format!(
+            "{other:?} key type is not supported for OpenVTC secrets"
+        ))),
     }
 }
