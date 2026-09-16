@@ -1314,6 +1314,34 @@ fn tsp_document_to_message(
 /// ever sees it. Accepting both also lets a migrated and an unmigrated
 /// VTC be talked to during the rollout; the `openvtc/vtc/` arm can be
 /// retired once no supported VTC emits it.
+/// Would an inbound message of this `type` reach the handler?
+///
+/// The gate itself, exposed so the dispatcher that routes these types can be
+/// checked against it. Before this, the only way to ask was to recompile
+/// [`OPENVTC_CATCH_ALL_PATTERN`] and ask a copy — which is the same shape of
+/// mistake the pattern keeps producing: two descriptions of one fact, agreeing
+/// until one of them changes.
+///
+/// # Why this matters more than it looks
+///
+/// A `type` this returns `false` for is dropped at `classify_inbound` with a
+/// `debug!` and no reply. There is no error, no problem-report, and nothing on
+/// the sender's side but a wait that never ends. Adding a handler and forgetting
+/// the prefix is therefore a *total, silent* failure of that verb — which has
+/// already happened here: `capabilities::send_capability_document` sent the
+/// binding envelope, `process_inbound_message` had a branch for it, and every
+/// reply was dropped in between.
+#[must_use]
+pub fn routes_inbound_type(type_uri: &str) -> bool {
+    // Mirrors [`classify_inbound`]'s admission order exactly. The two
+    // trust-ping types return before the catch-all is consulted, so a predicate
+    // that asked only the pattern would report them as dropped — which is the
+    // wrong answer, and the kind of near-miss that makes a census worse than
+    // useless: it would send someone to widen a regex that was never the
+    // problem.
+    type_uri == TRUST_PING_TYPE || type_uri == TRUST_PONG_TYPE || CATCH_ALL.is_match(type_uri)
+}
+
 pub const OPENVTC_CATCH_ALL_PATTERN: &str = concat!(
     r"https://linuxfoundation\.org/openvtc/.*",
     r"|https://firstperson\.network/.*",
