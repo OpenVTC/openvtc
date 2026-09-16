@@ -31,6 +31,7 @@ use vta_sdk::protocols::join_requests::{
     JoinRequestSubmitBody, MEMBER_SELF_REMOVE_TYPE, SelfRemoveBody,
 };
 
+use crate::capabilities::TRUST_TASK_ENVELOPE_TYPE;
 use crate::errors::OpenVTCError;
 
 /// Submit a join request to a VTC (`vtc_did`) over DIDComm, presenting
@@ -83,7 +84,7 @@ pub async fn submit_join_request(
         }
         None => {
             let now = Utc::now().timestamp().max(0) as u64;
-            let msg = Message::build(document_id, JOIN_REQUEST_SUBMIT_TYPE.to_string(), body)
+            let msg = Message::build(document_id, TRUST_TASK_ENVELOPE_TYPE.to_string(), body)
                 .from(persona_did.to_string())
                 .to(vtc_did.to_string())
                 .created_time(now)
@@ -140,7 +141,7 @@ pub async fn poll_join_status(
         }
         None => {
             let now = Utc::now().timestamp().max(0) as u64;
-            let msg = Message::build(document_id, JOIN_REQUEST_STATUS_TYPE.to_string(), body)
+            let msg = Message::build(document_id, TRUST_TASK_ENVELOPE_TYPE.to_string(), body)
                 .from(persona_did.to_string())
                 .to(vtc_did.to_string())
                 .created_time(now)
@@ -221,20 +222,27 @@ pub async fn submit_self_remove(
     mediator_did: &str,
     disposition: Option<String>,
 ) -> Result<Uuid, OpenVTCError> {
-    let body = serde_json::to_value(SelfRemoveBody { disposition })
-        .map_err(|e| OpenVTCError::Config(format!("self-remove body serialize: {e}")))?;
-
+    // A **document**, not a bare payload. The bare form reached a VTC handler
+    // that bypasses its dispatch spine, so the reply was never signed and a
+    // refusal was never a framework error document. Nothing here reads that
+    // reply — self-remove is fire-and-forget — but "the answer is
+    // unattributable" is not a property to leave in place on purpose.
     let msg_id = Uuid::new_v4();
+    let document_id = format!("urn:uuid:{msg_id}");
+    let body = crate::trust_task_doc::build_value(
+        MEMBER_SELF_REMOVE_TYPE,
+        member_did,
+        vtc_did,
+        &document_id,
+        SelfRemoveBody { disposition },
+    )?;
+
     let now = Utc::now().timestamp().max(0) as u64;
-    let msg = Message::build(
-        msg_id.to_string(),
-        MEMBER_SELF_REMOVE_TYPE.to_string(),
-        body,
-    )
-    .from(member_did.to_string())
-    .to(vtc_did.to_string())
-    .created_time(now)
-    .finalize();
+    let msg = Message::build(document_id, TRUST_TASK_ENVELOPE_TYPE.to_string(), body)
+        .from(member_did.to_string())
+        .to(vtc_did.to_string())
+        .created_time(now)
+        .finalize();
 
     crate::pack_and_send(atm, profile, &msg, member_did, vtc_did, mediator_did).await?;
     Ok(msg_id)

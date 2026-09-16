@@ -161,13 +161,35 @@ pub async fn submit_member_vmc(
     })
     .map_err(|e| OpenVTCError::Config(format!("member vmc body serialize: {e}")))?;
 
+    // A **document** in the binding envelope, not a bare payload typed with the
+    // task URI. The bare form reached a VTC handler that bypasses its dispatch
+    // spine — so the receipt was never signed, and a refusal came back as a
+    // DIDComm problem-report rather than a framework error document.
+    //
+    // The reply type is unchanged either way: `MEMBER_VMC_RESPONSE_TYPE` is
+    // exactly `MEMBER_VMC_TYPE#response`, which is what the spine's
+    // `success_response` produces, so `message_dispatch`'s arm for it keeps
+    // matching.
     let msg_id = Uuid::new_v4();
+    let document_id = format!("urn:uuid:{msg_id}");
+    let body = crate::trust_task_doc::build_value(
+        MEMBER_VMC_TYPE,
+        member_did,
+        vtc_did,
+        &document_id,
+        body,
+    )?;
+
     let now = Utc::now().timestamp().max(0) as u64;
-    let msg = Message::build(msg_id.to_string(), MEMBER_VMC_TYPE.to_string(), body)
-        .from(member_did.to_string())
-        .to(vtc_did.to_string())
-        .created_time(now)
-        .finalize();
+    let msg = Message::build(
+        document_id,
+        crate::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
+        body,
+    )
+    .from(member_did.to_string())
+    .to(vtc_did.to_string())
+    .created_time(now)
+    .finalize();
 
     crate::pack_and_send(atm, profile, &msg, member_did, vtc_did, mediator_did).await?;
     Ok(msg_id)
