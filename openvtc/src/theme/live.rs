@@ -156,6 +156,7 @@ mod tests {
             config: Some(base.join("config")),
             home: Some(base.join("home")),
             system_omarchy: None,
+            profile: "default".to_string(),
         };
         (base, roots)
     }

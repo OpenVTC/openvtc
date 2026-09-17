@@ -9,9 +9,11 @@
 //! | `omarchy/<name>`    | an Omarchy theme directory, read in place                   |
 //!
 //! `<config>` is `OPENVTC_CONFIG_PATH`, else `~/.config/openvtc` (the
-//! platform's config directory on Windows). The choice is kept in
-//! `<config>/tui.toml`, shared by every profile: how the TUI looks is the
-//! person's, not the account's.
+//! platform's config directory on Windows). The choice is kept per profile —
+//! `<config>/tui.toml` for `default`, `<config>/tui-{profile}.toml` otherwise —
+//! so running two instances under different profiles no longer makes a theme
+//! change in one repaint the others. The theme *library* (`<config>/themes/`)
+//! stays shared: it is content the person authored, not a per-profile setting.
 //!
 //! ```toml
 //! theme = "auto"
@@ -121,12 +123,28 @@ pub struct Roots {
     pub home: Option<PathBuf>,
     /// Omarchy's system-wide themes.
     pub system_omarchy: Option<PathBuf>,
+    /// The active config profile. It scopes the remembered theme *choice*
+    /// (`tui.toml` for `default`, `tui-{profile}.toml` otherwise), so two
+    /// instances running under different profiles no longer share a look — the
+    /// theme leaked across profiles because the choice file was fixed-named. The
+    /// theme *library* (`themes/`) stays shared: it is content the person
+    /// authored, not a per-profile setting. Empty or `"default"` ⇒ `tui.toml`.
+    pub profile: String,
 }
 
 impl Roots {
-    /// The real locations for this user.
+    /// The real locations for this user, scoped to the `default` profile. Use
+    /// [`from_env_for_profile`](Self::from_env_for_profile) once the running
+    /// profile is known so the theme choice is per-profile.
     #[must_use]
     pub fn from_env() -> Self {
+        Self::from_env_for_profile("default")
+    }
+
+    /// [`from_env`](Self::from_env), scoped to `profile` so the remembered theme
+    /// choice is kept per-profile rather than shared across all of them.
+    #[must_use]
+    pub fn from_env_for_profile(profile: &str) -> Self {
         let home = dirs::home_dir();
         let config = std::env::var_os("OPENVTC_CONFIG_PATH")
             .map(PathBuf::from)
@@ -144,19 +162,29 @@ impl Roots {
             config,
             home,
             system_omarchy: Some(PathBuf::from("/usr/share/omarchy/themes")),
+            profile: profile.to_string(),
         }
     }
 
-    /// Where the person's own theme files live.
+    /// Where the person's own theme files live. Shared across profiles — the
+    /// theme library is content, not a per-profile choice.
     #[must_use]
     pub fn themes_dir(&self) -> Option<PathBuf> {
         self.config.as_ref().map(|c| c.join("themes"))
     }
 
-    /// `tui.toml`, where the choice is kept.
+    /// The file the theme choice is kept in: `tui.toml` for the `default`
+    /// profile, `tui-{profile}.toml` for any other — mirroring the
+    /// profile-suffixed naming the main config already uses, so a choice made
+    /// under one profile does not reach another.
     #[must_use]
     pub fn settings_file(&self) -> Option<PathBuf> {
-        self.config.as_ref().map(|c| c.join("tui.toml"))
+        let name = if self.profile.is_empty() || self.profile == "default" {
+            "tui.toml".to_string()
+        } else {
+            format!("tui-{}.toml", self.profile)
+        };
+        self.config.as_ref().map(|c| c.join(name))
     }
 
     /// Omarchy's theme directories, the person's own first.
@@ -505,8 +533,41 @@ mod tests {
             config: Some(base.join("config")),
             home: Some(base.join("home")),
             system_omarchy: Some(base.join("system")),
+            profile: "default".to_string(),
         };
         (base, roots)
+    }
+
+    /// The theme choice file is per-profile: the `default` profile keeps the
+    /// unsuffixed `tui.toml`, and any other profile gets its own
+    /// `tui-{profile}.toml`, so a choice made under one profile is never read or
+    /// overwritten by another.
+    #[test]
+    fn settings_file_is_scoped_per_profile() {
+        let (_base, mut roots) = roots("settings-file-profile");
+
+        roots.profile = "default".to_string();
+        assert!(
+            roots.settings_file().unwrap().ends_with("tui.toml"),
+            "the default profile keeps the unsuffixed name"
+        );
+
+        roots.profile = String::new();
+        assert!(
+            roots.settings_file().unwrap().ends_with("tui.toml"),
+            "an empty profile is treated as default"
+        );
+
+        roots.profile = "work".to_string();
+        assert!(
+            roots.settings_file().unwrap().ends_with("tui-work.toml"),
+            "a named profile gets its own choice file"
+        );
+        assert_ne!(
+            Roots::from_env_for_profile("work").settings_file(),
+            Roots::from_env_for_profile("home").settings_file(),
+            "two profiles resolve to different choice files"
+        );
     }
 
     fn omarchy_theme(dir: &Path, name: &str, background: &str) {
