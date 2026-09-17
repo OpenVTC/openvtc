@@ -58,6 +58,7 @@
 
 use std::sync::Arc;
 
+use affinidi_messaging_sdk::protocols::tsp::RelationshipState;
 use affinidi_tdk::messaging::ATM;
 use affinidi_tdk::messaging::profiles::ATMProfile;
 use serde_json::Value;
@@ -169,6 +170,57 @@ pub async fn send_trust_task(
     let document = serde_json::to_vec(document)
         .map_err(|e| OpenVTCError::Config(format!("serialise Trust Task document for TSP: {e}")))?;
     let payload = vta_sdk::tsp_binding::wrap_envelope(&document);
+
+    // Rev 3 §7.2.2: form the relationship before the application message, or the
+    // peer drops it.
+    //
+    // "It is not permissible that one endpoint which has learned a VID of the
+    // other simply starts with an application level message without first having
+    // an exchange of TSP control messages." A Rev 3 VTC/VTA gates on that by
+    // default and *silently discards* a Trust Task from a VID it holds no
+    // relationship with — no reply, nothing in either log — so the sender
+    // experiences a ceremony that hangs. This is the precondition the raw
+    // `send_routed` below cannot satisfy on its own.
+    //
+    // Recording an invite is enough: `admits_application_message` is true for any
+    // recorded relationship, not only a completed (`Bidirectional`) one, and §3.6
+    // lets user data follow an invite without waiting a round trip. So the VTC
+    // admits this Trust Task once it has recorded our invite; we do not block on
+    // its accept (which the SDK records if and when it arrives).
+    //
+    // Idempotent, and it must be: `SendInvite` is a valid FSM transition only
+    // from `None` (`affinidi_tsp::relationship::transition`), so an unconditional
+    // invite is an `InvalidTransition` for a peer we have already invited
+    // (`Pending`) or completed with (`Bidirectional`) — and, with a durable
+    // relationship store, that peer survives a restart. Any non-`None` state
+    // already admits the message, so we only invite from `None`.
+    let state = atm
+        .tsp()
+        .relationship_state(profile, to_did)
+        .await
+        .map_err(|e| {
+            OpenVTCError::Config(format!(
+                "TSP send to {to_did}: could not read relationship state before \
+                 sending (routed via {tsp_mediator_did}): {e}"
+            ))
+        })?;
+    if matches!(state, RelationshipState::None) {
+        // `form_relationship_routed` supplies a `Reply_Path` of
+        // `[our_mediator, our_did]` (§5.3.3 / §7.2.4) so the peer's accept comes
+        // back through our mediator rather than being sent to us direct — the
+        // same federation shape the Trust Task itself uses below.
+        atm.tsp()
+            .form_relationship_routed(profile, to_did)
+            .await
+            .map_err(|e| {
+                OpenVTCError::Config(format!(
+                    "TSP send to {to_did}: could not form the Rev 3 relationship its \
+                     mediator {tsp_mediator_did} requires before an application message \
+                     (posted through our own mediator {our_mediator}): {e}"
+                ))
+            })?;
+    }
+
     let route = hops(&our_mediator, tsp_mediator_did, to_did);
 
     atm.tsp()

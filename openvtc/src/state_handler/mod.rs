@@ -361,6 +361,48 @@ fn diagnose_startup(err: &anyhow::Error, profile: &str) -> openvtc_core::diagnos
     diagnosis
 }
 
+/// Compute the TSP Rev 3 relationships pane rows from the durable store: one row
+/// per joined community, showing the §7.2.2 relationship state the joining
+/// persona holds with that community's VTC.
+///
+/// Async because reading a relationship's state goes through the SDK's decoder
+/// (`state_for`) rather than by re-implementing its private key layout. It reads
+/// the in-memory store — no network — so the loop can call it whenever a
+/// relationship changes and at startup.
+async fn compute_tsp_relationship_rows(
+    config: &Config,
+    store: &openvtc_core::tsp_store::TspStoreHandle,
+) -> Vec<main_page::content::TspRelationshipRow> {
+    use affinidi_tdk::messaging::protocols::tsp::RelationshipState;
+
+    let mut rows = Vec::new();
+    for community in config.account.memberships() {
+        let vtc_did = community.vtc_did.to_string();
+        let Some(persona) = config.account.personas.get(&community.persona_ref) else {
+            continue;
+        };
+        let persona_did = persona.did.clone();
+        let (state, established) = match store.state_for(&persona_did, &vtc_did).await {
+            RelationshipState::Bidirectional => ("Bidirectional".to_string(), true),
+            RelationshipState::Pending => ("Pending".to_string(), false),
+            RelationshipState::InviteReceived => ("Invite received".to_string(), false),
+            RelationshipState::None => ("None".to_string(), false),
+        };
+        let community_label = community
+            .display_name
+            .clone()
+            .unwrap_or_else(|| vtc_did.clone());
+        rows.push(main_page::content::TspRelationshipRow {
+            community_label,
+            vtc_did,
+            persona_did,
+            state,
+            established,
+        });
+    }
+    rows
+}
+
 impl StateHandler {
     pub fn new(
         profile: &str,
@@ -859,6 +901,24 @@ impl StateHandler {
         let shutdown_token = tokio_util::sync::CancellationToken::new();
         let didcomm_service =
             didcomm::start_empty_service(didcomm_event_tx.clone(), shutdown_token.clone());
+        // Hydrate the durable TSP Rev 3 relationship store from the persisted
+        // config before any listener is installed, so the SDK resumes the
+        // relationships that survived the last run rather than starting empty and
+        // re-forming (or dropping the traffic of) every peer that still holds one.
+        // The loop persists it back on the store's dirty signal (the
+        // `tsp_dirty.notified()` arm below).
+        didcomm_service
+            .tsp_store()
+            .hydrate(&config.private.tsp_relationships)
+            .await;
+        let tsp_dirty = didcomm_service.tsp_store().dirty();
+        // Seed the TSP relationships pane from the hydrated store, so it is
+        // populated at launch rather than only after the first relationship
+        // change wakes the dirty arm.
+        {
+            let rows = compute_tsp_relationship_rows(&config, &didcomm_service.tsp_store()).await;
+            state.main_page.content_panel.tsp_relationships.rows = rows.into();
+        }
 
         // A State-A account has no persona/community yet (R-A-5): there is no
         // DID to open a DIDComm session for *yet*. Run the responsive degraded
@@ -1891,6 +1951,24 @@ impl StateHandler {
                             },
                         );
                     }
+                },
+                // A background TSP relationship write (an invite recorded by the
+                // inbound dispatcher, a relationship formed by a send) changed the
+                // durable store. Snapshot it into the config and mark it dirty; the
+                // deadline arm below persists it on the same coalesced schedule as
+                // every other mutation. `Notify` holds one permit, so a write that
+                // lands between iterations is not missed, and a burst collapses to
+                // one snapshot — which is exactly the coalescing we want.
+                _ = tsp_dirty.notified() => {
+                    config.private.tsp_relationships =
+                        didcomm_service.tsp_store().snapshot().await;
+                    save.mark_dirty();
+                    // A relationship changed, so the pane's view of it is stale.
+                    // Recompute here — the same event that persists it also
+                    // refreshes what the user sees.
+                    let rows =
+                        compute_tsp_relationship_rows(&config, &didcomm_service.tsp_store()).await;
+                    state.main_page.content_panel.tsp_relationships.rows = rows.into();
                 },
                 _ = save.wait_deadline() => {
                     match save.take_for_save(|| config.clone_for_save()) {

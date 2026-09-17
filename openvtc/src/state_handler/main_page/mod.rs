@@ -1006,11 +1006,11 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
                 .credentials
                 .get(&openvtc_core::CredentialKind::Membership)
                 .zip(
-                    vc.pointer("/credentialSubject/digest")
+                    vc.pointer("/credentialSubject/digestMultibase")
                         .and_then(|d| d.as_str()),
                 )
                 .map(|(grant, claimed)| {
-                    dtg_credentials::digest_json(grant)
+                    dtg_credentials::digest_multibase_json(grant)
                         .map(|expected| expected != claimed)
                         // Undigestable grant: we cannot say it is stale, so we
                         // do not. R6.3 — claim only what was checked.

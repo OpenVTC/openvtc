@@ -1187,7 +1187,34 @@ async fn enable_tsp_with_resolver(
 ) {
     match discover_tsp_mediator(vta_did, resolver).await {
         TspDiscovery::Advertised(mediator) => match client.enable_tsp_trust_tasks(&mediator) {
-            Ok(()) => tracing::info!("trust tasks routed over TSP (mediator {mediator})"),
+            Ok(()) => {
+                // Rev 3 §7.2.2: attaching the leg is not enough — the VTA drops
+                // the first Trust Task on it unless we have formed the
+                // relationship. `connect_auto` + enable is a two-step, so we
+                // relate explicitly here; the one-call `connect_didcomm_with_tsp`
+                // does it internally. The relate is idempotent (state-read
+                // guarded), so a reconnect that re-runs this is safe.
+                match client.relate_tsp_trust_task_leg(vta_did).await {
+                    Ok(()) => tracing::info!(
+                        "trust tasks routed over TSP (mediator {mediator}); relationship formed"
+                    ),
+                    Err(e) => {
+                        // The relate is a single invite over the already-open
+                        // DIDComm socket, so a failure here is rare (and usually a
+                        // transient that also hit `connect_didcomm`). It leaves the
+                        // leg attached but unrelated, so a Rev 3 VTA would drop this
+                        // session's Trust Tasks — but the surface has no public
+                        // `disable`, and openvtc rebuilds the runtime VTA client per
+                        // operation (`with_runtime_vta_client`), so the next connect
+                        // re-runs this and re-relates. Logged at `debug`, matching
+                        // the best-effort discovery/enable arms above (R6.4).
+                        tracing::debug!(
+                            "TSP relate to {vta_did} failed ({e}); this session's trust tasks \
+                             may fall to the §7.2.2 gate until the next VTA connect re-relates"
+                        );
+                    }
+                }
+            }
             Err(e) => {
                 tracing::debug!("could not enable the TSP leg ({e}); trust tasks stay on DIDComm")
             }

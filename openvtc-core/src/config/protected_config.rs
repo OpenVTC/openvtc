@@ -12,6 +12,7 @@ use crate::{
     logs::{LogFamily, Logs},
     relationships::Relationships,
     tasks::Tasks,
+    tsp_store::TspRelationships,
     vetting::VettingBook,
     vrc::Vrcs,
 };
@@ -224,6 +225,16 @@ pub struct ProtectedConfig {
     #[serde(default)]
     pub relationships: Relationships,
 
+    /// Durable TSP Rev 3 relationship state — the opaque store the SDK's
+    /// `PersistentRelationshipStore` reads and writes, mirrored here so a peer's
+    /// §7.2.2 relationship survives a restart instead of being silently re-formed
+    /// (or its traffic dropped until it is). Deliberately **separate** from
+    /// `relationships` above, which is the DIDComm pairwise model — a different
+    /// keyspace and lifecycle. Skipped when empty so a config that has never
+    /// spoken TSP round-trips byte-identically. See [`crate::tsp_store`].
+    #[serde(default, skip_serializing_if = "TspRelationships::is_empty")]
+    pub tsp_relationships: TspRelationships,
+
     /// Known Tasks
     #[serde(default)]
     pub tasks: Tasks,
@@ -307,6 +318,7 @@ impl Default for ProtectedConfig {
             account: Account::default(),
             contacts: Contacts::default(),
             relationships: Relationships::default(),
+            tsp_relationships: TspRelationships::default(),
             tasks: Tasks::default(),
             vrcs_issued: Vrcs::default(),
             vrcs_received: Vrcs::default(),

@@ -54,6 +54,9 @@ pub mod tasks;
 /// Building a Trust Task document — once, for every verb that sends one.
 pub mod trust_task_doc;
 pub mod tsp;
+/// Durable backing for TSP Rev 3 relationship state (the SDK's
+/// `PersistentRelationshipStore`, mirrored into `ProtectedConfig`).
+pub mod tsp_store;
 pub mod vetting;
 pub mod vrc;
 

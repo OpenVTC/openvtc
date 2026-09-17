@@ -81,6 +81,44 @@ pub struct ContentPanelState {
     pub identity: IdentityState,
     /// Peer identity vetting: our applications, and our desk as a vetter.
     pub vetting: VettingState,
+    /// TSP Rev 3 relationships view: each joined community's §7.2.2 relationship
+    /// state. Populated by the loop (not `sync_from_config`, which is synchronous
+    /// and cannot read the async store), so it is left untouched here.
+    pub tsp_relationships: TspRelationshipsState,
+}
+
+/// The TSP Rev 3 relationships pane: one row per joined community, showing the
+/// state of the §7.2.2 relationship the joining persona holds with its VTC.
+///
+/// Deliberately distinct from [`RelationshipsState`], which is the DIDComm
+/// pairwise model. This one is read-only status: the relationships are formed and
+/// answered automatically by the protocol layer (`openvtc_core::tsp` on send,
+/// the SDK's transport adapter on receive), and this view is the window onto
+/// whether each community connection is `None` / `Pending` / `Bidirectional`.
+#[derive(Clone, Debug, Default)]
+pub struct TspRelationshipsState {
+    /// One row per joined community, recomputed by the loop from the durable
+    /// store whenever a relationship changes.
+    pub rows: Arc<[TspRelationshipRow]>,
+    /// Cursor into `rows`.
+    pub selected_index: usize,
+}
+
+/// One community's TSP relationship, as shown in the pane.
+#[derive(Clone, Debug)]
+pub struct TspRelationshipRow {
+    /// Human label for the community (its name, or a short DID tail).
+    pub community_label: String,
+    /// The community's VTC DID — the peer VID of the relationship (`their_vid`).
+    pub vtc_did: String,
+    /// The persona that joined, whose VID is our side of the relationship
+    /// (`our_vid`).
+    pub persona_did: String,
+    /// The relationship state, already rendered for display
+    /// (`None` / `Pending` / `Invite received` / `Bidirectional`).
+    pub state: String,
+    /// Whether the relationship is fully established (drives the row colour).
+    pub established: bool,
 }
 
 // ****************************************************************************
