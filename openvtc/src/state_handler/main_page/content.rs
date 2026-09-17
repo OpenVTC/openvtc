@@ -513,6 +513,28 @@ pub struct SwitcherItem {
     pub is_current: bool,
 }
 
+/// Why a membership ended, worded for the community detail block (issue #240).
+///
+/// Built only for the terminal states a community drives — `Rejected` and
+/// `Removed` — from the record's [`DecisionEvidence`](openvtc_core::config::account::DecisionEvidence).
+/// A terminal record that carries no evidence (an older config, or a path that
+/// gave none) still gets a summary, with [`reason`](Self::reason) reading "no
+/// reason given" rather than being omitted — the absence is the answer.
+#[derive(Clone, Debug)]
+pub struct DecisionSummary {
+    /// The community's stable code for the decision, when it gave one.
+    pub code: Option<String>,
+    /// The stated reason, or "no reason given" when the community gave none.
+    pub reason: String,
+    /// The deciding authority, shortened for display. A removal notice names the
+    /// administrator; a join rejection names no verifiable authority, so `None`.
+    pub decided_by: Option<String>,
+    /// When the decision was taken, formatted; `None` when none travelled.
+    pub decided_at: Option<String>,
+    /// How our published record was handled on removal; `None` for a rejection.
+    pub disposition: Option<String>,
+}
+
 /// Lightweight display summary of a community membership (no Arc/Mutex).
 #[derive(Clone, Debug)]
 pub struct CommunitySummary {
@@ -581,6 +603,9 @@ pub struct CommunitySummary {
     pub has_role_credential: bool,
     /// The accent colour the community publishes in its manifest's branding.
     pub accent: Option<(u8, u8, u8)>,
+    /// Why the membership ended, for a `Rejected`/`Removed` row (issue #240).
+    /// `None` for every other state.
+    pub decision: Option<DecisionSummary>,
 }
 
 // ****************************************************************************

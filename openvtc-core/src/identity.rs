@@ -186,6 +186,7 @@ mod tests {
     fn community(vtc: &str, persona_ref: PersonaId, status: CommunityStatus) -> CommunityRecord {
         CommunityRecord {
             member_vmc: None,
+            decision: None,
             extra: serde_json::Map::new(),
             vtc_did: vtc.into(),
             display_name: None,

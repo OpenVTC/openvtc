@@ -18,9 +18,10 @@ use uuid::Uuid;
 use vta_sdk::protocols::join_requests::{
     JoinRequestStatusResponseBody, JoinRequestSubmitReceiptBody, VerdictEffect, VerdictResponse,
 };
+use vta_sdk::protocols::members::{RemovalCode, RemovalNoticeBody};
 
 use crate::config::Config;
-use crate::config::account::{Account, PersonaId};
+use crate::config::account::{Account, DecisionEvidence, PersonaId};
 use crate::relationships::{RelationshipState, Relationships};
 use crate::tasks::{TaskType, Tasks};
 
@@ -373,8 +374,24 @@ pub fn handle_join_status_response(
             }
         }
         "rejected" => {
-            record.reject();
-            info!(vtc = %from_did, "join rejected by VTC");
+            // The poll is the recovery path for a rejection whose correlated
+            // verdict was missed (dropped socket, decision taken while offline).
+            // It now carries the decision's own code/reason/time — so a
+            // re-fetched rejection persists the same evidence a live verdict
+            // would have (issue #240). A rejection decided before the VTC
+            // exposed these leaves them absent → "no reason given".
+            record.reject(DecisionEvidence {
+                code: body.code.clone(),
+                reason: body.reason.clone(),
+                decided_by: None,
+                decided_at: body.decided_at,
+                disposition: None,
+            });
+            info!(
+                vtc = %from_did,
+                code = body.code.as_deref().unwrap_or(""),
+                "join rejected by VTC"
+            );
             StatusOutcome {
                 changed: true,
                 inactivated: Some(persona),
@@ -457,7 +474,21 @@ pub fn handle_join_verdict(
             }
         }
         VerdictEffect::Deny => {
-            record.reject();
+            // Adopt the VTC's request id and stamp acknowledgement, as the
+            // Refer/RequestMore arms do — a denial is just as much a correlated
+            // response, and leaving `receipt_at` unset made it read like a
+            // dropped submit. Persist the policy's own code + reason as the
+            // decision evidence (issue #240). No decision time on the verdict
+            // wire, so `decided_at` stays absent here.
+            record.confirm_request_id(body.request_id);
+            record.mark_acknowledged(chrono::Utc::now());
+            record.reject(DecisionEvidence {
+                code: body.verdict.with.code.clone(),
+                reason: body.verdict.with.reason.clone(),
+                decided_by: None,
+                decided_at: None,
+                disposition: None,
+            });
             info!(
                 vtc = %from_did,
                 code = body.verdict.with.code.as_deref().unwrap_or(""),
@@ -541,7 +572,16 @@ pub fn handle_join_problem_report(
     let persona = record.persona_ref;
 
     if code == codes::FORBIDDEN {
-        record.reject();
+        // The problem-report's `comment` is free text; keep it verbatim as the
+        // reason, and the report `code` as the code (issue #240). An empty
+        // comment is "no reason given", not an empty reason.
+        record.reject(DecisionEvidence {
+            code: Some(code.clone()),
+            reason: (!comment.is_empty()).then(|| comment.clone()),
+            decided_by: None,
+            decided_at: None,
+            disposition: None,
+        });
         info!(
             vtc = %from_did,
             comment = %comment,
@@ -632,7 +672,15 @@ pub fn handle_join_trust_task_error(
     };
 
     if is_join_denial_code(&code) {
-        record.reject();
+        // Persist the ceremony error's code + human `message` as the decision
+        // evidence (issue #240). No decision time on this document.
+        record.reject(DecisionEvidence {
+            code: (!code.is_empty()).then(|| code.clone()),
+            reason: (!detail.is_empty()).then(|| detail.clone()),
+            decided_by: None,
+            decided_at: None,
+            disposition: None,
+        });
         info!(
             vtc = %from_did,
             code = %code,
@@ -659,6 +707,89 @@ pub fn handle_join_trust_task_error(
             changed,
             inactivated: None,
         }
+    }
+}
+
+/// Handle a VTC → member **removal notice** (`vtc/members/removal-notice/0.1`):
+/// the community telling a member it removed them (issue #240). Unlike every
+/// join-decision path above it is *unsolicited* — not threaded on any request we
+/// sent — so it is correlated by its two named parties instead: the sender
+/// (`from_did`, the community's VTC) and the removed member's persona
+/// (`body.did`, which must be one of ours).
+///
+/// Transitions the matching **Active** membership to `Removed`, persisting the
+/// notice's authority (`decided_by`), reason, decision time (`decided_at`) and
+/// disposition as [`DecisionEvidence`]. `inactivated` names the persona so the
+/// loop tears down its now-defunct session, as a rejection does.
+///
+/// Ignored (no transition) when it names no persona of ours, no membership of
+/// that community as that persona, or a membership that is not Active — a stale
+/// or duplicate notice must not clobber a `Left` the member chose, and the
+/// removed member can no longer authenticate to the community to be told twice.
+pub fn handle_member_removal_notice(
+    account: &mut Account,
+    message: &Message,
+    from_did: &str,
+) -> StatusOutcome {
+    let body: RemovalNoticeBody = match serde_json::from_value(message.body.clone()) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "malformed removal-notice body — ignoring");
+            return StatusOutcome::NONE;
+        }
+    };
+    let Some(persona) = account.persona_id_for_did(&body.did) else {
+        warn!(
+            vtc = %from_did,
+            "removal-notice names a DID that is not one of our personas — ignoring"
+        );
+        return StatusOutcome::NONE;
+    };
+    let Some(record) = account.membership_mut(from_did, persona) else {
+        warn!(
+            vtc = %from_did,
+            "removal-notice for a community we hold no membership of as that persona — ignoring"
+        );
+        return StatusOutcome::NONE;
+    };
+    if !record.status.is_active() {
+        // A removal only applies to an active member. A notice arriving for a
+        // membership already terminal (a Left the member chose, an earlier
+        // Removed) is stale or duplicate; applying it would overwrite the
+        // member's own account of how it ended.
+        info!(
+            vtc = %from_did,
+            status = ?record.status,
+            "removal-notice for a non-active membership — ignoring"
+        );
+        return StatusOutcome::NONE;
+    }
+    // `decided_at` is RFC 3339 on the wire; keep the rest of the evidence even if
+    // it fails to parse rather than dropping the whole notice.
+    let decided_at = chrono::DateTime::parse_from_rfc3339(&body.decided_at)
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .ok();
+    let code = match body.code {
+        RemovalCode::AdminRemoved => "adminRemoved",
+        RemovalCode::Purged => "purged",
+    };
+    record.remove(DecisionEvidence {
+        code: Some(code.to_string()),
+        reason: body.reason.clone(),
+        decided_by: Some(body.decided_by.clone()),
+        decided_at,
+        disposition: Some(body.disposition.clone()),
+    });
+    info!(
+        vtc = %from_did,
+        code = %code,
+        disposition = %body.disposition,
+        decided_by = %body.decided_by,
+        "removed from community by VTC — now Removed"
+    );
+    StatusOutcome {
+        changed: true,
+        inactivated: Some(persona),
     }
 }
 
@@ -1233,6 +1364,298 @@ mod tests {
         assert!(
             rec.needs_attention(),
             "an unacknowledged rejection nags (R-S-2)"
+        );
+    }
+
+    // ----- decision evidence on the four reject paths (issue #240) -----------
+
+    /// A polled rejection now carries code/reason/decidedAt (VTI #1058); the
+    /// recovery path must persist them, so a rejection whose live verdict was
+    /// missed is still explained.
+    #[test]
+    fn status_response_rejected_persists_decision_evidence() {
+        let vtc = "did:webvh:example:vtc";
+        let rid = Uuid::new_v4();
+        let mut acct = pending_account(vtc, rid);
+
+        let message = Message::build(
+            Uuid::new_v4().to_string(),
+            JOIN_REQUEST_STATUS_RESPONSE_TYPE.to_string(),
+            serde_json::json!({
+                "requestId": rid,
+                "status": "rejected",
+                "code": "admin-reject",
+                "reason": "not this time",
+                "decidedAt": "2026-08-23T09:14:02Z",
+            }),
+        )
+        .from(vtc.to_string())
+        .finalize();
+
+        assert!(handle_join_status_response(&mut acct, &message, vtc).changed);
+        let d = only(&acct, vtc)
+            .decision
+            .clone()
+            .expect("a rejection records decision evidence");
+        assert_eq!(d.code.as_deref(), Some("admin-reject"));
+        assert_eq!(d.reason.as_deref(), Some("not this time"));
+        assert!(d.decided_at.is_some(), "the decision time is persisted");
+        assert!(
+            d.decided_by.is_none(),
+            "a join rejection names no verifiable authority"
+        );
+    }
+
+    /// The oldest poll shape carries no evidence. It must still land as a
+    /// *present but empty* decision, which the UI reads as "no reason given" —
+    /// an explicit absence, distinct from a record predating the field.
+    #[test]
+    fn status_response_rejected_without_evidence_is_empty_not_absent() {
+        let vtc = "did:webvh:example:vtc";
+        let rid = Uuid::new_v4();
+        let mut acct = pending_account(vtc, rid);
+
+        assert!(
+            handle_join_status_response(&mut acct, &status_response(vtc, rid, "rejected"), vtc)
+                .changed
+        );
+        let d = only(&acct, vtc)
+            .decision
+            .clone()
+            .expect("even an evidence-free rejection records a (empty) decision");
+        assert!(d.is_empty(), "no fields travelled — 'no reason given'");
+    }
+
+    /// The `deny` verdict must persist code + reason, and — the bug the issue
+    /// flagged — also acknowledge (stamp receipt_at) and adopt the VTC's request
+    /// id, as the refer/request_more arms already do.
+    #[test]
+    fn verdict_deny_persists_evidence_and_acknowledges() {
+        let vtc = "did:webvh:example:vtc";
+        let rid = Uuid::new_v4();
+        let mut acct = pending_account(vtc, rid);
+
+        let with = serde_json::json!({ "code": "policy.denied", "reason": "membership full" });
+        let out = handle_join_verdict(
+            &mut acct,
+            &verdict(&rid.to_string(), vtc, "deny", with),
+            vtc,
+        );
+        assert!(out.changed);
+
+        let rec = only(&acct, vtc);
+        assert!(matches!(rec.status, CommunityStatus::Rejected));
+        assert!(
+            rec.receipt_at.is_some(),
+            "a denial is a correlated response — it must stamp receipt_at, \
+             not read like a dropped submit"
+        );
+        assert!(
+            rec.request_id_confirmed,
+            "the deny arm adopts the VTC's request id, like refer/request_more"
+        );
+        let d = rec.decision.clone().expect("deny records evidence");
+        assert_eq!(d.code.as_deref(), Some("policy.denied"));
+        assert_eq!(d.reason.as_deref(), Some("membership full"));
+    }
+
+    /// A FORBIDDEN problem-report persists its code and the free-text comment.
+    #[test]
+    fn problem_report_forbidden_persists_code_and_comment() {
+        let vtc = "did:webvh:example:vtc";
+        let rid = Uuid::new_v4();
+        let mut acct = pending_account(vtc, rid);
+
+        let out = handle_join_problem_report(
+            &mut acct,
+            &problem_report(
+                &rid.to_string(),
+                vtc,
+                "e.p.msg.forbidden",
+                "invitation rejected",
+            ),
+            vtc,
+        );
+        assert!(out.status.changed);
+        let d = only(&acct, vtc)
+            .decision
+            .clone()
+            .expect("forbidden records evidence");
+        assert_eq!(d.code.as_deref(), Some("e.p.msg.forbidden"));
+        assert_eq!(d.reason.as_deref(), Some("invitation rejected"));
+    }
+
+    /// An empty problem-report comment is "no reason given", not an empty reason.
+    #[test]
+    fn problem_report_forbidden_empty_comment_gives_no_reason() {
+        let vtc = "did:webvh:example:vtc";
+        let rid = Uuid::new_v4();
+        let mut acct = pending_account(vtc, rid);
+
+        handle_join_problem_report(
+            &mut acct,
+            &problem_report(&rid.to_string(), vtc, "e.p.msg.forbidden", ""),
+            vtc,
+        );
+        let d = only(&acct, vtc).decision.clone().expect("records evidence");
+        assert!(d.reason.is_none(), "an empty comment is an absent reason");
+        assert_eq!(d.code.as_deref(), Some("e.p.msg.forbidden"));
+    }
+
+    /// A denial trust-task-error persists its code and human `message`.
+    #[test]
+    fn trust_task_error_denial_persists_code_and_detail() {
+        let vtc = "did:webvh:example:vtc";
+        let rid = Uuid::new_v4();
+        let mut acct = pending_account(vtc, rid);
+
+        let out = handle_join_trust_task_error(
+            &mut acct,
+            &trust_task_error(&rid.to_string(), vtc, "permissionDenied", "not on the list"),
+            vtc,
+        );
+        assert!(out.changed);
+        let d = only(&acct, vtc)
+            .decision
+            .clone()
+            .expect("denial records evidence");
+        assert_eq!(d.code.as_deref(), Some("permissionDenied"));
+        assert_eq!(d.reason.as_deref(), Some("not on the list"));
+    }
+
+    // ----- removal notice (issue #240) --------------------------------------
+
+    fn removal_notice(from: &str, body: serde_json::Value) -> Message {
+        Message::build(
+            Uuid::new_v4().to_string(),
+            vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE.to_string(),
+            body,
+        )
+        .from(from.to_string())
+        .finalize()
+    }
+
+    /// A removal notice for an active member transitions it to Removed, persists
+    /// the full evidence (authority, reason, time, disposition), and deregisters
+    /// the session.
+    #[test]
+    fn removal_notice_removes_active_member_with_evidence() {
+        let vtc = "did:webvh:example:vtc";
+        let persona = "did:webvh:example:persona";
+        let mut acct = account_with_persona(vtc, persona);
+        acct.memberships_mut().next().unwrap().activate(Utc::now());
+
+        let out = handle_member_removal_notice(
+            &mut acct,
+            &removal_notice(
+                vtc,
+                serde_json::json!({
+                    "did": persona,
+                    "code": "adminRemoved",
+                    "disposition": "tombstone",
+                    "reason": "code of conduct",
+                    "decidedAt": "2026-08-23T09:14:02Z",
+                    "decidedBy": "did:key:z6MkAdmin",
+                }),
+            ),
+            vtc,
+        );
+        assert!(out.changed);
+        assert!(
+            out.inactivated.is_some(),
+            "a removal deregisters the session, like a rejection"
+        );
+        let rec = only(&acct, vtc);
+        assert!(matches!(rec.status, CommunityStatus::Removed));
+        assert!(rec.needs_attention(), "a fresh Removed nags (R-S-2)");
+        let d = rec.decision.clone().expect("removal records evidence");
+        assert_eq!(d.code.as_deref(), Some("adminRemoved"));
+        assert_eq!(d.reason.as_deref(), Some("code of conduct"));
+        assert_eq!(d.decided_by.as_deref(), Some("did:key:z6MkAdmin"));
+        assert_eq!(d.disposition.as_deref(), Some("tombstone"));
+        assert!(d.decided_at.is_some());
+    }
+
+    /// A purge with no reason keeps `reason` absent (not empty) — the member's
+    /// only account of why says, truthfully, that none was given.
+    #[test]
+    fn removal_notice_without_reason_stays_absent() {
+        let vtc = "did:webvh:example:vtc";
+        let persona = "did:webvh:example:persona";
+        let mut acct = account_with_persona(vtc, persona);
+        acct.memberships_mut().next().unwrap().activate(Utc::now());
+
+        handle_member_removal_notice(
+            &mut acct,
+            &removal_notice(
+                vtc,
+                serde_json::json!({
+                    "did": persona,
+                    "code": "purged",
+                    "disposition": "purge",
+                    "decidedAt": "2026-08-23T11:02:41Z",
+                    "decidedBy": "did:key:z6MkSuperAdmin",
+                }),
+            ),
+            vtc,
+        );
+        let d = only(&acct, vtc).decision.clone().expect("records evidence");
+        assert!(d.reason.is_none(), "an omitted reason stays absent");
+        assert_eq!(d.code.as_deref(), Some("purged"));
+    }
+
+    /// A removal notice naming a DID that is not one of our personas is ignored.
+    #[test]
+    fn removal_notice_for_unknown_persona_is_ignored() {
+        let vtc = "did:webvh:example:vtc";
+        let mut acct = account_with_persona(vtc, "did:webvh:example:persona");
+        acct.memberships_mut().next().unwrap().activate(Utc::now());
+
+        let out = handle_member_removal_notice(
+            &mut acct,
+            &removal_notice(
+                vtc,
+                serde_json::json!({
+                    "did": "did:webvh:example:someone-else",
+                    "code": "adminRemoved",
+                    "disposition": "tombstone",
+                    "decidedAt": "2026-08-23T09:14:02Z",
+                    "decidedBy": "did:key:z6MkAdmin",
+                }),
+            ),
+            vtc,
+        );
+        assert!(!out.changed);
+        assert!(matches!(only(&acct, vtc).status, CommunityStatus::Active));
+    }
+
+    /// A stale/duplicate removal notice must not clobber a terminal state the
+    /// member reached another way (e.g. a Left they chose).
+    #[test]
+    fn removal_notice_for_non_active_membership_is_ignored() {
+        let vtc = "did:webvh:example:vtc";
+        let persona = "did:webvh:example:persona";
+        let mut acct = account_with_persona(vtc, persona);
+        acct.memberships_mut().next().unwrap().leave();
+
+        let out = handle_member_removal_notice(
+            &mut acct,
+            &removal_notice(
+                vtc,
+                serde_json::json!({
+                    "did": persona,
+                    "code": "adminRemoved",
+                    "disposition": "tombstone",
+                    "decidedAt": "2026-08-23T09:14:02Z",
+                    "decidedBy": "did:key:z6MkAdmin",
+                }),
+            ),
+            vtc,
+        );
+        assert!(!out.changed);
+        assert!(
+            matches!(only(&acct, vtc).status, CommunityStatus::Left),
+            "the member's own Left is not overwritten"
         );
     }
 

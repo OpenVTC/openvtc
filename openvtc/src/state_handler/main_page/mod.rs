@@ -662,6 +662,7 @@ impl MainPageState {
                 has_role_credential: c
                     .credentials
                     .contains_key(&openvtc_core::CredentialKind::Role),
+                decision: community_decision_summary(c),
             });
         }
         let community_count = community_items.len();
@@ -762,6 +763,40 @@ impl MainPageState {
             .collect();
         self.content_panel.vta.vics = named.into();
     }
+}
+
+/// Decision evidence for a `Rejected`/`Removed` membership, worded for the
+/// community detail block (issue #240). `None` for every other state.
+///
+/// A terminal record is summarised even when it carries no
+/// [`DecisionEvidence`](openvtc_core::config::account::DecisionEvidence) — an
+/// older config, or a path that gave none — so the reason reads "no reason
+/// given" rather than the block silently disappearing.
+fn community_decision_summary(
+    c: &openvtc_core::config::account::CommunityRecord,
+) -> Option<content::DecisionSummary> {
+    use openvtc_core::config::account::CommunityStatus;
+    if !matches!(
+        c.status,
+        CommunityStatus::Rejected | CommunityStatus::Removed
+    ) {
+        return None;
+    }
+    let evidence = c.decision.clone().unwrap_or_default();
+    Some(content::DecisionSummary {
+        code: evidence.code.map(|s| sanitize_display(&s, 128)),
+        reason: evidence
+            .reason
+            .map(|r| sanitize_display(&r, 512))
+            .unwrap_or_else(|| "no reason given".to_string()),
+        // The deciding admin's own agent name, when it verifies, else the DID
+        // shortened — the same precedence every other identifier row uses.
+        decided_by: evidence.decided_by.map(|did| shorten_did(&did, 40)),
+        decided_at: evidence
+            .decided_at
+            .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()),
+        disposition: evidence.disposition.map(|s| sanitize_display(&s, 64)),
+    })
 }
 
 /// Human-readable label for a community membership status (R-C-2).
@@ -1432,6 +1467,7 @@ mod tests {
             vtc_did.to_string(),
             vec![CommunityRecord {
                 member_vmc: None,
+                decision: None,
                 extra: serde_json::Map::new(),
                 vtc_did: vtc_did.to_string(),
                 display_name: display_name.map(str::to_owned),

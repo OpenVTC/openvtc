@@ -194,6 +194,72 @@ impl CommunityStatus {
     }
 }
 
+/// Why a membership ended, as the deciding community stated it.
+///
+/// Populated on the two terminal transitions a *community* drives —
+/// [`CommunityRecord::reject`] (join denied) and [`CommunityRecord::remove`]
+/// (member removed) — from whatever the wire carried. It is the member's own
+/// account of an outcome they did not choose, kept so a rejected or removed
+/// membership can say *by whom*, *why*, and *when* rather than only *that* it
+/// ended.
+///
+/// Every field is optional because the inbound paths differ in what they
+/// expose: a verdict or a polled rejection carries `code`/`reason`, a removal
+/// notice adds `decided_by`/`decided_at`/`disposition`, and the oldest poll
+/// path carried nothing at all. An all-absent value is a deliberate "no reason
+/// given" (proposal 4) — an absence the operator can read, distinct from a
+/// record that predates this field.
+///
+/// **`decided_by` is not independently verifiable on a join rejection.** The
+/// decision document is unsigned and its `issuer` is echoed from a field the
+/// *applicant* set, so only a removal notice — which names the deciding
+/// administrator on the wire — populates this. It is stated authority, not
+/// attested authority; the doc comments on the wire types say the same.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecisionEvidence {
+    /// Stable machine code for the decision — a join policy's own code on an
+    /// auto-deny, `admin-reject` when a human denied a join, or a removal
+    /// notice's `adminRemoved` / `purged`. `None` when the path carried none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// The operator's stated reason, verbatim. `None` — never `""` — when none
+    /// was given: an omitted reason and an empty one are different claims, and
+    /// keeping them distinct is the whole point of rendering "no reason given"
+    /// rather than a blank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The deciding authority's DID, when the wire names one. A removal notice
+    /// names the deciding administrator (`decidedBy`); a join rejection does
+    /// not, so this stays `None` there rather than being guessed from the
+    /// unsigned, applicant-influenced `issuer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+    /// When the decision was taken — distinct from when we recorded it
+    /// ([`CommunityRecord::receipt_at`]), which for an offline member can lag
+    /// the decision arbitrarily. `None` when the path carried no decision time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<DateTime<Utc>>,
+    /// How the community handled our published record on removal
+    /// (`purge` / `tombstone` / `historical`). Removal-only; `None` for a join
+    /// rejection, which leaves no member record to dispose of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<String>,
+}
+
+impl DecisionEvidence {
+    /// True when the community told us nothing beyond the bare outcome — no
+    /// code, reason, authority, time or disposition. Drives the "no reason
+    /// given" rendering, and is what a record written before this field existed
+    /// (`decision: None`) is treated as.
+    pub fn is_empty(&self) -> bool {
+        self.code.is_none()
+            && self.reason.is_none()
+            && self.decided_by.is_none()
+            && self.decided_at.is_none()
+            && self.disposition.is_none()
+    }
+}
+
 /// A community membership — one per State-B join, referencing an account persona.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(from = "CommunityRecordShadow")]
@@ -310,6 +376,14 @@ pub struct CommunityRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_vmc: Option<serde_json::Value>,
 
+    /// Why this membership ended, when the community told us — set by
+    /// [`reject`](Self::reject) and [`remove`](Self::remove). `None` for a
+    /// membership that never reached a community-driven terminal state, and for
+    /// records written before this field existed (read as "no reason given").
+    /// See [`DecisionEvidence`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<DecisionEvidence>,
+
     /// Fields written by a newer build, preserved verbatim (D19). See
     /// [`Account::extra`] for why.
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
@@ -360,6 +434,8 @@ struct CommunityRecordShadow {
     credentials: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     member_vmc: Option<serde_json::Value>,
+    #[serde(default)]
+    decision: Option<DecisionEvidence>,
     // Legacy pre-R19 flat fields, folded into `credentials` below.
     #[serde(default)]
     membership_credential: Option<serde_json::Value>,
@@ -417,6 +493,7 @@ impl From<CommunityRecordShadow> for CommunityRecord {
             vrcs_received: shadow.vrcs_received,
             credentials,
             member_vmc: shadow.member_vmc,
+            decision: shadow.decision,
         }
     }
 }
@@ -473,6 +550,7 @@ impl CommunityRecord {
             vrcs_received: Vrcs::default(),
             credentials: BTreeMap::new(),
             member_vmc: None,
+            decision: None,
         }
     }
 
@@ -497,16 +575,26 @@ impl CommunityRecord {
     /// Transition to `Rejected` — the VTC denied the join request (R-B-8). A
     /// fresh terminal outcome starts unacknowledged so it raises the
     /// actions-required badge until the user clears it (R-S-2).
-    pub fn reject(&mut self) {
+    ///
+    /// `evidence` records why, as the community stated it (issue #240); pass
+    /// [`DecisionEvidence::default`] when the path carried none, which renders
+    /// "no reason given" rather than a blank.
+    pub fn reject(&mut self, evidence: DecisionEvidence) {
         self.status = CommunityStatus::Rejected;
         self.acknowledged = false;
+        self.decision = Some(evidence);
     }
 
     /// Transition to `Removed` — the VTC removed an active member (R-B-8). Starts
     /// unacknowledged (R-S-2).
-    pub fn remove(&mut self) {
+    ///
+    /// `evidence` records why, as carried by the removal notice
+    /// (`vtc/members/removal-notice/0.1`); pass [`DecisionEvidence::default`]
+    /// when none was given.
+    pub fn remove(&mut self, evidence: DecisionEvidence) {
         self.status = CommunityStatus::Removed;
         self.acknowledged = false;
+        self.decision = Some(evidence);
     }
 
     /// Transition to `Left` — the member voluntarily left (R-L-1). `Left` never
@@ -1094,6 +1182,7 @@ mod tests {
             vrcs_received: Vrcs::default(),
             credentials: BTreeMap::new(),
             member_vmc: None,
+            decision: None,
         }
     }
 
@@ -1404,11 +1493,11 @@ mod tests {
         let pid = PersonaId::new();
 
         let mut r = community("v", pid, pending());
-        r.reject();
+        r.reject(DecisionEvidence::default());
         assert_eq!(r.status, CommunityStatus::Rejected);
 
         let mut rm = community("v", pid, CommunityStatus::Active);
-        rm.remove();
+        rm.remove(DecisionEvidence::default());
         assert_eq!(rm.status, CommunityStatus::Removed);
 
         let mut l = community("v", pid, CommunityStatus::Active);
@@ -1787,7 +1876,7 @@ mod tests {
         c.activate(Utc::now());
         assert!(!c.acknowledged, "returning to a live state clears the ack");
         assert!(!c.needs_attention(), "Active never nags");
-        c.remove();
+        c.remove(DecisionEvidence::default());
         assert!(
             c.needs_attention(),
             "a fresh Removed must nag despite the earlier ack"
