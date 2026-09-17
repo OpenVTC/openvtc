@@ -247,21 +247,27 @@ mod tests {
         let (_secret, vc) = signed_vmc().await;
 
         assert_eq!(
-            vc["credentialSubject"]["digest"],
-            Value::String(dtg_credentials::digest_json(&grant()).expect("digest")),
+            vc["credentialSubject"]["digestMultibase"],
+            Value::String(dtg_credentials::digest_multibase_json(&grant()).expect("digest")),
             "the digest must cover the grant the community sent"
         );
 
-        // And not what a round trip through the local model would produce. Parsed
-        // without the proof, which the digest excludes anyway — the divergence being
-        // asserted is `credentialStatus`, not the signature.
+        // Digesting a round trip through the local model now produces the *same*
+        // value. This used to be the hazard the acknowledgement guarded against:
+        // the model had no field for `credentialStatus`, so parsing dropped it and
+        // a digest over the parse mismatched the one the community recomputes. As
+        // of `dtg-credentials` 0.9.1 (Working Draft 02) the model carries
+        // `credentialStatus`, so the round trip is lossless and either route
+        // digests to the same bytes — the divergence is closed at the library
+        // rather than worked around here. Parsed without the proof, which the
+        // digest excludes anyway.
         let mut proofless = grant();
         proofless.as_object_mut().expect("object").remove("proof");
         let parsed: DTGCredential = serde_json::from_value(proofless).expect("parses");
-        assert_ne!(
-            vc["credentialSubject"]["digest"],
-            Value::String(parsed.digest().expect("digest")),
-            "digesting the parsed model drops credentialStatus and matches nothing"
+        assert_eq!(
+            vc["credentialSubject"]["digestMultibase"],
+            Value::String(parsed.digest_multibase().expect("digest")),
+            "0.9.1 models credentialStatus, so digesting the parsed grant matches the wire"
         );
     }
 
@@ -278,8 +284,8 @@ mod tests {
         renewed["validFrom"] = Value::String("2027-01-01T00:00:00Z".into());
 
         assert_ne!(
-            vc["credentialSubject"]["digest"],
-            Value::String(dtg_credentials::digest_json(&renewed).expect("digest"))
+            vc["credentialSubject"]["digestMultibase"],
+            Value::String(dtg_credentials::digest_multibase_json(&renewed).expect("digest"))
         );
     }
 

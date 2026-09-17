@@ -14,5 +14,6 @@ pub mod qr;
 pub mod relationships_panel;
 pub mod settings_panel;
 pub mod status;
+pub mod tsp_relationships_panel;
 pub mod vetting_panel;
 pub mod vta_panel;

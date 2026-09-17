@@ -61,11 +61,13 @@ anyhow.workspace = true
 # cadence: `trql-client` 0.17 shipped, VGI's manifest went back to a version
 # requirement, and `publish.yml` could get past the manifest again.
 #
-# This line is the first time the rule is met on the same day the sdk moved.
-# VGI took 0.38 in its #51 and cut 0.4.10 from `main`; the bump here followed
-# within the hour. Worth recording because the failure mode was never the rule
-# being unknown — it was the gap between the sdk moving and VGI shipping, and
-# what closed the gap was VGI having no git dependency left to block `publish`.
+# On the 0.42 move VGI took `vta-sdk` 0.42 in its #57 and cut 0.4.12 (tagged
+# `v0.4.12`, published by `publish.yml`); the bump here followed once it indexed.
+# This cycle the gap was not merely untidy — on 0.4.11 (`vta-sdk ^0.39`) the
+# second sdk pulled `affinidi-messaging-sdk` 0.24, which does not compile against
+# the shared `affinidi-messaging-core` 0.1.8 the runtime is on, so the workspace
+# would not build at all until VGI shipped. What closed the gap, as ever, was VGI
+# having no git dependency left to block `publish` — `trql-client` 0.18 this time.
 #
 # The floor must name the exact release, never a lower caret. `"0.4.3"` admitted
 # 0.4.5, which requires `vta-sdk ^0.25` — so while this workspace was already on
@@ -85,7 +87,7 @@ anyhow.workspace = true
 # rather than as a wall of satisfied constraints — 0.4.5 was the first release on
 # vta-sdk 0.25, 0.4.3 the first on 0.23, and 0.4.0/0.4.1 were on `^0.19` and put
 # a second vta-sdk *and* a second trust-tasks in the binary.
-did-git-sign = "0.4.11"
+did-git-sign = "0.4.12"
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true
