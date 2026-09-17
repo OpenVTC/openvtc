@@ -187,6 +187,7 @@ mod tests {
         CommunityRecord {
             member_vmc: None,
             decision: None,
+            relationship_identifier_default: None,
             extra: serde_json::Map::new(),
             vtc_did: vtc.into(),
             display_name: None,

@@ -21,7 +21,7 @@ use vta_sdk::protocols::join_requests::{
 use vta_sdk::protocols::members::{RemovalCode, RemovalNoticeBody};
 
 use crate::config::Config;
-use crate::config::account::{Account, DecisionEvidence, PersonaId};
+use crate::config::account::{Account, DecisionEvidence, PersonaId, RelationshipIdentifierDefault};
 use crate::relationships::{RelationshipState, Relationships};
 use crate::tasks::{TaskType, Tasks};
 
@@ -793,6 +793,74 @@ pub fn handle_member_removal_notice(
     }
 }
 
+/// Handle a VTC `community/profile/show` `#response` — record the community's
+/// declared `relationshipIdentifierDefault` (issue #241).
+///
+/// The value is community-level, identical for every persona joined there, so it
+/// is written to every membership of the sending VTC. Read via a JSON pointer
+/// rather than a strict `CommunityProfileView` parse: the view is
+/// `deny_unknown_fields` + `non_exhaustive` with required members this consumer
+/// does not need, so a strict parse would drop a valid response over a field it
+/// never reads.
+///
+/// **Anti-spoof:** only a community we actually hold a membership with may set
+/// this — a response from a DID we know nothing about is ignored. An absent or
+/// unrecognised value stores `None`, which reads as "default to pairwise" (the
+/// field is a declaration, not an enforcement); it does not fail the message.
+///
+/// Returns whether any record changed (for the caller's persist decision).
+pub fn handle_community_profile_show_response(
+    account: &mut Account,
+    message: &Message,
+    from_did: &str,
+) -> bool {
+    let payload = trust_task_reply_payload(&message.body);
+    let declared = match payload
+        .pointer("/profile/relationshipIdentifierDefault")
+        .and_then(Value::as_str)
+    {
+        Some("attributed") => Some(RelationshipIdentifierDefault::Attributed),
+        Some("pairwise") => Some(RelationshipIdentifierDefault::Pairwise),
+        // Undeclared — the community published no preference; pairwise stands.
+        None => None,
+        // A value this build does not know. Treat as undeclared rather than
+        // guessing; a newer form is not a reason to fail the read.
+        Some(other) => {
+            warn!(
+                vtc = %from_did,
+                value = %other,
+                "community profile: unrecognised relationshipIdentifierDefault — treating as undeclared"
+            );
+            None
+        }
+    };
+
+    let mut records = account
+        .memberships_mut()
+        .filter(|c| c.vtc_did == from_did)
+        .peekable();
+    if records.peek().is_none() {
+        warn!(
+            vtc = %from_did,
+            "community profile response from a VTC we hold no membership with — ignoring"
+        );
+        return false;
+    }
+    let mut changed = false;
+    for record in records {
+        if record.relationship_identifier_default != declared {
+            record.relationship_identifier_default = declared;
+            changed = true;
+        }
+    }
+    debug!(
+        vtc = %from_did,
+        default = ?declared,
+        "recorded community relationship-identifier default"
+    );
+    changed
+}
+
 /// Handle a VTC `credential-exchange/issue`: store the issued credential on the
 /// matching community and, for the membership credential (VMC), flip the
 /// membership to `Active`. The issuing VTC is the authcrypt sender; the
@@ -1294,6 +1362,93 @@ mod tests {
         )
         .from(from.to_string())
         .finalize()
+    }
+
+    // ----- community profile show (relationshipIdentifierDefault, #241) ------
+
+    /// A profile-show `#response`, payload nested as the VTC sends it.
+    fn profile_response(from: &str, relationship_identifier_default: Option<&str>) -> Message {
+        let mut profile = serde_json::json!({
+            "communityDid": from,
+            "name": "Acme",
+            "language": "en",
+        });
+        if let Some(v) = relationship_identifier_default {
+            profile["relationshipIdentifierDefault"] = serde_json::json!(v);
+        }
+        Message::build(
+            Uuid::new_v4().to_string(),
+            crate::join::COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE.to_string(),
+            serde_json::json!({
+                "id": format!("urn:uuid:{}", Uuid::new_v4()),
+                "type": crate::join::COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE,
+                "issuer": from,
+                "payload": { "profile": profile },
+            }),
+        )
+        .from(from.to_string())
+        .finalize()
+    }
+
+    #[test]
+    fn profile_response_records_attributed_and_pairwise() {
+        let vtc = "did:webvh:example:vtc";
+
+        let mut acct = pending_account(vtc, Uuid::new_v4());
+        assert!(handle_community_profile_show_response(
+            &mut acct,
+            &profile_response(vtc, Some("attributed")),
+            vtc,
+        ));
+        assert_eq!(
+            only(&acct, vtc).relationship_identifier_default,
+            Some(RelationshipIdentifierDefault::Attributed)
+        );
+
+        let mut acct = pending_account(vtc, Uuid::new_v4());
+        assert!(handle_community_profile_show_response(
+            &mut acct,
+            &profile_response(vtc, Some("pairwise")),
+            vtc,
+        ));
+        assert_eq!(
+            only(&acct, vtc).relationship_identifier_default,
+            Some(RelationshipIdentifierDefault::Pairwise)
+        );
+    }
+
+    /// A community that declares nothing leaves the value `None` (pairwise
+    /// default), and an unrecognised form is treated the same rather than failing.
+    #[test]
+    fn profile_response_undeclared_or_unknown_stays_none() {
+        let vtc = "did:webvh:example:vtc";
+
+        let mut acct = pending_account(vtc, Uuid::new_v4());
+        handle_community_profile_show_response(&mut acct, &profile_response(vtc, None), vtc);
+        assert_eq!(only(&acct, vtc).relationship_identifier_default, None);
+
+        let mut acct = pending_account(vtc, Uuid::new_v4());
+        handle_community_profile_show_response(
+            &mut acct,
+            &profile_response(vtc, Some("someFutureForm")),
+            vtc,
+        );
+        assert_eq!(only(&acct, vtc).relationship_identifier_default, None);
+    }
+
+    /// A profile response from a VTC we hold no membership with is ignored
+    /// (anti-spoof: only our own communities may set this).
+    #[test]
+    fn profile_response_from_a_stranger_is_ignored() {
+        let vtc = "did:webvh:example:vtc";
+        let mut acct = pending_account(vtc, Uuid::new_v4());
+        let changed = handle_community_profile_show_response(
+            &mut acct,
+            &profile_response("did:webvh:example:other", Some("attributed")),
+            "did:webvh:example:other",
+        );
+        assert!(!changed);
+        assert_eq!(only(&acct, vtc).relationship_identifier_default, None);
     }
 
     #[test]

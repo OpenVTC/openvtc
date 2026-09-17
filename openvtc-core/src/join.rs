@@ -34,6 +34,14 @@ use vta_sdk::protocols::join_requests::{
 use crate::capabilities::TRUST_TASK_ENVELOPE_TYPE;
 use crate::errors::OpenVTCError;
 
+/// The `vtc/community/profile/show` request type, sourced from the spec crate so
+/// it cannot drift from the schema OpenVTC is built against (issue #241).
+pub const COMMUNITY_PROFILE_SHOW_TYPE: &str = <trust_tasks_rs::specs::vtc::community::profile::show::v0_1::Payload as trust_tasks_rs::Payload>::TYPE_URI;
+
+/// The correlated `#response` type the VTC replies with, carrying the
+/// `CommunityProfileView` (and its `relationshipIdentifierDefault`).
+pub const COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE: &str = <trust_tasks_rs::specs::vtc::community::profile::show::v0_1::Response as trust_tasks_rs::Payload>::TYPE_URI;
+
 /// Submit a join request to a VTC (`vtc_did`) over DIDComm, presenting
 /// `persona_did` as the applicant.
 ///
@@ -133,6 +141,54 @@ pub async fn poll_join_status(
         vtc_did,
         &document_id,
         payload,
+    )?;
+
+    match tsp_mediator_did {
+        Some(tsp_mediator) => {
+            crate::tsp::send_trust_task(atm, profile, &body, vtc_did, tsp_mediator).await?;
+        }
+        None => {
+            let now = Utc::now().timestamp().max(0) as u64;
+            let msg = Message::build(document_id, TRUST_TASK_ENVELOPE_TYPE.to_string(), body)
+                .from(persona_did.to_string())
+                .to(vtc_did.to_string())
+                .created_time(now)
+                .finalize();
+            crate::pack_and_send(atm, profile, &msg, persona_did, vtc_did, mediator_did).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Ask a community for its profile (`vtc/community/profile/show/0.1`) so we can
+/// read its declared `relationshipIdentifierDefault` (issue #241).
+///
+/// The request payload is empty — the community answers about itself, and the
+/// applicant is proven exactly as `poll_join_status` proves it (authcrypt sender
+/// over DIDComm, sender VID over TSP; no holder signature). The reply is a
+/// `#response` document threaded on this message, handled asynchronously by
+/// [`crate::messaging::handle_community_profile_show_response`]; nothing is
+/// awaited here. Background, best-effort — a send failure is the caller's to log,
+/// not surface (the value only seeds a form default, and its absence is a valid,
+/// pairwise-defaulting state).
+pub async fn send_community_profile_show(
+    atm: &ATM,
+    profile: &Arc<ATMProfile>,
+    persona_did: &str,
+    vtc_did: &str,
+    mediator_did: &str,
+    tsp_mediator_did: Option<&str>,
+) -> Result<(), OpenVTCError> {
+    let document_id = format!("urn:uuid:{}", Uuid::new_v4());
+    // The show payload carries only an optional extension bag; an empty object is
+    // the request. The VTC reads the body as a Trust Task document, so it must be
+    // wrapped (a bare payload is rejected `malformedRequest`).
+    let body = build_trust_task_document(
+        COMMUNITY_PROFILE_SHOW_TYPE,
+        persona_did,
+        vtc_did,
+        &document_id,
+        serde_json::json!({}),
     )?;
 
     match tsp_mediator_did {

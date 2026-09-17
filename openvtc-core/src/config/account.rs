@@ -260,6 +260,32 @@ impl DecisionEvidence {
     }
 }
 
+/// Which identifier form a community declares it expects members to use when
+/// issuing relationship credentials (`relationshipIdentifierDefault` on the
+/// community profile; issue #241).
+///
+/// `Attributed` means the member's persona/membership DID, so a relationship
+/// edge names them; `Pairwise` means a Relationship DID unique to each
+/// counterparty. It is a **declaration, not an enforcement**: the member still
+/// chooses per relationship, and a community that wants to *require* a form does
+/// so in its own policy. OpenVTC uses it only to seed the new-relationship
+/// form's default (still toggle-able).
+///
+/// An absent value on the wire is *not* this enum's problem: the field on
+/// [`CommunityRecord`] is `Option<Self>`, and `None` (unread or undeclared)
+/// means "default to `Pairwise`", matching the DTG Credentials recommendation
+/// the spec cites.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RelationshipIdentifierDefault {
+    /// Relationships default to the persona DID — correlatable edges, which a
+    /// public community that wants a legible graph asks for.
+    Attributed,
+    /// Relationships default to a per-counterparty Relationship DID (the
+    /// codebase-wide default when nothing is declared).
+    Pairwise,
+}
+
 /// A community membership — one per State-B join, referencing an account persona.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(from = "CommunityRecordShadow")]
@@ -384,6 +410,14 @@ pub struct CommunityRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<DecisionEvidence>,
 
+    /// The identifier form this community declares it prefers for relationship
+    /// credentials (issue #241), read from its community profile
+    /// (`vtc/community/profile/show`). Seeds the new-relationship form's default;
+    /// `None` (unread or undeclared) means "default to pairwise". See
+    /// [`RelationshipIdentifierDefault`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_identifier_default: Option<RelationshipIdentifierDefault>,
+
     /// Fields written by a newer build, preserved verbatim (D19). See
     /// [`Account::extra`] for why.
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
@@ -436,6 +470,8 @@ struct CommunityRecordShadow {
     member_vmc: Option<serde_json::Value>,
     #[serde(default)]
     decision: Option<DecisionEvidence>,
+    #[serde(default)]
+    relationship_identifier_default: Option<RelationshipIdentifierDefault>,
     // Legacy pre-R19 flat fields, folded into `credentials` below.
     #[serde(default)]
     membership_credential: Option<serde_json::Value>,
@@ -494,6 +530,7 @@ impl From<CommunityRecordShadow> for CommunityRecord {
             credentials,
             member_vmc: shadow.member_vmc,
             decision: shadow.decision,
+            relationship_identifier_default: shadow.relationship_identifier_default,
         }
     }
 }
@@ -551,6 +588,9 @@ impl CommunityRecord {
             credentials: BTreeMap::new(),
             member_vmc: None,
             decision: None,
+            // Unknown until the community's profile is read (issue #241);
+            // `None` seeds the pairwise default.
+            relationship_identifier_default: None,
         }
     }
 
@@ -1183,6 +1223,7 @@ mod tests {
             credentials: BTreeMap::new(),
             member_vmc: None,
             decision: None,
+            relationship_identifier_default: None,
         }
     }
 

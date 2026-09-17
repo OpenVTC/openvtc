@@ -244,6 +244,7 @@ mod persona_binding_refresh;
 /// means the move itself changed no call sites, so a regression in the messaging
 /// layer cannot hide inside an import churn diff.
 pub use openvtc_core::didcomm;
+mod community_profile_poll;
 mod device_presence;
 mod dispatch_util;
 mod inbox_actions;
@@ -1148,6 +1149,13 @@ impl StateHandler {
         let mut join_status_tick = tokio::time::interval(std::time::Duration::from_secs(60));
         let mut join_status_pacer = join_status_poll::PollPacer::default();
 
+        // Ask each Active community, once per session, for its declared
+        // `relationshipIdentifierDefault` (issue #241). The pacer asks each
+        // community once, so this tick over communities already asked does no
+        // work; a bare account (no Active membership) does none at all.
+        let mut community_profile_tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut community_profile_pacer = community_profile_poll::ProfilePacer::default();
+
         // The join flow to enter at the end of this iteration, and a join
         // waiting on a community's requirements (see `join_flow::AwaitingRequirements`).
         let mut join_entry: Option<join_flow::JoinEntry> = None;
@@ -1789,6 +1797,21 @@ impl StateHandler {
                         let polls = join_status_poll::build(&config, due);
                         if !polls.is_empty() {
                             tokio::spawn(join_status_poll::send_all(atm, polls));
+                        }
+                    }
+                },
+                _ = community_profile_tick.tick() => {
+                    // Ask each Active community, once, for its profile so the
+                    // new-relationship form can default to the community's
+                    // declared identifier form (issue #241). Spawned detached,
+                    // like the status poll: the reply arrives on the persona's
+                    // listener and folds in through inbound dispatch, and the
+                    // pacer marks each community asked before the send so a tick
+                    // never re-asks one.
+                    if let Some(atm) = tdk.atm.clone() {
+                        let asks = community_profile_pacer.due(&config);
+                        if !asks.is_empty() {
+                            tokio::spawn(community_profile_poll::send_all(atm, asks));
                         }
                     }
                 },
