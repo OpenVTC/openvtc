@@ -41,6 +41,7 @@ use crate::relationships::RelationshipState;
 /// need not depend on `affinidi-messaging-core` directly.
 pub use affinidi_messaging_core::ConnState;
 use affinidi_messaging_core::MessageTransport;
+use affinidi_messaging_core::transport::InboundKind;
 use affinidi_messaging_core::types::Protocol;
 use affinidi_messaging_delivery::{
     Delivery, InMemoryOutboxStore, MessagingService, OutboxStore, drain_loop_via,
@@ -49,6 +50,7 @@ use affinidi_messaging_sdk::DidCommTransport;
 /// A picked-up frame, tagged by protocol — the stored-mail counterpart of the
 /// live stream's `Protocol`-tagged `Inbound`.
 use affinidi_messaging_sdk::protocols::message_pickup::InboundFrame;
+use affinidi_messaging_sdk::protocols::tsp::InboundTsp;
 use affinidi_tdk::common::TDKSharedState;
 use affinidi_tdk::common::config::TDKConfig;
 use affinidi_tdk::common::profiles::TDKProfile;
@@ -401,6 +403,11 @@ struct MessagingInner {
     /// [`IdentityWire`], so that removing one listener aborts its drain without
     /// touching another's (see [`quiesce_wire`]).
     tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// The one durable TSP Rev 3 relationship store, shared by every listener's
+    /// ATM so all identities record into and read from the same relationships.
+    /// Hydrated at startup and mirrored into `ProtectedConfig` by the loop; see
+    /// [`crate::tsp_store`].
+    tsp_store: crate::tsp_store::TspStoreHandle,
 }
 
 impl Messaging {
@@ -421,6 +428,7 @@ impl Messaging {
             event_tx: event_tx.clone(),
             pickup_in_flight: std::sync::Mutex::new(std::collections::HashSet::new()),
             tasks: std::sync::Mutex::new(Vec::new()),
+            tsp_store: crate::tsp_store::TspStoreHandle::new(),
         });
 
         let dispatcher = tokio::spawn(dispatch_inbound(service.clone(), event_tx));
@@ -443,6 +451,17 @@ impl Messaging {
         }
 
         messaging
+    }
+
+    /// The durable TSP Rev 3 relationship store shared by every listener.
+    ///
+    /// The single-mutator loop uses it to hydrate the store from
+    /// `ProtectedConfig` at startup ([`crate::tsp_store::TspStoreHandle::hydrate`]),
+    /// to persist it on the dirty signal ([`crate::tsp_store::TspStoreHandle::dirty`]
+    /// / [`crate::tsp_store::TspStoreHandle::snapshot`]), and it is injected into
+    /// each listener's ATM by [`add_listener`].
+    pub fn tsp_store(&self) -> crate::tsp_store::TspStoreHandle {
+        self.inner.tsp_store.clone()
     }
 
     /// Whether a transport is installed for `listener_id`.
@@ -923,8 +942,13 @@ pub async fn add_listener(service: &Messaging, spec: &ListenerSpec) -> Result<()
     for secret in spec.secrets.clone() {
         tdk.secrets_resolver().insert(secret).await;
     }
+    // Inject the shared durable relationship store (TSP Rev 3). Every listener's
+    // ATM wraps the *same* underlying map, so a relationship one identity records
+    // is one every identity — and the loop persisting it — sees. Without this the
+    // ATM falls back to the SDK's in-memory default, which a restart wipes.
     let atm = ATM::new(
         ATMConfig::builder()
+            .with_relationship_store(service.inner.tsp_store.relationship_store())
             .build()
             .map_err(|e| fail(format!("ATM config: {e}")))?,
         Arc::new(tdk),
@@ -999,6 +1023,45 @@ async fn dispatch_inbound(
 ) {
     let mut inbound = service.subscribe();
     while let Some(item) = inbound.next().await {
+        // Rev 3 TSP relationship control (invite / accept / cancel), surfaced by
+        // the SDK's transport adapter with an empty payload. Intercept it before
+        // the protocol match: it carries no Trust Task, so running it through the
+        // TSP mapper below would drop it as a document with no `type` — and, more
+        // importantly, the SDK has *already recorded* it into the relationship
+        // store, which is the step that admits the application messages that
+        // follow (§7.2.2). So the state transition is done by the time it reaches
+        // us; what is left is policy and display, which belong to the loop.
+        //
+        // Answering an invite (this deployment accepts any authenticated sender)
+        // and reflecting the new state in the TSP-relationships pane are the
+        // loop's job — see the runtime handling of the event emitted here. The
+        // sender is the VID the adapter cryptographically authenticated on
+        // unpack, so it is proven, and `introduces` (a §7.2.5 referral) has had
+        // its signature checked by `record_incoming_control` before it reached
+        // this variant.
+        if let InboundKind::RelationshipControl {
+            request,
+            reply_expected,
+            introduces,
+            ..
+        } = &item.kind
+        {
+            tracing::debug!(
+                ?request,
+                peer = item.message.sender.as_deref().unwrap_or("<unknown>"),
+                recipient = %item.message.recipient,
+                reply_expected,
+                introduces = introduces.as_deref().unwrap_or("<none>"),
+                "recorded an inbound TSP relationship control message",
+            );
+            // WS5 (loop/UI, gated on the binary crate): emit an event so the loop
+            // can answer an invite (accept any authenticated sender) and reflect
+            // the state change in the TSP-relationships pane. Recording is already
+            // done by the SDK adapter, so dropping here is correct in the interim —
+            // it loses only the acknowledgement and the display, not the state.
+            continue;
+        }
+
         // Both protocols arrive on this one stream — `DidCommTransport` owns the
         // single mediator socket and surfaces each, tagged. A DIDComm frame's
         // payload is the `Message` JSON (`to_inbound` in the SDK adapter); a TSP
@@ -1063,26 +1126,76 @@ async fn frame_to_message(
             Some((*message, MessagingTransport::DidComm, from))
         }
         InboundFrame::Tsp(packed) => {
-            // `unpack` authenticates the sender VID (resolve + verify), so
-            // `sender` here is proven, not self-asserted — the same guarantee
-            // the live path's `Inbound.message.sender` carries.
-            let (payload, sender) = match atm.tsp().unpack(profile, &packed).await {
+            // Rev 3: use `unpack_message`, not `unpack`, so a control frame is
+            // reported rather than mishandled. `unpack` returns `(payload,
+            // sender)` and cannot say what kind a message is — an invite would hit
+            // the §7.2.2 application-message gate and error, an accept would come
+            // back as opaque bytes the Trust Task mapper drops. This is the same
+            // migration the SDK's live transport adapter made; the pickup path is
+            // OpenVTC's own code and has to make it too.
+            //
+            // `unpack_message` takes raw qb2; a stored frame is qb64 (base64url of
+            // qb2, `-E…` as text), so decode first — exactly what `unpack` did
+            // internally before it read the bytes.
+            let qb2 = match atm.tsp().decode(&packed) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not decode a stored TSP frame — leaving it in the mailbox");
+                    return None;
+                }
+            };
+            let inbound = match atm.tsp().unpack_message(profile, &qb2).await {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(error = %e, "could not unpack a stored TSP frame — leaving it in the mailbox");
                     return None;
                 }
             };
-            // The mediator keys a stored TSP frame on `sha256(packed)`, which is
-            // the id the live path falls back to when the document carries none.
-            let fallback_id = {
-                use sha2::{Digest, Sha256};
-                hex::encode(Sha256::digest(packed.as_bytes()))
-            };
-            let recipient = profile.inner.did.clone();
-            let message =
-                tsp_document_to_message(&payload, Some(&sender), &recipient, &fallback_id)?;
-            Some((message, MessagingTransport::Tsp, Some(sender)))
+            match inbound {
+                // An application message: the sender VID is proven (resolve +
+                // verify on unpack), the same guarantee the live path carries.
+                InboundTsp::Application { payload, sender } => {
+                    // The mediator keys a stored TSP frame on `sha256(packed)`,
+                    // which is the id the live path falls back to when the
+                    // document carries none.
+                    let fallback_id = {
+                        use sha2::{Digest, Sha256};
+                        hex::encode(Sha256::digest(packed.as_bytes()))
+                    };
+                    let recipient = profile.inner.did.clone();
+                    let message =
+                        tsp_document_to_message(&payload, Some(&sender), &recipient, &fallback_id)?;
+                    Some((message, MessagingTransport::Tsp, Some(sender)))
+                }
+                // A relationship control message. The live path is recorded by the
+                // SDK adapter; a frame picked up from storage was never through
+                // it, so record it here — the step that admits the application
+                // messages that follow (§7.2.2). Answering and display are the
+                // loop's job (WS5); dropping the frame here is correct in the
+                // interim, as it is on the live path.
+                InboundTsp::Control {
+                    control, sender, ..
+                } => {
+                    if let Err(e) = atm
+                        .tsp()
+                        .record_incoming_control(profile, &sender, &control)
+                        .await
+                    {
+                        tracing::debug!(error = %e, %sender, "stored TSP control message not recorded — a protocol rule refused it");
+                    }
+                    None
+                }
+                // §9.4 padding, and an upper-layer control message this transport
+                // has no layer to route to: discarded, as on the live path.
+                InboundTsp::Padding { .. } | InboundTsp::UpperLayerControl { .. } => None,
+                // `InboundTsp` is `#[non_exhaustive]`: a kind added later is left
+                // stored rather than mis-delivered, the same conservative handling
+                // an unsupported protocol gets below.
+                other => {
+                    debug!(kind = ?std::mem::discriminant(&other), "stored TSP frame of an unhandled kind — left stored");
+                    None
+                }
+            }
         }
         // `InboundFrame` is `#[non_exhaustive]`: a protocol OpenVTC does not
         // speak. Left in the mailbox rather than acked — the same handling the
@@ -1984,6 +2097,15 @@ pub async fn start_service(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<Messaging, MessagingError> {
     let service = start_empty_service(event_tx, shutdown);
+    // Hydrate the durable TSP Rev 3 relationship store before any listener
+    // connects, so the SDK sees the relationships that survived the last run and
+    // does not re-invite a peer it is already bidirectional with — or, worse, drop
+    // that peer's traffic until it is re-formed. The loop persists it back on the
+    // store's dirty signal.
+    service
+        .tsp_store()
+        .hydrate(&config.private.tsp_relationships)
+        .await;
     install_listeners(&service, config, tdk).await;
     Ok(service)
 }
@@ -2548,8 +2670,8 @@ mod tsp_inbound_tests {
     /// A TSP frame as the transport hands it over: the payload is the bare Trust
     /// Task document, and `sender` is the VID `unpack` authenticated.
     fn tsp_frame(payload: serde_json::Value, sender: Option<&str>) -> Inbound {
-        Inbound {
-            message: ReceivedMessage {
+        Inbound::new(
+            ReceivedMessage {
                 id: "frame-hash".to_string(),
                 sender: sender.map(str::to_string),
                 recipient: "did:webvh:example:alice".to_string(),
@@ -2558,9 +2680,9 @@ mod tsp_inbound_tests {
                 verified: true,
                 encrypted: true,
             },
-            thread_id: None,
-            ack: InboundAck("frame-hash".to_string()),
-        }
+            None,
+            InboundAck("frame-hash".to_string()),
+        )
     }
 
     fn verdict_document(thread_id: &str) -> serde_json::Value {
