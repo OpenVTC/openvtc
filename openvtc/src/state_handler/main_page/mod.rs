@@ -1468,6 +1468,7 @@ mod tests {
             vec![CommunityRecord {
                 member_vmc: None,
                 decision: None,
+                relationship_identifier_default: None,
                 extra: serde_json::Map::new(),
                 vtc_did: vtc_did.to_string(),
                 display_name: display_name.map(str::to_owned),

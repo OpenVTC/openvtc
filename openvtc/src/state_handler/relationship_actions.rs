@@ -18,6 +18,7 @@ use openvtc_core::didcomm::Messaging;
 use openvtc_core::{
     config::{
         Config, KeyBackend, KeyTypes,
+        account::RelationshipIdentifierDefault,
         secured_config::{KeyInfoConfig, KeySourceMaterial},
     },
     logs::LogFamily,
@@ -1048,7 +1049,7 @@ fn handle_open_detail(state: &mut State, index: usize) {
     };
 }
 
-fn handle_start_new_request(state: &mut State) {
+fn handle_start_new_request(state: &mut State, generate_r_did: bool) {
     state.main_page.content_panel.relationships.mode = RelationshipsMode::NewRequest {
         did_input: String::new(),
         alias_input: String::new(),
@@ -1058,9 +1059,38 @@ fn handle_start_new_request(state: &mut State) {
         // reusing it across contacts makes correlation a lookup rather than an
         // inference. Opting out stays available on field 3, labelled with what
         // it costs.
-        generate_r_did: true,
+        //
+        // A community that declares `relationshipIdentifierDefault: attributed`
+        // (a public community that wants a legible graph) flips this to `false`
+        // — see [`default_generate_r_did`]. The user can still toggle it.
+        generate_r_did,
         active_field: 0,
     };
+}
+
+/// The mint default for a new relationship, seeded from the working community's
+/// declared `relationshipIdentifierDefault` (issue #241).
+///
+/// `Attributed` ⇒ default to the persona DID (`false`); `Pairwise`, undeclared,
+/// or no working community ⇒ pairwise (`true`), the codebase-wide default. It is
+/// only a *default* — the form's field-3 toggle overrides it either way. The
+/// working community is the selected one, falling back to the account's default
+/// working membership; in State-A there is none, so pairwise stands.
+fn default_generate_r_did(config: &Config, state: &State) -> bool {
+    let membership = state
+        .selected_community
+        .clone()
+        .or_else(|| config.account.default_working_membership());
+    let Some((vtc, persona)) = membership else {
+        return true;
+    };
+    !matches!(
+        config
+            .account
+            .membership(&vtc, persona)
+            .and_then(|c| c.relationship_identifier_default),
+        Some(RelationshipIdentifierDefault::Attributed)
+    )
 }
 
 fn handle_cancel_or_back(state: &mut State) {
@@ -1461,7 +1491,9 @@ pub(crate) async fn dispatch(
             state.main_page.content_panel.relationships.selected_index = index;
         }
         RelationshipAction::OpenDetail(index) => handle_open_detail(state, index),
-        RelationshipAction::StartNewRequest => handle_start_new_request(state),
+        RelationshipAction::StartNewRequest => {
+            handle_start_new_request(state, default_generate_r_did(config, state))
+        }
         RelationshipAction::CancelNewRequest | RelationshipAction::Back => {
             handle_cancel_or_back(state)
         }
@@ -1674,6 +1706,65 @@ mod tests {
                 }
             ),
             "the effect must record that the pairwise DID was used"
+        );
+    }
+
+    /// #241 — the new-relationship mint default follows the working community's
+    /// declared `relationshipIdentifierDefault`: `attributed` opts into the
+    /// persona DID, everything else (pairwise, undeclared, or no working
+    /// community at all) keeps the pairwise default.
+    #[test]
+    fn mint_default_follows_the_working_communitys_declaration() {
+        use openvtc_core::config::account::{
+            CommunityRecord, CommunityStatus, PersonaId, RelationshipIdentifierDefault,
+        };
+
+        let vtc = "did:webvh:example:vtc";
+        let persona = PersonaId::new();
+        let seed = |declared: Option<RelationshipIdentifierDefault>| {
+            let mut config = test_config();
+            let mut record = CommunityRecord::new_pending(
+                vtc.to_string(),
+                None,
+                format!("openvtc/{vtc}"),
+                persona,
+                Uuid::new_v4(),
+                Utc::now(),
+            );
+            record.status = CommunityStatus::Active;
+            record.relationship_identifier_default = declared;
+            config.account.add_membership(record);
+            let state = State {
+                selected_community: Some((vtc.to_string(), persona)),
+                ..State::default()
+            };
+            (config, state)
+        };
+
+        let (config, state) = seed(Some(RelationshipIdentifierDefault::Attributed));
+        assert!(
+            !default_generate_r_did(&config, &state),
+            "an attributed community defaults to the persona DID"
+        );
+
+        let (config, state) = seed(Some(RelationshipIdentifierDefault::Pairwise));
+        assert!(
+            default_generate_r_did(&config, &state),
+            "a pairwise community keeps the pairwise default"
+        );
+
+        let (config, state) = seed(None);
+        assert!(
+            default_generate_r_did(&config, &state),
+            "an undeclared community keeps the pairwise default"
+        );
+
+        // State-A: no working community at all → pairwise.
+        let config = test_config();
+        let state = State::default();
+        assert!(
+            default_generate_r_did(&config, &state),
+            "with no working community, pairwise stands"
         );
     }
 
@@ -2065,7 +2156,7 @@ mod tests {
     #[test]
     fn start_new_request_and_cancel_back() {
         let mut state = State::default();
-        handle_start_new_request(&mut state);
+        handle_start_new_request(&mut state, true);
         // Pairwise is the default (#241) — a new request mints an R-DID unless
         // the operator deliberately turns it off.
         assert!(matches!(
@@ -2142,7 +2233,7 @@ mod tests {
         ];
         for (field, (did, alias, reason)) in cases {
             let mut state = State::default();
-            handle_start_new_request(&mut state);
+            handle_start_new_request(&mut state, true);
             let value = match field {
                 0 => "the-did",
                 1 => "the-alias",
@@ -2174,7 +2265,7 @@ mod tests {
     #[test]
     fn toggle_r_did_flips_flag() {
         let mut state = State::default();
-        handle_start_new_request(&mut state);
+        handle_start_new_request(&mut state, true);
         // Starts pairwise (#241), so the first toggle is the opt-out.
         handle_toggle_r_did(&mut state);
         assert!(matches!(

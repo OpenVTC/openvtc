@@ -14,12 +14,13 @@ use std::sync::Arc;
 use affinidi_tdk::{TDK, didcomm::Message};
 use dtg_credentials::DTGCredential;
 use openvtc_core::didcomm::Messaging;
+use openvtc_core::join::COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE;
 use openvtc_core::messaging::{
     SeenMessages, check_message_age, check_task_capacity, create_finalize_message,
-    handle_credential_issue, handle_join_problem_report, handle_join_status_response,
-    handle_join_submit_receipt, handle_join_trust_task_error, handle_join_verdict,
-    handle_member_removal_notice, is_trust_task_error_type, require_thid, validate_did,
-    verify_vrc_proof, vet_vrc_issued,
+    handle_community_profile_show_response, handle_credential_issue, handle_join_problem_report,
+    handle_join_status_response, handle_join_submit_receipt, handle_join_trust_task_error,
+    handle_join_verdict, handle_member_removal_notice, is_trust_task_error_type, require_thid,
+    validate_did, verify_vrc_proof, vet_vrc_issued,
 };
 use openvtc_core::personhood::{
     PERSONHOOD_ASSERT_RESPONSE_TYPE, PERSONHOOD_CHALLENGE_RESPONSE_TYPE,
@@ -454,6 +455,16 @@ pub async fn process_inbound_message(
             inactivated.push((from_did.to_string(), persona));
         }
         return Ok(outcome.changed);
+    }
+
+    // VTC community-profile response: carries the community's declared
+    // `relationshipIdentifierDefault`, which seeds the pairwise-vs-attributed
+    // default of the new-relationship form (issue #241). Informational — it
+    // updates stored community metadata and never inactivates a session.
+    if message.typ == COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE {
+        let changed =
+            handle_community_profile_show_response(&mut config.account, message, &from_did);
+        return Ok(changed);
     }
 
     // VTC personhood challenge reply: carries the nonce an assertion must be
