@@ -3674,6 +3674,7 @@ mod key_handler_tests {
             has_membership_credential: false,
             has_role_credential: false,
             accent: None,
+            decision: None,
         }
     }
 

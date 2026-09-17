@@ -253,6 +253,25 @@ pub fn render(
                     if c.has_role_credential { "✓" } else { "—" },
                 ),
             ));
+            // Why a Rejected/Removed membership ended, as the community stated it
+            // (issue #240). The reason always renders — "no reason given" when
+            // none travelled — so a terminal row never silently omits its cause;
+            // authority, code, time and disposition appear only when carried.
+            if let Some(d) = &c.decision {
+                lines.push(kv("Reason:", d.reason.clone()));
+                if let Some(by) = &d.decided_by {
+                    lines.push(kv("Decided by:", by.clone()));
+                }
+                if let Some(at) = &d.decided_at {
+                    lines.push(kv("Decided at:", at.clone()));
+                }
+                if let Some(code) = &d.code {
+                    lines.push(kv("Code:", code.clone()));
+                }
+                if let Some(disp) = &d.disposition {
+                    lines.push(kv("Record:", disp.clone()));
+                }
+            }
         }
     }
 
@@ -682,7 +701,7 @@ fn render_empty(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod key_hint_tests {
     use super::*;
-    use crate::state_handler::main_page::content::CommunitySummary;
+    use crate::state_handler::main_page::content::{CommunitySummary, DecisionSummary};
     use std::sync::Arc;
 
     fn row(is_active: bool, is_inactive: bool, is_pending: bool) -> CommunitySummary {
@@ -710,6 +729,7 @@ mod key_hint_tests {
             has_membership_credential: false,
             has_role_credential: false,
             accent: None,
+            decision: None,
         }
     }
 
@@ -906,6 +926,55 @@ mod key_hint_tests {
             !rendered.iter().any(|l| l.contains("5CY1-GZEE")),
             "a dead code must not still read as answerable: {rendered:#?}"
         );
+    }
+
+    // ─── decision evidence (issue #240) ─────────────────────────────────
+
+    /// A rejected/removed row spells out why it ended: authority, reason and
+    /// timestamp all reach the expanded detail block.
+    #[test]
+    fn a_terminal_row_shows_its_decision_evidence() {
+        let rejected = CommunitySummary {
+            decision: Some(DecisionSummary {
+                code: Some("adminRemoved".to_string()),
+                reason: "code of conduct".to_string(),
+                decided_by: Some("did:key:z6MkAdmin".to_string()),
+                decided_at: Some("2026-08-23 09:14 UTC".to_string()),
+                disposition: Some("tombstone".to_string()),
+            }),
+            ..row(false, true, false)
+        };
+        let rendered = text(&render_for_test(&state_with(Some(rejected), None)));
+
+        assert!(rendered.contains("Reason:"), "{rendered}");
+        assert!(rendered.contains("code of conduct"), "{rendered}");
+        assert!(rendered.contains("Decided by:"), "{rendered}");
+        assert!(rendered.contains("did:key:z6MkAdmin"), "{rendered}");
+        assert!(rendered.contains("2026-08-23 09:14 UTC"), "{rendered}");
+        assert!(rendered.contains("tombstone"), "{rendered}");
+    }
+
+    /// When the community gave no reason, the row says so explicitly — the
+    /// absence is the answer, not a missing line the reader has to notice.
+    #[test]
+    fn a_terminal_row_with_no_evidence_says_no_reason_given() {
+        let rejected = CommunitySummary {
+            decision: Some(DecisionSummary {
+                code: None,
+                reason: "no reason given".to_string(),
+                decided_by: None,
+                decided_at: None,
+                disposition: None,
+            }),
+            ..row(false, true, false)
+        };
+        let rendered = text(&render_for_test(&state_with(Some(rejected), None)));
+
+        assert!(rendered.contains("Reason:"), "{rendered}");
+        assert!(rendered.contains("no reason given"), "{rendered}");
+        // Nothing else was carried, so no authority/code/disposition rows appear.
+        assert!(!rendered.contains("Decided by:"), "{rendered}");
+        assert!(!rendered.contains("Code:"), "{rendered}");
     }
 
     // ─── community contexts ─────────────────────────────────────────────

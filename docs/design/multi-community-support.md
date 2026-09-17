@@ -262,6 +262,14 @@ read-only, D14):
   raise the actions-required indicator (R-C-3) until acknowledged.
 - **R-S-3** Entering any non-Active state **deregisters** the community's
   session from the multi-session manager (D15).
+- **R-S-4** A `Rejected` or `Removed` record persists the community's own
+  **decision evidence** (code, reason, deciding authority, decision time, and —
+  for a removal — the record disposition), surfaced in the expanded detail
+  block. A rejection carries what its verdict / problem-report / trust-task-error
+  / status-poll gave; a removal reads `vtc/members/removal-notice/0.1`. When the
+  community gave no reason the row reads "no reason given" — an explicit absence,
+  not a blank. The deciding authority is only independently attestable on a
+  removal notice; a rejection's is not, and is not shown as if it were.
 
 ### 5.7 Persona lifecycle & referential integrity
 - **R-P-1** A persona cannot be deleted while any community references it

@@ -18,7 +18,8 @@ use openvtc_core::messaging::{
     SeenMessages, check_message_age, check_task_capacity, create_finalize_message,
     handle_credential_issue, handle_join_problem_report, handle_join_status_response,
     handle_join_submit_receipt, handle_join_trust_task_error, handle_join_verdict,
-    is_trust_task_error_type, require_thid, validate_did, verify_vrc_proof, vet_vrc_issued,
+    handle_member_removal_notice, is_trust_task_error_type, require_thid, validate_did,
+    verify_vrc_proof, vet_vrc_issued,
 };
 use openvtc_core::personhood::{
     PERSONHOOD_ASSERT_RESPONSE_TYPE, PERSONHOOD_CHALLENGE_RESPONSE_TYPE,
@@ -38,7 +39,9 @@ use vta_sdk::protocols::join_requests::{
     JOIN_REQUEST_STATUS_RESPONSE_TYPE, JOIN_REQUEST_SUBMIT_RECEIPT_TYPE,
     JOIN_REQUEST_SUBMIT_RESPONSE_TYPE,
 };
-use vta_sdk::protocols::members::{MEMBER_REQUEST_VMC_TYPE, MEMBER_VMC_RESPONSE_TYPE};
+use vta_sdk::protocols::members::{
+    MEMBER_REMOVAL_NOTICE_TYPE, MEMBER_REQUEST_VMC_TYPE, MEMBER_VMC_RESPONSE_TYPE,
+};
 
 /// Maximum allowed message body size in bytes (1 MB).
 const MAX_MESSAGE_BODY_SIZE: usize = 1_048_576;
@@ -543,6 +546,19 @@ pub async fn process_inbound_message(
             ),
         }
         return Ok(false);
+    }
+
+    // VTC → member removal notice (`vtc/members/removal-notice/0.1`): the
+    // community telling a member it removed them (issue #240). Unsolicited — not
+    // threaded on anything we sent — and the first thing that can move a
+    // membership into `Removed`. A removal inactivates the community, so report
+    // its VTC DID up for the loop to deregister the session (R-S-3).
+    if message.typ == MEMBER_REMOVAL_NOTICE_TYPE {
+        let outcome = handle_member_removal_notice(&mut config.account, message, &from_did);
+        if let Some(persona) = outcome.inactivated {
+            inactivated.push((from_did.to_string(), persona));
+        }
+        return Ok(outcome.changed);
     }
 
     let msg_type = match MessageType::try_from(message) {
