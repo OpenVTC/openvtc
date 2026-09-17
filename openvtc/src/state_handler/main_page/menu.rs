@@ -43,6 +43,11 @@ pub enum MainMenu {
     Identity,
     Settings,
     Vta,
+    /// TSP Rev 3 relationships: the §7.2.2 relationships this account has formed
+    /// with community VTCs (and other TSP peers), and their state. Distinct from
+    /// [`MainMenu::Relationships`], which is the DIDComm pairwise model — a
+    /// different keyspace, lifecycle and wire.
+    TspRelationships,
     Logs,
     Help,
     Quit,
@@ -59,6 +64,7 @@ impl Display for MainMenu {
             MainMenu::Identity => write!(f, "My Identity"),
             MainMenu::Settings => write!(f, "Settings"),
             MainMenu::Vta => write!(f, "VTA Service"),
+            MainMenu::TspRelationships => write!(f, "TSP Relationships"),
             MainMenu::Logs => write!(f, "Logs"),
             MainMenu::Help => write!(f, "Help / Status"),
             MainMenu::Quit => write!(f, "Quit"),
@@ -78,7 +84,8 @@ impl MainMenu {
             MainMenu::Identity => MainMenu::Vetting,
             MainMenu::Settings => MainMenu::Identity,
             MainMenu::Vta => MainMenu::Settings,
-            MainMenu::Logs => MainMenu::Vta,
+            MainMenu::TspRelationships => MainMenu::Vta,
+            MainMenu::Logs => MainMenu::TspRelationships,
             MainMenu::Help => MainMenu::Logs,
             MainMenu::Quit => MainMenu::Help,
         }
@@ -94,7 +101,8 @@ impl MainMenu {
             MainMenu::Vetting => MainMenu::Identity,
             MainMenu::Identity => MainMenu::Settings,
             MainMenu::Settings => MainMenu::Vta,
-            MainMenu::Vta => MainMenu::Logs,
+            MainMenu::Vta => MainMenu::TspRelationships,
+            MainMenu::TspRelationships => MainMenu::Logs,
             MainMenu::Logs => MainMenu::Help,
             MainMenu::Help => MainMenu::Quit,
             MainMenu::Quit => MainMenu::Communities,

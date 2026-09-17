@@ -127,7 +127,18 @@ pub async fn run(
     // `openvtc health --json > report.json` piping cleanly while still showing
     // the operator what is being waited on — and progress *is* wanted under
     // `--json`, since that is the run most likely to be watched rather than read.
-    let report = build_report_with_progress(&subjects, &|step| trace(&step), policy).await;
+    let mut report = build_report_with_progress(&subjects, &|step| trace(&step), policy).await;
+
+    // TSP Rev 3 relationship findings. A join can go out to a VTC that resolves,
+    // advertises a healthy transport and shares a mediator — and still get no
+    // reply — because §7.2.2 has the VTC drop a Trust Task from a VID it holds no
+    // relationship with. That is exactly the "clean run, nothing came back"
+    // question this command exists for, so it is a finding worth naming.
+    if let Some(config) = config {
+        for note in tsp_relationship_notes(config).await {
+            report.notes.push(note);
+        }
+    }
 
     if as_json {
         // Additive: the existing report keys stay where they are, with the
@@ -157,6 +168,52 @@ pub async fn run(
     } else {
         std::process::exit(1);
     }
+}
+
+/// One finding per joined community describing the state of the TSP Rev 3
+/// relationship the Trust Task path depends on.
+///
+/// Read from the persisted store (`config.private.tsp_relationships`) via a
+/// throwaway [`TspStoreHandle`] hydrated from it — the `health` command does not
+/// run the messaging loop, so the live in-memory store is empty, but the durable
+/// mirror carries what the last run recorded. States are read through the SDK's
+/// own decoder rather than by re-implementing its key layout.
+///
+/// [`TspStoreHandle`]: openvtc_core::tsp_store::TspStoreHandle
+async fn tsp_relationship_notes(config: &Config) -> Vec<String> {
+    use affinidi_tdk::messaging::protocols::tsp::RelationshipState;
+
+    let store = openvtc_core::tsp_store::TspStoreHandle::new();
+    store.hydrate(&config.private.tsp_relationships).await;
+
+    let mut notes = Vec::new();
+    for community in config.account.memberships() {
+        let vtc_did = community.vtc_did.to_string();
+        let Some(persona) = config.account.personas.get(&community.persona_ref) else {
+            continue;
+        };
+        let label = community
+            .display_name
+            .clone()
+            .unwrap_or_else(|| short_tail(&vtc_did));
+        match store.state_for(&persona.did, &vtc_did).await {
+            RelationshipState::Bidirectional => {
+                notes.push(format!("TSP relationship with {label} is established."));
+            }
+            RelationshipState::None => {
+                notes.push(format!(
+                    "TSP: no relationship with {label} — a Trust Task to it is dropped by the \
+                     §7.2.2 gate until one is formed (it forms on the next send)."
+                ));
+            }
+            other => {
+                notes.push(format!(
+                    "TSP relationship with {label} is {other:?} — not yet complete."
+                ));
+            }
+        }
+    }
+    notes
 }
 
 /// Where this profile's secrets live and whether they are actually there.
