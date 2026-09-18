@@ -13,10 +13,12 @@ use crate::{
     state_handler::{
         actions::Action,
         join::{JoinPage, JoinState},
+        main_page::content::CreatePersonaState,
         state::State,
     },
     ui::{
         component::{Component, ComponentRender},
+        pages::create_persona_overlay,
         pages::join_flow::{
             context_choice::ContextChoice, identity_choice::IdentityChoice,
             invitation_choice::InvitationChoice, join_progress::JoinProgress,
@@ -68,12 +70,22 @@ pub struct JoinFlow {
 #[derive(Clone)]
 pub struct Props {
     pub state: JoinState,
+    /// The create-persona overlay, while one is open.
+    ///
+    /// Page-level state shared with the main page rather than a copy of its
+    /// own: the join needs a persona at exactly the moment it tells you so, and
+    /// sending you to My Identity to make one meant leaving the flow and
+    /// entering the community's DID a second time on the way back. The same
+    /// overlay, the same phases, the same keys — floated over whichever page
+    /// asked for it.
+    pub create_persona: Option<CreatePersonaState>,
 }
 
 impl From<&State> for Props {
     fn from(state: &State) -> Self {
         Props {
             state: state.join.clone(),
+            create_persona: state.main_page.create_persona.clone(),
         }
     }
 }
@@ -174,6 +186,13 @@ impl Component for JoinFlow {
         if key.kind != KeyEventKind::Press {
             return;
         }
+        // An open overlay takes the keys, as it does on the main page: it is
+        // floating over this page, so the page beneath it must not also act on
+        // what is typed into it.
+        if let Some(overlay) = self.props.create_persona.as_ref() {
+            create_persona_overlay::handle_key(overlay, key, &self.action_tx);
+            return;
+        }
         match self.props.state.page {
             JoinPage::EnterDid => VtcEnterDid::handle_key_event(self, key),
             JoinPage::InvitationChoice => InvitationChoice::handle_key_event(self, key),
@@ -185,7 +204,7 @@ impl Component for JoinFlow {
     }
 
     fn handle_paste_event(&mut self, text: &str) {
-        if self.props.state.processing {
+        if self.props.state.processing || self.props.create_persona.is_some() {
             return;
         }
         let trimmed = text.trim();
@@ -226,6 +245,9 @@ impl ComponentRender<()> for JoinFlow {
             JoinPage::ContextChoice => self.context_choice.render(&self.props.state, frame),
             JoinPage::Progress => self.join_progress.render(&self.props.state, frame),
             JoinPage::Vetting => self.vetting.render(&self.props.state, frame),
+        }
+        if let Some(overlay) = self.props.create_persona.as_ref() {
+            create_persona_overlay::render(frame, overlay);
         }
     }
 }
