@@ -2557,6 +2557,19 @@ impl MainPage {
             (VettingTab::Applications, KeyCode::Char('m')) => V::RefreshRequirements,
             (VettingTab::Applications, KeyCode::Char('v')) => V::FindVetters,
             (VettingTab::Applications, KeyCode::Char('c') | KeyCode::Enter) => V::ReviewCard,
+            // The join this application was made for. It leaves the panel
+            // rather than sending an action, because the join flow owns the
+            // screen — and it carries the community, so the DID an application
+            // already names is never asked for again.
+            (VettingTab::Applications, KeyCode::Char('j')) => {
+                let Some(application) = vetting.applications.get(selected) else {
+                    return false;
+                };
+                let _ = self
+                    .action_tx
+                    .send(Action::StartJoinFor(application.community.clone()));
+                return true;
+            }
             // Anywhere on the desk: the profile the communities hold, and
             // asking one to reissue a grant that has lapsed.
             (VettingTab::Desk, KeyCode::Char('p')) => V::EditProfile,
@@ -3768,6 +3781,56 @@ mod key_handler_tests {
         let (mut page, mut rx) = page_for(MainMenu::Vetting, |_| {});
         page.handle_key_event(press(KeyCode::Tab));
         assert!(matches!(vetting_action(&mut rx), V::SwitchTab));
+    }
+
+    /// `j` on an application is the join that application was made for. It
+    /// carries the community, because being told "go and get vetted" and then
+    /// having to find the community's DID again is what made applying feel like
+    /// abandoning the join.
+    #[test]
+    fn j_on_an_application_joins_the_community_it_names() {
+        use crate::state_handler::main_page::content::{ApplicationRow, VettingTab};
+
+        let row = |community: &str| ApplicationRow {
+            id: "a1".into(),
+            community: community.into(),
+            community_name: None,
+            accent: None,
+            next_step: None,
+            join_did: "did:key:zA".into(),
+            requirements: None,
+            progress: None,
+            satisfied: false,
+            identity: Vec::new(),
+            requests: Vec::new(),
+            statements: 0,
+        };
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
+            let vetting = &mut s.main_page.content_panel.vetting;
+            vetting.applications = vec![row("did:web:kernel"), row("did:web:other")].into();
+            vetting.selected = 1;
+        });
+        page.handle_key_event(press(KeyCode::Char('j')));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::StartJoinFor(did)) if did == "did:web:other"
+        ));
+
+        // With no application under the cursor there is no join to take up, so
+        // the key does nothing rather than starting one for a community it
+        // would have to invent.
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |_| {});
+        page.handle_key_event(press(KeyCode::Char('j')));
+        assert!(rx.try_recv().is_err());
+
+        // The desk is the other side of vetting; `j` is not its key.
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
+            let vetting = &mut s.main_page.content_panel.vetting;
+            vetting.applications = vec![row("did:web:kernel")].into();
+            vetting.tab = VettingTab::Desk;
+        });
+        page.handle_key_event(press(KeyCode::Char('j')));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

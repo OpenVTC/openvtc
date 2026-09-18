@@ -62,6 +62,14 @@ pub(crate) enum JoinEntry {
     /// loop reads inbound messages: only then can the flow ask a community for
     /// its requirements and hand the wait for the answer to that loop.
     Fresh { hears_replies: bool },
+    /// For a community already chosen elsewhere — `j` on a vetting application,
+    /// which is the join that application was made for. The DID entry page is
+    /// skipped: an application names its community, and making someone find and
+    /// retype that DID is what turned "go and get vetted" into a dead end.
+    ForCommunity {
+        vtc_did: String,
+        hears_replies: bool,
+    },
     /// Back from waiting for a community's requirements.
     Resume {
         vtc_did: String,
@@ -527,7 +535,8 @@ fn apply_for_vetting(
     };
     if let Some(app) = &known.application {
         let message = format!(
-            "Your application to {name}, as {}. Next: {}",
+            "Your application to {name}, as {}. Next: {}. Press j here when you are ready to \
+             join — the join picks up where you left it.",
             app.persona_label, app.next_step
         );
         vetting_actions::focus_application(state, config, &app.id, message);
@@ -568,7 +577,8 @@ fn apply_for_vetting(
         config,
         &id,
         format!(
-            "Application to {name} started as {}. Next: {next}",
+            "Application to {name} started as {}. Next: {next}. The join to {name} is not lost — \
+             press j here to take it up again, without finding that DID a second time.",
             persona.label
         ),
     );
@@ -628,35 +638,61 @@ impl StateHandler {
         state.join.has_invitation = state.invitation_credential.is_some();
         state.active_page = ActivePage::Join;
         let hears_replies = match &entry {
-            JoinEntry::Fresh { hears_replies } => *hears_replies,
+            JoinEntry::Fresh { hears_replies } | JoinEntry::ForCommunity { hears_replies, .. } => {
+                *hears_replies
+            }
             JoinEntry::Resume { .. } => true,
         };
-        if let JoinEntry::Resume { vtc_did, outcome } = entry {
-            // `reset` above cleared what the asking pass collected, and the
-            // routes cannot be drawn without it.
-            ensure_invitations(state, admin_vta, &vtc_did).await;
-            match outcome {
-                RequirementsOutcome::Unanswered(reason) => {
-                    show_unknown(state, config, &vtc_did, reason, true);
+        match entry {
+            JoinEntry::Fresh { .. } => {}
+            // The community is already chosen, so the flow opens where the DID
+            // entry page would have led.
+            JoinEntry::ForCommunity { vtc_did, .. } => {
+                if let Some(exit) = self
+                    .enter_community(
+                        vtc_did,
+                        hears_replies,
+                        interrupt_rx,
+                        state,
+                        tdk,
+                        config,
+                        admin_vta,
+                        profile,
+                        messaging,
+                    )
+                    .await
+                {
+                    let _ = self.state_tx.send(state.clone());
+                    return Ok(exit);
                 }
-                outcome => {
-                    let shown = matches!(outcome, RequirementsOutcome::Learned)
-                        && show_vetting(state, config, &vtc_did);
-                    if !shown
-                        && let Some(interrupted) = self
-                            .continue_join(
-                                vtc_did,
-                                interrupt_rx,
-                                state,
-                                tdk,
-                                config,
-                                admin_vta,
-                                profile,
-                                messaging,
-                            )
-                            .await
-                    {
-                        return Ok(JoinExit::Exit(interrupted));
+            }
+            JoinEntry::Resume { vtc_did, outcome } => {
+                // `reset` above cleared what the asking pass collected, and the
+                // routes cannot be drawn without it.
+                ensure_invitations(state, admin_vta, &vtc_did).await;
+                match outcome {
+                    RequirementsOutcome::Unanswered(reason) => {
+                        show_unknown(state, config, &vtc_did, reason, true);
+                    }
+                    outcome => {
+                        let shown = matches!(outcome, RequirementsOutcome::Learned)
+                            && show_vetting(state, config, &vtc_did);
+                        if !shown
+                            && let Some(interrupted) = self
+                                .continue_join(
+                                    vtc_did,
+                                    interrupt_rx,
+                                    state,
+                                    tdk,
+                                    config,
+                                    admin_vta,
+                                    profile,
+                                    messaging,
+                                )
+                                .await
+                        {
+                            return Ok(JoinExit::Exit(interrupted));
+                        }
                     }
                 }
             }
@@ -766,70 +802,22 @@ impl StateHandler {
                             } else {
                                 vtc_did
                             };
-                            // The invitations before the routes: whether presenting
-                            // one is a way in to this community is a fact about
-                            // this account, and the vetting page cannot say what
-                            // the options are without it.
-                            ensure_invitations(state, admin_vta, &vtc_did).await;
-                            // Peer identity vetting: a community that vets says what
-                            // it requires before anything about the applicant is sent
-                            // (vetting-process.md §6.1). What the book already knows
-                            // decides at once. Otherwise the community is asked, and
-                            // the wait happens in the caller's loop — the one that
-                            // hears the answer — which enters this flow again.
-                            let knowledge = match config.private.vetting.knowledge(&vtc_did) {
-                                Knowledge::Vetting(_) => Some(true),
-                                Knowledge::NoVetting => Some(false),
-                                Knowledge::Unknown => None,
-                            };
-                            match knowledge {
-                                Some(true) => {
-                                    show_vetting(state, config, &vtc_did);
-                                }
-                                None if hears_replies => {
-                                    if let Ok(awaiting) =
-                                        ask_requirements(state, config, tdk, messaging, &vtc_did)
-                                            .await
-                                    {
-                                        let _ = self.state_tx.send(state.clone());
-                                        return Ok(JoinExit::AwaitRequirements(awaiting));
-                                    }
-                                }
-                                None => {
-                                    // Nothing is known and this loop cannot hear an
-                                    // answer, so the community is not asked. Say so
-                                    // rather than sending an open request on the
-                                    // quiet: a community that vets would refer that
-                                    // request to its moderators, and the applicant
-                                    // would never learn there was a way in they
-                                    // could have taken.
-                                    show_unknown(
-                                        state,
-                                        config,
-                                        &vtc_did,
-                                        "OpenVTC cannot hear its answer until you belong to a \
-                                         community, so it was not asked — this is your first join"
-                                            .to_string(),
-                                        false,
-                                    );
-                                }
-                                Some(false) => {
-                                    if let Some(interrupted) = self
-                                        .continue_join(
-                                            vtc_did,
-                                            interrupt_rx,
-                                            state,
-                                            tdk,
-                                            config,
-                                            admin_vta,
-                                            profile,
-                                            messaging,
-                                        )
-                                        .await
-                                    {
-                                        return Ok(JoinExit::Exit(interrupted));
-                                    }
-                                }
+                            if let Some(exit) = self
+                                .enter_community(
+                                    vtc_did,
+                                    hears_replies,
+                                    interrupt_rx,
+                                    state,
+                                    tdk,
+                                    config,
+                                    admin_vta,
+                                    profile,
+                                    messaging,
+                                )
+                                .await
+                            {
+                                let _ = self.state_tx.send(state.clone());
+                                return Ok(exit);
                             }
                         }
                         Action::JoinIdentitySelect(i) => {
@@ -1177,6 +1165,85 @@ impl StateHandler {
                 }
             }
             let _ = self.state_tx.send(state.clone());
+        }
+    }
+
+    /// Enter `vtc_did` into the flow: learn what it asks of the people who join,
+    /// and put up the page that answers it.
+    ///
+    /// `Some` means leave the flow with that exit; `None` means a page is now up
+    /// and the loop carries on. Shared by the DID entry page and by a join
+    /// started for a community already chosen (a vetting application's), so both
+    /// get the same discovery rather than the entry page's alone.
+    #[allow(clippy::too_many_arguments)]
+    async fn enter_community(
+        &self,
+        vtc_did: String,
+        hears_replies: bool,
+        interrupt_rx: &mut broadcast::Receiver<Interrupted>,
+        state: &mut State,
+        tdk: &TDK,
+        config: &mut Config,
+        admin_vta: Option<&VtaClient>,
+        profile: &str,
+        messaging: Option<&Messaging>,
+    ) -> Option<JoinExit> {
+        // The invitations before the routes: whether presenting one is a way in
+        // to this community is a fact about this account, and the vetting page
+        // cannot say what the options are without it.
+        ensure_invitations(state, admin_vta, &vtc_did).await;
+        // Peer identity vetting: a community that vets says what it requires
+        // before anything about the applicant is sent (vetting-process.md §6.1).
+        // What the book already knows decides at once. Otherwise the community
+        // is asked, and the wait happens in the caller's loop — the one that
+        // hears the answer — which enters this flow again.
+        let knowledge = match config.private.vetting.knowledge(&vtc_did) {
+            Knowledge::Vetting(_) => Some(true),
+            Knowledge::NoVetting => Some(false),
+            Knowledge::Unknown => None,
+        };
+        match knowledge {
+            Some(true) => {
+                show_vetting(state, config, &vtc_did);
+                None
+            }
+            None if hears_replies => {
+                match ask_requirements(state, config, tdk, messaging, &vtc_did).await {
+                    Ok(awaiting) => Some(JoinExit::AwaitRequirements(awaiting)),
+                    // The page now says why the question could not be sent.
+                    Err(()) => None,
+                }
+            }
+            None => {
+                // Nothing is known and this loop cannot hear an answer, so the
+                // community is not asked. Say so rather than sending an open
+                // request on the quiet: a community that vets would refer that
+                // request to its moderators, and the applicant would never learn
+                // there was a way in they could have taken.
+                show_unknown(
+                    state,
+                    config,
+                    &vtc_did,
+                    "OpenVTC cannot hear its answer until you belong to a community, so it was \
+                     not asked — this is your first join"
+                        .to_string(),
+                    false,
+                );
+                None
+            }
+            Some(false) => self
+                .continue_join(
+                    vtc_did,
+                    interrupt_rx,
+                    state,
+                    tdk,
+                    config,
+                    admin_vta,
+                    profile,
+                    messaging,
+                )
+                .await
+                .map(JoinExit::Exit),
         }
     }
 
