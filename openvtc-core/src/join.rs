@@ -34,6 +34,16 @@ use vta_sdk::protocols::join_requests::{
 use crate::capabilities::TRUST_TASK_ENVELOPE_TYPE;
 use crate::errors::OpenVTCError;
 
+/// Ceiling on a join submit's serialized body, guarded before it goes out.
+///
+/// Mirrors the inbound `MAX_MESSAGE_BODY_SIZE` (1 MiB): a submit larger than the
+/// size we ourselves refuse to *receive* will not be handled by a conformant
+/// peer either. A mediator/bridge forward limit silently dropped an oversized
+/// submit once — the join sat `Pending` with no error anywhere (PR #137). Guard
+/// it at the source so an oversized submit fails loudly and actionably instead
+/// of vanishing.
+pub const MAX_JOIN_SUBMIT_BYTES: usize = 1_048_576;
+
 /// The `vtc/community/profile/show` request type, sourced from the spec crate so
 /// it cannot drift from the schema OpenVTC is built against (issue #241).
 pub const COMMUNITY_PROFILE_SHOW_TYPE: &str = <trust_tasks_rs::specs::vtc::community::profile::show::v0_1::Payload as trust_tasks_rs::Payload>::TYPE_URI;
@@ -84,6 +94,18 @@ pub async fn submit_join_request(
     let document_id = format!("urn:uuid:{request_id}");
     let body = build_join_submit_document(persona_did, vtc_did, presentation, &document_id)?;
 
+    // Fail loudly on an oversized submit rather than letting a mediator/bridge
+    // drop it silently into a stuck `Pending` (PR #137). This is the largest
+    // thing OpenVTC sends — it carries the presentation and any invitation
+    // credential — so it is the one worth guarding.
+    if let Some(body_size) = oversized_join_submit(&body) {
+        return Err(OpenVTCError::InvalidMessage(format!(
+            "join request is too large to send reliably ({body_size} bytes; limit \
+             {MAX_JOIN_SUBMIT_BYTES}). A large presentation or invitation credential is the \
+             usual cause — remove or shrink it and try again."
+        )));
+    }
+
     match tsp_mediator_did {
         // TSP carries the Trust Task document as-is: no DIDComm envelope, and
         // the VTC's dispatcher reads `type`/`threadId` out of the document.
@@ -103,6 +125,14 @@ pub async fn submit_join_request(
     }
 
     Ok(request_id)
+}
+
+/// The serialized size of a join submit `body` when it exceeds
+/// [`MAX_JOIN_SUBMIT_BYTES`], else `None`. Split out so the guard in
+/// [`submit_join_request`] is testable without a live transport.
+fn oversized_join_submit(body: &Value) -> Option<usize> {
+    let size = serde_json::to_string(body).map(|s| s.len()).unwrap_or(0);
+    (size > MAX_JOIN_SUBMIT_BYTES).then_some(size)
 }
 
 /// Ask a VTC what became of a join request we already have its id for
@@ -609,6 +639,35 @@ pub fn validate_invitation_credential(vic: &Value) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The outbound size guard: an ordinary submit passes, an oversized one is
+    /// reported (so `submit_join_request` fails loudly instead of the mediator
+    /// dropping it into a stuck `Pending`).
+    #[test]
+    fn oversized_join_submit_is_flagged() {
+        let ordinary = build_join_submit_document(
+            "did:key:alice",
+            "did:webvh:example.com:vtc",
+            json!({}),
+            "urn:uuid:1",
+        )
+        .expect("builds");
+        assert_eq!(oversized_join_submit(&ordinary), None);
+
+        // A presentation larger than the ceiling.
+        let huge = json!({ "vp": "x".repeat(MAX_JOIN_SUBMIT_BYTES + 1) });
+        let body = build_join_submit_document(
+            "did:key:alice",
+            "did:webvh:example.com:vtc",
+            huge,
+            "urn:uuid:2",
+        )
+        .expect("builds");
+        assert!(
+            oversized_join_submit(&body).is_some_and(|n| n > MAX_JOIN_SUBMIT_BYTES),
+            "an oversized submit must be flagged"
+        );
+    }
 
     /// The document a status poll puts on the wire. The VTC dispatches on the
     /// document, not the payload — a bare payload is rejected as
