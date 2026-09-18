@@ -708,7 +708,7 @@ async fn probe(client: &reqwest::Client, url: &str, policy: ProbePolicy) -> Prob
 /// This is the literal half of the guard: the host is classified as the URL
 /// names it, after WHATWG canonicalisation, so `https://2130706433/` is
 /// `127.0.0.1` here too. A hostname is left to the probe client's DNS guard.
-fn vet_probe_url(url: &str, policy: ProbePolicy) -> Result<reqwest::Url, String> {
+pub(crate) fn vet_probe_url(url: &str, policy: ProbePolicy) -> Result<reqwest::Url, String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("unparseable URL: {e}"))?;
     match (parsed.scheme(), policy) {
         ("https", _) | ("http", ProbePolicy::AllowPrivate) => {}

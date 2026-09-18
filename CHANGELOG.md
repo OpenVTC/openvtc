@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **A community's join requirements are read from the endpoint it publishes.**
+  What a community asks of the people who join is a public read, and a VTC
+  serves it over the `VTCRest` service in its DID document — no mediator, no
+  persona, no loop that can hear a reply. OpenVTC now asks there first and falls
+  back to the DIDComm question, which means the requirements arrive in one round
+  trip everywhere, and arrive *at all* on a first join, where the DIDComm
+  question could not be asked.
+
+  The request names nobody. It carries no `issuer`, because the join page
+  promises "nothing about you has been sent to {community}" and stamping a
+  persona DID on a pre-application question would quietly make that false —
+  reading what a community asks of applicants must not tell it who is
+  considering applying.
+
+  The endpoint comes out of someone else's DID document, so it is dialled under
+  the guards the health probe already uses: HTTPS only, no redirects, no proxy,
+  no userinfo, and a resolver that refuses a name pointing at a non-routable
+  address. The answer is trusted only as far as its proof — a forged manifest
+  could ask for documents the real community never wanted, so the reply's
+  Data-Integrity proof is verified and the proven signer must be the community
+  asked. A claimed `issuer`, or TLS to a host the DID document named, is not
+  enough on its own.
+
+### Fixed
+
+- **A first join now says what to do about it when nothing can be asked.** The
+  page stated the problem and offered a key, leaving the question the operator
+  actually has — is joining now a dead end? — to be guessed at. It now says that
+  joining anyway is the way forward rather than a last resort: the request is
+  recorded and messaging comes up with it, so the community can be asked
+  straight afterwards, and if it does vet, the application can be made then and
+  the join taken up again from it. Where asking *could* work, it says to ask
+  again instead. The two cases no longer share one sentence.
+
 ### Fixed
 
 - **Choosing to be vetted no longer abandons the join.** Starting an application
