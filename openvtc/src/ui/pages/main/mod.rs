@@ -1510,6 +1510,7 @@ impl MainPage {
                 reason_input,
                 generate_r_did,
                 active_field,
+                ..
             } => {
                 // Form input handling
                 let active_field = *active_field;
