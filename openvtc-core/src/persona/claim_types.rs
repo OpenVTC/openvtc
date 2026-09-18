@@ -268,6 +268,15 @@ impl ClaimTypeDefaults {
         self.mask.hides_anything()
     }
 
+    /// Whether a value of this type is withheld from a listing that did not ask
+    /// for sensitive values (`sensitivity: high`). A valueless row of such a type
+    /// is "not fetched yet" (press `s`), not "absent" — the distinction the pane
+    /// must keep so a card number does not read as "you hold nothing".
+    #[must_use]
+    pub fn is_sensitive(self) -> bool {
+        matches!(self.sensitivity, Sensitivity::High)
+    }
+
     /// The value as this type shows it — masked when the type asks for it.
     #[must_use]
     pub fn render(self, text: &str) -> String {

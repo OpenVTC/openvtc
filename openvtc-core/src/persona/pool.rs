@@ -195,6 +195,23 @@ impl PoolAttribute {
         !self.stale && self.value.is_some() && self.claim_defaults(registry).masks_by_default()
     }
 
+    /// Whether this row is valueless *because it is sensitive and the listing
+    /// did not fetch sensitive values*, rather than genuinely absent.
+    ///
+    /// The pane uses this to offer `s` (a per-attribute reveal that fetches the
+    /// one value) and to render "sensitive — press s" instead of "(no value)":
+    /// `••••••••`, "(no value)" and a withheld card number are one glance apart,
+    /// and confusing them misinforms the holder about what they hold. Only
+    /// meaningful once values were requested (`values_requested`): in picker mode
+    /// nothing has a value and none of it is "withheld".
+    #[must_use]
+    pub fn is_withheld_sensitive(&self, registry: &Registry, values_requested: bool) -> bool {
+        values_requested
+            && !self.stale
+            && self.value.is_none()
+            && self.claim_defaults(registry).is_sensitive()
+    }
+
     /// The value as one line, or the reason there is none — masked when its
     /// claim type asks for that.
     ///
@@ -311,28 +328,26 @@ impl AttributeEdit {
 
 /// Enumerate the pool.
 ///
-/// `include_values` is the whole of the difference between a picker and a read
-/// of the holder's identity — see the module header.
+/// Two independent escalations, both the holder's to make:
+///
+/// - `include_values` — the difference between a picker and a read of the
+///   holder's identity (see the module header).
+/// - `include_sensitive` — vta-sdk's *second* escalation, and it only ever
+///   widens the first. It is kept separate on purpose. The bulk listing behind
+///   the pane's `show_values` (`v`) passes `false`, so it does **not** carry
+///   every `sensitivity: high` value (card numbers, passport ids) into this
+///   process; a `sensitivity: high` attribute then comes back valueless, which
+///   the pane renders as "sensitive — press s" rather than "(no value)" (it
+///   knows the type is sensitive). The per-attribute reveal ([`reveal`]) fetches
+///   that one value on its own with `include_sensitive: true`, so the default
+///   read stays lean and the reveal stays truthful.
 pub async fn list(
     client: &VtaClient,
     include_values: bool,
+    include_sensitive: bool,
 ) -> Result<Vec<PoolAttribute>, OpenVTCError> {
     let value = client
-        // `include_sensitive` is vta-sdk 0.34's second escalation, and it is
-        // passed `include_values` rather than a constant on purpose. In this
-        // client the two questions have one answer: the only caller is the
-        // identity pane's `show_values` toggle, which is the holder saying
-        // "show me what I hold" — and when it is on, the pane reveals masked
-        // values whole from what this call returned. Passing `false` here would
-        // not narrow that read, it would make every `sensitivity: high`
-        // attribute come back valueless and render as "(no value)" under the
-        // reveal — which is a *wrong answer* about what the holder holds, and
-        // one glance away from "nothing is stored". Honouring the escalation
-        // properly means the `s` reveal fetching that one value on its own, so
-        // the default read stops carrying every card number into this process
-        // while the reveal stays truthful. That is a pane change, not a
-        // dependency bump.
-        .persona_attribute_list(None, include_values, include_values, None, None, None)
+        .persona_attribute_list(None, include_values, include_sensitive, None, None, None)
         .await
         .map_err(|e| OpenVTCError::Vta(format!("persona attribute list failed: {e}")))?;
 
@@ -350,6 +365,32 @@ pub async fn list(
             .then_with(|| a.display_name().cmp(b.display_name()))
     });
     Ok(attributes)
+}
+
+/// Fetch one attribute's value, sensitive values included, for the per-attribute
+/// reveal (`s`) — so the holder gets the one value they asked for without the
+/// bulk [`list`] having carried every sensitive value into memory.
+///
+/// The SDK has no by-id read, so this is a `type_prefix`-scoped list (a prefix
+/// match on the claim type, which may return several rows) filtered to
+/// `attribute_id`. Returns `Ok(None)` when the store no longer has it (deleted
+/// or renamed out from under the pane).
+pub async fn reveal(
+    client: &VtaClient,
+    claim_type: &str,
+    attribute_id: &str,
+) -> Result<Option<PoolAttribute>, OpenVTCError> {
+    let value = client
+        .persona_attribute_list(Some(claim_type), true, true, None, None, None)
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("persona attribute reveal failed: {e}")))?;
+    Ok(value
+        .get("attributes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(PoolAttribute::from_wire)
+        .find(|a| a.attribute_id == attribute_id))
 }
 
 /// Create or update a self-asserted attribute.
@@ -616,6 +657,34 @@ mod tests {
 
         attr.value = Some(Value::String("1990-01-01".into()));
         assert!(attr.is_masked(&reg()));
+    }
+
+    /// A value withheld because it is sensitive is "not loaded", a third state
+    /// distinct from masked (in memory) and absent (nothing held) — so the pane
+    /// can offer `s` to fetch it rather than render "(no value)".
+    #[test]
+    fn a_withheld_sensitive_value_is_distinct_from_absent() {
+        // Fixture assumptions, asserted so a classification change fails loudly.
+        let sensitive = "medical.condition";
+        let ordinary = "name.given";
+        assert!(reg().resolve(sensitive).is_sensitive());
+        assert!(!reg().resolve(ordinary).is_sensitive());
+
+        let mut attr = PoolAttribute::from_wire(&wire("selfAsserted"));
+        attr.value = None;
+
+        // Sensitive + valueless + values requested → withheld (fetchable via `s`).
+        attr.claim_type = sensitive.into();
+        assert!(attr.is_withheld_sensitive(&reg(), true));
+        // Non-sensitive + valueless → genuinely absent, not withheld.
+        attr.claim_type = ordinary.into();
+        assert!(!attr.is_withheld_sensitive(&reg(), true));
+        // Picker mode (values not requested): nothing is "withheld".
+        attr.claim_type = sensitive.into();
+        assert!(!attr.is_withheld_sensitive(&reg(), false));
+        // Once the value is in hand it is no longer withheld.
+        attr.value = Some(Value::String("held".into()));
+        assert!(!attr.is_withheld_sensitive(&reg(), true));
     }
 
     /// A stale value keeps saying it is stale. The reason it cannot be shown is

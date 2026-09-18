@@ -524,8 +524,15 @@ fn render_attributes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         // that re-sorted under a stale grant cannot open a row nobody chose.
         let revealed =
             is_selected && state.revealed_attribute.as_deref() == Some(attr.attribute_id.as_str());
+        // A sensitive value the bulk listing withheld: it is *not loaded*, which
+        // is a different answer from "(no value)". Say so, and offer `s` to fetch
+        // it — the listing never carried it into memory.
+        let withheld =
+            !revealed && attr.is_withheld_sensitive(&state.claim_types, state.show_values);
         let value = if revealed {
             attr.revealed_value(&state.claim_types, state.show_values)
+        } else if withheld {
+            "sensitive — not loaded".to_string()
         } else {
             attr.display_value(&state.claim_types, state.show_values)
         };
@@ -538,8 +545,10 @@ fn render_attributes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
             },
         )];
         // Without this the row is a wrong answer rather than a reduced one:
-        // `••••••••` and "(no value)" are the same shape, and a holder reading
-        // the first as the second believes they hold nothing.
+        // `••••••••`, "sensitive — not loaded" and "(no value)" are the same
+        // shape, and a holder reading one as another believes they hold nothing.
+        // A masked value is in memory (`s` lifts the mask); a withheld one is not
+        // (`s` fetches it) — both offer `s`.
         if attr.is_masked(&state.claim_types) {
             value_spans.push(Span::styled(
                 if revealed {
@@ -552,6 +561,11 @@ fn render_attributes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
                 } else {
                     Style::new().fg(COLOR_SOFT_PURPLE)
                 },
+            ));
+        } else if withheld {
+            value_spans.push(Span::styled(
+                "   s to show",
+                Style::new().fg(COLOR_SOFT_PURPLE),
             ));
         }
         lines.push(Line::from(value_spans));
