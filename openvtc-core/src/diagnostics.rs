@@ -87,11 +87,21 @@ impl Diagnosis {
     ///
     /// Best-effort: a profile whose directory is unwritable is already having a
     /// bad day, and failing to save the explanation must not replace the
-    /// explanation. Overwrites any previous report — the current failure is the
-    /// one being asked about.
+    /// explanation. Overwrites any previous report *for this profile* — the
+    /// current failure is the one being asked about.
+    ///
+    /// The filename carries the profile (`last-startup-failure-{profile}.txt`,
+    /// unsuffixed for `default`) because the profile directory is shared across
+    /// profiles; a fixed name would let one profile's crash report overwrite
+    /// another's.
     #[must_use]
     pub fn write_report(&self, profile: &str) -> Option<std::path::PathBuf> {
-        let path = profile_dir(profile).ok()?.join("last-startup-failure.txt");
+        let name = if profile.is_empty() || profile == "default" {
+            "last-startup-failure.txt".to_string()
+        } else {
+            format!("last-startup-failure-{profile}.txt")
+        };
+        let path = profile_dir(profile).ok()?.join(name);
         std::fs::write(&path, self.render_plain()).ok()?;
         Some(path)
     }

@@ -138,8 +138,11 @@ pub fn command() -> Command {
 /// # Errors
 ///
 /// A theme that cannot be found, read, imported or written.
-pub fn run(matches: &ArgMatches) -> Result<()> {
-    let roots = Roots::from_env();
+pub fn run(matches: &ArgMatches, profile: &str) -> Result<()> {
+    // The remembered theme choice is per-profile (`tui-{profile}.toml`), so
+    // `openvtc theme set/auto/import` writes the profile the command was run
+    // under rather than a shared file every profile would then read.
+    let roots = Roots::from_env_for_profile(profile);
     match matches.subcommand() {
         Some(("list", _)) => {
             list(&roots);

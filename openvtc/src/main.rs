@@ -365,6 +365,62 @@ fn open_debug_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
+/// Resolve the config profile from the `--profile` flag and the
+/// `OPENVTC_CONFIG_PROFILE` env var (the env wins, with a warning on a
+/// mismatch), then validate it.
+///
+/// The name is interpolated into lock-file, config and theme paths and used as
+/// the OS keyring account, so path separators and traversal are rejected before
+/// it reaches the filesystem. Factored out of `main` so it can run *before* the
+/// theme is chosen — the theme choice is scoped to the profile, so the profile
+/// has to be known first.
+fn resolve_profile(matches: &clap::ArgMatches) -> Result<String> {
+    let cli_profile = matches
+        .get_one::<String>("profile")
+        .cloned()
+        .unwrap_or_else(|| "default".to_string());
+
+    let profile = if let Ok(env_profile) = env::var("OPENVTC_CONFIG_PROFILE") {
+        // ENV Profile will override the CLI Argument
+        if cli_profile != "default" && cli_profile != env_profile {
+            println!("{}",
+                style("WARNING: Using both ENV OPENVTC_CONFIG_PROFILE and CLI profile! These do not match!").themed(CLI_CAUTION)
+            );
+            println!(
+                "{} {}",
+                style("WARNING: Using CLI Profile:").themed(CLI_CAUTION),
+                style(&cli_profile).themed(CLI_EXAMPLE)
+            );
+            cli_profile
+        } else {
+            println!(
+                "{}{}{}",
+                style("Using profile (").themed(CLI_INFO),
+                style(&env_profile).themed(CLI_EXAMPLE),
+                style(") from OPENVTC_CONFIG_PROFILE ENV variable").themed(CLI_INFO)
+            );
+            env_profile
+        }
+    } else {
+        cli_profile
+    };
+
+    if profile.is_empty()
+        || !profile
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        || profile.contains("..")
+    {
+        eprintln!(
+            "{} {}",
+            style("ERROR: Invalid profile name:").themed(CLI_ERROR),
+            style(&profile).themed(CLI_CAUTION)
+        );
+        bail!("Profile name may only contain [A-Za-z0-9._-] and must not contain '..'");
+    }
+    Ok(profile)
+}
+
 // ****************************************************************************
 // MAIN Function
 // ****************************************************************************
@@ -420,21 +476,21 @@ async fn main() -> Result<()> {
     // the unlock-code passed into `load_fast`). Unknown subcommands and
     // `--help`/`--version` are handled here by clap (process exits).
     let matches = cli().get_matches();
-    // The theme colours everything printed from here on — prompts and errors
-    // as well as the TUI — so it is chosen first. Under `auto` this asks the
-    // terminal for its background, which only works before the TUI starts.
-    let theme_roots = theme::catalog::Roots::from_env();
+    // Which configuration profile to use? Resolved before the theme so the theme
+    // choice can be scoped to it: the choice used to live in a single shared
+    // `tui.toml`, so a theme change under one profile repainted every other. Its
+    // informational messages print with the default palette, since the theme is
+    // not chosen yet — a rare, acceptable trade for per-profile isolation.
+    let profile = resolve_profile(&matches)?;
+    // The theme colours everything printed from here on — prompts and errors as
+    // well as the TUI — so it is chosen next, per profile. Under `auto` this asks
+    // the terminal for its background, which only works before the TUI starts.
+    let theme_roots = theme::catalog::Roots::from_env_for_profile(&profile);
     let theme_in_use = theme::init(&theme_roots);
-    // `theme` needs no profile: how the TUI looks is the person's, not an
-    // account's, so it runs before any profile is resolved or opened.
     if let Some(("theme", theme_args)) = matches.subcommand() {
-        return theme_cmd::run(theme_args);
+        return theme_cmd::run(theme_args, &profile);
     }
     let theme_watcher = theme::live::Watcher::new(theme_roots, &theme_in_use);
-    let cli_profile = matches
-        .get_one::<String>("profile")
-        .cloned()
-        .unwrap_or_else(|| "default".to_string());
     // `--unlock-code-file` (a path, or `-` for standard input) takes the place of
     // `--unlock-code`, which clap refuses alongside it. Read eagerly so a bad
     // path fails here, with a clear message, rather than after the profile has
@@ -473,49 +529,6 @@ async fn main() -> Result<()> {
         }
         None => None,
     };
-
-    // Which configuration profile to use?
-    let profile = if let Ok(env_profile) = env::var("OPENVTC_CONFIG_PROFILE") {
-        // ENV Profile will override the CLI Argument
-        if cli_profile != "default" && cli_profile != env_profile {
-            println!("{}", 
-                style("WARNING: Using both ENV OPENVTC_CONFIG_PROFILE and CLI profile! These do not match!").themed(CLI_CAUTION)
-            );
-            println!(
-                "{} {}",
-                style("WARNING: Using CLI Profile:").themed(CLI_CAUTION),
-                style(&cli_profile).themed(CLI_EXAMPLE)
-            );
-            cli_profile
-        } else {
-            println!(
-                "{}{}{}",
-                style("Using profile (").themed(CLI_INFO),
-                style(&env_profile).themed(CLI_EXAMPLE),
-                style(") from OPENVTC_CONFIG_PROFILE ENV variable").themed(CLI_INFO)
-            );
-            env_profile
-        }
-    } else {
-        cli_profile
-    };
-
-    // The profile name is interpolated into lock-file and config paths and
-    // used as the OS keyring account identifier; reject path separators and
-    // traversal sequences before it reaches the filesystem.
-    if profile.is_empty()
-        || !profile
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-        || profile.contains("..")
-    {
-        eprintln!(
-            "{} {}",
-            style("ERROR: Invalid profile name:").themed(CLI_ERROR),
-            style(&profile).themed(CLI_CAUTION)
-        );
-        bail!("Profile name may only contain [A-Za-z0-9._-] and must not contain '..'");
-    }
 
     // Register the platform's keyring-core credential store. keyring-core 1.0
     // doesn't auto-pick a backend — every binary registers exactly one at

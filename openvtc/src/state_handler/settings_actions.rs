@@ -947,14 +947,26 @@ pub(crate) async fn dispatch(
             begin_reconnect_status(state);
             return SettingsOutcome::ReconnectMediator;
         }
-        SettingsAction::ThemeOpen => handle_theme_open(state, &Roots::from_env()),
-        SettingsAction::ThemeSelect(index) => {
-            handle_theme_select(state, &Roots::from_env(), index);
+        // The theme choice is kept per-profile (`tui-{profile}.toml`), so these
+        // read/write against the running profile rather than the shared default.
+        SettingsAction::ThemeOpen => {
+            handle_theme_open(state, &Roots::from_env_for_profile(profile))
         }
-        SettingsAction::ThemeApply => handle_theme_apply(state, &Roots::from_env()),
-        SettingsAction::ThemeCancel => handle_theme_cancel(state, &Roots::from_env()),
-        SettingsAction::ThemeCopy => handle_theme_copy(state, &Roots::from_env()),
-        SettingsAction::ThemeReload => handle_theme_reload(state, &Roots::from_env()),
+        SettingsAction::ThemeSelect(index) => {
+            handle_theme_select(state, &Roots::from_env_for_profile(profile), index);
+        }
+        SettingsAction::ThemeApply => {
+            handle_theme_apply(state, &Roots::from_env_for_profile(profile))
+        }
+        SettingsAction::ThemeCancel => {
+            handle_theme_cancel(state, &Roots::from_env_for_profile(profile))
+        }
+        SettingsAction::ThemeCopy => {
+            handle_theme_copy(state, &Roots::from_env_for_profile(profile))
+        }
+        SettingsAction::ThemeReload => {
+            handle_theme_reload(state, &Roots::from_env_for_profile(profile))
+        }
     }
     SettingsOutcome::Continue
 }
@@ -974,6 +986,7 @@ mod tests {
             config: Some(base.join("config")),
             home: Some(base.join("home")),
             system_omarchy: None,
+            profile: "default".to_string(),
         };
         theme::set_active(&Theme::default_theme());
         let mut state = State::default();
