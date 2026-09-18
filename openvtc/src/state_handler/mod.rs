@@ -2658,7 +2658,7 @@ impl StateHandler {
                     Action::JoinVettingJoin |
                     Action::JoinVettingAskAgain | Action::JoinVettingRow(..) |
                     Action::JoinVettingCycle(..) |
-                    Action::JoinCancel | Action::JoinPasteVic(..) | Action::JoinPasteFromClipboard |
+                    Action::JoinCancel | Action::JoinPasteVic(..) | Action::JoinClipboardFailed(..) |
                     Action::JoinClearVic | Action::ImportConfig(..) | Action::SetProtection(..) |
                     Action::VtaSubmitDid(..) | Action::VtaStartProvision(..) |
                     Action::RecoverPlanContext |
