@@ -1189,11 +1189,12 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::TokenWriteKeys(..) => {}
 
         // Owned by the loop: `Exit` and `UXError` signal the terminator and
-        // break with its outcome type, and `StartJoin` drives the join flow's
-        // own action loop using the receiver this one selects on. Listed so the
-        // match stays exhaustive — the guarantee is that a NEW variant cannot be
-        // added without a decision here, and these three already have one.
-        Action::Exit | Action::UXError(..) | Action::StartJoin => {
+        // break with its outcome type, and the two `StartJoin` verbs drive the
+        // join flow's own action loop using the receiver this one selects on.
+        // Listed so the match stays exhaustive — the guarantee is that a NEW
+        // variant cannot be added without a decision here, and these already
+        // have one.
+        Action::Exit | Action::UXError(..) | Action::StartJoin | Action::StartJoinFor(..) => {
             debug_assert!(false, "handled by the loop, not the handler");
         }
     }

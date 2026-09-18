@@ -442,6 +442,12 @@ pub enum Action {
     /// both the degraded loop (State-A first join) and the runtime select loop.
     StartJoin,
 
+    /// Open the join flow for a community already chosen elsewhere — `j` on a
+    /// vetting application, which is the join that application was made for.
+    /// Skips the DID entry page: the community is the one the application
+    /// names, not one to be found and retyped.
+    StartJoinFor(String),
+
     /// Submit the entered community VTC DID. With existing personas this opens
     /// the identity-choice page (R-B-3); with none it kicks off the mint+join
     /// sequence directly.

@@ -496,7 +496,7 @@ pub(crate) fn next_step_words(step: &NextStep) -> String {
             "c — a vetter opened a session: read the code together, then send your card"
         }
         NextStep::LearnRequirements => "m — ask the community what it requires",
-        NextStep::Join => "join from Communities (j) — your statements go with the request",
+        NextStep::Join => "j — join now; your statements go with the request",
         NextStep::ChooseFace => "f — choose the face vetters are shown, then ask a vetter",
         NextStep::AskVetter => "r — ask a vetter with their ticket, or v to find one",
         NextStep::WaitForVetters => "wait for your vetters — you are told when one answers",
@@ -545,7 +545,7 @@ fn requirements_line(r: &VettingRequirements) -> String {
 
 pub(crate) fn progress_line(evaluation: &Evaluation) -> String {
     if evaluation.satisfied() {
-        return "meets the published requirements — join from Communities".to_string();
+        return "meets the published requirements — press j to join".to_string();
     }
     let needs: Vec<String> = evaluation
         .needs

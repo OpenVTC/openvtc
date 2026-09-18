@@ -1189,6 +1189,15 @@ impl StateHandler {
                         // entered again.
                         join_entry = Some(join_flow::JoinEntry::Fresh { hears_replies: true });
                     },
+                    // The same join, for a community already chosen: `j` on a
+                    // vetting application resumes the join that application was
+                    // made for, without going back for its DID.
+                    Action::StartJoinFor(vtc_did) => {
+                        join_entry = Some(join_flow::JoinEntry::ForCommunity {
+                            vtc_did,
+                            hears_replies: true,
+                        });
+                    },
                     // A join waiting on a community's requirements keeps its screen
                     // up while this loop hears the answer, so the two keys that
                     // page offers land here rather than in the join flow.
@@ -2258,7 +2267,22 @@ impl StateHandler {
                             }
                         }
                     }
-                    Action::StartJoin => {
+                    // `StartJoinFor` carries a community already chosen — `j` on a
+                    // vetting application. Both enter the same flow; only the
+                    // page it opens on differs, so they share this arm and its
+                    // listener invariant below.
+                    Action::StartJoin | Action::StartJoinFor(_) => {
+                        let entry = match &action {
+                            Action::StartJoinFor(vtc_did) => join_flow::JoinEntry::ForCommunity {
+                                vtc_did: vtc_did.clone(),
+                                // This loop has no inbound arm, so the flow
+                                // cannot wait here for a community's answer.
+                                hears_replies: false,
+                            },
+                            _ => join_flow::JoinEntry::Fresh {
+                                hears_replies: false,
+                            },
+                        };
                         // Set when a join succeeded: the loop then breaks `Joined`
                         // so `run()` can start messaging.
                         let mut joined_a_community = false;
@@ -2279,10 +2303,7 @@ impl StateHandler {
                                     // the early load-failure callers, which
                                     // cannot reach a join anyway.
                                     messaging,
-                                    // This loop has no inbound arm, so the flow
-                                    // cannot wait here for a community's
-                                    // requirements; it uses what the book knows.
-                                    join_flow::JoinEntry::Fresh { hears_replies: false },
+                                    entry,
                                 )
                                 .await
                             {

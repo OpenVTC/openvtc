@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Choosing to be vetted no longer abandons the join.** Starting an application
+  from the join flow left it for the Vetting page, and the community then had to
+  be found and entered a second time when the statements were in — which is why
+  vetting read as something to go and do *before* joining rather than a way of
+  joining. `j` on an application now takes up that join: the community is the one
+  the application names, so the flow opens where the DID entry page would have
+  led, with the same routes and the same discovery. The application is the parked
+  join, so it survives restarts — which matters, because gathering statements
+  takes days.
+
 ### Changed
 
 - **Joining a community that vets now offers every way in at once.** The join

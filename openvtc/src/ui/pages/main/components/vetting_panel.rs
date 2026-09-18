@@ -619,6 +619,9 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     lines.push(hint(
         "n: new  f: face  r: ask a vetter  v: find vetters  c: send card  m: refresh requirements",
     ));
+    lines.push(hint(
+        "j: join this community — the join this application was made for",
+    ));
     lines.push(hint("Tab: your vetting desk"));
 }
 
