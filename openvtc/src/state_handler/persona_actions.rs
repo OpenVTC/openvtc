@@ -69,6 +69,13 @@ pub(crate) enum PersonaJob {
         attribute_id: String,
         cascade: bool,
     },
+    /// Fetch one attribute's value on its own (`s` on a sensitive row), so the
+    /// bulk listing never has to carry every sensitive value into memory. The
+    /// result is spliced into the in-memory row and the mask lifted.
+    AttributeReveal {
+        attribute_id: String,
+        claim_type: String,
+    },
     ProfilePut {
         profile_id: Option<String>,
         name: String,
@@ -178,17 +185,25 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             let Some(attr) = p.attributes.get(*index) else {
                 return PersonaEffect::None;
             };
-            // A second press puts it back, so the key the holder used to show
-            // the value is also the one that hides it again.
-            p.revealed_attribute = match &p.revealed_attribute {
-                Some(id) if id == &attr.attribute_id => None,
-                _ => Some(attr.attribute_id.clone()),
-            };
-            // No read: this lifts a mask over a value already in memory, which
-            // is exactly why the mask is not a security control. The read-path
-            // control — a listing that is never *sent* sensitive values —
-            // would belong here and does not exist; see
-            // `openvtc_core::persona::claim_types`.
+            // A second press puts it back, so the key the holder used to show the
+            // value is also the one that hides it again.
+            if p.revealed_attribute.as_deref() == Some(attr.attribute_id.as_str()) {
+                p.revealed_attribute = None;
+                return PersonaEffect::None;
+            }
+            // A sensitive value the bulk listing withheld is not in memory — fetch
+            // this one on its own (`pool::reveal`). The value is spliced in and the
+            // mask lifted when it returns (`AttributeRevealed`); nothing is
+            // revealed until then. This is the only case that becomes a read.
+            if attr.is_withheld_sensitive(&p.claim_types, p.show_values) {
+                return PersonaEffect::Job(PersonaJob::AttributeReveal {
+                    attribute_id: attr.attribute_id.clone(),
+                    claim_type: attr.claim_type.clone(),
+                });
+            }
+            // Otherwise just lift the mask over a value already in memory — no
+            // read, which is exactly why the mask is not a security control.
+            p.revealed_attribute = Some(attr.attribute_id.clone());
             PersonaEffect::None
         }
 
@@ -869,7 +884,11 @@ impl PersonaReadJob {
 
     /// I/O only.
     pub(crate) async fn run(self) -> PersonaOutcome {
-        let attributes = pool::list(&self.admin_vta, self.include_values)
+        // The bulk listing never carries sensitive values (card numbers, ids):
+        // `include_sensitive: false`. A `sensitivity: high` attribute comes back
+        // valueless and the pane renders "sensitive — press s"; the per-attribute
+        // reveal (`s`) fetches that one value on its own via `pool::reveal`.
+        let attributes = pool::list(&self.admin_vta, self.include_values, false)
             .await
             .map_err(|e| format!("{e}"));
         let profiles = profile::list(&self.admin_vta)
@@ -937,6 +956,15 @@ impl PersonaJobRun {
                     .await
                     .err()
                     .map(|e| format!("{e}")),
+            },
+            PersonaJob::AttributeReveal {
+                attribute_id,
+                claim_type,
+            } => PersonaOutcome::AttributeRevealed {
+                attribute_id: attribute_id.clone(),
+                result: pool::reveal(&client, &claim_type, &attribute_id)
+                    .await
+                    .map_err(|e| format!("{e}")),
             },
             PersonaJob::ProfilePut {
                 profile_id,
@@ -1085,6 +1113,12 @@ pub(crate) enum PersonaOutcome {
     ProfileRead {
         edit: bool,
         result: Result<ProfileDetail, String>,
+    },
+    /// One attribute's value, fetched on its own for the `s` reveal. Spliced into
+    /// the in-memory row and the mask lifted, without a full re-read.
+    AttributeRevealed {
+        attribute_id: String,
+        result: Result<Option<PoolAttribute>, String>,
     },
     Bound {
         community: String,
@@ -1281,6 +1315,47 @@ impl PersonaOutcome {
                     state
                         .main_page
                         .log_error("Reading the profile failed", e.as_str());
+                }
+            },
+
+            PersonaOutcome::AttributeRevealed {
+                attribute_id,
+                result,
+            } => match result {
+                // Splice the fetched value into the in-memory row (rebuilding the
+                // shared slice) and lift the mask. Only when a value actually came
+                // back — a fetch that returns nothing must not reveal a blank.
+                Ok(Some(fetched)) if fetched.value.is_some() => {
+                    let updated: Vec<PoolAttribute> = p
+                        .attributes
+                        .iter()
+                        .map(|a| {
+                            if a.attribute_id == attribute_id {
+                                PoolAttribute {
+                                    value: fetched.value.clone(),
+                                    stale: fetched.stale,
+                                    stale_reason: fetched.stale_reason.clone(),
+                                    version: fetched.version,
+                                    ..a.clone()
+                                }
+                            } else {
+                                a.clone()
+                            }
+                        })
+                        .collect();
+                    p.attributes = updated.into();
+                    p.revealed_attribute = Some(attribute_id);
+                }
+                Ok(_) => {
+                    p.status_message = Some(
+                        "That value can't be shown — it has no single stored value.".to_string(),
+                    );
+                }
+                Err(e) => {
+                    p.status_message = Some(e.clone());
+                    state
+                        .main_page
+                        .log_error("Revealing the value failed", e.as_str());
                 }
             },
 
@@ -1541,6 +1616,39 @@ mod tests {
 
         apply(&mut state, &PersonaAction::RevealValue(1));
         assert!(personas(&state).revealed_attribute.is_none());
+    }
+
+    /// A reveal of a *sensitive* value the bulk listing withheld becomes a
+    /// targeted fetch — the value was never carried into memory — not an
+    /// in-memory mask-lift. Nothing is revealed until the fetch returns.
+    #[test]
+    fn a_reveal_of_a_withheld_sensitive_value_fetches_it() {
+        let mut attr = attribute("01C");
+        attr.claim_type = "medical.condition".into();
+        attr.value = None;
+        assert!(
+            attr.is_withheld_sensitive(&claim_types::Registry::vendored(), true),
+            "the fixture has to be a withheld sensitive attribute"
+        );
+
+        let mut state = state_with(IdentityState {
+            attributes: vec![attr].into(),
+            show_values: true,
+            ..IdentityState::default()
+        });
+
+        let effect = apply(&mut state, &PersonaAction::RevealValue(0));
+        assert!(
+            matches!(
+                effect,
+                PersonaEffect::Job(PersonaJob::AttributeReveal { .. })
+            ),
+            "a withheld sensitive value is fetched, not mask-lifted"
+        );
+        assert!(
+            personas(&state).revealed_attribute.is_none(),
+            "nothing is revealed until the fetched value is spliced in"
+        );
     }
 
     /// The editor opens on the value, never on the mask.
