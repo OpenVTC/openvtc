@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use dtg_credentials::DTGCredential;
 use openvtc_core::community_access::{DEFAULT_EXPIRY, DeviceGrant};
-use openvtc_core::config::account::PersonaId;
+use openvtc_core::config::account::{PersonaId, RelationshipIdentifierDefault};
 use openvtc_core::config::community_context::{
     ContextDeletion, ContextDeletionPreview, ContextOption, PersonaTakenAlong,
 };
@@ -2490,6 +2490,12 @@ pub enum RelationshipsMode {
         reason_input: String,
         /// Whether to generate a random relationship DID (privacy)
         generate_r_did: bool,
+        /// The working community's declared `relationshipIdentifierDefault`, if
+        /// any — what seeded [`generate_r_did`](Self::NewRequest::generate_r_did).
+        /// Carried only so the form can explain *why* the toggle defaulted where
+        /// it did ("your community prefers …"); `None` when there is no working
+        /// community or it declared nothing (issue #241 follow-up).
+        community_default: Option<RelationshipIdentifierDefault>,
         /// Which form field is currently focused (0=DID, 1=Alias, 2=Reason, 3=R-DID toggle)
         active_field: usize,
     },

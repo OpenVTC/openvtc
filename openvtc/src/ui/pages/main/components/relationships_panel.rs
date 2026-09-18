@@ -7,6 +7,7 @@ use crate::state_handler::{
     main_page::content::{ContentPanelState, RelationshipsMode, RelationshipsState},
     state::ConnectionState,
 };
+use openvtc_core::config::account::RelationshipIdentifierDefault;
 use openvtc_core::display::display_identifier;
 use ratatui::{
     style::{Style, Stylize},
@@ -46,12 +47,14 @@ pub fn render(state: &RelationshipsState) -> Vec<Line<'static>> {
             alias_input,
             reason_input,
             generate_r_did,
+            community_default,
             active_field,
         } => render_form(
             did_input,
             alias_input,
             reason_input,
             *generate_r_did,
+            *community_default,
             *active_field,
         ),
         RelationshipsMode::List => render_list(state),
@@ -419,6 +422,7 @@ fn render_form(
     alias_input: &str,
     reason_input: &str,
     generate_r_did: bool,
+    community_default: Option<RelationshipIdentifierDefault>,
     active_field: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("")];
@@ -469,8 +473,19 @@ fn render_form(
     } else {
         Style::new().fg(COLOR_DARK_GRAY)
     };
+    // "(recommended)" is the general privacy recommendation (pairwise), except
+    // where the working community declares it wants attributed edges — there the
+    // persona DID is the community's default, and the hint below says why.
+    let community_prefers_attributed =
+        community_default == Some(RelationshipIdentifierDefault::Attributed);
     let toggle_value = if generate_r_did {
-        "Pairwise R-DID (recommended)"
+        if community_prefers_attributed {
+            "Pairwise R-DID (more private)"
+        } else {
+            "Pairwise R-DID (recommended)"
+        }
+    } else if community_prefers_attributed {
+        "Your persona DID (your community's default)"
     } else {
         "Your persona DID"
     };
@@ -479,6 +494,28 @@ fn render_form(
         Span::styled("[Space] Contact you as: ".to_string(), field_style),
         Span::styled(toggle_value.to_string(), value_style),
     ]));
+
+    // Explain where the default came from, when the community declared one — so a
+    // toggle that started on the persona DID does not look like an odd choice
+    // (issue #241 follow-up).
+    match community_default {
+        Some(RelationshipIdentifierDefault::Attributed) => {
+            lines.push(
+                Line::from(
+                    "  Your community publishes relationships under members' persona DIDs, so \
+                     this defaults there.",
+                )
+                .fg(COLOR_DARK_GRAY),
+            );
+        }
+        Some(RelationshipIdentifierDefault::Pairwise) => {
+            lines.push(
+                Line::from("  Your community recommends a pairwise DID (the default).")
+                    .fg(COLOR_DARK_GRAY),
+            );
+        }
+        None => {}
+    }
 
     // Spell out the trade-off at the point of choice — the cost of reusing the
     // persona DID is invisible at the moment the decision is made (#241).
@@ -540,6 +577,38 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    /// The new-relationship form explains where its identifier default came
+    /// from when the working community declared one (issue #241 follow-up), and
+    /// says nothing extra when it did not.
+    #[test]
+    fn the_form_explains_a_community_relationship_default() {
+        let rendered = |cd: Option<RelationshipIdentifierDefault>| {
+            let generate_r_did = !matches!(cd, Some(RelationshipIdentifierDefault::Attributed));
+            text(&render_form("", "", "", generate_r_did, cd, 0)).join("\n")
+        };
+
+        let attributed = rendered(Some(RelationshipIdentifierDefault::Attributed));
+        assert!(
+            attributed.contains("Your persona DID (your community's default)"),
+            "{attributed}"
+        );
+        assert!(
+            attributed.contains("publishes relationships under members' persona DIDs"),
+            "{attributed}"
+        );
+
+        let pairwise = rendered(Some(RelationshipIdentifierDefault::Pairwise));
+        assert!(
+            pairwise.contains("Your community recommends a pairwise DID"),
+            "{pairwise}"
+        );
+
+        let none = rendered(None);
+        assert!(none.contains("Pairwise R-DID (recommended)"), "{none}");
+        assert!(!none.contains("your community's default"), "{none}");
+        assert!(!none.contains("Your community"), "{none}");
     }
 
     fn raw() -> RawCredential {
