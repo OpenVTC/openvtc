@@ -106,6 +106,36 @@ impl JoinFlow {
         }
         self.prefilled_issuer = Some(issuer.to_string());
     }
+
+    /// What a paste on the entry page means, wherever the text came from.
+    ///
+    /// A JSON object is an invitation credential; anything else is the
+    /// community's DID or agent name, going into the input. Both the bracketed
+    /// paste a terminal delivers and the `[Ctrl+V]` clipboard read come through
+    /// here, because they used not to: the clipboard key assumed every paste
+    /// was an invitation, so pasting the community's DID — the commonest thing
+    /// anyone pastes on this page — answered "not valid JSON", while the same
+    /// text bracketed-pasted worked. The comment on that key claimed the two
+    /// did the same thing long after they had stopped.
+    ///
+    /// The test is the *shape* of the text, not whether it parses: a DID never
+    /// opens a brace, and text that does open one and then fails to parse is a
+    /// broken invitation, which the handler reports as one. Sniffing by "does
+    /// it parse as JSON" would report a mangled VIC as a malformed DID.
+    pub fn apply_entry_paste(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.starts_with('{') {
+            // Re-arm the prefill: a paste is a deliberate act, so pasting the
+            // same VIC again after clearing the input fills it back in rather
+            // than being a no-op.
+            self.prefilled_issuer = None;
+            let _ = self
+                .action_tx
+                .send(Action::JoinPasteVic(trimmed.to_string()));
+        } else {
+            self.vtc_did = Input::new(trimmed.to_string());
+        }
+    }
 }
 
 impl Component for JoinFlow {
@@ -160,22 +190,7 @@ impl Component for JoinFlow {
         }
         let trimmed = text.trim();
         match self.props.state.page {
-            JoinPage::EnterDid => {
-                // A pasted JSON object is treated as an invitation credential
-                // (VIC): hand it to the state handler to validate + stash (#3).
-                // Anything else is the VTC DID being pasted into the input.
-                if trimmed.starts_with('{') {
-                    // Re-arm the prefill: a paste is a deliberate act, so
-                    // pasting the same VIC again after clearing the input fills
-                    // it back in rather than being a no-op.
-                    self.prefilled_issuer = None;
-                    let _ = self
-                        .action_tx
-                        .send(Action::JoinPasteVic(trimmed.to_string()));
-                } else {
-                    self.vtc_did = Input::new(trimmed.to_string());
-                }
-            }
+            JoinPage::EnterDid => self.apply_entry_paste(trimmed),
             // The invitation step has no text input, so anything pasted there is
             // an invitation being offered. This is the portable half of the paste
             // row — bracketed paste works over SSH, where reading the OS

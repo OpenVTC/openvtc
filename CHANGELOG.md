@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pasting the community's DID on the join entry page works.** `[Ctrl+V]` read
+  the clipboard and handed the text to the invitation loader whatever it was, so
+  pasting a DID — the commonest thing anyone pastes on that page — answered
+  "Pasted text is not valid JSON", while the identical text delivered as a
+  bracketed paste went into the field correctly. The two paste routes had drifted
+  apart, and the comment on the clipboard key claimed they had not.
+
+  Both now go through one `apply_entry_paste`: a JSON object is an invitation,
+  anything else is the community's DID or agent name. The test is the shape of
+  the text rather than whether it parses, so a mangled invitation is still
+  reported as a broken invitation instead of a malformed DID.
+
+### Changed
+
+- **The join entry page leads with the community, not the invitation.** The DID
+  prompt and its input come first; the invitation sits under the input, still
+  ahead of the examples. It led the page while this was the only screen that
+  mentioned invitations at all — what made that necessary was an affordance that
+  was dim, unnamed and last, and the named `[Ctrl+V]` row that fixed it stays.
+  The join now offers invitations again on the step after this one, counted and
+  matched against the community, so leading with them here only pushed the DID
+  prompt down the page. Pasting one still fills in a DID you may not have.
+
 ### Added
 
 - **A community's join requirements are read from the endpoint it publishes.**

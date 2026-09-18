@@ -50,14 +50,23 @@ impl VtcEnterDid {
             KeyCode::Esc => {
                 let _ = state.action_tx.send(Action::JoinCancel);
             }
-            // Ctrl+V: the explicit "paste an invitation" affordance. Intercepted
-            // ahead of the input handler so it loads a VIC rather than typing
-            // into the DID field. Bracketed paste still works and is the path
-            // that survives SSH; this is the discoverable one.
+            // Ctrl+V: the discoverable paste. Intercepted ahead of the input
+            // handler, then treated exactly as a bracketed paste of the same
+            // text — a DID lands in the field, an invitation is loaded.
+            // Bracketed paste still works and is the path that survives SSH;
+            // this is the one that is visible on screen.
             KeyCode::Char('v') | KeyCode::Char('V')
                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                let _ = state.action_tx.send(Action::JoinPasteFromClipboard);
+                match crate::clipboard::read_clipboard() {
+                    Ok(text) => state.apply_entry_paste(&text),
+                    // Reading the OS clipboard cannot work over SSH, where a
+                    // bracketed paste still can — so the refusal says that
+                    // rather than only that it failed.
+                    Err(why) => {
+                        let _ = state.action_tx.send(Action::JoinClipboardFailed(why));
+                    }
+                }
             }
             // Ctrl+L: clear a loaded invitation and join without it. Ctrl-modified
             // so it never collides with typing the VTC DID into the input field.
@@ -86,10 +95,18 @@ impl VtcEnterDid {
 
         let inner = middle.inner(Margin::new(3, 2));
 
-        // Everything the operator needs *before* typing goes above the input:
-        // the invitation status and any error. Both used to sit below it, under
-        // the examples block, where the invitation tip was the dimmest and
-        // lowest thing on the page and read as decoration (issue #29).
+        // The community comes first, because entering it is what this page is
+        // for and what almost everyone arriving here has in hand. The
+        // invitation sits under that prompt, close enough to be seen while
+        // still being the secondary answer.
+        //
+        // It led the page for a while (issue #29), when this was the only
+        // screen that mentioned invitations at all and one pasted here was
+        // easy to miss. That stopped being true once the join learned to list
+        // the ways in: an invitation is now offered again — counted, matched
+        // against the community, with a paste row of its own — on the step
+        // after this one. What it does *here* is fill in a DID you may not
+        // have, which is a shortcut, not the main road.
         let width = inner.width as usize;
         let mut header = wrapped(
             "Enter the Verifiable Trust Community (VTC) DID you want to join. OpenVTC \
@@ -98,7 +115,6 @@ impl VtcEnterDid {
             Style::new().fg(COLOR_DARK_GRAY),
         );
         header.push(Line::default());
-        header.extend(invitation_lines(state, width));
         // Surface any pre-submit error (e.g. idempotency, empty input) inline.
         let mut had_error = false;
         for msg in &state.messages {
@@ -143,7 +159,8 @@ impl VtcEnterDid {
         );
         render_input(input, frame, input_col);
 
-        let lines = vec![
+        let mut lines = invitation_lines(state, width);
+        lines.extend([
             Line::styled("Examples:", Style::new().fg(COLOR_ORANGE).bold()),
             Line::styled(
                 "  • did:webvh:QmRoot…:community.example.com",
@@ -160,7 +177,7 @@ impl VtcEnterDid {
                 Span::styled("[ENTER]", Style::new().fg(COLOR_BORDER).bold()),
                 Span::styled(" to join", Style::new().fg(COLOR_TEXT_DEFAULT)),
             ]),
-        ];
+        ]);
 
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), content[2]);
 
@@ -230,12 +247,13 @@ fn invitation_lines(state: &JoinState, width: usize) -> Vec<Line<'static>> {
         // The lead-in gets its own line: hanging it off a narrowed first line
         // wraps the body into a ragged column on small terminals.
         lines.push(Line::styled(
-            "Have an invitation?",
+            "Don't have the DID?",
             Style::new().fg(COLOR_BORDER).bold(),
         ));
         lines.extend(wrapped(
-            "Load the invitation credential (VIC) JSON — it fills in the community \
-             DID for you and rides along with the join request.",
+            "If you were handed an invitation credential (VIC), paste the JSON here \
+             instead — it names the community, so it fills the DID in for you, and it \
+             rides along with the join request.",
             width,
             Style::new().fg(COLOR_TEXT_DEFAULT),
         ));
@@ -255,8 +273,8 @@ fn invitation_lines(state: &JoinState, width: usize) -> Vec<Line<'static>> {
 fn paste_row(width: usize) -> Line<'static> {
     key_row(
         "[Ctrl+V]",
-        " paste an invitation from the clipboard, or paste the JSON straight in",
-        " paste an invitation",
+        " paste from the clipboard — a DID goes in the field, an invitation is loaded",
+        " paste from the clipboard",
         width,
     )
 }
@@ -381,24 +399,69 @@ mod tests {
         }
     }
 
-    /// Ctrl+V loads a VIC instead of typing a `v` into the DID field.
+    /// Ctrl+V is a paste, not a character: whatever the clipboard holds, the
+    /// key itself must never land in the DID field.
+    ///
+    /// Deliberately asserts nothing about what *was* pasted — that depends on
+    /// the machine's clipboard, and a test that reads it would pass or fail on
+    /// what the developer last copied. What the key means is pinned by
+    /// [`a_pasted_did_goes_in_the_field_and_an_invitation_is_loaded`] below,
+    /// which drives the same path with text of its own.
     #[test]
-    fn ctrl_v_asks_for_the_clipboard_rather_than_typing() {
+    fn ctrl_v_never_types_a_v() {
+        use crate::ui::component::Component;
+        use crate::{state_handler::state::State, ui::pages::join_flow::JoinFlow};
+        use tokio::sync::mpsc::unbounded_channel;
+
+        let (tx, _rx) = unbounded_channel();
+        let mut flow = JoinFlow::new(&State::default(), tx);
+        VtcEnterDid::handle_key_event(
+            &mut flow,
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+        );
+        assert_ne!(
+            flow.vtc_did.value(),
+            "v",
+            "the key must not reach the input"
+        );
+    }
+
+    /// The thing that was broken: a pasted DID is a DID.
+    ///
+    /// `[Ctrl+V]` used to hand its text to the invitation loader whatever it
+    /// was, so pasting the community's DID — the commonest thing anyone pastes
+    /// on this page — came back "Pasted text is not valid JSON", while the
+    /// identical text bracketed-pasted worked. Both routes now come through
+    /// `apply_entry_paste`, so they cannot disagree again.
+    #[test]
+    fn a_pasted_did_goes_in_the_field_and_an_invitation_is_loaded() {
         use crate::ui::component::Component;
         use crate::{state_handler::state::State, ui::pages::join_flow::JoinFlow};
         use tokio::sync::mpsc::unbounded_channel;
 
         let (tx, mut rx) = unbounded_channel();
         let mut flow = JoinFlow::new(&State::default(), tx);
-        VtcEnterDid::handle_key_event(
-            &mut flow,
-            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
-        );
+
+        flow.apply_entry_paste("  did:webvh:QmRoot:vtc.example.com  ");
+        assert_eq!(flow.vtc_did.value(), "did:webvh:QmRoot:vtc.example.com");
         assert!(
-            matches!(rx.try_recv(), Ok(Action::JoinPasteFromClipboard)),
-            "expected JoinPasteFromClipboard"
+            rx.try_recv().is_err(),
+            "a DID is not handed to the VIC loader"
         );
-        assert_eq!(flow.vtc_did.value(), "", "the key must not reach the input");
+
+        // An agent name is not JSON either, so it lands in the field too.
+        flow.apply_entry_paste("example.com/@acme");
+        assert_eq!(flow.vtc_did.value(), "example.com/@acme");
+        assert!(rx.try_recv().is_err());
+
+        // A JSON object is still an invitation, and does not overwrite the DID
+        // being typed — the issuer it names is what prefills that, later.
+        flow.apply_entry_paste(r#"{"id":"urn:uuid:one"}"#);
+        assert!(
+            matches!(rx.try_recv(), Ok(Action::JoinPasteVic(text)) if text.starts_with('{')),
+            "a JSON object is an invitation"
+        );
+        assert_eq!(flow.vtc_did.value(), "example.com/@acme");
     }
 
     /// A plain `v` is still just a character — the guard is on the modifier.
@@ -421,18 +484,30 @@ mod tests {
         assert_eq!(flow.vtc_did.value(), "v");
     }
 
-    /// The paste affordance is the thing an operator holding a VIC needs to
-    /// see; it belongs above the input, not below the examples (issue #29).
+    /// The community is what this page asks for, so its prompt comes first and
+    /// the invitation follows the input — but still ahead of the examples.
+    ///
+    /// The invitation led the page for a while (issue #29), when this was the
+    /// only screen that mentioned one and a VIC pasted here was easy to miss.
+    /// What #29 actually caught was an affordance that was dim, unnamed and
+    /// last; the fix that stuck is the named `[Ctrl+V]` row, which this keeps.
+    /// The join now offers invitations again on the step after this one —
+    /// counted and matched against the community — so leading with them here
+    /// buys nothing and pushes the DID prompt down the page.
     #[test]
-    fn the_paste_affordance_is_drawn_above_the_input() {
+    fn the_did_prompt_leads_and_the_invitation_follows_the_input() {
         let drawn = rows(&JoinState::default(), "", 100);
         assert!(
-            row_of(&drawn, "Have an invitation?") < row_of(&drawn, "Enter the community's DID"),
-            "the invitation prompt should precede the input prompt:\n{}",
+            row_of(&drawn, "Enter the community's DID") < row_of(&drawn, "Don't have the DID?"),
+            "the input prompt should precede the invitation:\n{}",
             drawn.join("\n")
         );
-        // And still ahead of the examples that used to bury it.
-        assert!(row_of(&drawn, "Have an invitation?") < row_of(&drawn, "Examples:"));
+        // Still ahead of the examples, so it is not the dim last thing again.
+        assert!(
+            row_of(&drawn, "Don't have the DID?") < row_of(&drawn, "Examples:"),
+            "the invitation should precede the examples:\n{}",
+            drawn.join("\n")
+        );
     }
 
     /// A loaded invitation names the community it is for — that DID is what

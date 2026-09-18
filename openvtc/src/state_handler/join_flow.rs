@@ -783,23 +783,17 @@ impl StateHandler {
                             load_pasted_vic(state, &text, vtc.as_deref());
                             let _ = self.state_tx.send(state.clone());
                         }
-                        Action::JoinPasteFromClipboard => {
-                            // The `[Ctrl+V]` affordance on the entry page: same
-                            // validation as a bracketed paste, just sourced from
-                            // the OS clipboard. Kept to the entry page, where the
-                            // community is not yet chosen, so no match is done.
+                        Action::JoinClipboardFailed(why) => {
+                            // Only the failure reaches the loop: `[Ctrl+V]` reads
+                            // and applies the text where the input lives, so a
+                            // pasted DID never takes a trip through here to be
+                            // mistaken for an invitation.
                             state.join.messages.clear();
-                            match crate::clipboard::read_clipboard() {
-                                Ok(text) => load_pasted_vic(state, &text, None),
-                                Err(why) => {
-                                    state.join.messages.push(MessageType::Error(format!(
-                                        "Could not read the clipboard ({why}). Paste the \
-                                         invitation JSON directly into this screen instead \
-                                         — that works over SSH, where reading the \
-                                         clipboard cannot."
-                                    )));
-                                }
-                            }
+                            state.join.messages.push(MessageType::Error(format!(
+                                "Could not read the clipboard ({why}). Paste directly into \
+                                 this screen instead — that works over SSH, where reading \
+                                 the clipboard cannot."
+                            )));
                             let _ = self.state_tx.send(state.clone());
                         }
                         Action::JoinClearVic => {

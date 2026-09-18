@@ -1172,7 +1172,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::JoinVettingCycle(..)
         | Action::JoinCancel
         | Action::JoinPasteVic(..)
-        | Action::JoinPasteFromClipboard
+        | Action::JoinClipboardFailed(..)
         | Action::JoinClearVic
         | Action::ImportConfig(..)
         | Action::SetProtection(..)
