@@ -72,6 +72,50 @@ where
     }
 }
 
+/// The message prefix every TSP reply-timeout carries, from the SDK's own
+/// `TSP_REPLY_TIMEOUT_PREFIX`. Matched as a literal because the SDK keeps both
+/// that constant and `VtaError::is_tsp_reply_timeout` `pub(crate)`, so there is
+/// no public predicate to ask — the prefix is documented as the stable shared
+/// signature between its producers, which makes it the least-bad handle. If the
+/// SDK ever exports the predicate, use it instead.
+const TSP_REPLY_TIMEOUT_PREFIX: &str = "timed out waiting for the TSP reply";
+
+/// Render a [`VtaError`] with what an operator can act on (R6.4).
+///
+/// The raw `Display` is written for a developer reading a stack of SDK errors,
+/// not for someone watching a join fail: `tsp transport error: timed out waiting
+/// for the TSP reply to request 'urn:uuid:…'` names a transport and a UUID and
+/// nothing an operator can do. R6.4 asks that the text let them tell
+/// network-unreachable from auth-rejected from contract-mismatch, so this
+/// appends the SDK's own [`VtaError::suggested_fix`] — which exists for exactly
+/// this, non-CLI consumers that would otherwise fork the CLI's dispatch.
+///
+/// A TSP reply-timeout gets a line of its own, because it is the one failure
+/// whose plain reading is actively misleading. It looks like "the VTA is
+/// unreachable", and the VTA is almost always fine: a trust task that the VTA
+/// has to relay onward (minting a DID means calling the hosting server) reports
+/// *its* leg's silence in the same words as our own. Observed live: the VTA
+/// accepted the task, called the hosting server, the hosting server answered
+/// promptly and the VTA refused every answer as malformed — an hour of the
+/// operator's time went on a message that said "timed out". Whose leg it is
+/// decides which log to open, so say so here.
+fn explain(e: &VtaError) -> String {
+    let mut out = e.to_string();
+    if matches!(e, VtaError::TspTransport(msg) if msg.starts_with(TSP_REPLY_TIMEOUT_PREFIX)) {
+        out.push_str(
+            "\nThe request reached the VTA; what went unanswered is a TSP leg. \
+             Check the VTA's log for the peer it was waiting on — if the task \
+             is one the VTA relays onward (minting a DID calls the hosting \
+             server), the silent leg is that peer's, not ours.",
+        );
+    }
+    if let Some(fix) = e.suggested_fix() {
+        out.push('\n');
+        out.push_str(fix);
+    }
+    out
+}
+
 /// Authenticate with VTA using REST challenge-response. Only valid for the
 /// REST transport — DIDComm-only VTAs authenticate implicitly when the
 /// session opens.
@@ -280,7 +324,7 @@ pub async fn create_update_keys(
 pub async fn list_webvh_servers(client: &VtaClient) -> Result<Vec<WebvhServerRecord>> {
     let result = vta_retry("list WebVH servers", || client.list_webvh_servers())
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to list WebVH servers: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to list WebVH servers: {}", explain(&e)))?;
     Ok(result.servers)
 }
 
@@ -369,7 +413,7 @@ pub async fn create_did_via_server(
         client.create_did_webvh(req)
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create DID via WebVH server: {e}"))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create DID via WebVH server: {}", explain(&e)))?;
 
     let did = result.did.clone();
     let mnemonic = result.mnemonic.clone().unwrap_or_default();
@@ -532,5 +576,39 @@ mod tests {
         .await;
         assert!(out.is_err());
         assert_eq!(calls.get(), 1, "deterministic faults are not retried");
+    }
+
+    /// The failure that cost an hour of log-reading: the VTA relayed the
+    /// mint onward to the DID hosting server, the hosting server answered
+    /// but in a dialect the VTA refused, and all the operator saw was
+    /// "timed out". The plain reading — "the VTA is unreachable" — sends
+    /// them to the wrong log, so the text has to name the leg.
+    #[test]
+    fn a_tsp_reply_timeout_says_which_leg_went_quiet() {
+        let out = explain(&VtaError::TspTransport(
+            "timed out waiting for the TSP reply to request 'urn:uuid:fa7c223d'".into(),
+        ));
+        // The original is kept — the request id is what ties the TUI line to
+        // the VTA's own log entry for the same task.
+        assert!(out.contains("urn:uuid:fa7c223d"), "{out}");
+        assert!(out.contains("reached the VTA"), "{out}");
+        assert!(out.contains("hosting"), "{out}");
+        // And the SDK's own hint, rather than a second one forked here.
+        assert_eq!(
+            out.lines().last(),
+            VtaError::TspTransport(String::new())
+                .suggested_fix()
+                .map(str::trim),
+            "the closing line is the SDK hint verbatim: {out}"
+        );
+    }
+
+    /// Every other TSP transport fault — a seal or socket failure — is a
+    /// genuinely local one, so it must *not* be told it reached the VTA.
+    #[test]
+    fn a_non_timeout_tsp_fault_is_not_blamed_on_a_far_leg() {
+        let out = explain(&VtaError::TspTransport("failed to seal frame".into()));
+        assert!(!out.contains("reached the VTA"), "{out}");
+        assert!(out.contains("failed to seal frame"), "{out}");
     }
 }
