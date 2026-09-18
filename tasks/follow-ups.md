@@ -5,8 +5,10 @@ R0–R27) when those were archived on 2026-07-20. Everything numbered in those
 plans shipped; what remains are small, unscheduled items that lived in the
 prose notes rather than as checkboxes.
 
-Companion: [`d4-scoping.md`](./d4-scoping.md) — the one item large enough to
-have its own scoping doc.
+Companions — the items large enough to have their own scoping docs:
+[`d4-scoping.md`](./d4-scoping.md) (VP construction) and
+[`vtc-client-migration-scoping.md`](./vtc-client-migration-scoping.md)
+(the messaging-layer migration behind "consume vtc-client").
 
 Status legend: `[ ]` open · `[~]` in progress · `[x]` done
 
@@ -80,13 +82,23 @@ beside the `vta-sdk` line in the root manifest;
 has to be reversed.
 
 ### [ ] Consume `vtc-client` for VTC interactions and delete the hand-built path
+**Blocked on an architectural mismatch, not an upstream release — see
+[`vtc-client-migration-scoping.md`](./vtc-client-migration-scoping.md).** VTI #1399
+is in (`vtc-client 0.6.7` has `submit_join_as` + `connect_didcomm`/`connect_tsp`),
+but verifying against the source showed the drop-in cannot work: vtc-client's
+session verbs open their **own** mediator socket per DID ("one socket per DID"),
+which would displace OpenVTC's per-identity listener and break inbound; and the
+REST verbs need a VTC REST base URL the join flow never discovers (VTCs are
+addressed by DID over DIDComm/TSP), so REST-only would regress transport support.
+Consuming vtc-client therefore means migrating OpenVTC's whole messaging layer
+onto `vta-sdk` sessions — its own initiative, scoped in that doc.
+
+Original framing (kept for context — its premise does not hold):
 `openvtc-core/src/join.rs` builds the join-ceremony Trust Task documents itself
 and sends them over ATM or `tsp::send_trust_task`, because the library offered a
 transport we could not use and a signature we could not satisfy. **VTI #1399
 fixed both** (`vtc-client` gained `submit_join_as` for any DID method, and
-`connect_didcomm` / `connect_tsp` behind off-by-default features), so this is now
-a consumer change waiting on a `vtc-client` release carrying it — and on the
-0.35 line above, since `vtc-client` on `main` declares `vta-sdk` 0.35.
+`connect_didcomm` / `connect_tsp` behind off-by-default features).
 
 What goes when it lands: `submit_join_request`, the status poll and self-remove
 in `join.rs`, our half of `tsp.rs`, and the DIDComm-vs-TSP thread-id
@@ -113,7 +125,11 @@ Gated on a `vtc-service` release carrying #1334: `main` is still at **0.11.58**,
 the same version published 2026-08-11, a month before the fix. Built today it
 would have to ship default-off, which is a switch with nothing to switch on.
 Falls out for free if the item above lands first, since `vtc-client`'s session
-transports verify reply proofs through the SDK.
+transports verify reply proofs through the SDK — but the item above is now a
+whole messaging migration (see the scoping doc), so this is better done on its
+own: verify the inbound reply's DI proof on OpenVTC's existing inbound path with
+the `affinidi-data-integrity` verifier the VRC path already uses, no transport
+change. That is conflict-free and does not wait on the migration.
 
 ---
 
