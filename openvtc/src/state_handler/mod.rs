@@ -1509,26 +1509,39 @@ impl StateHandler {
                         &mut in_flight,
                         outcome,
                     );
-                    let pending_deregistration = settle_after_apply(
+                    let settled = settle_after_apply(
                         after, &mut state, &mut config, &tdk, self.profile.as_str(),
                     )
                     .await;
-                    // A community we have just left still holds a messaging
-                    // session. The session manager lives here, not in the shared
-                    // apply path, so the outcome reports the teardown and this
-                    // arm performs it. Local work — removing a listener — not a
-                    // network call.
-                    if let Some((vtc, persona)) = pending_deregistration {
-                        deregister_inactive_community(
-                            &mut session_manager,
-                            &didcomm_service,
-                            &config,
-                            &mut state,
-                            &vtc,
-                            persona,
-                        )
-                        .await;
-                        state.main_page.sync_from_config(&config);
+                    match settled {
+                        // A community we have just left still holds a messaging
+                        // session. The session manager lives here, not in the
+                        // shared apply path, so the outcome reports the teardown
+                        // and this arm performs it. Local work — removing a
+                        // listener — not a network call.
+                        AfterSettle::Deregister(vtc, persona) => {
+                            deregister_inactive_community(
+                                &mut session_manager,
+                                &didcomm_service,
+                                &config,
+                                &mut state,
+                                &vtc,
+                                persona,
+                            )
+                            .await;
+                            state.main_page.sync_from_config(&config);
+                        }
+                        // A persona minted while running has no listener yet
+                        // (startup builds one per identity; this path does not).
+                        // Bring it up so it can vet/apply/join without a restart.
+                        // It has no community, so — like a community-less identity
+                        // at startup — it gets a listener but no session-manager
+                        // entry (that is per (persona, community)).
+                        AfterSettle::PersonaMinted(persona_id) => {
+                            install_persona_listener(&didcomm_service, &tdk, &config, persona_id, &mut state)
+                                .await;
+                        }
+                        AfterSettle::Nothing => {}
                     }
                     // A refresh asked for while the vault was busy is re-issued
                     // here, now that the domain is free — see `vic_refresh_queued`.
@@ -2633,11 +2646,16 @@ impl StateHandler {
                     Action::SetTokenName(..) | Action::FactoryReset(..) | Action::TokenWriteKeys(..) => {}
 
                     // Vetting sends and receives peer messages as a persona, and
-                    // this loop has neither a persona nor an inbound arm.
+                    // reaching this arm means there is none yet (the first persona
+                    // created hands off to the runtime loop). Guide the operator in
+                    // the panel where they are looking — not only the Activity Log —
+                    // and no restart is needed any more: creating a persona brings
+                    // messaging up on its own.
                     Action::Vetting(..) => {
-                        state.main_page.log(
-                            "Vetting needs a persona — create one under My Identity, then \
-                             restart OpenVTC to apply or to vet.",
+                        state.main_page.content_panel.vetting.status_message = Some(
+                            "Vetting needs a persona. Create one under My Identity — it is the \
+                             DID you apply and vet as — and vetting comes online automatically."
+                                .to_string(),
                         );
                     }
 
@@ -2665,6 +2683,10 @@ impl StateHandler {
                     // runtime loop — a listing that lands in that window has
                     // nowhere to go, but its domain must still be freed or the
                     // guard stays set for the life of the loop.
+                    // Set when the outcome just persisted the account's first
+                    // persona, which triggers the hand-off below (checked once the
+                    // `join_ctx` borrow this match takes has ended).
+                    let mut minted_persona = false;
                     match join_ctx.as_mut() {
                         // State A holds no messaging sessions, so a pending
                         // deregistration cannot arise here — and could not be
@@ -2681,7 +2703,7 @@ impl StateHandler {
                             // deregistration cannot arise here; a persona
                             // persist very much can — this is where an account's
                             // first one is minted.
-                            let _ = settle_after_apply(
+                            let settled = settle_after_apply(
                                 after,
                                 state,
                                 &mut ctx.config,
@@ -2689,8 +2711,27 @@ impl StateHandler {
                                 self.profile.as_str(),
                             )
                             .await;
+                            // The first persona was just minted. This loop has no
+                            // inbound arm, so the persona cannot vet/apply/join
+                            // here — hand off to `run()`, which brings up a
+                            // listener per identity and enters the runtime loop.
+                            // Reuses the tested hot-start path rather than telling
+                            // the operator to restart. The borrow on `join_ctx`
+                            // ends with this match, so the break below can take it.
+                            minted_persona = matches!(settled, AfterSettle::PersonaMinted(_));
                         }
                         None => in_flight.finish(outcome.domain()),
+                    }
+                    if minted_persona {
+                        state
+                            .main_page
+                            .log("Persona created — starting secure messaging…");
+                        let _ = self.state_tx.send(state.clone());
+                        break DegradedOutcome::Joined(Box::new(
+                            join_ctx
+                                .take()
+                                .expect("join_ctx present: a persona was just minted through it"),
+                        ));
                     }
                     if state.main_page.content_panel.vta.vic_refresh_queued {
                         state.main_page.content_panel.vta.vic_refresh_queued = false;
@@ -2844,6 +2885,21 @@ fn apply_capability_replies(
     }
 }
 
+/// What a settled outcome asks the owning loop to do next — work that needs a
+/// loop's own resources ([`settle_after_apply`] holds neither the session
+/// manager nor the messaging service).
+enum AfterSettle {
+    /// Nothing further.
+    Nothing,
+    /// A community was left; the runtime loop tears its messaging session down.
+    Deregister(String, openvtc_core::config::account::PersonaId),
+    /// A persona was just minted and needs its DIDComm listener brought up so it
+    /// can send and receive (apply, vet, join) without a restart. The runtime
+    /// loop installs the listener in place; the degraded loop hands off to
+    /// `run`, which brings up a listener per identity.
+    PersonaMinted(openvtc_core::config::account::PersonaId),
+}
+
 /// Do the work an outcome handed back because [`background_dispatch::apply_outcome`]
 /// could not: it is shared by both loops, and they hold different things.
 ///
@@ -2855,16 +2911,18 @@ async fn settle_after_apply(
     config: &mut Config,
     tdk: &TDK,
     profile: &str,
-) -> Option<(String, openvtc_core::config::account::PersonaId)> {
+) -> AfterSettle {
     use main_page::content::CreatePersonaPhase;
 
     match after {
-        background_dispatch::AfterApply::Nothing => None,
+        background_dispatch::AfterApply::Nothing => AfterSettle::Nothing,
         // Only the runtime loop owns a session manager, so it is handed back up.
-        background_dispatch::AfterApply::Deregister(vtc, persona) => Some((vtc, persona)),
+        background_dispatch::AfterApply::Deregister(vtc, persona) => {
+            AfterSettle::Deregister(vtc, persona)
+        }
         background_dispatch::AfterApply::PersistPersona(minted) => {
             match minted.persist(config, tdk, profile).await {
-                Ok(_) => {
+                Ok(persona_id) => {
                     let did = minted.did.clone();
                     let copied = crate::clipboard::copy_to_clipboard(&did).is_ok();
                     if let Some(o) = state.main_page.create_persona.as_mut() {
@@ -2876,6 +2934,11 @@ async fn settle_after_apply(
                     // Refresh the VTA panel so the new orphan persona is listed.
                     state.main_page.sync_from_config(config);
                     state.main_page.log(format!("Created persona DID {did}"));
+                    // The new persona needs its listener brought up to be usable
+                    // for vetting/joining without a restart — the caller owns the
+                    // means to do that (session manager / messaging service, or a
+                    // hand-off from the degraded loop).
+                    AfterSettle::PersonaMinted(persona_id)
                 }
                 Err(e) => {
                     // The DID exists at the VTA but is not in the config. Say so
@@ -2888,9 +2951,9 @@ async fn settle_after_apply(
                     state
                         .main_page
                         .log_error("Persona minted but not saved", &e);
+                    AfterSettle::Nothing
                 }
             }
-            None
         }
     }
 }
@@ -4047,6 +4110,51 @@ async fn register_joined_session(
                     );
                 }
             }
+        }
+    }
+}
+
+/// Bring up the DIDComm listener for a persona minted at runtime, so it can send
+/// and receive (apply, vet, join) without a restart.
+///
+/// A freshly minted persona has no community, so — like a community-less identity
+/// at startup ([`didcomm::build_listener_configs`] builds one listener per
+/// identity) — it gets a listener but **no** session-manager entry; those are per
+/// (persona, community) and are added when it joins one. Idempotent: a listener
+/// that already exists (a reused persona) is left as it is.
+async fn install_persona_listener(
+    service: &openvtc_core::didcomm::Messaging,
+    tdk: &TDK,
+    config: &Config,
+    persona_id: openvtc_core::config::account::PersonaId,
+    state: &mut State,
+) {
+    let Some(did) = config.identities.get(&persona_id).map(|id| id.did.clone()) else {
+        return;
+    };
+    let lid = didcomm::persona_listener_id(&did);
+    if service.has_listener(&lid).await {
+        return;
+    }
+    match didcomm::persona_listener_config_for(config, tdk, persona_id).await {
+        Some(cfg) => {
+            if let Err(e) = didcomm::add_listener(service, &cfg).await {
+                state.main_page.log(format!(
+                    "Persona created, but its live session could not start now (it will \
+                     connect on next launch): {e}"
+                ));
+            } else {
+                state
+                    .main_page
+                    .log("New persona online — secure messaging connecting…");
+            }
+        }
+        None => {
+            // Just minted this identity, so this is unexpected — but do not
+            // pretend it is online.
+            state.main_page.log(
+                "Persona created, but its identity could not be resolved to start a live session.",
+            );
         }
     }
 }
