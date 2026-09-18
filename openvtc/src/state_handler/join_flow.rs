@@ -32,7 +32,11 @@ use openvtc_core::vetting::queries::{CommunityAnswer, CommunityQuery, QueryKind}
 use openvtc_core::vetting::wire;
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
 use tracing::debug;
-use vta_sdk::{client::VtaClient, protocols::did_management::create::WebvhPathMode};
+use vta_sdk::{
+    client::VtaClient,
+    protocols::did_management::create::WebvhPathMode,
+    protocols::vetting::{VettingRequirements, VettingRequirementsInvitation},
+};
 
 use crate::{
     Interrupted,
@@ -40,8 +44,9 @@ use crate::{
         StateHandler,
         actions::Action,
         join::{
-            ApplyAs, AvailableVic, IdentityPick, JoinApplication, JoinPage, JoinState,
-            JoinVettingView, KnownVetting, PersonaOption, PresentedInvitation, VettingPhase,
+            ApplyAs, AvailableVic, IdentityPick, JoinApplication, JoinPage, JoinRoute, JoinState,
+            JoinVettingView, KnownVetting, PersonaOption, PresentedInvitation, RouteOption,
+            VettingPhase,
         },
         main_page::content::{VicLifecycle, VicSummary},
         main_page::{sanitize_display, shorten_did},
@@ -134,10 +139,145 @@ fn application_contexts(
     community_context::context_options(&config.account, record, &suggested_context(config, vtc_did))
 }
 
+/// The invitation row's detail: how many are held, and when the longest-lived
+/// one runs out. Dates are shown as the credential writes them — an invitation
+/// is someone else's document, and reformatting its `validUntil` would put a
+/// date on screen that is not in the thing being presented.
+fn invitations_held(invitations: &[AvailableVic]) -> String {
+    let n = invitations.len();
+    let latest = invitations
+        .iter()
+        .map(|v| v.valid_until.as_str())
+        .filter(|u| !u.is_empty())
+        .max();
+    match latest {
+        Some(until) => format!("{n} held, valid until {}", sanitize_display(until, 40)),
+        None => format!("{n} held"),
+    }
+}
+
+/// The ways in to `vtc_did`, in the order they are offered.
+///
+/// The order is "what actually admits you soonest": an invitation in hand
+/// short-circuits vetting, a satisfied application is next, and an open request
+/// — which only puts the applicant in front of the community's moderators — is
+/// always last. Blocked routes keep their place rather than sinking to the
+/// bottom, so the list reads the same way twice running.
+fn build_routes(
+    community: &str,
+    requirements: &VettingRequirements,
+    application: Option<&JoinApplication>,
+    personas: &[ApplyAs],
+    invitations: &[AvailableVic],
+) -> Vec<RouteOption> {
+    let held = invitations.len();
+    let mut routes = Vec::new();
+
+    // An invitation the community requires is not an alternative to being
+    // vetted — it is a second thing asked for on top. Offering it as its own
+    // row would read as a way around the statements, so it is left to the
+    // requirement bullets (`describe_requirements` already names it) and to the
+    // vetting row's detail.
+    let invitation_required = matches!(
+        requirements.invitation,
+        Some(VettingRequirementsInvitation::Required)
+    );
+    if !invitation_required {
+        let refuses = matches!(
+            requirements.invitation,
+            Some(VettingRequirementsInvitation::None)
+        );
+        routes.push(RouteOption {
+            route: JoinRoute::Invitation,
+            label: "Use an invitation".to_string(),
+            detail: if held == 0 {
+                "admits you without being vetted".to_string()
+            } else {
+                invitations_held(invitations)
+            },
+            blocked: if refuses {
+                Some(format!("{community} does not admit anyone by invitation"))
+            } else if held == 0 {
+                Some(
+                    "none held for this community — paste one on the next step if you have one \
+                     the vault has not seen"
+                        .to_string(),
+                )
+            } else {
+                None
+            },
+        });
+    }
+
+    let (detail, blocked) = match application {
+        Some(app) if app.satisfied => (
+            format!(
+                "{} statement{} ready to present",
+                app.statements,
+                if app.statements == 1 { "" } else { "s" }
+            ),
+            None,
+        ),
+        Some(app) => (
+            app.progress
+                .clone()
+                .unwrap_or_else(|| format!("under way as {}", app.persona_label)),
+            None,
+        ),
+        None if personas.is_empty() => (
+            "no application yet".to_string(),
+            Some(
+                "applying needs a persona — every card is signed by the DID you join with. \
+                 Create one under My Identity."
+                    .to_string(),
+            ),
+        ),
+        None => ("no application yet".to_string(), None),
+    };
+    routes.push(RouteOption {
+        route: JoinRoute::Vetting,
+        label: match application {
+            Some(app) if app.satisfied => "Present your vetting statements".to_string(),
+            Some(_) => "Carry on with your application".to_string(),
+            None => "Apply for vetting".to_string(),
+        },
+        detail: if invitation_required {
+            format!(
+                "{detail} — {community} also asks for an invitation ({} held)",
+                held
+            )
+        } else {
+            detail
+        },
+        blocked,
+    });
+
+    routes.push(RouteOption {
+        route: JoinRoute::OpenRequest,
+        label: "Send an open request".to_string(),
+        // Statements ride with the request whenever the persona joining has
+        // gathered any — the submit attaches them without asking. Saying so
+        // here keeps this row from reading as a way to hold them back.
+        detail: match application.filter(|a| a.statements > 0) {
+            Some(_) => {
+                format!("{community} refers it to its moderators — your statements go with it")
+            }
+            None => format!("{community} refers it to its moderators to decide"),
+        },
+        blocked: None,
+    });
+    routes
+}
+
 /// What the join flow shows for `vtc_did`, when the book knows it vets.
+///
+/// `invitations` are this community's usable VICs, already collected — the
+/// routes cannot be drawn without them, because whether an invitation is a way
+/// in is a fact about this account, not about the community.
 pub(crate) fn vetting_view(
     config: &Config,
     vtc_did: &str,
+    invitations: &[AvailableVic],
     now: chrono::DateTime<Utc>,
 ) -> Option<JoinVettingView> {
     let book = &config.private.vetting;
@@ -180,9 +320,20 @@ pub(crate) fn vetting_view(
     personas.sort_by(|a, b| a.label.cmp(&b.label));
     let context_options =
         application_contexts(config, vtc_did, personas.first().map(|p| p.persona));
+    let name = vetting_actions::community_display(config, vtc_did);
+    let routes = build_routes(
+        &name,
+        &criterion.requirements,
+        application.as_ref(),
+        &personas,
+        invitations,
+    );
+    // Open on the first route that can actually be taken, so Enter on arrival
+    // does the most useful thing rather than landing on a row that refuses.
+    let row = routes.iter().position(RouteOption::available).unwrap_or(0);
     Some(JoinVettingView {
         community: vtc_did.to_string(),
-        name: vetting_actions::community_display(config, vtc_did),
+        name,
         accent: book.branding(vtc_did).and_then(|b| b.accent_rgb()),
         phase: VettingPhase::Known(Box::new(KnownVetting {
             requirements: describe_requirements(&criterion.requirements)
@@ -195,11 +346,12 @@ pub(crate) fn vetting_view(
                 .as_deref()
                 .map(|u| sanitize_display(u, 300)),
             application,
+            routes,
             personas,
             persona_index: 0,
             context_options,
             context_index: 0,
-            field: 0,
+            row,
         })),
     })
 }
@@ -207,7 +359,7 @@ pub(crate) fn vetting_view(
 /// Open the vetting page for `vtc_did` when the book knows it vets. Returns
 /// whether it did.
 fn show_vetting(state: &mut State, config: &Config, vtc_did: &str) -> bool {
-    let Some(view) = vetting_view(config, vtc_did, Utc::now()) else {
+    let Some(view) = vetting_view(config, vtc_did, &state.join.available_vics, Utc::now()) else {
         return false;
     };
     state.join.pending_vtc = Some(vtc_did.to_string());
@@ -218,7 +370,17 @@ fn show_vetting(state: &mut State, config: &Config, vtc_did: &str) -> bool {
 }
 
 /// Open the vetting page saying the requirements could not be learned.
-fn show_unknown(state: &mut State, config: &Config, vtc_did: &str, reason: String) {
+///
+/// `can_retry` is whether the calling loop can hear an answer at all: the
+/// State-A loop cannot, and offering it "ask again" there would be a key that
+/// can only ever fail.
+fn show_unknown(
+    state: &mut State,
+    config: &Config,
+    vtc_did: &str,
+    reason: String,
+    can_retry: bool,
+) {
     state.join.pending_vtc = Some(vtc_did.to_string());
     state.join.vetting = Some(JoinVettingView {
         community: vtc_did.to_string(),
@@ -230,6 +392,7 @@ fn show_unknown(state: &mut State, config: &Config, vtc_did: &str, reason: Strin
             .and_then(|b| b.accent_rgb()),
         phase: VettingPhase::Unknown {
             reason: sanitize_display(&reason, 300),
+            can_retry,
         },
     });
     state.join.page = JoinPage::Vetting;
@@ -295,7 +458,7 @@ async fn ask_requirements(
             })
         }
         Err(reason) => {
-            show_unknown(state, config, vtc_did, reason);
+            show_unknown(state, config, vtc_did, reason, true);
             Err(())
         }
     }
@@ -320,22 +483,29 @@ fn satisfied_application_persona(state: &State) -> Option<PersonaId> {
     }
 }
 
+/// Cycle the value of the "applying as" selector the cursor is on. A no-op
+/// while the cursor is on a route — ←/→ there would silently change a choice
+/// that is not on screen.
 fn cycle_vetting_choice(config: &Config, vtc_did: &str, known: &mut KnownVetting, forward: bool) {
     let turn = |i: usize, n: usize| match n {
         0 => 0,
         n if forward => (i + 1) % n,
         n => (i + n - 1) % n,
     };
-    if known.field == 0 {
-        known.persona_index = turn(known.persona_index, known.personas.len());
-        known.context_options = application_contexts(
-            config,
-            vtc_did,
-            known.personas.get(known.persona_index).map(|p| p.persona),
-        );
-        known.context_index = 0;
-    } else {
-        known.context_index = turn(known.context_index, known.context_options.len());
+    match known.selector() {
+        Some(0) => {
+            known.persona_index = turn(known.persona_index, known.personas.len());
+            known.context_options = application_contexts(
+                config,
+                vtc_did,
+                known.personas.get(known.persona_index).map(|p| p.persona),
+            );
+            known.context_index = 0;
+        }
+        Some(_) => {
+            known.context_index = turn(known.context_index, known.context_options.len());
+        }
+        None => {}
     }
 }
 
@@ -462,9 +632,12 @@ impl StateHandler {
             JoinEntry::Resume { .. } => true,
         };
         if let JoinEntry::Resume { vtc_did, outcome } = entry {
+            // `reset` above cleared what the asking pass collected, and the
+            // routes cannot be drawn without it.
+            ensure_invitations(state, admin_vta, &vtc_did).await;
             match outcome {
                 RequirementsOutcome::Unanswered(reason) => {
-                    show_unknown(state, config, &vtc_did, reason);
+                    show_unknown(state, config, &vtc_did, reason, true);
                 }
                 outcome => {
                     let shown = matches!(outcome, RequirementsOutcome::Learned)
@@ -593,6 +766,11 @@ impl StateHandler {
                             } else {
                                 vtc_did
                             };
+                            // The invitations before the routes: whether presenting
+                            // one is a way in to this community is a fact about
+                            // this account, and the vetting page cannot say what
+                            // the options are without it.
+                            ensure_invitations(state, admin_vta, &vtc_did).await;
                             // Peer identity vetting: a community that vets says what
                             // it requires before anything about the applicant is sent
                             // (vetting-process.md §6.1). What the book already knows
@@ -617,7 +795,25 @@ impl StateHandler {
                                         return Ok(JoinExit::AwaitRequirements(awaiting));
                                     }
                                 }
-                                _ => {
+                                None => {
+                                    // Nothing is known and this loop cannot hear an
+                                    // answer, so the community is not asked. Say so
+                                    // rather than sending an open request on the
+                                    // quiet: a community that vets would refer that
+                                    // request to its moderators, and the applicant
+                                    // would never learn there was a way in they
+                                    // could have taken.
+                                    show_unknown(
+                                        state,
+                                        config,
+                                        &vtc_did,
+                                        "OpenVTC cannot hear its answer until you belong to a \
+                                         community, so it was not asked — this is your first join"
+                                            .to_string(),
+                                        false,
+                                    );
+                                }
+                                Some(false) => {
                                     if let Some(interrupted) = self
                                         .continue_join(
                                             vtc_did,
@@ -824,13 +1020,13 @@ impl StateHandler {
                                 return Ok(JoinExit::Exit(interrupted));
                             }
                         }
-                        Action::JoinVettingField(forward) => {
+                        Action::JoinVettingRow(forward) => {
                             if let Some(known) = known_vetting(state) {
-                                let fields = if known.application.is_some() { 1 } else { 2 };
-                                known.field = if forward {
-                                    (known.field + 1) % fields
+                                let rows = known.row_count().max(1);
+                                known.row = if forward {
+                                    (known.row + 1) % rows
                                 } else {
-                                    (known.field + fields - 1) % fields
+                                    (known.row + rows - 1) % rows
                                 };
                             }
                         }
@@ -838,6 +1034,93 @@ impl StateHandler {
                             let vtc_did = state.join.pending_vtc.clone().unwrap_or_default();
                             if let Some(known) = known_vetting(state) {
                                 cycle_vetting_choice(config, &vtc_did, known, forward);
+                            }
+                        }
+                        Action::JoinVettingTake => {
+                            // Enter on the routes list. A route the page drew as
+                            // blocked must say why rather than do nothing — a
+                            // keypress that cannot proceed reads as a frozen
+                            // screen (issue #29). The two "applying as" selectors
+                            // belong to the vetting route, so Enter on one takes
+                            // that route.
+                            let Some(known) = known_vetting(state) else {
+                                continue;
+                            };
+                            let route = match known.selected_route() {
+                                Some(option) if !option.available() => {
+                                    let why = option.blocked.clone().unwrap_or_default();
+                                    let label = option.label.clone();
+                                    state.join.messages.clear();
+                                    state.join.messages.push(MessageType::Error(format!(
+                                        "{label}: {why}"
+                                    )));
+                                    let _ = self.state_tx.send(state.clone());
+                                    continue;
+                                }
+                                Some(option) => option.route,
+                                // On a selector.
+                                None => JoinRoute::Vetting,
+                            };
+                            let Some(vtc_did) = state.join.pending_vtc.clone() else {
+                                continue;
+                            };
+                            state.join.messages.clear();
+                            match route {
+                                // The invitation is chosen further on, once the
+                                // persona it is bound to is known: the invitation
+                                // step lists this community's VICs for that
+                                // persona and is where one is picked.
+                                JoinRoute::Invitation => {
+                                    if let Some(interrupted) = self
+                                        .continue_join(
+                                            vtc_did,
+                                            interrupt_rx,
+                                            state,
+                                            tdk,
+                                            config,
+                                            admin_vta,
+                                            profile,
+                                            messaging,
+                                        )
+                                        .await
+                                    {
+                                        return Ok(JoinExit::Exit(interrupted));
+                                    }
+                                }
+                                // An application that already meets the
+                                // requirements is taken by joining — that is what
+                                // presents its statements. One that does not is
+                                // taken by working on it.
+                                JoinRoute::Vetting
+                                    if satisfied_application_persona(state).is_none() =>
+                                {
+                                    match apply_for_vetting(state, config, profile, &vtc_did) {
+                                        Ok(()) => {
+                                            state.active_page = ActivePage::Main;
+                                            return Ok(JoinExit::Returned(None));
+                                        }
+                                        Err(why) => {
+                                            state.join.messages.push(MessageType::Error(why));
+                                        }
+                                    }
+                                }
+                                JoinRoute::Vetting | JoinRoute::OpenRequest => {
+                                    if let Some(interrupted) = self
+                                        .take_join_route(
+                                            vtc_did,
+                                            interrupt_rx,
+                                            state,
+                                            tdk,
+                                            config,
+                                            admin_vta,
+                                            profile,
+                                            messaging,
+                                        )
+                                        .await
+                                    {
+                                        return Ok(JoinExit::Exit(interrupted));
+                                    }
+                                }
                             }
                         }
                         Action::JoinVettingApply => {
@@ -858,31 +1141,20 @@ impl StateHandler {
                                 continue;
                             };
                             state.join.messages.clear();
-                            // An application that meets the requirements joins as
-                            // its own persona, so its statements are presented.
-                            match satisfied_application_persona(state) {
-                                Some(persona_id) => {
-                                    state.join.available_vics =
-                                        collect_available_vics(state, admin_vta, &vtc_did).await;
-                                    open_invitation_choice(state, config, persona_id);
-                                }
-                                None => {
-                                    if let Some(interrupted) = self
-                                        .continue_join(
-                                            vtc_did,
-                                            interrupt_rx,
-                                            state,
-                                            tdk,
-                                            config,
-                                            admin_vta,
-                                            profile,
-                                            messaging,
-                                        )
-                                        .await
-                                    {
-                                        return Ok(JoinExit::Exit(interrupted));
-                                    }
-                                }
+                            if let Some(interrupted) = self
+                                .take_join_route(
+                                    vtc_did,
+                                    interrupt_rx,
+                                    state,
+                                    tdk,
+                                    config,
+                                    admin_vta,
+                                    profile,
+                                    messaging,
+                                )
+                                .await
+                            {
+                                return Ok(JoinExit::Exit(interrupted));
                             }
                         }
                         Action::JoinVettingAskAgain => {
@@ -905,6 +1177,47 @@ impl StateHandler {
                 }
             }
             let _ = self.state_tx.send(state.clone());
+        }
+    }
+
+    /// Go on with a join from the vetting page, presenting the statements of an
+    /// application that already meets the requirements when there is one.
+    ///
+    /// Such an application fixes the persona — its statements name the DID they
+    /// were gathered for — so the identity step has nothing left to ask and the
+    /// flow goes straight to the invitation choice. Anything else falls through
+    /// to the ordinary [`continue_join`](Self::continue_join).
+    #[allow(clippy::too_many_arguments)]
+    async fn take_join_route(
+        &self,
+        vtc_did: String,
+        interrupt_rx: &mut broadcast::Receiver<Interrupted>,
+        state: &mut State,
+        tdk: &TDK,
+        config: &mut Config,
+        admin_vta: Option<&VtaClient>,
+        profile: &str,
+        messaging: Option<&Messaging>,
+    ) -> Option<Interrupted> {
+        match satisfied_application_persona(state) {
+            Some(persona_id) => {
+                ensure_invitations(state, admin_vta, &vtc_did).await;
+                open_invitation_choice(state, config, persona_id);
+                None
+            }
+            None => {
+                self.continue_join(
+                    vtc_did,
+                    interrupt_rx,
+                    state,
+                    tdk,
+                    config,
+                    admin_vta,
+                    profile,
+                    messaging,
+                )
+                .await
+            }
         }
     }
 
@@ -933,7 +1246,7 @@ impl StateHandler {
         // usable-invitation count, then let the operator pick the
         // identity to present (the invitation choice, if any,
         // follows for the chosen persona).
-        state.join.available_vics = collect_available_vics(state, admin_vta, &vtc_did).await;
+        ensure_invitations(state, admin_vta, &vtc_did).await;
         let options = build_persona_options(config, &state.join.available_vics);
         if options.is_empty() {
             // First join — nothing to reuse; mint a fresh identity.
@@ -1236,6 +1549,22 @@ fn build_persona_options(config: &Config, vics: &[AvailableVic]) -> Vec<PersonaO
 /// (complete + unexpired) so the identity badges and the invitation list only
 /// ever show usable invitations. Best-effort: with no admin VTA only a loaded VIC
 /// is considered.
+/// Collect `vtc_did`'s usable invitations into the join state, once.
+///
+/// Two screens need them now — the vetting page, to say whether presenting one
+/// is a way in, and the identity step, to badge each persona with its count —
+/// and the collection is a vault listing plus a fetch per descriptor. The
+/// marker on the state, rather than the emptiness of the list, is what says it
+/// has been done: holding none is a legitimate answer, and re-asking on every
+/// screen would put a round trip behind a keypress.
+async fn ensure_invitations(state: &mut State, admin_vta: Option<&VtaClient>, vtc_did: &str) {
+    if state.join.invitations_for.as_deref() == Some(vtc_did) {
+        return;
+    }
+    state.join.available_vics = collect_available_vics(state, admin_vta, vtc_did).await;
+    state.join.invitations_for = Some(vtc_did.to_string());
+}
+
 async fn collect_available_vics(
     state: &State,
     admin_vta: Option<&VtaClient>,
@@ -2934,19 +3263,25 @@ mod vetting_tests {
     fn a_vetting_community_is_explained_before_joining() {
         let mut config = test_config();
         let now = Utc::now();
-        assert!(vetting_view(&config, VTC, now).is_none(), "not known yet");
+        assert!(
+            vetting_view(&config, VTC, &[], now).is_none(),
+            "not known yet"
+        );
 
         config
             .private
             .vetting
             .learn_manifest(VTC, &manifest(false), now);
-        assert!(vetting_view(&config, VTC, now).is_none(), "does not vet");
+        assert!(
+            vetting_view(&config, VTC, &[], now).is_none(),
+            "does not vet"
+        );
 
         config
             .private
             .vetting
             .learn_manifest(VTC, &manifest(true), now);
-        let view = vetting_view(&config, VTC, now).unwrap();
+        let view = vetting_view(&config, VTC, &[], now).unwrap();
         let VettingPhase::Known(known) = &view.phase else {
             panic!("known");
         };
@@ -2963,7 +3298,7 @@ mod vetting_tests {
             .id
             .clone();
         config.private.vetting.adopt_known_requirements(&id);
-        let view = vetting_view(&config, VTC, now).unwrap();
+        let view = vetting_view(&config, VTC, &[], now).unwrap();
         let VettingPhase::Known(known) = &view.phase else {
             panic!("known");
         };
@@ -2974,5 +3309,151 @@ mod vetting_tests {
         assert_eq!(app.persona, persona);
         assert!(!app.satisfied);
         assert!(app.next_step.starts_with("f —"), "{}", app.next_step);
+    }
+
+    fn requirements(invitation: Option<&str>) -> VettingRequirements {
+        let mut value = serde_json::json!({
+            "version": "0.1",
+            "statementType": vta_sdk::protocols::vetting::IDENTITY_VETTING_ENDORSEMENT_TYPE,
+            "minStatements": 2,
+            "acceptedMethods": ["inPerson"],
+            "eligibleVetters": { "role": "vetter" }
+        });
+        if let Some(invitation) = invitation {
+            value["invitation"] = serde_json::json!(invitation);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn a_persona() -> ApplyAs {
+        ApplyAs {
+            persona: PersonaId::new(),
+            label: "alice".into(),
+            did: "did:webvh:alice".into(),
+        }
+    }
+
+    fn a_vic() -> AvailableVic {
+        AvailableVic {
+            id: "urn:uuid:vic".into(),
+            subject: None,
+            valid_from: String::new(),
+            valid_until: "2026-12-01T00:00:00Z".into(),
+            body: serde_json::Value::Null,
+        }
+    }
+
+    fn option_for(routes: &[RouteOption], route: JoinRoute) -> Option<&RouteOption> {
+        routes.iter().find(|r| r.route == route)
+    }
+
+    /// The whole point of the routes list: an invitation in hand is a way in
+    /// that does not go through vetting, and it is offered first.
+    #[test]
+    fn an_invitation_in_hand_is_the_first_way_in() {
+        let personas = [a_persona()];
+        let held = [a_vic()];
+        let routes = build_routes("Kernel", &requirements(None), None, &personas, &held);
+        let known = KnownVetting {
+            routes: routes.clone(),
+            ..KnownVetting::default()
+        };
+        assert_eq!(
+            known.selected_route().map(|r| r.route),
+            Some(JoinRoute::Invitation)
+        );
+        let invitation = option_for(&routes, JoinRoute::Invitation).unwrap();
+        assert!(invitation.available());
+        assert!(invitation.detail.contains("1 held"));
+        assert!(invitation.detail.contains("2026-12-01"));
+    }
+
+    /// Holding none is an answer, not a reason to drop the row — "why can I
+    /// not use an invitation?" is what the page exists to settle.
+    #[test]
+    fn holding_no_invitation_keeps_the_row_and_gives_the_reason() {
+        let routes = build_routes("Kernel", &requirements(None), None, &[a_persona()], &[]);
+        let invitation = option_for(&routes, JoinRoute::Invitation).unwrap();
+        assert!(!invitation.available());
+        assert!(invitation.blocked.as_deref().unwrap().contains("none held"));
+    }
+
+    /// An invitation the community *requires* is asked for on top of the
+    /// statements, not instead of them. Offering it as its own row would read
+    /// as a way around being vetted.
+    #[test]
+    fn a_required_invitation_is_not_offered_as_a_way_around_vetting() {
+        let routes = build_routes(
+            "Kernel",
+            &requirements(Some("required")),
+            None,
+            &[a_persona()],
+            &[a_vic()],
+        );
+        assert!(option_for(&routes, JoinRoute::Invitation).is_none());
+        let vetting = option_for(&routes, JoinRoute::Vetting).unwrap();
+        assert!(vetting.detail.contains("also asks for an invitation"));
+        assert!(vetting.detail.contains("1 held"));
+    }
+
+    /// A community that admits nobody by invitation says so, even to someone
+    /// holding one — otherwise the row is an offer that cannot be taken.
+    #[test]
+    fn a_community_that_takes_no_invitations_says_so() {
+        let routes = build_routes(
+            "Kernel",
+            &requirements(Some("none")),
+            None,
+            &[a_persona()],
+            &[a_vic()],
+        );
+        let invitation = option_for(&routes, JoinRoute::Invitation).unwrap();
+        assert!(!invitation.available());
+        assert!(
+            invitation
+                .blocked
+                .as_deref()
+                .unwrap()
+                .contains("does not admit anyone by invitation")
+        );
+    }
+
+    /// Applying signs cards with a persona, so with none there is nothing to
+    /// apply as. The open request still stands: it mints one on the way.
+    #[test]
+    fn applying_needs_a_persona_but_an_open_request_does_not() {
+        let routes = build_routes("Kernel", &requirements(None), None, &[], &[]);
+        assert!(!option_for(&routes, JoinRoute::Vetting).unwrap().available());
+        assert!(
+            option_for(&routes, JoinRoute::OpenRequest)
+                .unwrap()
+                .available()
+        );
+    }
+
+    /// Statements ride with an open request whenever the joining persona has
+    /// gathered any, so the row must not read as a way to hold them back.
+    #[test]
+    fn an_open_request_admits_that_statements_go_with_it() {
+        let application = JoinApplication {
+            id: "a1".into(),
+            persona: PersonaId::new(),
+            persona_label: "alice".into(),
+            statements: 2,
+            progress: Some("2 counted".into()),
+            next_step: "join".into(),
+            satisfied: true,
+        };
+        let routes = build_routes(
+            "Kernel",
+            &requirements(None),
+            Some(&application),
+            &[a_persona()],
+            &[],
+        );
+        let open = option_for(&routes, JoinRoute::OpenRequest).unwrap();
+        assert!(open.detail.contains("your statements go with it"));
+        let vetting = option_for(&routes, JoinRoute::Vetting).unwrap();
+        assert_eq!(vetting.label, "Present your vetting statements");
     }
 }

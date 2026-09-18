@@ -2633,8 +2633,9 @@ impl StateHandler {
                     Action::JoinReuseConfirm | Action::JoinReuseCancel |
                     Action::JoinInvitationSelect(..) | Action::JoinInvitationChoose |
                     Action::JoinContextSelect(..) | Action::JoinContextSlug(..) |
-                    Action::JoinContextChoose | Action::JoinVettingApply | Action::JoinVettingJoin |
-                    Action::JoinVettingAskAgain | Action::JoinVettingField(..) |
+                    Action::JoinContextChoose | Action::JoinVettingTake | Action::JoinVettingApply |
+                    Action::JoinVettingJoin |
+                    Action::JoinVettingAskAgain | Action::JoinVettingRow(..) |
                     Action::JoinVettingCycle(..) |
                     Action::JoinCancel | Action::JoinPasteVic(..) | Action::JoinPasteFromClipboard |
                     Action::JoinClearVic | Action::ImportConfig(..) | Action::SetProtection(..) |

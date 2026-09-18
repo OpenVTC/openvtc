@@ -36,9 +36,9 @@ pub enum JoinPage {
     /// Automated mint + join sequence progress / result.
     Progress,
     /// A community that vets its members: what it requires, in plain words,
-    /// before anything about the applicant is sent — with the persona's
-    /// application if there is one, and the ways on (apply, join anyway,
-    /// cancel). Also the page shown while the community is being asked.
+    /// before anything about the applicant is sent — and the ways in it leaves
+    /// open, each said to be available or not and why. Also the page shown
+    /// while the community is being asked.
     Vetting,
 }
 
@@ -61,12 +61,58 @@ pub enum VettingPhase {
     /// answer, draws the page while it waits.
     Asking,
     /// Its requirements could not be learned; why.
-    Unknown { reason: String },
+    Unknown {
+        reason: String,
+        /// Whether asking again can work from here. False in the State-A
+        /// degraded loop, which has no inbound arm to hear an answer on — there
+        /// the offer would be a key that can only ever fail.
+        can_retry: bool,
+    },
     /// It vets, and this is what it asks.
     Known(Box<KnownVetting>),
 }
 
-/// A vetting community's requirements and where this persona stands.
+/// A way in to a community that vets.
+///
+/// The join flow offers all of them at once, available or not, rather than
+/// walking one path and leaving the others to be discovered: which way in is
+/// open depends on the community's manifest *and* on what this account already
+/// holds, and neither is knowable before the community has been asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinRoute {
+    /// Present an invitation (VIC) this account already holds.
+    Invitation,
+    /// Be vetted: start an application, carry one on, or present the statements
+    /// of one that already meets the requirements.
+    Vetting,
+    /// Submit with neither; the community's moderators decide.
+    OpenRequest,
+}
+
+/// One way in, as the routes list shows it.
+#[derive(Clone, Debug)]
+pub struct RouteOption {
+    pub route: JoinRoute,
+    /// The row's label.
+    pub label: String,
+    /// What taking it does, or where it stands, in a few words.
+    pub detail: String,
+    /// `None` when it can be taken now; otherwise why it cannot. A blocked
+    /// route is still listed — "you cannot use an invitation because you hold
+    /// none" is the answer to "what are my options", and hiding the row leaves
+    /// the question open.
+    pub blocked: Option<String>,
+}
+
+impl RouteOption {
+    #[must_use]
+    pub fn available(&self) -> bool {
+        self.blocked.is_none()
+    }
+}
+
+/// A vetting community's requirements, the ways in, and where this persona
+/// stands.
 #[derive(Clone, Debug, Default)]
 pub struct KnownVetting {
     /// What it requires, one sentence each.
@@ -75,14 +121,48 @@ pub struct KnownVetting {
     pub governance_url: Option<String>,
     /// Our application to it, when there is one.
     pub application: Option<JoinApplication>,
+    /// The ways in, in the order they are offered.
+    pub routes: Vec<RouteOption>,
     /// Personas a new application can be made as.
     pub personas: Vec<ApplyAs>,
     pub persona_index: usize,
     /// Where a new application's face is worn.
     pub context_options: Vec<ContextOption>,
     pub context_index: usize,
-    /// 0 = persona, 1 = context.
-    pub field: usize,
+    /// The highlighted row: a route, then the two "applying as" selectors when
+    /// they are shown. See [`selector`](Self::selector).
+    pub row: usize,
+}
+
+impl KnownVetting {
+    /// Whether the "Apply as" / "Context" selectors are shown. They choose what
+    /// a *new* application is made as, so an application already under way has
+    /// answered them — its persona is fixed for its whole life.
+    #[must_use]
+    pub fn shows_selectors(&self) -> bool {
+        self.application.is_none()
+    }
+
+    /// Total rows the cursor moves over.
+    #[must_use]
+    pub fn row_count(&self) -> usize {
+        self.routes.len() + usize::from(self.shows_selectors()) * 2
+    }
+
+    /// The highlighted route, when the cursor is on one.
+    #[must_use]
+    pub fn selected_route(&self) -> Option<&RouteOption> {
+        self.routes.get(self.row)
+    }
+
+    /// Which selector the cursor is on: `0` the persona, `1` the context.
+    #[must_use]
+    pub fn selector(&self) -> Option<usize> {
+        if !self.shows_selectors() {
+            return None;
+        }
+        self.row.checked_sub(self.routes.len()).filter(|i| *i < 2)
+    }
 }
 
 /// A persona an application can be made as.
@@ -226,9 +306,17 @@ pub struct JoinState {
     /// had one; re-pasting a VIC (`JoinPasteVic`) flips it back to `false`.
     pub vic_cleared: bool,
     /// All valid invitations (VICs) for the community being joined, across
-    /// personas — collected once after the VTC DID is entered and used to badge
-    /// each persona with its count on the identity step.
+    /// personas — collected once the VTC DID is known, and used to badge each
+    /// persona with its count on the identity step *and* to say on the vetting
+    /// page whether an invitation is one of this account's ways in.
     pub available_vics: Vec<AvailableVic>,
+    /// The community [`available_vics`](Self::available_vics) was collected
+    /// for. The collection is a vault listing plus a fetch per descriptor, and
+    /// several paths now need it (the vetting page before the routes are drawn,
+    /// the identity step after), so it is done once per community rather than
+    /// once per caller. An empty result is a legitimate answer, so the marker —
+    /// not the emptiness of the list — is what says it has been done.
+    pub invitations_for: Option<String>,
     /// The chosen persona's invitations, listed on the
     /// [`InvitationChoice`](JoinPage::InvitationChoice) page (a subset of
     /// [`available_vics`](Self::available_vics) bound to that persona).

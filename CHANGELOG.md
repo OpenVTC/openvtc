@@ -8,6 +8,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Joining a community that vets now offers every way in at once.** The join
+  flow already asked the community what it required before anything about the
+  applicant was sent; what it did with the answer was print the requirements
+  and leave the applicant to work out what to do with them. It now lists the
+  ways in — present an invitation, be vetted, or send an open request — each
+  said to be available or not, and why, with the cursor on the first one that
+  can actually be taken.
+
+  Which way in is open is a fact about the community *and* about this account,
+  so the invitations held for the community are collected before the page is
+  drawn rather than two steps later on the identity step. Someone holding an
+  invitation used to have no way of learning, on the screen that told them the
+  community vets, that they did not need to be vetted at all.
+
+  A route that cannot be taken keeps its row and reads dim with the reason in
+  place of its detail — "you hold none for this community", "this community
+  admits nobody by invitation" — because *why not* is the question the page
+  exists to answer. Taking one says the same thing rather than doing nothing.
+
+  An invitation the community marks `required` is not offered as its own row:
+  it is asked for on top of the statements, not instead of them, so it stays
+  with the requirements and in the vetting row's detail. An open request admits
+  that gathered statements ride along with it, which the submit does anyway.
+
+### Fixed
+
+- **A first join no longer sends an open request without asking the community
+  anything.** Before a community is joined there is no inbound arm to hear a
+  reply on, so the manifest request the join flow makes from the Communities
+  panel could not be made at all — and the flow fell through to an open
+  request in silence. A community that vets refers such a request to its
+  moderators, and the applicant never learned there was a way in they could
+  have taken. The flow now says the community was not asked and why, and
+  offers to join anyway; "ask again" is withheld there rather than offered as
+  a key that could only ever fail.
+
+### Changed
+
 - **The vetting wire types are the published, generated ones.** `vta-sdk` 0.37
   deleted its hand-written copies of the peer-vetting payloads and re-exports
   the generated `trust_tasks_rs::specs` types in their place, so what this
