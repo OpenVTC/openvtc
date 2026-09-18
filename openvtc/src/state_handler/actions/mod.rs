@@ -479,6 +479,9 @@ pub enum Action {
     /// Commit the highlighted context and launch the join in it.
     JoinContextChoose,
 
+    /// Vetting page: take the highlighted way in. A route the page drew as
+    /// blocked answers with why instead.
+    JoinVettingTake,
     /// Vetting page: start the application to the community (or continue the
     /// one under way) and go to it on the Vetting page.
     JoinVettingApply,
@@ -488,9 +491,10 @@ pub enum Action {
     JoinVettingJoin,
     /// Vetting page: ask the community for its requirements again.
     JoinVettingAskAgain,
-    /// Vetting page: move the focus (`true` = next field).
-    JoinVettingField(bool),
-    /// Vetting page: cycle the focused choice (`true` = forwards).
+    /// Vetting page: move the highlight down the rows (`true` = next).
+    JoinVettingRow(bool),
+    /// Vetting page: cycle the focused "applying as" choice (`true` =
+    /// forwards). Inert while the highlight is on a route.
     JoinVettingCycle(bool),
 
     /// Issue this Active membership's reciprocal VMC (member → community) and

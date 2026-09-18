@@ -1,10 +1,16 @@
-//! Join flow — what a vetting community asks of the people who join.
+//! Join flow — what a vetting community asks, and the ways in it leaves open.
 //!
 //! Shown after the community's DID when that community vets its members
 //! (`docs/design/vetting-process.md` §6.1, §12.3). It says in plain words what
-//! the community requires before anything about the applicant is sent. It
-//! shows this persona's application if there is one, and offers the ways on:
-//! apply (or continue), join anyway, or cancel.
+//! the community requires before anything about the applicant is sent, and
+//! then lists every way in at once — present an invitation, be vetted, or send
+//! an open request — each said to be available or not, and why.
+//!
+//! Listing them together is the point. Which way in is open depends on the
+//! community's manifest *and* on what this account already holds, and neither
+//! is knowable before the community has been asked; walking one path and
+//! leaving the rest to be found later is how an applicant ends up sending an
+//! open request while holding an invitation that would have admitted them.
 //!
 //! While the community is still being asked, this page is drawn by the runtime
 //! loop rather than the join flow, because that loop is the one that hears the
@@ -31,11 +37,15 @@ use ratatui::{
 
 use crate::state_handler::{
     actions::Action,
-    join::{JoinState, JoinVettingView, VettingPhase},
+    join::{JoinState, JoinVettingView, KnownVetting, VettingPhase},
     setup_sequence::MessageType,
 };
 use crate::ui::pages::join_flow::JoinFlow;
 use crate::ui::pages::main::components::vetting_panel::accent_swatch;
+
+/// Width of the routes list's label column, so the details line up under each
+/// other rather than under whichever label happened to be longest.
+const LABEL_WIDTH: usize = 30;
 
 #[derive(Clone, Debug, Default)]
 pub struct VettingPage;
@@ -51,27 +61,23 @@ impl VettingPage {
             }
             return;
         };
-        let satisfied = matches!(
-            &view.phase,
-            VettingPhase::Known(known) if known.application.as_ref().is_some_and(|a| a.satisfied)
-        );
         let action = match (&view.phase, key.code) {
             (_, KeyCode::F(10)) => Action::Exit,
             (_, KeyCode::Esc) => Action::JoinCancel,
             (_, KeyCode::Char('j' | 'J')) => Action::JoinVettingJoin,
-            (VettingPhase::Unknown { .. }, KeyCode::Enter | KeyCode::Char('r' | 'R')) => {
-                Action::JoinVettingAskAgain
-            }
-            (VettingPhase::Known(_), KeyCode::Enter) if satisfied => Action::JoinVettingJoin,
-            (VettingPhase::Known(_), KeyCode::Enter | KeyCode::Char('a' | 'A')) => {
-                Action::JoinVettingApply
-            }
+            // Asking again needs a loop that can hear the answer. The State-A
+            // loop cannot, so there the key is not offered at all rather than
+            // offered and silently ineffective.
+            (
+                VettingPhase::Unknown { can_retry, .. },
+                KeyCode::Enter | KeyCode::Char('r' | 'R'),
+            ) if *can_retry => Action::JoinVettingAskAgain,
+            (VettingPhase::Known(_), KeyCode::Enter) => Action::JoinVettingTake,
+            (VettingPhase::Known(_), KeyCode::Char('a' | 'A')) => Action::JoinVettingApply,
             (VettingPhase::Known(_), KeyCode::Up | KeyCode::BackTab) => {
-                Action::JoinVettingField(false)
+                Action::JoinVettingRow(false)
             }
-            (VettingPhase::Known(_), KeyCode::Down | KeyCode::Tab) => {
-                Action::JoinVettingField(true)
-            }
+            (VettingPhase::Known(_), KeyCode::Down | KeyCode::Tab) => Action::JoinVettingRow(true),
             (VettingPhase::Known(_), KeyCode::Left) => Action::JoinVettingCycle(false),
             (VettingPhase::Known(_), KeyCode::Right) => Action::JoinVettingCycle(true),
             _ => return,
@@ -127,16 +133,50 @@ fn keys(pairs: &[(&str, &str)]) -> Line<'static> {
     Line::from(spans)
 }
 
+fn cursor(focused: bool) -> Span<'static> {
+    Span::styled(
+        if focused { "▸ " } else { "  " },
+        Style::new().fg(COLOR_SUCCESS).bold(),
+    )
+}
+
 fn choice(name: &str, shown: String, focused: bool) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            if focused { "▸ " } else { "  " },
-            Style::new().fg(COLOR_SUCCESS).bold(),
-        ),
+        cursor(focused),
         Span::styled(format!("{name:<10}"), text()),
         Span::styled(shown, Style::new().fg(COLOR_SOFT_PURPLE)),
         Span::styled(if focused { "  ←/→" } else { "" }, dim()),
     ])
+}
+
+/// The routes list: every way in, available or not.
+///
+/// A blocked route keeps its row and reads dim, with the reason where its
+/// detail would be. Dropping it would leave "why can I not use my invitation?"
+/// unanswered — and the answer ("you hold none", "this community admits nobody
+/// that way") is exactly what the page exists to give.
+fn route_lines(known: &KnownVetting) -> Vec<Line<'static>> {
+    known
+        .routes
+        .iter()
+        .enumerate()
+        .map(|(i, option)| {
+            let focused = known.row == i;
+            let (label_style, detail_style, detail) = match &option.blocked {
+                Some(why) => (dim(), dim(), why.clone()),
+                None => (
+                    text().bold(),
+                    Style::new().fg(COLOR_SOFT_PURPLE),
+                    option.detail.clone(),
+                ),
+            };
+            Line::from(vec![
+                cursor(focused),
+                Span::styled(format!("{:<LABEL_WIDTH$}", option.label), label_style),
+                Span::styled(detail, detail_style),
+            ])
+        })
+        .collect()
 }
 
 /// The page's lines, below its border.
@@ -160,7 +200,7 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
             lines.push(Line::default());
             lines.push(keys(&[("J", "join without waiting"), ("ESC", "cancel")]));
         }
-        VettingPhase::Unknown { reason } => {
+        VettingPhase::Unknown { reason, can_retry } => {
             lines.push(Line::from(vec![
                 accent_swatch(view.accent),
                 Span::styled(
@@ -177,12 +217,28 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
                  moderators to decide.",
                 dim(),
             ));
+            // What this account holds is knowable even when the community is
+            // not, and it changes what joining now means.
+            let held = state.available_vics.len();
+            if held > 0 {
+                lines.push(Line::styled(
+                    format!(
+                        "You hold {held} invitation{} from this community; joining now offers \
+                         {} to it.",
+                        if held == 1 { "" } else { "s" },
+                        if held == 1 { "it" } else { "one" },
+                    ),
+                    Style::new().fg(COLOR_SUCCESS),
+                ));
+            }
             lines.push(Line::default());
-            lines.push(keys(&[
-                ("ENTER/R", "ask again"),
-                ("J", "join anyway"),
-                ("ESC", "cancel"),
-            ]));
+            let mut offered = Vec::new();
+            if *can_retry {
+                offered.push(("ENTER/R", "ask again"));
+            }
+            offered.push(("J", "join anyway"));
+            offered.push(("ESC", "cancel"));
+            lines.push(keys(&offered));
         }
         VettingPhase::Known(known) => {
             lines.push(Line::from(vec![
@@ -201,6 +257,9 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
                     Style::new().fg(COLOR_SOFT_PURPLE),
                 ));
             }
+            if let Some(url) = &known.governance_url {
+                lines.push(Line::styled(format!("How it decides: {url}"), dim()));
+            }
             lines.push(Line::default());
             lines.push(Line::styled(
                 format!(
@@ -210,89 +269,52 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
                 ),
                 dim(),
             ));
-            if let Some(url) = &known.governance_url {
-                lines.push(Line::styled(format!("How it decides: {url}"), dim()));
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Your ways in",
+                Style::new().fg(COLOR_BORDER).bold(),
+            ));
+            lines.extend(route_lines(known));
+
+            if known.shows_selectors() {
+                lines.push(Line::default());
+                lines.push(Line::styled(
+                    "Applying as",
+                    Style::new().fg(COLOR_BORDER).bold(),
+                ));
+                let persona = known.personas.get(known.persona_index).map_or_else(
+                    || "no persona yet — create one under My Identity".to_string(),
+                    |p| format!("{}  ({})", p.label, p.did),
+                );
+                lines.push(choice("Apply as", persona, known.selector() == Some(0)));
+                let context = known
+                    .context_options
+                    .get(known.context_index)
+                    .map_or_else(|| "—".to_string(), ContextOption::summary);
+                lines.push(choice("Context", context, known.selector() == Some(1)));
+                lines.push(Line::styled(
+                    "The persona is fixed for the whole application: every card is signed by it, \
+                     and it is the DID the community admits.",
+                    dim(),
+                ));
+            } else if let Some(app) = &known.application {
+                lines.push(Line::default());
+                lines.push(Line::styled(
+                    format!(
+                        "Your application, as {} — next: {}",
+                        app.persona_label, app.next_step
+                    ),
+                    Style::new().fg(COLOR_SUCCESS),
+                ));
             }
             lines.push(Line::default());
-            match &known.application {
-                Some(app) => {
-                    lines.push(Line::styled(
-                        format!("Your application, as {}", app.persona_label),
-                        Style::new().fg(COLOR_SUCCESS).bold(),
-                    ));
-                    lines.push(Line::styled(
-                        format!(
-                            "  {} statement{} held{}",
-                            app.statements,
-                            if app.statements == 1 { "" } else { "s" },
-                            app.progress
-                                .as_ref()
-                                .map(|p| format!(" — {p}"))
-                                .unwrap_or_default()
-                        ),
-                        text(),
-                    ));
-                    lines.push(Line::from(vec![
-                        Span::styled("  Next: ", text()),
-                        Span::styled(app.next_step.clone(), Style::new().fg(COLOR_SUCCESS).bold()),
-                    ]));
-                    lines.push(Line::default());
-                    if app.satisfied {
-                        lines.push(Line::styled(
-                            format!(
-                                "Joining now presents your {} vetting statement{} to {}.",
-                                app.statements,
-                                if app.statements == 1 { "" } else { "s" },
-                                view.name
-                            ),
-                            Style::new().fg(COLOR_SUCCESS),
-                        ));
-                        lines.push(Line::default());
-                        lines.push(keys(&[
-                            ("ENTER", "join and present your statements"),
-                            ("A", "open the application"),
-                            ("ESC", "cancel"),
-                        ]));
-                    } else {
-                        lines.push(keys(&[
-                            ("ENTER", "continue on the Vetting page"),
-                            (
-                                "J",
-                                "join anyway — the community refers the request to its moderators",
-                            ),
-                            ("ESC", "cancel"),
-                        ]));
-                    }
-                }
-                None => {
-                    lines.push(Line::styled(
-                        "Start an application",
-                        Style::new().fg(COLOR_BORDER).bold(),
-                    ));
-                    let persona = known.personas.get(known.persona_index).map_or_else(
-                        || "no persona yet — create one under My Identity".to_string(),
-                        |p| format!("{}  ({})", p.label, p.did),
-                    );
-                    lines.push(choice("Apply as", persona, known.field == 0));
-                    let context = known
-                        .context_options
-                        .get(known.context_index)
-                        .map_or_else(|| "—".to_string(), ContextOption::summary);
-                    lines.push(choice("Context", context, known.field == 1));
-                    lines.push(Line::styled(
-                        "The persona is fixed for the whole application: every card is signed by \
-                         it, and it is the DID the community admits.",
-                        dim(),
-                    ));
-                    lines.push(Line::default());
-                    lines.push(keys(&[
-                        ("ENTER", "start the application"),
-                        ("↑/↓", "field"),
-                        ("J", "join anyway — the community refers the request"),
-                        ("ESC", "cancel"),
-                    ]));
-                }
-            }
+            lines.push(keys(&[
+                ("↑/↓", "choose"),
+                ("ENTER", "take it"),
+                ("A", "open the application"),
+                ("J", "join now"),
+                ("ESC", "cancel"),
+            ]));
         }
     }
     // The DID under the name, so the community being joined is never only a
@@ -321,7 +343,9 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state_handler::join::{JoinApplication, JoinPage, KnownVetting};
+    use crate::state_handler::join::{
+        AvailableVic, JoinApplication, JoinPage, JoinRoute, RouteOption,
+    };
     use crate::state_handler::state::State;
     use crate::ui::component::Component;
     use crossterm::event::KeyModifiers;
@@ -337,9 +361,32 @@ mod tests {
         }
     }
 
+    fn route(route: JoinRoute, label: &str, blocked: Option<&str>) -> RouteOption {
+        RouteOption {
+            route,
+            label: label.into(),
+            detail: "detail".into(),
+            blocked: blocked.map(Into::into),
+        }
+    }
+
+    fn routes() -> Vec<RouteOption> {
+        vec![
+            route(
+                JoinRoute::Invitation,
+                "Use an invitation",
+                Some("none held"),
+            ),
+            route(JoinRoute::Vetting, "Apply for vetting", None),
+            route(JoinRoute::OpenRequest, "Send an open request", None),
+        ]
+    }
+
     fn known(satisfied: Option<bool>) -> VettingPhase {
         VettingPhase::Known(Box::new(KnownVetting {
             requirements: vec!["2 vetting statements".into()],
+            routes: routes(),
+            row: 1,
             application: satisfied.map(|satisfied| JoinApplication {
                 id: "a1".into(),
                 persona: PersonaId::new(),
@@ -365,40 +412,6 @@ mod tests {
         VettingPage::handle_key_event(flow, KeyEvent::new(code, KeyModifiers::NONE));
     }
 
-    #[test]
-    fn enter_starts_an_application_or_joins_one_that_is_ready() {
-        let (mut f, mut rx) = flow(known(None));
-        press(&mut f, KeyCode::Enter);
-        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingApply)));
-        press(&mut f, KeyCode::Right);
-        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingCycle(true))));
-        press(&mut f, KeyCode::Char('j'));
-        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingJoin)));
-
-        let (mut f, mut rx) = flow(known(Some(true)));
-        press(&mut f, KeyCode::Enter);
-        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingJoin)));
-        press(&mut f, KeyCode::Char('a'));
-        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingApply)));
-    }
-
-    #[test]
-    fn while_asking_or_unknown_only_the_ways_on_are_offered() {
-        let (mut f, mut rx) = flow(VettingPhase::Asking);
-        press(&mut f, KeyCode::Enter);
-        assert!(rx.try_recv().is_err(), "nothing to confirm while asking");
-        press(&mut f, KeyCode::Char('j'));
-        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingJoin)));
-        press(&mut f, KeyCode::Esc);
-        assert!(matches!(rx.try_recv(), Ok(Action::JoinCancel)));
-
-        let (mut f, mut rx) = flow(VettingPhase::Unknown {
-            reason: "no answer".into(),
-        });
-        press(&mut f, KeyCode::Char('r'));
-        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingAskAgain)));
-    }
-
     fn text_of(lines: &[Line<'_>]) -> String {
         lines
             .iter()
@@ -413,16 +426,106 @@ mod tests {
     }
 
     #[test]
-    fn the_page_says_what_is_required_and_that_statements_go_with_the_join() {
+    fn enter_takes_the_highlighted_route_whatever_it_is() {
+        // One key for the list, rather than a key whose meaning depends on
+        // whether an application happens to be satisfied.
+        for satisfied in [None, Some(false), Some(true)] {
+            let (mut f, mut rx) = flow(known(satisfied));
+            press(&mut f, KeyCode::Enter);
+            assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingTake)));
+        }
+        let (mut f, mut rx) = flow(known(None));
+        press(&mut f, KeyCode::Down);
+        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingRow(true))));
+        press(&mut f, KeyCode::Right);
+        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingCycle(true))));
+        press(&mut f, KeyCode::Char('a'));
+        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingApply)));
+        press(&mut f, KeyCode::Char('j'));
+        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingJoin)));
+    }
+
+    #[test]
+    fn while_asking_or_unknown_only_the_ways_on_are_offered() {
+        let (mut f, mut rx) = flow(VettingPhase::Asking);
+        press(&mut f, KeyCode::Enter);
+        assert!(rx.try_recv().is_err(), "nothing to confirm while asking");
+        press(&mut f, KeyCode::Char('j'));
+        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingJoin)));
+        press(&mut f, KeyCode::Esc);
+        assert!(matches!(rx.try_recv(), Ok(Action::JoinCancel)));
+
+        let (mut f, mut rx) = flow(VettingPhase::Unknown {
+            reason: "no answer".into(),
+            can_retry: true,
+        });
+        press(&mut f, KeyCode::Char('r'));
+        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingAskAgain)));
+    }
+
+    /// The State-A loop cannot hear an answer, so "ask again" is neither drawn
+    /// nor bound — a key that can only ever fail is worse than no key.
+    #[test]
+    fn asking_again_is_withheld_when_no_answer_could_be_heard() {
+        let phase = || VettingPhase::Unknown {
+            reason: "it was not asked".into(),
+            can_retry: false,
+        };
+        let (mut f, mut rx) = flow(phase());
+        press(&mut f, KeyCode::Char('r'));
+        assert!(rx.try_recv().is_err());
+        press(&mut f, KeyCode::Enter);
+        assert!(rx.try_recv().is_err());
+        press(&mut f, KeyCode::Char('j'));
+        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingJoin)));
+
+        let shown = text_of(&body_lines(&JoinState::default(), &view(phase())));
+        assert!(!shown.contains("ask again"));
+        assert!(shown.contains("join anyway"));
+    }
+
+    #[test]
+    fn the_page_says_what_is_required_and_lists_every_way_in() {
         let state = JoinState::default();
-        let lines = body_lines(&state, &view(known(Some(true))));
-        let shown = text_of(&lines);
+        let shown = text_of(&body_lines(&state, &view(known(Some(true)))));
         assert!(shown.contains("Kernel vets the people who join."));
         assert!(shown.contains("• 2 vetting statements"));
-        assert!(shown.contains("Joining now presents your 2 vetting statements to Kernel."));
         assert!(shown.contains("Nothing about you has been sent"));
+        assert!(shown.contains("Your ways in"));
+        assert!(shown.contains("Apply for vetting"));
+        assert!(shown.contains("Send an open request"));
+    }
 
-        let lines = body_lines(&state, &view(known(Some(false))));
-        assert!(text_of(&lines).contains("refers the request to its moderators"));
+    /// A route that cannot be taken is still listed, with the reason in place
+    /// of its detail: "why not?" is the question the page answers.
+    #[test]
+    fn a_blocked_route_keeps_its_row_and_says_why() {
+        let shown = text_of(&body_lines(&JoinState::default(), &view(known(None))));
+        assert!(shown.contains("Use an invitation"));
+        assert!(shown.contains("none held"));
+    }
+
+    /// Held invitations are a fact about this account, so they are worth saying
+    /// even when the community itself could not be reached.
+    #[test]
+    fn invitations_held_are_named_even_when_the_community_is_unknown() {
+        let state = JoinState {
+            available_vics: vec![AvailableVic {
+                id: "urn:uuid:a".into(),
+                subject: None,
+                valid_from: String::new(),
+                valid_until: String::new(),
+                body: serde_json::Value::Null,
+            }],
+            ..JoinState::default()
+        };
+        let shown = text_of(&body_lines(
+            &state,
+            &view(VettingPhase::Unknown {
+                reason: "no answer".into(),
+                can_retry: true,
+            }),
+        ));
+        assert!(shown.contains("You hold 1 invitation from this community"));
     }
 }
