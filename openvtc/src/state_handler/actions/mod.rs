@@ -543,14 +543,17 @@ pub enum Action {
     /// credential (VIC) JSON — validated + stashed into the join flow.
     JoinPasteVic(String),
 
-    /// Load an invitation credential (VIC) from the OS clipboard on the join
-    /// entry page — the explicit affordance behind `[Ctrl+V]`.
+    /// The OS clipboard could not be read on the join entry page; the string
+    /// is why.
     ///
-    /// A discoverable action, unlike bracketed paste, which is invisible until
-    /// you already know it works. Reading the clipboard is arboard-only and so
-    /// fails over SSH; the terminal's own paste still arrives as
-    /// [`JoinPasteVic`](Self::JoinPasteVic) there, and the failure says so.
-    JoinPasteFromClipboard,
+    /// Not a paste. `[Ctrl+V]` reads the clipboard where the input lives and
+    /// applies the text itself, so only the *failure* needs the loop — which
+    /// is the whole point: the key used to hand its text to a VIC loader
+    /// whatever it was, and a pasted DID came back "not valid JSON".
+    ///
+    /// Reading the clipboard is arboard-only and so fails over SSH, where the
+    /// terminal's own bracketed paste still works; the message says that.
+    JoinClipboardFailed(String),
 
     /// Clear the loaded invitation credential on the join entry page so the
     /// join proceeds without a VIC (explicit "ignore it" choice).

@@ -14,6 +14,7 @@ use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use tokio::sync::mpsc::UnboundedSender;
 
+pub mod create_persona_overlay;
 pub mod join_flow;
 pub mod loading;
 pub mod main;

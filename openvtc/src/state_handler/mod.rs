@@ -2658,7 +2658,7 @@ impl StateHandler {
                     Action::JoinVettingJoin |
                     Action::JoinVettingAskAgain | Action::JoinVettingRow(..) |
                     Action::JoinVettingCycle(..) |
-                    Action::JoinCancel | Action::JoinPasteVic(..) | Action::JoinPasteFromClipboard |
+                    Action::JoinCancel | Action::JoinPasteVic(..) | Action::JoinClipboardFailed(..) |
                     Action::JoinClearVic | Action::ImportConfig(..) | Action::SetProtection(..) |
                     Action::VtaSubmitDid(..) | Action::VtaStartProvision(..) |
                     Action::RecoverPlanContext |
@@ -3019,19 +3019,52 @@ fn spawn_persona_mint(
     tdk: &TDK,
     admin_vta: Option<&vta_sdk::client::VtaClient>,
 ) {
+    let Some(job) = advance_persona_overlay(state, config, tdk, admin_vta, dispatch_tx) else {
+        return;
+    };
+    let domain = background_dispatch::DispatchDomain::Persona;
+    if !in_flight.try_begin(domain) {
+        if let Some(o) = state.main_page.create_persona.as_mut() {
+            o.phase = main_page::content::CreatePersonaPhase::Path;
+            o.messages = vec![background_dispatch::InFlight::busy_message(domain)];
+        }
+        return;
+    }
+    background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {
+        background_dispatch::DispatchOutcome::Persona(Box::new(job.run().await))
+    });
+}
+
+/// Advance the create-persona overlay one phase, and return the mint to run
+/// when the last one commits.
+///
+/// Split out of [`spawn_persona_mint`] so the join flow can host the same
+/// overlay. Everything up to the mint is phase-checking against `config` and
+/// needs no I/O; the mint itself is a job, which the runtime loop spawns
+/// through its dispatcher and the join loop awaits inline — the way that loop
+/// already runs the join sequence. `None` means the overlay moved on (or
+/// refused) and there is nothing to run.
+pub(crate) fn advance_persona_overlay(
+    state: &mut State,
+    config: &Config,
+    tdk: &TDK,
+    admin_vta: Option<&vta_sdk::client::VtaClient>,
+    progress_tx: &tokio::sync::mpsc::UnboundedSender<background_dispatch::DispatchOutcome>,
+) -> Option<create_persona::MintJob> {
     use main_page::content::CreatePersonaPhase;
 
-    fn fail(state: &mut State, msg: &str, terminal: bool) {
+    /// Report onto the overlay and yield "nothing to run", so the callers
+    /// below can stay `return fail(…)`.
+    fn fail(state: &mut State, msg: &str, terminal: bool) -> Option<create_persona::MintJob> {
         if let Some(o) = state.main_page.create_persona.as_mut() {
             if terminal {
                 o.phase = CreatePersonaPhase::Failed;
             }
             o.messages = vec![msg.to_string()];
         }
+        None
     }
-    let Some(overlay) = state.main_page.create_persona.clone() else {
-        return;
-    };
+    let overlay = state.main_page.create_persona.clone()?;
     let label = overlay.label.value().trim().to_string();
     match overlay.phase {
         // The label is checked, then where the DID sits on the host is asked —
@@ -3051,7 +3084,7 @@ fn spawn_persona_mint(
                 o.messages.clear();
                 o.phase = CreatePersonaPhase::Path;
             }
-            return;
+            return None;
         }
         // The path is checked against the hosting server's naming rules before
         // the contexts are offered, so a typo is caught here rather than after
@@ -3068,11 +3101,11 @@ fn spawn_persona_mint(
                 o.messages.clear();
                 o.phase = CreatePersonaPhase::Context;
             }
-            return;
+            return None;
         }
         CreatePersonaPhase::Context => {}
         CreatePersonaPhase::Working | CreatePersonaPhase::Done | CreatePersonaPhase::Failed => {
-            return;
+            return None;
         }
     }
     // Re-checked rather than carried from the path phase: Esc goes back to it,
@@ -3097,15 +3130,6 @@ fn spawn_persona_mint(
             true,
         );
     };
-    let domain = background_dispatch::DispatchDomain::Persona;
-    if !in_flight.try_begin(domain) {
-        return fail(
-            state,
-            &background_dispatch::InFlight::busy_message(domain),
-            false,
-        );
-    }
-
     if let Some(o) = state.main_page.create_persona.as_mut() {
         o.phase = CreatePersonaPhase::Working;
         o.messages = vec![format!(
@@ -3113,16 +3137,13 @@ fn spawn_persona_mint(
         )];
     }
 
-    let job = create_persona::MintJob {
+    Some(create_persona::MintJob {
         admin_vta: admin_vta.clone(),
         tdk: tdk.clone(),
         inputs: create_persona::MintInputs::from_config(config, context_id, path_mode),
         label,
-        progress_tx: dispatch_tx.clone(),
-    };
-    background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {
-        background_dispatch::DispatchOutcome::Persona(Box::new(job.run().await))
-    });
+        progress_tx: progress_tx.clone(),
+    })
 }
 
 /// Send a document addressed to a community, off the loop.

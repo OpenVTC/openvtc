@@ -6,6 +6,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **A join that needs a persona can make one without leaving the join.** The
+  vetting route was blocked with "create one under My Identity", which meant
+  leaving the flow, finding the right pane, minting, and coming back to start
+  the join again — entering the community's DID a second time on the way. `n` on
+  that page now opens the same create-persona overlay the main page opens, with
+  every option it offers: label, whether the host names the DID's path or you
+  do, and which context it is minted into.
+
+  It is the same overlay, not a second one. Its keys and its rendering moved to
+  one module both pages call, so the phases and the wording cannot fork; only
+  the mint differs, because the runtime loop spawns it through its dispatcher
+  and the join loop awaits it inline — raced against the interrupt, with its
+  progress streaming onto the overlay as it arrives.
+
+  A persona minted this way is persisted and brought online before the overlay
+  closes: the route it unblocks is the one that would otherwise fail on a
+  persona that cannot send. The routes are re-derived once the overlay is gone,
+  so the row that was blocked on having no persona unblocks itself.
+
+### Fixed
+
+- **Pasting the community's DID on the join entry page works.** `[Ctrl+V]` read
+  the clipboard and handed the text to the invitation loader whatever it was, so
+  pasting a DID — the commonest thing anyone pastes on that page — answered
+  "Pasted text is not valid JSON", while the identical text delivered as a
+  bracketed paste went into the field correctly. The two paste routes had drifted
+  apart, and the comment on the clipboard key claimed they had not.
+
+  Both now go through one `apply_entry_paste`: a JSON object is an invitation,
+  anything else is the community's DID or agent name. The test is the shape of
+  the text rather than whether it parses, so a mangled invitation is still
+  reported as a broken invitation instead of a malformed DID.
+
+### Changed
+
+- **The join entry page leads with the community, not the invitation.** The DID
+  prompt and its input come first; the invitation sits under the input, still
+  ahead of the examples. It led the page while this was the only screen that
+  mentioned invitations at all — what made that necessary was an affordance that
+  was dim, unnamed and last, and the named `[Ctrl+V]` row that fixed it stays.
+  The join now offers invitations again on the step after this one, counted and
+  matched against the community, so leading with them here only pushed the DID
+  prompt down the page. Pasting one still fills in a DID you may not have.
+
 ### Added
 
 - **A community's join requirements are read from the endpoint it publishes.**

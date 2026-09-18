@@ -74,6 +74,11 @@ impl VettingPage {
             ) if *can_retry => Action::JoinVettingAskAgain,
             (VettingPhase::Known(_), KeyCode::Enter) => Action::JoinVettingTake,
             (VettingPhase::Known(_), KeyCode::Char('a' | 'A')) => Action::JoinVettingApply,
+            // Applying signs cards with a persona, so a community that vets is
+            // exactly where someone without one finds out they need one. Making
+            // it here keeps the community — and the requirements just read —
+            // on screen behind the overlay.
+            (VettingPhase::Known(_), KeyCode::Char('n' | 'N')) => Action::StartCreatePersona,
             (VettingPhase::Known(_), KeyCode::Up | KeyCode::BackTab) => {
                 Action::JoinVettingRow(false)
             }
@@ -304,7 +309,7 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
                     Style::new().fg(COLOR_BORDER).bold(),
                 ));
                 let persona = known.personas.get(known.persona_index).map_or_else(
-                    || "no persona yet — create one under My Identity".to_string(),
+                    || "no persona yet — press n to create one".to_string(),
                     |p| format!("{}  ({})", p.label, p.did),
                 );
                 lines.push(choice("Apply as", persona, known.selector() == Some(0)));
@@ -329,13 +334,17 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
                 ));
             }
             lines.push(Line::default());
-            lines.push(keys(&[
-                ("↑/↓", "choose"),
-                ("ENTER", "take it"),
+            let mut offered = vec![("↑/↓", "choose"), ("ENTER", "take it")];
+            // Only worth naming where it is the thing standing in the way.
+            if known.personas.is_empty() {
+                offered.push(("N", "create a persona"));
+            }
+            offered.extend([
                 ("A", "open the application"),
                 ("J", "join now"),
                 ("ESC", "cancel"),
-            ]));
+            ]);
+            lines.push(keys(&offered));
         }
     }
     // The DID under the name, so the community being joined is never only a

@@ -242,7 +242,7 @@ fn build_routes(
             "no application yet".to_string(),
             Some(
                 "applying needs a persona — every card is signed by the DID you join with. \
-                 Create one under My Identity."
+                 Press n to create one without leaving this join."
                     .to_string(),
             ),
         ),
@@ -593,8 +593,8 @@ fn apply_for_vetting(
     }
     let Some(persona) = known.personas.get(known.persona_index).cloned() else {
         return Err(
-            "Applying needs a persona: every card is signed by the DID you join with. Create one \
-             under My Identity, or join anyway (j), which makes one."
+            "Applying needs a persona: every card is signed by the DID you join with. Press n to \
+             create one here, or join anyway (j), which makes one."
                 .to_string(),
         );
     };
@@ -783,23 +783,17 @@ impl StateHandler {
                             load_pasted_vic(state, &text, vtc.as_deref());
                             let _ = self.state_tx.send(state.clone());
                         }
-                        Action::JoinPasteFromClipboard => {
-                            // The `[Ctrl+V]` affordance on the entry page: same
-                            // validation as a bracketed paste, just sourced from
-                            // the OS clipboard. Kept to the entry page, where the
-                            // community is not yet chosen, so no match is done.
+                        Action::JoinClipboardFailed(why) => {
+                            // Only the failure reaches the loop: `[Ctrl+V]` reads
+                            // and applies the text where the input lives, so a
+                            // pasted DID never takes a trip through here to be
+                            // mistaken for an invitation.
                             state.join.messages.clear();
-                            match crate::clipboard::read_clipboard() {
-                                Ok(text) => load_pasted_vic(state, &text, None),
-                                Err(why) => {
-                                    state.join.messages.push(MessageType::Error(format!(
-                                        "Could not read the clipboard ({why}). Paste the \
-                                         invitation JSON directly into this screen instead \
-                                         — that works over SSH, where reading the \
-                                         clipboard cannot."
-                                    )));
-                                }
-                            }
+                            state.join.messages.push(MessageType::Error(format!(
+                                "Could not read the clipboard ({why}). Paste directly into \
+                                 this screen instead — that works over SSH, where reading \
+                                 the clipboard cannot."
+                            )));
                             let _ = self.state_tx.send(state.clone());
                         }
                         Action::JoinClearVic => {
@@ -1194,6 +1188,53 @@ impl StateHandler {
                                 return Ok(JoinExit::Exit(interrupted));
                             }
                         }
+                        // The create-persona overlay, hosted here rather than
+                        // on the main page. Everything except the mint is the
+                        // shared pure reducer, so the phases and keys cannot
+                        // drift from the ones the main page shows.
+                        action if super::handle_nav_action(state, &action) => {
+                            // A persona minted behind this page changes what the
+                            // routes say, so they are re-derived once the overlay
+                            // is gone. Cheap, idempotent, and it means the row
+                            // that was blocked on having no persona unblocks
+                            // itself rather than waiting for a re-entry.
+                            if state.join.page == JoinPage::Vetting
+                                && state.main_page.create_persona.is_none()
+                                && let Some(vtc_did) = state.join.pending_vtc.clone()
+                            {
+                                show_vetting(state, config, &vtc_did);
+                            }
+                        }
+                        Action::CreatePersonaSubmit => {
+                            if let Some(interrupted) = self
+                                .mint_persona_inline(
+                                    interrupt_rx,
+                                    state,
+                                    tdk,
+                                    config,
+                                    admin_vta,
+                                    profile,
+                                    messaging,
+                                )
+                                .await
+                            {
+                                return Ok(JoinExit::Exit(interrupted));
+                            }
+                        }
+                        Action::CreatePersonaCopy => {
+                            if let Some(did) = state
+                                .main_page
+                                .create_persona
+                                .as_ref()
+                                .and_then(|o| o.did.clone())
+                            {
+                                let copied =
+                                    crate::clipboard::copy_to_clipboard(&did).is_ok();
+                                if let Some(o) = state.main_page.create_persona.as_mut() {
+                                    o.copied = copied;
+                                }
+                            }
+                        }
                         Action::JoinVettingAskAgain => {
                             let Some(vtc_did) = state.join.pending_vtc.clone() else {
                                 continue;
@@ -1314,6 +1355,99 @@ impl StateHandler {
                 .await
                 .map(JoinExit::Exit),
         }
+    }
+
+    /// Mint a persona from the overlay this flow is hosting, without leaving it.
+    ///
+    /// The runtime loop spawns this job through its dispatcher; this loop has
+    /// none, so it awaits it the way it already awaits the join sequence —
+    /// raced against the interrupt, so a mint that hangs does not take Ctrl-C
+    /// with it (R15). Progress lines stream onto the overlay as they arrive
+    /// rather than after, because minting a DID is not instant and a frozen
+    /// "Creating persona…" is indistinguishable from a wedged one.
+    ///
+    /// On success the persona is persisted and brought online here: a persona
+    /// the join can see but cannot send as would be worse than none, since the
+    /// route it unblocks is the one that then fails.
+    #[allow(clippy::too_many_arguments)]
+    async fn mint_persona_inline(
+        &self,
+        interrupt_rx: &mut broadcast::Receiver<Interrupted>,
+        state: &mut State,
+        tdk: &TDK,
+        config: &mut Config,
+        admin_vta: Option<&VtaClient>,
+        profile: &str,
+        messaging: Option<&Messaging>,
+    ) -> Option<Interrupted> {
+        use crate::state_handler::background_dispatch::{DispatchOutcome, ProgressUpdate};
+
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let Some(job) = super::advance_persona_overlay(state, config, tdk, admin_vta, &progress_tx)
+        else {
+            // A phase moved on, or refused and said why on the overlay.
+            let _ = self.state_tx.send(state.clone());
+            return None;
+        };
+        drop(progress_tx);
+        let _ = self.state_tx.send(state.clone());
+
+        let run = job.run();
+        tokio::pin!(run);
+        let outcome = loop {
+            tokio::select! {
+                outcome = &mut run => break outcome,
+                Some(update) = progress_rx.recv() => {
+                    if let DispatchOutcome::Progress(ProgressUpdate::PersonaMint(line)) = update
+                        && let Some(o) = state.main_page.create_persona.as_mut()
+                    {
+                        o.messages.push(line);
+                        let _ = self.state_tx.send(state.clone());
+                    }
+                }
+                Ok(interrupted) = interrupt_rx.recv() => return Some(interrupted),
+            }
+        };
+
+        if let Some(minted) = outcome.apply(state) {
+            let did = minted.did.clone();
+            match minted.persist(config, tdk, profile).await {
+                Ok(persona_id) => {
+                    let copied = crate::clipboard::copy_to_clipboard(&did).is_ok();
+                    if let Some(o) = state.main_page.create_persona.as_mut() {
+                        o.phase =
+                            crate::state_handler::main_page::content::CreatePersonaPhase::Done;
+                        o.did = Some(did.clone());
+                        o.copied = copied;
+                        o.messages.push("Persona created.".to_string());
+                    }
+                    state.main_page.sync_from_config(config);
+                    state.main_page.log(format!("Created persona DID {did}"));
+                    // Bring it online now. The join is about to offer it as a
+                    // way in, and a persona that cannot send is not one. A
+                    // no-op in State A, which has no service to install into —
+                    // that loop restarts into the full pipeline after a join
+                    // and brings it up there.
+                    start_persona_listener(self, state, messaging, config, tdk, persona_id, &did)
+                        .await;
+                }
+                Err(e) => {
+                    // The DID exists at the VTA but is not in the config. Say so
+                    // plainly: it is not lost, and a retry would mint a second.
+                    if let Some(o) = state.main_page.create_persona.as_mut() {
+                        o.phase =
+                            crate::state_handler::main_page::content::CreatePersonaPhase::Failed;
+                        o.messages
+                            .push(format!("Minted, but could not be saved: {e}"));
+                    }
+                    state
+                        .main_page
+                        .log_error("Persona minted but not saved", &e);
+                }
+            }
+        }
+        let _ = self.state_tx.send(state.clone());
+        None
     }
 
     /// Go on with a join from the vetting page, presenting the statements of an
@@ -3564,6 +3698,21 @@ mod vetting_tests {
             option_for(&routes, JoinRoute::OpenRequest)
                 .unwrap()
                 .available()
+        );
+    }
+
+    /// The blocked reason names the key that is on the very page it appears on.
+    /// It used to send people to My Identity, which meant leaving the join and
+    /// entering the community's DID again on the way back.
+    #[test]
+    fn applying_without_a_persona_points_at_the_key_here() {
+        let routes = build_routes("Kernel", &requirements(None), None, &[], &[]);
+        let vetting = option_for(&routes, JoinRoute::Vetting).unwrap();
+        let why = vetting.blocked.as_deref().unwrap();
+        assert!(why.contains("Press n"), "{why}");
+        assert!(
+            !why.contains("My Identity"),
+            "the join no longer sends people away for this: {why}"
         );
     }
 
