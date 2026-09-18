@@ -464,6 +464,21 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
 
 fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     if v.applications.is_empty() {
+        // You apply and vet *as* a persona, so with none there is nothing to
+        // start yet. Guide to creating one in the panel rather than offering an
+        // "n: new application" key that only refuses — the same guard the runtime
+        // handler applies (`vetting_actions::StartApplication`).
+        if v.personas.is_empty() {
+            lines.push(hint("You have no persona yet."));
+            lines.push(Line::from(""));
+            lines.push(hint(
+                "You apply and vet as a persona — the DID a community vets. Create one under",
+            ));
+            lines.push(hint(
+                "My Identity, and vetting comes online automatically (no restart).",
+            ));
+            return;
+        }
         lines.push(hint("You are not applying to any community."));
         lines.push(Line::from(""));
         lines.push(hint(
@@ -1596,5 +1611,52 @@ mod desk_tests {
                  why nothing is arriving: {text}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod persona_guidance_tests {
+    use super::*;
+    use crate::state_handler::main_page::content::{VettingPersona, VettingState};
+    use openvtc_core::config::account::PersonaId;
+    use std::sync::Arc;
+
+    fn text(v: &VettingState) -> String {
+        render(v)
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// With no persona there is nothing to apply as, so the empty Applications
+    /// state guides the operator to create one in the panel — not the dead
+    /// "n: new application" key that would only refuse.
+    #[test]
+    fn empty_applications_with_no_persona_guides_to_create_one() {
+        let out = text(&VettingState::default());
+        assert!(out.contains("no persona"), "{out}");
+        assert!(out.contains("My Identity"), "{out}");
+        assert!(
+            !out.contains("n: new application"),
+            "the call to action is create-a-persona, not new application:\n{out}"
+        );
+    }
+
+    /// Once a persona exists, the normal empty state (with the new-application
+    /// key) is shown.
+    #[test]
+    fn empty_applications_with_a_persona_offers_new_application() {
+        let v = VettingState {
+            personas: Arc::from(vec![VettingPersona {
+                persona: PersonaId::new(),
+                did: "did:webvh:example:p".to_string(),
+                label: "me".to_string(),
+            }]),
+            ..VettingState::default()
+        };
+        let out = text(&v);
+        assert!(out.contains("n: new application"), "{out}");
+        assert!(!out.contains("no persona yet"), "{out}");
     }
 }
