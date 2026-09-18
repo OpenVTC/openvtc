@@ -217,6 +217,27 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
                  moderators to decide.",
                 dim(),
             ));
+            // What to do about it, which differs by why the asking stopped.
+            // Without this the page states a problem and offers a key, leaving
+            // the one thing the person actually wants to know — is joining now
+            // a dead end? — to be guessed at.
+            lines.push(Line::default());
+            if *can_retry {
+                lines.push(Line::styled(
+                    "Ask again if the community was only briefly unreachable. Joining anyway \
+                     costs nothing you cannot recover: a request its moderators refer is still \
+                     a request, and you are told what it was decided on.",
+                    dim(),
+                ));
+            } else {
+                lines.push(Line::styled(
+                    "Joining anyway is the way forward here, not a last resort. It records the \
+                     request and brings your messaging online — so straight afterwards this \
+                     community can be asked what it requires, and if it does vet you can apply \
+                     then and take this join up again from the application.",
+                    dim(),
+                ));
+            }
             // What this account holds is knowable even when the community is
             // not, and it changes what joining now means.
             let held = state.available_vics.len();
@@ -482,6 +503,34 @@ mod tests {
         let shown = text_of(&body_lines(&JoinState::default(), &view(phase())));
         assert!(!shown.contains("ask again"));
         assert!(shown.contains("join anyway"));
+    }
+
+    /// The page has to say what to do, and the answer differs by why the
+    /// asking stopped: a community that was briefly unreachable is worth
+    /// asking again, while a first join cannot ask at all until the request
+    /// it is about to send brings messaging up.
+    #[test]
+    fn the_page_says_what_to_do_about_not_knowing() {
+        let unknown = |can_retry| {
+            text_of(&body_lines(
+                &JoinState::default(),
+                &view(VettingPhase::Unknown {
+                    reason: "its endpoint could not be reached".into(),
+                    can_retry,
+                }),
+            ))
+        };
+        let retryable = unknown(true);
+        assert!(retryable.contains("Ask again"));
+        assert!(!retryable.contains("brings your messaging online"));
+
+        let first_join = unknown(false);
+        assert!(first_join.contains("not a last resort"));
+        assert!(first_join.contains("brings your messaging online"));
+        assert!(
+            first_join.contains("take this join up again from the application"),
+            "the way back into the join is named"
+        );
     }
 
     #[test]

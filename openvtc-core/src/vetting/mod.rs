@@ -57,6 +57,7 @@ where
 
 pub mod applicant;
 pub mod book;
+pub mod discover;
 pub mod guide;
 pub mod inbound;
 pub mod queries;

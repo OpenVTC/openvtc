@@ -24,9 +24,11 @@ use openvtc_core::config::{
     context_path::{build_sub_context_id, parse_sub_context_id},
 };
 use openvtc_core::didcomm::Messaging;
+use openvtc_core::health::ProbePolicy;
 use openvtc_core::logs::LogFamily;
 use openvtc_core::vetting::applicant::Application;
 use openvtc_core::vetting::book::Knowledge;
+use openvtc_core::vetting::discover;
 use openvtc_core::vetting::guide::describe_requirements;
 use openvtc_core::vetting::queries::{CommunityAnswer, CommunityQuery, QueryKind};
 use openvtc_core::vetting::wire;
@@ -105,6 +107,10 @@ pub(crate) const REQUIREMENTS_WAIT: Duration = Duration::from_secs(15);
 
 /// How long sending the question may take before the page says so.
 const ASK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long resolving a community's DID may take before its endpoint is given
+/// up on. Bounded by rule R1.2, like every other outbound step here.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The entry a community's answer makes for the join waiting on it, if the
 /// answer is about that community's requirements.
@@ -404,6 +410,49 @@ fn show_unknown(
         },
     });
     state.join.page = JoinPage::Vetting;
+}
+
+/// Read `vtc_did`'s manifest from the REST endpoint it publishes, and learn it.
+///
+/// The question a community answers about what it requires is a public read
+/// (`vetting-process.md` §6.1), and serving it over HTTPS is what makes it
+/// answerable on a first join: no mediator socket, no persona to ask as, and no
+/// loop that can hear a reply. `Err` is the sentence the page shows, already
+/// distinguishing the ways it can fail — rule R6.4.
+///
+/// Mirrors the DIDComm handler
+/// ([`openvtc_core::vetting::inbound`]): the book learns the manifest, and any
+/// application to this community adopts it, so a change to the requirements
+/// mid-application is detectable from either route rather than only from one.
+async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Result<(), String> {
+    let resolver = tdk.did_resolver();
+    let resolved = tokio::time::timeout(RESOLVE_TIMEOUT, resolver.resolve(vtc_did))
+        .await
+        .map_err(|_| {
+            format!(
+                "it could not be resolved within {} seconds",
+                RESOLVE_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|e| format!("it could not be resolved ({e})"))?;
+    let doc = serde_json::to_value(&resolved.doc)
+        .map_err(|e| format!("its DID document could not be read ({e})"))?;
+    let manifest = discover::fetch_manifest(&doc, vtc_did, resolver, ProbePolicy::PublicOnly)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let book = &mut config.private.vetting;
+    book.learn_manifest(vtc_did, &manifest, Utc::now());
+    for application in book
+        .applications
+        .iter_mut()
+        .filter(|a| a.community == vtc_did)
+    {
+        if let Err(e) = application.adopt_manifest(&manifest) {
+            debug!(community = %vtc_did, error = %e, "community manifest not adopted");
+        }
+    }
+    Ok(())
 }
 
 /// Ask `vtc_did` for its manifest, as the active persona, and show the page
@@ -1207,29 +1256,49 @@ impl StateHandler {
                 show_vetting(state, config, &vtc_did);
                 None
             }
-            None if hears_replies => {
-                match ask_requirements(state, config, tdk, messaging, &vtc_did).await {
-                    Ok(awaiting) => Some(JoinExit::AwaitRequirements(awaiting)),
-                    // The page now says why the question could not be sent.
-                    Err(()) => None,
-                }
-            }
             None => {
-                // Nothing is known and this loop cannot hear an answer, so the
-                // community is not asked. Say so rather than sending an open
-                // request on the quiet: a community that vets would refer that
-                // request to its moderators, and the applicant would never learn
-                // there was a way in they could have taken.
-                show_unknown(
-                    state,
-                    config,
-                    &vtc_did,
-                    "OpenVTC cannot hear its answer until you belong to a community, so it was \
-                     not asked — this is your first join"
-                        .to_string(),
-                    false,
-                );
-                None
+                // The community's own endpoint first. It needs no mediator, no
+                // persona and no loop that can hear a reply, so it answers on a
+                // first join — where the DIDComm question cannot be asked at
+                // all — and it answers in one round trip everywhere else.
+                match learn_over_http(config, tdk, &vtc_did).await {
+                    Ok(()) => {
+                        if show_vetting(state, config, &vtc_did) {
+                            return None;
+                        }
+                        // It answered, and the answer is that it does not vet.
+                        self.continue_join(
+                            vtc_did,
+                            interrupt_rx,
+                            state,
+                            tdk,
+                            config,
+                            admin_vta,
+                            profile,
+                            messaging,
+                        )
+                        .await
+                        .map(JoinExit::Exit)
+                    }
+                    Err(why) if hears_replies => {
+                        debug!(community = %vtc_did, reason = %why, "manifest not read over REST");
+                        match ask_requirements(state, config, tdk, messaging, &vtc_did).await {
+                            Ok(awaiting) => Some(JoinExit::AwaitRequirements(awaiting)),
+                            // The page now says why the question could not be sent.
+                            Err(()) => None,
+                        }
+                    }
+                    Err(why) => {
+                        // Both ways of asking are shut: its endpoint did not
+                        // answer, and this loop has no inbound arm to hear a
+                        // message on. Say so rather than sending an open request
+                        // on the quiet — a community that vets refers that
+                        // request to its moderators, and the applicant would
+                        // never learn there was a way in they could have taken.
+                        show_unknown(state, config, &vtc_did, why, false);
+                        None
+                    }
+                }
             }
             Some(false) => self
                 .continue_join(
