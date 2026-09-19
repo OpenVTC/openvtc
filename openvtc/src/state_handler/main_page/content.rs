@@ -1816,6 +1816,104 @@ pub struct VetterStandingRow {
     pub profile: String,
 }
 
+/// One of the holder's pool attributes, as a row to tick.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PoolRow {
+    pub attribute_id: String,
+    pub claim_type: String,
+    /// What to call it on screen — the holder's label, else the claim type.
+    pub label: String,
+}
+
+/// Which half of the new-face form has the keyboard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NewFaceFocus {
+    #[default]
+    Name,
+    Attributes,
+}
+
+/// Making a face without leaving the vetting flow.
+///
+/// The general face editor lives on the Identity page and is the right place to
+/// build a face for its own sake. This is the narrow case: a community has
+/// already said which claim types its card must carry, so the form knows what
+/// the face is *for* and can open with those attributes already ticked.
+///
+/// Composed from attributes the pool already holds — it never creates one.
+/// Supplying a value for, say, a legal name is a different act from arranging
+/// which attributes a face shows, and it belongs with the editor that knows
+/// about value types, sensitivity and masking. What this form owes the holder
+/// when the pool is short is to say exactly which claim type is missing, rather
+/// than to offer a face that cannot make the card.
+#[derive(Clone, Debug, Default)]
+pub struct NewFaceForm {
+    pub application_id: String,
+    /// The claim types this community's card must carry, so the list can mark
+    /// them and the form can warn when the pool cannot cover them.
+    pub required: Vec<String>,
+    /// Every attribute the holder has, metadata only.
+    pub pool: Vec<PoolRow>,
+    pub name: String,
+    /// Attribute ids ticked, in the order they were ticked — which is the
+    /// order the face will present them in.
+    pub ticked: Vec<String>,
+    pub cursor: usize,
+    pub focus: NewFaceFocus,
+    pub error: Option<String>,
+}
+
+impl NewFaceForm {
+    /// Required claim types no attribute in the pool can supply.
+    ///
+    /// Not a refusal: a holder may be building a face now and adding the
+    /// attribute afterwards. It is named so the reason the card will be
+    /// refused is on screen *before* a vetter is waiting on it.
+    #[must_use]
+    pub fn uncoverable(&self) -> Vec<&str> {
+        self.required
+            .iter()
+            .filter(|r| !self.pool.iter().any(|a| &&a.claim_type == r))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// The claim types the ticked attributes would disclose.
+    #[must_use]
+    pub fn covered(&self) -> Vec<&str> {
+        self.pool
+            .iter()
+            .filter(|a| self.ticked.contains(&a.attribute_id))
+            .map(|a| a.claim_type.as_str())
+            .collect()
+    }
+
+    /// Required claim types the current selection still does not carry.
+    #[must_use]
+    pub fn still_missing(&self) -> Vec<&str> {
+        let covered = self.covered();
+        self.required
+            .iter()
+            .filter(|r| !covered.contains(&r.as_str()))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Tick or untick the attribute under the cursor.
+    pub fn toggle(&mut self) {
+        let Some(row) = self.pool.get(self.cursor) else {
+            return;
+        };
+        match self.ticked.iter().position(|id| id == &row.attribute_id) {
+            Some(i) => {
+                self.ticked.remove(i);
+            }
+            None => self.ticked.push(row.attribute_id.clone()),
+        }
+        self.error = None;
+    }
+}
+
 /// What the Vetting page is doing.
 #[derive(Clone, Debug, Default)]
 pub enum VettingMode {
@@ -1841,6 +1939,8 @@ pub enum VettingMode {
         /// The DID to grant it to, when this install has one.
         credential_did: Option<String>,
     },
+    /// Make a face for this community, without leaving the flow.
+    NewFace(Box<NewFaceForm>),
     /// Choose the face an application shows vetters.
     ChooseFace {
         application_id: String,
@@ -1937,6 +2037,9 @@ impl VettingMode {
                 Some(event) => event.text().map(String::as_str),
                 None => form.text().map(String::as_str),
             },
+            // Only while the name has focus: on the tick list, space has to
+            // reach `Toggle` rather than being typed into a field.
+            VettingMode::NewFace(form) if form.focus == NewFaceFocus::Name => Some(&form.name),
             _ => None,
         }
     }
@@ -1955,6 +2058,7 @@ impl VettingMode {
             VettingMode::RequestVetter { code, field: 1, .. } => Some(code),
             VettingMode::Directory(view) => view.text_mut(),
             VettingMode::Profile(form) => form.focused_text_mut(),
+            VettingMode::NewFace(form) if form.focus == NewFaceFocus::Name => Some(&mut form.name),
             _ => None,
         }
     }

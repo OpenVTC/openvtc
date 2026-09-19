@@ -23,7 +23,7 @@ use crate::state_handler::{
     main_page::content::{
         AttestForm, CardPreview, ContentPanelState, DIRECTORY_FIELDS, DIRECTORY_LABELS,
         DIRECTORY_METHODS, DeskStage, DeskView, DirectoryView, EVENT_LABELS, EventForm, LineTone,
-        PROFILE_FIELDS, PROFILE_LABELS, VETTING_METHODS, VETTING_RELATIONSHIPS,
+        NewFaceFocus, PROFILE_FIELDS, PROFILE_LABELS, VETTING_METHODS, VETTING_RELATIONSHIPS,
         VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VettingMode,
         VettingState, VettingTab, method_label, reason_label, relationship_label,
     },
@@ -67,6 +67,7 @@ pub fn mode_id(state: &VettingState) -> &'static str {
         (VettingMode::NewApplication { .. }, _) => "new-application",
         (VettingMode::HolderGrant { .. }, _) => "holder-grant",
         (VettingMode::ChooseFace { .. }, _) => "face",
+        (VettingMode::NewFace(_), _) => "new-face",
         (VettingMode::RequestVetter { .. }, _) => "request",
         (VettingMode::Directory(_), _) => "directory",
         (VettingMode::Profile(form), _) if form.event.is_some() => "profile-event",
@@ -246,6 +247,101 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.push(hint("Esc: back"));
         }
+        VettingMode::NewFace(form) => {
+            lines.push(heading("Make a face for this community"));
+            lines.push(Line::from(""));
+            lines.push(hint(
+                "A face is a selection of your attributes. Making one here does not copy them —",
+            ));
+            lines.push(hint(
+                "the same attribute can appear in as many faces as you like.",
+            ));
+            lines.push(Line::from(""));
+            lines.push(field(
+                "Name",
+                if form.name.is_empty() {
+                    "—".to_string()
+                } else {
+                    form.name.clone()
+                },
+                form.focus == NewFaceFocus::Name,
+                false,
+            ));
+            lines.push(Line::from(""));
+            if !form.required.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled(" This community's card needs  ", label()),
+                    Span::styled(form.required.join(", "), value()),
+                ]));
+                lines.push(Line::from(""));
+            }
+            if form.pool.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  You have no attributes yet. Add them under My Identity, then press f again.",
+                    dim(),
+                )));
+            }
+            for (i, attribute) in form.pool.iter().enumerate() {
+                let on_row = form.focus == NewFaceFocus::Attributes && i == form.cursor;
+                let ticked = form.ticked.contains(&attribute.attribute_id);
+                // A required claim type is marked wherever it appears, ticked
+                // or not: the holder is choosing against a list the community
+                // set, and that list should be visible on the rows it governs.
+                let wanted = form.required.contains(&attribute.claim_type);
+                let style = if on_row {
+                    Style::new().fg(COLOR_SUCCESS).bold()
+                } else {
+                    label()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(if on_row { "▸ " } else { "  " }, style),
+                    Span::styled(if ticked { "[x] " } else { "[ ] " }, style),
+                    Span::styled(attribute.label.clone(), style),
+                    Span::styled(format!("  {}", attribute.claim_type), dim()),
+                    Span::styled(
+                        if wanted { "  needed here" } else { "" },
+                        Style::new().fg(COLOR_SUCCESS),
+                    ),
+                ]));
+            }
+            // Said against the current selection, not against the pool, so
+            // unticking something required says so at once rather than at the
+            // card preview.
+            let short = form.still_missing();
+            if !short.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("  missing   ", dim()),
+                    Span::styled(
+                        short.join(", "),
+                        Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+                    ),
+                    Span::styled(" — this face could not make the card", dim()),
+                ]));
+                let uncoverable = form.uncoverable();
+                if !uncoverable.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "            no attribute of yours is {} — add one under My Identity",
+                            uncoverable.join(" or ")
+                        ),
+                        dim(),
+                    )));
+                }
+            }
+            if let Some(error) = &form.error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!(" {error}"),
+                    Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(hint(
+                "Tab: name / attributes  ↑/↓: move  Space: tick  Enter: make it and wear it  \
+                 Esc: cancel",
+            ));
+        }
         VettingMode::ChooseFace {
             faces,
             index,
@@ -335,10 +431,28 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
                     ]));
                 }
             }
-            lines.push(Line::from(""));
-            lines.push(hint(
-                "Add a missing claim to a face under My Identity, then press f again.",
-            ));
+            // A row rather than a key, so every way out of this screen is in
+            // the list the eye is already on.
+            let on_new = *index == faces.len();
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if on_new { "▸ " } else { "  " },
+                    if on_new {
+                        Style::new().fg(COLOR_SUCCESS).bold()
+                    } else {
+                        label()
+                    },
+                ),
+                Span::styled(
+                    "Make a face for this community",
+                    if on_new {
+                        Style::new().fg(COLOR_SUCCESS).bold()
+                    } else {
+                        label()
+                    },
+                ),
+                Span::styled("  from attributes you already have", dim()),
+            ]));
             lines.push(Line::from(""));
             lines.push(hint("↑/↓: choose  Enter: wear it  Esc: cancel"));
         }
