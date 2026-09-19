@@ -237,35 +237,16 @@ fn build_routes(
         });
     }
 
-    let detail = match application {
-        Some(app) if app.satisfied => format!(
-            "{} statement{} ready to present",
-            app.statements,
-            if app.statements == 1 { "" } else { "s" }
-        ),
-        Some(app) => app
-            .progress
-            .clone()
-            .unwrap_or_else(|| format!("under way as {}", app.persona_label)),
-        None => "no application yet".to_string(),
-    };
+    let (label, detail) = vetting_row_words(application);
     // With no persona the only value "Apply as" can hold is a new one, so the
     // route starts by making it.
     let state = vetting_route_state(application.is_some(), personas.is_empty());
     routes.push(RouteOption {
         route: JoinRoute::Vetting,
-        label: match application {
-            Some(app) if app.satisfied => "Present your vetting statements".to_string(),
-            Some(_) => "Carry on with your application".to_string(),
-            None => "Apply for vetting".to_string(),
-        },
-        detail: if invitation_required {
-            format!(
-                "{detail} — {community} also asks for an invitation ({} held)",
-                held
-            )
-        } else {
-            detail
+        label,
+        detail: match vetting_detail_suffix(community, requirements, held) {
+            Some(suffix) => format!("{detail}{suffix}"),
+            None => detail,
         },
         state,
     });
@@ -285,6 +266,50 @@ fn build_routes(
         state: RouteState::Ready,
     });
     routes
+}
+
+/// What the vetting row says, for the application the persona chooser is on.
+///
+/// One function because the row is rebuilt every time that choice moves: the
+/// label, the detail and the state all turn on whether *this* persona has an
+/// application, and a row whose label still said "Carry on with your
+/// application" after cycling to a persona that has none would describe a
+/// different action from the one Enter takes.
+fn vetting_row_words(application: Option<&JoinApplication>) -> (String, String) {
+    match application {
+        Some(app) if app.satisfied => (
+            "Present your vetting statements".to_string(),
+            format!(
+                "{} statement{} ready to present",
+                app.statements,
+                if app.statements == 1 { "" } else { "s" }
+            ),
+        ),
+        Some(app) => (
+            "Carry on with your application".to_string(),
+            app.progress
+                .clone()
+                .unwrap_or_else(|| format!("under way as {}", app.persona_label)),
+        ),
+        None => (
+            "Apply for vetting".to_string(),
+            "no application yet".to_string(),
+        ),
+    }
+}
+
+/// The part of the vetting row's detail that does not depend on who is
+/// applying: that this community also asks for an invitation.
+fn vetting_detail_suffix(
+    community: &str,
+    requirements: &VettingRequirements,
+    held: usize,
+) -> Option<String> {
+    matches!(
+        requirements.invitation,
+        Some(VettingRequirementsInvitation::Required)
+    )
+    .then(|| format!(" — {community} also asks for an invitation ({held} held)"))
 }
 
 /// What the join flow shows for `vtc_did`, when the book knows it vets.
@@ -309,23 +334,32 @@ pub(crate) fn vetting_view(
         .iter()
         .filter(|a| a.community == vtc_did)
         .collect();
-    let chosen = applications
+    // Every one, not the first: a community can hold an application from each
+    // of this account's personas, and the chooser has to be able to reach them.
+    let joins: Vec<JoinApplication> = applications
         .iter()
-        .find(|a| a.checklist(now).is_some_and(|e| e.satisfied()))
-        .or_else(|| applications.first())
-        .copied();
-    let application = chosen.map(|app| {
-        let evaluation = app.checklist(now);
-        JoinApplication {
-            id: app.id.clone(),
-            persona: app.persona,
-            persona_label: label(app.persona),
-            statements: app.presentable_statements(now).len(),
-            progress: evaluation.as_ref().map(vetting_actions::progress_line),
-            satisfied: evaluation.as_ref().is_some_and(|e| e.satisfied()),
-            next_step: vetting_actions::next_step_words(&app.next_step(now)),
-        }
-    });
+        .map(|app| {
+            let evaluation = app.checklist(now);
+            JoinApplication {
+                id: app.id.clone(),
+                persona: app.persona,
+                persona_label: label(app.persona),
+                statements: app.presentable_statements(now).len(),
+                progress: evaluation.as_ref().map(vetting_actions::progress_line),
+                satisfied: evaluation.as_ref().is_some_and(|e| e.satisfied()),
+                next_step: vetting_actions::next_step_words(&app.next_step(now)),
+            }
+        })
+        .collect();
+    // The page opens on the application it would have collapsed to before —
+    // one that meets the requirements, else the first — so the common case
+    // still takes no keystrokes to reach. The difference is that the others
+    // are now a ←/→ away instead of unreachable.
+    let opens_on = joins
+        .iter()
+        .find(|a| a.satisfied)
+        .or_else(|| joins.first())
+        .map(|a| a.persona);
     let mut personas: Vec<ApplyAs> = config
         .identities
         .iter()
@@ -336,13 +370,21 @@ pub(crate) fn vetting_view(
         })
         .collect();
     personas.sort_by(|a, b| a.label.cmp(&b.label));
-    let context_options =
-        application_contexts(config, vtc_did, personas.first().map(|p| p.persona));
+    let persona_index = opens_on
+        .and_then(|persona| personas.iter().position(|p| p.persona == persona))
+        .unwrap_or(0);
+    let application = opens_on.and_then(|persona| joins.iter().find(|a| a.persona == persona));
+    let context_options = application_contexts(
+        config,
+        vtc_did,
+        personas.get(persona_index).map(|p| p.persona),
+    );
     let name = vetting_actions::community_display(config, vtc_did);
+    let detail_suffix = vetting_detail_suffix(&name, &criterion.requirements, invitations.len());
     let routes = build_routes(
         &name,
         &criterion.requirements,
-        application.as_ref(),
+        application,
         &personas,
         invitations,
     );
@@ -363,10 +405,11 @@ pub(crate) fn vetting_view(
                 .governance_framework_url
                 .as_deref()
                 .map(|u| sanitize_display(u, 300)),
-            application,
+            applications: joins,
+            vetting_detail_suffix: detail_suffix,
             routes,
             personas,
-            persona_index: 0,
+            persona_index,
             context_options,
             context_index: 0,
             row,
@@ -535,10 +578,13 @@ fn known_vetting(state: &mut State) -> Option<&mut KnownVetting> {
 /// The persona of an application that meets the published requirements.
 fn satisfied_application_persona(state: &State) -> Option<PersonaId> {
     match state.join.vetting.as_ref().map(|v| &v.phase) {
+        // The one the chooser is on first — a page showing two applications
+        // must submit the one being looked at — then any other that qualifies,
+        // so arriving on an unsatisfied persona still finds the ready one.
         Some(VettingPhase::Known(known)) => known
-            .application
-            .as_ref()
+            .selected_application()
             .filter(|a| a.satisfied)
+            .or_else(|| known.applications.iter().find(|a| a.satisfied))
             .map(|a| a.persona),
         _ => None,
     }
@@ -587,14 +633,21 @@ fn cycle_vetting_choice(config: &Config, vtc_did: &str, known: &mut KnownVetting
                 known.personas.get(known.persona_index).map(|p| p.persona),
             );
             known.context_index = 0;
-            // What the route does follows from that choice.
-            let state =
-                vetting_route_state(known.application.is_some(), known.applying_as_new_persona());
+            // The whole row follows from that choice — what it is called, what
+            // it says, and what Enter does. Updating only the state left a row
+            // reading "Carry on with your application" over a persona that has
+            // none, and taking it would have started one.
+            let application = known.selected_application().cloned();
+            let (label, detail) = vetting_row_words(application.as_ref());
+            let state = vetting_route_state(application.is_some(), known.applying_as_new_persona());
+            let suffix = known.vetting_detail_suffix.clone().unwrap_or_default();
             if let Some(route) = known
                 .routes
                 .iter_mut()
                 .find(|r| r.route == JoinRoute::Vetting)
             {
+                route.label = label;
+                route.detail = format!("{detail}{suffix}");
                 route.state = state;
             }
         }
@@ -621,7 +674,10 @@ fn apply_for_vetting(
     else {
         return Err("The community's requirements are not known yet.".to_string());
     };
-    if let Some(app) = &known.application {
+    // Carrying one on or starting another is the same row; which it does
+    // follows from the persona the chooser is on. Before this, the *existence*
+    // of any application decided it, so a second persona could never apply.
+    if let Some(app) = known.selected_application() {
         let message = format!(
             "Your application to {name}, as {}. Next: {}. Press j here when you are ready to \
              join — the join picks up where you left it.",
@@ -3675,7 +3731,7 @@ mod vetting_tests {
         };
         assert!(known.requirements[0].starts_with("2 vetting statements"));
         assert!(known.requirements.iter().any(|l| l.contains("120 days")));
-        assert!(known.application.is_none());
+        assert!(known.applications.is_empty());
 
         let persona = PersonaId::new();
         let id = config
@@ -3691,12 +3747,78 @@ mod vetting_tests {
             panic!("known");
         };
         let app = known
-            .application
-            .as_ref()
+            .applications
+            .first()
             .expect("the application under way");
         assert_eq!(app.persona, persona);
         assert!(!app.satisfied);
         assert!(app.next_step.starts_with("f —"), "{}", app.next_step);
+    }
+
+    /// A community can hold an application from each of this account's
+    /// personas — they are keyed on `(community, persona)`. The join page used
+    /// to show only the first and hide the chooser, so a second persona could
+    /// never apply from here at all.
+    #[test]
+    fn every_persona_with_an_application_is_reachable_from_the_join() {
+        let mut config = test_config();
+        let now = Utc::now();
+        config
+            .private
+            .vetting
+            .learn_manifest(VTC, &manifest(true), now);
+
+        let alice = PersonaId::new();
+        let bob = PersonaId::new();
+        for persona in [alice, bob] {
+            let id = config
+                .private
+                .vetting
+                .start_application(VTC, persona, "did:key:zA", now)
+                .unwrap()
+                .id
+                .clone();
+            config.private.vetting.adopt_known_requirements(&id);
+        }
+
+        let view = vetting_view(&config, VTC, &[], now).unwrap();
+        let VettingPhase::Known(known) = &view.phase else {
+            panic!("known");
+        };
+        assert_eq!(known.applications.len(), 2, "both must be on the page");
+    }
+
+    /// The row's words, its state and what Enter does all turn on the same
+    /// fact, so they are decided in one place. A row still saying "Carry on
+    /// with your application" after cycling to a persona that has none would
+    /// describe a different action from the one it takes.
+    #[test]
+    fn the_vetting_row_follows_the_persona_being_applied_as() {
+        let (label, detail) = vetting_row_words(None);
+        assert_eq!(label, "Apply for vetting");
+        assert_eq!(detail, "no application yet");
+
+        let under_way = JoinApplication {
+            id: "a1".into(),
+            persona: PersonaId::new(),
+            persona_label: "alice".into(),
+            statements: 0,
+            progress: Some("0 of 2".into()),
+            next_step: "f — choose the face you show vetters".into(),
+            satisfied: false,
+        };
+        let (label, detail) = vetting_row_words(Some(&under_way));
+        assert_eq!(label, "Carry on with your application");
+        assert_eq!(detail, "0 of 2");
+
+        let ready = JoinApplication {
+            statements: 2,
+            satisfied: true,
+            ..under_way
+        };
+        let (label, detail) = vetting_row_words(Some(&ready));
+        assert_eq!(label, "Present your vetting statements");
+        assert_eq!(detail, "2 statements ready to present");
     }
 
     fn requirements(invitation: Option<&str>) -> VettingRequirements {
