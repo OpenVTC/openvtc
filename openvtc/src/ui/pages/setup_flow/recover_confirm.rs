@@ -162,7 +162,7 @@ impl RecoverConfirm {
                             Span::styled(
                                 format!(
                                     "{} — {}",
-                                    openvtc_core::display::truncate_did(&s.did, 44),
+                                    openvtc_core::display::shorten_for_display(&s.did, 44),
                                     s.reason.summary()
                                 ),
                                 Style::new().fg(COLOR_ORANGE),

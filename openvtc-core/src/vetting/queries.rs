@@ -15,6 +15,8 @@
 
 use chrono::{DateTime, Duration, Utc};
 use vta_sdk::protocols::vetting::{
+    VETTING_REQUEST_ERR_CAPACITY, VETTING_REQUEST_ERR_DECLINED, VETTING_REQUEST_ERR_INVALID_TICKET,
+    VETTING_REQUEST_ERR_METHOD_UNAVAILABLE, VETTING_REQUEST_ERR_NOT_ELIGIBLE,
     VETTING_VETTER_PROFILE_ERR_NOT_ELIGIBLE, VETTING_VETTER_RESEND_ERR_NOT_GRANTED, vetters,
 };
 
@@ -144,6 +146,37 @@ impl CommunityAnswer {
             | CommunityAnswer::Refused { community, .. }
             | CommunityAnswer::Unreadable { community, .. } => community,
         }
+    }
+}
+
+/// What a `vetting/request` refusal means, and what to do about it.
+///
+/// Both ends read this. The applicant sees why their request was turned down;
+/// the vetter sees why one they never saw was turned down for them. The wire
+/// code on its own (`vetting/request:invalidTicket`) says neither — it appeared
+/// verbatim under a vetter's name on the applicant's page, where it reads as a
+/// fault in the software rather than as a ticket that needs replacing (rule
+/// R6.4).
+#[must_use]
+pub fn request_refusal_words(code: &str) -> &'static str {
+    match code {
+        VETTING_REQUEST_ERR_INVALID_TICKET => {
+            "their ticket did not match — it may have been used up, expired, or been issued for \
+             a different community or a different persona of theirs. Ask them for a fresh one."
+        }
+        VETTING_REQUEST_ERR_CAPACITY => {
+            "they have as many open requests as they take. Try again later, or ask another \
+             vetter."
+        }
+        VETTING_REQUEST_ERR_NOT_ELIGIBLE => {
+            "the community does not count them as a vetter — their grant may have lapsed or \
+             been revoked. Ask another vetter."
+        }
+        VETTING_REQUEST_ERR_METHOD_UNAVAILABLE => {
+            "their ticket does not offer the way of meeting you asked for."
+        }
+        VETTING_REQUEST_ERR_DECLINED => "they declined to take it.",
+        _ => "they refused it, and gave no reason this client understands.",
     }
 }
 

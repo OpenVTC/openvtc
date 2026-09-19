@@ -27,14 +27,14 @@ use openvtc_core::vetting::applicant::{
 };
 use openvtc_core::vetting::book::FALLBACK_REQUIRED_CLAIMS;
 use openvtc_core::vetting::queries::{
-    CommunityAnswer, CommunityQuery, QUERY_TIMEOUT, QueryKind, refusal_words,
+    CommunityAnswer, CommunityQuery, QUERY_TIMEOUT, QueryKind, refusal_words, request_refusal_words,
 };
 use openvtc_core::vetting::registry::{
     EventDraft, ProfileDraft, ProfileState, VetterProfileRecord, listed_event_line,
     listed_location_line,
 };
 use openvtc_core::vetting::status::GrantCheck;
-use openvtc_core::vetting::tickets::{DEFAULT_VALIDITY, Ticket, normalise_code};
+use openvtc_core::vetting::tickets::{DEFAULT_VALIDITY, Ticket};
 use openvtc_core::vetting::vetter::{Attestation, DeskState};
 use openvtc_core::vetting::wire::{self, Document};
 use serde_json::Value;
@@ -309,6 +309,16 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                             card_session,
                             eligibility: r.eligibility.as_ref().map(eligibility_line),
                             grant: r.grant_status.as_ref().map(grant_line),
+                            // The code stays on the state line, because it is
+                            // what to quote when asking anyone else about this;
+                            // what it *means* gets a line of its own, because a
+                            // wire code is not an instruction.
+                            refusal: match &r.state {
+                                RequestState::Refused { code, .. } => {
+                                    Some(request_refusal_words(code).to_string())
+                                }
+                                _ => None,
+                            },
                         }
                     })
                     .collect(),
@@ -712,11 +722,10 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             if let Some(row) = v.applications.get(v.selected).cloned() {
                 v.mode = VettingMode::RequestVetter {
                     application_id: row.id,
+                    entry: String::new(),
                     vetter: String::new(),
-                    code: String::new(),
                     ticket: None,
                     note: None,
-                    field: 0,
                 };
             }
         }
@@ -759,16 +768,9 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
         }
         VettingAction::DeleteTicket => {
             let v = page(ctx);
-            if let Some(row) = v.tickets.get(v.selected).cloned() {
-                ctx.config
-                    .private
-                    .vetting
-                    .tickets
-                    .retain(|t| t.id != row.id);
-                persist(
-                    ctx,
-                    format!("Ticket {} deleted — it admits nothing now.", row.code),
-                );
+            match v.tickets.get(v.selected).cloned() {
+                Some(row) => v.mode = VettingMode::ConfirmDeleteTicket { ticket_id: row.id },
+                None => status(ctx, "Highlight a ticket to delete."),
             }
         }
         VettingAction::OpenSession => {
@@ -838,12 +840,12 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
 }
 
 fn input(mode: &mut VettingMode, text: String) {
-    // Typing a code replaces a ticket read from a link.
-    if let VettingMode::RequestVetter {
-        ticket, field: 1, ..
-    } = mode
-    {
+    // Editing the field discards what the last link was read as: the vetter and
+    // the ticket both come out of that text, and leaving either behind would
+    // send the request to whoever the *previous* link named.
+    if let VettingMode::RequestVetter { ticket, vetter, .. } = mode {
         *ticket = None;
+        vetter.clear();
     }
     if let Some(focused) = mode.focused_text_mut() {
         *focused = text;
@@ -890,10 +892,10 @@ fn move_field(v: &mut VettingState, forward: bool) {
         };
     };
     match &mut v.mode {
-        VettingMode::NewApplication { field, .. } => step(field, 3),
-        VettingMode::RequestVetter { field, .. } | VettingMode::NewTicket { field, .. } => {
-            step(field, 2);
-        }
+        // Two fields, not three: which context the application lives in is
+        // taken rather than asked (a sub-context of its own).
+        VettingMode::NewApplication { field, .. } => step(field, 2),
+        VettingMode::NewTicket { field, .. } => step(field, 2),
         VettingMode::Directory(view) => {
             let rows = view.rows();
             step(&mut view.field, rows);
@@ -956,12 +958,6 @@ fn cycle(v: &mut VettingState, forward: bool) {
             field: 1,
             ..
         } => turn(persona_index, personas),
-        VettingMode::NewApplication {
-            context_options,
-            context_index,
-            field: 2,
-            ..
-        } => turn(context_index, context_options.len()),
         VettingMode::NewTicket {
             membership_index,
             field: 0,
@@ -1012,6 +1008,7 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             start_application(ctx, community.trim(), persona_index, context).await;
         }
         VettingMode::ConfirmAbandon { .. } => abandon_application(ctx),
+        VettingMode::ConfirmDeleteTicket { ticket_id } => delete_ticket(ctx, &ticket_id),
         VettingMode::ChooseFace {
             application_id,
             faces,
@@ -1027,11 +1024,11 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
         VettingMode::NewFace(form) => create_face(ctx, *form),
         VettingMode::RequestVetter {
             application_id,
+            entry,
             vetter,
-            code,
             ticket,
             ..
-        } => request_vetter(ctx, &application_id, vetter.trim(), &code, ticket).await,
+        } => request_vetter(ctx, &application_id, entry.trim(), vetter.trim(), ticket).await,
         VettingMode::Directory(view) => match view.result_index() {
             Some(_) => ask_listed_vetter(ctx),
             None => search_directory(ctx, vec![None]).await,
@@ -1255,41 +1252,48 @@ async fn start_application(
     refresh_requirements(ctx, &application_id).await;
 }
 
+/// Send a vetting request carrying the ticket from a `vetting-ticket:` link.
+///
+/// `entry` is the one field; `vetter` and `ticket` are what a paste already
+/// read out of it. Enter with neither of those set — someone typed or pasted
+/// without the paste hook firing — reads `entry` here, so the form behaves the
+/// same whichever way the text arrived.
 async fn request_vetter(
     ctx: &mut ActionCtx<'_>,
     application_id: &str,
+    entry: &str,
     vetter: &str,
-    code: &str,
     ticket: Option<request::v0_1::Ticket>,
 ) {
-    // A link typed into the DID field is read the same as a pasted one.
-    if vetter.to_ascii_lowercase().starts_with("vetting-ticket:") {
-        return paste_ticket(ctx, vetter);
-    }
-    if !vetter.starts_with("did:") {
-        return status(ctx, "Enter the vetter's DID (it starts with did:).");
-    }
-    let presentation = match ticket {
-        Some(ticket) if code.is_empty() => ticket,
-        // The published short code is upper-case Crockford base32, so the code
-        // is normalised into that form before the ticket is built rather than
-        // sent as it was typed.
-        _ => match normalise_code(code).and_then(|code| {
-            request::v0_1::ShortCodeTicket::try_from(
-                request::v0_1::ShortCodeTicket::builder().code(code),
-            )
-            .ok()
-        }) {
-            Some(code) => request::v0_1::Ticket::ShortCodeTicket(code),
-            None => {
-                return status(
-                    ctx,
-                    "That is not a ticket code — they look like K7QF-2M9X. Or paste the link \
-                     from their QR code.",
-                );
+    // Not yet read (typed rather than pasted): read it now, which also reports
+    // a link for the wrong community or one that cannot be decoded.
+    let (vetter, presentation) = match (ticket, vetter.starts_with("did:")) {
+        (Some(ticket), true) => (vetter.to_string(), ticket),
+        _ => {
+            let Some(app) = ctx
+                .config
+                .private
+                .vetting
+                .applications
+                .iter()
+                .find(|a| a.id == application_id)
+            else {
+                return;
+            };
+            match app.ticket_from_uri(entry) {
+                Ok(ticket) => (ticket.vetter, ticket.presentation),
+                Err(_) if entry.is_empty() => {
+                    return status(
+                        ctx,
+                        "Paste the link from the vetter's QR code — it carries their ticket, \
+                         and a request without one is never answered.",
+                    );
+                }
+                Err(e) => return status(ctx, sanitize_display(&e.to_string(), 400)),
             }
-        },
+        }
     };
+    let vetter = vetter.as_str();
     if !begin(ctx) {
         return;
     }
@@ -1360,25 +1364,24 @@ fn paste_ticket(ctx: &mut ActionCtx<'_>, text: &str) {
     else {
         return;
     };
+    let pasted = text.trim().to_string();
     match app.ticket_from_uri(text) {
         Ok(ticket) => {
             let shown = shorten_did(&ticket.vetter, 64);
             if let VettingMode::RequestVetter {
+                entry,
                 vetter,
-                code,
                 ticket: slot,
-                field,
                 ..
             } = &mut page(ctx).mode
             {
+                *entry = pasted;
                 *vetter = ticket.vetter;
-                code.clear();
                 *slot = Some(ticket.presentation);
-                *field = 1;
             }
             status(
                 ctx,
-                format!("Filled in from the ticket link: {shown}. Enter sends the request."),
+                format!("Read the ticket link. It goes to {shown} — Enter sends the request."),
             );
         }
         Err(e) => status(ctx, sanitize_display(&e.to_string(), 400)),
@@ -1545,15 +1548,17 @@ fn ask_listed_vetter(ctx: &mut ActionCtx<'_>) {
     let v = page(ctx);
     v.mode = VettingMode::RequestVetter {
         application_id,
-        vetter: row.did.clone(),
-        code: String::new(),
+        entry: String::new(),
+        // Left empty on purpose. The directory knows who they are, but the
+        // request goes to whoever the *ticket* names, and showing a vetter the
+        // form is not going to use would be a claim about where this is going.
+        vetter: String::new(),
         ticket: None,
         note: Some(format!(
             "{} still has to give you a ticket before they answer — {how}. Paste the link from \
-             their QR code, or type the code they read to you.",
+             their QR code here.",
             row.name
         )),
-        field: 1,
     };
     v.tab = VettingTab::Applications;
 }
@@ -1806,6 +1811,43 @@ async fn ask_resend(ctx: &mut ActionCtx<'_>, index: usize) {
 
 /// Drop the application the confirmation is armed on.
 ///
+/// Delete a ticket, once the confirmation has been taken.
+///
+/// Irreversible and invisible to the people who matter: whoever is holding a
+/// copy of this ticket — read off a screen, scanned from a QR code — finds
+/// their request refused with `invalidTicket` and no way to tell that the
+/// ticket was withdrawn rather than mistyped. That is why it is confirmed, and
+/// why the message says what it costs rather than only that it happened.
+fn delete_ticket(ctx: &mut ActionCtx<'_>, ticket_id: &str) {
+    let Some(ticket) = ctx
+        .config
+        .private
+        .vetting
+        .tickets
+        .iter()
+        .find(|t| t.id == ticket_id)
+        .cloned()
+    else {
+        back(page(ctx));
+        return status(ctx, "That ticket is already gone.");
+    };
+    ctx.config
+        .private
+        .vetting
+        .tickets
+        .retain(|t| t.id != ticket_id);
+    back(page(ctx));
+    page(ctx).selected = 0;
+    persist(
+        ctx,
+        format!(
+            "Ticket {} deleted — anyone already holding it is now refused, and they are not \
+             told why.",
+            ticket.code
+        ),
+    );
+}
+
 /// Local only: vetting is client-side until the join is submitted, so nothing
 /// was sent to the community and there is nothing to withdraw from it. What the
 /// message says instead is the part that is *not* tidied — a vetter who already
@@ -2215,8 +2257,8 @@ fn issue_ticket(ctx: &mut ActionCtx<'_>, membership_index: usize, uses_index: us
     persist(
         ctx,
         format!(
-            "Ticket {code} for {} — read it to the person, or copy it with y. It admits {uses} \
-             request{} for 14 days.",
+            "Ticket {code} for {} — press ⏎ to show its QR code, or u to copy its link. It \
+             admits {uses} request{} for 14 days.",
             membership.name,
             if uses == 1 { "" } else { "s" }
         ),

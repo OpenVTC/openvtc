@@ -2423,11 +2423,40 @@ impl MainPage {
         if !matches!(vetting.mode, VettingMode::List) {
             let text = vetting.mode.focused_text().map(str::to_string);
             let confirming = matches!(vetting.mode, VettingMode::ConfirmDecline { .. });
+            // The holder-grant view's whole job is to send you to another
+            // terminal and back, and it ends with "then press f again". That
+            // key was not bound here, so the one thing the screen asks for did
+            // nothing — and with no field to type in and no rows to move
+            // between, Tab and the arrows did nothing visible either. The view
+            // read as frozen, and the only way back to a working `f` was to
+            // restart.
+            let holder_grant = matches!(vetting.mode, VettingMode::HolderGrant { .. });
             let on_result = matches!(&vetting.mode, VettingMode::Directory(view) if view.result_index().is_some());
             let on_event = matches!(
                 &vetting.mode,
                 VettingMode::Profile(form) if form.event.is_none() && form.event_index().is_some()
             );
+            // Ctrl+V on the one field whose whole content is something pasted.
+            // Ahead of the text handler, which would otherwise type a literal
+            // `v` into the ticket link. Bracketed paste still works and is the
+            // path that survives SSH; this is the one that is on the screen.
+            if matches!(vetting.mode, VettingMode::RequestVetter { .. })
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('v' | 'V'))
+            {
+                let action = match crate::clipboard::read_clipboard() {
+                    Ok(pasted) => V::PasteTicket(pasted),
+                    // Reading the OS clipboard cannot work over SSH, where a
+                    // bracketed paste still can — so the refusal says that
+                    // rather than only that it failed.
+                    Err(why) => V::Status(format!(
+                        "Could not read the clipboard ({why}). Paste directly into this screen \
+                         instead — that works over SSH, where reading the clipboard cannot."
+                    )),
+                };
+                let _ = self.action_tx.send(Action::Vetting(action));
+                return true;
+            }
             let action = match key.code {
                 KeyCode::Esc => Some(V::Back),
                 KeyCode::Enter => Some(V::Submit),
@@ -2437,6 +2466,7 @@ impl MainPage {
                 KeyCode::Right => Some(V::Cycle(true)),
                 code => match text {
                     Some(current) => edit_text(code, &current).map(V::Input),
+                    None if holder_grant && code == KeyCode::Char('f') => Some(V::ChooseFace),
                     None if code == KeyCode::Char('y') && confirming => Some(V::Submit),
                     None if code == KeyCode::Char('n') && confirming => Some(V::Back),
                     None if on_result && code == KeyCode::Char('n') => Some(V::DirectoryPage(true)),
@@ -3569,15 +3599,14 @@ mod key_handler_tests {
         let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
             s.main_page.content_panel.vetting.mode = VettingMode::RequestVetter {
                 application_id: "a1".into(),
-                vetter: "did:key:z".into(),
-                code: String::new(),
+                entry: "vetting-ticket:abc".into(),
+                vetter: String::new(),
                 ticket: None,
                 note: None,
-                field: 0,
             };
         });
         page.handle_key_event(press(KeyCode::Char('Q')));
-        assert!(matches!(vetting_action(&mut rx), V::Input(text) if text == "did:key:zQ"));
+        assert!(matches!(vetting_action(&mut rx), V::Input(text) if text == "vetting-ticket:abcQ"));
 
         // In the checklist, Space ticks and the arrows cycle.
         let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
@@ -3802,6 +3831,52 @@ mod key_handler_tests {
         assert!(rx.try_recv().is_err(), "x removes nothing off an event row");
     }
 
+    /// The holder-grant view ends with "then press f", and that key has to
+    /// work. It was unbound, so the one thing the screen asks for did nothing —
+    /// and with no field and no rows, nothing else visibly worked either, which
+    /// left the view looking frozen until the app was restarted.
+    #[test]
+    fn vetting_holder_grant_retries_on_f() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::VettingMode;
+        let grant = |s: &mut State| {
+            s.main_page.content_panel.vetting.mode = VettingMode::HolderGrant {
+                credential_did: Some("did:key:z6MkThisInstall".into()),
+            };
+        };
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, grant);
+        page.handle_key_event(press(KeyCode::Char('f')));
+        assert!(matches!(vetting_action(&mut rx), V::ChooseFace));
+
+        // And the way out still works, so the view is never a dead end.
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, grant);
+        page.handle_key_event(press(KeyCode::Esc));
+        assert!(matches!(vetting_action(&mut rx), V::Back));
+    }
+
+    /// Asking a vetter is one field. The link carries the vetter's DID, so a
+    /// separate box for it only ever held what the paste was about to
+    /// overwrite — and Tab had a second field to move to that nobody typed in.
+    #[test]
+    fn vetting_ask_a_vetter_is_one_field() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::VettingMode;
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
+            s.main_page.content_panel.vetting.mode = VettingMode::RequestVetter {
+                application_id: "a1".into(),
+                entry: String::new(),
+                vetter: String::new(),
+                ticket: None,
+                note: None,
+            };
+        });
+        // Whatever is typed reaches the one field, wherever the cursor "is".
+        page.handle_key_event(press(KeyCode::Char('v')));
+        assert!(matches!(vetting_action(&mut rx), V::Input(t) if t == "v"));
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(vetting_action(&mut rx), V::Submit));
+    }
+
     #[test]
     fn vetting_a_pasted_ticket_link_fills_the_request_form() {
         use crate::state_handler::actions::VettingAction as V;
@@ -3809,11 +3884,10 @@ mod key_handler_tests {
         let request = |s: &mut State| {
             s.main_page.content_panel.vetting.mode = VettingMode::RequestVetter {
                 application_id: "a1".into(),
+                entry: String::new(),
                 vetter: String::new(),
-                code: String::new(),
                 ticket: None,
                 note: None,
-                field: 0,
             };
         };
         let (mut page, mut rx) = page_for(MainMenu::Vetting, request);
@@ -4397,6 +4471,54 @@ mod key_handler_tests {
     /// "Path" means nothing until you have seen one in place, so the phase
     /// that asks for it shows a DID with its last segment picked out. The
     /// choice is only open here — the path is inside the identifier.
+    /// The first screen of the first thing anyone makes here. "Label for the
+    /// new persona:" over an empty box said what to fill in and nothing about
+    /// what it was for, so the field gets both: a line of explanation and an
+    /// example sitting in it.
+    #[test]
+    fn the_label_phase_says_what_the_label_is_for() {
+        use crate::state_handler::main_page::content::{CreatePersonaPhase, CreatePersonaState};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let draw = |overlay: CreatePersonaState| {
+            let (page, _rx) = page_for(MainMenu::Identity, move |s: &mut State| {
+                s.main_page.create_persona = Some(overlay.clone());
+            });
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+            terminal
+                .draw(|frame| page.render(frame, ()))
+                .expect("render");
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+        };
+
+        let empty = draw(CreatePersonaState {
+            phase: CreatePersonaPhase::Label,
+            ..Default::default()
+        });
+        assert!(empty.contains("tell your personas apart"), "{empty}");
+        assert!(
+            empty.contains("Communities are shown the DID, not this"),
+            "and what it is not: {empty}"
+        );
+        assert!(empty.contains("e.g. Work, Conference, Alice"), "{empty}");
+
+        // The example is a placeholder, not a value: the moment anything is
+        // typed it is gone, so nobody submits it by pressing Enter.
+        let typed = draw(CreatePersonaState {
+            phase: CreatePersonaPhase::Label,
+            label: tui_input::Input::new("Conference".to_string()),
+            ..Default::default()
+        });
+        assert!(typed.contains("Conference"), "{typed}");
+        assert!(!typed.contains("e.g. Work"), "{typed}");
+    }
+
     #[test]
     fn the_path_phase_shows_where_the_path_sits_in_a_did() {
         use crate::state_handler::main_page::content::{CreatePersonaPhase, CreatePersonaState};
@@ -4427,13 +4549,56 @@ mod key_handler_tests {
         assert!(drawn.contains("did:webvh:"), "a worked example: {drawn}");
         assert!(drawn.contains("the path"), "and a pointer at it: {drawn}");
         assert!(
-            drawn.contains("cannot be changed afterwards"),
+            drawn.contains("cannot be changed"),
             "and why it is worth getting right: {drawn}"
         );
     }
 
     #[test]
-    fn create_persona_path_overlay_shows_both_rows() {
+    fn create_persona_path_overlay_leads_with_the_server_assigned_outcome() {
+        use crate::state_handler::main_page::content::{CreatePersonaPhase, CreatePersonaState};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (page, _rx) = page_for(MainMenu::Identity, |s: &mut State| {
+            s.main_page.create_persona = Some(CreatePersonaState {
+                phase: CreatePersonaPhase::Path,
+                ..Default::default()
+            });
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| page.render(frame, ()))
+            .expect("render");
+        let drawn: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+
+        // No choice is put on the default screen — it says what will happen and
+        // where a memorable name actually comes from.
+        assert!(
+            !drawn.contains("Server-assigned"),
+            "no rows to pick: {drawn}"
+        );
+        assert!(!drawn.contains("My own path"), "{drawn}");
+        assert!(drawn.contains("the server picks a random one"), "{drawn}");
+        assert!(
+            drawn.contains("an agent name"),
+            "the cheap, reversible way to a memorable name: {drawn}"
+        );
+        assert!(
+            drawn.contains("p: choose the path yourself"),
+            "and the typed path is still reachable: {drawn}"
+        );
+    }
+
+    /// `p` opens the editor, and the screen then shows the typed path in the
+    /// worked example rather than the random one it will no longer get.
+    #[test]
+    fn create_persona_custom_path_screen_shows_what_was_typed() {
         use crate::state_handler::main_page::content::{
             CreatePersonaPhase, CreatePersonaState, PersonaPathChoice,
         };
@@ -4459,16 +4624,20 @@ mod key_handler_tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
 
-        assert!(drawn.contains("Server-assigned"), "{drawn}");
-        assert!(drawn.contains("My own path:  alice"), "{drawn}");
+        assert!(drawn.contains("Your path:  alice"), "{drawn}");
         assert!(
-            drawn.contains("⏎ next   esc back"),
-            "the key line is the last line: {drawn}"
+            drawn.contains("webvh.example.com:alice"),
+            "the example shows the outcome of the screen you are on: {drawn}"
+        );
+        assert!(
+            drawn.contains("esc: let the server pick"),
+            "the way out of the editor is the other outcome, not the label: {drawn}"
         );
     }
 
-    /// Path phase: ↑/↓ pick who names the path, any other key edits it (which
-    /// is also what picks the typed row), Enter goes on and Esc steps back.
+    /// Path phase: the default screen takes only `p`, Enter and Esc; inside the
+    /// editor every other key is the path being typed, and Esc comes back out
+    /// of the editor rather than out of the step.
     #[test]
     fn create_persona_path_phase_keys() {
         use crate::state_handler::main_page::content::{
@@ -4483,18 +4652,13 @@ mod key_handler_tests {
 
         page.handle_key_event(press(KeyCode::Char('a')));
         assert!(
-            matches!(rx.try_recv(), Ok(Action::CreatePersonaPathInput(k)) if k.code == KeyCode::Char('a')),
-            "the key that starts the name must reach the input, not just select the row"
+            rx.try_recv().is_err(),
+            "the default screen has no field, so a stray letter does nothing"
         );
-        page.handle_key_event(press(KeyCode::Down));
+        page.handle_key_event(press(KeyCode::Char('p')));
         assert!(matches!(
             rx.try_recv(),
             Ok(Action::CreatePersonaPathChoice(PersonaPathChoice::Custom))
-        ));
-        page.handle_key_event(press(KeyCode::Up));
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(Action::CreatePersonaPathChoice(PersonaPathChoice::Auto))
         ));
         page.handle_key_event(press(KeyCode::Enter));
         assert!(matches!(rx.try_recv(), Ok(Action::CreatePersonaSubmit)));
@@ -4503,53 +4667,29 @@ mod key_handler_tests {
             matches!(rx.try_recv(), Ok(Action::CreatePersonaBack)),
             "Esc steps back to the label, it does not close the overlay"
         );
-    }
 
-    #[test]
-    fn create_persona_context_phase_keys() {
-        use crate::state_handler::main_page::content::{CreatePersonaPhase, CreatePersonaState};
-        use openvtc_core::config::community_context::{ContextKind, ContextOption};
-        let option = |id: &str, kind| ContextOption {
-            context_id: id.to_string(),
-            kind,
-            communities: vec![],
-            holds_persona_keys: false,
-        };
-        let overlay = |selected: usize| {
-            move |s: &mut State| {
-                s.main_page.create_persona = Some(CreatePersonaState {
-                    phase: CreatePersonaPhase::Context,
-                    context_options: vec![
-                        option("openvtc/laptop", ContextKind::New),
-                        option("openvtc", ContextKind::Top),
-                    ],
-                    context_selected: selected,
-                    context_slug: "lapto".to_string(),
-                    ..Default::default()
-                });
-            }
-        };
-        let (mut page, mut rx) = page_for(MainMenu::Identity, overlay(0));
+        let (mut page, mut rx) = page_for(MainMenu::Identity, |s: &mut State| {
+            s.main_page.create_persona = Some(CreatePersonaState {
+                phase: CreatePersonaPhase::Path,
+                path_choice: PersonaPathChoice::Custom,
+                ..Default::default()
+            });
+        });
+        // `p` is a letter once the path is being typed, not a verb — otherwise
+        // the one key that opens the editor is the one it cannot hold.
         page.handle_key_event(press(KeyCode::Char('p')));
-        assert!(matches!(rx.try_recv(), Ok(Action::CreatePersonaContextSlug(s)) if s == "laptop"));
-        page.handle_key_event(press(KeyCode::Down));
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(Action::CreatePersonaContextSelect(1))
-        ));
-        page.handle_key_event(press(KeyCode::Enter));
-        assert!(matches!(rx.try_recv(), Ok(Action::CreatePersonaSubmit)));
-        page.handle_key_event(press(KeyCode::Esc));
-        assert!(matches!(rx.try_recv(), Ok(Action::CreatePersonaBack)));
-
-        let (mut page, mut rx) = page_for(MainMenu::Identity, overlay(1));
-        page.handle_key_event(press(KeyCode::Char('x')));
         assert!(
-            rx.try_recv().is_err(),
-            "only the new context's row takes a name"
+            matches!(rx.try_recv(), Ok(Action::CreatePersonaPathInput(k)) if k.code == KeyCode::Char('p')),
+        );
+        page.handle_key_event(press(KeyCode::Esc));
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(Action::CreatePersonaPathChoice(PersonaPathChoice::Auto))
+            ),
+            "Esc leaves the editor for the server-assigned screen, not the label"
         );
     }
-
     #[test]
     fn personas_n_opens_create_persona() {
         let (mut page, mut rx) = page_for(MainMenu::Identity, |_| {});

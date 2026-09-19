@@ -128,6 +128,14 @@ pub enum Notice {
         /// Their presentation showed the community named them a vetter.
         shown_eligible: bool,
     },
+    /// Vetter: a request reached us and was turned away. Informational — the
+    /// applicant was answered, and there is nothing at this desk to act on.
+    RequestRefused {
+        /// Their join DID.
+        applicant: String,
+        /// The error code sent back.
+        code: String,
+    },
     /// Vetter: a community named us a vetter.
     VetterGranted {
         /// The community.
@@ -256,9 +264,14 @@ impl Notice {
                 ),
                 None => format!("{community} named you a vetter."),
             },
-            Notice::VetterRefused { vetter, code, .. } => {
-                format!("{vetter} refused your vetting request [{code}].")
-            }
+            Notice::RequestRefused { applicant, code } => format!(
+                "Vetting request from {applicant} refused [{code}] — {}",
+                super::queries::request_refusal_words(code)
+            ),
+            Notice::VetterRefused { vetter, code, .. } => format!(
+                "{vetter} refused your vetting request [{code}] — {}",
+                super::queries::request_refusal_words(code)
+            ),
             Notice::SessionOpened {
                 vetter, match_code, ..
             } => format!(
@@ -543,6 +556,17 @@ async fn take_request(
                         document,
                         eligibility: None,
                     }),
+                // A refusal used to leave nothing behind at all, so a vetter
+                // whose applicant was turned away saw an empty desk and had no
+                // way to find out why — the one end that can fix a stale
+                // ticket learned nothing. Only refusals are noticed, never the
+                // silent branch: that one exists so a guesser cannot discover
+                // the vetter, and a log line they could provoke would hand
+                // them the same discovery from the other side.
+                notice: Some(Notice::RequestRefused {
+                    applicant: sender.to_string(),
+                    code: code.to_string(),
+                }),
                 ..Handled::default()
             }
         }

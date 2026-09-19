@@ -29,7 +29,6 @@ use crate::state_handler::{
     },
     state::ConnectionState,
 };
-use openvtc_core::config::community_context::ContextOption;
 use openvtc_core::display::display_identifier;
 use openvtc_core::vetting::registry::event_line;
 use ratatui::{
@@ -81,6 +80,7 @@ pub fn mode_id(state: &VettingState) -> &'static str {
         (VettingMode::ConfirmDecline { .. }, _) => "decline",
         (VettingMode::Withdraw { .. }, _) => "withdraw",
         (VettingMode::ConfirmAbandon { .. }, _) => "abandon",
+        (VettingMode::ConfirmDeleteTicket { .. }, _) => "delete-ticket",
     }
 }
 
@@ -196,9 +196,8 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
         VettingMode::NewApplication {
             community,
             persona_index,
-            context_options,
-            context_index,
             field: f,
+            ..
         } => {
             lines.push(heading("Apply to be vetted"));
             lines.push(Line::from(""));
@@ -213,20 +212,24 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             let persona = v
                 .personas
                 .get(*persona_index)
-                .map(|p| format!("{}  ({})", p.label, p.did))
+                .map(|p| {
+                    format!(
+                        "{}  ({})",
+                        p.label,
+                        openvtc_core::display::shorten_for_display(&p.did, 48)
+                    )
+                })
                 .unwrap_or_else(|| "no personas".to_string());
             lines.push(field("Join as", persona, *f == 1, false));
-            let context = context_options
-                .get(*context_index)
-                .map_or_else(|| "—".to_string(), ContextOption::summary);
-            lines.push(field("Context", context, *f == 2, false));
             lines.push(Line::from(""));
+            // The context is taken, not asked: this community gets one of its
+            // own, which is what keeps its faces apart from your other
+            // communities — and a persona minted into a context can only be
+            // presented from that one anyway.
             lines.push(hint(
-                "The context keeps this community's faces apart from your other communities. A",
+                "This community's faces are kept in a context of their own, apart from your",
             ));
-            lines.push(hint(
-                "persona minted into a context can only be presented from it.",
-            ));
+            lines.push(hint("other communities."));
             lines.push(Line::from(""));
             lines.push(hint(
                 "Enter: start  Tab: next field  ←/→: choose  Esc: cancel",
@@ -243,9 +246,14 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
                 lines.push(Line::from(line).fg(COLOR_ORANGE));
             }
             lines.push(Line::from(""));
-            lines.push(hint("Run it as a super-admin, then press f again."));
+            lines.push(hint(
+                "Run it as a super-admin, then press f to read your faces again.",
+            ));
             lines.push(Line::from(""));
-            lines.push(hint("Esc: back"));
+            // Both keys named. This view has no field and no rows, so with only
+            // "Esc: back" on it every other key looked broken rather than
+            // unbound — including the `f` the line above asks for.
+            lines.push(hint("f: try again   Esc: back"));
         }
         VettingMode::NewFace(form) => {
             lines.push(heading("Make a face for this community"));
@@ -457,35 +465,39 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(hint("↑/↓: choose  Enter: wear it  Esc: cancel"));
         }
         VettingMode::RequestVetter {
+            entry,
             vetter,
-            code,
             ticket,
             note,
-            field: f,
             ..
         } => {
             lines.push(heading("Ask a vetter"));
             lines.push(Line::from(""));
             lines.push(hint(
-                "A vetter only answers a request carrying their ticket: a code they read to you, or",
+                "A vetter only answers a request carrying their ticket. Paste the link from",
             ));
             lines.push(hint(
-                "the link in their QR code. Pasting that link fills in both fields.",
+                "their QR code (Ctrl+V) — it carries the ticket and says who they are.",
             ));
             if let Some(note) = note {
                 lines.push(Line::from(""));
                 lines.push(Line::from(note.clone()).fg(COLOR_ORANGE));
             }
             lines.push(Line::from(""));
-            lines.push(field("Vetter DID", vetter.clone(), *f == 0, true));
-            let shown = if ticket.is_some() && code.is_empty() {
-                "scanned ticket, from the link".to_string()
-            } else {
-                code.clone()
-            };
-            lines.push(field("Ticket code", shown, *f == 1, true));
+            lines.push(field("Ticket link", entry.clone(), true, true));
+            // The vetter is shown, never typed: it is read out of the link, and
+            // seeing who the request is about to go to is the check a person
+            // can actually make on a string of base64.
+            if ticket.is_some() && !vetter.is_empty() {
+                lines.push(field(
+                    "Goes to",
+                    openvtc_core::display::shorten_for_display(vetter, 56).into_owned(),
+                    false,
+                    false,
+                ));
+            }
             lines.push(Line::from(""));
-            lines.push(hint("Enter: send  Tab: next field  Esc: cancel"));
+            lines.push(hint("Enter: send  Esc: cancel"));
         }
         VettingMode::Directory(view) => directory(&mut lines, v, view),
         VettingMode::Profile(form) => match &form.event {
@@ -661,6 +673,48 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.push(hint("Enter: abandon  Esc: keep it"));
         }
+        VettingMode::ConfirmDeleteTicket { ticket_id } => {
+            lines.push(heading("Delete this ticket"));
+            lines.push(Line::from(""));
+            if let Some(row) = v.tickets.iter().find(|t| &t.id == ticket_id) {
+                lines.push(Line::from(vec![
+                    Span::styled("Ticket     ", label()),
+                    Span::styled(row.code.clone(), value()),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("Community  ", label()),
+                    Span::styled(row.community.clone(), value()),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("Admits     ", label()),
+                    Span::styled(
+                        format!(
+                            "{} more request{}, until {}",
+                            row.uses_left,
+                            if row.uses_left == 1 { "" } else { "s" },
+                            row.expires
+                        ),
+                        value(),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+            // The cost is entirely on the other side, and it is silent: a
+            // ticket already handed out cannot be recalled, and the person
+            // holding it is refused with `invalidTicket` — the same answer as a
+            // ticket they mistyped.
+            lines.push(hint(
+                "Anyone already holding this ticket is refused from now on, and their",
+            ));
+            lines.push(hint(
+                "request says only that the ticket did not match. They cannot be told,",
+            ));
+            lines.push(hint(
+                "so hand out a new one if they still need to reach you.",
+            ));
+            lines.push(Line::from(""));
+            lines.push(hint("Enter: delete  Esc: keep it"));
+        }
         VettingMode::Withdraw {
             statement_id,
             reason_index,
@@ -738,7 +792,12 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         let name = app
             .community_name
             .clone()
-            .unwrap_or_else(|| app.community.clone());
+            // A community with no name of its own is its DID, shortened from
+            // the middle: the path is the only part that tells two communities
+            // on one host apart, and it is the part a tail cut drops.
+            .unwrap_or_else(|| {
+                openvtc_core::display::shorten_for_display(&app.community, 56).into_owned()
+            });
         lines.push(Line::from(vec![
             Span::styled(if selected { "▸ " } else { "  " }, style),
             accent_swatch(app.accent),
@@ -840,6 +899,17 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             ));
         }
         lines.push(Line::from(state));
+        // Wrapped, and on its own line: the state line is unwrapped and would
+        // simply cut this off at the panel edge.
+        if let Some(why) = &request.refusal {
+            let width = super::status::content_width().saturating_sub(4).max(1);
+            for wrapped in super::status::wrap_text(why, width) {
+                lines.push(Line::from(Span::styled(
+                    format!("    {wrapped}"),
+                    Style::new().fg(COLOR_ORANGE),
+                )));
+            }
+        }
         if let Some((good, line)) = &request.eligibility {
             lines.push(Line::from(Span::styled(
                 format!("    {line}"),

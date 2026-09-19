@@ -434,13 +434,15 @@ fn show_vetting(state: &mut State, config: &Config, vtc_did: &str) -> bool {
 ///
 /// `can_retry` is whether the calling loop can hear an answer at all: the
 /// State-A loop cannot, and offering it "ask again" there would be a key that
-/// can only ever fail.
+/// can only ever fail. `resolvable` is whether the DID names anything — when it
+/// does not, "join anyway" is withdrawn too, for the same reason.
 fn show_unknown(
     state: &mut State,
     config: &Config,
     vtc_did: &str,
     reason: String,
     can_retry: bool,
+    resolvable: bool,
 ) {
     state.join.pending_vtc = Some(vtc_did.to_string());
     state.join.vetting = Some(JoinVettingView {
@@ -454,9 +456,40 @@ fn show_unknown(
         phase: VettingPhase::Unknown {
             reason: sanitize_display(&reason, 300),
             can_retry,
+            resolvable,
         },
     });
     state.join.page = JoinPage::Vetting;
+}
+
+/// Why a community could not be asked what it requires.
+///
+/// The distinction is not cosmetic: it decides whether "join anyway" is an
+/// offer at all. A community that resolves but will not answer is one you can
+/// still send a request to, and its moderators will see it. A DID that does not
+/// resolve names nothing — there is no document, no endpoint and no mediator
+/// route, so a join request addressed to it goes nowhere and waits for an
+/// answer nobody can send. Offering the same key for both told someone who had
+/// mistyped a DID that joining was "the way forward here" (rule R6.4).
+enum NotLearned {
+    /// The identifier did not resolve to a DID document.
+    Unresolvable(String),
+    /// It resolved; the manifest could not be read from it.
+    Unanswered(String),
+}
+
+impl NotLearned {
+    /// The sentence the page shows.
+    fn reason(&self) -> &str {
+        match self {
+            NotLearned::Unresolvable(why) | NotLearned::Unanswered(why) => why,
+        }
+    }
+
+    /// Whether there is something at this DID to send a join request to.
+    fn resolvable(&self) -> bool {
+        matches!(self, NotLearned::Unanswered(_))
+    }
 }
 
 /// Read `vtc_did`'s manifest from the REST endpoint it publishes, and learn it.
@@ -471,22 +504,25 @@ fn show_unknown(
 /// ([`openvtc_core::vetting::inbound`]): the book learns the manifest, and any
 /// application to this community adopts it, so a change to the requirements
 /// mid-application is detectable from either route rather than only from one.
-async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Result<(), String> {
+async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Result<(), NotLearned> {
     let resolver = tdk.did_resolver();
     let resolved = tokio::time::timeout(RESOLVE_TIMEOUT, resolver.resolve(vtc_did))
         .await
         .map_err(|_| {
-            format!(
+            // A timeout is not "there is nothing there": the resolver may
+            // simply be slow or the host briefly down, and the DID is still
+            // worth sending to.
+            NotLearned::Unanswered(format!(
                 "it could not be resolved within {} seconds",
                 RESOLVE_TIMEOUT.as_secs()
-            )
+            ))
         })?
-        .map_err(|e| format!("it could not be resolved ({e})"))?;
+        .map_err(|e| NotLearned::Unresolvable(format!("it could not be resolved ({e})")))?;
     let doc = serde_json::to_value(&resolved.doc)
-        .map_err(|e| format!("its DID document could not be read ({e})"))?;
+        .map_err(|e| NotLearned::Unanswered(format!("its DID document could not be read ({e})")))?;
     let manifest = discover::fetch_manifest(&doc, vtc_did, resolver, ProbePolicy::PublicOnly)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| NotLearned::Unanswered(e.to_string()))?;
 
     let book = &mut config.private.vetting;
     book.learn_manifest(vtc_did, &manifest, Utc::now());
@@ -562,7 +598,9 @@ async fn ask_requirements(
             })
         }
         Err(reason) => {
-            show_unknown(state, config, vtc_did, reason, true);
+            // Our side failed, not theirs: the community resolved, we could not
+            // put the question on the wire. Joining anyway still reaches it.
+            show_unknown(state, config, vtc_did, reason, true, true);
             Err(())
         }
     }
@@ -816,7 +854,9 @@ impl StateHandler {
                 ensure_invitations(state, admin_vta, &vtc_did).await;
                 match outcome {
                     RequirementsOutcome::Unanswered(reason) => {
-                        show_unknown(state, config, &vtc_did, reason, true);
+                        // We got here by sending the question, so the DID
+                        // resolved: it is the answer that never came.
+                        show_unknown(state, config, &vtc_did, reason, true, true);
                     }
                     outcome => {
                         let shown = matches!(outcome, RequirementsOutcome::Learned)
@@ -903,18 +943,16 @@ impl StateHandler {
                             let _ = self.state_tx.send(state.clone());
                         }
                         Action::JoinSubmitVtc(vtc_did) => {
-                            let Some(vtc_did) = validate_join_input(&vtc_did) else {
+                            let vtc_did = match validate_join_input(&vtc_did) {
+                                Ok(did) => did,
                                 // Say why nothing happened. A keypress that
                                 // cannot proceed must not be a silent no-op —
                                 // that reads as a frozen screen (issue #29).
-                                state.join.messages.push(MessageType::Error(
-                                    "Enter the community's DID or agent name \
-                                     first — or paste an invitation credential \
-                                     (VIC) to fill it in."
-                                        .to_string(),
-                                ));
-                                let _ = self.state_tx.send(state.clone());
-                                continue;
+                                Err(why) => {
+                                    state.join.messages.push(MessageType::Error(why));
+                                    let _ = self.state_tx.send(state.clone());
+                                    continue;
+                                }
                             };
                             // Accept an agent name (`example.com/@acme`) in place
                             // of the VTC DID. Only resolve when the input actually
@@ -1427,8 +1465,23 @@ impl StateHandler {
                         .await
                         .map(JoinExit::Exit)
                     }
+                    // Nothing resolved, so there is nobody to ask by any
+                    // route: a DIDComm question needs an endpoint the document
+                    // would have named. Stop here rather than send a request
+                    // into the dark.
+                    Err(why) if !why.resolvable() => {
+                        show_unknown(
+                            state,
+                            config,
+                            &vtc_did,
+                            why.reason().to_string(),
+                            false,
+                            false,
+                        );
+                        None
+                    }
                     Err(why) if hears_replies => {
-                        debug!(community = %vtc_did, reason = %why, "manifest not read over REST");
+                        debug!(community = %vtc_did, reason = %why.reason(), "manifest not read over REST");
                         match ask_requirements(state, config, tdk, messaging, &vtc_did).await {
                             Ok(awaiting) => Some(JoinExit::AwaitRequirements(awaiting)),
                             // The page now says why the question could not be sent.
@@ -1442,7 +1495,14 @@ impl StateHandler {
                         // on the quiet — a community that vets refers that
                         // request to its moderators, and the applicant would
                         // never learn there was a way in they could have taken.
-                        show_unknown(state, config, &vtc_did, why, false);
+                        show_unknown(
+                            state,
+                            config,
+                            &vtc_did,
+                            why.reason().to_string(),
+                            false,
+                            true,
+                        );
                         None
                     }
                 }
@@ -2174,18 +2234,53 @@ fn load_pasted_vic(state: &mut State, text: &str, vtc_did: Option<&str>) {
 /// Validate the raw VTC DID the operator submitted on the EnterDid page.
 ///
 /// Pure decision peeled out of the `JoinSubmitVtc` arm: trims surrounding
-/// whitespace and rejects an empty input (the loop `continue`s, staying on the
-/// EnterDid page). Returns the cleaned DID to drive the sequence with, or `None`
-/// when there is nothing to submit.
-fn validate_join_input(raw: &str) -> Option<String> {
+/// whitespace, then checks that what is left could be an identifier at all —
+/// an agent name (`example.com/@acme`), or a DID (`did:<method>:<id>`). `Err`
+/// is the sentence the page shows, and the loop `continue`s on it, staying on
+/// the EnterDid page with the field intact.
+///
+/// The syntax check is here rather than downstream because of what downstream
+/// does with a string it cannot resolve: it cannot tell "this community does
+/// not answer" from "this is not a community", so it offers to join anyway —
+/// a request to a DID that does not exist, which nothing will ever answer.
+/// Typing `asdasd` produced exactly that offer. A resolver failure on a
+/// well-formed DID still reaches that screen, because then joining anyway is a
+/// real option; a string that is not an identifier never had one.
+fn validate_join_input(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
+        return Err(
+            "Enter the community's DID or agent name first — or paste an invitation \
+                    credential (VIC) to fill it in."
+                .to_string(),
+        );
     }
+    if openvtc_core::agent_name::looks_like_agent_name(trimmed) {
+        return Ok(trimmed.to_string());
+    }
+    // Deliberately shallow: a DID's method-specific id is the method's business,
+    // and refusing one this build does not recognise would refuse a community
+    // OpenVTC can reach perfectly well. This rejects what is not a DID at all.
+    let well_formed = trimmed
+        .strip_prefix("did:")
+        .and_then(|rest| rest.split_once(':'))
+        .is_some_and(|(method, id)| {
+            !method.is_empty()
+                && !id.is_empty()
+                && method
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        });
+    if well_formed {
+        return Ok(trimmed.to_string());
+    }
+    Err(format!(
+        "\u{201c}{}\u{201d} is not a community identifier. A community is a DID \
+         (did:webvh:\u{2026}) or an agent name (example.com/@acme) — check what you pasted, \
+         or paste an invitation credential (VIC) to fill it in.",
+        openvtc_core::display::shorten_for_display(trimmed, 40)
+    ))
 }
-
 /// #2: load a *presentable* invitation the VTA already holds for the community
 /// being joined (`vtc_did`). Queries the credential vault for `purpose = invite`
 /// and selects an active, vault-valid (not expired / revoked) VIC whose issuer is
@@ -3182,27 +3277,51 @@ mod tests {
         assert_eq!(state.join.picked_identity, Some(IdentityPick::Mint));
     }
 
-    /// `validate_join_input` trims and rejects empties; otherwise returns the
-    /// cleaned DID. Table-driven over (raw input, expected).
+    /// `validate_join_input` trims, and accepts only something that could be a
+    /// community: a DID or an agent name. Garbage is refused here, on the page
+    /// that can still be corrected — downstream, an unresolvable string reached
+    /// the "join anyway" offer, which for `asdasd` meant offering to send a
+    /// join request to nothing.
     #[test]
     fn validate_join_input_table() {
-        let cases: &[(&str, Option<&str>)] = &[
-            ("", None),
-            ("   ", None),
-            ("\t\n", None),
-            ("did:webvh:example", Some("did:webvh:example")),
-            ("  did:webvh:example  ", Some("did:webvh:example")),
-            ("\tdid:peer:abc\n", Some("did:peer:abc")),
+        let cases: &[(&str, bool)] = &[
+            ("", false),
+            ("   ", false),
+            ("\t\n", false),
+            // The one from the report.
+            ("asdasd", false),
+            // Looks close, but is not an identifier.
+            ("did:", false),
+            ("did:webvh", false),
+            ("did:webvh:", false),
+            ("did::abc", false),
+            ("https://vtc.example.com", false),
+            // DIDs, including methods this build has never heard of — which
+            // method-specific ids are legal is the method's business, not ours.
+            ("did:webvh:example", true),
+            ("  did:webvh:example  ", true),
+            ("\tdid:peer:abc\n", true),
+            ("did:futuremethod:whatever", true),
+            // Agent names.
+            ("vtc.example.com/@acme", true),
         ];
-        for (raw, expected) in cases {
+        for (raw, accepted) in cases {
+            let got = validate_join_input(raw);
             assert_eq!(
-                validate_join_input(raw).as_deref(),
-                *expected,
-                "validate_join_input({raw:?})"
+                got.is_ok(),
+                *accepted,
+                "validate_join_input({raw:?}) = {got:?}"
             );
+            if let Ok(did) = got {
+                assert_eq!(did, raw.trim(), "the cleaned value is the trimmed input");
+            }
         }
+        // The refusal names what was typed, so it is about *this* input rather
+        // than a rule the reader has to apply themselves.
+        let why = validate_join_input("asdasd").unwrap_err();
+        assert!(why.contains("asdasd"), "{why}");
+        assert!(why.contains("did:webvh"), "and what one looks like: {why}");
     }
-
     /// `is_duplicate_membership` mirrors `Account::live_community`: live
     /// (Active/Pending) memberships are duplicates; inactive ones and unknown
     /// DIDs are not. Table-driven over the membership status.

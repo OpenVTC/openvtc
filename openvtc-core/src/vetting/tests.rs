@@ -553,9 +553,29 @@ async fn a_bad_scanned_ticket_is_refused_and_the_applicant_hears_why() {
         reply.document.payload["code"],
         VETTING_REQUEST_ERR_INVALID_TICKET
     );
+    // The vetter hears about it too. A refusal used to leave nothing at all on
+    // their side, so the one person who can issue a fresh ticket saw an empty
+    // desk and no way to find out that anybody had tried.
+    let Some(Notice::RequestRefused {
+        applicant: who,
+        code,
+    }) = handled.notice
+    else {
+        panic!("the vetter is told a request was turned away");
+    };
+    assert_eq!(who, applicant.did);
+    assert_eq!(code, VETTING_REQUEST_ERR_INVALID_TICKET);
+
     let message = signed(reply.document, &vetter.secret).await;
     let handled = applicant.receive(&message, &vetter.did).await;
-    assert!(matches!(handled.notice, Some(Notice::VetterRefused { .. })));
+    let refused = handled.notice.expect("the applicant is told");
+    assert!(matches!(refused, Notice::VetterRefused { .. }));
+    // In words, not just the wire code: "vetting/request:invalidTicket" under
+    // a vetter's name reads as a fault in the software rather than as a ticket
+    // that needs replacing.
+    let said = refused.describe();
+    assert!(said.contains(VETTING_REQUEST_ERR_INVALID_TICKET), "{said}");
+    assert!(said.contains("Ask them for a fresh one"), "{said}");
     assert!(matches!(
         applicant.application().requests[0].state,
         RequestState::Refused { .. }

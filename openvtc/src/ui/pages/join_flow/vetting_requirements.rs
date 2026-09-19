@@ -22,7 +22,6 @@ use crate::colors::{
     COLOR_TEXT_DEFAULT, COLOR_WARNING_ACCESSIBLE_RED,
 };
 use crossterm::event::{KeyCode, KeyEvent};
-use openvtc_core::config::community_context::ContextOption;
 use openvtc_core::display::display_identifier;
 use ratatui::{
     Frame,
@@ -73,9 +72,17 @@ impl VettingPage {
             // could not be. Once the ways in are listed, one of them *is* the
             // open request, and a second key for it was a shorter, differently
             // worded copy of a row already on screen.
-            (VettingPhase::Asking | VettingPhase::Unknown { .. }, KeyCode::Char('j' | 'J')) => {
-                Action::JoinVettingJoin
-            }
+            // Not offered when the DID resolves to nothing: the join would
+            // address a request to an identifier that names no document, no
+            // endpoint and no mediator route, and then wait for an answer
+            // nobody can send. The page says so in place of the key.
+            (VettingPhase::Asking, KeyCode::Char('j' | 'J')) => Action::JoinVettingJoin,
+            (
+                VettingPhase::Unknown {
+                    resolvable: true, ..
+                },
+                KeyCode::Char('j' | 'J'),
+            ) => Action::JoinVettingJoin,
             // Asking again needs a loop that can hear the answer. The State-A
             // loop cannot, so there the key is not offered at all rather than
             // offered and silently ineffective.
@@ -230,17 +237,14 @@ fn route_lines(known: &KnownVetting) -> Vec<Line<'static>> {
                                 Some(_) => "  — already applied",
                                 None => "  — no application yet",
                             };
-                        format!("{}  ({}){standing}", p.label, p.did)
+                        format!(
+                            "{}  ({}){standing}",
+                            p.label,
+                            openvtc_core::display::shorten_for_display(&p.did, 48)
+                        )
                     },
                 );
                 lines.push(nested_choice("Apply as", persona, focused));
-            }
-            VettingRow::Context => {
-                let context = known
-                    .context_options
-                    .get(known.context_index)
-                    .map_or_else(|| "—".to_string(), ContextOption::summary);
-                lines.push(nested_choice("Context", context, focused));
             }
         }
     }
@@ -279,27 +283,50 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
             lines.push(Line::default());
             lines.push(keys(&[("J", "join without waiting"), ("ESC", "cancel")]));
         }
-        VettingPhase::Unknown { reason, can_retry } => {
+        VettingPhase::Unknown {
+            reason,
+            can_retry,
+            resolvable,
+        } => {
             lines.push(Line::from(vec![
                 accent_swatch(view.accent),
                 Span::styled(
-                    format!(
-                        "Could not learn whether {} vets the people who join — {reason}.",
-                        view.name
-                    ),
+                    if *resolvable {
+                        format!(
+                            "Could not learn whether {} vets the people who join — {reason}.",
+                            view.name
+                        )
+                    } else {
+                        // Not the same problem at all, and it must not read as
+                        // one: there is no community here to have a policy.
+                        format!("Nothing answers at {} — {reason}.", view.name)
+                    },
                     Style::new().fg(COLOR_ORANGE),
                 ),
             ]));
             lines.push(Line::default());
+            // What to do about it, which differs by why the asking stopped.
+            // Without this the page states a problem and offers a key, leaving
+            // the one thing the person actually wants to know — is joining now
+            // a dead end? — to be guessed at.
+            if !*resolvable {
+                lines.push(Line::styled(
+                    "That identifier does not resolve to anything, so there is no community \
+                     behind it to join: a request sent to it would reach nobody and be answered \
+                     by nobody. Check the DID with whoever gave it to you — a single wrong \
+                     character is enough — or paste an invitation credential (VIC), which \
+                     carries the community's own DID.",
+                    dim(),
+                ));
+                lines.push(Line::default());
+                lines.push(keys(&[("ESC", "go back and re-enter it")]));
+                return lines;
+            }
             lines.push(Line::styled(
                 "If it does, a request that arrives without vetting statements goes to its \
                  moderators to decide.",
                 dim(),
             ));
-            // What to do about it, which differs by why the asking stopped.
-            // Without this the page states a problem and offers a key, leaving
-            // the one thing the person actually wants to know — is joining now
-            // a dead end? — to be guessed at.
             lines.push(Line::default());
             if *can_retry {
                 lines.push(Line::styled(
@@ -594,6 +621,7 @@ mod tests {
         let (mut f, mut rx) = flow(VettingPhase::Unknown {
             reason: "no answer".into(),
             can_retry: true,
+            resolvable: true,
         });
         press(&mut f, KeyCode::Char('r'));
         assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingAskAgain)));
@@ -606,6 +634,7 @@ mod tests {
         let phase = || VettingPhase::Unknown {
             reason: "it was not asked".into(),
             can_retry: false,
+            resolvable: true,
         };
         let (mut f, mut rx) = flow(phase());
         press(&mut f, KeyCode::Char('r'));
@@ -620,6 +649,37 @@ mod tests {
         assert!(shown.contains("join anyway"));
     }
 
+    /// A DID that resolves to nothing is not a community that would not
+    /// answer, and the page must not offer the same way forward for both.
+    /// Typing garbage produced "Joining anyway is the way forward here" over an
+    /// identifier that names nothing — an offer to send a request nobody can
+    /// receive, let alone answer.
+    #[test]
+    fn an_unresolvable_did_is_not_offered_a_join() {
+        let phase = || VettingPhase::Unknown {
+            reason: "it could not be resolved (DID must start with 'did:')".into(),
+            can_retry: true,
+            resolvable: false,
+        };
+        let (mut f, mut rx) = flow(phase());
+        press(&mut f, KeyCode::Char('j'));
+        assert!(
+            rx.try_recv().is_err(),
+            "there is nothing at this DID to send a join request to"
+        );
+        press(&mut f, KeyCode::Esc);
+        assert!(matches!(rx.try_recv(), Ok(Action::JoinCancel)));
+
+        let shown = text_of(&body_lines(&JoinState::default(), &view(phase())));
+        assert!(!shown.contains("join anyway"), "{shown}");
+        assert!(!shown.contains("way forward here"), "{shown}");
+        assert!(shown.contains("does not resolve"), "{shown}");
+        assert!(
+            shown.contains("go back and re-enter it"),
+            "and the one thing that can be done is named: {shown}"
+        );
+    }
+
     /// The page has to say what to do, and the answer differs by why the
     /// asking stopped: a community that was briefly unreachable is worth
     /// asking again, while a first join cannot ask at all until the request
@@ -632,6 +692,7 @@ mod tests {
                 &view(VettingPhase::Unknown {
                     reason: "its endpoint could not be reached".into(),
                     can_retry,
+                    resolvable: true,
                 }),
             ))
         };
@@ -751,6 +812,7 @@ mod tests {
             &view(VettingPhase::Unknown {
                 reason: "no answer".into(),
                 can_retry: true,
+                resolvable: true,
             }),
         ));
         assert!(shown.contains("You hold 1 invitation from this community"));

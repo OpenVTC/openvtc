@@ -104,8 +104,59 @@ pub fn shorten_webvh(did: &str, scid_keep: usize) -> Cow<'_, str> {
     Cow::Owned(did.replacen(scid.as_str(), &format!("{head}…{tail}"), 1))
 }
 
+/// Shorten `did` to at most `max_len` characters for display, giving up the
+/// middle and keeping the end.
+///
+/// The truncator for every identifier shown to be *read* — a status line, a
+/// summary, a row label. What distinguishes two `did:webvh`s is their host and
+/// path, and both sit at the end; the SCID is a hash in the middle that nobody
+/// reads and cannot compare by eye. A tail truncation drops exactly the half
+/// worth keeping, so every persona on a host renders as the same prefix as
+/// every other:
+///
+/// ```text
+/// did:webvh:QmZBWtbz1VVTwyFNUHjx8YfL9fZ8XDc6KrBQ66tj9xq6Eh:dids.ic3.dev:firstperson-vtc
+/// did:webvh:QmZBWtbz1VVTwyFNUHjx8YfL9fZ8XDc6KrB...          ← tail-truncated at 48
+/// did:webvh:QmZB…q6Eh:dids.ic3.dev:firstperson-vtc          ← this, at 48
+/// ```
+///
+/// The SCID goes first, via [`shorten_webvh`], which is usually enough on its
+/// own. Only when that still does not fit is the identifier cut again, and the
+/// budget then goes to the tail: a short head says what kind of identifier this
+/// is, and everything else is spent on the part that identifies it.
+///
+/// Anything that is not a parseable `did:webvh` keeps its whole head and loses
+/// its middle the same way — a `did:key` has nothing readable at either end, and
+/// a name or a URL reads from the front, which the head preserves.
+#[must_use]
+pub fn shorten_for_display(did: &str, max_len: usize) -> Cow<'_, str> {
+    let short = shorten_webvh(did, 4);
+    let count = short.chars().count();
+    if count <= max_len {
+        return short;
+    }
+    // Too narrow to say anything either way: fall back to the plain cut rather
+    // than emit an ellipsis with a character on each side of it.
+    if max_len < 8 {
+        return Cow::Owned(truncate_did(&short, max_len).into_owned());
+    }
+    let head_len = (max_len / 4).min(10);
+    let tail_len = max_len - head_len - 1;
+    let head: String = short.chars().take(head_len).collect();
+    let tail: String = short.chars().skip(count - tail_len).collect();
+    // The SCID may already have been elided at exactly this seam, and
+    // `did:webv\u{2026}\u{2026}AAAA:host:path` reads as a rendering fault rather than as
+    // one cut. Two adjacent ellipses say no more than one.
+    let head = head.trim_end_matches(ELLIPSIS);
+    let tail = tail.trim_start_matches(ELLIPSIS);
+    Cow::Owned(format!("{head}{ELLIPSIS}{tail}"))
+}
+
+/// What a shortened identifier puts where the dropped characters were.
+const ELLIPSIS: char = '\u{2026}';
+
 /// Pick what to show for an identifier: a verified agent name when one is
-/// known, otherwise the tail-truncated DID.
+/// known, otherwise the shortened DID.
 ///
 /// A name (`example.com/@alice`) is short and human-memorable, so it is shown
 /// whole (only truncated in the rare case it exceeds `max_len`); the DID is the
@@ -118,14 +169,11 @@ pub fn shorten_webvh(did: &str, scid_keep: usize) -> Cow<'_, str> {
 pub fn display_identifier<'a>(name: Option<&'a str>, did: &'a str, max_len: usize) -> Cow<'a, str> {
     match name {
         Some(name) => truncate_did(name, max_len),
-        // A `did:webvh` gives up its SCID before its tail: the hash is the part
-        // nobody reads, and the host and path are the parts they recognise.
-        // Tail-truncation dropped exactly the wrong half, and every persona on
-        // a host rendered as the same prefix as every other.
-        None => match shorten_webvh(did, 4) {
-            Cow::Borrowed(did) => truncate_did(did, max_len),
-            Cow::Owned(short) => Cow::Owned(truncate_did(&short, max_len).into_owned()),
-        },
+        // A `did:webvh` gives up its SCID, then its middle: the hash is the
+        // part nobody reads, and the host and path are the parts they
+        // recognise. Tail-truncation dropped exactly the wrong half, and every
+        // persona on a host rendered as the same prefix as every other.
+        None => shorten_for_display(did, max_len),
     }
 }
 
@@ -303,12 +351,51 @@ mod tests {
         );
     }
 
+    /// The fallback keeps the end. The path is the only part of two DIDs on one
+    /// host that differs, so a truncation that drops it makes them identical on
+    /// screen.
     #[test]
-    fn display_identifier_falls_back_to_truncated_did() {
-        let did = "did:webvh:abcdef0123456789:example.com:alice";
-        let out = display_identifier(None, did, 20);
-        assert!(out.starts_with("did:webvh"));
-        assert!(out.ends_with("..."));
+    fn display_identifier_falls_back_to_a_did_that_keeps_its_path() {
+        let did = "did:webvh:QmZBWtbz1VVTwyFNUHjx8YfL9fZ8XDc6KrBQ66tj9xq6Eh:dids.ic3.dev:alice";
+        let out = display_identifier(None, did, 30);
+        assert!(out.starts_with("did:web"), "{out}");
+        assert!(out.ends_with(":alice"), "{out}");
+        assert!(out.chars().count() <= 30, "{out}");
+    }
+
+    /// The whole point, on the two DIDs that shared a prefix on screen.
+    #[test]
+    fn shortening_for_display_keeps_two_dids_on_one_host_apart() {
+        let host = "QmZBWtbz1VVTwyFNUHjx8YfL9fZ8XDc6KrBQ66tj9xq6Eh:dids.ic3.dev";
+        let a = format!("did:webvh:{host}:firstperson-vtc");
+        let b = format!("did:webvh:{host}:earn-auction");
+        for width in [24, 32, 48, 64] {
+            let (sa, sb) = (
+                shorten_for_display(&a, width),
+                shorten_for_display(&b, width),
+            );
+            assert_ne!(sa, sb, "width {width}");
+            assert!(sa.ends_with("firstperson-vtc"), "width {width}: {sa}");
+            assert!(sb.ends_with("earn-auction"), "width {width}: {sb}");
+            assert!(sa.chars().count() <= width, "width {width}: {sa}");
+        }
+    }
+
+    /// It runs on whatever is handed to it, including identifiers it knows
+    /// nothing about and widths too small to say anything in.
+    #[test]
+    fn shortening_for_display_survives_anything() {
+        for s in [
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "example.com/@alice",
+            "",
+            "😀😀😀😀😀😀😀😀😀😀😀😀",
+        ] {
+            for width in 0..20 {
+                let out = shorten_for_display(s, width);
+                assert!(out.chars().count() <= width.max(3), "{s:?} at {width}");
+            }
+        }
     }
 
     #[test]
