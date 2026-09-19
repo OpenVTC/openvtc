@@ -78,6 +78,7 @@ pub fn mode_id(state: &VettingState) -> &'static str {
         (VettingMode::Attest { .. }, _) => "attest",
         (VettingMode::ConfirmDecline { .. }, _) => "decline",
         (VettingMode::Withdraw { .. }, _) => "withdraw",
+        (VettingMode::ConfirmAbandon { .. }, _) => "abandon",
     }
 }
 
@@ -424,6 +425,56 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
                     .bold(),
             );
         }
+        VettingMode::ConfirmAbandon { application_id } => {
+            lines.push(heading("Abandon this application"));
+            lines.push(Line::from(""));
+            let row = v.applications.iter().find(|a| &a.id == application_id);
+            if let Some(row) = row {
+                lines.push(Line::from(vec![
+                    Span::styled("Community  ", label()),
+                    Span::styled(
+                        row.community_name
+                            .clone()
+                            .unwrap_or_else(|| row.community.clone()),
+                        value(),
+                    ),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("Gathered   ", label()),
+                    Span::styled(
+                        format!(
+                            "{} statement{}",
+                            row.statements,
+                            if row.statements == 1 { "" } else { "s" }
+                        ),
+                        value(),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+            // Nothing was sent to the community — vetting is client-side until
+            // the join is submitted — so what this costs is local, and the one
+            // thing it cannot tidy is the other person's desk.
+            lines.push(hint(
+                "Nothing has been sent to the community, so there is nothing to withdraw",
+            ));
+            lines.push(hint(
+                "from it. What goes is local: the application, the statements gathered",
+            ));
+            lines.push(hint("for it, and the record of who was asked."));
+            if row.is_some_and(|r| !r.requests.is_empty()) {
+                lines.push(Line::from(""));
+                lines.push(hint(
+                    "A vetter who already accepted still holds your request. This cannot",
+                ));
+                lines.push(hint(
+                    "reach them — tell them, or they will open a session with nothing to",
+                ));
+                lines.push(hint("answer."));
+            }
+            lines.push(Line::from(""));
+            lines.push(hint("Enter: abandon  Esc: keep it"));
+        }
         VettingMode::Withdraw {
             statement_id,
             reason_index,
@@ -624,6 +675,7 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     lines.push(hint(
         "n: new  f: face  r: ask a vetter  v: find vetters  c: send card  m: refresh requirements",
     ));
+    lines.push(hint("x: abandon this application"));
     lines.push(hint(
         "j: join this community — the join this application was made for",
     ));

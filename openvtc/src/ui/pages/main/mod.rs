@@ -2494,6 +2494,10 @@ impl MainPage {
             (VettingTab::Applications, KeyCode::Char('m')) => V::RefreshRequirements,
             (VettingTab::Applications, KeyCode::Char('v')) => V::FindVetters,
             (VettingTab::Applications, KeyCode::Char('c') | KeyCode::Enter) => V::ReviewCard,
+            // An application is otherwise permanent, and its persona is fixed
+            // for its whole life — so one started as the wrong persona would
+            // own that community's vetting route forever.
+            (VettingTab::Applications, KeyCode::Char('x') | KeyCode::Delete) => V::ArmAbandon,
             // The join this application was made for. It leaves the panel
             // rather than sending an action, because the join flow owns the
             // screen — and it carries the community, so the DID an application

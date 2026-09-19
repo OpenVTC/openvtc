@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **A vetting application can be abandoned.** `x` on the Applications tab arms a
+  confirmation; `Enter` drops it. There was no way to remove one at all, and an
+  application's persona is fixed for its whole life — so one started as the
+  wrong persona owned that community's vetting route forever, with the join page
+  offering only "carry on with your application".
+
+  The confirmation says what abandoning costs, because it is not obvious:
+  nothing has been sent to the community — vetting is client-side until the join
+  is submitted — so there is nothing to withdraw from it. What goes is local: the
+  application, the statements gathered for it, and the record of who was asked.
+
+  It also names the one thing it cannot tidy. A vetter who already accepted
+  still holds the request at their desk; abandoning here does not reach them, and
+  a session they open afterwards finds nothing to answer. The message says to
+  tell them.
+
 ### Fixed
 
 - **"Could not read your faces" now says what to do about it.** Faces are built
