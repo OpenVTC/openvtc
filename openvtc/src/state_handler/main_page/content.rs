@@ -1846,6 +1846,11 @@ pub enum VettingMode {
         application_id: String,
         faces: Vec<FaceChoice>,
         index: usize,
+        /// The claim types a card for this community must carry, so the list
+        /// can say which faces can make one. Without it the picker offered
+        /// names and a count, and a face missing a required claim failed three
+        /// steps later at the card preview.
+        required: Vec<String>,
     },
     /// Ask a vetter, with the ticket code they gave us or the link they showed.
     RequestVetter {
@@ -2184,6 +2189,10 @@ pub struct FaceChoice {
     pub entries: usize,
     /// Worn in the application's context now.
     pub worn: bool,
+    /// The claim types this face would disclose, in the order it resolves
+    /// them. Empty when the read that would have said failed — a face whose
+    /// contents could not be read is shown without them rather than hidden.
+    pub claim_types: Vec<String>,
 }
 
 /// What a card would show, as the VTA previewed it. Nothing has left.

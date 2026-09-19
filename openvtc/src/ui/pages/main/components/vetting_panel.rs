@@ -246,7 +246,12 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.push(hint("Esc: back"));
         }
-        VettingMode::ChooseFace { faces, index, .. } => {
+        VettingMode::ChooseFace {
+            faces,
+            index,
+            required,
+            ..
+        } => {
             lines.push(heading("The face you show vetters"));
             lines.push(Line::from(""));
             lines.push(hint(
@@ -258,9 +263,27 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(hint(
                 "you join. Its values must match your documents exactly, and must not change later.",
             ));
+            if !required.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled(" This community's card needs  ", label()),
+                    Span::styled(required.join(", "), value()),
+                ]));
+            }
             lines.push(Line::from(""));
             for (i, face) in faces.iter().enumerate() {
                 let chosen = i == *index;
+                // A face is judged only when we managed to read its contents.
+                // Empty means the read failed, not that the face is empty, and
+                // marking it short would be an accusation we cannot support.
+                let missing: Vec<&String> = if face.claim_types.is_empty() {
+                    Vec::new()
+                } else {
+                    required
+                        .iter()
+                        .filter(|r| !face.claim_types.contains(r))
+                        .collect()
+                };
                 let style = if chosen {
                     Style::new().fg(COLOR_SUCCESS).bold()
                 } else {
@@ -282,7 +305,40 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
                         Style::new().fg(COLOR_SUCCESS),
                     ),
                 ]));
+                // What it would actually disclose, under the name. This is the
+                // whole basis for choosing between two faces, and the picker
+                // used to withhold it — so a face short of a required claim
+                // looked like any other until the card preview refused it.
+                if face.claim_types.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "      could not read what it shows",
+                        dim(),
+                    )));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("      shows     ", dim()),
+                        Span::styled(face.claim_types.join(", "), value()),
+                    ]));
+                }
+                if !missing.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("      missing   ", dim()),
+                        Span::styled(
+                            missing
+                                .iter()
+                                .map(|m| m.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+                        ),
+                        Span::styled(" — no card for this community", dim()),
+                    ]));
+                }
             }
+            lines.push(Line::from(""));
+            lines.push(hint(
+                "Add a missing claim to a face under My Identity, then press f again.",
+            ));
             lines.push(Line::from(""));
             lines.push(hint("↑/↓: choose  Enter: wear it  Esc: cancel"));
         }

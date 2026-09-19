@@ -19,7 +19,7 @@ use openvtc_core::config::community_context::{self, ContextKind, ContextOption};
 use openvtc_core::config::context_path::parse_sub_context_id;
 use openvtc_core::didcomm::Messaging;
 use openvtc_core::persona::disclosure::{self, PresentError};
-use openvtc_core::persona::{binding, profile};
+use openvtc_core::persona::{binding, pool, profile};
 use openvtc_core::vetting::VettingBook;
 use openvtc_core::vetting::applicant::{
     Application, ChosenFace, GrantStatus, NextStep, RequestDraft, RequestState, SentCard,
@@ -230,23 +230,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
         .applications
         .iter()
         .map(|app| {
-            let required: Vec<String> = app
-                .requirements
-                .as_ref()
-                .map(|r| {
-                    r.required_claims
-                        .iter()
-                        .flatten()
-                        .map(|c| c.as_str().to_string())
-                        .collect::<Vec<_>>()
-                })
-                .filter(|claims| !claims.is_empty())
-                .unwrap_or_else(|| {
-                    FALLBACK_REQUIRED_CLAIMS
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect()
-                });
+            let required = required_claim_types(app);
             let identity = required
                 .iter()
                 .map(|claim_type| {
@@ -1014,6 +998,7 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             application_id,
             faces,
             index,
+            ..
         } => wear_face(ctx, &application_id, faces.get(index).cloned()),
         VettingMode::RequestVetter {
             application_id,
@@ -1835,6 +1820,68 @@ fn abandon_application(ctx: &mut ActionCtx<'_>) {
     );
 }
 
+/// What a failed card preview means, when we can tell.
+///
+/// One refusal has a specific cause and a specific answer: the face being worn
+/// holds none of the claim types the vetter's session asked for. The agent says
+/// so accurately — "none of the requested claim types are present in this
+/// persona's profile" — in a sentence that names neither the claim types nor
+/// the face nor the key that changes it, wrapped in two layers of protocol
+/// framing. Everything else is passed through: a failure we cannot explain is
+/// better verbatim than paraphrased into a guess (R6.4).
+fn preview_refusal(error: &str, application_id: &str, config: &Config) -> String {
+    if !error.contains("none of the requested claim types are present") {
+        return format!("Could not preview the card: {error}");
+    }
+    let app = config
+        .private
+        .vetting
+        .applications
+        .iter()
+        .find(|a| a.id == application_id);
+    let wanted = app.map(required_claim_types).unwrap_or_default();
+    let face = app.and_then(|a| a.face.as_ref()).map_or_else(
+        || "The face you are wearing".to_string(),
+        |f| f.name.clone(),
+    );
+    if wanted.is_empty() {
+        return format!(
+            "{face} holds none of the claims this vetter asked for. Press f to wear a face that does, or add them under My Identity."
+        );
+    }
+    format!(
+        "{face} holds none of {}, which this community's card must carry. Press f to wear a \
+         face that has them, or add them to this one under My Identity.",
+        wanted.join(", ")
+    )
+}
+
+/// The claim types a card for this community must carry.
+///
+/// From the manifest when it has been read, and from the fallback set when it
+/// has not — the same rule the identity block on the application already used,
+/// lifted out so the face picker answers against the same list. A picker
+/// judging faces by a different standard than the card is checked against would
+/// be worse than one that says nothing.
+fn required_claim_types(app: &Application) -> Vec<String> {
+    app.requirements
+        .as_ref()
+        .map(|r| {
+            r.required_claims
+                .iter()
+                .flatten()
+                .map(|c| c.as_str().to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|claims| !claims.is_empty())
+        .unwrap_or_else(|| {
+            FALLBACK_REQUIRED_CLAIMS
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
+}
+
 /// The DID this install authenticates to its agent as, when it has one.
 ///
 /// A BIP32 account has no agent credential at all — and, having no agent, will
@@ -2480,6 +2527,44 @@ pub(crate) enum FaceJob {
     },
 }
 
+/// Fill in what each face would disclose, as claim types.
+///
+/// **Metadata only.** A profile's entries are attribute *ids*, so the claim
+/// types come from one pool listing read without values (`include_values:
+/// false`) and joined against them. Resolving each profile instead would
+/// decrypt the whole pool to answer a question about names, which is the
+/// reason `profile::list` does not do it either.
+///
+/// Every failure degrades to an empty list rather than failing the picker: a
+/// face whose contents could not be read is still a face the holder may want to
+/// wear, and the list already treats a failed binding read the same way. The
+/// reads are sequential because a holder has a handful of faces, and each
+/// carries the client's own timeout (R1.2).
+async fn fill_claim_types(client: &VtaClient, faces: &mut [FaceChoice]) {
+    let Ok(pool) = pool::list(client, false, false).await else {
+        return;
+    };
+    let claim_of: std::collections::HashMap<&str, &str> = pool
+        .iter()
+        .map(|a| (a.attribute_id.as_str(), a.claim_type.as_str()))
+        .collect();
+    for face in faces.iter_mut() {
+        let Ok(detail) = profile::get(client, &face.profile_id, false).await else {
+            continue;
+        };
+        let mut seen = std::collections::HashSet::new();
+        face.claim_types = detail
+            .live_refs
+            .iter()
+            .filter_map(|id| claim_of.get(id.as_str()).map(|t| (*t).to_string()))
+            // Two attributes of the same type — a work and a personal email —
+            // are one claim type on the card. `dedup` would only catch them
+            // when they happened to sit next to each other.
+            .filter(|t| seen.insert(t.clone()))
+            .collect();
+    }
+}
+
 impl FaceJob {
     pub(crate) async fn run(self) -> VettingOutcome {
         match self {
@@ -2498,15 +2583,18 @@ impl FaceJob {
                             .ok()
                             .filter(|b| b.bound)
                             .and_then(|b| b.profile_id);
-                        Ok(profiles
+                        let mut faces: Vec<FaceChoice> = profiles
                             .into_iter()
                             .map(|p| FaceChoice {
                                 worn: worn.as_deref() == Some(p.profile_id.as_str()),
                                 name: sanitize_display(p.display_name(), 128),
                                 entries: p.entry_count,
                                 profile_id: p.profile_id,
+                                claim_types: Vec::new(),
                             })
-                            .collect())
+                            .collect();
+                        fill_claim_types(&client, &mut faces).await;
+                        Ok(faces)
                     }
                     Err(e) => Err(e.to_string()),
                 };
@@ -2789,10 +2877,19 @@ impl VettingOutcome {
                 };
                 if matches!(v.mode, VettingMode::List) && !faces.is_empty() {
                     let index = faces.iter().position(|f| f.worn).unwrap_or(0);
+                    let required = config
+                        .private
+                        .vetting
+                        .applications
+                        .iter()
+                        .find(|a| a.id == application_id)
+                        .map(required_claim_types)
+                        .unwrap_or_default();
                     v.mode = VettingMode::ChooseFace {
                         application_id,
                         faces,
                         index,
+                        required,
                     };
                 }
                 // The application may have just been given its context.
@@ -2871,9 +2968,11 @@ impl VettingOutcome {
                 }
                 (message, true)
             }
-            VettingOutcome::Previewed { result: Err(e), .. } => {
-                (format!("Could not preview the card: {e}"), true)
-            }
+            VettingOutcome::Previewed {
+                application_id,
+                result: Err(e),
+                ..
+            } => (preview_refusal(&e, &application_id, config), true),
             VettingOutcome::CardSent {
                 application_id,
                 session_id,
@@ -3697,6 +3796,7 @@ mod tests {
             name: id.to_uppercase(),
             entries: 2,
             worn,
+            claim_types: vec!["name.legal".into()],
         };
         VettingOutcome::Faces {
             application_id: "a".into(),
@@ -3706,6 +3806,50 @@ mod tests {
         let v = &state.main_page.content_panel.vetting;
         assert!(matches!(&v.mode, VettingMode::ChooseFace { index: 1, .. }));
         assert_eq!(v.worn_faces.get("a").map(String::as_str), Some("WORK"));
+    }
+
+    /// The card preview's one explicable refusal. The agent's sentence names
+    /// neither the claims, nor the face, nor the key that changes it — and it
+    /// arrives three steps after the choice that caused it.
+    #[test]
+    fn the_preview_refusal_names_the_claims_and_the_key() {
+        let mut config = test_config();
+        let mut app = Application::new(
+            "did:web:vtc.example",
+            PersonaId::new(),
+            "did:key:zApplicant",
+            Utc::now(),
+        )
+        .unwrap();
+        app.face = Some(ChosenFace {
+            profile_id: "p1".into(),
+            name: "OSS Developer".into(),
+        });
+        let id = app.id.clone();
+        config.private.vetting.applications.push(app);
+
+        let out = preview_refusal(
+            "VTA Error: persona disclosure preview failed: protocol error: trust task failed \
+             [malformedRequest]: validation error: none of the requested claim types are present \
+             in this persona's profile",
+            &id,
+            &config,
+        );
+        // The face it is actually wearing, so there is no doubt which to change.
+        assert!(out.contains("OSS Developer"), "{out}");
+        // And the key that changes it.
+        assert!(out.contains("Press f"), "{out}");
+        // The agent's framing does not survive into the sentence.
+        assert!(!out.contains("malformedRequest"), "{out}");
+    }
+
+    /// Anything else is passed through. A failure we cannot explain is better
+    /// verbatim than paraphrased into a guess (R6.4).
+    #[test]
+    fn other_preview_failures_are_reported_as_they_came() {
+        let config = test_config();
+        let out = preview_refusal("connection refused", "no-such-application", &config);
+        assert_eq!(out, "Could not preview the card: connection refused");
     }
 
     /// The refusal with an answer opens a view, so the command it names gets a
