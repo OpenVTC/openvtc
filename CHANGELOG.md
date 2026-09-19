@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Could not read your faces" now says what to do about it.** Faces are built
+  over the holder's attribute pool, which sits above every trust context, so
+  reaching them needs the VTA's `persona-holder` capability — the one capability
+  no role derives, granted only where an operator named it. An agent credential
+  that administers a context does not have it, and the agent says so at length.
+
+  The Identity pane already recognised that refusal and printed the exact
+  `pnm acl update … --capabilities persona-holder` to run, with the DID filled
+  in. The Vetting pane, where choosing the face a vetter is shown reads the very
+  same pool, passed the agent's sentence straight through — so one screen
+  guided you and the other handed you a paragraph about trust contexts.
+
+  The recognition and the wording now live in one module both use. Only that
+  refusal is rewritten; everything else is reported as it came, because a wrong
+  hint sends someone to run a grant that is not their problem.
+
 ### Changed
 
 - **The join page for a community that vets is one list of choices.** It had

@@ -1777,6 +1777,74 @@ async fn ask_resend(ctx: &mut ActionCtx<'_>, index: usize) {
     }
 }
 
+#[cfg(test)]
+mod holder_grant_message_tests {
+    use super::*;
+
+    const SUBJECT: &str = "did:key:z6MkThisInstall";
+
+    /// The refusal that has an answer gets the answer, with the command
+    /// complete, because it is retyped into another terminal.
+    #[test]
+    fn the_holder_refusal_carries_the_command() {
+        let out = holder_grant_or(
+            "forbidden: requires an unscoped holder credential",
+            "Could not read your faces",
+            Some(SUBJECT),
+        );
+        assert!(out.starts_with("Could not read your faces."), "{out}");
+        assert!(
+            out.contains("pnm acl update did:key:z6MkThisInstall --capabilities persona-holder"),
+            "{out}"
+        );
+        assert!(
+            out.contains("without giving this install any over other contexts"),
+            "{out}"
+        );
+    }
+
+    /// Anything else is passed through: a wrong hint sends someone to run a
+    /// grant that is not their problem.
+    #[test]
+    fn other_failures_are_reported_as_they_came() {
+        let out = holder_grant_or(
+            "connection refused",
+            "Could not read your faces",
+            Some(SUBJECT),
+        );
+        assert_eq!(out, "Could not read your faces: connection refused");
+    }
+}
+
+/// A refusal, said in the way that helps.
+///
+/// The holder-grant refusal is the one with a specific answer, and it is the
+/// commonest way a faces read fails — faces are built over the attribute pool,
+/// which sits above every context — so it gets that answer instead of the
+/// agent's sentence. Everything else is passed through unchanged: a wrong hint
+/// costs more than no hint, because it sends someone to run a grant that is not
+/// their problem.
+fn holder_grant_or(error: &str, context: &str, subject: Option<&str>) -> String {
+    if crate::holder_grant::needs_holder_grant(error) {
+        return format!(
+            "{context}. {}",
+            crate::holder_grant::holder_grant_sentence(subject)
+        );
+    }
+    format!("{context}: {error}")
+}
+
+/// The DID this install authenticates to its agent as, when it has one.
+///
+/// A BIP32 account has no agent credential at all — and, having no agent, will
+/// not have produced a holder refusal in the first place.
+fn agent_credential_did(config: &Config) -> Option<&str> {
+    match &config.key_backend {
+        openvtc_core::config::KeyBackend::Vta { credential_did, .. } => Some(credential_did),
+        openvtc_core::config::KeyBackend::Bip32 { .. } => None,
+    }
+}
+
 /// What a card's disclosure tells the VTA it is for.
 const VETTING_PURPOSE: &str = "identity vetting";
 
@@ -2715,7 +2783,20 @@ impl VettingOutcome {
                 (message.to_string(), true)
             }
             VettingOutcome::Faces { result: Err(e), .. } => {
-                (format!("Could not read your faces: {e}"), true)
+                // Faces are built over the holder's attribute pool, which sits
+                // above every context — so the commonest way this fails is the
+                // one refusal with a specific answer. The Identity pane already
+                // recognised it; passing the agent's sentence through here
+                // meant the same failure was guidance on one screen and a wall
+                // of text on another.
+                (
+                    holder_grant_or(
+                        &e,
+                        "Could not read your faces",
+                        agent_credential_did(config),
+                    ),
+                    true,
+                )
             }
             VettingOutcome::FaceWorn {
                 application_id,

@@ -1119,8 +1119,10 @@ fn push_agent_state(state: &IdentityState, lines: &mut Vec<Line<'static>>, noun:
         // Every other failure is echoed verbatim. That text is *data*: it may
         // name a host, a port, a contract mismatch, and translating what we do
         // not recognise would be inventing a cause (VTI R6.4).
-        if needs_holder_grant(error) {
-            for line in holder_grant_hint(state.agent_credential_did.as_deref()) {
+        if crate::holder_grant::needs_holder_grant(error) {
+            for line in
+                crate::holder_grant::holder_grant_hint(state.agent_credential_did.as_deref())
+            {
                 lines.push(Line::from(line).fg(COLOR_ORANGE));
             }
         } else {
@@ -1144,47 +1146,6 @@ fn push_agent_state(state: &IdentityState, lines: &mut Vec<Line<'static>>, noun:
         return true;
     }
     false
-}
-
-/// What to do about the one refusal that has a specific answer.
-///
-/// Kept as lines rather than a paragraph because the middle one is a command an
-/// operator has to read character by character — and, when we know it, retype
-/// or copy into another terminal.
-///
-/// We *do* know it: the DID this install authenticates as is in the config the
-/// pane is already rendering from, so the command is emitted complete rather
-/// than with a `<this install's DID>` placeholder the reader has to go and
-/// resolve on another pane. The placeholder survives only for the case where
-/// there is genuinely nothing to substitute — a BIP32 account, which has no
-/// agent credential at all (and, having no agent, will not have produced this
-/// refusal in the first place).
-fn holder_grant_hint(credential_did: Option<&str>) -> Vec<String> {
-    let subject = credential_did.unwrap_or("<this install's DID>");
-    vec![
-        " Your agent credential administers this context. Your attributes, and the faces"
-            .to_string(),
-        " over them, sit above every context — reaching them is a separate grant:".to_string(),
-        String::new(),
-        format!("   pnm acl update {subject} --capabilities persona-holder"),
-        String::new(),
-        " It adds authority over your own identity without giving this install any".to_string(),
-        " authority over other contexts.".to_string(),
-    ]
-}
-
-/// Whether a read failed because the caller lacks holder authority, as opposed
-/// to the agent being unreachable or the request being malformed.
-///
-/// Matched on the phrase both the current and the pre-capability VTA use, since
-/// an operator may be pointing at either: the older one refuses with "unscoped
-/// holder credential" and names no capability, because there was none to name.
-/// A false negative here costs a hint; a false positive would tell someone to
-/// run a grant that is not their problem, so the match is on the specific
-/// phrase rather than on "forbidden".
-fn needs_holder_grant(error: &str) -> bool {
-    let e = error.to_ascii_lowercase();
-    e.contains("holder credential") || e.contains("persona-holder")
 }
 
 // ---------------------------------------------------------------------------
@@ -1965,7 +1926,8 @@ mod tests {
     /// hint that grew one would be a command that fails on paste.
     #[test]
     fn the_grant_command_passes_the_did_positionally() {
-        let hint = holder_grant_hint(Some("did:key:z6MkThisInstall")).join("\n");
+        let hint =
+            crate::holder_grant::holder_grant_hint(Some("did:key:z6MkThisInstall")).join("\n");
         assert!(!hint.contains("--did"), "{hint}");
     }
 
@@ -1973,7 +1935,7 @@ mod tests {
     /// — better an obvious blank than a command naming the wrong subject.
     #[test]
     fn the_grant_command_keeps_a_placeholder_when_there_is_no_credential() {
-        let hint = holder_grant_hint(None).join("\n");
+        let hint = crate::holder_grant::holder_grant_hint(None).join("\n");
         assert!(
             hint.contains("pnm acl update <this install\'s DID>"),
             "{hint}"
