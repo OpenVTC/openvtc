@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **A way in whose prerequisite the join can supply is one you can take.**
+  Applying for vetting without a persona was greyed out with "create one under
+  My Identity" — so on a community that vets, the one route the community was
+  actually telling you about looked like the one you could not use, and the way
+  forward looked like configuration work to go and do elsewhere.
+
+  It is now selectable and says what taking it starts with: *"First: you have no
+  persona yet, so this starts by creating one."* Taking it opens the
+  create-persona overlay, and when a persona exists the join carries straight on
+  into the application rather than returning you to the list to press the same
+  key again.
+
+  The line is who has to supply the missing thing. A persona is something
+  OpenVTC can make, so needing one is a first step. An invitation is something
+  somebody else has to have issued you, so holding none still blocks that route
+  — no amount of walking you through it produces one. `RouteState` names the
+  three cases, and only the last is drawn dim.
+
+### Changed
+
 - **A join that needs a persona can make one without leaving the join.** The
   vetting route was blocked with "create one under My Identity", which meant
   leaving the flow, finding the right pane, minting, and coming back to start

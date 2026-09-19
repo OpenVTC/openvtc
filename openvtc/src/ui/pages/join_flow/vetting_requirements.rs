@@ -161,27 +161,35 @@ fn choice(name: &str, shown: String, focused: bool) -> Line<'static> {
 /// unanswered — and the answer ("you hold none", "this community admits nobody
 /// that way") is exactly what the page exists to give.
 fn route_lines(known: &KnownVetting) -> Vec<Line<'static>> {
-    known
-        .routes
-        .iter()
-        .enumerate()
-        .map(|(i, option)| {
-            let focused = known.row == i;
-            let (label_style, detail_style, detail) = match &option.blocked {
-                Some(why) => (dim(), dim(), why.clone()),
-                None => (
-                    text().bold(),
-                    Style::new().fg(COLOR_SOFT_PURPLE),
-                    option.detail.clone(),
-                ),
-            };
-            Line::from(vec![
-                cursor(focused),
-                Span::styled(format!("{:<LABEL_WIDTH$}", option.label), label_style),
-                Span::styled(detail, detail_style),
-            ])
-        })
-        .collect()
+    let mut lines = Vec::new();
+    for (i, option) in known.routes.iter().enumerate() {
+        let focused = known.row == i;
+        let (label_style, detail_style, detail) = match option.blocked() {
+            Some(why) => (dim(), dim(), why.to_string()),
+            None => (
+                text().bold(),
+                Style::new().fg(COLOR_SOFT_PURPLE),
+                option.detail.clone(),
+            ),
+        };
+        lines.push(Line::from(vec![
+            cursor(focused),
+            Span::styled(format!("{:<LABEL_WIDTH$}", option.label), label_style),
+            Span::styled(detail, detail_style),
+        ]));
+        // A route that starts with a step says so on its own line, under the
+        // row and indented past the label column. It reads as what happens
+        // next rather than as a reason the row is off — which is the whole
+        // point of it not being dim.
+        if let Some(step) = option.first_step() {
+            lines.push(Line::from(vec![
+                Span::raw(" ".repeat(LABEL_WIDTH + 2)),
+                Span::styled("First: ", Style::new().fg(COLOR_SUCCESS).bold()),
+                Span::styled(step.to_string(), Style::new().fg(COLOR_SUCCESS)),
+            ]));
+        }
+    }
+    lines
 }
 
 /// The page's lines, below its border.
@@ -334,17 +342,17 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
                 ));
             }
             lines.push(Line::default());
-            let mut offered = vec![("↑/↓", "choose"), ("ENTER", "take it")];
-            // Only worth naming where it is the thing standing in the way.
-            if known.personas.is_empty() {
-                offered.push(("N", "create a persona"));
-            }
-            offered.extend([
+            // `N` is not listed as a way past a blockage any more — taking the
+            // route that needs a persona creates one on the way. It stays bound
+            // for someone who wants a second persona before choosing.
+            lines.push(keys(&[
+                ("↑/↓", "choose"),
+                ("ENTER", "take it"),
+                ("N", "create a persona"),
                 ("A", "open the application"),
                 ("J", "join now"),
                 ("ESC", "cancel"),
-            ]);
-            lines.push(keys(&offered));
+            ]));
         }
     }
     // The DID under the name, so the community being joined is never only a
@@ -374,7 +382,7 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
 mod tests {
     use super::*;
     use crate::state_handler::join::{
-        AvailableVic, JoinApplication, JoinPage, JoinRoute, RouteOption,
+        AvailableVic, JoinApplication, JoinPage, JoinRoute, RouteOption, RouteState,
     };
     use crate::state_handler::state::State;
     use crate::ui::component::Component;
@@ -391,12 +399,12 @@ mod tests {
         }
     }
 
-    fn route(route: JoinRoute, label: &str, blocked: Option<&str>) -> RouteOption {
+    fn route(route: JoinRoute, label: &str, state: RouteState) -> RouteOption {
         RouteOption {
             route,
             label: label.into(),
             detail: "detail".into(),
-            blocked: blocked.map(Into::into),
+            state,
         }
     }
 
@@ -405,10 +413,14 @@ mod tests {
             route(
                 JoinRoute::Invitation,
                 "Use an invitation",
-                Some("none held"),
+                RouteState::Blocked("none held".into()),
             ),
-            route(JoinRoute::Vetting, "Apply for vetting", None),
-            route(JoinRoute::OpenRequest, "Send an open request", None),
+            route(JoinRoute::Vetting, "Apply for vetting", RouteState::Ready),
+            route(
+                JoinRoute::OpenRequest,
+                "Send an open request",
+                RouteState::Ready,
+            ),
         ]
     }
 
@@ -561,6 +573,23 @@ mod tests {
         let shown = text_of(&body_lines(&JoinState::default(), &view(known(None))));
         assert!(shown.contains("Use an invitation"));
         assert!(shown.contains("none held"));
+    }
+
+    /// A route that starts with a step says so under its row, as what happens
+    /// next — not as a reason it is off.
+    #[test]
+    fn a_route_that_starts_with_a_step_says_what_it_starts_with() {
+        let phase = VettingPhase::Known(Box::new(KnownVetting {
+            routes: vec![route(
+                JoinRoute::Vetting,
+                "Apply for vetting",
+                RouteState::FirstStep("you have no persona yet".into()),
+            )],
+            ..KnownVetting::default()
+        }));
+        let shown = text_of(&body_lines(&JoinState::default(), &view(phase)));
+        assert!(shown.contains("Apply for vetting"));
+        assert!(shown.contains("First: you have no persona yet"), "{shown}");
     }
 
     /// Held invitations are a fact about this account, so they are worth saying
