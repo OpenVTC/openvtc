@@ -748,6 +748,27 @@ impl VettingBook {
         Ok(self.applications.last_mut().expect("just pushed"))
     }
 
+    /// Abandon an application, returning it.
+    ///
+    /// Vetting is client-side until the join is submitted: nothing was sent to
+    /// the community, so there is nothing to withdraw from it and nobody to
+    /// tell. What goes is local — the application, the statements gathered for
+    /// it, and the record of which vetters were asked.
+    ///
+    /// The vetters are the part worth knowing about. A vetter who accepted a
+    /// request still holds it at their desk; abandoning here does not reach
+    /// them, and a session they open afterwards will find no application to
+    /// answer. That is a loose end this cannot tidy from one side, and it is
+    /// why the caller confirms first.
+    ///
+    /// Needed because an application is otherwise permanent. Started as the
+    /// wrong persona — easy, since the persona is fixed for its whole life —
+    /// it would own that community's vetting route forever.
+    pub fn abandon_application(&mut self, id: &str) -> Option<Application> {
+        let i = self.applications.iter().position(|a| a.id == id)?;
+        Some(self.applications.remove(i))
+    }
+
     /// The desk entry with our `request_id`.
     #[must_use]
     pub fn desk_entry(&self, request_id: &str) -> Option<&DeskEntry> {
@@ -849,6 +870,50 @@ mod tests {
         book.start_application("did:web:other", persona, "did:key:zA", now)
             .unwrap();
         assert_eq!(book.applications.len(), 2);
+    }
+
+    /// The parallel half of the rule above: one application per *persona*,
+    /// several per community. A community may be joined by more than one
+    /// persona, and being vetted as one says nothing about another.
+    #[test]
+    fn a_second_persona_gets_its_own_application_to_the_same_community() {
+        let mut book = VettingBook::default();
+        let now = Utc::now();
+        let alice = PersonaId::new();
+        let bob = PersonaId::new();
+        book.start_application("did:web:vtc", alice, "did:key:zA", now)
+            .unwrap();
+        book.start_application("did:web:vtc", bob, "did:key:zB", now)
+            .unwrap();
+        assert_eq!(book.applications.len(), 2);
+    }
+
+    /// Without this an application is permanent, and its persona is fixed for
+    /// its whole life — so one started as the wrong persona would own that
+    /// community's vetting route forever.
+    #[test]
+    fn an_application_can_be_abandoned() {
+        let mut book = VettingBook::default();
+        let now = Utc::now();
+        let persona = PersonaId::new();
+        let id = book
+            .start_application("did:web:vtc", persona, "did:key:zA", now)
+            .unwrap()
+            .id
+            .clone();
+
+        let gone = book.abandon_application(&id).expect("it was there");
+        assert_eq!(gone.id, id);
+        assert!(book.applications.is_empty());
+
+        // Abandoning it twice is not an error the caller has to guard against.
+        assert!(book.abandon_application(&id).is_none());
+
+        // And the same persona may apply again afterwards — abandoning is a
+        // clearing, not a bar.
+        book.start_application("did:web:vtc", persona, "did:key:zA", now)
+            .unwrap();
+        assert_eq!(book.applications.len(), 1);
     }
 
     /// A `requirementsDigest` the published criterion accepts: base58btc, and

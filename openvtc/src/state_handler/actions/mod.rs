@@ -347,6 +347,11 @@ pub enum VettingAction {
     RemoveEvent,
     /// Ask a community to send our vetter credential again.
     AskResend,
+    /// Arm the confirmation for abandoning the highlighted application.
+    ///
+    /// Confirming is `Enter`, which the open mode already routes — the same
+    /// shape as every other confirmation on this panel.
+    ArmAbandon,
 }
 
 /// A membership's VTA context, from the communities panel: deleting a finished

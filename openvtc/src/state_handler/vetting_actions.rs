@@ -821,6 +821,17 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 None => {}
             }
         }
+        VettingAction::ArmAbandon => {
+            let v = page(ctx);
+            match v.applications.get(v.selected).cloned() {
+                Some(row) => {
+                    v.mode = VettingMode::ConfirmAbandon {
+                        application_id: row.id,
+                    };
+                }
+                None => status(ctx, "Highlight an application to abandon."),
+            }
+        }
         VettingAction::ArmWithdraw => {
             let v = page(ctx);
             match v.issued.get(v.selected).cloned() {
@@ -993,6 +1004,7 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
                 .map(|o| o.context_id.clone());
             start_application(ctx, community.trim(), persona_index, context).await;
         }
+        VettingMode::ConfirmAbandon { .. } => abandon_application(ctx),
         VettingMode::ChooseFace {
             application_id,
             faces,
@@ -1814,6 +1826,47 @@ mod holder_grant_message_tests {
         );
         assert_eq!(out, "Could not read your faces: connection refused");
     }
+}
+
+/// Drop the application the confirmation is armed on.
+///
+/// Local only: vetting is client-side until the join is submitted, so nothing
+/// was sent to the community and there is nothing to withdraw from it. What the
+/// message says instead is the part that is *not* tidied — a vetter who already
+/// accepted a request still holds it, and this cannot reach them.
+fn abandon_application(ctx: &mut ActionCtx<'_>) {
+    let VettingMode::ConfirmAbandon { application_id } = page(ctx).mode.clone() else {
+        return;
+    };
+    let Some(app) = ctx
+        .config
+        .private
+        .vetting
+        .abandon_application(&application_id)
+    else {
+        back(page(ctx));
+        return status(ctx, "That application is already gone.");
+    };
+    let community = community_display(ctx.config, &app.community);
+    let asked = app.requests.len();
+    back(page(ctx));
+    ctx.state.main_page.content_panel.vetting.selected = 0;
+    ctx.state.main_page.sync_from_config(ctx.config);
+    ctx.save.mark_dirty();
+    status(
+        ctx,
+        if asked == 0 {
+            format!("Abandoned your application to {community}.")
+        } else {
+            format!(
+                "Abandoned your application to {community}. {asked} vetter{} still \
+                 hold{} your request — tell them, or they will open a session with \
+                 nothing to answer.",
+                if asked == 1 { "" } else { "s" },
+                if asked == 1 { "s" } else { "" }
+            )
+        },
+    );
 }
 
 /// A refusal, said in the way that helps.

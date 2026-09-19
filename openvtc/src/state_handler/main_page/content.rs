@@ -1899,6 +1899,8 @@ pub enum VettingMode {
         statement_id: String,
         reason_index: usize,
     },
+    /// Confirm abandoning one of our own applications.
+    ConfirmAbandon { application_id: String },
 }
 
 impl VettingMode {
