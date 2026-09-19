@@ -27,6 +27,7 @@ mod clipboard;
 mod colors;
 mod env_overrides;
 mod health_cmd;
+mod holder_grant;
 mod state_handler;
 mod theme;
 mod theme_cmd;
