@@ -1831,6 +1831,16 @@ pub enum VettingMode {
         context_index: usize,
         field: usize,
     },
+    /// The faces could not be read because this install lacks holder
+    /// authority — the one refusal with a specific answer.
+    ///
+    /// A view rather than a status line: the answer is a command, and a command
+    /// in a status line is wrapped across the width of the panel wherever the
+    /// words happen to fall, which is neither readable nor selectable.
+    HolderGrant {
+        /// The DID to grant it to, when this install has one.
+        credential_did: Option<String>,
+    },
     /// Choose the face an application shows vetters.
     ChooseFace {
         application_id: String,
@@ -2221,6 +2231,9 @@ pub struct ApplicationRow {
     /// Progress against those requirements.
     pub progress: Option<String>,
     pub satisfied: bool,
+    /// The face shown to vetters, once chosen. From the application rather
+    /// than from `worn_faces`, which only holds what this run has read.
+    pub face: Option<String>,
     /// Claim type and the value we show vetters (empty when not set).
     pub identity: Vec<(String, String)>,
     pub requests: Vec<RequestRow>,

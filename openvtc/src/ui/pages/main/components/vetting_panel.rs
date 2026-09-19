@@ -65,6 +65,7 @@ pub fn mode_id(state: &VettingState) -> &'static str {
             DeskView::Issued => "issued",
         },
         (VettingMode::NewApplication { .. }, _) => "new-application",
+        (VettingMode::HolderGrant { .. }, _) => "holder-grant",
         (VettingMode::ChooseFace { .. }, _) => "face",
         (VettingMode::RequestVetter { .. }, _) => "request",
         (VettingMode::Directory(_), _) => "directory",
@@ -230,8 +231,23 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
                 "Enter: start  Tab: next field  ←/→: choose  Esc: cancel",
             ));
         }
+        VettingMode::HolderGrant { credential_did } => {
+            lines.push(heading("Your faces need one more grant"));
+            lines.push(Line::from(""));
+            // The command gets a line to itself, indented and unwrapped, because
+            // it is retyped or copied into another terminal. Folded into a
+            // paragraph it breaks wherever the width falls, and a DID broken
+            // across two lines cannot be selected in one drag.
+            for line in crate::holder_grant::holder_grant_hint(credential_did.as_deref()) {
+                lines.push(Line::from(line).fg(COLOR_ORANGE));
+            }
+            lines.push(Line::from(""));
+            lines.push(hint("Run it as a super-admin, then press f again."));
+            lines.push(Line::from(""));
+            lines.push(hint("Esc: back"));
+        }
         VettingMode::ChooseFace { faces, index, .. } => {
-            lines.push(heading("The face vetters are shown"));
+            lines.push(heading("The face you show vetters"));
             lines.push(Line::from(""));
             lines.push(hint(
                 "A vetter's card is read from this face, and they check it against your documents.",
@@ -613,7 +629,7 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     lines.push(Line::from(" Identity shown to vetters").fg(COLOR_SUCCESS));
     lines.push(Line::from(vec![
         Span::styled(format!("  {:<20}", "face"), label()),
-        match v.worn_faces.get(&app.id) {
+        match v.worn_faces.get(&app.id).or(app.face.as_ref()) {
             Some(face) => Span::styled(face.clone(), value()),
             None => Span::styled("f shows or changes it", dim()),
         },

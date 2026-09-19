@@ -3527,6 +3527,7 @@ mod key_handler_tests {
             requirements: None,
             progress: None,
             satisfied: false,
+            face: None,
             identity: Vec::new(),
             requests: Vec::new(),
             statements: 0,

@@ -22,7 +22,8 @@ use openvtc_core::persona::disclosure::{self, PresentError};
 use openvtc_core::persona::{binding, profile};
 use openvtc_core::vetting::VettingBook;
 use openvtc_core::vetting::applicant::{
-    Application, GrantStatus, NextStep, RequestDraft, RequestState, SentCard, VetterEligibility,
+    Application, ChosenFace, GrantStatus, NextStep, RequestDraft, RequestState, SentCard,
+    VetterEligibility,
 };
 use openvtc_core::vetting::book::FALLBACK_REQUIRED_CLAIMS;
 use openvtc_core::vetting::queries::{
@@ -269,6 +270,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                 requirements: app.requirements.as_ref().map(requirements_line),
                 progress: evaluation.as_ref().map(progress_line),
                 satisfied: evaluation.as_ref().is_some_and(Evaluation::satisfied),
+                face: app.face.as_ref().map(|f| f.name.clone()),
                 identity,
                 statements: app.statements.len(),
                 requests: app
@@ -497,7 +499,7 @@ pub(crate) fn next_step_words(step: &NextStep) -> String {
         }
         NextStep::LearnRequirements => "m — ask the community what it requires",
         NextStep::Join => "j — join now; your statements go with the request",
-        NextStep::ChooseFace => "f — choose the face vetters are shown, then ask a vetter",
+        NextStep::ChooseFace => "f — choose the face you show vetters, then ask a vetter",
         NextStep::AskVetter => "r — ask a vetter with their ticket, or v to find one",
         NextStep::WaitForVetters => "wait for your vetters — you are told when one answers",
     }
@@ -992,6 +994,9 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
         // closes it, the same as Esc, because both are what a hand reaches for
         // when the scan is done.
         VettingMode::ShowTicket { .. } => back(page(ctx)),
+        // Nor here: it says what to run somewhere else. Enter closes it like
+        // Esc, rather than being the one view where Enter does nothing.
+        VettingMode::HolderGrant { .. } => back(page(ctx)),
         VettingMode::NewApplication {
             community,
             persona_index,
@@ -1789,45 +1794,6 @@ async fn ask_resend(ctx: &mut ActionCtx<'_>, index: usize) {
     }
 }
 
-#[cfg(test)]
-mod holder_grant_message_tests {
-    use super::*;
-
-    const SUBJECT: &str = "did:key:z6MkThisInstall";
-
-    /// The refusal that has an answer gets the answer, with the command
-    /// complete, because it is retyped into another terminal.
-    #[test]
-    fn the_holder_refusal_carries_the_command() {
-        let out = holder_grant_or(
-            "forbidden: requires an unscoped holder credential",
-            "Could not read your faces",
-            Some(SUBJECT),
-        );
-        assert!(out.starts_with("Could not read your faces."), "{out}");
-        assert!(
-            out.contains("pnm acl update did:key:z6MkThisInstall --capabilities persona-holder"),
-            "{out}"
-        );
-        assert!(
-            out.contains("without giving this install any over other contexts"),
-            "{out}"
-        );
-    }
-
-    /// Anything else is passed through: a wrong hint sends someone to run a
-    /// grant that is not their problem.
-    #[test]
-    fn other_failures_are_reported_as_they_came() {
-        let out = holder_grant_or(
-            "connection refused",
-            "Could not read your faces",
-            Some(SUBJECT),
-        );
-        assert_eq!(out, "Could not read your faces: connection refused");
-    }
-}
-
 /// Drop the application the confirmation is armed on.
 ///
 /// Local only: vetting is client-side until the join is submitted, so nothing
@@ -1867,24 +1833,6 @@ fn abandon_application(ctx: &mut ActionCtx<'_>) {
             )
         },
     );
-}
-
-/// A refusal, said in the way that helps.
-///
-/// The holder-grant refusal is the one with a specific answer, and it is the
-/// commonest way a faces read fails — faces are built over the attribute pool,
-/// which sits above every context — so it gets that answer instead of the
-/// agent's sentence. Everything else is passed through unchanged: a wrong hint
-/// costs more than no hint, because it sends someone to run a grant that is not
-/// their problem.
-fn holder_grant_or(error: &str, context: &str, subject: Option<&str>) -> String {
-    if crate::holder_grant::needs_holder_grant(error) {
-        return format!(
-            "{context}. {}",
-            crate::holder_grant::holder_grant_sentence(subject)
-        );
-    }
-    format!("{context}: {error}")
 }
 
 /// The DID this install authenticates to its agent as, when it has one.
@@ -1989,7 +1937,7 @@ fn wear_face(ctx: &mut ActionCtx<'_>, application_id: &str, face: Option<FaceCho
         page(ctx).mode = VettingMode::List;
         return status(
             ctx,
-            format!("{} is already the face vetters are shown.", face.name),
+            format!("{} is already the face you show vetters.", face.name),
         );
     }
     let Some(client) = admin_client(ctx) else {
@@ -2597,6 +2545,7 @@ impl FaceJob {
                 VettingOutcome::FaceWorn {
                     error,
                     application_id,
+                    profile_id: face.profile_id,
                     name: face.name,
                 }
             }
@@ -2777,6 +2726,7 @@ pub(crate) enum VettingOutcome {
     /// A face is worn, or is not.
     FaceWorn {
         application_id: String,
+        profile_id: String,
         name: String,
         error: Option<String>,
     },
@@ -2817,12 +2767,25 @@ impl VettingOutcome {
                 if let Some(worn) = faces.iter().find(|f| f.worn) {
                     v.worn_faces
                         .insert(application_id.clone(), worn.name.clone());
+                    // The agent is authoritative about what is worn, so a list
+                    // is also the chance to pick up a face chosen before this
+                    // was recorded, and to refresh a name that has changed.
+                    if let Some(app) = config
+                        .private
+                        .vetting
+                        .application_by_id_mut(&application_id)
+                    {
+                        app.face = Some(ChosenFace {
+                            profile_id: worn.profile_id.clone(),
+                            name: worn.name.clone(),
+                        });
+                    }
                 }
                 let message = if faces.is_empty() {
                     "You have no faces yet — make one under My Identity with the claims the \
                      community requires, then press f again."
                 } else {
-                    "Choose the face vetters are shown."
+                    "Choose the face you show vetters."
                 };
                 if matches!(v.mode, VettingMode::List) && !faces.is_empty() {
                     let index = faces.iter().position(|f| f.worn).unwrap_or(0);
@@ -2838,24 +2801,41 @@ impl VettingOutcome {
             VettingOutcome::Faces { result: Err(e), .. } => {
                 // Faces are built over the holder's attribute pool, which sits
                 // above every context — so the commonest way this fails is the
-                // one refusal with a specific answer. The Identity pane already
-                // recognised it; passing the agent's sentence through here
-                // meant the same failure was guidance on one screen and a wall
-                // of text on another.
-                (
-                    holder_grant_or(
-                        &e,
-                        "Could not read your faces",
-                        agent_credential_did(config),
-                    ),
-                    true,
-                )
+                // one refusal with a specific answer. It opens a view of its
+                // own: the answer is a command, and the status line wrapped it
+                // mid-DID, where it could be neither read nor selected.
+                //
+                // Everything else stays a status line. A failure we do not
+                // recognise has no command to offer, so a view would be a
+                // bigger frame around the same sentence.
+                if crate::holder_grant::needs_holder_grant(&e) {
+                    v.mode = VettingMode::HolderGrant {
+                        credential_did: agent_credential_did(config).map(str::to_string),
+                    };
+                    ("Could not read your faces.".to_string(), true)
+                } else {
+                    (format!("Could not read your faces: {e}"), true)
+                }
             }
             VettingOutcome::FaceWorn {
                 application_id,
+                profile_id,
                 name,
                 error: None,
             } => {
+                // Persisted as well as cached: `worn_faces` is this run only,
+                // and the application's own next step has to know a face was
+                // chosen after a restart too.
+                if let Some(app) = config
+                    .private
+                    .vetting
+                    .application_by_id_mut(&application_id)
+                {
+                    app.face = Some(ChosenFace {
+                        profile_id,
+                        name: name.clone(),
+                    });
+                }
                 v.worn_faces.insert(application_id, name.clone());
                 (
                     format!(
@@ -3726,6 +3706,41 @@ mod tests {
         let v = &state.main_page.content_panel.vetting;
         assert!(matches!(&v.mode, VettingMode::ChooseFace { index: 1, .. }));
         assert_eq!(v.worn_faces.get("a").map(String::as_str), Some("WORK"));
+    }
+
+    /// The refusal with an answer opens a view, so the command it names gets a
+    /// line to itself. As a status line it wrapped at the panel's width, which
+    /// fell mid-DID.
+    #[test]
+    fn the_holder_refusal_opens_a_view_and_everything_else_does_not() {
+        let mut save = SaveScheduler::new("test");
+
+        let mut state = State::default();
+        let mut config = test_config();
+        VettingOutcome::Faces {
+            application_id: "a".into(),
+            result: Err("forbidden: requires an unscoped holder credential".into()),
+        }
+        .apply(&mut state, &mut config, &mut save);
+        assert!(matches!(
+            &state.main_page.content_panel.vetting.mode,
+            VettingMode::HolderGrant { .. }
+        ));
+
+        // A failure we do not recognise has no command to offer, so a view
+        // would be a bigger frame around the same sentence — and inventing a
+        // cause for it is what R6.4 forbids.
+        let mut state = State::default();
+        let mut config = test_config();
+        VettingOutcome::Faces {
+            application_id: "a".into(),
+            result: Err("connection refused".into()),
+        }
+        .apply(&mut state, &mut config, &mut save);
+        assert!(matches!(
+            &state.main_page.content_panel.vetting.mode,
+            VettingMode::List
+        ));
     }
 
     /// A request that never left is forgotten, so retrying is not shadowed by
