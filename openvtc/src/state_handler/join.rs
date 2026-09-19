@@ -191,13 +191,23 @@ pub struct KnownVetting {
     pub requirements: Vec<String>,
     /// Where it says how it decides.
     pub governance_url: Option<String>,
-    /// Our application to it, when there is one.
-    pub application: Option<JoinApplication>,
+    /// Our applications to it — one per persona.
+    ///
+    /// A list, not an option. Applications are keyed on `(community, persona)`,
+    /// so a community can hold one from each of your personas, and being vetted
+    /// as one says nothing about another. Showing only the first made that
+    /// impossible to reach from here: the page collapsed to "carry on with your
+    /// application" and hid the chooser, so a second persona could never apply.
+    pub applications: Vec<JoinApplication>,
     /// The ways in, in the order they are offered.
     pub routes: Vec<RouteOption>,
     /// Personas a new application can be made as.
     pub personas: Vec<ApplyAs>,
     pub persona_index: usize,
+    /// Appended to the vetting row's detail when this community also asks for
+    /// an invitation. Constant for the page, and kept because the rest of that
+    /// row is rebuilt whenever the persona chooser moves.
+    pub vetting_detail_suffix: Option<String>,
     /// Where a new application's face is worn.
     pub context_options: Vec<ContextOption>,
     pub context_index: usize,
@@ -223,12 +233,28 @@ pub enum VettingRow {
 }
 
 impl KnownVetting {
-    /// Whether the "Apply as" / "Context" choices are shown. They choose what a
-    /// *new* application is made as, so an application already under way has
-    /// answered them — its persona is fixed for its whole life.
+    /// The application belonging to the persona the chooser is on, if any.
+    ///
+    /// Reads `persona_index`, never the cursor, so the nested-row arithmetic in
+    /// [`rows`](Self::rows) can call it without the two defining each other.
     #[must_use]
-    pub fn shows_selectors(&self) -> bool {
-        self.application.is_none()
+    pub fn selected_application(&self) -> Option<&JoinApplication> {
+        let persona = self.personas.get(self.persona_index)?.persona;
+        self.applications.iter().find(|a| a.persona == persona)
+    }
+
+    /// How many choices are nested under the vetting route.
+    ///
+    /// "Apply as" always, because which persona applies is the decision this
+    /// route *is*. "Context" only when a new application would be started: an
+    /// application under way has already answered it, and its face's context is
+    /// fixed for the application's whole life.
+    fn nested_rows(&self) -> usize {
+        if self.selected_application().is_some() {
+            1
+        } else {
+            2
+        }
     }
 
     /// Every row the cursor moves over, in the order they are drawn.
@@ -240,12 +266,11 @@ impl KnownVetting {
             // Nested under the route they belong to, and only while it is the
             // one being considered — the choices are noise on a page whose
             // reader has already decided to do something else.
-            if option.route == JoinRoute::Vetting
-                && self.shows_selectors()
-                && self.row_is_vetting(rows.len() - 1)
-            {
+            if option.route == JoinRoute::Vetting && self.row_is_vetting(rows.len() - 1) {
                 rows.push(VettingRow::ApplyAs);
-                rows.push(VettingRow::Context);
+                if self.selected_application().is_none() {
+                    rows.push(VettingRow::Context);
+                }
             }
         }
         rows
@@ -256,7 +281,7 @@ impl KnownVetting {
     /// Reads the cursor without [`rows`](Self::rows), which is what builds the
     /// list this answers for — the two would otherwise call each other.
     fn row_is_vetting(&self, route_row: usize) -> bool {
-        self.row >= route_row && self.row <= route_row + 2
+        self.row >= route_row && self.row <= route_row + self.nested_rows()
     }
 
     /// Total rows the cursor moves over.

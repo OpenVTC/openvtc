@@ -88,7 +88,7 @@ impl VettingPage {
             // list cannot reach, so it keeps a key — named under the row it
             // belongs to rather than in a menu at the foot of the page.
             (VettingPhase::Known(known), KeyCode::Char('a' | 'A'))
-                if known.application.is_some() =>
+                if known.selected_application().is_some() =>
             {
                 Action::JoinVettingApply
             }
@@ -203,7 +203,10 @@ fn route_lines(known: &KnownVetting) -> Vec<Line<'static>> {
                 // The one thing this page cannot otherwise reach: reading an
                 // application before presenting it. Named where it applies
                 // rather than in a row of keys at the foot of the page.
-                if option.route == JoinRoute::Vetting && known.application.is_some() && focused {
+                if option.route == JoinRoute::Vetting
+                    && known.selected_application().is_some()
+                    && focused
+                {
                     lines.push(Line::from(vec![
                         Span::raw(" ".repeat(LABEL_WIDTH + 2)),
                         Span::styled("[a]", Style::new().fg(COLOR_BORDER).bold()),
@@ -214,7 +217,21 @@ fn route_lines(known: &KnownVetting) -> Vec<Line<'static>> {
             VettingRow::ApplyAs => {
                 let persona = known.personas.get(known.persona_index).map_or_else(
                     || "a new persona — created when you continue".to_string(),
-                    |p| format!("{}  ({})", p.label, p.did),
+                    |p| {
+                        // Whether this persona already has an application is
+                        // the difference between carrying one on and starting
+                        // another, and it is what the reader is cycling to find
+                        // out. Saying it on the row means the answer is where
+                        // the choice is, rather than two lines up in a label
+                        // that changes as a side effect.
+                        let standing =
+                            match known.applications.iter().find(|a| a.persona == p.persona) {
+                                Some(app) if app.satisfied => "  — ready to present",
+                                Some(_) => "  — already applied",
+                                None => "  — no application yet",
+                            };
+                        format!("{}  ({}){standing}", p.label, p.did)
+                    },
                 );
                 lines.push(nested_choice("Apply as", persona, focused));
             }
@@ -367,7 +384,10 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
                     dim(),
                 ));
             }
-            if let Some(app) = &known.application {
+            // Every application, not only the one the chooser is on: a second
+            // persona's application is a fact about this community that should
+            // not go dark because the cursor moved.
+            for app in &known.applications {
                 lines.push(Line::default());
                 lines.push(Line::styled(
                     format!(
@@ -417,7 +437,8 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
 mod tests {
     use super::*;
     use crate::state_handler::join::{
-        AvailableVic, FirstStepKind, JoinApplication, JoinPage, JoinRoute, RouteOption, RouteState,
+        ApplyAs, AvailableVic, FirstStepKind, JoinApplication, JoinPage, JoinRoute, RouteOption,
+        RouteState,
     };
     use crate::state_handler::state::State;
     use crate::ui::component::Component;
@@ -460,19 +481,32 @@ mod tests {
     }
 
     fn known(satisfied: Option<bool>) -> VettingPhase {
+        // The persona has to exist in `personas` as well as on the application:
+        // which application the page is showing follows from the persona the
+        // chooser is on, so an application whose persona is not in the list
+        // belongs to nobody the cursor can reach.
+        let persona = PersonaId::new();
         VettingPhase::Known(Box::new(KnownVetting {
             requirements: vec!["2 vetting statements".into()],
             routes: routes(),
             row: 1,
-            application: satisfied.map(|satisfied| JoinApplication {
-                id: "a1".into(),
-                persona: PersonaId::new(),
-                persona_label: "alice".into(),
-                statements: 2,
-                progress: None,
-                next_step: "join".into(),
-                satisfied,
-            }),
+            personas: vec![ApplyAs {
+                persona,
+                label: "alice".into(),
+                did: "did:key:zA".into(),
+            }],
+            applications: satisfied
+                .into_iter()
+                .map(|satisfied| JoinApplication {
+                    id: "a1".into(),
+                    persona,
+                    persona_label: "alice".into(),
+                    statements: 2,
+                    progress: None,
+                    next_step: "join".into(),
+                    satisfied,
+                })
+                .collect(),
             ..KnownVetting::default()
         }))
     }
