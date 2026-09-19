@@ -8,6 +8,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The join page for a community that vets is one list of choices.** It had
+  grown a row of keys along the foot that was a second, shorter, differently
+  worded menu of the same things: `j` was *Send an open request*, `n` was the
+  vetting route's own first step (described contradictorily), and `a` was the
+  vetting route again. Three of five keys were alternate doors to rows already
+  on screen. The foot now offers only moving, committing and leaving.
+
+  The "Applying as" block is gone as a block. Those choices belong to *Apply for
+  vetting* — they are not a separate decision — so they are drawn under it, and
+  only while it is the one being considered. Making a persona is a value of the
+  "Apply as" choice rather than a key of its own, which is what let `n` go.
+
+  Reading an application before sending it is the one thing the list cannot
+  reach, so it keeps `a` — named under the row it belongs to, and only when
+  there is an application to read.
+
+- **A `did:webvh` gives up its SCID before its tail.** Tail-truncating one kept
+  the hash nobody can read and dropped the host and path they can, so every
+  persona on a server rendered as the same prefix as every other.
+  `display::shorten_webvh` elides the SCID instead —
+  `did:webvh:QmUF…FtL3:webvh.storm.ws:kid-long` — parsed with `didwebvh-rs`
+  rather than split on colons, because a port is `%3A`-encoded inside the host
+  segment and counting colons finds the wrong boundary for exactly the DIDs a
+  developer runs locally.
+
+- **The create-persona overlay shows what a path is.** "Where should this
+  persona's DID live?" meant nothing without seeing one in place, so the path
+  phase now points at the last segment of an example DID and says it cannot be
+  changed afterwards. The overlay is also wider: a minted `did:webvh` is about a
+  hundred characters and was being cut off mid-identifier on the one screen
+  where reading it is the point.
+
+### Fixed
+
+- **A route label exactly as wide as its column touched its own detail.**
+  "Carry on with your application" is exactly thirty characters, so the longest
+  label in the list was the one that ran into its text.
+
+### Changed
+
 - **Holding no invitation is two different situations, and the join now tells
   them apart.** An invitation credential must name a `credentialSubject.id` —
   `validate_invitation_credential` refuses one without it, so there is no such

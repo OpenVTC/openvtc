@@ -61,6 +61,49 @@ pub fn truncate_did_centered(did: &str, max_len: usize) -> Cow<'_, str> {
     Cow::Owned(format!("{start}...{end}"))
 }
 
+/// Shorten a `did:webvh` by eliding its SCID, keeping the host and path.
+///
+/// A `did:webvh` is about a hundred characters, and tail-truncating one keeps
+/// the part nobody can read — the SCID is a hash — while dropping the part they
+/// can: the host, and the path they may well have chosen themselves. On screen
+/// that turns every persona into `did:webvh:QmUFMgMsbGpei5bGSx6…` and every
+/// persona into the same thing as every other.
+///
+/// So the SCID is what gives way:
+///
+/// ```text
+/// did:webvh:QmUFMgMsbGpei5bGSx6yXT8ZTkmKUT7sQMGWFkx28aFtL3:webvh.storm.ws:kid-long
+/// did:webvh:QmUF…aFtL3:webvh.storm.ws:kid-long
+/// ```
+///
+/// Parsed with `didwebvh-rs` rather than split on colons, per the repository
+/// rule: a port is `%3A`-encoded inside the host segment, so counting colons
+/// finds the wrong boundary for exactly the DIDs a developer runs locally.
+///
+/// Anything that is not a parseable `did:webvh` is returned untouched — this
+/// shortens one method and says nothing about the others.
+#[must_use]
+pub fn shorten_webvh(did: &str, scid_keep: usize) -> Cow<'_, str> {
+    let Ok(parsed) = didwebvh_rs::url::WebVHURL::parse_did_url(did) else {
+        return Cow::Borrowed(did);
+    };
+    let scid = &parsed.scid;
+    // Nothing to gain from eliding a SCID that is already short.
+    if scid.chars().count() <= scid_keep * 2 + 1 {
+        return Cow::Borrowed(did);
+    }
+    let head: String = scid.chars().take(scid_keep).collect();
+    let tail: String = scid
+        .chars()
+        .skip(scid.chars().count() - scid_keep)
+        .collect();
+    // Rebuilt by replacing the SCID *in the original*, so every other part —
+    // host, port encoding, path, fragment, query — survives exactly as it
+    // arrived. Re-emitting from the parse would risk normalising something the
+    // reader is trying to compare by eye.
+    Cow::Owned(did.replacen(scid.as_str(), &format!("{head}…{tail}"), 1))
+}
+
 /// Pick what to show for an identifier: a verified agent name when one is
 /// known, otherwise the tail-truncated DID.
 ///
@@ -75,7 +118,14 @@ pub fn truncate_did_centered(did: &str, max_len: usize) -> Cow<'_, str> {
 pub fn display_identifier<'a>(name: Option<&'a str>, did: &'a str, max_len: usize) -> Cow<'a, str> {
     match name {
         Some(name) => truncate_did(name, max_len),
-        None => truncate_did(did, max_len),
+        // A `did:webvh` gives up its SCID before its tail: the hash is the part
+        // nobody reads, and the host and path are the parts they recognise.
+        // Tail-truncation dropped exactly the wrong half, and every persona on
+        // a host rendered as the same prefix as every other.
+        None => match shorten_webvh(did, 4) {
+            Cow::Borrowed(did) => truncate_did(did, max_len),
+            Cow::Owned(short) => Cow::Owned(truncate_did(&short, max_len).into_owned()),
+        },
     }
 }
 
@@ -215,6 +265,33 @@ mod tests {
         assert!(out.starts_with("did:web"));
         assert!(out.contains("..."));
         assert!(out.ends_with("path"));
+    }
+
+    /// The SCID is a hash and the path is often chosen by the person; when
+    /// something has to give, it is the hash. Tail-truncation dropped the
+    /// readable half and made every persona on a host look alike.
+    #[test]
+    fn shortening_a_webvh_keeps_the_host_and_path() {
+        let did =
+            "did:webvh:QmUFMgMsbGpei5bGSx6yXT8ZTkmKUT7sQMGWFkx28aFtL3:webvh.storm.ws:kid-long";
+        let short = shorten_webvh(did, 4);
+        assert_eq!(short, "did:webvh:QmUF\u{2026}FtL3:webvh.storm.ws:kid-long");
+        assert!(short.ends_with("kid-long"), "the path survives");
+        assert!(short.contains("webvh.storm.ws"), "and so does the host");
+        assert!(short.chars().count() < did.chars().count());
+    }
+
+    /// One method only. Anything else is returned exactly as it came, because
+    /// this knows where a `did:webvh` keeps its SCID and nothing more.
+    #[test]
+    fn shortening_leaves_other_identifiers_alone() {
+        for other in [
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "example.com/@alice",
+            "not a did at all",
+        ] {
+            assert_eq!(shorten_webvh(other, 4), other);
+        }
     }
 
     #[test]

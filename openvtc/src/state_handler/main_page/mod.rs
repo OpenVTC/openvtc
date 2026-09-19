@@ -2356,13 +2356,15 @@ mod tests {
         let vic = &page.content_panel.vta.vics[0];
 
         assert!(vic.issuer_agent_name.is_none());
+        // The DID is what is shown, shortened at its SCID — the host and path
+        // are what tell one community from another.
         assert_eq!(
             openvtc_core::display::display_identifier(
                 vic.issuer_agent_name.as_deref(),
                 &vic.issuer,
                 256
             ),
-            vtc_did
+            openvtc_core::display::shorten_webvh(vtc_did, 4)
         );
     }
 

@@ -251,6 +251,13 @@ mod tests {
             subject: Some(PERSONA_DID.to_string()),
             subject_agent_name: None,
         };
-        assert_eq!(bound_to_display(&vic, PERSONA_DID), PERSONA_DID);
+        // No name, so the DID — shortened at its SCID, which is the part
+        // nobody reads.
+        let shown = bound_to_display(&vic, PERSONA_DID);
+        assert!(shown.ends_with(":example.com:alice"), "{shown}");
+        assert!(
+            !shown.contains("QmScidAliceAAAA"),
+            "the SCID gives way: {shown}"
+        );
     }
 }

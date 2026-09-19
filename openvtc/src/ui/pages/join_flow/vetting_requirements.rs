@@ -37,7 +37,7 @@ use ratatui::{
 
 use crate::state_handler::{
     actions::Action,
-    join::{JoinState, JoinVettingView, KnownVetting, VettingPhase},
+    join::{JoinRoute, JoinState, JoinVettingView, KnownVetting, VettingPhase, VettingRow},
     setup_sequence::MessageType,
 };
 use crate::ui::pages::join_flow::JoinFlow;
@@ -45,7 +45,12 @@ use crate::ui::pages::main::components::vetting_panel::accent_swatch;
 
 /// Width of the routes list's label column, so the details line up under each
 /// other rather than under whichever label happened to be longest.
-const LABEL_WIDTH: usize = 30;
+///
+/// The detail is padded to `LABEL_WIDTH + 1`, not `LABEL_WIDTH`: a label of
+/// exactly the column's width would otherwise touch its detail, and
+/// "Carry on with your application" is exactly thirty characters — so the
+/// longest label in the list was the one that ran into its own text.
+const LABEL_WIDTH: usize = 32;
 
 #[derive(Clone, Debug, Default)]
 pub struct VettingPage;
@@ -64,7 +69,13 @@ impl VettingPage {
         let action = match (&view.phase, key.code) {
             (_, KeyCode::F(10)) => Action::Exit,
             (_, KeyCode::Esc) => Action::JoinCancel,
-            (_, KeyCode::Char('j' | 'J')) => Action::JoinVettingJoin,
+            // `j` is the only way on while the community is being asked or
+            // could not be. Once the ways in are listed, one of them *is* the
+            // open request, and a second key for it was a shorter, differently
+            // worded copy of a row already on screen.
+            (VettingPhase::Asking | VettingPhase::Unknown { .. }, KeyCode::Char('j' | 'J')) => {
+                Action::JoinVettingJoin
+            }
             // Asking again needs a loop that can hear the answer. The State-A
             // loop cannot, so there the key is not offered at all rather than
             // offered and silently ineffective.
@@ -73,12 +84,18 @@ impl VettingPage {
                 KeyCode::Enter | KeyCode::Char('r' | 'R'),
             ) if *can_retry => Action::JoinVettingAskAgain,
             (VettingPhase::Known(_), KeyCode::Enter) => Action::JoinVettingTake,
-            (VettingPhase::Known(_), KeyCode::Char('a' | 'A')) => Action::JoinVettingApply,
-            // Applying signs cards with a persona, so a community that vets is
-            // exactly where someone without one finds out they need one. Making
-            // it here keeps the community — and the requirements just read —
-            // on screen behind the overlay.
-            (VettingPhase::Known(_), KeyCode::Char('n' | 'N')) => Action::StartCreatePersona,
+            // Reading an application before sending it is the one thing the
+            // list cannot reach, so it keeps a key — named under the row it
+            // belongs to rather than in a menu at the foot of the page.
+            (VettingPhase::Known(known), KeyCode::Char('a' | 'A'))
+                if known.application.is_some() =>
+            {
+                Action::JoinVettingApply
+            }
+            // No `n`: making a persona is a value of the "Apply as" choice
+            // now, under the way in that needs one. A key for it as well meant
+            // the page offered the same thing twice in two different
+            // vocabularies, and the key's wording contradicted the row's.
             (VettingPhase::Known(_), KeyCode::Up | KeyCode::BackTab) => {
                 Action::JoinVettingRow(false)
             }
@@ -145,15 +162,6 @@ fn cursor(focused: bool) -> Span<'static> {
     )
 }
 
-fn choice(name: &str, shown: String, focused: bool) -> Line<'static> {
-    Line::from(vec![
-        cursor(focused),
-        Span::styled(format!("{name:<10}"), text()),
-        Span::styled(shown, Style::new().fg(COLOR_SOFT_PURPLE)),
-        Span::styled(if focused { "  ←/→" } else { "" }, dim()),
-    ])
-}
-
 /// The routes list: every way in, available or not.
 ///
 /// A blocked route keeps its row and reads dim, with the reason where its
@@ -162,34 +170,75 @@ fn choice(name: &str, shown: String, focused: bool) -> Line<'static> {
 /// that way") is exactly what the page exists to give.
 fn route_lines(known: &KnownVetting) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for (i, option) in known.routes.iter().enumerate() {
-        let focused = known.row == i;
-        let (label_style, detail_style, detail) = match option.blocked() {
-            Some(why) => (dim(), dim(), why.to_string()),
-            None => (
-                text().bold(),
-                Style::new().fg(COLOR_SOFT_PURPLE),
-                option.detail.clone(),
-            ),
-        };
-        lines.push(Line::from(vec![
-            cursor(focused),
-            Span::styled(format!("{:<LABEL_WIDTH$}", option.label), label_style),
-            Span::styled(detail, detail_style),
-        ]));
-        // A route that starts with a step says so on its own line, under the
-        // row and indented past the label column. It reads as what happens
-        // next rather than as a reason the row is off — which is the whole
-        // point of it not being dim.
-        if let Some(step) = option.first_step() {
-            lines.push(Line::from(vec![
-                Span::raw(" ".repeat(LABEL_WIDTH + 2)),
-                Span::styled("First: ", Style::new().fg(COLOR_SUCCESS).bold()),
-                Span::styled(step.to_string(), Style::new().fg(COLOR_SUCCESS)),
-            ]));
+    for (row_index, row) in known.rows().iter().enumerate() {
+        let focused = known.row == row_index;
+        match row {
+            VettingRow::Route(i) => {
+                let Some(option) = known.routes.get(*i) else {
+                    continue;
+                };
+                let (label_style, detail_style, detail) = match option.blocked() {
+                    Some(why) => (dim(), dim(), why.to_string()),
+                    None => (
+                        text().bold(),
+                        Style::new().fg(COLOR_SOFT_PURPLE),
+                        option.detail.clone(),
+                    ),
+                };
+                lines.push(Line::from(vec![
+                    cursor(focused),
+                    Span::styled(format!("{:<LABEL_WIDTH$}", option.label), label_style),
+                    Span::styled(detail, detail_style),
+                ]));
+                // What taking it starts with, under the row and past the label
+                // column. Phrased as what happens next rather than as a reason
+                // the row is off — which is the point of it not being dim.
+                if let Some(step) = option.first_step() {
+                    lines.push(Line::from(vec![
+                        Span::raw(" ".repeat(LABEL_WIDTH + 2)),
+                        Span::styled("First: ", Style::new().fg(COLOR_SUCCESS).bold()),
+                        Span::styled(step.to_string(), Style::new().fg(COLOR_SUCCESS)),
+                    ]));
+                }
+                // The one thing this page cannot otherwise reach: reading an
+                // application before presenting it. Named where it applies
+                // rather than in a row of keys at the foot of the page.
+                if option.route == JoinRoute::Vetting && known.application.is_some() && focused {
+                    lines.push(Line::from(vec![
+                        Span::raw(" ".repeat(LABEL_WIDTH + 2)),
+                        Span::styled("[a]", Style::new().fg(COLOR_BORDER).bold()),
+                        Span::styled(" read it before you send it", dim()),
+                    ]));
+                }
+            }
+            VettingRow::ApplyAs => {
+                let persona = known.personas.get(known.persona_index).map_or_else(
+                    || "a new persona — created when you continue".to_string(),
+                    |p| format!("{}  ({})", p.label, p.did),
+                );
+                lines.push(nested_choice("Apply as", persona, focused));
+            }
+            VettingRow::Context => {
+                let context = known
+                    .context_options
+                    .get(known.context_index)
+                    .map_or_else(|| "—".to_string(), ContextOption::summary);
+                lines.push(nested_choice("Context", context, focused));
+            }
         }
     }
     lines
+}
+
+/// A choice belonging to the way in above it, indented under its label column.
+fn nested_choice(name: &str, shown: String, focused: bool) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" ".repeat(LABEL_WIDTH - 10)),
+        cursor(focused),
+        Span::styled(format!("{name:<10}"), text()),
+        Span::styled(shown, Style::new().fg(COLOR_SOFT_PURPLE)),
+        Span::styled(if focused { "  ←/→" } else { "" }, dim()),
+    ])
 }
 
 /// The page's lines, below its border.
@@ -305,33 +354,20 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
             ));
             lines.push(Line::default());
             lines.push(Line::styled(
-                "Your ways in",
+                "Choose how to join",
                 Style::new().fg(COLOR_BORDER).bold(),
             ));
             lines.extend(route_lines(known));
-
-            if known.shows_selectors() {
-                lines.push(Line::default());
-                lines.push(Line::styled(
-                    "Applying as",
-                    Style::new().fg(COLOR_BORDER).bold(),
-                ));
-                let persona = known.personas.get(known.persona_index).map_or_else(
-                    || "no persona yet — press n to create one".to_string(),
-                    |p| format!("{}  ({})", p.label, p.did),
-                );
-                lines.push(choice("Apply as", persona, known.selector() == Some(0)));
-                let context = known
-                    .context_options
-                    .get(known.context_index)
-                    .map_or_else(|| "—".to_string(), ContextOption::summary);
-                lines.push(choice("Context", context, known.selector() == Some(1)));
+            // Only where it is a live choice — the note is about a decision
+            // being made, not a fact about the page.
+            if known.selector().is_some() {
                 lines.push(Line::styled(
                     "The persona is fixed for the whole application: every card is signed by it, \
                      and it is the DID the community admits.",
                     dim(),
                 ));
-            } else if let Some(app) = &known.application {
+            }
+            if let Some(app) = &known.application {
                 lines.push(Line::default());
                 lines.push(Line::styled(
                     format!(
@@ -342,15 +378,14 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
                 ));
             }
             lines.push(Line::default());
-            // `N` is not listed as a way past a blockage any more — taking the
-            // route that needs a persona creates one on the way. It stays bound
-            // for someone who wants a second persona before choosing.
+            // Three keys: move, commit, leave. Every other way in used to have
+            // a key of its own down here as well as a row up there, so the foot
+            // of the page was a second, shorter, differently-worded menu of the
+            // same choices — and one of them (`n`) contradicted the row it
+            // duplicated. What a row does is the row's business now.
             lines.push(keys(&[
                 ("↑/↓", "choose"),
-                ("ENTER", "take it"),
-                ("N", "create a persona"),
-                ("A", "open the application"),
-                ("J", "join now"),
+                ("ENTER", "continue"),
                 ("ESC", "cancel"),
             ]));
         }
@@ -481,10 +516,35 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingRow(true))));
         press(&mut f, KeyCode::Right);
         assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingCycle(true))));
+    }
+
+    /// The page offers one door per thing, so the keys that were a second,
+    /// shorter menu of the rows are gone. `j` duplicated *Send an open
+    /// request*; `n` duplicated the vetting route's first step and described it
+    /// differently. Neither does anything here now.
+    #[test]
+    fn the_keys_that_duplicated_rows_are_gone() {
+        for key in ['j', 'J', 'n', 'N'] {
+            let (mut f, mut rx) = flow(known(None));
+            press(&mut f, KeyCode::Char(key));
+            assert!(
+                rx.try_recv().is_err(),
+                "`{key}` should be a row, not a key, once the ways in are listed"
+            );
+        }
+    }
+
+    /// Reading an application before sending it is the one thing the list
+    /// cannot reach, so it keeps a key — and only while there is one to read.
+    #[test]
+    fn reading_an_application_keeps_its_key_only_when_there_is_one() {
+        let (mut f, mut rx) = flow(known(Some(false)));
         press(&mut f, KeyCode::Char('a'));
         assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingApply)));
-        press(&mut f, KeyCode::Char('j'));
-        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingJoin)));
+
+        let (mut f, mut rx) = flow(known(None));
+        press(&mut f, KeyCode::Char('a'));
+        assert!(rx.try_recv().is_err(), "nothing to read yet");
     }
 
     #[test]
@@ -554,6 +614,49 @@ mod tests {
         );
     }
 
+    /// Three keys: move, commit, leave. Everything else a row does is the
+    /// row's business — the foot of the page used to repeat the list in a
+    /// second vocabulary.
+    #[test]
+    fn the_foot_of_the_page_offers_only_moving_committing_and_leaving() {
+        let shown = text_of(&body_lines(&JoinState::default(), &view(known(None))));
+        assert!(shown.contains("[↑/↓] choose"));
+        assert!(shown.contains("[ENTER] continue"));
+        assert!(shown.contains("[ESC] cancel"));
+        for gone in ["[J]", "[N]", "join now", "create a persona", "take it"] {
+            assert!(!shown.contains(gone), "{gone} is still offered: {shown}");
+        }
+    }
+
+    /// The choices that belong to a way in are drawn under it, and only while
+    /// it is the one being considered — two places for one decision is what
+    /// made the reader join them up.
+    #[test]
+    fn the_applying_choices_sit_under_the_way_in_they_belong_to() {
+        let mut phase = known(None);
+        if let VettingPhase::Known(k) = &mut phase {
+            k.row = 1; // the vetting route
+        }
+        let shown = text_of(&body_lines(&JoinState::default(), &view(phase)));
+        let line_of = |needle: &str| {
+            shown
+                .lines()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} not drawn:\n{shown}"))
+        };
+        assert!(line_of("Apply for vetting") < line_of("Apply as"));
+        assert!(line_of("Apply as") < line_of("Send an open request"));
+        assert!(!shown.contains("Applying as"), "no block of its own");
+
+        // Considering something else, they are not drawn at all.
+        let mut elsewhere = known(None);
+        if let VettingPhase::Known(k) = &mut elsewhere {
+            k.row = 0; // the invitation route
+        }
+        let shown = text_of(&body_lines(&JoinState::default(), &view(elsewhere)));
+        assert!(!shown.contains("Apply as"), "{shown}");
+    }
+
     #[test]
     fn the_page_says_what_is_required_and_lists_every_way_in() {
         let state = JoinState::default();
@@ -561,7 +664,7 @@ mod tests {
         assert!(shown.contains("Kernel vets the people who join."));
         assert!(shown.contains("• 2 vetting statements"));
         assert!(shown.contains("Nothing about you has been sent"));
-        assert!(shown.contains("Your ways in"));
+        assert!(shown.contains("Choose how to join"));
         assert!(shown.contains("Apply for vetting"));
         assert!(shown.contains("Send an open request"));
     }
