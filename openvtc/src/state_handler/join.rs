@@ -89,6 +89,31 @@ pub enum JoinRoute {
     OpenRequest,
 }
 
+/// Whether a way in can be taken, and what taking it starts with.
+///
+/// The line between the last two is who has to do the missing thing. A persona
+/// is something OpenVTC can make for you, so a route that needs one is a route
+/// you can take — it just begins a step earlier. An invitation is something you
+/// have to have been given; no amount of walking you through it produces one.
+///
+/// Getting that line wrong is what made the vetting route read as a dead end: it
+/// was greyed out with "create one under My Identity", so the one route the
+/// community was actually telling you about looked like the one you could not
+/// use, and the way forward looked like out-of-band configuration work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RouteState {
+    /// Take it and it proceeds.
+    Ready,
+    /// Take it and it starts with this, then proceeds. Said in the second
+    /// person and in order — it is a description of what happens next, not a
+    /// refusal dressed up.
+    FirstStep(String),
+    /// It cannot be taken, and why. Reserved for what the join cannot supply:
+    /// an invitation you were never given, or a community that admits nobody
+    /// that way.
+    Blocked(String),
+}
+
 /// One way in, as the routes list shows it.
 #[derive(Clone, Debug)]
 pub struct RouteOption {
@@ -97,17 +122,36 @@ pub struct RouteOption {
     pub label: String,
     /// What taking it does, or where it stands, in a few words.
     pub detail: String,
-    /// `None` when it can be taken now; otherwise why it cannot. A blocked
-    /// route is still listed — "you cannot use an invitation because you hold
-    /// none" is the answer to "what are my options", and hiding the row leaves
-    /// the question open.
-    pub blocked: Option<String>,
+    /// Whether it can be taken. A route that cannot is still listed — "you
+    /// cannot use an invitation because you hold none" is the answer to "what
+    /// are my options", and hiding the row leaves the question open.
+    pub state: RouteState,
 }
 
 impl RouteOption {
+    /// Whether taking it leads somewhere. True for a route that starts with a
+    /// step — that is the point of [`RouteState::FirstStep`].
     #[must_use]
     pub fn available(&self) -> bool {
-        self.blocked.is_none()
+        !matches!(self.state, RouteState::Blocked(_))
+    }
+
+    /// What taking it begins with, when it begins with something.
+    #[must_use]
+    pub fn first_step(&self) -> Option<&str> {
+        match &self.state {
+            RouteState::FirstStep(step) => Some(step),
+            _ => None,
+        }
+    }
+
+    /// Why it cannot be taken.
+    #[must_use]
+    pub fn blocked(&self) -> Option<&str> {
+        match &self.state {
+            RouteState::Blocked(why) => Some(why),
+            _ => None,
+        }
     }
 }
 
@@ -153,6 +197,12 @@ impl KnownVetting {
     #[must_use]
     pub fn selected_route(&self) -> Option<&RouteOption> {
         self.routes.get(self.row)
+    }
+
+    /// The row of `route`, when it is offered.
+    #[must_use]
+    pub fn row_of(&self, route: JoinRoute) -> Option<usize> {
+        self.routes.iter().position(|r| r.route == route)
     }
 
     /// Which selector the cursor is on: `0` the persona, `1` the context.
@@ -350,6 +400,14 @@ pub struct JoinState {
     pub context_community_names: Vec<(String, String)>,
     /// The vetting page, while the community being joined vets its members.
     pub vetting: Option<JoinVettingView>,
+    /// The way in that was being taken when a first step interrupted it.
+    ///
+    /// Taking a route whose prerequisite the join can supply — today, a persona
+    /// — performs that step and then carries on, rather than refusing and
+    /// leaving the person to work out what to press next. This is what
+    /// "carries on" reads from. Cleared when it is taken, and when the step
+    /// ends without producing what the route was waiting for.
+    pub resume_route: Option<JoinRoute>,
 }
 
 impl JoinState {

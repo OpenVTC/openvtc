@@ -48,7 +48,7 @@ use crate::{
         join::{
             ApplyAs, AvailableVic, IdentityPick, JoinApplication, JoinPage, JoinRoute, JoinState,
             JoinVettingView, KnownVetting, PersonaOption, PresentedInvitation, RouteOption,
-            VettingPhase,
+            RouteState, VettingPhase,
         },
         main_page::content::{VicLifecycle, VicSummary},
         main_page::{sanitize_display, shorten_did},
@@ -209,44 +209,52 @@ fn build_routes(
             } else {
                 invitations_held(invitations)
             },
-            blocked: if refuses {
-                Some(format!("{community} does not admit anyone by invitation"))
+            // An invitation is the one prerequisite the join cannot supply:
+            // it is a credential somebody else has to have issued to you. So
+            // holding none blocks the route rather than starting it a step
+            // earlier — there is no step that would produce one.
+            state: if refuses {
+                RouteState::Blocked(format!("{community} does not admit anyone by invitation"))
             } else if held == 0 {
-                Some(
-                    "none held for this community — paste one on the next step if you have one \
-                     the vault has not seen"
+                RouteState::Blocked(
+                    "none held for this community — paste one on the invitation step if you \
+                     have one the vault has not seen"
                         .to_string(),
                 )
             } else {
-                None
+                RouteState::Ready
             },
         });
     }
 
-    let (detail, blocked) = match application {
+    let (detail, state) = match application {
         Some(app) if app.satisfied => (
             format!(
                 "{} statement{} ready to present",
                 app.statements,
                 if app.statements == 1 { "" } else { "s" }
             ),
-            None,
+            RouteState::Ready,
         ),
         Some(app) => (
             app.progress
                 .clone()
                 .unwrap_or_else(|| format!("under way as {}", app.persona_label)),
-            None,
+            RouteState::Ready,
         ),
+        // A persona is something this join can make, so needing one is the
+        // first step of the route rather than a reason it is shut. Greyed out
+        // with "create one under My Identity", the one route the community is
+        // actually telling you about read as the one you could not use.
         None if personas.is_empty() => (
             "no application yet".to_string(),
-            Some(
-                "applying needs a persona — every card is signed by the DID you join with. \
-                 Press n to create one without leaving this join."
+            RouteState::FirstStep(
+                "you have no persona yet, so this starts by creating one — every card is \
+                 signed by the DID you join with"
                     .to_string(),
             ),
         ),
-        None => ("no application yet".to_string(), None),
+        None => ("no application yet".to_string(), RouteState::Ready),
     };
     routes.push(RouteOption {
         route: JoinRoute::Vetting,
@@ -263,7 +271,7 @@ fn build_routes(
         } else {
             detail
         },
-        blocked,
+        state,
     });
 
     routes.push(RouteOption {
@@ -278,7 +286,7 @@ fn build_routes(
             }
             None => format!("{community} refers it to its moderators to decide"),
         },
-        blocked: None,
+        state: RouteState::Ready,
     });
     routes
 }
@@ -1079,7 +1087,7 @@ impl StateHandler {
                             };
                             let route = match known.selected_route() {
                                 Some(option) if !option.available() => {
-                                    let why = option.blocked.clone().unwrap_or_default();
+                                    let why = option.blocked().unwrap_or_default().to_string();
                                     let label = option.label.clone();
                                     state.join.messages.clear();
                                     state.join.messages.push(MessageType::Error(format!(
@@ -1088,70 +1096,36 @@ impl StateHandler {
                                     let _ = self.state_tx.send(state.clone());
                                     continue;
                                 }
+                                // A route that starts with a step: do the step,
+                                // and remember what it was on the way to. That
+                                // is the difference between being guided and
+                                // being told to go and configure something.
+                                Some(option) if option.first_step().is_some() => {
+                                    let route = option.route;
+                                    state.join.messages.clear();
+                                    state.join.resume_route = Some(route);
+                                    super::handle_nav_action(state, &Action::StartCreatePersona);
+                                    let _ = self.state_tx.send(state.clone());
+                                    continue;
+                                }
                                 Some(option) => option.route,
                                 // On a selector.
                                 None => JoinRoute::Vetting,
                             };
-                            let Some(vtc_did) = state.join.pending_vtc.clone() else {
-                                continue;
-                            };
-                            state.join.messages.clear();
-                            match route {
-                                // The invitation is chosen further on, once the
-                                // persona it is bound to is known: the invitation
-                                // step lists this community's VICs for that
-                                // persona and is where one is picked.
-                                JoinRoute::Invitation => {
-                                    if let Some(interrupted) = self
-                                        .continue_join(
-                                            vtc_did,
-                                            interrupt_rx,
-                                            state,
-                                            tdk,
-                                            config,
-                                            admin_vta,
-                                            profile,
-                                            messaging,
-                                        )
-                                        .await
-                                    {
-                                        return Ok(JoinExit::Exit(interrupted));
-                                    }
-                                }
-                                // An application that already meets the
-                                // requirements is taken by joining — that is what
-                                // presents its statements. One that does not is
-                                // taken by working on it.
-                                JoinRoute::Vetting
-                                    if satisfied_application_persona(state).is_none() =>
-                                {
-                                    match apply_for_vetting(state, config, profile, &vtc_did) {
-                                        Ok(()) => {
-                                            state.active_page = ActivePage::Main;
-                                            return Ok(JoinExit::Returned(None));
-                                        }
-                                        Err(why) => {
-                                            state.join.messages.push(MessageType::Error(why));
-                                        }
-                                    }
-                                }
-                                JoinRoute::Vetting | JoinRoute::OpenRequest => {
-                                    if let Some(interrupted) = self
-                                        .take_join_route(
-                                            vtc_did,
-                                            interrupt_rx,
-                                            state,
-                                            tdk,
-                                            config,
-                                            admin_vta,
-                                            profile,
-                                            messaging,
-                                        )
-                                        .await
-                                    {
-                                        return Ok(JoinExit::Exit(interrupted));
-                                    }
-                                }
+                            if let Some(exit) = self
+                                .take_route(
+                                    route,
+                                    interrupt_rx,
+                                    state,
+                                    tdk,
+                                    config,
+                                    admin_vta,
+                                    profile,
+                                    messaging,
+                                )
+                                .await
+                            {
+                                return Ok(exit);
                             }
                         }
                         Action::JoinVettingApply => {
@@ -1203,6 +1177,44 @@ impl StateHandler {
                                 && let Some(vtc_did) = state.join.pending_vtc.clone()
                             {
                                 show_vetting(state, config, &vtc_did);
+                                // And carry on where the step interrupted. Only
+                                // when the step actually produced what the route
+                                // was waiting for: an overlay closed with Esc
+                                // leaves the route exactly as it was, which is
+                                // the row still saying what it starts with.
+                                let resumable = state.join.resume_route.filter(|route| {
+                                    known_vetting(state)
+                                        .and_then(|k| {
+                                            k.routes.iter().find(|r| r.route == *route).cloned()
+                                        })
+                                        .is_some_and(|r| {
+                                            r.first_step().is_none() && r.available()
+                                        })
+                                });
+                                if let Some(route) = resumable {
+                                    state.join.resume_route = None;
+                                    if let Some(row) =
+                                        known_vetting(state).and_then(|k| k.row_of(route))
+                                        && let Some(known) = known_vetting(state)
+                                    {
+                                        known.row = row;
+                                    }
+                                    if let Some(exit) = self
+                                        .take_route(
+                                            route,
+                                            interrupt_rx,
+                                            state,
+                                            tdk,
+                                            config,
+                                            admin_vta,
+                                            profile,
+                                            messaging,
+                                        )
+                                        .await
+                                    {
+                                        return Ok(exit);
+                                    }
+                                }
                             }
                         }
                         Action::CreatePersonaSubmit => {
@@ -1343,6 +1355,74 @@ impl StateHandler {
             }
             Some(false) => self
                 .continue_join(
+                    vtc_did,
+                    interrupt_rx,
+                    state,
+                    tdk,
+                    config,
+                    admin_vta,
+                    profile,
+                    messaging,
+                )
+                .await
+                .map(JoinExit::Exit),
+        }
+    }
+
+    /// Take one of the community's ways in.
+    ///
+    /// Split out of the keypress so the join can also take a route it had to
+    /// interrupt: a route whose first step was creating a persona resumes here
+    /// once that persona exists, rather than putting the person back on the
+    /// list to press the same key again.
+    #[allow(clippy::too_many_arguments)]
+    async fn take_route(
+        &self,
+        route: JoinRoute,
+        interrupt_rx: &mut broadcast::Receiver<Interrupted>,
+        state: &mut State,
+        tdk: &TDK,
+        config: &mut Config,
+        admin_vta: Option<&VtaClient>,
+        profile: &str,
+        messaging: Option<&Messaging>,
+    ) -> Option<JoinExit> {
+        let vtc_did = state.join.pending_vtc.clone()?;
+        state.join.messages.clear();
+        match route {
+            // The invitation is chosen further on, once the persona it is bound
+            // to is known: the invitation step lists this community's VICs for
+            // that persona and is where one is picked.
+            JoinRoute::Invitation => self
+                .continue_join(
+                    vtc_did,
+                    interrupt_rx,
+                    state,
+                    tdk,
+                    config,
+                    admin_vta,
+                    profile,
+                    messaging,
+                )
+                .await
+                .map(JoinExit::Exit),
+            // An application that already meets the requirements is taken by
+            // joining — that is what presents its statements. One that does not
+            // is taken by working on it.
+            JoinRoute::Vetting if satisfied_application_persona(state).is_none() => {
+                match apply_for_vetting(state, config, profile, &vtc_did) {
+                    Ok(()) => {
+                        state.active_page = ActivePage::Main;
+                        Some(JoinExit::Returned(None))
+                    }
+                    Err(why) => {
+                        state.join.messages.push(MessageType::Error(why));
+                        None
+                    }
+                }
+            }
+            JoinRoute::Vetting | JoinRoute::OpenRequest => self
+                .take_join_route(
                     vtc_did,
                     interrupt_rx,
                     state,
@@ -3645,7 +3725,7 @@ mod vetting_tests {
         let routes = build_routes("Kernel", &requirements(None), None, &[a_persona()], &[]);
         let invitation = option_for(&routes, JoinRoute::Invitation).unwrap();
         assert!(!invitation.available());
-        assert!(invitation.blocked.as_deref().unwrap().contains("none held"));
+        assert!(invitation.blocked().unwrap().contains("none held"));
     }
 
     /// An invitation the community *requires* is asked for on top of the
@@ -3681,39 +3761,78 @@ mod vetting_tests {
         assert!(!invitation.available());
         assert!(
             invitation
-                .blocked
-                .as_deref()
+                .blocked()
                 .unwrap()
                 .contains("does not admit anyone by invitation")
         );
     }
 
-    /// Applying signs cards with a persona, so with none there is nothing to
-    /// apply as. The open request still stands: it mints one on the way.
+    /// Applying signs cards with a persona, and the open request mints one on
+    /// the way — so with none, both are takeable and only one announces a step.
+    ///
+    /// This assertion used to read `!available()` for the vetting route. That
+    /// was the bug: the route the community is telling you about looked like
+    /// the one you could not use.
     #[test]
-    fn applying_needs_a_persona_but_an_open_request_does_not() {
+    fn with_no_persona_both_routes_are_takeable_and_only_one_says_so() {
         let routes = build_routes("Kernel", &requirements(None), None, &[], &[]);
-        assert!(!option_for(&routes, JoinRoute::Vetting).unwrap().available());
+        let vetting = option_for(&routes, JoinRoute::Vetting).unwrap();
+        let open = option_for(&routes, JoinRoute::OpenRequest).unwrap();
+        assert!(vetting.available());
+        assert!(open.available());
         assert!(
-            option_for(&routes, JoinRoute::OpenRequest)
-                .unwrap()
-                .available()
+            vetting.first_step().is_some(),
+            "applying starts by making one"
+        );
+        assert!(
+            open.first_step().is_none(),
+            "an open request mints one inside the sequence; nothing to announce"
         );
     }
 
-    /// The blocked reason names the key that is on the very page it appears on.
-    /// It used to send people to My Identity, which meant leaving the join and
-    /// entering the community's DID again on the way back.
+    /// Applying without a persona is a route you can take, not one that is
+    /// shut: the join can make a persona, so needing one is the route's first
+    /// step. Greyed out, the one route the community was actually telling you
+    /// about read as the one you could not use.
     #[test]
-    fn applying_without_a_persona_points_at_the_key_here() {
+    fn applying_without_a_persona_is_takeable_and_starts_by_making_one() {
         let routes = build_routes("Kernel", &requirements(None), None, &[], &[]);
         let vetting = option_for(&routes, JoinRoute::Vetting).unwrap();
-        let why = vetting.blocked.as_deref().unwrap();
-        assert!(why.contains("Press n"), "{why}");
+        assert!(vetting.available(), "the route is takeable");
+        let step = vetting.first_step().expect("it starts with a step");
+        assert!(step.contains("no persona yet"), "{step}");
+        assert!(vetting.blocked().is_none());
+    }
+
+    /// The line between the two is who has to supply the missing thing. The
+    /// join can make a persona; it cannot make an invitation somebody else
+    /// has to have issued — so that one stays shut.
+    #[test]
+    fn only_what_the_join_cannot_supply_is_blocked() {
+        let routes = build_routes("Kernel", &requirements(None), None, &[], &[]);
         assert!(
-            !why.contains("My Identity"),
-            "the join no longer sends people away for this: {why}"
+            option_for(&routes, JoinRoute::Invitation)
+                .unwrap()
+                .blocked()
+                .is_some(),
+            "an invitation is not something the join can produce"
         );
+        assert!(
+            option_for(&routes, JoinRoute::Vetting)
+                .unwrap()
+                .first_step()
+                .is_some(),
+            "a persona is"
+        );
+    }
+
+    /// With a persona there is no step to announce — the route is simply ready.
+    #[test]
+    fn a_route_with_nothing_missing_announces_no_step() {
+        let routes = build_routes("Kernel", &requirements(None), None, &[a_persona()], &[]);
+        let vetting = option_for(&routes, JoinRoute::Vetting).unwrap();
+        assert!(vetting.available());
+        assert!(vetting.first_step().is_none());
     }
 
     /// Statements ride with an open request whenever the joining persona has
