@@ -280,8 +280,10 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
             Span::styled(
                 // `&value[..47]` sliced by *bytes* — it panics when the cut
                 // lands inside a multi-byte character, which a friendly name or
-                // an agent name may well contain.
-                openvtc_core::display::truncate_did(value, VALUE_WIDTH).into_owned(),
+                // an agent name may well contain. Two of these four rows are
+                // DIDs, so the cut takes the middle: a mediator and an org DID
+                // that share a host are told apart by their tails.
+                openvtc_core::display::shorten_for_display(value, VALUE_WIDTH).into_owned(),
                 Style::new().fg(COLOR_SOFT_PURPLE),
             ),
             Span::styled(edit_hint, Style::new().fg(COLOR_DARK_GRAY)),

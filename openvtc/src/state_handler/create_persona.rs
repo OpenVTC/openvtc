@@ -12,10 +12,9 @@
 //! The minted persona is an orphan (no community) until a join reuses it, and
 //! shows in the identity pane's Personas list.
 //!
-//! Like a join, the mint asks where the persona lives: a new sub-context named
-//! from its label (the default), a context already in use, or the top context.
-//! Its keys and DID are minted in that context, which is recorded as the
-//! persona's origin — so a later join with this persona is presented from it
+//! Every persona gets a sub-context of its own, named from its label — see
+//! [`auto_context`]. Its keys and DID are minted there, which is recorded as
+//! the persona's origin, so a later join with this persona is presented from it
 //! ([`community_context`]).
 
 use affinidi_tdk::TDK;
@@ -25,8 +24,7 @@ use vta_sdk::{client::VtaClient, protocols::did_management::create::WebvhPathMod
 use openvtc_core::config::{
     Config, KeyBackend,
     account::PersonaId,
-    community_context::{self, ContextKind, ContextOption},
-    context_path::parse_sub_context_id,
+    community_context::{self},
 };
 use openvtc_core::errors::OpenVTCError;
 
@@ -37,50 +35,30 @@ use crate::state_handler::setup_sequence::{SetupState, config::ConfigExtension, 
 /// can hold.
 const FALLBACK_SLUG: &str = "persona";
 
-/// The contexts a standalone persona can be minted into — the choice a join
-/// offers a new persona: a new sub-context named from `label` first, then every
-/// context already in use, then the top context — and the new sub-context's
-/// suggested last segment.
-pub(crate) fn context_choice(config: &Config, label: &str) -> (Vec<ContextOption>, String) {
+/// The sub-context a new persona's keys and DID are minted into: one of its
+/// own, named from `label`, clear of every context already in use.
+///
+/// Not a question the overlay asks. A persona's keys live in exactly one
+/// context and that is what isolates it from every other community it is later
+/// presented to — so "a context of its own" is the only answer that keeps the
+/// guarantee the sub-context exists for, and it was being put to someone who
+/// had just been told what a `did:webvh` path is. Choosing otherwise stays
+/// possible where it belongs, on a persona that already has keys somewhere:
+/// [`community_context::context_options`] still offers that persona its own
+/// context and nothing else.
+///
+/// Falls back to the top context only when the account has none — a config with
+/// no `top_context_id`, which the caller has already refused.
+pub(crate) fn auto_context(config: &Config, label: &str) -> Result<String, String> {
     let top = &config.account.top_context_id;
     let suggested = community_context::suggested_context_id(top, label, FALLBACK_SLUG, |id| {
         join_flow::context_taken(config, id)
     })
-    .unwrap_or_else(|_| top.clone());
-    let slug = parse_sub_context_id(&suggested)
-        .filter(|_| suggested != *top)
-        .map(|(_, slug)| slug.to_string())
-        .unwrap_or_default();
-    (
-        community_context::context_options(&config.account, None, &suggested),
-        slug,
-    )
-}
-
-/// The context the highlighted option names. For the new sub-context that is
-/// the typed name under the top context, refused when malformed or already
-/// claimed — choosing a context in use is a different row.
-pub(crate) fn chosen_context(
-    config: &Config,
-    options: &[ContextOption],
-    selected: usize,
-    slug: &str,
-) -> Result<String, String> {
-    let option = options
-        .get(selected)
-        .ok_or_else(|| "Choose a context.".to_string())?;
-    match option.kind {
-        ContextKind::New => {
-            community_context::new_context_id(&config.account.top_context_id, slug, |id| {
-                join_flow::context_taken(config, id)
-            })
-            .map_err(|e| match e {
-                OpenVTCError::Config(message) => message,
-                other => other.to_string(),
-            })
-        }
-        ContextKind::Existing | ContextKind::Top => Ok(option.context_id.clone()),
-    }
+    .map_err(|e| match e {
+        OpenVTCError::Config(message) => message,
+        other => other.to_string(),
+    })?;
+    Ok(suggested)
 }
 
 /// Mint a standalone persona DID into `config` and persist it, returning its id
@@ -435,42 +413,27 @@ mod context_choice_tests {
         config
     }
 
-    /// The same three kinds a join offers, with the new context named from the
-    /// label and kept clear of one already in use.
+    /// Every persona gets a sub-context of its own, named from its label and
+    /// kept clear of one already in use — no choice, and never the top context
+    /// while the account has one.
     #[test]
-    fn a_standalone_persona_is_offered_new_existing_and_top() {
+    fn a_new_persona_lands_in_a_sub_context_of_its_own() {
         let config = config_with_work_context();
-        let (options, slug) = context_choice(&config, "Work");
-        let kinds: Vec<_> = options.iter().map(|o| o.kind).collect();
         assert_eq!(
-            kinds,
-            [ContextKind::New, ContextKind::Existing, ContextKind::Top]
-        );
-        assert_eq!(slug, "work-2");
-        assert_eq!(options[1].context_id, "openvtc/work");
-        assert_eq!(options[2].context_id, "openvtc");
-    }
-
-    #[test]
-    fn the_chosen_row_names_the_context_minted_into() {
-        let config = config_with_work_context();
-        let (options, _) = context_choice(&config, "Laptop");
-        assert_eq!(
-            chosen_context(&config, &options, 0, "laptop").as_deref(),
+            auto_context(&config, "Laptop").as_deref(),
             Ok("openvtc/laptop")
         );
+        // "Work" is taken by the persona already there, so the next one is not
+        // silently minted into the same context as it.
         assert_eq!(
-            chosen_context(&config, &options, 1, "ignored").as_deref(),
-            Ok("openvtc/work")
+            auto_context(&config, "Work").as_deref(),
+            Ok("openvtc/work-2")
         );
-        assert_eq!(
-            chosen_context(&config, &options, 2, "ignored").as_deref(),
-            Ok("openvtc")
-        );
+        // A label a path segment cannot hold still gets its own context.
+        let derived = auto_context(&config, "中文").unwrap();
         assert!(
-            chosen_context(&config, &options, 0, "work").is_err(),
-            "a new context must be new"
+            derived.starts_with("openvtc/") && derived != "openvtc/work",
+            "{derived}"
         );
-        assert!(chosen_context(&config, &options, 0, "a/b").is_err());
     }
 }

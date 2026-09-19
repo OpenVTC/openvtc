@@ -9,7 +9,6 @@ use crate::{
 use affinidi_tdk::{TDK, common::config::TDKConfig};
 use anyhow::Result;
 use openvtc_core::config::{Config, UnlockCode, public_config::PublicConfig};
-use openvtc_core::display::truncate_did;
 #[cfg(feature = "openpgp-card")]
 use secrecy::SecretString;
 use tokio::sync::{
@@ -18,9 +17,13 @@ use tokio::sync::{
 };
 use tracing::{debug, error, warn};
 
-/// Tail-truncate a DID for log-message display, fixed at 30 chars.
+/// Shorten a DID for log-message display, fixed at 30 chars.
+///
+/// From the middle: an activity-log line naming two personas on one host is
+/// only useful if they read differently, and their SCIDs are the part that
+/// does not.
 pub(crate) fn log_did(did: &str) -> std::borrow::Cow<'_, str> {
-    truncate_did(did, 30)
+    openvtc_core::display::shorten_for_display(did, 30)
 }
 
 /// Resolve a DID to a human-readable display name.
@@ -33,7 +36,8 @@ pub(crate) fn log_did(did: &str) -> std::borrow::Cow<'_, str> {
 /// What to call a community on screen.
 ///
 /// Precedence: the user's explicit display name, then the community's verified
-/// agent name, then its DID shortened to `max_len`.
+/// agent name, then its DID shortened to `max_len` — from the middle, so the
+/// host and path that tell two communities apart survive.
 ///
 /// Exists because the middle step kept being missed. Three separate places
 /// wrote `display_name.unwrap_or_else(|| vtc_did)` — the header, the membership
@@ -50,7 +54,9 @@ pub(crate) fn community_label(
     display_name
         .map(str::to_owned)
         .or_else(|| config.agent_name_for(vtc_did).map(str::to_owned))
-        .unwrap_or_else(|| openvtc_core::display::truncate_did(vtc_did, max_len).into_owned())
+        .unwrap_or_else(|| {
+            openvtc_core::display::shorten_for_display(vtc_did, max_len).into_owned()
+        })
 }
 
 /// Render a listener lifecycle event for the activity log.
@@ -737,7 +743,8 @@ impl StateHandler {
                         state.main_page.log(format!(
                             "Persona unavailable: {} — {}",
                             persona.label.clone().unwrap_or_else(|| {
-                                openvtc_core::display::truncate_did(&persona.did, 40).into_owned()
+                                openvtc_core::display::shorten_for_display(&persona.did, 40)
+                                    .into_owned()
                             }),
                             persona.reason.summary()
                         ));
@@ -2636,8 +2643,7 @@ impl StateHandler {
                     Action::CloseCommunitySwitcher | Action::DidSelect(..) |
                     Action::DidConfirmDelete(..) | Action::DidCancelDelete |
                     Action::StartCreatePersona | Action::CreatePersonaInput(..) |
-                    Action::CreatePersonaClose | Action::CreatePersonaContextSelect(..) |
-                    Action::CreatePersonaContextSlug(..) | Action::CreatePersonaBack |
+                    Action::CreatePersonaClose | Action::CreatePersonaBack |
                     Action::CreatePersonaPathChoice(..) | Action::CreatePersonaPathInput(..) |
                     Action::AgentNameManagerInput(..) |
                     Action::AgentNameManagerSelect(..) | Action::AgentNameManagerConfirmRemove |
@@ -3086,40 +3092,22 @@ pub(crate) fn advance_persona_overlay(
             }
             return None;
         }
-        // The path is checked against the hosting server's naming rules before
-        // the contexts are offered, so a typo is caught here rather than after
-        // a context has been created for a mint that was never going to land.
-        CreatePersonaPhase::Path => {
-            if let Err(e) = chosen_path_mode(&overlay) {
-                return fail(state, &e, false);
-            }
-            let (options, slug) = create_persona::context_choice(config, &label);
-            if let Some(o) = state.main_page.create_persona.as_mut() {
-                o.context_options = options;
-                o.context_selected = 0;
-                o.context_slug = slug;
-                o.messages.clear();
-                o.phase = CreatePersonaPhase::Context;
-            }
-            return None;
-        }
-        CreatePersonaPhase::Context => {}
+        // The path is the last question, so this is the commit. A typed path is
+        // checked against the hosting server's naming rules *before* the
+        // context is created, so a typo is caught here rather than after a
+        // context has been made for a mint that was never going to land.
+        CreatePersonaPhase::Path => {}
         CreatePersonaPhase::Working | CreatePersonaPhase::Done | CreatePersonaPhase::Failed => {
             return None;
         }
     }
-    // Re-checked rather than carried from the path phase: Esc goes back to it,
-    // so the answer can change after it was first accepted.
     let path_mode = match chosen_path_mode(&overlay) {
         Ok(mode) => mode,
         Err(e) => return fail(state, &e, false),
     };
-    let context_id = match create_persona::chosen_context(
-        config,
-        &overlay.context_options,
-        overlay.context_selected,
-        &overlay.context_slug,
-    ) {
+    // Not asked: every persona gets a sub-context of its own. See
+    // `create_persona::auto_context`.
+    let context_id = match create_persona::auto_context(config, &label) {
         Ok(context_id) => context_id,
         Err(e) => return fail(state, &e, false),
     };
@@ -3883,26 +3871,6 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
                 o.messages.clear();
             }
         }
-        Action::CreatePersonaContextSelect(i) => {
-            if let Some(o) = state.main_page.create_persona.as_mut()
-                && o.phase == main_page::content::CreatePersonaPhase::Context
-            {
-                o.context_selected = (*i).min(o.context_options.len().saturating_sub(1));
-                o.messages.clear();
-            }
-        }
-        Action::CreatePersonaContextSlug(slug) => {
-            // Only the new sub-context's row takes a typed name.
-            if let Some(o) = state.main_page.create_persona.as_mut()
-                && o.phase == main_page::content::CreatePersonaPhase::Context
-                && o.context_options.get(o.context_selected).is_some_and(|c| {
-                    c.kind == openvtc_core::config::community_context::ContextKind::New
-                })
-            {
-                o.context_slug = slug.chars().take(64).collect();
-                o.messages.clear();
-            }
-        }
         Action::CreatePersonaBack => {
             use main_page::content::CreatePersonaPhase;
             if let Some(o) = state.main_page.create_persona.as_mut() {
@@ -3910,10 +3878,6 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
                 // question: a mint that is running or finished has nothing to
                 // go back to.
                 match o.phase {
-                    CreatePersonaPhase::Context => {
-                        o.phase = CreatePersonaPhase::Path;
-                        o.messages.clear();
-                    }
                     CreatePersonaPhase::Path => {
                         o.phase = CreatePersonaPhase::Label;
                         o.messages.clear();
@@ -4311,7 +4275,7 @@ mod tests {
             line.summary
         );
         assert!(
-            line.summary.contains("did:webvh:QmScid"),
+            line.summary.contains("did:web") && line.summary.contains("magic-depart"),
             "the name must not be the only identifier: {}",
             line.summary
         );
@@ -4497,7 +4461,7 @@ mod tests {
 
     /// `resolve_did_to_display` precedence: a verified agent name is shown when
     /// present, but a user alias overrides it, and an unknown DID falls back to
-    /// the truncated form.
+    /// the shortened form.
     #[test]
     fn resolve_did_to_display_prefers_alias_then_agent_name() {
         use crate::state_handler::dispatch_util::test_config;
@@ -4505,11 +4469,10 @@ mod tests {
         let did = "did:webvh:example.com:alice";
         let mut config = test_config();
 
-        // No alias, no cached name → truncated DID.
-        assert_eq!(
-            resolve_did_to_display(&config, did),
-            openvtc_core::display::truncate_did(did, 30)
-        );
+        // No alias, no cached name → shortened DID, which keeps the path.
+        let shown = resolve_did_to_display(&config, did);
+        assert!(shown.ends_with(":alice"), "{shown}");
+        assert!(shown.chars().count() <= 30, "{shown}");
 
         // A verified agent name is now shown.
         config.set_cached_agent_name(did, Some("example.com/@alice".into()), chrono::Utc::now());
@@ -4724,57 +4687,25 @@ mod tests {
         );
     }
 
-    /// The persona context choice is view state, shared by both loops: moving
-    /// the highlight, naming a new context (on its row only), and going back.
-    /// A community-context view action is too, while one that reaches the VTA
-    /// is left to the loop.
+    /// Stepping back through the overlay is view state, shared by both loops —
+    /// and there are only two questions to step back through, because which
+    /// context a persona is minted into is no longer one of them. A
+    /// community-context view action is view state too, while one that reaches
+    /// the VTA is left to the loop.
     #[test]
-    fn nav_reducer_moves_through_the_persona_context_choice() {
+    fn nav_reducer_steps_back_through_the_persona_overlay() {
         use crate::state_handler::actions::CommunityContextAction;
         use crate::state_handler::main_page::content::{
             CreatePersonaPhase, CreatePersonaState, DeviceAccessView,
         };
-        use openvtc_core::config::community_context::{ContextKind, ContextOption};
 
-        let option = |id: &str, kind| ContextOption {
-            context_id: id.to_string(),
-            kind,
-            communities: vec![],
-            holds_persona_keys: false,
-        };
         let mut state = State::default();
         state.main_page.create_persona = Some(CreatePersonaState {
-            phase: CreatePersonaPhase::Context,
-            context_options: vec![
-                option("openvtc/a", ContextKind::New),
-                option("openvtc", ContextKind::Top),
-            ],
-            context_slug: "a".to_string(),
+            phase: CreatePersonaPhase::Path,
             ..Default::default()
         });
         let overlay = |s: &State| s.main_page.create_persona.clone().unwrap();
 
-        assert!(handle_nav_action(
-            &mut state,
-            &Action::CreatePersonaContextSelect(9)
-        ));
-        assert_eq!(overlay(&state).context_selected, 1);
-        handle_nav_action(&mut state, &Action::CreatePersonaContextSlug("b".into()));
-        assert_eq!(
-            overlay(&state).context_slug,
-            "a",
-            "the top row takes no name"
-        );
-        handle_nav_action(&mut state, &Action::CreatePersonaContextSelect(0));
-        handle_nav_action(
-            &mut state,
-            &Action::CreatePersonaContextSlug("laptop".into()),
-        );
-        assert_eq!(overlay(&state).context_slug, "laptop");
-        // Back walks one phase at a time: the path choice sits between the
-        // context and the label.
-        assert!(handle_nav_action(&mut state, &Action::CreatePersonaBack));
-        assert_eq!(overlay(&state).phase, CreatePersonaPhase::Path);
         assert!(handle_nav_action(&mut state, &Action::CreatePersonaBack));
         assert_eq!(overlay(&state).phase, CreatePersonaPhase::Label);
         assert!(
@@ -4811,9 +4742,8 @@ mod tests {
         ));
     }
 
-    /// The DID path choice: server-assigned by default, typing picks the typed
-    /// row (and keeps the character that picked it), and the typed text
-    /// survives a look at the other row.
+    /// The DID path: server-assigned unless `p` opens the editor, typing keeps
+    /// what was typed, and leaving the editor does not discard it.
     #[test]
     fn nav_reducer_moves_through_the_persona_path_choice() {
         use crate::state_handler::main_page::content::{
@@ -4835,8 +4765,8 @@ mod tests {
              existed, so it stays the default"
         );
 
-        // Typing is the choice — the row need not be selected first, or the
-        // character that started the name would be swallowed.
+        // Once the editor is open every key is the path, including the `p`
+        // that opened it.
         for c in "alice".chars() {
             assert!(handle_nav_action(
                 &mut state,
@@ -4846,8 +4776,8 @@ mod tests {
         assert_eq!(overlay(&state).path_choice, PersonaPathChoice::Custom);
         assert_eq!(overlay(&state).path.value(), "alice");
 
-        // Going back up to the server-assigned row must not discard it: the
-        // rows are a choice, not a mode switch that clears the field.
+        // Leaving the editor must not discard it: Esc is "let the server pick",
+        // and reopening the editor should still hold what was typed.
         handle_nav_action(
             &mut state,
             &Action::CreatePersonaPathChoice(PersonaPathChoice::Auto),
@@ -4856,7 +4786,7 @@ mod tests {
         assert_eq!(
             chosen_path_mode(&overlay(&state)),
             Ok(WebvhPathMode::AutoAssign),
-            "the chosen row decides, not the leftover text"
+            "the chosen outcome decides, not the leftover text"
         );
 
         handle_nav_action(

@@ -67,6 +67,12 @@ pub enum VettingPhase {
         /// degraded loop, which has no inbound arm to hear an answer on — there
         /// the offer would be a key that can only ever fail.
         can_retry: bool,
+        /// Whether the DID resolves to anything. False for an identifier that
+        /// names no document: there is then no endpoint, no mediator route and
+        /// nobody to receive a join request, so "join anyway" is withdrawn as
+        /// well — it would address a message to nothing and then wait for an
+        /// answer nobody can send.
+        resolvable: bool,
     },
     /// It vets, and this is what it asks.
     Known(Box<KnownVetting>),
@@ -208,11 +214,15 @@ pub struct KnownVetting {
     /// an invitation. Constant for the page, and kept because the rest of that
     /// row is rebuilt whenever the persona chooser moves.
     pub vetting_detail_suffix: Option<String>,
-    /// Where a new application's face is worn.
+    /// Where a new application's face is worn. Not a question the page asks —
+    /// [`context_index`](Self::context_index) stays at 0, which is a
+    /// sub-context of the application's own. Kept as a list because the options
+    /// are what decide what that first one *is*: a persona that already has
+    /// keys somewhere has exactly one, its own.
     pub context_options: Vec<ContextOption>,
     pub context_index: usize,
-    /// The highlighted row: a route, then the two "applying as" selectors when
-    /// they are shown. See [`selector`](Self::selector).
+    /// The highlighted row: a route, then its "applying as" selector when it is
+    /// shown. See [`selector`](Self::selector).
     pub row: usize,
 }
 
@@ -228,8 +238,6 @@ pub enum VettingRow {
     Route(usize),
     /// Which persona a new application is made as.
     ApplyAs,
-    /// Which context its face is worn in.
-    Context,
 }
 
 impl KnownVetting {
@@ -245,16 +253,15 @@ impl KnownVetting {
 
     /// How many choices are nested under the vetting route.
     ///
-    /// "Apply as" always, because which persona applies is the decision this
-    /// route *is*. "Context" only when a new application would be started: an
-    /// application under way has already answered it, and its face's context is
-    /// fixed for the application's whole life.
+    /// One: which persona applies, because that is the decision this route
+    /// *is*. Which context the application's face is worn in used to be a
+    /// second row; it is now taken, always, as a sub-context of its own —
+    /// [`context_options`](Self::context_options) still holds it, and index 0
+    /// is the same value the row opened on. A persona already has exactly one
+    /// context it can be presented from, so for every persona but a brand-new
+    /// one the row had a single value anyway.
     fn nested_rows(&self) -> usize {
-        if self.selected_application().is_some() {
-            1
-        } else {
-            2
-        }
+        1
     }
 
     /// Every row the cursor moves over, in the order they are drawn.
@@ -268,9 +275,6 @@ impl KnownVetting {
             // reader has already decided to do something else.
             if option.route == JoinRoute::Vetting && self.row_is_vetting(rows.len() - 1) {
                 rows.push(VettingRow::ApplyAs);
-                if self.selected_application().is_none() {
-                    rows.push(VettingRow::Context);
-                }
             }
         }
         rows
@@ -302,20 +306,17 @@ impl KnownVetting {
     pub fn selected_route(&self) -> Option<&RouteOption> {
         match self.selected()? {
             VettingRow::Route(i) => self.routes.get(i),
-            // The choices belong to the vetting route, so resting on one is
-            // resting on it.
-            VettingRow::ApplyAs | VettingRow::Context => {
-                self.routes.iter().find(|r| r.route == JoinRoute::Vetting)
-            }
+            // The choice belongs to the vetting route, so resting on it is
+            // resting on the route.
+            VettingRow::ApplyAs => self.routes.iter().find(|r| r.route == JoinRoute::Vetting),
         }
     }
 
-    /// Which choice the cursor is on: `0` the persona, `1` the context.
+    /// Which choice the cursor is on: `0` the persona, the only one there is.
     #[must_use]
     pub fn selector(&self) -> Option<usize> {
         match self.selected()? {
             VettingRow::ApplyAs => Some(0),
-            VettingRow::Context => Some(1),
             VettingRow::Route(_) => None,
         }
     }

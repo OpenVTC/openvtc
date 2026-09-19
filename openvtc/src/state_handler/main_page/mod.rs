@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use openvtc_core::{
     config::{Config, KeyBackend, KeyTypes, account::PersonaId},
-    display::truncate_did,
     tasks::TaskType,
 };
 
@@ -1324,12 +1323,13 @@ fn detect_did_git_sign_info(persona_did: &str) -> Option<DidGitSignInfo> {
 }
 
 /// Shortens a DID for display, fitting within `max_width` characters.
-/// Sanitises first to drop ANSI / control bytes from untrusted input,
-/// then delegates to the canonical tail-truncate helper.
+/// Sanitises first to drop ANSI / control bytes from untrusted input, then
+/// delegates to the canonical shortener — which gives up the SCID and then the
+/// middle, so the host and path a reader recognises survive the cut.
 #[must_use]
 pub(crate) fn shorten_did(did: &str, max_width: usize) -> String {
     let sanitized = sanitize_display(did, 256);
-    truncate_did(&sanitized, max_width).into_owned()
+    openvtc_core::display::shorten_for_display(&sanitized, max_width).into_owned()
 }
 
 /// Contains config information that is shown in the main menu header
@@ -2464,12 +2464,15 @@ mod tests {
         assert_eq!(result, short); // fits within 60 chars
     }
 
+    /// Long input loses its middle, not its tail: the end of an identifier is
+    /// what tells two of them apart, and the old tail cut dropped exactly that.
     #[test]
     fn test_shorten_did_long_input() {
         let long = "did:test:abcdefghijklmnopqrstuvwxyz";
         let result = shorten_did(long, 20);
-        assert!(result.ends_with("..."));
-        assert!(result.len() <= 20);
+        assert!(result.ends_with("vwxyz"), "{result}");
+        assert!(result.starts_with("did:"), "{result}");
+        assert!(result.chars().count() <= 20, "{result}");
     }
 
     #[test]

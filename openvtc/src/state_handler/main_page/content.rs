@@ -401,11 +401,16 @@ pub struct CommunitySwitcherState {
 
 /// "Create a new persona DID" overlay. `Some` while open; floats over the main
 /// page like the switcher. Walks `Label` (enter a label) → `Path` (where the DID
-/// lives on the host) → `Context` (which VTA context holds its keys) →
-/// `Working` (the VTA mint runs) → `Done` (show + copy the DID) or `Failed`. The
-/// minted persona is standalone (orphan) — handing its DID to a VTC lets the VTC
-/// issue a VIC bound to it, which a later join then redeems on the clean
-/// join-as-subject path.
+/// lives on the host) → `Working` (the VTA mint runs) → `Done` (show + copy the
+/// DID) or `Failed`. The minted persona is standalone (orphan) — handing its DID
+/// to a VTC lets the VTC issue a VIC bound to it, which a later join then
+/// redeems on the clean join-as-subject path.
+///
+/// Which VTA context holds the persona's keys is **not** a step: every persona
+/// gets a sub-context of its own, named from its label. It was a question with
+/// one sensible answer, asked of someone who had just been told what a `did:webvh`
+/// path is — and answering it any other way gives up the isolation the
+/// sub-context exists for.
 #[derive(Clone, Debug, Default)]
 pub struct CreatePersonaState {
     /// Which step of the overlay is showing.
@@ -424,13 +429,6 @@ pub struct CreatePersonaState {
     pub did: Option<String>,
     /// Whether [`did`](Self::did) was copied to the clipboard.
     pub copied: bool,
-    /// Contexts the persona can be minted into, the new sub-context first
-    /// (`Context` phase).
-    pub context_options: Vec<ContextOption>,
-    /// Highlighted row in [`context_options`](Self::context_options).
-    pub context_selected: usize,
-    /// The name typed for a new sub-context: its last path segment.
-    pub context_slug: String,
 }
 
 /// "Manage agent names" overlay for a persona. `Some` while open; floats over
@@ -501,13 +499,9 @@ pub enum CreatePersonaPhase {
     /// Awaiting the persona label (text input).
     #[default]
     Label,
-    /// Choosing where the DID sits on the hosting server: a path the server
-    /// allocates (a random mnemonic), or one the operator types.
+    /// Where the DID sits on the hosting server. The server allocates a random
+    /// path unless the operator asks (`p`) to type one.
     Path,
-    /// Choosing the VTA context the persona's keys and DID are minted in: a
-    /// new sub-context named from the label, one already in use, or the top
-    /// context.
-    Context,
     /// The VTA mint sequence is running (input locked).
     Working,
     /// The persona was minted; show the DID + copy affordance.
@@ -1952,17 +1946,23 @@ pub enum VettingMode {
         /// steps later at the card preview.
         required: Vec<String>,
     },
-    /// Ask a vetter, with the ticket code they gave us or the link they showed.
+    /// Ask a vetter, with the ticket link from their QR code.
+    ///
+    /// One field. The link carries the vetter's DID as well as the ticket, so
+    /// asking for the DID separately was asking for something the person had
+    /// just pasted — and the form filled that field in for them anyway, which
+    /// left a box on screen whose only job was to be overwritten.
     RequestVetter {
         application_id: String,
+        /// The link, as pasted or typed.
+        entry: String,
+        /// The vetter's DID, read out of the link. Shown, not typed.
         vetter: String,
-        code: String,
-        /// A scanned ticket from a pasted link, in place of the code.
+        /// The scanned ticket read out of the same link.
         ticket: Option<request::v0_1::Ticket>,
         /// What the person should know before sending, e.g. how this vetter
         /// hands out tickets.
         note: Option<String>,
-        field: usize,
     },
     /// Search a community's vetter directory.
     Directory(Box<DirectoryView>),
@@ -2016,6 +2016,14 @@ pub enum VettingMode {
     },
     /// Confirm abandoning one of our own applications.
     ConfirmAbandon { application_id: String },
+    /// Confirm deleting one of our own tickets.
+    ///
+    /// A ticket is the only thing that gets a request answered, and the people
+    /// holding one are not reachable to be told it is gone: their request is
+    /// simply refused with `invalidTicket`, and nothing appears at either end
+    /// saying which ticket it was. `d` did that on one keypress, next to `u`
+    /// and `y`, which copy.
+    ConfirmDeleteTicket { ticket_id: String },
 }
 
 impl VettingMode {
@@ -2028,10 +2036,7 @@ impl VettingMode {
                 field: 0,
                 ..
             } => Some(community),
-            VettingMode::RequestVetter {
-                vetter, field: 0, ..
-            } => Some(vetter),
-            VettingMode::RequestVetter { code, field: 1, .. } => Some(code),
+            VettingMode::RequestVetter { entry, .. } => Some(entry),
             VettingMode::Directory(view) => view.text().map(String::as_str),
             VettingMode::Profile(form) => match &form.event {
                 Some(event) => event.text().map(String::as_str),
@@ -2052,10 +2057,7 @@ impl VettingMode {
                 field: 0,
                 ..
             } => Some(community),
-            VettingMode::RequestVetter {
-                vetter, field: 0, ..
-            } => Some(vetter),
-            VettingMode::RequestVetter { code, field: 1, .. } => Some(code),
+            VettingMode::RequestVetter { entry, .. } => Some(entry),
             VettingMode::Directory(view) => view.text_mut(),
             VettingMode::Profile(form) => form.focused_text_mut(),
             VettingMode::NewFace(form) if form.focus == NewFaceFocus::Name => Some(&mut form.name),
@@ -2367,6 +2369,11 @@ pub struct RequestRow {
     pub eligibility: Option<(bool, String)>,
     /// Whether the community has since revoked their grant.
     pub grant: Option<(LineTone, String)>,
+    /// Why a refused request was refused, in words — kept off
+    /// [`state`](Self::state) because that is one unwrapped line, and this is a
+    /// sentence. The wire code alone (`vetting/request:invalidTicket`) told the
+    /// applicant nothing they could act on.
+    pub refusal: Option<String>,
 }
 
 /// Where a desk request is, for choosing what the keys do.

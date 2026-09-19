@@ -42,38 +42,26 @@ pub fn handle_key(
                 let _ = action_tx.send(Action::CreatePersonaInput(key));
             }
         },
+        // Two screens behind one phase. The default one asks nothing — the
+        // server picks the path — so its only keys are "create" and the one
+        // that opens the other screen. Once a path is being typed every key
+        // belongs to the input, which is why `p` is bound here and nowhere
+        // inside the editor.
         CreatePersonaPhase::Path => {
             use crate::state_handler::main_page::content::PersonaPathChoice;
+            let typing = overlay.path_choice == PersonaPathChoice::Custom;
             let action = match key.code {
-                KeyCode::Up => Action::CreatePersonaPathChoice(PersonaPathChoice::Auto),
-                KeyCode::Down => Action::CreatePersonaPathChoice(PersonaPathChoice::Custom),
                 KeyCode::Enter => Action::CreatePersonaSubmit,
+                // Esc leaves the path editor rather than the whole step: the
+                // way out of "my own path" is "let the server pick", and a key
+                // that skipped both screens at once would take the label with
+                // it.
+                KeyCode::Esc if typing => Action::CreatePersonaPathChoice(PersonaPathChoice::Auto),
                 KeyCode::Esc => Action::CreatePersonaBack,
-                // Everything else edits the path, which is also how the
-                // typed row gets chosen — see `CreatePersonaPathInput`.
-                _ => Action::CreatePersonaPathInput(key),
-            };
-            let _ = action_tx.send(action);
-        }
-        CreatePersonaPhase::Context => {
-            let selected = overlay.context_selected;
-            let last = overlay.context_options.len().saturating_sub(1);
-            let new_row = overlay.context_options.get(selected).is_some_and(|o| {
-                o.kind == openvtc_core::config::community_context::ContextKind::New
-            });
-            let action = match key.code {
-                KeyCode::Up => Action::CreatePersonaContextSelect(selected.saturating_sub(1)),
-                KeyCode::Down => Action::CreatePersonaContextSelect((selected + 1).min(last)),
-                KeyCode::Enter => Action::CreatePersonaSubmit,
-                KeyCode::Esc => Action::CreatePersonaBack,
-                KeyCode::Char(c) if new_row => {
-                    Action::CreatePersonaContextSlug(format!("{}{c}", overlay.context_slug))
+                KeyCode::Char('p') if !typing => {
+                    Action::CreatePersonaPathChoice(PersonaPathChoice::Custom)
                 }
-                KeyCode::Backspace if new_row => {
-                    let mut slug = overlay.context_slug.clone();
-                    slug.pop();
-                    Action::CreatePersonaContextSlug(slug)
-                }
+                _ if typing => Action::CreatePersonaPathInput(key),
                 _ => return,
             };
             let _ = action_tx.send(action);
@@ -96,7 +84,7 @@ pub fn handle_key(
 }
 
 pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
-    use crate::state_handler::main_page::content::CreatePersonaPhase;
+    use crate::state_handler::main_page::content::{CreatePersonaPhase, PersonaPathChoice};
     use ratatui::{
         layout::{Constraint, Flex},
         style::Style,
@@ -104,27 +92,26 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
     };
 
     let area = frame.area();
-    // The context and path choices both carry full paths, so they are wider
-    // and grow with what they list. `Done` shows the minted `did:webvh` in
-    // full — around a hundred characters of SCID, host and path — and at 64 it
-    // was cut off mid-identifier, which is the one thing on that screen worth
+    // The path screen carries a whole worked DID, and `Done` shows the minted
+    // one in full — around a hundred characters of SCID, host and path — which
+    // at 64 was cut off mid-identifier, the one thing on that screen worth
     // reading: it is what you hand to a community to be issued an invitation.
-    let choosing = overlay.phase == CreatePersonaPhase::Context;
+    let label = overlay.phase == CreatePersonaPhase::Label;
     let path = overlay.phase == CreatePersonaPhase::Path;
     let done = overlay.phase == CreatePersonaPhase::Done;
-    let popup_width = if choosing || path || done {
-        96u16
-    } else {
-        64u16
-    }
-    .min(area.width.saturating_sub(4));
-    let popup_height = if choosing {
-        (overlay.context_options.len() + overlay.messages.len()) as u16 + 9
-    } else if path {
-        // Two rows, the worked example and its pointer, the explanatory lines,
-        // the charset hint, the key line, and whatever the path was refused
-        // for.
-        overlay.messages.len() as u16 + 17
+    let popup_width = if path || done { 96u16 } else { 76u16 }.min(area.width.saturating_sub(4));
+    let popup_height = if path {
+        // The worked example and its pointer, the explanatory lines, the
+        // agent-name note or the typed path and its charset hint, the key line,
+        // and whatever the path was refused for.
+        overlay.messages.len() as u16
+            + if overlay.path_choice == PersonaPathChoice::Custom {
+                17
+            } else {
+                16
+            }
+    } else if label {
+        overlay.messages.len() as u16 + 14
     } else {
         11u16
     }
@@ -148,15 +135,43 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
 
     let mut lines: Vec<Line> = Vec::new();
     match overlay.phase {
+        // "Label" on its own is a box with no clue what belongs in it, on the
+        // first screen of the first thing anyone makes here. What it is *for*
+        // is one line, and an example sitting in the empty field is worth more
+        // than another sentence explaining it.
         CreatePersonaPhase::Label => {
             lines.push(Line::from(Span::styled(
-                "Label for the new persona:",
+                "What should this persona be called?",
                 Style::new().fg(COLOR_TEXT_DEFAULT),
             )));
+            lines.push(Line::default());
             lines.push(Line::from(Span::styled(
-                format!("> {}", overlay.label.value()),
-                Style::new().fg(COLOR_SOFT_PURPLE).bold(),
+                "  A name for you, to tell your personas apart in OpenVTC — and it names",
+                Style::new().fg(COLOR_BORDER),
             )));
+            lines.push(Line::from(Span::styled(
+                "  the context its keys live in. Communities are shown the DID, not this,",
+                Style::new().fg(COLOR_BORDER),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  and you can rename it later.",
+                Style::new().fg(COLOR_BORDER),
+            )));
+            lines.push(Line::default());
+            let typed = overlay.label.value();
+            lines.push(Line::from(vec![
+                Span::styled("> ", Style::new().fg(COLOR_SOFT_PURPLE).bold()),
+                if typed.is_empty() {
+                    // A placeholder, not a value: dimmed, and gone the moment
+                    // anything is typed, so nobody submits the example.
+                    Span::styled(
+                        "e.g. Work, Conference, Alice",
+                        Style::new().fg(COLOR_BORDER),
+                    )
+                } else {
+                    Span::styled(typed.to_string(), Style::new().fg(COLOR_SOFT_PURPLE).bold())
+                },
+            ]));
             lines.push(Line::default());
             for msg in &overlay.messages {
                 lines.push(Line::from(Span::styled(
@@ -170,7 +185,6 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
             )));
         }
         CreatePersonaPhase::Path => {
-            use crate::state_handler::main_page::content::PersonaPathChoice;
             let custom = overlay.path_choice == PersonaPathChoice::Custom;
             lines.push(Line::from(Span::styled(
                 "Where should this persona's DID live on the hosting server?",
@@ -180,118 +194,91 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
             // "Path" means nothing until you have seen one in place. A DID with
             // its last segment picked out says in one line what a paragraph
             // about hosting servers does not — and this is the only screen
-            // where the choice is open, because the path is inside the
+            // where it is open at all, because the path is inside the
             // identifier and nothing can move it afterwards.
             lines.push(Line::from(Span::styled(
                 "  The path is the last part of the DID:",
                 Style::new().fg(COLOR_BORDER),
             )));
             let lead = "did:webvh:QmXi1\u{2026}U83F:webvh.example.com:";
+            // The example shows the outcome of the screen you are on, so the
+            // default is not illustrated with a name nobody is going to get.
+            let typed = overlay.path.value();
+            let example = if !custom {
+                "x7f2q9"
+            } else if typed.is_empty() {
+                "alice"
+            } else {
+                typed
+            };
             lines.push(Line::from(vec![
                 Span::raw("    "),
                 Span::styled(lead, Style::new().fg(COLOR_TEXT_DEFAULT)),
-                Span::styled("alice", Style::new().fg(COLOR_SUCCESS).bold()),
+                Span::styled(example.to_string(), Style::new().fg(COLOR_SUCCESS).bold()),
             ]));
             lines.push(Line::from(vec![
                 Span::raw(" ".repeat(4 + lead.chars().count())),
                 Span::styled("\u{2514} the path", Style::new().fg(COLOR_SUCCESS)),
             ]));
-            lines.push(Line::from(Span::styled(
-                "  It is part of the identifier, so it cannot be changed afterwards.",
-                Style::new().fg(COLOR_BORDER),
-            )));
-            lines.push(Line::default());
-
-            let row = |selected: bool, text: String| {
-                let style = if selected {
-                    Style::new().fg(COLOR_SUCCESS).bold()
-                } else {
-                    Style::new().fg(COLOR_TEXT_DEFAULT)
-                };
-                Line::from(Span::styled(
-                    format!("{}{text}", if selected { "▸ " } else { "  " }),
-                    style,
-                ))
-            };
-            lines.push(row(
-                !custom,
-                "Server-assigned  (a random, unguessable path)".to_string(),
-            ));
-            lines.push(row(
-                custom,
-                format!(
-                    "My own path:  {}{}",
-                    overlay.path.value(),
-                    if custom { "▎" } else { "" }
-                ),
-            ));
+            if custom {
+                lines.push(Line::from(Span::styled(
+                    "  It is part of the identifier, so it cannot be changed afterwards.",
+                    Style::new().fg(COLOR_BORDER),
+                )));
+                lines.push(Line::default());
+                lines.push(Line::from(vec![
+                    Span::styled("  Your path:  ", Style::new().fg(COLOR_TEXT_DEFAULT)),
+                    Span::styled(
+                        format!("{typed}\u{258e}"),
+                        Style::new().fg(COLOR_SUCCESS).bold(),
+                    ),
+                ]));
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    "Lowercase letters, digits and hyphens; '/' separates segments. A typed",
+                    Style::new().fg(COLOR_BORDER),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "path is public forever, and may already be taken.",
+                    Style::new().fg(COLOR_BORDER),
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "  It is part of the identifier, so it cannot be changed",
+                    Style::new().fg(COLOR_BORDER),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "  afterwards — so the server picks a random one.",
+                    Style::new().fg(COLOR_BORDER),
+                )));
+                lines.push(Line::default());
+                // The question this screen used to leave hanging. A typed path
+                // reads like the way to get a memorable identifier, and it is
+                // the expensive way: permanent, public, and possibly taken. The
+                // cheap way exists and is reversible, so say so here rather
+                // than let someone buy the permanent one by mistake.
+                lines.push(Line::from(Span::styled(
+                    "A memorable name does not have to live in the DID: an agent name",
+                    Style::new().fg(COLOR_BORDER),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "(example.com/@alice) points at it, and can be changed later.",
+                    Style::new().fg(COLOR_BORDER),
+                )));
+            }
+            for msg in &overlay.messages {
+                lines.push(Line::from(Span::styled(
+                    msg.clone(),
+                    Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+                )));
+            }
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
                 if custom {
-                    "Lowercase letters, digits and hyphens; '/' separates segments."
+                    "⏎ create   esc: let the server pick"
                 } else {
-                    "A typed path is public and memorable — and may already be taken."
+                    "⏎ create   p: choose the path yourself   esc back"
                 },
-                Style::new().fg(COLOR_BORDER),
-            )));
-            for msg in &overlay.messages {
-                lines.push(Line::from(Span::styled(
-                    msg.clone(),
-                    Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
-                )));
-            }
-            lines.push(Line::default());
-            lines.push(Line::from(Span::styled(
-                "↑/↓ choose   type: name the path   ⏎ next   esc back",
-                Style::new().fg(COLOR_BORDER),
-            )));
-        }
-        CreatePersonaPhase::Context => {
-            use openvtc_core::config::community_context::ContextKind;
-            lines.push(Line::from(Span::styled(
-                "Where should this persona's keys and DID live?",
-                Style::new().fg(COLOR_TEXT_DEFAULT),
-            )));
-            lines.push(Line::from(Span::styled(
-                "A persona is presented from the context it is minted in.",
-                Style::new().fg(COLOR_BORDER),
-            )));
-            lines.push(Line::default());
-            for (i, option) in overlay.context_options.iter().enumerate() {
-                let selected = i == overlay.context_selected;
-                let text = match option.kind {
-                    ContextKind::New => {
-                        let parent = openvtc_core::config::context_path::parse_sub_context_id(
-                            &option.context_id,
-                        )
-                        .map_or(option.context_id.as_str(), |(parent, _)| parent);
-                        format!(
-                            "{parent}/{}{}  (a context of its own)",
-                            overlay.context_slug,
-                            if selected { "▎" } else { "" }
-                        )
-                    }
-                    ContextKind::Existing | ContextKind::Top => option.summary(),
-                };
-                let style = if selected {
-                    Style::new().fg(COLOR_SUCCESS).bold()
-                } else {
-                    Style::new().fg(COLOR_TEXT_DEFAULT)
-                };
-                lines.push(Line::from(Span::styled(
-                    format!("{}{text}", if selected { "▸ " } else { "  " }),
-                    style,
-                )));
-            }
-            for msg in &overlay.messages {
-                lines.push(Line::from(Span::styled(
-                    msg.clone(),
-                    Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
-                )));
-            }
-            lines.push(Line::default());
-            lines.push(Line::from(Span::styled(
-                "↑/↓ choose   type: name the new context   ⏎ create   esc back",
                 Style::new().fg(COLOR_BORDER),
             )));
         }

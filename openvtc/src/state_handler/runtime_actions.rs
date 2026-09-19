@@ -1132,8 +1132,6 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::StartCreatePersona
         | Action::CreatePersonaInput(..)
         | Action::CreatePersonaClose
-        | Action::CreatePersonaContextSelect(..)
-        | Action::CreatePersonaContextSlug(..)
         | Action::CreatePersonaBack
         | Action::CreatePersonaPathChoice(..)
         | Action::CreatePersonaPathInput(..)

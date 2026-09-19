@@ -443,7 +443,7 @@ pub(crate) fn membership_profile_label(
     persona_did: &str,
     agent_name: impl FnOnce(&str) -> Option<String>,
 ) -> String {
-    let who = crate::display::truncate_did(persona_did, PROFILE_LABEL_DID_WIDTH);
+    let who = crate::display::shorten_for_display(persona_did, PROFILE_LABEL_DID_WIDTH);
     let Some(c) = membership else {
         // No community yet (State A). The DID is then the only thing that
         // distinguishes this listener, so it carries the label alone rather
@@ -1595,8 +1595,9 @@ mod membership_profile_label_tests {
 
     const VTC_DID: &str = "did:webvh:QmScidCommunityCCCCCCCCCCCC:vtc.example:acme";
     const PERSONA_DID: &str = "did:webvh:QmScidPersonaAAAAAAAAAAAAAA:vtc.example:alice";
-    /// What `PERSONA_DID` renders as inside a label.
-    const PERSONA_SHORT: &str = "did:webvh:QmScidPersonaAAAAAA...";
+    /// What `PERSONA_DID` renders as inside a label: the SCID gives way, and
+    /// the host and path — the parts that tell two personas apart — survive.
+    const PERSONA_SHORT: &str = "did:webv\u{2026}AAAA:vtc.example:alice";
 
     fn membership(display_name: Option<&str>) -> CommunityRecord {
         CommunityRecord::new_pending(

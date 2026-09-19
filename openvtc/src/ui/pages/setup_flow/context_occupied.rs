@@ -123,7 +123,10 @@ impl ContextOccupied {
             lines.push(Line::default());
             for did in dids.iter().take(4) {
                 lines.push(Line::styled(
-                    format!("    {}", openvtc_core::display::truncate_did(did, 58)),
+                    format!(
+                        "    {}",
+                        openvtc_core::display::shorten_for_display(did, 58)
+                    ),
                     Style::new().fg(COLOR_BORDER),
                 ));
             }
