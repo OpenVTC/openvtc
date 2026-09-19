@@ -46,9 +46,9 @@ use crate::{
         StateHandler,
         actions::Action,
         join::{
-            ApplyAs, AvailableVic, IdentityPick, JoinApplication, JoinPage, JoinRoute, JoinState,
-            JoinVettingView, KnownVetting, PersonaOption, PresentedInvitation, RouteOption,
-            RouteState, VettingPhase,
+            ApplyAs, AvailableVic, FirstStepKind, IdentityPick, JoinApplication, JoinPage,
+            JoinRoute, JoinState, JoinVettingView, KnownVetting, PersonaOption,
+            PresentedInvitation, RouteOption, RouteState, VettingPhase,
         },
         main_page::content::{VicLifecycle, VicSummary},
         main_page::{sanitize_display, shorten_did},
@@ -209,20 +209,30 @@ fn build_routes(
             } else {
                 invitations_held(invitations)
             },
-            // An invitation is the one prerequisite the join cannot supply:
-            // it is a credential somebody else has to have issued to you. So
-            // holding none blocks the route rather than starting it a step
-            // earlier — there is no step that would produce one.
+            // Holding none is two different situations, and the difference is
+            // provable rather than a guess. A VIC must name a
+            // `credentialSubject.id` — `validate_invitation_credential` refuses
+            // one without it, so there is no such thing as a bearer invitation
+            // — and that subject is a persona DID. With no personas, no valid
+            // invitation can be *for* you, and the row is genuinely shut. With
+            // personas, one may well exist that this vault has not seen, and
+            // pasting it is a step the join can walk you through.
             state: if refuses {
                 RouteState::Blocked(format!("{community} does not admit anyone by invitation"))
-            } else if held == 0 {
+            } else if held > 0 {
+                RouteState::Ready
+            } else if personas.is_empty() {
                 RouteState::Blocked(
-                    "none held for this community — paste one on the invitation step if you \
-                     have one the vault has not seen"
+                    "an invitation is issued to one of your personas, and you have none yet"
                         .to_string(),
                 )
             } else {
-                RouteState::Ready
+                RouteState::FirstStep {
+                    note: "none is in your vault, so this starts by asking you to paste one — \
+                           if you have none, the step offers to join without it"
+                        .to_string(),
+                    kind: FirstStepKind::OnTheWay,
+                }
             },
         });
     }
@@ -248,11 +258,12 @@ fn build_routes(
         // actually telling you about read as the one you could not use.
         None if personas.is_empty() => (
             "no application yet".to_string(),
-            RouteState::FirstStep(
-                "you have no persona yet, so this starts by creating one — every card is \
-                 signed by the DID you join with"
+            RouteState::FirstStep {
+                note: "you have no persona yet, so this starts by creating one — every card \
+                       is signed by the DID you join with"
                     .to_string(),
-            ),
+                kind: FirstStepKind::CreatePersona,
+            },
         ),
         None => ("no application yet".to_string(), RouteState::Ready),
     };
@@ -1096,11 +1107,18 @@ impl StateHandler {
                                     let _ = self.state_tx.send(state.clone());
                                     continue;
                                 }
-                                // A route that starts with a step: do the step,
-                                // and remember what it was on the way to. That
-                                // is the difference between being guided and
-                                // being told to go and configure something.
-                                Some(option) if option.first_step().is_some() => {
+                                // A route that starts with the join doing
+                                // something: do it, and remember what it was on
+                                // the way to. That is the difference between
+                                // being guided and being told to go and
+                                // configure something elsewhere.
+                                //
+                                // A step that is merely the next page needs none
+                                // of this — taking the route reaches it.
+                                Some(option)
+                                    if option.first_step_kind()
+                                        == Some(FirstStepKind::CreatePersona) =>
+                                {
                                     let route = option.route;
                                     state.join.messages.clear();
                                     state.join.resume_route = Some(route);
@@ -3718,14 +3736,33 @@ mod vetting_tests {
         assert!(invitation.detail.contains("2026-12-01"));
     }
 
-    /// Holding none is an answer, not a reason to drop the row — "why can I
-    /// not use an invitation?" is what the page exists to settle.
+    /// Holding none is two situations, and which one it is follows from the
+    /// credential rather than from a guess: a VIC must name a
+    /// `credentialSubject.id`, so with no persona no valid invitation can be
+    /// *for* you. That row is shut. With a persona, one may exist that this
+    /// vault has not seen, and pasting it is a step the join can walk through.
     #[test]
-    fn holding_no_invitation_keeps_the_row_and_gives_the_reason() {
-        let routes = build_routes("Kernel", &requirements(None), None, &[a_persona()], &[]);
-        let invitation = option_for(&routes, JoinRoute::Invitation).unwrap();
-        assert!(!invitation.available());
-        assert!(invitation.blocked().unwrap().contains("none held"));
+    fn holding_no_invitation_is_shut_without_a_persona_and_a_step_with_one() {
+        let no_persona = build_routes("Kernel", &requirements(None), None, &[], &[]);
+        let invitation = option_for(&no_persona, JoinRoute::Invitation).unwrap();
+        assert!(
+            !invitation.available(),
+            "nothing could have been issued yet"
+        );
+        assert!(
+            invitation.blocked().unwrap().contains("you have none yet"),
+            "{:?}",
+            invitation.blocked()
+        );
+
+        let with_persona = build_routes("Kernel", &requirements(None), None, &[a_persona()], &[]);
+        let invitation = option_for(&with_persona, JoinRoute::Invitation).unwrap();
+        assert!(invitation.available(), "one could exist outside the vault");
+        assert!(
+            invitation.first_step().unwrap().contains("paste one"),
+            "{:?}",
+            invitation.first_step()
+        );
     }
 
     /// An invitation the community *requires* is asked for on top of the
@@ -3804,9 +3841,33 @@ mod vetting_tests {
         assert!(vetting.blocked().is_none());
     }
 
+    /// Not every first step is the same step. Creating a persona is something
+    /// the join has to do *before* the route can proceed; being asked to paste
+    /// an invitation is a page the route already leads to. Taking the second
+    /// must not open the persona overlay.
+    #[test]
+    fn the_two_first_steps_are_different_steps() {
+        let routes = build_routes("Kernel", &requirements(None), None, &[a_persona()], &[]);
+        assert_eq!(
+            option_for(&routes, JoinRoute::Invitation)
+                .unwrap()
+                .first_step_kind(),
+            Some(FirstStepKind::OnTheWay),
+        );
+
+        let routes = build_routes("Kernel", &requirements(None), None, &[], &[]);
+        assert_eq!(
+            option_for(&routes, JoinRoute::Vetting)
+                .unwrap()
+                .first_step_kind(),
+            Some(FirstStepKind::CreatePersona),
+        );
+    }
+
     /// The line between the two is who has to supply the missing thing. The
-    /// join can make a persona; it cannot make an invitation somebody else
-    /// has to have issued — so that one stays shut.
+    /// join can make a persona; it cannot make an invitation somebody else has
+    /// to have issued — and with no persona there is not even a DID one could
+    /// have been issued to.
     #[test]
     fn only_what_the_join_cannot_supply_is_blocked() {
         let routes = build_routes("Kernel", &requirements(None), None, &[], &[]);
@@ -3815,14 +3876,14 @@ mod vetting_tests {
                 .unwrap()
                 .blocked()
                 .is_some(),
-            "an invitation is not something the join can produce"
+            "no persona means no subject an invitation could name"
         );
         assert!(
             option_for(&routes, JoinRoute::Vetting)
                 .unwrap()
                 .first_step()
                 .is_some(),
-            "a persona is"
+            "a persona is something the join can make"
         );
     }
 

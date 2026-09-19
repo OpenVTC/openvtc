@@ -107,11 +107,30 @@ pub enum RouteState {
     /// Take it and it starts with this, then proceeds. Said in the second
     /// person and in order — it is a description of what happens next, not a
     /// refusal dressed up.
-    FirstStep(String),
+    FirstStep {
+        /// What the step is, for the row to show.
+        note: String,
+        /// Which step, for the flow to take. Not every first step is the same
+        /// one: creating a persona is something the join has to *do* before the
+        /// route can proceed, while being asked to paste an invitation is
+        /// simply what the next page of the route already does. Deciding that
+        /// from the route's identity would put the same reasoning in two
+        /// places, and get it wrong in one of them.
+        kind: FirstStepKind,
+    },
     /// It cannot be taken, and why. Reserved for what the join cannot supply:
     /// an invitation you were never given, or a community that admits nobody
     /// that way.
     Blocked(String),
+}
+
+/// What taking a route has to do before it can proceed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstStepKind {
+    /// Open the create-persona overlay, then take the route.
+    CreatePersona,
+    /// Nothing extra — the step is a page the route already leads to.
+    OnTheWay,
 }
 
 /// One way in, as the routes list shows it.
@@ -140,7 +159,16 @@ impl RouteOption {
     #[must_use]
     pub fn first_step(&self) -> Option<&str> {
         match &self.state {
-            RouteState::FirstStep(step) => Some(step),
+            RouteState::FirstStep { note, .. } => Some(note),
+            _ => None,
+        }
+    }
+
+    /// Which step that is.
+    #[must_use]
+    pub fn first_step_kind(&self) -> Option<FirstStepKind> {
+        match &self.state {
+            RouteState::FirstStep { kind, .. } => Some(*kind),
             _ => None,
         }
     }
