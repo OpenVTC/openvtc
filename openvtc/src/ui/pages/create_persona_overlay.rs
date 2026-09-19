@@ -105,17 +105,26 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
 
     let area = frame.area();
     // The context and path choices both carry full paths, so they are wider
-    // and grow with what they list.
+    // and grow with what they list. `Done` shows the minted `did:webvh` in
+    // full — around a hundred characters of SCID, host and path — and at 64 it
+    // was cut off mid-identifier, which is the one thing on that screen worth
+    // reading: it is what you hand to a community to be issued an invitation.
     let choosing = overlay.phase == CreatePersonaPhase::Context;
     let path = overlay.phase == CreatePersonaPhase::Path;
-    let popup_width =
-        if choosing || path { 84u16 } else { 64u16 }.min(area.width.saturating_sub(4));
+    let done = overlay.phase == CreatePersonaPhase::Done;
+    let popup_width = if choosing || path || done {
+        96u16
+    } else {
+        64u16
+    }
+    .min(area.width.saturating_sub(4));
     let popup_height = if choosing {
         (overlay.context_options.len() + overlay.messages.len()) as u16 + 9
     } else if path {
-        // Two rows, two explanatory lines, the charset hint, the key line,
-        // and whatever the path was refused for.
-        overlay.messages.len() as u16 + 13
+        // Two rows, the worked example and its pointer, the explanatory lines,
+        // the charset hint, the key line, and whatever the path was refused
+        // for.
+        overlay.messages.len() as u16 + 17
     } else {
         11u16
     }
@@ -167,8 +176,28 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
                 "Where should this persona's DID live on the hosting server?",
                 Style::new().fg(COLOR_TEXT_DEFAULT),
             )));
+            lines.push(Line::default());
+            // "Path" means nothing until you have seen one in place. A DID with
+            // its last segment picked out says in one line what a paragraph
+            // about hosting servers does not — and this is the only screen
+            // where the choice is open, because the path is inside the
+            // identifier and nothing can move it afterwards.
             lines.push(Line::from(Span::styled(
-                "The path is part of the DID, and cannot be changed afterwards.",
+                "  The path is the last part of the DID:",
+                Style::new().fg(COLOR_BORDER),
+            )));
+            let lead = "did:webvh:QmXi1\u{2026}U83F:webvh.example.com:";
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(lead, Style::new().fg(COLOR_TEXT_DEFAULT)),
+                Span::styled("alice", Style::new().fg(COLOR_SUCCESS).bold()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw(" ".repeat(4 + lead.chars().count())),
+                Span::styled("\u{2514} the path", Style::new().fg(COLOR_SUCCESS)),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "  It is part of the identifier, so it cannot be changed afterwards.",
                 Style::new().fg(COLOR_BORDER),
             )));
             lines.push(Line::default());

@@ -206,40 +206,111 @@ pub struct KnownVetting {
     pub row: usize,
 }
 
+/// A line the cursor can rest on.
+///
+/// The choices that belong to a way in sit *under* that way in rather than in a
+/// block of their own further down the page. "Apply as" is not a separate
+/// decision from "apply for vetting" — it is part of it, and a page that puts
+/// them in two places makes the reader join them up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VettingRow {
+    /// A way in, by index into [`KnownVetting::routes`].
+    Route(usize),
+    /// Which persona a new application is made as.
+    ApplyAs,
+    /// Which context its face is worn in.
+    Context,
+}
+
 impl KnownVetting {
-    /// Whether the "Apply as" / "Context" selectors are shown. They choose what
-    /// a *new* application is made as, so an application already under way has
+    /// Whether the "Apply as" / "Context" choices are shown. They choose what a
+    /// *new* application is made as, so an application already under way has
     /// answered them — its persona is fixed for its whole life.
     #[must_use]
     pub fn shows_selectors(&self) -> bool {
         self.application.is_none()
     }
 
+    /// Every row the cursor moves over, in the order they are drawn.
+    #[must_use]
+    pub fn rows(&self) -> Vec<VettingRow> {
+        let mut rows = Vec::with_capacity(self.routes.len() + 2);
+        for (i, option) in self.routes.iter().enumerate() {
+            rows.push(VettingRow::Route(i));
+            // Nested under the route they belong to, and only while it is the
+            // one being considered — the choices are noise on a page whose
+            // reader has already decided to do something else.
+            if option.route == JoinRoute::Vetting
+                && self.shows_selectors()
+                && self.row_is_vetting(rows.len() - 1)
+            {
+                rows.push(VettingRow::ApplyAs);
+                rows.push(VettingRow::Context);
+            }
+        }
+        rows
+    }
+
+    /// Whether the cursor is on, or inside, the way in drawn at `route_row`.
+    ///
+    /// Reads the cursor without [`rows`](Self::rows), which is what builds the
+    /// list this answers for — the two would otherwise call each other.
+    fn row_is_vetting(&self, route_row: usize) -> bool {
+        self.row >= route_row && self.row <= route_row + 2
+    }
+
     /// Total rows the cursor moves over.
     #[must_use]
     pub fn row_count(&self) -> usize {
-        self.routes.len() + usize::from(self.shows_selectors()) * 2
+        self.rows().len()
     }
 
-    /// The highlighted route, when the cursor is on one.
+    /// What the cursor is on.
+    #[must_use]
+    pub fn selected(&self) -> Option<VettingRow> {
+        self.rows().get(self.row).copied()
+    }
+
+    /// The highlighted way in — the route itself, or the one whose choices the
+    /// cursor is inside.
     #[must_use]
     pub fn selected_route(&self) -> Option<&RouteOption> {
-        self.routes.get(self.row)
+        match self.selected()? {
+            VettingRow::Route(i) => self.routes.get(i),
+            // The choices belong to the vetting route, so resting on one is
+            // resting on it.
+            VettingRow::ApplyAs | VettingRow::Context => {
+                self.routes.iter().find(|r| r.route == JoinRoute::Vetting)
+            }
+        }
+    }
+
+    /// Which choice the cursor is on: `0` the persona, `1` the context.
+    #[must_use]
+    pub fn selector(&self) -> Option<usize> {
+        match self.selected()? {
+            VettingRow::ApplyAs => Some(0),
+            VettingRow::Context => Some(1),
+            VettingRow::Route(_) => None,
+        }
     }
 
     /// The row of `route`, when it is offered.
     #[must_use]
     pub fn row_of(&self, route: JoinRoute) -> Option<usize> {
-        self.routes.iter().position(|r| r.route == route)
+        self.rows().iter().position(|row| {
+            matches!(row, VettingRow::Route(i) if self.routes.get(*i).is_some_and(|r| r.route == route))
+        })
     }
 
-    /// Which selector the cursor is on: `0` the persona, `1` the context.
+    /// Whether "Apply as" is set to a persona that does not exist yet.
+    ///
+    /// The last value in that choice is a new persona — which is what makes
+    /// creating one a decision inside the join rather than a separate key. It
+    /// is the only value when there are none.
     #[must_use]
-    pub fn selector(&self) -> Option<usize> {
-        if !self.shows_selectors() {
-            return None;
-        }
-        self.row.checked_sub(self.routes.len()).filter(|i| *i < 2)
+    pub fn applying_as_new_persona(&self) -> bool {
+        self.persona_index >= self.personas.len()
     }
 }
 

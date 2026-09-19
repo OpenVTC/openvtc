@@ -4389,6 +4389,44 @@ mod key_handler_tests {
     /// overlay sizes itself per phase, so a phase whose height was not counted
     /// loses its last lines silently — here that would be the very choice the
     /// phase exists to offer.
+    /// "Path" means nothing until you have seen one in place, so the phase
+    /// that asks for it shows a DID with its last segment picked out. The
+    /// choice is only open here — the path is inside the identifier.
+    #[test]
+    fn the_path_phase_shows_where_the_path_sits_in_a_did() {
+        use crate::state_handler::main_page::content::{CreatePersonaPhase, CreatePersonaState};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (page, _rx) = page_for(MainMenu::Identity, |s: &mut State| {
+            s.main_page.create_persona = Some(CreatePersonaState {
+                phase: CreatePersonaPhase::Path,
+                ..Default::default()
+            });
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| page.render(frame, ()))
+            .expect("render");
+        let drawn: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+
+        assert!(
+            drawn.contains("The path is the last part of the DID"),
+            "{drawn}"
+        );
+        assert!(drawn.contains("did:webvh:"), "a worked example: {drawn}");
+        assert!(drawn.contains("the path"), "and a pointer at it: {drawn}");
+        assert!(
+            drawn.contains("cannot be changed afterwards"),
+            "and why it is worth getting right: {drawn}"
+        );
+    }
+
     #[test]
     fn create_persona_path_overlay_shows_both_rows() {
         use crate::state_handler::main_page::content::{

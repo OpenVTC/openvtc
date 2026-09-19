@@ -237,36 +237,21 @@ fn build_routes(
         });
     }
 
-    let (detail, state) = match application {
-        Some(app) if app.satisfied => (
-            format!(
-                "{} statement{} ready to present",
-                app.statements,
-                if app.statements == 1 { "" } else { "s" }
-            ),
-            RouteState::Ready,
+    let detail = match application {
+        Some(app) if app.satisfied => format!(
+            "{} statement{} ready to present",
+            app.statements,
+            if app.statements == 1 { "" } else { "s" }
         ),
-        Some(app) => (
-            app.progress
-                .clone()
-                .unwrap_or_else(|| format!("under way as {}", app.persona_label)),
-            RouteState::Ready,
-        ),
-        // A persona is something this join can make, so needing one is the
-        // first step of the route rather than a reason it is shut. Greyed out
-        // with "create one under My Identity", the one route the community is
-        // actually telling you about read as the one you could not use.
-        None if personas.is_empty() => (
-            "no application yet".to_string(),
-            RouteState::FirstStep {
-                note: "you have no persona yet, so this starts by creating one — every card \
-                       is signed by the DID you join with"
-                    .to_string(),
-                kind: FirstStepKind::CreatePersona,
-            },
-        ),
-        None => ("no application yet".to_string(), RouteState::Ready),
+        Some(app) => app
+            .progress
+            .clone()
+            .unwrap_or_else(|| format!("under way as {}", app.persona_label)),
+        None => "no application yet".to_string(),
     };
+    // With no persona the only value "Apply as" can hold is a new one, so the
+    // route starts by making it.
+    let state = vetting_route_state(application.is_some(), personas.is_empty());
     routes.push(RouteOption {
         route: JoinRoute::Vetting,
         label: match application {
@@ -559,6 +544,28 @@ fn satisfied_application_persona(state: &State) -> Option<PersonaId> {
     }
 }
 
+/// What the vetting route is waiting for, given who it would apply as.
+///
+/// A persona is something this join can make, so needing one is the route's
+/// first step rather than a reason it is shut — greyed out, the one route the
+/// community is actually telling you about read as the one you could not use.
+///
+/// Read whenever the "Apply as" choice moves, not only when the page is built:
+/// cycling to *a new persona* is what turns a ready route into one that starts
+/// by creating it, and a route whose row says "First: …" while its state says
+/// `Ready` would take the wrong path on the next keypress.
+fn vetting_route_state(has_application: bool, applying_as_new_persona: bool) -> RouteState {
+    if has_application || !applying_as_new_persona {
+        return RouteState::Ready;
+    }
+    RouteState::FirstStep {
+        note: "you have no persona yet, so this starts by creating one — every card is \
+               signed by the DID you join with"
+            .to_string(),
+        kind: FirstStepKind::CreatePersona,
+    }
+}
+
 /// Cycle the value of the "applying as" selector the cursor is on. A no-op
 /// while the cursor is on a route — ←/→ there would silently change a choice
 /// that is not on screen.
@@ -570,13 +577,26 @@ fn cycle_vetting_choice(config: &Config, vtc_did: &str, known: &mut KnownVetting
     };
     match known.selector() {
         Some(0) => {
-            known.persona_index = turn(known.persona_index, known.personas.len());
+            // One past the personas is "a new persona" — the value that makes
+            // creating one a decision inside the join rather than a key of its
+            // own. It is the only value when there are none.
+            known.persona_index = turn(known.persona_index, known.personas.len() + 1);
             known.context_options = application_contexts(
                 config,
                 vtc_did,
                 known.personas.get(known.persona_index).map(|p| p.persona),
             );
             known.context_index = 0;
+            // What the route does follows from that choice.
+            let state =
+                vetting_route_state(known.application.is_some(), known.applying_as_new_persona());
+            if let Some(route) = known
+                .routes
+                .iter_mut()
+                .find(|r| r.route == JoinRoute::Vetting)
+            {
+                route.state = state;
+            }
         }
         Some(_) => {
             known.context_index = turn(known.context_index, known.context_options.len());

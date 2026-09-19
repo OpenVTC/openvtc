@@ -522,7 +522,12 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("Joining as   ", label()),
-        Span::styled(app.join_did.clone(), value()),
+        // Shortened at the SCID, not the tail: the host and path are what
+        // distinguish this persona from the next one on the same server.
+        Span::styled(
+            openvtc_core::display::shorten_webvh(&app.join_did, 4).into_owned(),
+            value(),
+        ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("Requires     ", label()),

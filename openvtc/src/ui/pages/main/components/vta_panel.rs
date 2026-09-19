@@ -898,8 +898,11 @@ mod tests {
     #[test]
     fn vic_row_without_a_name_keeps_the_issuer_did() {
         let out = text(&render(&state_with(vec![vic(None)]), true));
+        // Shortened at the SCID: the host and path are what identify it.
+        let tail = VTC_DID.rsplit_once(':').expect("a host:path DID").0;
+        let tail = tail.rsplit_once(':').map_or(VTC_DID, |(_, host)| host);
         assert!(
-            out.iter().any(|l| l.contains(VTC_DID)),
+            out.iter().any(|l| l.contains(tail)),
             "issuer DID is shown: {out:?}"
         );
     }
