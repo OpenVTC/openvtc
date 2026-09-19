@@ -57,10 +57,11 @@ use crate::state_handler::join_flow;
 use crate::state_handler::main_page::content::{
     ApplicationRow, AttestForm, CardPreview, DIRECTORY_FIELDS, DIRECTORY_LABELS, DIRECTORY_METHODS,
     DeskRow, DeskStage, DeskView, DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS,
-    EventForm, FaceChoice, IssuedRow, LineTone, ListedVetterRow, PROFILE_FIELDS, PROFILE_LABELS,
-    RequestRow, TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
-    VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VetterStandingRow, VettingMembership,
-    VettingMode, VettingPersona, VettingState, VettingTab, method_label, row_of,
+    EventForm, FaceChoice, IssuedRow, LineTone, ListedVetterRow, NewFaceFocus, NewFaceForm,
+    PROFILE_FIELDS, PROFILE_LABELS, PoolRow, RequestRow, TicketRow, VETTING_METHODS,
+    VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm,
+    VetterStandingRow, VettingMembership, VettingMode, VettingPersona, VettingState, VettingTab,
+    method_label, row_of,
 };
 use crate::state_handler::main_page::menu::MainMenu;
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
@@ -665,6 +666,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             refresh_application_contexts(ctx);
         }
         VettingAction::Toggle => match &mut page(ctx).mode {
+            VettingMode::NewFace(form) if form.focus == NewFaceFocus::Attributes => form.toggle(),
             VettingMode::Attest { form, .. } => match form.field {
                 3 => form.liveness_confirmed = !form.liveness_confirmed,
                 4 => form.attested = !form.attested,
@@ -903,7 +905,23 @@ fn move_field(v: &mut VettingState, forward: bool) {
                 step(&mut form.field, rows);
             }
         },
-        VettingMode::ChooseFace { faces, index, .. } => step(index, faces.len()),
+        // One past the faces is "make a new one" — a row, not a key, so that
+        // every way out of this screen is in the list the eye is already on.
+        VettingMode::ChooseFace { faces, index, .. } => step(index, faces.len() + 1),
+        VettingMode::NewFace(form) => match form.focus {
+            NewFaceFocus::Name => form.focus = NewFaceFocus::Attributes,
+            NewFaceFocus::Attributes => {
+                let rows = form.pool.len();
+                if rows == 0 {
+                    form.focus = NewFaceFocus::Name;
+                } else if form.cursor + 1 < rows {
+                    form.cursor += 1;
+                } else {
+                    form.focus = NewFaceFocus::Name;
+                    form.cursor = 0;
+                }
+            }
+        },
         VettingMode::Attest { form, .. } => step(&mut form.field, AttestForm::FIELDS),
         _ => {}
     }
@@ -966,7 +984,7 @@ fn cycle(v: &mut VettingState, forward: bool) {
         VettingMode::Withdraw { reason_index, .. } => {
             turn(reason_index, VETTING_WITHDRAWAL_REASONS.len());
         }
-        VettingMode::ChooseFace { faces, index, .. } => turn(index, faces.len()),
+        VettingMode::ChooseFace { faces, index, .. } => turn(index, faces.len() + 1),
         _ => {}
     }
 }
@@ -998,8 +1016,15 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             application_id,
             faces,
             index,
-            ..
-        } => wear_face(ctx, &application_id, faces.get(index).cloned()),
+            required,
+        } => {
+            if index == faces.len() {
+                open_new_face(ctx, &application_id, required);
+            } else {
+                wear_face(ctx, &application_id, faces.get(index).cloned());
+            }
+        }
+        VettingMode::NewFace(form) => create_face(ctx, *form),
         VettingMode::RequestVetter {
             application_id,
             vetter,
@@ -1856,6 +1881,75 @@ fn preview_refusal(error: &str, application_id: &str, config: &Config) -> String
     )
 }
 
+/// Open the make-a-face form, reading the pool to fill its tick list.
+///
+/// The read is what makes this worth doing inline: the community has already
+/// said which claim types it needs, so the form opens with the matching
+/// attributes already ticked and the holder's decision is usually just a name.
+fn open_new_face(ctx: &mut ActionCtx<'_>, application_id: &str, required: Vec<String>) {
+    let Some(client) = admin_client(ctx) else {
+        return;
+    };
+    if !begin(ctx) {
+        return;
+    }
+    status(ctx, "Reading your attributes…");
+    let job = FaceJob::Pool {
+        client,
+        application_id: application_id.to_string(),
+        required,
+    };
+    spawn_job(ctx, job.run());
+}
+
+/// Create the face the form describes, and wear it.
+///
+/// One step, not two. A face made here exists only to be worn by this
+/// application — leaving it created but unworn would put the holder back on the
+/// picker to do the thing they had just asked for.
+fn create_face(ctx: &mut ActionCtx<'_>, mut form: NewFaceForm) {
+    let name = form.name.trim().to_string();
+    if name.is_empty() {
+        form.error = Some("Give the face a name — it is how you will recognise it later.".into());
+        form.focus = NewFaceFocus::Name;
+        page(ctx).mode = VettingMode::NewFace(Box::new(form));
+        return;
+    }
+    if form.ticked.is_empty() {
+        form.error = Some(
+            "Tick at least one attribute with space — a face that shows nothing cannot make a \
+             card."
+                .into(),
+        );
+        form.focus = NewFaceFocus::Attributes;
+        page(ctx).mode = VettingMode::NewFace(Box::new(form));
+        return;
+    }
+    let Some(client) = admin_client(ctx) else {
+        return;
+    };
+    let application_id = form.application_id.clone();
+    let (context_id, persona_did) = match application_context(ctx.config, &application_id) {
+        Ok(found) => found,
+        Err(e) => return status(ctx, format!("Cannot make a face: {e}")),
+    };
+    if !begin(ctx) {
+        return;
+    }
+    page(ctx).mode = VettingMode::List;
+    status(ctx, format!("Making {name}…"));
+    let job = FaceJob::Create {
+        client,
+        top_context_id: ctx.config.account.top_context_id.clone(),
+        context_id,
+        persona_did,
+        application_id,
+        name,
+        live_refs: form.ticked.clone(),
+    };
+    spawn_job(ctx, job.run());
+}
+
 /// The claim types a card for this community must carry.
 ///
 /// From the manifest when it has been read, and from the fallback set when it
@@ -2517,6 +2611,22 @@ pub(crate) enum FaceJob {
         persona_did: String,
         application_id: String,
     },
+    /// Read the pool so the make-a-face form has something to tick.
+    Pool {
+        client: VtaClient,
+        application_id: String,
+        required: Vec<String>,
+    },
+    /// Create a face and wear it, in one step.
+    Create {
+        client: VtaClient,
+        top_context_id: String,
+        context_id: String,
+        persona_did: String,
+        application_id: String,
+        name: String,
+        live_refs: Vec<String>,
+    },
     Wear {
         client: VtaClient,
         top_context_id: String,
@@ -2601,6 +2711,85 @@ impl FaceJob {
                 VettingOutcome::Faces {
                     application_id,
                     result,
+                }
+            }
+            FaceJob::Pool {
+                client,
+                application_id,
+                required,
+            } => {
+                // Metadata only. The form arranges which attributes a face
+                // shows; it never reads or writes their values, so there is
+                // nothing here to decrypt.
+                let result = pool::list(&client, false, false)
+                    .await
+                    .map(|attributes| {
+                        attributes
+                            .into_iter()
+                            .map(|a| PoolRow {
+                                label: sanitize_display(a.display_name(), 128),
+                                claim_type: a.claim_type,
+                                attribute_id: a.attribute_id,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .map_err(|e| e.to_string());
+                VettingOutcome::Pool {
+                    application_id,
+                    required,
+                    result,
+                }
+            }
+            FaceJob::Create {
+                client,
+                top_context_id,
+                context_id,
+                persona_did,
+                application_id,
+                name,
+                live_refs,
+            } => {
+                // `other_entries` is empty because this creates: there is no
+                // profile whose pinned or inline entries could be dropped. The
+                // general editor has to carry them; here there is nothing yet
+                // to carry.
+                let created = profile::put(&client, None, &name, &live_refs, &[], None).await;
+                let (profile_id, error) = match created {
+                    Ok(id) => (id, None),
+                    Err(e) => (String::new(), Some(e.to_string())),
+                };
+                // Wearing it is the point, so a face created but left unworn
+                // would put the holder back on the picker to do what they had
+                // just asked for. A failure to wear is still reported against
+                // the face that now exists.
+                let error = match error {
+                    Some(e) => Some(e),
+                    None => {
+                        let slug = parse_sub_context_id(&context_id)
+                            .map_or(context_id.as_str(), |(_, slug)| slug);
+                        match community_context::ensure_context(
+                            &client,
+                            &top_context_id,
+                            &context_id,
+                            slug,
+                        )
+                        .await
+                        {
+                            Err(e) => Some(e.to_string()),
+                            Ok(_) => {
+                                binding::set(&client, &context_id, &persona_did, Some(&profile_id))
+                                    .await
+                                    .err()
+                                    .map(|e| e.to_string())
+                            }
+                        }
+                    }
+                };
+                VettingOutcome::FaceWorn {
+                    error,
+                    application_id,
+                    profile_id,
+                    name,
                 }
             }
             FaceJob::Wear {
@@ -2811,6 +3000,12 @@ pub(crate) enum VettingOutcome {
         application_id: String,
         result: Result<Vec<FaceChoice>, String>,
     },
+    /// The pool, for the make-a-face form.
+    Pool {
+        application_id: String,
+        required: Vec<String>,
+        result: Result<Vec<PoolRow>, String>,
+    },
     /// A face is worn, or is not.
     FaceWorn {
         application_id: String,
@@ -2894,6 +3089,58 @@ impl VettingOutcome {
                 }
                 // The application may have just been given its context.
                 (message.to_string(), true)
+            }
+            VettingOutcome::Pool {
+                application_id,
+                required,
+                result: Ok(pool),
+            } => {
+                // Open with the required claim types already ticked. The
+                // community has said what the card needs, so leaving the
+                // holder to work that out from a list of thirty attributes
+                // would be withholding the one thing that makes this inline.
+                let ticked: Vec<String> = required
+                    .iter()
+                    .filter_map(|want| {
+                        pool.iter()
+                            .find(|a| &a.claim_type == want)
+                            .map(|a| a.attribute_id.clone())
+                    })
+                    .collect();
+                let form = NewFaceForm {
+                    application_id,
+                    required,
+                    pool,
+                    name: String::new(),
+                    ticked,
+                    cursor: 0,
+                    focus: NewFaceFocus::Name,
+                    error: None,
+                };
+                let short = form.uncoverable();
+                let message = if short.is_empty() {
+                    "Name the face. What this community needs is already ticked.".to_string()
+                } else {
+                    format!(
+                        "You have no {} attribute — add one under My Identity, or make the face \
+                         now and add it after.",
+                        short.join(" or ")
+                    )
+                };
+                v.mode = VettingMode::NewFace(Box::new(form));
+                (message, true)
+            }
+            VettingOutcome::Pool { result: Err(e), .. } => {
+                // The same refusal the faces read has, for the same reason:
+                // the pool is what a face is built over.
+                if crate::holder_grant::needs_holder_grant(&e) {
+                    v.mode = VettingMode::HolderGrant {
+                        credential_did: agent_credential_did(config).map(str::to_string),
+                    };
+                    ("Could not read your attributes.".to_string(), true)
+                } else {
+                    (format!("Could not read your attributes: {e}"), true)
+                }
             }
             VettingOutcome::Faces { result: Err(e), .. } => {
                 // Faces are built over the holder's attribute pool, which sits
@@ -3806,6 +4053,95 @@ mod tests {
         let v = &state.main_page.content_panel.vetting;
         assert!(matches!(&v.mode, VettingMode::ChooseFace { index: 1, .. }));
         assert_eq!(v.worn_faces.get("a").map(String::as_str), Some("WORK"));
+    }
+
+    fn pool_row(id: &str, claim_type: &str) -> PoolRow {
+        PoolRow {
+            attribute_id: id.into(),
+            claim_type: claim_type.into(),
+            label: claim_type.to_uppercase(),
+        }
+    }
+
+    /// The whole point of making the face *here*: the community has already
+    /// said what its card needs, so the holder should not have to work that out
+    /// again from a list of attributes.
+    #[test]
+    fn the_new_face_form_opens_with_the_required_claims_ticked() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+
+        VettingOutcome::Pool {
+            application_id: "a".into(),
+            required: vec!["name.legal".into()],
+            result: Ok(vec![
+                pool_row("attr-email", "email.work"),
+                pool_row("attr-name", "name.legal"),
+            ]),
+        }
+        .apply(&mut state, &mut config, &mut save);
+
+        let VettingMode::NewFace(form) = &state.main_page.content_panel.vetting.mode else {
+            panic!("the form did not open");
+        };
+        assert_eq!(form.ticked, vec!["attr-name".to_string()]);
+        assert!(
+            form.still_missing().is_empty(),
+            "the required claim is covered by the opening selection"
+        );
+        // Unticking it is said against the selection, not the pool, so the
+        // warning appears at the moment the choice is made.
+        let mut form = (**form).clone();
+        form.cursor = 1;
+        form.toggle();
+        assert_eq!(form.still_missing(), vec!["name.legal"]);
+    }
+
+    /// A claim type no attribute can supply is a different problem from one
+    /// that is merely unticked, and the form must not conflate them: ticking
+    /// harder will not fix it.
+    #[test]
+    fn a_claim_the_pool_cannot_cover_is_named_as_such() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+
+        VettingOutcome::Pool {
+            application_id: "a".into(),
+            required: vec!["name.legal".into()],
+            result: Ok(vec![pool_row("attr-email", "email.work")]),
+        }
+        .apply(&mut state, &mut config, &mut save);
+
+        let VettingMode::NewFace(form) = &state.main_page.content_panel.vetting.mode else {
+            panic!("the form did not open");
+        };
+        assert!(form.ticked.is_empty(), "nothing in the pool matches");
+        assert_eq!(form.uncoverable(), vec!["name.legal"]);
+        assert_eq!(form.still_missing(), vec!["name.legal"]);
+    }
+
+    /// The pool is what a face is built over, so it meets the same refusal the
+    /// faces read does — and must answer it the same way rather than passing
+    /// the agent's paragraph through.
+    #[test]
+    fn the_pool_read_routes_the_holder_refusal_to_the_same_view() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+
+        VettingOutcome::Pool {
+            application_id: "a".into(),
+            required: Vec::new(),
+            result: Err("forbidden: requires an unscoped holder credential".into()),
+        }
+        .apply(&mut state, &mut config, &mut save);
+
+        assert!(matches!(
+            &state.main_page.content_panel.vetting.mode,
+            VettingMode::HolderGrant { .. }
+        ));
     }
 
     /// The card preview's one explicable refusal. The agent's sentence names
