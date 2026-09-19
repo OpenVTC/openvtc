@@ -36,6 +36,13 @@ pub async fn run(
 ) -> Result<()> {
     let local = local_report(profile);
     let access = config.and_then(vta_access);
+    // One authenticated read, run by default rather than behind a flag: a
+    // missing grant is invisible until it refuses something, and by then a
+    // vetter is usually waiting.
+    let holder = match config {
+        Some(config) => check_holder_authority(config).await,
+        None => HolderAuthority::NotApplicable,
+    };
 
     let mut subjects: Vec<Subject> = Vec::new();
 
@@ -95,6 +102,7 @@ pub async fn run(
         if as_json {
             let mut value = local.as_json();
             if let Some(obj) = value.as_object_mut() {
+                obj.insert("holder_authority".to_string(), holder.as_json());
                 obj.insert(
                     "vta_access".to_string(),
                     VtaAccess::as_json(access.as_ref()),
@@ -151,6 +159,7 @@ pub async fn run(
                 "vta_access".to_string(),
                 VtaAccess::as_json(access.as_ref()),
             );
+            obj.insert("holder_authority".to_string(), holder.as_json());
         }
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
@@ -158,12 +167,14 @@ pub async fn run(
         if let Some(access) = &access {
             access.render();
         }
+        // After the ACL subject, because the remedy names that DID.
+        holder.render();
         render(&report, config.is_none());
     }
 
     // A broken chain is a failed check: exit non-zero so this is usable in a
     // script or a CI smoke test, not only by eye.
-    if report.is_healthy() && local.is_healthy() {
+    if report.is_healthy() && local.is_healthy() && holder.is_healthy() {
         Ok(())
     } else {
         std::process::exit(1);
@@ -373,6 +384,127 @@ struct VtaAccess {
     /// `build_runtime_vta_client` will pick again at runtime.
     mediator_did: Option<String>,
     context_id: String,
+}
+
+/// Whether this install can actually reach the holder's own attribute pool.
+///
+/// The section above prints the grant command from the config alone, which is
+/// what an operator needs once they know something is wrong. This answers the
+/// prior question — *is* anything wrong — and it is the one that would have
+/// saved a live run: the grant went missing during onboarding (VTI #1573), the
+/// install looked entirely healthy, and it surfaced days later as a refusal on
+/// the one screen that needed it.
+///
+/// Determined by **doing the read**, not by asking what the ACL claims.
+/// `auth/whoami/0.1` would return the effective capability list, but it has no
+/// client method — only a task URI — and a claim about a capability is a weaker
+/// answer than exercising it. A VTA old enough to have no capability concept
+/// refuses in its own words, and this still reports it correctly.
+///
+/// Metadata only: `profile::list` names faces and never decrypts the pool.
+enum HolderAuthority {
+    /// No VTA backend. A BIP32 profile has no agent and no ACL.
+    NotApplicable,
+    /// The read went through.
+    Granted { faces: usize },
+    /// The read was refused for want of the grant, which is a real defect in
+    /// this install: nothing that reads a face will work.
+    Missing { credential_did: Option<String> },
+    /// We could not tell — the VTA was unreachable, or refused for some other
+    /// reason. Never treated as a failure: an unknown is not a finding.
+    Unknown(String),
+}
+
+async fn check_holder_authority(config: &Config) -> HolderAuthority {
+    let KeyBackend::Vta { .. } = &config.key_backend else {
+        return HolderAuthority::NotApplicable;
+    };
+    let client = match openvtc_core::config::build_runtime_vta_client(&config.key_backend).await {
+        Ok(c) => c,
+        Err(e) => return HolderAuthority::Unknown(format!("could not open a VTA session: {e}")),
+    };
+    let outcome = match openvtc_core::persona::profile::list(&client).await {
+        Ok(faces) => HolderAuthority::Granted { faces: faces.len() },
+        Err(e) => {
+            let text = e.to_string();
+            if crate::holder_grant::needs_holder_grant(&text) {
+                HolderAuthority::Missing {
+                    credential_did: vta_access(config).map(|a| a.credential_did),
+                }
+            } else {
+                HolderAuthority::Unknown(text)
+            }
+        }
+    };
+    client.shutdown().await;
+    outcome
+}
+
+impl HolderAuthority {
+    /// Only a *positive* determination that the grant is absent fails the run.
+    /// An unreachable VTA has already been reported by the chain checks, and
+    /// failing twice for one cause tells an operator nothing new.
+    fn is_healthy(&self) -> bool {
+        !matches!(self, Self::Missing { .. })
+    }
+
+    fn as_json(&self) -> serde_json::Value {
+        match self {
+            Self::NotApplicable => serde_json::json!({"applicable": false}),
+            Self::Granted { faces } => serde_json::json!({
+                "applicable": true,
+                "granted": true,
+                "faces": faces,
+            }),
+            Self::Missing { credential_did } => serde_json::json!({
+                "applicable": true,
+                "granted": false,
+                "remedy": crate::holder_grant::grant_command(credential_did.as_deref()),
+            }),
+            Self::Unknown(why) => serde_json::json!({
+                "applicable": true,
+                "granted": serde_json::Value::Null,
+                "why": why,
+            }),
+        }
+    }
+
+    fn render(&self) {
+        if matches!(self, Self::NotApplicable) {
+            return;
+        }
+        println!("{}", style("Your own identity").themed(CLI_INFO).bold());
+        match self {
+            Self::NotApplicable => unreachable!(),
+            Self::Granted { faces } => {
+                println!(
+                    "  faces            {}",
+                    style(format!(
+                        "{faces} readable — this install holds holder authority"
+                    ))
+                    .themed(CLI_INFO)
+                );
+            }
+            Self::Unknown(why) => {
+                println!("  faces            could not tell: {why}");
+            }
+            Self::Missing { credential_did } => {
+                println!(
+                    "  faces            {}",
+                    style("refused — this install has no holder authority").themed(CLI_CAUTION)
+                );
+                println!();
+                for line in crate::holder_grant::holder_grant_hint(credential_did.as_deref()) {
+                    println!(" {line}");
+                }
+                println!();
+                println!("  Run it from a super-admin PNM session. Until then nothing that reads");
+                println!("  a face works: personas, the faces a vetter is shown, and the identity");
+                println!("  a community sees when you join.");
+            }
+        }
+        println!();
+    }
 }
 
 /// `None` for a BIP32 profile: there is no VTA and so no ACL to edit.
@@ -995,6 +1127,51 @@ mod tests {
     fn short_tail_falls_back_for_pathless_dids() {
         assert_eq!(short_tail("did:key:z6Mkabc"), "z6Mkabc");
         assert_eq!(short_tail("notadid"), "notadid");
+    }
+
+    /// Only a positive determination fails the run. An unreachable VTA has
+    /// already been reported by the chain checks, and failing twice for one
+    /// cause tells an operator nothing new — while failing on "unknown" would
+    /// make every offline run look like a missing grant.
+    #[test]
+    fn only_a_confirmed_absence_fails_the_run() {
+        assert!(HolderAuthority::NotApplicable.is_healthy());
+        assert!(HolderAuthority::Granted { faces: 0 }.is_healthy());
+        assert!(HolderAuthority::Unknown("connection refused".into()).is_healthy());
+        assert!(
+            !HolderAuthority::Missing {
+                credential_did: Some("did:key:z6MkAuthKeyForThisInstall".into())
+            }
+            .is_healthy()
+        );
+    }
+
+    /// The JSON carries the command, not a boolean somebody has to look up how
+    /// to act on. `granted` is null rather than false when we could not tell:
+    /// a script must be able to distinguish "no" from "did not find out".
+    #[test]
+    fn the_json_distinguishes_absent_from_unknown() {
+        let missing = HolderAuthority::Missing {
+            credential_did: Some("did:key:z6MkAuthKeyForThisInstall".into()),
+        }
+        .as_json();
+        assert_eq!(missing["granted"], false);
+        assert_eq!(
+            missing["remedy"],
+            "pnm acl update did:key:z6MkAuthKeyForThisInstall --capabilities persona-holder"
+        );
+
+        let unknown = HolderAuthority::Unknown("connection refused".into()).as_json();
+        assert!(
+            unknown["granted"].is_null(),
+            "a run that could not tell must not report a refusal"
+        );
+        assert_eq!(unknown["why"], "connection refused");
+
+        // And a BIP32 profile has no agent, so the question does not arise.
+        let na = HolderAuthority::NotApplicable.as_json();
+        assert_eq!(na["applicable"], false);
+        assert!(na["granted"].is_null());
     }
 
     fn vta_access_fixture() -> VtaAccess {
