@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Holding no invitation is two different situations, and the join now tells
+  them apart.** An invitation credential must name a `credentialSubject.id` —
+  `validate_invitation_credential` refuses one without it, so there is no such
+  thing as a bearer invitation — and that subject is a persona DID. With no
+  personas, no valid invitation can be *for* you, so that row is genuinely shut
+  and says why. With a persona, one may exist that this vault has not seen, so
+  the row is live and starts by asking you to paste it.
+
+  Before, both read "none held for this community" while suggesting you paste
+  one on a later step — a greyed-out row telling you there was a way to act on
+  it, which is the shape of confusion the routes list exists to remove.
+
+  `RouteState::FirstStep` now carries *which* step, because they are not the
+  same: creating a persona is something the join has to do before the route can
+  proceed, while being asked to paste an invitation is a page the route already
+  leads to. Deciding that from the route's identity would have put the same
+  reasoning in two places and got it wrong in one.
+
+### Changed
+
 - **A way in whose prerequisite the join can supply is one you can take.**
   Applying for vetting without a persona was greyed out with "create one under
   My Identity" — so on a community that vets, the one route the community was

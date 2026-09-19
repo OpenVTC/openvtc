@@ -382,7 +382,7 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
 mod tests {
     use super::*;
     use crate::state_handler::join::{
-        AvailableVic, JoinApplication, JoinPage, JoinRoute, RouteOption, RouteState,
+        AvailableVic, FirstStepKind, JoinApplication, JoinPage, JoinRoute, RouteOption, RouteState,
     };
     use crate::state_handler::state::State;
     use crate::ui::component::Component;
@@ -583,7 +583,10 @@ mod tests {
             routes: vec![route(
                 JoinRoute::Vetting,
                 "Apply for vetting",
-                RouteState::FirstStep("you have no persona yet".into()),
+                RouteState::FirstStep {
+                    note: "you have no persona yet".into(),
+                    kind: FirstStepKind::CreatePersona,
+                },
             )],
             ..KnownVetting::default()
         }));
