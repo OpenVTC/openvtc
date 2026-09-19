@@ -28,8 +28,8 @@ use vta_sdk::vetting::status::StatusCheck;
 
 use super::VettingBook;
 use super::applicant::{
-    ApplicantError, Application, GrantStatus, NextStep, RequestDraft, RequestState, TicketUriError,
-    VetterEligibility,
+    ApplicantError, Application, ChosenFace, GrantStatus, NextStep, RequestDraft, RequestState,
+    TicketUriError, VetterEligibility,
 };
 use super::book::{Knowledge, VetterPolicy};
 use super::inbound::{Context, Handled, Notice, Reply, handle};
@@ -1254,6 +1254,18 @@ async fn the_next_step_follows_the_application() {
     assert_eq!(
         applicant.application().next_step(Utc::now()),
         NextStep::ChooseFace
+    );
+    // Choosing one advances the step. The claims are only read from the face
+    // when the first card goes out, so without `face` being recorded in its own
+    // right the step still said "choose a face" right after one was chosen —
+    // the screen told you to do the thing you had just done.
+    applicant.application().face = Some(ChosenFace {
+        profile_id: "p1".into(),
+        name: "Work".into(),
+    });
+    assert_eq!(
+        applicant.application().next_step(Utc::now()),
+        NextStep::AskVetter
     );
     let (_, session_doc) = in_session(&mut applicant, &mut vetter).await;
     assert_eq!(

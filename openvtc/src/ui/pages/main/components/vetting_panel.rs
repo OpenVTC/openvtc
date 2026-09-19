@@ -65,6 +65,7 @@ pub fn mode_id(state: &VettingState) -> &'static str {
             DeskView::Issued => "issued",
         },
         (VettingMode::NewApplication { .. }, _) => "new-application",
+        (VettingMode::HolderGrant { .. }, _) => "holder-grant",
         (VettingMode::ChooseFace { .. }, _) => "face",
         (VettingMode::RequestVetter { .. }, _) => "request",
         (VettingMode::Directory(_), _) => "directory",
@@ -230,8 +231,28 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
                 "Enter: start  Tab: next field  ←/→: choose  Esc: cancel",
             ));
         }
-        VettingMode::ChooseFace { faces, index, .. } => {
-            lines.push(heading("The face vetters are shown"));
+        VettingMode::HolderGrant { credential_did } => {
+            lines.push(heading("Your faces need one more grant"));
+            lines.push(Line::from(""));
+            // The command gets a line to itself, indented and unwrapped, because
+            // it is retyped or copied into another terminal. Folded into a
+            // paragraph it breaks wherever the width falls, and a DID broken
+            // across two lines cannot be selected in one drag.
+            for line in crate::holder_grant::holder_grant_hint(credential_did.as_deref()) {
+                lines.push(Line::from(line).fg(COLOR_ORANGE));
+            }
+            lines.push(Line::from(""));
+            lines.push(hint("Run it as a super-admin, then press f again."));
+            lines.push(Line::from(""));
+            lines.push(hint("Esc: back"));
+        }
+        VettingMode::ChooseFace {
+            faces,
+            index,
+            required,
+            ..
+        } => {
+            lines.push(heading("The face you show vetters"));
             lines.push(Line::from(""));
             lines.push(hint(
                 "A vetter's card is read from this face, and they check it against your documents.",
@@ -242,9 +263,27 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(hint(
                 "you join. Its values must match your documents exactly, and must not change later.",
             ));
+            if !required.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled(" This community's card needs  ", label()),
+                    Span::styled(required.join(", "), value()),
+                ]));
+            }
             lines.push(Line::from(""));
             for (i, face) in faces.iter().enumerate() {
                 let chosen = i == *index;
+                // A face is judged only when we managed to read its contents.
+                // Empty means the read failed, not that the face is empty, and
+                // marking it short would be an accusation we cannot support.
+                let missing: Vec<&String> = if face.claim_types.is_empty() {
+                    Vec::new()
+                } else {
+                    required
+                        .iter()
+                        .filter(|r| !face.claim_types.contains(r))
+                        .collect()
+                };
                 let style = if chosen {
                     Style::new().fg(COLOR_SUCCESS).bold()
                 } else {
@@ -266,7 +305,40 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
                         Style::new().fg(COLOR_SUCCESS),
                     ),
                 ]));
+                // What it would actually disclose, under the name. This is the
+                // whole basis for choosing between two faces, and the picker
+                // used to withhold it — so a face short of a required claim
+                // looked like any other until the card preview refused it.
+                if face.claim_types.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "      could not read what it shows",
+                        dim(),
+                    )));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("      shows     ", dim()),
+                        Span::styled(face.claim_types.join(", "), value()),
+                    ]));
+                }
+                if !missing.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("      missing   ", dim()),
+                        Span::styled(
+                            missing
+                                .iter()
+                                .map(|m| m.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+                        ),
+                        Span::styled(" — no card for this community", dim()),
+                    ]));
+                }
             }
+            lines.push(Line::from(""));
+            lines.push(hint(
+                "Add a missing claim to a face under My Identity, then press f again.",
+            ));
             lines.push(Line::from(""));
             lines.push(hint("↑/↓: choose  Enter: wear it  Esc: cancel"));
         }
@@ -613,7 +685,7 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     lines.push(Line::from(" Identity shown to vetters").fg(COLOR_SUCCESS));
     lines.push(Line::from(vec![
         Span::styled(format!("  {:<20}", "face"), label()),
-        match v.worn_faces.get(&app.id) {
+        match v.worn_faces.get(&app.id).or(app.face.as_ref()) {
             Some(face) => Span::styled(face.clone(), value()),
             None => Span::styled("f shows or changes it", dim()),
         },

@@ -17,6 +17,11 @@
 //! pane recognised it; the Vetting pane, where choosing the face a vetter is
 //! shown reads the very same pool, did not — so the same failure was guidance
 //! in one place and a wall of agent text in another.
+//!
+//! Both now render [`holder_grant_hint`], as lines, in a view of their own. A
+//! one-sentence form existed for status lines and has been withdrawn: a status
+//! line wraps at the panel's width, which fell mid-DID, and a command broken
+//! across two lines can be neither read in one pass nor selected in one drag.
 
 /// Whether a read failed because the caller lacks holder authority, as opposed
 /// to the agent being unreachable or the request being malformed.
@@ -66,22 +71,6 @@ pub fn holder_grant_hint(credential_did: Option<&str>) -> Vec<String> {
     ]
 }
 
-/// The same thing in one sentence, for a surface that has a status line rather
-/// than a panel.
-///
-/// Says what is missing, what to run, and that running it does not widen this
-/// install's authority — the question an operator asks before pasting a command
-/// that contains the word `admin`.
-#[must_use]
-pub fn holder_grant_sentence(credential_did: Option<&str>) -> String {
-    format!(
-        "Your faces sit above every context, and your agent credential administers only one. \
-         Grant it holder authority with:  {}  — it adds authority over your own identity \
-         without giving this install any over other contexts.",
-        grant_command(credential_did)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,11 +111,7 @@ mod tests {
             "pnm acl update did:key:z6MkThisInstall --capabilities persona-holder"
         );
         assert!(grant_command(None).contains("<this install's DID>"));
-        // The sentence carries the same command, so the two cannot drift.
-        assert!(
-            holder_grant_sentence(Some("did:key:z6MkThisInstall"))
-                .contains(&grant_command(Some("did:key:z6MkThisInstall")))
-        );
+        // The hint carries the same command, so the two cannot drift.
         assert!(
             holder_grant_hint(Some("did:key:z6MkThisInstall"))
                 .join("\n")

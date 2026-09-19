@@ -1831,11 +1831,26 @@ pub enum VettingMode {
         context_index: usize,
         field: usize,
     },
+    /// The faces could not be read because this install lacks holder
+    /// authority — the one refusal with a specific answer.
+    ///
+    /// A view rather than a status line: the answer is a command, and a command
+    /// in a status line is wrapped across the width of the panel wherever the
+    /// words happen to fall, which is neither readable nor selectable.
+    HolderGrant {
+        /// The DID to grant it to, when this install has one.
+        credential_did: Option<String>,
+    },
     /// Choose the face an application shows vetters.
     ChooseFace {
         application_id: String,
         faces: Vec<FaceChoice>,
         index: usize,
+        /// The claim types a card for this community must carry, so the list
+        /// can say which faces can make one. Without it the picker offered
+        /// names and a count, and a face missing a required claim failed three
+        /// steps later at the card preview.
+        required: Vec<String>,
     },
     /// Ask a vetter, with the ticket code they gave us or the link they showed.
     RequestVetter {
@@ -2174,6 +2189,10 @@ pub struct FaceChoice {
     pub entries: usize,
     /// Worn in the application's context now.
     pub worn: bool,
+    /// The claim types this face would disclose, in the order it resolves
+    /// them. Empty when the read that would have said failed — a face whose
+    /// contents could not be read is shown without them rather than hidden.
+    pub claim_types: Vec<String>,
 }
 
 /// What a card would show, as the VTA previewed it. Nothing has left.
@@ -2221,6 +2240,9 @@ pub struct ApplicationRow {
     /// Progress against those requirements.
     pub progress: Option<String>,
     pub satisfied: bool,
+    /// The face shown to vetters, once chosen. From the application rather
+    /// than from `worn_faces`, which only holds what this run has read.
+    pub face: Option<String>,
     /// Claim type and the value we show vetters (empty when not set).
     pub identity: Vec<(String, String)>,
     pub requests: Vec<RequestRow>,

@@ -122,6 +122,21 @@ pub enum NextStep {
     WaitForVetters,
 }
 
+/// The face an application shows vetters.
+///
+/// The `profile_id` is what identifies it — a face can be renamed, and a name
+/// read once and stored would then label the wrong thing. `name` is kept only
+/// so a screen can say which face without a round trip to the agent, and is
+/// refreshed whenever the faces are listed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChosenFace {
+    /// The profile the VTA knows it by.
+    pub profile_id: String,
+    /// Its display name, as last read.
+    pub name: String,
+}
+
 /// One application.
 ///
 /// No `PartialEq`: it carries the community's generated requirements and the
@@ -156,6 +171,16 @@ pub struct Application {
     /// One salt for the whole application, so every vetter sees the same
     /// identity commitment. Goes to vetters, never to the community.
     pub commitment_salt: String,
+    /// The face this application shows vetters, once one has been chosen.
+    ///
+    /// The binding at the VTA is the source of truth for what is *worn*; this
+    /// records that a face was chosen for this application at all. That is a
+    /// distinct fact, and the one the next step turns on: the claims are only
+    /// read from the face when the first card goes out, so nothing else on the
+    /// application distinguishes "no face yet" from "face chosen, no vetter
+    /// asked". It is persisted so that distinction survives a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face: Option<ChosenFace>,
     /// The identity vetters have been shown, as the persona's face disclosed
     /// it. Every later card must show the same values: two cards that spell a
     /// name differently commit to different identities, and the community
@@ -415,6 +440,7 @@ impl Application {
             persona,
             join_did: join_did.to_string(),
             context_id: None,
+            face: None,
             criterion_id: None,
             requirements: None,
             requirements_digest: None,
@@ -695,7 +721,12 @@ impl Application {
         if evaluation.satisfied() {
             return NextStep::Join;
         }
-        if self.identity_claims.is_empty() && self.requests.is_empty() {
+        // The claims are read from the face with the *first card*, so
+        // `identity_claims` stays empty until a vetter has been asked — which
+        // is why choosing a face has to be recorded in its own right. Without
+        // `face`, the step still read "choose a face" immediately after one had
+        // been chosen, and the screen contradicted itself.
+        if self.face.is_none() && self.identity_claims.is_empty() && self.requests.is_empty() {
             return NextStep::ChooseFace;
         }
         let in_progress = self.requests.iter().any(|r| {
