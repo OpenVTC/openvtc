@@ -974,9 +974,9 @@ fn render_communities(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         };
         lines.push(Line::from(vec![
             Span::styled(if is_selected { "▸ " } else { "  " }, row_style),
-            Span::styled(truncate(&m.community_name, 30), row_style),
+            Span::styled(shorten_id(&m.community_name, 30), row_style),
             Span::styled(
-                format!("  as {}", truncate(&m.persona_label, 24)),
+                format!("  as {}", shorten_id(&m.persona_label, 24)),
                 Style::new().fg(COLOR_SOFT_PURPLE),
             ),
         ]));
@@ -1075,7 +1075,7 @@ fn render_disclosures(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
                 row_style,
             ),
             Span::styled(
-                truncate(&row.verifier_did, 44),
+                shorten_id(&row.verifier_did, 44),
                 Style::new().fg(COLOR_SOFT_PURPLE),
             ),
         ]));
@@ -1089,7 +1089,7 @@ fn render_disclosures(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
             lines.push(
                 Line::from(format!(
                     "      ● still live as a credential ({}) — can be revoked",
-                    truncate(id, 40)
+                    shorten_id(id, 40)
                 ))
                 .fg(COLOR_ORANGE),
             );
@@ -1590,9 +1590,30 @@ fn field(lines: &mut Vec<Line<'static>>, label: &str, value: &str, focused: bool
     ]));
 }
 
-/// Truncate for a fixed-width column, with an ellipsis so a cut is visible.
+/// Truncate prose for a fixed-width column, with an ellipsis so a cut is
+/// visible.
+///
+/// It said that before and did not do it — `truncate_chars` cuts and marks
+/// nothing — so a clipped value was indistinguishable from a whole one. That is
+/// tolerable for a display name, where the reader knows roughly how long their
+/// own attribute is. It was not tolerable for the identifiers, which is why
+/// they now go through [`shorten_id`] instead.
 fn truncate(text: &str, max: usize) -> String {
-    openvtc_core::display::truncate_chars(text, max).to_string()
+    openvtc_core::display::truncate_did(text, max).into_owned()
+}
+
+/// Shorten an identifier for a fixed-width column: the SCID first, then the
+/// middle, so what is left still identifies it.
+///
+/// A DID on this pane is a thing the reader compares against another DID —
+/// against the one in their clipboard, or against the row below. Cutting the
+/// tail off `did:webvh:{SCID}:host:path` leaves the hash, which is the half
+/// nobody can read, and drops the host and path, which are the half that
+/// differs. The history pane showed a verifier as
+/// `did:webvh:QmX38g7H85V9zYdkEucGMcRZbJgyBBWBic` — no host, no path, and no
+/// mark to say it had been cut at all.
+fn shorten_id(id: &str, max: usize) -> String {
+    openvtc_core::display::shorten_for_display(id, max).into_owned()
 }
 
 #[cfg(test)]
@@ -2482,6 +2503,47 @@ mod tests {
             1,
             "only the durable one is flagged: {out}"
         );
+    }
+
+    /// The history says who a release went to, so that DID has to be one you
+    /// can compare against another. A real `did:webvh` is about ninety
+    /// characters and the column holds forty-four, and the cut used to take the
+    /// tail and mark nothing — leaving
+    /// `did:webvh:QmX38g7H85V9zYdkEucGMcRZbJgyBBWBic`, which has no host, no
+    /// path, and no sign that it had been cut at all.
+    #[test]
+    fn a_disclosure_names_a_verifier_you_can_still_recognise() {
+        use openvtc_core::persona::disclosure::DisclosureRow;
+        let host_and_path = "dids.ic3.dev:decade-equip";
+        let verifier =
+            format!("did:webvh:QmX38g7H85V9zYdkEucGMcRZbJgyBBWBicC6wJq1Daq1yc:{host_and_path}");
+        let mut state = IdentityState {
+            tab: PersonaTab::Disclosures,
+            disclosures: vec![DisclosureRow {
+                verifier_did: verifier.clone(),
+                disclosed_at: "2026-09-19T13:56:07Z".into(),
+                durable_credential_id: Some("urn:uuid:46bb5b3d-9915-4a60-ba99-5a7cac05b0d6".into()),
+                ..DisclosureRow::default()
+            }]
+            .into(),
+            ..IdentityState::default()
+        };
+        loaded(&mut state);
+
+        let out = text(&render(&state));
+        assert!(
+            out.contains(host_and_path),
+            "the half that identifies it survives: {out}"
+        );
+        assert!(
+            !out.contains("QmX38g7H85V9zYdkEucGMcRZbJgyBBWBic"),
+            "and the half nobody reads is what gave way: {out}"
+        );
+        // Whatever is shown, the reader can tell it is not the whole thing.
+        assert!(out.contains('\u{2026}'), "a cut is marked: {out}");
+        // Same for the credential id of a release that is still live: two of
+        // those differ in their last characters, not their first.
+        assert!(out.contains("5a7cac05b0d6"), "{out}");
     }
 
     /// A value that lives only in a face is marked as such, because correcting
