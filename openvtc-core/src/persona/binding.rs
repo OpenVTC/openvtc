@@ -47,8 +47,14 @@ use crate::errors::OpenVTCError;
 pub struct BindingSummary {
     /// Whether this persona presents anything at all in this context.
     pub bound: bool,
-    /// The holder's label for the bound profile, if it has one.
+    /// The holder's own name for the bound face, if it has one. The agent
+    /// returns it only to the holder — which OpenVTC is — and never to the
+    /// community.
     pub profile_name: Option<String>,
+    /// What the holder said this community may call the face — the only name
+    /// the community itself is given. `None` when they chose none.
+    #[serde(default)]
+    pub label: Option<String>,
     /// Identifier of the bound profile.
     pub profile_id: Option<String>,
     /// How many claims the binding carries. `0` for an unbound persona — a
@@ -135,7 +141,12 @@ impl BindingSummary {
         } else {
             format!("{} attributes", self.claim_count)
         };
-        format!("wears: {label} ({attributes})")
+        // Two names, for two audiences: the first is the holder's own and the
+        // community never sees it; the second is what the community is told.
+        match &self.label {
+            Some(shown) => format!("wears: {label} ({attributes}) — known here as “{shown}”"),
+            None => format!("wears: {label} ({attributes})"),
+        }
     }
 }
 
@@ -163,6 +174,10 @@ pub async fn get(
             .map(str::to_string),
         profile_id: value
             .get("profileId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        label: value
+            .get("label")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
         claim_count: value
@@ -271,8 +286,26 @@ pub async fn set(
     persona_did: &str,
     profile_id: Option<&str>,
 ) -> Result<(), OpenVTCError> {
+    // `binding/set` REPLACES the binding, label included, and OpenVTC has no
+    // way to set one — so a face change sent without the current label would
+    // silently take away the name the holder gave this community elsewhere
+    // (`pnm`, the console). Read it and send it back. A failed read fails the
+    // write rather than guessing: "unnamed" is not a safe default for a
+    // decision the holder made.
+    let label = match profile_id {
+        // Taking the face off: the agent drops the label with it.
+        None => None,
+        Some(_) => get(client, context_id, persona_did).await?.label,
+    };
     client
-        .persona_binding_set(context_id, persona_did, profile_id, Vec::new(), None)
+        .persona_binding_set(
+            context_id,
+            persona_did,
+            profile_id,
+            Vec::new(),
+            label.as_deref(),
+            None,
+        )
         .await
         .map_err(|e| OpenVTCError::Vta(format!("persona binding write failed: {e}")))?;
     Ok(())
@@ -371,6 +404,23 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(s.describe(), "wears: work (3 attributes)");
+    }
+
+    /// The holder sees both names: their own, and what this community is told.
+    /// Without the second, a holder cannot tell what the community calls them.
+    #[test]
+    fn a_labelled_binding_says_what_the_community_is_told() {
+        let s = BindingSummary {
+            bound: true,
+            profile_name: Some("the divorce".into()),
+            label: Some("Ada at the co-op".into()),
+            claim_count: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            s.describe(),
+            "wears: the divorce (2 attributes) — known here as “Ada at the co-op”"
+        );
     }
 
     /// One claim is not "1 claims". Small, and the kind of thing that makes a

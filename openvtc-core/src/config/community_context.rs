@@ -1285,6 +1285,7 @@ mod tests {
                     acl_entries_removed: vec!["did:key:zDevice".into()],
                     acl_entries_updated: vec!["did:key:zWide".into()],
                     did_templates: vec![],
+                    sub_contexts: vec![],
                 },
                 DeleteContextPreviewResultBody {
                     id: "openvtc/kernel/ci".into(),
