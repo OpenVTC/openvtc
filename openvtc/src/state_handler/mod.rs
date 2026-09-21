@@ -2660,7 +2660,8 @@ impl StateHandler {
                     Action::JoinReuseConfirm | Action::JoinReuseCancel |
                     Action::JoinInvitationSelect(..) | Action::JoinInvitationChoose |
                     Action::JoinContextSelect(..) | Action::JoinContextSlug(..) |
-                    Action::JoinContextChoose | Action::JoinVettingTake | Action::JoinVettingApply |
+                    Action::JoinContextChoose | Action::JoinAnswersSelect(..) | Action::JoinAnswersChoose |
+                    Action::JoinVettingTake | Action::JoinVettingApply |
                     Action::JoinVettingJoin |
                     Action::JoinVettingAskAgain | Action::JoinVettingRow(..) |
                     Action::JoinVettingCycle(..) |

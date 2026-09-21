@@ -1162,6 +1162,8 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::JoinContextSelect(..)
         | Action::JoinContextSlug(..)
         | Action::JoinContextChoose
+        | Action::JoinAnswersSelect(..)
+        | Action::JoinAnswersChoose
         | Action::JoinVettingTake
         | Action::JoinVettingApply
         | Action::JoinVettingJoin

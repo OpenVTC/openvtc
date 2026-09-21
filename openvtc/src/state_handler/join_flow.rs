@@ -46,8 +46,8 @@ use crate::{
         StateHandler,
         actions::Action,
         join::{
-            ApplyAs, AvailableVic, FirstStepKind, IdentityPick, JoinApplication, JoinPage,
-            JoinRoute, JoinState, JoinVettingView, KnownVetting, PersonaOption,
+            ApplyAs, AvailableVic, FirstStepKind, IdentityPick, JoinAnswers, JoinApplication,
+            JoinPage, JoinRoute, JoinState, JoinVettingView, KnownVetting, PersonaOption,
             PresentedInvitation, RouteOption, RouteState, VettingPhase,
         },
         main_page::content::{VicLifecycle, VicSummary},
@@ -1123,6 +1123,67 @@ impl StateHandler {
                                 return Ok(JoinExit::Exit(interrupted));
                             }
                         }
+                        Action::JoinAnswersSelect(i) => {
+                            if let (Some(answers), Some(client)) =
+                                (state.join.answers.as_mut(), admin_vta)
+                            {
+                                answers.selected = i.min(answers.faces.len().saturating_sub(1));
+                                load_shown(answers, client).await;
+                            }
+                        }
+                        Action::JoinAnswersChoose => {
+                            let Some(answers) = state.join.answers.as_mut() else {
+                                continue;
+                            };
+                            let Some((face_id, face_name)) =
+                                answers.faces.get(answers.selected).cloned()
+                            else {
+                                answers.error = Some(
+                                    "You have no face to answer with. Make one under Identity, \
+                                     then join again."
+                                        .into(),
+                                );
+                                let _ = self.state_tx.send(state.clone());
+                                continue;
+                            };
+                            let missing = answers.unanswered();
+                            if !missing.is_empty() {
+                                answers.error = Some(format!(
+                                    "{face_name} does not show {} — the community requires it. \
+                                     Pick another face, or add it to this one under Identity.",
+                                    missing.join(", ")
+                                ));
+                                let _ = self.state_tx.send(state.clone());
+                                continue;
+                            }
+                            // What the holder approves is these values, exactly.
+                            let approved = answers
+                                .shown
+                                .iter()
+                                .filter_map(|(t, v)| v.clone().map(|v| (t.clone(), v)))
+                                .collect();
+                            answers.approved = Some((face_id, approved));
+                            let Some((pick, vtc_did, context_id)) = answers.parked.take() else {
+                                continue;
+                            };
+                            if let Some(interrupted) = self
+                                .launch_join_sequence(
+                                    pick,
+                                    vtc_did,
+                                    context_id,
+                                    interrupt_rx,
+                                    state,
+                                    tdk,
+                                    config,
+                                    admin_vta,
+                                    profile,
+                                    messaging,
+                                )
+                                .await
+                            {
+                                return Ok(JoinExit::Exit(interrupted));
+                            }
+                        }
                         Action::JoinContextSelect(i) => {
                             let last = state.join.context_options.len().saturating_sub(1);
                             state.join.context_selected = i.min(last);
@@ -1803,6 +1864,22 @@ impl StateHandler {
         profile: &str,
         messaging: Option<&Messaging>,
     ) -> Option<Interrupted> {
+        // A community that asks the applicant to tell it about themselves is
+        // answered before anything else happens: which face, and exactly what
+        // it would send. The launch waits on the Answers page and resumes from
+        // `JoinAnswersChoose`.
+        let asked = config.private.vetting.requested_attributes(&vtc_did);
+        let answered = state
+            .join
+            .answers
+            .as_ref()
+            .is_some_and(|a| a.approved.is_some());
+        if !asked.is_empty() && !answered {
+            open_answers(state, admin_vta, asked, (choice, vtc_did, context_id)).await;
+            let _ = self.state_tx.send(state.clone());
+            return None;
+        }
+
         // Move to the progress page and lock input.
         state.join.page = JoinPage::Progress;
         state.join.processing = true;
@@ -2829,6 +2906,55 @@ async fn run_join_sequence(
         state.invitation_credential.as_ref(),
         linkage.as_ref(),
     );
+    // The community's questions, answered from the face the holder chose on the
+    // Answers page — through a disclosure, so the holder's own history records
+    // what they told the community. The persona wears the face here first:
+    // a disclosure is always of what a persona wears in a context.
+    let approved_answers = state.join.answers.as_ref().and_then(|a| {
+        a.approved
+            .clone()
+            .map(|(face, values)| (a.asked.clone(), face, values))
+    });
+    let attributes = match approved_answers {
+        None => Vec::new(),
+        Some((asked, face_id, approved)) => {
+            state
+                .join
+                .info("Answering the community's questions from your face…");
+            let _ = handler.state_tx.send(state.clone());
+            let answered = answer_from_face(
+                admin_vta,
+                &sub_context_id,
+                &applicant_did,
+                &vtc_did,
+                &asked,
+                &face_id,
+                &approved,
+            )
+            .await;
+            match answered {
+                Ok(attributes) => attributes,
+                Err(e) => {
+                    state.join.fail(e);
+                    if let (Some(service), Some(listener_id)) = (messaging, started_listener.take())
+                    {
+                        service.remove_listener(&listener_id).await;
+                    }
+                    if minted {
+                        rollback_minted_persona(
+                            config,
+                            persona_id,
+                            state,
+                            profile,
+                            prior_friendly_name,
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+    };
+
     // Peer identity vetting: present the statements gathered for this community
     // under this persona, and name the requirements they were gathered against
     // so the community applies the same criterion (vetting-process.md §10.1).
@@ -2845,9 +2971,13 @@ async fn run_join_sequence(
             openvtc_core::join::JoinPresentation {
                 vp,
                 extensions: application.join_extensions(),
+                attributes,
             }
         }
-        _ => vp.into(),
+        _ => openvtc_core::join::JoinPresentation {
+            attributes,
+            ..vp.into()
+        },
     };
     // Settle the wire. TSP needs **both** legs, which is the workspace rule that
     // the protocol is the highest-preference one present in *both* parties'
@@ -3144,6 +3274,97 @@ async fn await_persona_online(
 /// account — a spurious identity with no membership, which then confuses the
 /// active-identity display. Best-effort re-save; the VTA-side keys are cleaned
 /// separately via the DID manager.
+/// Wear `face_id` in the community's context, preview the disclosure of what
+/// it asks, refuse if that differs from what the holder approved, and release
+/// it. `Err` is the sentence the progress page shows; nothing was sent.
+async fn answer_from_face(
+    client: &VtaClient,
+    context_id: &str,
+    persona_did: &str,
+    community_did: &str,
+    asked: &[openvtc_core::persona::join_answers::Asked],
+    face_id: &str,
+    approved: &[(String, serde_json::Value)],
+) -> Result<Vec<vta_sdk::protocols::join_requests::JoinRequestAttribute>, String> {
+    use openvtc_core::persona::join_answers;
+    openvtc_core::persona::binding::set(client, context_id, persona_did, Some(face_id))
+        .await
+        .map_err(|e| format!("Could not put your face on this persona: {e}"))?;
+    let preview = join_answers::preview(client, context_id, persona_did, community_did, asked)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !join_answers::preview_matches(&preview, approved) {
+        return Err(
+            "What your face would send changed after you approved it, so nothing was \
+                    sent. Join again to see the current values."
+                .into(),
+        );
+    }
+    join_answers::present(client, context_id, &preview.preview_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Open the Answers page for `asked`, parking the launch until a face is
+/// chosen.
+async fn open_answers(
+    state: &mut State,
+    admin_vta: Option<&VtaClient>,
+    asked: Vec<openvtc_core::persona::join_answers::Asked>,
+    parked: (IdentityPick, String, String),
+) {
+    let mut answers = JoinAnswers {
+        asked,
+        parked: Some(parked),
+        ..JoinAnswers::default()
+    };
+    match admin_vta {
+        None => {
+            answers.error = Some(
+                "Your VTA is not connected, so your faces cannot be read. Reconnect and join \
+                 again."
+                    .into(),
+            );
+        }
+        Some(client) => {
+            match openvtc_core::persona::profile::list(client).await {
+                Ok(faces) => {
+                    answers.faces = faces
+                        .into_iter()
+                        .map(|f| (f.profile_id.clone(), f.display_name().to_string()))
+                        .collect();
+                }
+                Err(e) => answers.error = Some(format!("Your faces could not be read: {e}")),
+            }
+            load_shown(&mut answers, client).await;
+        }
+    }
+    state.join.answers = Some(answers);
+    state.join.page = JoinPage::Answers;
+    state.join.processing = false;
+}
+
+/// Read what the highlighted face would answer. A holder-scoped resolved read
+/// — the values a disclosure from it would carry.
+async fn load_shown(answers: &mut JoinAnswers, client: &VtaClient) {
+    answers.error = None;
+    answers.shown = answers
+        .asked
+        .iter()
+        .map(|a| (a.claim_type.clone(), None))
+        .collect();
+    let Some((face_id, _)) = answers.faces.get(answers.selected) else {
+        return;
+    };
+    match openvtc_core::persona::profile::get(client, face_id, true).await {
+        Ok(detail) => {
+            answers.shown =
+                openvtc_core::persona::join_answers::shown_by(&answers.asked, &detail.resolved);
+        }
+        Err(e) => answers.error = Some(format!("That face could not be read: {e}")),
+    }
+}
+
 fn rollback_minted_persona(
     config: &mut Config,
     persona_id: PersonaId,
@@ -3210,6 +3431,56 @@ mod tests {
     //! (`join_flow` → `rollback_minted_persona` when `!persona_referenced`).
 
     use super::race_against_interrupt;
+
+    /// A community that asks the applicant about themselves stops the join on
+    /// the Answers page before anything is minted or sent, with the launch
+    /// parked for Enter to resume. Without a connected VTA the page still
+    /// opens, and says why no face can be offered — rather than joining
+    /// without the answers the community requires and being refused.
+    #[tokio::test]
+    async fn a_community_that_asks_opens_the_answers_page_and_parks_the_launch() {
+        use crate::state_handler::State;
+        use crate::state_handler::join::{IdentityPick, JoinPage};
+        use openvtc_core::persona::join_answers::Asked;
+        let mut state = State::default();
+        super::open_answers(
+            &mut state,
+            None,
+            vec![Asked {
+                claim_type: "name.display".into(),
+                required: true,
+                purpose: None,
+            }],
+            (
+                IdentityPick::Mint,
+                "did:web:vtc.example".into(),
+                "acct/co-op".into(),
+            ),
+        )
+        .await;
+        assert_eq!(state.join.page, JoinPage::Answers);
+        assert!(!state.join.processing, "the page must take keys");
+        let answers = state.join.answers.expect("answers state");
+        assert_eq!(
+            answers.parked,
+            Some((
+                IdentityPick::Mint,
+                "did:web:vtc.example".into(),
+                "acct/co-op".into()
+            ))
+        );
+        assert!(
+            answers.approved.is_none(),
+            "nothing is approved by opening the page"
+        );
+        assert!(
+            answers
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("not connected"))
+        );
+        assert_eq!(answers.unanswered(), vec!["name.display".to_string()]);
+    }
     use super::{
         build_pending_record, is_duplicate_membership, joined_session, load_pasted_vic,
         start_persona_listener, validate_join_input,

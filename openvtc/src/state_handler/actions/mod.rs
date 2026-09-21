@@ -490,6 +490,12 @@ pub enum Action {
     /// Commit the highlighted context and launch the join in it.
     JoinContextChoose,
 
+    /// Answers page: highlight this face.
+    JoinAnswersSelect(usize),
+
+    /// Answers page: answer with the highlighted face, as shown, and go on.
+    JoinAnswersChoose,
+
     /// Vetting page: take the highlighted way in. A route the page drew as
     /// blocked answers with why instead.
     JoinVettingTake,

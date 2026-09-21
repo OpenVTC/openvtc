@@ -270,6 +270,11 @@ pub struct KnownCommunity {
     /// Its branding, if it publishes any.
     #[serde(default, skip_serializing_if = "Branding::is_default")]
     pub branding: Branding,
+    /// What it asks an applicant to tell it about themselves
+    /// (`requestedAttributes`). Empty when it asks nothing, and on a record
+    /// written before this was kept — the next manifest read fills it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested: Vec<crate::persona::join_answers::Asked>,
     /// When its manifest was last read.
     pub fetched_at: DateTime<Utc>,
 }
@@ -490,6 +495,20 @@ impl VettingBook {
 
     /// Remember `community`'s vetting criteria from its manifest, replacing
     /// what was known. Returns whether anything changed.
+    /// What `community` asks an applicant to tell it about themselves, as of
+    /// its last manifest read. Empty when it asks nothing or has not been read.
+    #[must_use]
+    pub fn requested_attributes(
+        &self,
+        community: &str,
+    ) -> Vec<crate::persona::join_answers::Asked> {
+        self.communities
+            .iter()
+            .find(|c| c.community == community)
+            .map(|c| c.requested.clone())
+            .unwrap_or_default()
+    }
+
     pub fn learn_manifest(
         &mut self,
         community: &str,
@@ -533,6 +552,7 @@ impl VettingBook {
             .as_ref()
             .map(Branding::from_manifest)
             .unwrap_or_default();
+        let requested = crate::persona::join_answers::asked(manifest);
         // A re-read refreshes `fetched_at` without counting as a change: the
         // same manifest again is not worth a save.
         let branding_changed = match self
@@ -542,14 +562,16 @@ impl VettingBook {
         {
             Some(known) => {
                 known.fetched_at = now;
-                let changed = known.branding != branding;
+                let changed = known.branding != branding || known.requested != requested;
                 known.branding = branding;
+                known.requested = requested;
                 changed
             }
             None => {
                 self.communities.push(KnownCommunity {
                     community: community.to_string(),
                     branding,
+                    requested,
                     fetched_at: now,
                 });
                 true
