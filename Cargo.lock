@@ -907,7 +907,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -918,7 +918,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2539,7 +2539,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.6",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -2920,7 +2920,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3228,7 +3228,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5624,7 +5624,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6188,7 +6188,7 @@ dependencies = [
  "tui-input",
  "url",
  "uuid",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "windows-native-keyring-store",
  "x25519-dalek 2.0.1",
  "zeroize",
@@ -6250,7 +6250,7 @@ dependencies = [
  "trust-tasks-rs",
  "url",
  "uuid",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "vta-service",
  "wiremock",
  "x25519-dalek 2.0.1",
@@ -6279,7 +6279,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6595,7 +6595,7 @@ dependencies = [
  "aes-gcm 0.10.3",
  "aes-kw",
  "argon2 0.5.3",
- "base64 0.22.1",
+ "base64 0.21.7",
  "bitfields",
  "block-padding 0.3.3",
  "blowfish",
@@ -7117,7 +7117,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7711,7 +7711,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7769,7 +7769,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8426,7 +8426,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8649,7 +8649,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8662,7 +8662,7 @@ dependencies = [
  "parking_lot",
  "rustix",
  "signal-hook",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9704,7 +9704,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "vti-common",
 ]
 
@@ -9730,7 +9730,7 @@ dependencies = [
  "vta-config",
  "vta-keys",
  "vta-keyspaces",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "vta-support",
  "vti-common",
  "zeroize",
@@ -9758,7 +9758,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.20",
  "tokio",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "vtc-client",
  "vti-common",
  "x25519-dalek 3.0.0",
@@ -9777,7 +9777,7 @@ dependencies = [
  "sha2 0.11.0",
  "toml",
  "tracing",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "vti-common",
  "vti-secrets",
 ]
@@ -9809,7 +9809,7 @@ dependencies = [
  "uuid",
  "vta-config",
  "vta-keyspaces",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "vti-common",
  "vti-secrets",
  "x25519-dalek 3.0.0",
@@ -9860,7 +9860,7 @@ dependencies = [
  "tracing",
  "vta-config",
  "vta-keyspaces",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "vti-common",
 ]
 
@@ -9911,9 +9911,9 @@ dependencies = [
 
 [[package]]
 name = "vta-sdk"
-version = "0.45.0"
+version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3240f4a5a7efcc020a86e6b51f1e441e21b05bb33402a89096ed244a5644d59"
+checksum = "206f417ad39662c921f2291539e0520bf23c340b09abd4c6547cff9f1f078ebf"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -10048,7 +10048,7 @@ dependencies = [
  "vta-keyspaces",
  "vta-persona",
  "vta-policy",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "vta-support",
  "vta-sweepers",
  "vta-vault",
@@ -10081,7 +10081,7 @@ dependencies = [
  "tracing",
  "vta-config",
  "vta-keyspaces",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "vti-common",
 ]
 
@@ -10127,7 +10127,7 @@ dependencies = [
  "tracing",
  "uuid",
  "vta-keyspaces",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "vti-common",
  "x509-parser 0.18.1",
 ]
@@ -10146,7 +10146,7 @@ dependencies = [
  "tracing",
  "url",
  "vta-keyspaces",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "vti-common",
  "zeroize",
 ]
@@ -10163,7 +10163,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "trust-tasks-rs",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "vti-rooms",
 ]
 
@@ -10208,7 +10208,7 @@ dependencies = [
  "utoipa",
  "utoipa-axum",
  "uuid",
- "vta-sdk 0.45.0",
+ "vta-sdk 0.45.1",
  "webauthn-rs",
  "zeroize",
 ]
@@ -10668,7 +10668,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
