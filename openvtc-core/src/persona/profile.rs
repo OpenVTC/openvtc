@@ -299,15 +299,29 @@ pub async fn get(
         .map(Vec::as_slice)
         .unwrap_or_default()
     {
-        match serde_json::from_value::<ProfileEntry>(entry.clone()) {
-            Ok(ProfileEntry::Ref { attribute_id }) => detail.live_refs.push(attribute_id),
-            Ok(other) => detail.other_entries.push(other),
-            // Counted, never dropped-and-forgotten: this is what makes the
-            // profile read-only rather than silently rewritable.
-            Err(_) => detail.unreadable_entries += 1,
-        }
+        file_entry(&mut detail, entry);
     }
     Ok(detail)
+}
+
+/// Sort one wire entry into what the editor may rebuild and what it must carry
+/// through untouched.
+fn file_entry(detail: &mut ProfileDetail, entry: &Value) {
+    match serde_json::from_value::<ProfileEntry>(entry.clone()) {
+        // Only an unslotted live reference is the tick list's to rebuild. One
+        // carrying a `slot` — `displayName`, what the face calls itself — is
+        // carried through like a pinned entry: `put` writes live refs back
+        // bare, so treating it as a tick would drop the face's name on the
+        // first save.
+        Ok(ProfileEntry::Ref {
+            attribute_id,
+            slot: None,
+        }) => detail.live_refs.push(attribute_id),
+        Ok(other) => detail.other_entries.push(other),
+        // Counted, never dropped-and-forgotten: this is what makes the
+        // profile read-only rather than silently rewritable.
+        Err(_) => detail.unreadable_entries += 1,
+    }
 }
 
 /// Create or update a profile.
@@ -330,6 +344,7 @@ pub async fn put(
         .iter()
         .map(|id| ProfileEntry::Ref {
             attribute_id: id.clone(),
+            slot: None,
         })
         .chain(other_entries.iter().cloned())
         .collect();
@@ -421,11 +436,7 @@ mod tests {
             ..ProfileDetail::default()
         };
         for entry in profile.get("entries").unwrap().as_array().unwrap() {
-            match serde_json::from_value::<ProfileEntry>(entry.clone()) {
-                Ok(ProfileEntry::Ref { attribute_id }) => detail.live_refs.push(attribute_id),
-                Ok(other) => detail.other_entries.push(other),
-                Err(_) => detail.unreadable_entries += 1,
-            }
+            file_entry(&mut detail, entry);
         }
 
         assert_eq!(detail.live_refs, vec!["01A".to_string()]);
@@ -577,16 +588,42 @@ mod tests {
                 "provenance": { "kind": "selfAsserted" }
             }))
             .unwrap(),
+            slot: None,
         }];
         let entries: Vec<ProfileEntry> = refs
             .iter()
             .map(|id| ProfileEntry::Ref {
                 attribute_id: id.clone(),
+                slot: None,
             })
             .chain(other.iter().cloned())
             .collect();
         assert_eq!(entries.len(), 3);
-        assert!(matches!(&entries[0], ProfileEntry::Ref { attribute_id } if attribute_id == "01A"));
+        assert!(
+            matches!(&entries[0], ProfileEntry::Ref { attribute_id, .. } if attribute_id == "01A")
+        );
         assert!(matches!(entries[2], ProfileEntry::Inline { .. }));
+    }
+
+    /// A face's name survives a save from OpenVTC.
+    ///
+    /// `put` writes live references back bare, so a slotted one filed as a tick
+    /// would lose its `displayName` the first time the holder saved the face
+    /// here — silently, with the face still resolving and simply no longer
+    /// saying which name is its own.
+    #[test]
+    fn a_slotted_reference_is_carried_through_not_rebuilt() {
+        let mut detail = ProfileDetail::default();
+        file_entry(
+            &mut detail,
+            &serde_json::json!({ "ref": "01N", "slot": "displayName" }),
+        );
+        file_entry(&mut detail, &serde_json::json!({ "ref": "01A" }));
+        assert_eq!(detail.live_refs, vec!["01A".to_string()]);
+        assert!(matches!(
+            detail.other_entries.as_slice(),
+            [ProfileEntry::Ref { attribute_id, slot: Some(s) }]
+                if attribute_id == "01N" && s == "displayName"
+        ));
     }
 }
