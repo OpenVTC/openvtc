@@ -478,9 +478,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-messaging-sdk"
-version = "0.26.7"
+version = "0.26.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f378765b74ff8132687c67ebc2e7315e17dfe489390258195e86155485cd423"
+checksum = "5cba180f9d47c1e782a042fe7ca1f8e889642a3593a14e1730c53f890335e1d1"
 dependencies = [
  "affinidi-crypto",
  "affinidi-did-authentication",
@@ -907,7 +907,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -918,7 +918,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2539,7 +2539,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -2920,7 +2920,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3228,7 +3228,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4478,6 +4478,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 
 [[package]]
+name = "ipnetwork"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5615,7 +5624,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6179,7 +6188,7 @@ dependencies = [
  "tui-input",
  "url",
  "uuid",
- "vta-sdk 0.43.1",
+ "vta-sdk 0.45.0",
  "windows-native-keyring-store",
  "x25519-dalek 2.0.1",
  "zeroize",
@@ -6241,7 +6250,7 @@ dependencies = [
  "trust-tasks-rs",
  "url",
  "uuid",
- "vta-sdk 0.43.1",
+ "vta-sdk 0.45.0",
  "vta-service",
  "wiremock",
  "x25519-dalek 2.0.1",
@@ -6270,7 +6279,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7108,7 +7117,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7702,7 +7711,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7760,7 +7769,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8417,7 +8426,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8640,7 +8649,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8653,7 +8662,7 @@ dependencies = [
  "parking_lot",
  "rustix",
  "signal-hook",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9262,9 +9271,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-rs"
-version = "0.21.3"
+version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ead41903b477d45a840a0b5020750af47a285b709603c483eabfe257291d379"
+checksum = "f4593c478ebe152c6d244ac3224c4f3ed50f0a75bcca76a53e417c08c980cdc1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9682,9 +9691,9 @@ dependencies = [
 
 [[package]]
 name = "vta-audit"
-version = "0.3.12"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6274912770bbeb8e59016e6ec31f936de082882238c7a201a1d37bff5a351ef7"
+checksum = "47a7d4aa5260146b0f78ac3303e8ee26d443727b443f227d914d7f88a3250dcc"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9695,15 +9704,15 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "vta-sdk 0.42.1",
+ "vta-sdk 0.45.0",
  "vti-common",
 ]
 
 [[package]]
 name = "vta-backup"
-version = "0.4.1"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e96c7fa40d918fc464a24a124718b0fee51a8b7ea6b206d26a7708bc3b4c6739"
+checksum = "8cc09573e72ab40b038874392907f39460633b419c47fd6ec621a9e2b34439cb"
 dependencies = [
  "aes-gcm 0.11.1",
  "argon2 0.6.0",
@@ -9721,7 +9730,7 @@ dependencies = [
  "vta-config",
  "vta-keys",
  "vta-keyspaces",
- "vta-sdk 0.42.1",
+ "vta-sdk 0.45.0",
  "vta-support",
  "vti-common",
  "zeroize",
@@ -9729,9 +9738,9 @@ dependencies = [
 
 [[package]]
 name = "vta-cli-common"
-version = "0.17.1"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "694fa0942a558e54708c1f02373466348adfe27f74895f6fabcc20661307ab48"
+checksum = "b94676c1660cd5751a28687f15a7394a7989905a7e9731e337add61004093760"
 dependencies = [
  "aes-gcm 0.11.1",
  "affinidi-crypto",
@@ -9749,7 +9758,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.20",
  "tokio",
- "vta-sdk 0.42.1",
+ "vta-sdk 0.45.0",
  "vtc-client",
  "vti-common",
  "x25519-dalek 3.0.0",
@@ -9757,26 +9766,27 @@ dependencies = [
 
 [[package]]
 name = "vta-config"
-version = "0.5.2"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "420392a5f787315cb2f941270f2b1ff5e3e50ceb6f324481e7f7d817131cf66b"
+checksum = "26c558fc1ac4f8a8e06cf7b3474e03117c6824f776432545fcb36ce5943bcac6"
 dependencies = [
+ "ipnetwork",
  "serde",
  "serde_ignored",
  "serde_json",
  "sha2 0.11.0",
  "toml",
  "tracing",
- "vta-sdk 0.42.1",
+ "vta-sdk 0.45.0",
  "vti-common",
  "vti-secrets",
 ]
 
 [[package]]
 name = "vta-keys"
-version = "0.6.0"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35bdd763772bf0c66bb24ddf2e784b8a2dce3da6df4889d5778d7862ee440bec"
+checksum = "b10a7000891018ae61e40bbfdcc4182ed66fe4f20324fad19db8362744acfb51"
 dependencies = [
  "aes-gcm 0.11.1",
  "affinidi-crypto",
@@ -9799,7 +9809,7 @@ dependencies = [
  "uuid",
  "vta-config",
  "vta-keyspaces",
- "vta-sdk 0.42.1",
+ "vta-sdk 0.45.0",
  "vti-common",
  "vti-secrets",
  "x25519-dalek 3.0.0",
@@ -9808,18 +9818,18 @@ dependencies = [
 
 [[package]]
 name = "vta-keyspaces"
-version = "0.2.9"
+version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66ca85e85ec6092f11930e1b53b0b7c0b12872b5bb17ff0118ae2ff428e113f6"
+checksum = "8bd928ff16b9614b8fc698306710d35807d75a9aa5c93dc6c9170bfcea9afe86"
 dependencies = [
  "vti-common",
 ]
 
 [[package]]
 name = "vta-persona"
-version = "0.3.8"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43217567081539a006e3ff5f729a5a7ebe5d1a5a335d7eb09eae93ab7efffa76"
+checksum = "0a097d8daf3b91cab278adafa551bdfc2c1ee9b6f5d6f727274d345697d34fb1"
 dependencies = [
  "chrono",
  "hmac 0.13.0",
@@ -9836,9 +9846,9 @@ dependencies = [
 
 [[package]]
 name = "vta-policy"
-version = "0.3.12"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37bf8037f6ddb26955406399a4c687fe0824ff41bd5d8bf09afc337709047673"
+checksum = "2fc41988703d498c8ff841084086d4773ad1b703b6525f79e52b075fa195357a"
 dependencies = [
  "hex",
  "multibase",
@@ -9850,7 +9860,7 @@ dependencies = [
  "tracing",
  "vta-config",
  "vta-keyspaces",
- "vta-sdk 0.42.1",
+ "vta-sdk 0.45.0",
  "vti-common",
 ]
 
@@ -9886,7 +9896,6 @@ dependencies = [
  "hpke",
  "multibase",
  "reqwest",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -9895,7 +9904,6 @@ dependencies = [
  "tracing",
  "trust-tasks-rs",
  "url",
- "utoipa",
  "uuid",
  "x25519-dalek 3.0.0",
  "zeroize",
@@ -9903,9 +9911,9 @@ dependencies = [
 
 [[package]]
 name = "vta-sdk"
-version = "0.43.1"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "282a0a1a70923ffa5f4973656e834d430057cdd098246d2acb301d7a3909317d"
+checksum = "c3240f4a5a7efcc020a86e6b51f1e441e21b05bb33402a89096ed244a5644d59"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -9938,6 +9946,7 @@ dependencies = [
  "keyring-core",
  "multibase",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -9947,6 +9956,7 @@ dependencies = [
  "trust-tasks-rs",
  "trust-tasks-tsp",
  "url",
+ "utoipa",
  "uuid",
  "windows-native-keyring-store",
  "x25519-dalek 3.0.0",
@@ -9955,9 +9965,9 @@ dependencies = [
 
 [[package]]
 name = "vta-service"
-version = "0.32.0"
+version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd2304ed6b8eb6e8361185101731675bfcd5f8a861f76471bd428abfbfb82e10"
+checksum = "11f0c4011a5930f3fd2cb9f180e17fefde05734f1edc928638da2cc6138ac561"
 dependencies = [
  "aes-gcm 0.11.1",
  "affinidi-crypto",
@@ -9995,6 +10005,7 @@ dependencies = [
  "hex",
  "hkdf 0.13.0",
  "hmac 0.13.0",
+ "ipnetwork",
  "jsonwebtoken 11.1.0",
  "metrics",
  "metrics-exporter-prometheus",
@@ -10037,7 +10048,7 @@ dependencies = [
  "vta-keyspaces",
  "vta-persona",
  "vta-policy",
- "vta-sdk 0.42.1",
+ "vta-sdk 0.45.0",
  "vta-support",
  "vta-sweepers",
  "vta-vault",
@@ -10055,9 +10066,9 @@ dependencies = [
 
 [[package]]
 name = "vta-support"
-version = "0.3.12"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "576c6c7159c4f678d5fbae7f878b085324577d122b84afae5708eee74bb34db6"
+checksum = "b34d752ad0e4137ca610d114c6e3c45787679bfd7f1cf03afa2e1bfbe87ffaa3"
 dependencies = [
  "chrono",
  "ed25519-dalek 3.0.0",
@@ -10070,15 +10081,15 @@ dependencies = [
  "tracing",
  "vta-config",
  "vta-keyspaces",
- "vta-sdk 0.42.1",
+ "vta-sdk 0.45.0",
  "vti-common",
 ]
 
 [[package]]
 name = "vta-sweepers"
-version = "0.3.7"
+version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7197ce7efd6dbf48ef9acdf1891c4323d58c5ad8d043910825117738555246c6"
+checksum = "5521710449c42d4b030055cefc41886cf4e6ea88688299a3e903f67115807bd2"
 dependencies = [
  "chrono",
  "serde_json",
@@ -10091,9 +10102,9 @@ dependencies = [
 
 [[package]]
 name = "vta-vault"
-version = "0.5.12"
+version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8410bad63c1e1d394b24b64e5259bb5ac68a237b606833cd6505f0f46d23c55a"
+checksum = "61b0130cc8dbbd10b28100c96ee4905d631983879a1534cede7e13e9ac08182c"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -10116,16 +10127,16 @@ dependencies = [
  "tracing",
  "uuid",
  "vta-keyspaces",
- "vta-sdk 0.42.1",
+ "vta-sdk 0.45.0",
  "vti-common",
  "x509-parser 0.18.1",
 ]
 
 [[package]]
 name = "vta-webvh"
-version = "0.2.13"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3a234c402634ab48eec1082f6da34ea4fc8485cbcbf388790425313cc8faff7"
+checksum = "b1cd932d9588e3e56562d8c5d8b642d8815e9255b1d13d8e863a70e6a8115271"
 dependencies = [
  "affinidi-tdk",
  "chrono",
@@ -10135,16 +10146,16 @@ dependencies = [
  "tracing",
  "url",
  "vta-keyspaces",
- "vta-sdk 0.42.1",
+ "vta-sdk 0.45.0",
  "vti-common",
  "zeroize",
 ]
 
 [[package]]
 name = "vtc-client"
-version = "0.6.7"
+version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e31f8fd0ad913d9d76108afa64a1c3e82d87775ccef04915afabd1d78a1c9cc"
+checksum = "19d041bf6134387e2116c4caf9b35682639d36407c933c4002ed2c2869f4d25e"
 dependencies = [
  "chrono",
  "reqwest",
@@ -10152,15 +10163,15 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "trust-tasks-rs",
- "vta-sdk 0.42.1",
+ "vta-sdk 0.45.0",
  "vti-rooms",
 ]
 
 [[package]]
 name = "vti-common"
-version = "0.19.0"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f33ec5fb6e4d117c520d8e35d80c25757c18295c66b728ef61a9e9b87b1301"
+checksum = "eb57f6185e6445aebd7e76c12634ebea00e6c6c0b47f384eb7562ac4b79c1446"
 dependencies = [
  "aes-gcm 0.11.1",
  "affinidi-data-integrity",
@@ -10180,6 +10191,7 @@ dependencies = [
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "http-body-util",
+ "ipnetwork",
  "jsonwebtoken 11.1.0",
  "multibase",
  "rand 0.10.2",
@@ -10188,6 +10200,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.20",
  "tokio",
+ "tower_governor",
  "tracing",
  "trust-tasks-capability-client",
  "trust-tasks-rs",
@@ -10195,16 +10208,16 @@ dependencies = [
  "utoipa",
  "utoipa-axum",
  "uuid",
- "vta-sdk 0.42.1",
+ "vta-sdk 0.45.0",
  "webauthn-rs",
  "zeroize",
 ]
 
 [[package]]
 name = "vti-rooms"
-version = "0.2.8"
+version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1012e701026444bbc728a76c146a7b0efa8a23d148f0725795420af1b533275d"
+checksum = "10771b0a8ec1b39fbfc975d34446004415982faf9a8638476fb91f22344e69b9"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -10229,9 +10242,9 @@ dependencies = [
 
 [[package]]
 name = "vti-rooms-dtg"
-version = "0.2.7"
+version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf9001f798f443d1fbbd45b27308f910a13f587c102996ec52f48931baafe6d6"
+checksum = "ba8cd8ce231d1000df044829d62cf778d7eef9afca409c497c254efa4fa99630"
 dependencies = [
  "affinidi-data-integrity",
  "affinidi-secrets-resolver",
@@ -10247,9 +10260,9 @@ dependencies = [
 
 [[package]]
 name = "vti-secrets"
-version = "0.3.12"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fdfee0e86f7834cdad93cfe5af7f58b38181132b60242e4bfd83f150ece3c02"
+checksum = "aa6451a62b79dc1aa93343c24bb40e14f677fc99d074641e5f1a7d15e55d2e29"
 dependencies = [
  "hex",
  "serde",
@@ -10655,7 +10668,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
