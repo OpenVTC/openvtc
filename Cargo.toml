@@ -448,7 +448,7 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # pane now calls both. On 0.34.0 the pane compiles and then cannot find the
 # constants; naming the patch is what turns that into a resolver error at the
 # point where it can be read.
-vta-sdk = { version = "0.46.0", features = [
+vta-sdk = { version = "0.47.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
