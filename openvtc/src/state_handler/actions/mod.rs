@@ -251,6 +251,14 @@ pub enum PersonaAction {
     ProfileNew,
     ProfileEdit(usize),
     ProfileDeleteArm(usize),
+    /// Arm retiring the face: taken off every community, kept with its history.
+    ProfileRetireArm(usize),
+    /// Make a retired face (index into the retired list) wearable again.
+    ProfileReinstate(usize),
+    /// Show the retired faces instead of the active ones, or back.
+    ToggleRetired,
+    /// Show where the opened face is worn and what it has done, or hide it.
+    FaceHistory,
 
     /// Open the picker: which world does this face belong to?
     ///

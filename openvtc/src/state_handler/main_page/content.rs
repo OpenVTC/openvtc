@@ -808,6 +808,18 @@ pub enum PersonaConfirm {
         profile_id: String,
         name: String,
         unbind: bool,
+        /// "disclosed to N parties … deleting does not un-tell them", once the
+        /// agent has said how far the face has spoken. `None` while unknown, or
+        /// when it told no one.
+        untell: Option<String>,
+    },
+    /// Retire a face: taken off every community it is worn in, kept with its
+    /// values and history, out of every picker until reinstated. `worn` is how
+    /// many places it is worn now, so the prompt can say what it takes off.
+    RetireFace {
+        profile_id: String,
+        name: String,
+        worn: usize,
     },
     /// Delete a world. Named, not indexed, for the reason above.
     ///
@@ -1135,6 +1147,17 @@ pub struct IdentityState {
     // ── Profiles (from the agent) ────────────────────────────────────────
     pub profiles: Arc<[openvtc_core::persona::profile::ProfileSummary]>,
     pub profile_selected: usize,
+    /// Faces the holder retired — kept, worn nowhere, out of every picker.
+    /// Listed on the Faces tab only when asked for (`z`), so one can be
+    /// brought back; nowhere else.
+    pub retired_faces: Arc<[openvtc_core::persona::profile::ProfileSummary]>,
+    /// Why the retired faces could not be read, shown in that view only: it is
+    /// an optional listing, and must not blank the faces the holder wears.
+    pub retired_error: Option<String>,
+    /// The Faces tab is showing the retired faces.
+    pub show_retired: bool,
+    /// Where the opened face is worn and what it has done (`h`), once read.
+    pub face_history: Option<Result<openvtc_core::persona::lifecycle::FaceHistory, String>>,
     /// The profile opened with Enter, resolved to what it would present.
     pub open_profile: Option<openvtc_core::persona::profile::ProfileDetail>,
     /// The claim under the cursor inside that opened face.
