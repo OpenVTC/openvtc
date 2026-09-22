@@ -473,6 +473,39 @@ pub async fn delete(
     Ok(())
 }
 
+/// What a purge took away, and what it cost.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Purged {
+    /// The versions actually removed. Empty when none named was still held.
+    pub versions: Vec<u64>,
+    /// Faces that pinned one of them and now present nothing for that entry.
+    ///
+    /// The count is the point: a purge that quietly shortened what three faces
+    /// show is exactly the surprise this family exists to prevent, so a caller
+    /// is expected to say so rather than report a bare "done".
+    pub stale_pins: usize,
+}
+
+/// Forget earlier versions of one attribute.
+///
+/// `versions: None` purges every version but the current one. Irreversible —
+/// retention by reference is what makes "what did I show them in March"
+/// answerable, and this is the holder's explicit override of it.
+pub async fn purge_versions(
+    client: &VtaClient,
+    attribute_id: &str,
+    versions: Option<&[u64]>,
+) -> Result<Purged, OpenVTCError> {
+    let value = client
+        .persona_attribute_purge_version(attribute_id, versions)
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("persona attribute purge failed: {e}")))?;
+    Ok(Purged {
+        versions: value.purged.iter().map(|v| v.0.get()).collect(),
+        stale_pins: value.stale_pins.len(),
+    })
+}
+
 /// Parse the `valueType` string a [`PoolAttribute`] carries back into the typed
 /// form [`put`] needs. Unknown types read as [`ValueType::String`], which is
 /// what an editor can actually offer a text field for.

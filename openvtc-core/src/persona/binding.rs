@@ -33,6 +33,7 @@
 //! returned rather than softened.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use vta_sdk::client::VtaClient;
 
 use crate::errors::OpenVTCError;
@@ -268,6 +269,71 @@ pub async fn get_or_unknown(
             BindingSummary::unknown()
         }
     }
+}
+
+/// One persona of the holder's that a context knows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KnownHere {
+    pub persona_did: String,
+    /// The name the holder gave this context for the face, if any.
+    pub label: Option<String>,
+    pub bound: bool,
+    /// The bound face was composed inside the context rather than pushed down
+    /// from the pool.
+    pub local: bool,
+    pub claim_count: u64,
+}
+
+/// Every persona of the holder's with a binding record in one context.
+///
+/// The privacy question behind it: a community that knows a holder under two
+/// personas can put them together, and nothing else in the pane says so — a
+/// membership row shows the one persona that joined, not the others that have
+/// worn something here since.
+pub async fn list(client: &VtaClient, context_id: &str) -> Result<Vec<KnownHere>, OpenVTCError> {
+    let value = client
+        .persona_binding_list(context_id, None, None)
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("persona binding list failed: {e}")))?;
+    let mut rows: Vec<KnownHere> = value
+        .get("personas")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(|r| KnownHere {
+                    persona_did: r
+                        .get("personaDid")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    label: r.get("label").and_then(Value::as_str).map(str::to_string),
+                    bound: r.get("bound").and_then(Value::as_bool).unwrap_or(false),
+                    local: r.get("isLocal").and_then(Value::as_bool).unwrap_or(false),
+                    claim_count: r.get("claimCount").and_then(Value::as_u64).unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    rows.sort_by(|a, b| a.persona_did.cmp(&b.persona_did));
+    Ok(rows)
+}
+
+/// Wear a face that lives inside the context, rather than one from the pool.
+///
+/// The context-local counterpart of [`set`]. Nothing is materialised down from
+/// above, because a local face never reached above: its values were typed here
+/// and stay here.
+pub async fn set_local(
+    client: &VtaClient,
+    context_id: &str,
+    persona_did: &str,
+    profile_id: Option<&str>,
+) -> Result<(), OpenVTCError> {
+    client
+        .persona_local_binding_set(context_id, persona_did, profile_id, None, None, None)
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("persona local binding write failed: {e}")))?;
+    Ok(())
 }
 
 /// Decide what one persona presents in one context.

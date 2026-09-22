@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 
 use openvtc_core::persona::{
-    binding, claim_types, correlation, disclosure, facet, family, lifecycle,
+    binding, claim_types, contacts, correlation, disclosure, facet, family, lifecycle,
     pool::{self, AttributeDraft, PoolAttribute},
     profile::{self, ProfileDetail, ProfileSummary},
 };
@@ -46,9 +46,10 @@ use vta_sdk::client::VtaClient;
 
 use crate::state_handler::actions::PersonaAction;
 use crate::state_handler::main_page::content::{
-    AttributeField, AttributeForm, BindPicker, ComposeForm, ComposeRow, FacePlacer, FacetForm,
-    FacetFormFocus, LocalFacesView, PersonaConfirm, PersonaMode, PersonaTab, ProfileForm,
-    ProfileFormFocus, VALUE_TYPES,
+    AttributeField, AttributeForm, BindPicker, ComposeForm, ComposeRow, ContactForm, FacePlacer,
+    FacetForm, FacetFormFocus, KnownHereView, LocalFaceForm, LocalFacesView, PeopleView,
+    PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus, RenderersView,
+    VALUE_TYPES,
 };
 use crate::state_handler::persona_binding_refresh::{self, BindingTarget};
 use crate::state_handler::state::State;
@@ -63,9 +64,37 @@ pub(crate) enum PersonaEffect {
     Job(PersonaJob),
 }
 
+/// Re-read the faces made in a community after a write of one.
+async fn local_faces_after_write(client: &VtaClient, context_id: String) -> PersonaOutcome {
+    PersonaOutcome::LocalFacesRead {
+        result: lifecycle::local_faces(client, &context_id)
+            .await
+            .map_err(|e| format!("{e}")),
+        context_id,
+    }
+}
+
+/// Re-read a community's contacts after a write of one.
+///
+/// The listing is the write's real answer: a put files a new revision, and
+/// which one is current — and whether anything it superseded is still held —
+/// is what the list says rather than what the caller assumed.
+async fn people_after_write(client: &VtaClient, context_id: String) -> PersonaOutcome {
+    PersonaOutcome::PeopleRead {
+        result: contacts::list(client, &context_id)
+            .await
+            .map_err(|e| format!("{e}")),
+        context_id,
+    }
+}
+
 /// A single persona round-trip.
 pub(crate) enum PersonaJob {
     AttributePut(AttributeDraft),
+    /// Forget every version of one attribute but the current one. One-way.
+    AttributePurge {
+        attribute_id: String,
+    },
     AttributeDelete {
         attribute_id: String,
         cascade: bool,
@@ -91,9 +120,54 @@ pub(crate) enum PersonaJob {
     ProfileRetire {
         profile_id: String,
     },
+    /// Read the formats the agent can produce.
+    RenderersRead,
+    /// Read the contacts filed in one community.
+    PeopleRead {
+        context_id: String,
+    },
+    /// Read one contact in full, with what they said before.
+    ContactRead {
+        context_id: String,
+        contact_id: String,
+    },
+    /// Record what someone told the holder.
+    ContactPut {
+        context_id: String,
+        subject_did: String,
+        known_by_persona: String,
+        facts: Vec<openvtc_core::persona::contacts::ContactFact>,
+        notes: Option<String>,
+    },
+    /// Forget a contact and every revision of it.
+    ContactDelete {
+        context_id: String,
+        contact_id: String,
+    },
+    /// Read every persona with a binding record in one community.
+    KnownHereRead {
+        context_id: String,
+    },
     /// Read the faces made inside one community.
     LocalFacesRead {
         context_id: String,
+    },
+    /// Make or replace a face that lives inside one community.
+    LocalFacePut {
+        context_id: String,
+        name: String,
+        values: Vec<lifecycle::ComposeValue>,
+    },
+    /// Delete a face made inside one community.
+    LocalFaceDelete {
+        context_id: String,
+        profile_id: String,
+    },
+    /// Wear a face made here, as the persona used here.
+    LocalFaceWear {
+        context_id: String,
+        persona_did: String,
+        profile_id: String,
     },
     /// Make chosen values of a face made here reusable. One-way.
     Promote {
@@ -287,6 +361,27 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                 attribute_id: attr.attribute_id.clone(),
                 name: attr.display_name().to_string(),
                 cascade,
+            };
+            PersonaEffect::None
+        }
+
+        PersonaAction::AttributePurgeArm(index) => {
+            let p = &mut state.main_page.content_panel.identity;
+            let Some(attr) = p.attributes.get(*index) else {
+                return PersonaEffect::None;
+            };
+            // Faces that use it at all. Which of them pin an *old* version is
+            // not in the listing, so the question names what is at risk and the
+            // purge reports what it actually broke.
+            let used_by = p
+                .profiles
+                .iter()
+                .filter(|profile| profile.referenced.contains(&attr.attribute_id))
+                .count();
+            p.confirm = PersonaConfirm::PurgeAttribute {
+                attribute_id: attr.attribute_id.clone(),
+                name: attr.display_name().to_string(),
+                used_by,
             };
             PersonaEffect::None
         }
@@ -524,6 +619,121 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             });
             PersonaEffect::None
         }
+        PersonaAction::RenderersOpen => {
+            let p = &mut state.main_page.content_panel.identity;
+            p.mode = PersonaMode::Renderers(RenderersView::default());
+            PersonaEffect::Job(PersonaJob::RenderersRead)
+        }
+        PersonaAction::KnownHereOpen(index) => {
+            let p = &mut state.main_page.content_panel.identity;
+            let Some(membership) = p.memberships.get(*index).cloned() else {
+                return PersonaEffect::None;
+            };
+            p.mode = PersonaMode::KnownHere(KnownHereView {
+                context_id: membership.sub_context_id.clone(),
+                community: membership.community_name,
+                personas: None,
+            });
+            PersonaEffect::Job(PersonaJob::KnownHereRead {
+                context_id: membership.sub_context_id,
+            })
+        }
+        PersonaAction::PeopleOpen(index) => {
+            let p = &mut state.main_page.content_panel.identity;
+            let Some(membership) = p.memberships.get(*index).cloned() else {
+                return PersonaEffect::None;
+            };
+            p.mode = PersonaMode::People(PeopleView {
+                context_id: membership.sub_context_id.clone(),
+                community: membership.community_name,
+                persona_did: membership.persona_did,
+                ..PeopleView::default()
+            });
+            PersonaEffect::Job(PersonaJob::PeopleRead {
+                context_id: membership.sub_context_id,
+            })
+        }
+        PersonaAction::ContactOpen => {
+            let p = &mut state.main_page.content_panel.identity;
+            let PersonaMode::People(view) = &mut p.mode else {
+                return PersonaEffect::None;
+            };
+            let Some(Ok(contacts)) = &view.contacts else {
+                return PersonaEffect::None;
+            };
+            let Some(contact) = contacts.get(view.selected) else {
+                return PersonaEffect::None;
+            };
+            let contact_id = contact.contact_id.clone();
+            let context_id = view.context_id.clone();
+            // A placeholder rather than an empty pane: the read is a round-trip
+            // and the holder pressed ⏎ on a row that is already on screen.
+            view.open = None;
+            view.working = true;
+            PersonaEffect::Job(PersonaJob::ContactRead {
+                context_id,
+                contact_id,
+            })
+        }
+        PersonaAction::ContactNew => {
+            let p = &mut state.main_page.content_panel.identity;
+            if let PersonaMode::People(view) = &mut p.mode {
+                view.form = Some(ContactForm::new());
+                view.error = None;
+            }
+            PersonaEffect::None
+        }
+        PersonaAction::ContactDeleteArm => {
+            let p = &mut state.main_page.content_panel.identity;
+            let PersonaMode::People(view) = &mut p.mode else {
+                return PersonaEffect::None;
+            };
+            let Some(Ok(contacts)) = &view.contacts else {
+                return PersonaEffect::None;
+            };
+            if let Some(contact) = contacts.get(view.selected) {
+                // Named, not indexed: a listing that arrives while the question
+                // is up must not move the answer onto another row.
+                view.deleting = Some((contact.contact_id.clone(), contact.label()));
+            }
+            PersonaEffect::None
+        }
+        PersonaAction::LocalFaceNew => {
+            if let PersonaMode::LocalFaces(view) = &mut state.main_page.content_panel.identity.mode
+            {
+                view.form = Some(LocalFaceForm::new());
+                view.error = None;
+                view.confirming = false;
+            }
+            PersonaEffect::None
+        }
+        PersonaAction::LocalFaceDeleteArm => {
+            let p = &mut state.main_page.content_panel.identity;
+            let PersonaMode::LocalFaces(view) = &mut p.mode else {
+                return PersonaEffect::None;
+            };
+            let Some(face) = view.face_under_cursor() else {
+                return PersonaEffect::None;
+            };
+            view.deleting = Some((face.profile_id, face.name));
+            view.confirming = false;
+            PersonaEffect::None
+        }
+        PersonaAction::LocalFaceWear => {
+            let p = &mut state.main_page.content_panel.identity;
+            let PersonaMode::LocalFaces(view) = &mut p.mode else {
+                return PersonaEffect::None;
+            };
+            let Some(face) = view.face_under_cursor() else {
+                return PersonaEffect::None;
+            };
+            view.working = true;
+            PersonaEffect::Job(PersonaJob::LocalFaceWear {
+                context_id: view.context_id.clone(),
+                persona_did: view.persona_did.clone(),
+                profile_id: face.profile_id,
+            })
+        }
         PersonaAction::LocalFacesOpen(index) => {
             let p = &mut state.main_page.content_panel.identity;
             let Some(membership) = p.memberships.get(*index).cloned() else {
@@ -532,6 +742,7 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             p.mode = PersonaMode::LocalFaces(LocalFacesView {
                 context_id: membership.sub_context_id.clone(),
                 community: membership.community_name,
+                persona_did: membership.persona_did,
                 ..LocalFacesView::default()
             });
             PersonaEffect::Job(PersonaJob::LocalFacesRead {
@@ -607,9 +818,53 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                         }
                     }
                 }
+                PersonaMode::LocalFaces(view) => {
+                    if let Some(form) = &mut view.form {
+                        match form.field {
+                            0 => {
+                                form.name.handle_event(&event);
+                            }
+                            f => {
+                                if let Some(r) = form.rows.get_mut((f - 1) / 2) {
+                                    if (f - 1) % 2 == 0 {
+                                        r.claim_type.handle_event(&event);
+                                    } else {
+                                        r.value.handle_event(&event);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                PersonaMode::People(view) => {
+                    // Only the form takes typing; the listing behind it does
+                    // not, and a keystroke that reached it would be silently
+                    // editing something the holder cannot see.
+                    if let Some(form) = &mut view.form {
+                        let notes = form.notes_field();
+                        match form.field {
+                            0 => {
+                                form.subject_did.handle_event(&event);
+                            }
+                            f if f == notes => {
+                                form.notes.handle_event(&event);
+                            }
+                            f => {
+                                if let Some(r) = form.rows.get_mut((f - 1) / 2) {
+                                    if (f - 1) % 2 == 0 {
+                                        r.claim_type.handle_event(&event);
+                                    } else {
+                                        r.value.handle_event(&event);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 PersonaMode::PlaceFace(_)
                 | PersonaMode::Bind(_)
-                | PersonaMode::LocalFaces(_)
+                | PersonaMode::Renderers(_)
+                | PersonaMode::KnownHere(_)
                 | PersonaMode::View => {}
             }
             PersonaEffect::None
@@ -645,9 +900,30 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                         (form.field + n - 1) % n
                     };
                 }
+                PersonaMode::LocalFaces(view) => {
+                    if let Some(form) = &mut view.form {
+                        let n = form.field_count();
+                        form.field = if *forwards {
+                            (form.field + 1) % n
+                        } else {
+                            (form.field + n - 1) % n
+                        };
+                    }
+                }
+                PersonaMode::People(view) => {
+                    if let Some(form) = &mut view.form {
+                        let n = form.notes_field() + 1;
+                        form.field = if *forwards {
+                            (form.field + 1) % n
+                        } else {
+                            (form.field + n - 1) % n
+                        };
+                    }
+                }
                 PersonaMode::PlaceFace(_)
                 | PersonaMode::Bind(_)
-                | PersonaMode::LocalFaces(_)
+                | PersonaMode::Renderers(_)
+                | PersonaMode::KnownHere(_)
                 | PersonaMode::View => {}
             }
             PersonaEffect::None
@@ -684,12 +960,79 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                 PersonaMode::Bind(picker) => {
                     picker.cursor = step(picker.cursor, option_count, *forwards);
                 }
-                PersonaMode::LocalFaces(view) => {
-                    let n = view.rows().len();
-                    view.cursor = step(view.cursor, n, *forwards);
-                    // Moving on is not agreeing: the question is put again.
-                    view.confirming = false;
-                }
+                // Read-only overlays: nothing to move between.
+                PersonaMode::Renderers(_) | PersonaMode::KnownHere(_) => {}
+                PersonaMode::People(view) => match &mut view.form {
+                    // In the form, ↓ on the last field adds a fact and ↑ on an
+                    // empty last row takes it away — the same shape as compose,
+                    // so one gesture means one thing across the pane.
+                    Some(form) => {
+                        let last = form.notes_field();
+                        if *forwards && form.field == last {
+                            form.rows.push(ComposeRow::default());
+                            form.field = form.notes_field() - 2;
+                        } else if !*forwards
+                            && form.rows.len() > 1
+                            && form.rows.last().is_some_and(|r| {
+                                r.claim_type.value().is_empty() && r.value.value().is_empty()
+                            })
+                            && form.field >= form.notes_field() - 2
+                        {
+                            form.rows.pop();
+                            form.field = form.notes_field();
+                        } else {
+                            let n = last + 1;
+                            form.field = if *forwards {
+                                (form.field + 1) % n
+                            } else {
+                                (form.field + n - 1) % n
+                            };
+                        }
+                    }
+                    None => {
+                        let len = match &view.contacts {
+                            Some(Ok(rows)) => rows.len(),
+                            _ => 0,
+                        };
+                        view.selected = step(view.selected, len, *forwards);
+                        // Moving on withdraws an armed question: it named the
+                        // row it was armed against, not wherever the cursor is.
+                        view.deleting = None;
+                        view.open = None;
+                    }
+                },
+                PersonaMode::LocalFaces(view) => match &mut view.form {
+                    Some(form) => {
+                        let last = form.field_count() - 1;
+                        if *forwards && form.field == last {
+                            form.rows.push(ComposeRow::default());
+                            form.field = form.field_count() - 2;
+                        } else if !*forwards
+                            && form.rows.len() > 1
+                            && form.rows.last().is_some_and(|r| {
+                                r.claim_type.value().is_empty() && r.value.value().is_empty()
+                            })
+                            && form.field >= form.field_count() - 2
+                        {
+                            form.rows.pop();
+                            form.field = form.field_count() - 1;
+                        } else {
+                            let n = form.field_count();
+                            form.field = if *forwards {
+                                (form.field + 1) % n
+                            } else {
+                                (form.field + n - 1) % n
+                            };
+                        }
+                    }
+                    None => {
+                        let n = view.rows().len();
+                        view.cursor = step(view.cursor, n, *forwards);
+                        // Moving on is not agreeing: the question is put again.
+                        view.confirming = false;
+                        view.deleting = None;
+                    }
+                },
                 // ↓ on the last field adds a value; ↑ on an empty last row
                 // takes it away again. Elsewhere they move between fields.
                 PersonaMode::Compose(form) => {
@@ -775,7 +1118,20 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             PersonaEffect::None
         }
         PersonaAction::FormCancel => {
-            state.main_page.content_panel.identity.mode = PersonaMode::View;
+            let p = &mut state.main_page.content_panel.identity;
+            // Esc withdraws one thing at a time. A view that holds a form, an
+            // armed question or an open record closes that first: dropping the
+            // whole view instead would throw away a half-typed card to answer
+            // "not that one", and the holder would have to find their way back.
+            match &mut p.mode {
+                PersonaMode::People(view) if view.form.is_some() => view.form = None,
+                PersonaMode::People(view) if view.deleting.is_some() => view.deleting = None,
+                PersonaMode::People(view) if view.open.is_some() => view.open = None,
+                PersonaMode::LocalFaces(view) if view.form.is_some() => view.form = None,
+                PersonaMode::LocalFaces(view) if view.deleting.is_some() => view.deleting = None,
+                PersonaMode::LocalFaces(view) if view.confirming => view.confirming = false,
+                _ => p.mode = PersonaMode::View,
+            }
             PersonaEffect::None
         }
         PersonaAction::FormSubmit => form_submit(state),
@@ -816,6 +1172,9 @@ fn confirm_yes(state: &mut State) -> PersonaEffect {
             facet_id,
             expected_version,
         }),
+        PersonaConfirm::PurgeAttribute { attribute_id, .. } => {
+            PersonaEffect::Job(PersonaJob::AttributePurge { attribute_id })
+        }
         PersonaConfirm::Unbind {
             context_id,
             persona_did,
@@ -853,7 +1212,10 @@ fn form_submit(state: &mut State) -> PersonaEffect {
     let p = &mut state.main_page.content_panel.identity;
 
     match &mut p.mode {
-        PersonaMode::View => PersonaEffect::None,
+        // Read-only overlays: ⏎ has nothing to submit, and Esc closes them.
+        PersonaMode::View | PersonaMode::Renderers(_) | PersonaMode::KnownHere(_) => {
+            PersonaEffect::None
+        }
         PersonaMode::Attribute(form) => {
             let claim_type = form.claim_type.value().trim().to_string();
             if claim_type.is_empty() {
@@ -946,7 +1308,104 @@ fn form_submit(state: &mut State) -> PersonaEffect {
                 into,
             })
         }
+        PersonaMode::People(view) => {
+            // An armed delete is what ⏎ answers first: it is on screen, and
+            // anything else would act past a question the holder can see.
+            if let Some((contact_id, _)) = view.deleting.clone() {
+                view.working = true;
+                return PersonaEffect::Job(PersonaJob::ContactDelete {
+                    context_id: view.context_id.clone(),
+                    contact_id,
+                });
+            }
+            let Some(form) = &mut view.form else {
+                // No form up: ⏎ reads the row under the cursor instead, which
+                // is what the list's own hint offers.
+                return PersonaEffect::None;
+            };
+            let subject_did = form.subject_did.value().trim().to_string();
+            if subject_did.is_empty() {
+                view.error = Some("Whose card is this? Give the DID they gave you.".into());
+                return PersonaEffect::None;
+            }
+            let mut facts = Vec::new();
+            for row in &form.rows {
+                let claim_type = row.claim_type.value().trim().to_string();
+                let value = row.value.value().trim().to_string();
+                match (claim_type.is_empty(), value.is_empty()) {
+                    (true, true) => continue,
+                    (false, false) => facts.push(contacts::ContactFact { claim_type, value }),
+                    // Half a row is a typo, not a fact: refused here rather
+                    // than filed as something they did not say.
+                    _ => {
+                        view.error =
+                            Some("Each fact needs both what it is and what they said.".into());
+                        return PersonaEffect::None;
+                    }
+                }
+            }
+            if facts.is_empty() {
+                view.error = Some("Nothing to record — add at least one fact.".into());
+                return PersonaEffect::None;
+            }
+            let notes = form.notes.value().trim().to_string();
+            view.working = true;
+            view.error = None;
+            PersonaEffect::Job(PersonaJob::ContactPut {
+                context_id: view.context_id.clone(),
+                subject_did,
+                known_by_persona: view.persona_did.clone(),
+                facts,
+                notes: (!notes.is_empty()).then_some(notes),
+            })
+        }
         PersonaMode::LocalFaces(view) => {
+            if let Some(form) = &view.form {
+                let name = form.name.value().trim().to_string();
+                if name.is_empty() {
+                    view.error = Some("Give the face a name — only you see it.".into());
+                    return PersonaEffect::None;
+                }
+                let mut values = Vec::new();
+                for row in &form.rows {
+                    let claim_type = row.claim_type.value().trim().to_string();
+                    let value = row.value.value().trim().to_string();
+                    match (claim_type.is_empty(), value.is_empty()) {
+                        (true, true) => continue,
+                        (false, false) => values.push(lifecycle::ComposeValue {
+                            claim_type,
+                            value,
+                            // Never shared from here: making a value reusable
+                            // is the promote step, asked separately because it
+                            // cannot be undone.
+                            share: false,
+                        }),
+                        _ => {
+                            view.error =
+                                Some("Each value needs both what it is and what it says.".into());
+                            return PersonaEffect::None;
+                        }
+                    }
+                }
+                if values.is_empty() {
+                    view.error = Some("A face with nothing on it shows nothing.".into());
+                    return PersonaEffect::None;
+                }
+                view.working = true;
+                view.error = None;
+                return PersonaEffect::Job(PersonaJob::LocalFacePut {
+                    context_id: view.context_id.clone(),
+                    name,
+                    values,
+                });
+            }
+            if let Some((profile_id, _)) = view.deleting.clone() {
+                view.working = true;
+                return PersonaEffect::Job(PersonaJob::LocalFaceDelete {
+                    context_id: view.context_id.clone(),
+                    profile_id,
+                });
+            }
             let Some((profile_id, positions)) = view.chosen.clone() else {
                 view.error = Some("Choose a value with space first.".to_string());
                 return PersonaEffect::None;
@@ -1056,7 +1515,15 @@ pub(crate) fn release_form(state: &mut State, reason: String) {
             view.working = false;
             view.error = Some(reason);
         }
-        PersonaMode::View => p.status_message = Some(reason),
+        PersonaMode::People(view) => {
+            view.working = false;
+            view.error = Some(reason);
+        }
+        // A read-only overlay has no in-flight write to release; the pane's own
+        // status line is where the reason belongs.
+        PersonaMode::View | PersonaMode::Renderers(_) | PersonaMode::KnownHere(_) => {
+            p.status_message = Some(reason);
+        }
     }
 }
 
@@ -1291,6 +1758,30 @@ impl PersonaJobRun {
                     .err()
                     .map(|e| format!("{e}")),
             },
+            PersonaJob::AttributePurge { attribute_id } => {
+                match pool::purge_versions(&client, &attribute_id, None).await {
+                    Ok(purged) => PersonaOutcome::Deleted {
+                        message: format!(
+                            "Forgot {} earlier version{}.{}",
+                            purged.versions.len(),
+                            if purged.versions.len() == 1 { "" } else { "s" },
+                            match purged.stale_pins {
+                                0 => String::new(),
+                                n => format!(
+                                    " {n} face{} pinned one of them and now shows nothing for it \
+                                     until you edit {}.",
+                                    if n == 1 { "" } else { "s" },
+                                    if n == 1 { "it" } else { "them" },
+                                ),
+                            }
+                        ),
+                    },
+                    Err(e) => PersonaOutcome::Written {
+                        verb: "Forgot the earlier versions",
+                        error: Some(format!("{e}")),
+                    },
+                }
+            }
             PersonaJob::AttributeReveal {
                 attribute_id,
                 claim_type,
@@ -1353,6 +1844,108 @@ impl PersonaJobRun {
                     },
                 }
             }
+            PersonaJob::RenderersRead => PersonaOutcome::RenderersRead {
+                result: disclosure::renderers(&client)
+                    .await
+                    .map_err(|e| format!("{e}")),
+            },
+            PersonaJob::PeopleRead { context_id } => PersonaOutcome::PeopleRead {
+                result: contacts::list(&client, &context_id)
+                    .await
+                    .map_err(|e| format!("{e}")),
+                context_id,
+            },
+            PersonaJob::ContactRead {
+                context_id,
+                contact_id,
+            } => PersonaOutcome::ContactRead {
+                result: contacts::get(&client, &context_id, &contact_id, true)
+                    .await
+                    .map_err(|e| format!("{e}")),
+                context_id,
+            },
+            PersonaJob::ContactPut {
+                context_id,
+                subject_did,
+                known_by_persona,
+                facts,
+                notes,
+            } => match contacts::put(
+                &client,
+                &context_id,
+                &subject_did,
+                &known_by_persona,
+                facts,
+                notes.as_deref(),
+            )
+            .await
+            {
+                // The write's own answer is the listing after it: a put is a
+                // new revision, and which of them is current is what the list
+                // says rather than what the caller assumed.
+                Ok(_) => people_after_write(&client, context_id).await,
+                Err(e) => PersonaOutcome::ContactWritten {
+                    context_id,
+                    error: Some(format!("{e}")),
+                },
+            },
+            PersonaJob::ContactDelete {
+                context_id,
+                contact_id,
+            } => match contacts::delete(&client, &context_id, &contact_id).await {
+                Ok(()) => people_after_write(&client, context_id).await,
+                Err(e) => PersonaOutcome::ContactWritten {
+                    context_id,
+                    error: Some(format!("{e}")),
+                },
+            },
+            PersonaJob::KnownHereRead { context_id } => PersonaOutcome::KnownHereRead {
+                result: binding::list(&client, &context_id)
+                    .await
+                    .map_err(|e| format!("{e}")),
+                context_id,
+            },
+            PersonaJob::LocalFacePut {
+                context_id,
+                name,
+                values,
+            } => match lifecycle::local_face_put(&client, &context_id, &name, values, None, None)
+                .await
+            {
+                Ok(_) => local_faces_after_write(&client, context_id).await,
+                Err(e) => PersonaOutcome::Written {
+                    verb: "Made the face",
+                    error: Some(format!("{e}")),
+                },
+            },
+            PersonaJob::LocalFaceDelete {
+                context_id,
+                profile_id,
+            } => {
+                // `unbind` is deliberate: the holder answered a question that
+                // said the face is taken off as it goes, and refusing here
+                // would leave them with a delete that only works sometimes.
+                match lifecycle::local_face_delete(&client, &context_id, &profile_id, true).await {
+                    Ok(()) => local_faces_after_write(&client, context_id).await,
+                    Err(e) => PersonaOutcome::Written {
+                        verb: "Deleted the face",
+                        error: Some(format!("{e}")),
+                    },
+                }
+            }
+            PersonaJob::LocalFaceWear {
+                context_id,
+                persona_did,
+                profile_id,
+            } => match binding::set_local(&client, &context_id, &persona_did, Some(&profile_id))
+                .await
+            {
+                Ok(()) => local_faces_after_write(&client, context_id).await,
+                Err(e) => PersonaOutcome::Written {
+                    verb: "Put the face on",
+                    error: Some(format!("{e}")),
+                },
+            },
             PersonaJob::LocalFacesRead { context_id } => PersonaOutcome::LocalFacesRead {
                 result: lifecycle::local_faces(&client, &context_id)
                     .await
@@ -1573,6 +2166,30 @@ pub(crate) enum PersonaOutcome {
         cleared: bool,
         error: Option<String>,
     },
+    /// The formats the agent can produce.
+    RenderersRead {
+        result: Result<Vec<openvtc_core::persona::disclosure::Renderer>, String>,
+    },
+    /// The contacts filed in one community, for the view that asked.
+    PeopleRead {
+        context_id: String,
+        result: Result<Vec<openvtc_core::persona::contacts::ContactSummary>, String>,
+    },
+    /// One contact in full.
+    ContactRead {
+        context_id: String,
+        result: Result<openvtc_core::persona::contacts::ContactDetail, String>,
+    },
+    /// A contact write finished — the listing is re-read either way.
+    ContactWritten {
+        context_id: String,
+        error: Option<String>,
+    },
+    /// Who one community knows the holder as, for the view that asked.
+    KnownHereRead {
+        context_id: String,
+        result: Result<Vec<openvtc_core::persona::binding::KnownHere>, String>,
+    },
     /// The faces made inside a community, for the view that asked.
     LocalFacesRead {
         context_id: String,
@@ -1749,6 +2366,10 @@ impl PersonaOutcome {
                                 view.working = false;
                                 view.error = Some(e.clone());
                             }
+                            PersonaMode::People(view) => {
+                                view.working = false;
+                                view.error = Some(e.clone());
+                            }
                             _ => p.status_message = Some(e.clone()),
                         }
                         state
@@ -1758,12 +2379,71 @@ impl PersonaOutcome {
                 }
             }
 
+            PersonaOutcome::RenderersRead { result } => {
+                if let PersonaMode::Renderers(view) = &mut p.mode {
+                    view.formats = Some(result);
+                }
+            }
+
+            PersonaOutcome::PeopleRead { context_id, result } => {
+                if let PersonaMode::People(view) = &mut p.mode
+                    && view.context_id == context_id
+                {
+                    // A write that succeeded closes what it was answering: the
+                    // form is done with, and the armed delete has happened.
+                    if result.is_ok() {
+                        view.form = None;
+                        view.deleting = None;
+                        view.open = None;
+                        view.error = None;
+                    }
+                    let len = result.as_ref().map(Vec::len).unwrap_or(0);
+                    view.contacts = Some(result);
+                    view.selected = view.selected.min(len.saturating_sub(1));
+                    view.working = false;
+                }
+            }
+
+            PersonaOutcome::ContactRead { context_id, result } => {
+                if let PersonaMode::People(view) = &mut p.mode
+                    && view.context_id == context_id
+                {
+                    view.open = Some(result);
+                    view.working = false;
+                }
+            }
+
+            PersonaOutcome::ContactWritten { context_id, error } => {
+                if let PersonaMode::People(view) = &mut p.mode
+                    && view.context_id == context_id
+                {
+                    view.working = false;
+                    view.error = error.clone();
+                }
+            }
+
+            PersonaOutcome::KnownHereRead { context_id, result } => {
+                if let PersonaMode::KnownHere(view) = &mut p.mode
+                    && view.context_id == context_id
+                {
+                    view.personas = Some(result);
+                }
+            }
+
             PersonaOutcome::LocalFacesRead { context_id, result } => {
                 if let PersonaMode::LocalFaces(view) = &mut p.mode
                     && view.context_id == context_id
                 {
+                    if result.is_ok() {
+                        // A write that succeeded closes what it was answering.
+                        view.form = None;
+                        view.deleting = None;
+                        view.chosen = None;
+                        view.error = None;
+                    }
                     view.faces = Some(result);
                     view.cursor = 0;
+                    view.working = false;
                 }
             }
 
@@ -3049,6 +3729,186 @@ mod tests {
                 assert!(view.error.as_deref().unwrap().contains("version conflict"));
             }
             _ => panic!("the view stays open on a refusal"),
+        }
+    }
+    /// Contacts: a community's people are read when the view opens, a half
+    /// row is refused before anything is sent, and a delete is armed against
+    /// the contact it named rather than whatever row the cursor later sits on.
+    #[test]
+    fn what_a_community_told_you_is_recorded_against_the_persona_it_reached() {
+        let mut state = state_with(IdentityState {
+            memberships: vec![PersonaMembership {
+                community_name: "Co-op".into(),
+                sub_context_id: "ctx-coop".into(),
+                persona_did: "did:key:zCoop".into(),
+                ..PersonaMembership::default()
+            }]
+            .into(),
+            ..IdentityState::default()
+        });
+        match apply(&mut state, &PersonaAction::PeopleOpen(0)) {
+            PersonaEffect::Job(PersonaJob::PeopleRead { context_id }) => {
+                assert_eq!(context_id, "ctx-coop")
+            }
+            _ => panic!("expected a read"),
+        }
+        PersonaOutcome::PeopleRead {
+            context_id: "ctx-coop".into(),
+            result: Ok(vec![contacts::ContactSummary {
+                contact_id: "01C".into(),
+                subject_did: "did:key:zPeer".into(),
+                known_by_persona: "did:key:zCoop".into(),
+                display_name: Some("Ada".into()),
+                claim_count: 2,
+                rev: 1,
+                received_at: "2026-09-07T10:00:00Z".into(),
+                unseen_change: false,
+            }]),
+        }
+        .apply(&mut state);
+
+        apply(&mut state, &PersonaAction::ContactNew);
+        let type_into = |state: &mut State, text: &str| {
+            for c in text.chars() {
+                apply(
+                    state,
+                    &PersonaAction::FormKey(crossterm::event::KeyEvent::from(
+                        crossterm::event::KeyCode::Char(c),
+                    )),
+                );
+            }
+        };
+        // No DID: refused, and said so.
+        assert!(matches!(
+            apply(&mut state, &PersonaAction::FormSubmit),
+            PersonaEffect::None
+        ));
+        type_into(&mut state, "did:key:zPeer");
+        apply(&mut state, &PersonaAction::FormField(true));
+        type_into(&mut state, "name.display");
+        // Half a row is refused too.
+        assert!(matches!(
+            apply(&mut state, &PersonaAction::FormSubmit),
+            PersonaEffect::None
+        ));
+        apply(&mut state, &PersonaAction::FormField(true));
+        type_into(&mut state, "Ada");
+        match apply(&mut state, &PersonaAction::FormSubmit) {
+            PersonaEffect::Job(PersonaJob::ContactPut {
+                context_id,
+                subject_did,
+                known_by_persona,
+                facts,
+                notes,
+            }) => {
+                assert_eq!(context_id, "ctx-coop");
+                assert_eq!(subject_did, "did:key:zPeer");
+                // Filed against the persona this community knows, not the
+                // holder's account or their first persona.
+                assert_eq!(known_by_persona, "did:key:zCoop");
+                assert_eq!(facts.len(), 1);
+                assert_eq!(facts[0].claim_type, "name.display");
+                assert_eq!(notes, None);
+            }
+            _ => panic!("expected a contact write"),
+        }
+
+        // Esc withdraws the form, not the view.
+        apply(&mut state, &PersonaAction::FormCancel);
+        match &personas(&state).mode {
+            PersonaMode::People(view) => assert!(view.form.is_none()),
+            _ => panic!("the view stays open"),
+        }
+        // An armed delete names the contact, and survives a listing that
+        // arrives while the question is on screen.
+        apply(&mut state, &PersonaAction::ContactDeleteArm);
+        PersonaOutcome::PeopleRead {
+            context_id: "ctx-other".into(),
+            result: Ok(Vec::new()),
+        }
+        .apply(&mut state);
+        match apply(&mut state, &PersonaAction::FormSubmit) {
+            PersonaEffect::Job(PersonaJob::ContactDelete { contact_id, .. }) => {
+                assert_eq!(contact_id, "01C")
+            }
+            _ => panic!("expected a delete"),
+        }
+    }
+
+    /// Forgetting earlier versions asks first, names the attribute it armed,
+    /// and says how many faces use it.
+    #[test]
+    fn forgetting_earlier_versions_is_asked_before_it_is_done() {
+        let mut state = state_with(IdentityState {
+            attributes: vec![attribute("01A")].into(),
+            ..IdentityState::default()
+        });
+        apply(&mut state, &PersonaAction::AttributePurgeArm(0));
+        match &personas(&state).confirm {
+            PersonaConfirm::PurgeAttribute {
+                attribute_id, name, ..
+            } => {
+                assert_eq!(attribute_id, "01A");
+                assert_eq!(name, "email.work");
+            }
+            _ => panic!("expected the question to be armed"),
+        }
+        match apply(&mut state, &PersonaAction::ConfirmYes) {
+            PersonaEffect::Job(PersonaJob::AttributePurge { attribute_id }) => {
+                assert_eq!(attribute_id, "01A")
+            }
+            _ => panic!("expected a purge"),
+        }
+    }
+
+    /// A face made inside a community carries no shared values: making one
+    /// reusable is the separate, one-way promote step.
+    #[test]
+    fn a_face_made_here_is_made_with_nothing_shared() {
+        let mut state = state_with(IdentityState {
+            memberships: vec![PersonaMembership {
+                community_name: "Co-op".into(),
+                sub_context_id: "ctx-coop".into(),
+                persona_did: "did:key:zCoop".into(),
+                ..PersonaMembership::default()
+            }]
+            .into(),
+            ..IdentityState::default()
+        });
+        apply(&mut state, &PersonaAction::LocalFacesOpen(0));
+        PersonaOutcome::LocalFacesRead {
+            context_id: "ctx-coop".into(),
+            result: Ok(Vec::new()),
+        }
+        .apply(&mut state);
+        apply(&mut state, &PersonaAction::LocalFaceNew);
+        let type_into = |state: &mut State, text: &str| {
+            for c in text.chars() {
+                apply(
+                    state,
+                    &PersonaAction::FormKey(crossterm::event::KeyEvent::from(
+                        crossterm::event::KeyCode::Char(c),
+                    )),
+                );
+            }
+        };
+        type_into(&mut state, "Market");
+        apply(&mut state, &PersonaAction::FormField(true));
+        type_into(&mut state, "name.display");
+        apply(&mut state, &PersonaAction::FormField(true));
+        type_into(&mut state, "Ada");
+        match apply(&mut state, &PersonaAction::FormSubmit) {
+            PersonaEffect::Job(PersonaJob::LocalFacePut {
+                context_id,
+                name,
+                values,
+            }) => {
+                assert_eq!(context_id, "ctx-coop");
+                assert_eq!(name, "Market");
+                assert_eq!(values.len(), 1);
+                assert!(!values[0].share, "nothing made here is shared by making it");
+            }
+            _ => panic!("expected a local face write"),
         }
     }
 }

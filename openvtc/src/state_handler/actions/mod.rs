@@ -282,6 +282,26 @@ pub enum PersonaAction {
     ComposeOpen(usize),
     /// Show the faces made inside this community, to make a value reusable.
     LocalFacesOpen(usize),
+    /// Ask whether to forget the earlier versions of the attribute at this row.
+    AttributePurgeArm(usize),
+    /// Show the formats the agent can produce, and what each discards.
+    RenderersOpen,
+    /// Show every persona this community has a binding record for.
+    KnownHereOpen(usize),
+    /// Show what people in this community have told the holder.
+    PeopleOpen(usize),
+    /// Read the contact under the cursor in full.
+    ContactOpen,
+    /// Start recording what someone told the holder.
+    ContactNew,
+    /// Ask whether to forget the contact under the cursor.
+    ContactDeleteArm,
+    /// Start making a face inside this community.
+    LocalFaceNew,
+    /// Ask whether to delete the face under the cursor, made here.
+    LocalFaceDeleteArm,
+    /// Wear the face under the cursor as the persona used here.
+    LocalFaceWear,
 
     // ── The shared confirmation slot ─────────────────────────────────────
     ConfirmYes,

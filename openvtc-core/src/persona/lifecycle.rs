@@ -20,6 +20,7 @@
 
 use serde_json::{Value, json};
 use vta_sdk::client::VtaClient;
+use vta_sdk::protocols::persona::{InlineValue, LocalProfileEntry, Provenance, ValueType};
 
 use crate::errors::OpenVTCError;
 use crate::persona::profile::ProfileSummary;
@@ -338,6 +339,65 @@ pub async fn local_faces(
     }
     faces.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(faces)
+}
+
+/// Make or replace a face that lives inside one community.
+///
+/// Inline values only — a context-local face cannot reference, pin or override
+/// a pool attribute, because there is nowhere in the wire type to name one.
+/// That is the boundary, not a simplification of this call.
+pub async fn local_face_put(
+    client: &VtaClient,
+    context_id: &str,
+    name: &str,
+    values: Vec<ComposeValue>,
+    profile_id: Option<&str>,
+    expected_version: Option<u64>,
+) -> Result<String, OpenVTCError> {
+    let entries = values
+        .into_iter()
+        .map(|v| LocalProfileEntry {
+            inline: InlineValue {
+                claim_type: v.claim_type,
+                value: Value::String(v.value),
+                value_type: ValueType::String,
+                // Typed here, by the holder, about themselves. A local face
+                // has no other provenance available to it: a credential-backed
+                // value lives in the pool, which is the half a context-local
+                // face deliberately cannot reach.
+                provenance: Provenance::SelfAsserted,
+                label: None,
+            },
+            slot: None,
+        })
+        .collect();
+    let value = client
+        .persona_local_profile_put(context_id, name, entries, profile_id, expected_version)
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("persona local profile write failed: {e}")))?;
+    Ok(value
+        .get("profileId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string())
+}
+
+/// Delete a face made inside one community.
+///
+/// `unbind` is what makes the delete possible while it is still worn. Without
+/// it the agent refuses rather than leaving a persona presenting a face that
+/// no longer exists, and the refusal is the thing to show the holder.
+pub async fn local_face_delete(
+    client: &VtaClient,
+    context_id: &str,
+    profile_id: &str,
+    unbind: bool,
+) -> Result<(), OpenVTCError> {
+    client
+        .persona_local_profile_delete(context_id, profile_id, unbind)
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("persona local profile delete failed: {e}")))?;
+    Ok(())
 }
 
 /// What a promotion did.
