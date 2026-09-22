@@ -669,3 +669,60 @@ Local only: nothing is pushed, published or merged.
   - concurrency (the locks are there, but the prototype is single-threaded);
   - a JCS encoding of the metadata.
 
+## 15. Testing it (branch `zkp-pcs`)
+
+The flow runs end to end today, in tests. Nothing is wired to a TUI screen yet, so this is how
+to exercise it.
+
+**The onboarding flow, client side** — manifest with published parameters, two vetting
+sessions, the proof, the submission, the community's decision:
+
+```sh
+cd ~/devel/openvtc-worktrees/zkp-pcs
+cargo test -p openvtc-core --test hidden_vetting_onboarding -- --nocapture
+```
+
+Two tests. The first drives `vetting::hidden` directly; the second drives `Application`, the
+type the join flow holds, and asserts the proof lands in `join_extensions()` beside the
+requirements digest, inside the VTC's 16 KiB cap.
+
+**The adversarial cases** — double-spent token, tokens and metadata moved between
+attestations, a forged withdrawal, a twin key pair for one member, replayed opening proofs,
+epoch rotation, event mode:
+
+```sh
+cargo test -p openvtc-vetting-pcs --release
+```
+
+**Criticality** — a community that marks a namespace this build does not implement stops the
+application instead of quietly applying the named way:
+
+```sh
+cargo test -p openvtc-core --lib vetting::hidden
+cargo test -p openvtc-core --lib vetting::tests::a_critical_namespace
+```
+
+**The VTC half** (VTI branch `zkp-pcs`), including the cross-repo fixture — the VTC's own
+verifier reading a submission this client produced:
+
+```sh
+cd ~/devel/vti-worktrees/zkp-pcs
+cargo test -p vti-vetting-pcs --release
+cargo test -p vtc-service --features vetting-pcs --lib vetting::
+```
+
+### What a real run still needs
+
+- **A VTC-issued challenge.** The proof binds one, but the client mints it and the service does
+  not yet check that it issued it. Replay is held off meanwhile by the spent-token set and the
+  one-open-request rule. The fix is a nonce on the manifest or submit round trip.
+- **The vetter's screen.** `vetting::hidden::attest` is the whole vetter half, but no TUI action
+  calls it: the attest action still signs a named statement. The applicant's PCS identifier also
+  has to reach the vetter through the session for the vetter to attest it.
+- **Vetter enrolment and the token drip over the wire.** Today the community issues the root
+  credential and the tokens through the in-process `Vtc`. In a deployment both are Trust Tasks
+  (`vtc/vetting/vetters/pcs-root`, `.../tokens`), and the VTC's minting half — its `hsk` and
+  `tsk` — is not built: `vti-vetting-pcs` verifies, it does not mint.
+- **A trust-tasks-rs release** carrying manifest 0.2's `ext`, after which the client reads the
+  typed member instead of parsing the raw criterion.
+
