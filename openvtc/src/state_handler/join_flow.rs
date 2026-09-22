@@ -520,9 +520,10 @@ async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Resul
         .map_err(|e| NotLearned::Unresolvable(format!("it could not be resolved ({e})")))?;
     let doc = serde_json::to_value(&resolved.doc)
         .map_err(|e| NotLearned::Unanswered(format!("its DID document could not be read ({e})")))?;
-    let manifest = discover::fetch_manifest(&doc, vtc_did, resolver, ProbePolicy::PublicOnly)
-        .await
-        .map_err(|e| NotLearned::Unanswered(e.to_string()))?;
+    let (manifest, raw) =
+        discover::fetch_manifest(&doc, vtc_did, resolver, ProbePolicy::PublicOnly)
+            .await
+            .map_err(|e| NotLearned::Unanswered(e.to_string()))?;
 
     let book = &mut config.private.vetting;
     book.learn_manifest(vtc_did, &manifest, Utc::now());
@@ -531,7 +532,7 @@ async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Resul
         .iter_mut()
         .filter(|a| a.community == vtc_did)
     {
-        if let Err(e) = application.adopt_manifest(&manifest) {
+        if let Err(e) = application.adopt_manifest(&manifest, &raw) {
             debug!(community = %vtc_did, error = %e, "community manifest not adopted");
         }
     }

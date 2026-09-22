@@ -193,6 +193,17 @@ pub enum Notice {
         /// The community.
         community: String,
     },
+    /// Applicant: the community requires something this build cannot honour, so the
+    /// application stops here rather than gathering evidence the community will not accept
+    /// ([`super::hidden`]).
+    RequirementsUnsupported {
+        /// The application.
+        application_id: String,
+        /// The community.
+        community: String,
+        /// What it asked for, in the applicant's words.
+        detail: String,
+    },
     /// Vetter: the community recorded our withdrawal.
     WithdrawalRecorded {
         /// The statement.
@@ -289,6 +300,7 @@ impl Notice {
             Notice::RequirementsUpdated { community, .. } => {
                 format!("Vetting requirements for {community} updated.")
             }
+            Notice::RequirementsUnsupported { detail, .. } => detail.clone(),
             Notice::WithdrawalRecorded { statement_id } => {
                 format!("The community recorded the withdrawal of statement {statement_id}.")
             }
@@ -1009,6 +1021,10 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
             };
         }
     };
+    // The payload as received. A generated criterion drops the members its schema does not
+    // name, and `vetting.ext` is one of them until this workspace takes a `trust-tasks-rs`
+    // release carrying it, so the mode is read from these bytes (`vetting::hidden`).
+    let raw = message.body.get("payload").cloned().unwrap_or(Value::Null);
     let mut handled = Handled {
         changed: book.learn_manifest(sender, &body, ctx.now),
         ..Handled::default()
@@ -1018,7 +1034,7 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
         .iter_mut()
         .filter(|a| a.community == sender)
     {
-        match application.adopt_manifest(&body) {
+        match application.adopt_manifest(&body, &raw) {
             Ok(true) => {
                 handled.changed = true;
                 handled.notice = Some(Notice::RequirementsUpdated {
@@ -1027,6 +1043,16 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
                 });
             }
             Ok(false) => {}
+            // A refusal the applicant has to see: the community requires something this build
+            // cannot honour, and carrying on would gather evidence it does not accept.
+            Err(e @ super::applicant::ApplicantError::Hidden(_)) => {
+                handled.notice = Some(Notice::RequirementsUnsupported {
+                    application_id: application.id.clone(),
+                    community: sender.to_string(),
+                    detail: e.to_string(),
+                });
+                warn!(community = %sender, error = %e, "community requires an unsupported extension");
+            }
             Err(e) => warn!(community = %sender, error = %e, "community manifest not adopted"),
         }
     }

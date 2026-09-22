@@ -229,6 +229,99 @@ fn manifest_with(
     .unwrap()
 }
 
+/// A manifest payload as the wire carries it, with `vetting.ext` / `vetting.extCritical`
+/// added to the criterion — the members a generated type drops, so the test has to build them
+/// on the raw JSON exactly as a community would send them.
+fn manifest_raw_with_ext(ext: Value, critical: Option<Value>) -> Value {
+    let mut raw = serde_json::to_value(manifest_body()).unwrap();
+    let vetting = raw["criteria"][0]["vetting"].as_object_mut().unwrap();
+    vetting.insert("ext".into(), ext);
+    if let Some(c) = critical {
+        vetting.insert("extCritical".into(), c);
+    }
+    raw
+}
+
+fn hidden_params() -> Value {
+    json!({
+        "suite": super::hidden::SUITE,
+        "helperKey": "zHelperKey",
+        "tokenKey": "zTokenKey",
+        "vetterLabels": ["vetter/2026-10"],
+        "tokenLabels": ["token/2026-10"]
+    })
+}
+
+#[tokio::test]
+async fn an_application_adopts_the_hidden_vetting_parameters_a_community_publishes() {
+    let mut party = Party::new(1);
+    party
+        .book
+        .start_application(COMMUNITY, party.persona, &party.did, Utc::now())
+        .expect("an application starts");
+    let raw = manifest_raw_with_ext(
+        json!({ super::hidden::HIDDEN_VETTING_NS: hidden_params() }),
+        Some(json!([super::hidden::HIDDEN_VETTING_NS])),
+    );
+    let changed = party
+        .application()
+        .adopt_manifest(&manifest_body(), &raw)
+        .expect("the criterion is one this build implements");
+    assert!(changed);
+    let hidden = party
+        .application()
+        .hidden
+        .clone()
+        .expect("the parameters were adopted");
+    assert_eq!(hidden.helper_key, "zHelperKey");
+    assert_eq!(hidden.vetter_labels, vec!["vetter/2026-10".to_string()]);
+    // The named members are adopted exactly as before.
+    assert!(party.application().requirements.is_some());
+}
+
+#[tokio::test]
+async fn a_critical_namespace_this_build_cannot_honour_stops_the_application() {
+    let mut party = Party::new(1);
+    party
+        .book
+        .start_application(COMMUNITY, party.persona, &party.did, Utc::now())
+        .expect("an application starts");
+    let raw = manifest_raw_with_ext(
+        json!({ "com.example.some-scheme": { "a": 1 } }),
+        Some(json!(["com.example.some-scheme"])),
+    );
+    let err = party
+        .application()
+        .adopt_manifest(&manifest_body(), &raw)
+        .expect_err("a marked namespace we do not implement must refuse");
+    assert!(matches!(
+        err,
+        super::applicant::ApplicantError::Hidden(super::hidden::HiddenError::UnsupportedExtension(
+            _
+        ))
+    ));
+    // Nothing was adopted: the application does not carry on against requirements whose
+    // meaning it could not honour.
+    assert!(party.application().hidden.is_none());
+    assert!(party.application().requirements.is_none());
+}
+
+#[tokio::test]
+async fn an_unmarked_namespace_this_build_does_not_implement_is_ignored() {
+    let mut party = Party::new(1);
+    party
+        .book
+        .start_application(COMMUNITY, party.persona, &party.did, Utc::now())
+        .expect("an application starts");
+    let raw = manifest_raw_with_ext(json!({ "com.example.hint": { "a": 1 } }), None);
+    party
+        .application()
+        .adopt_manifest(&manifest_body(), &raw)
+        .expect("an unmarked namespace is advisory");
+    assert!(party.application().hidden.is_none());
+    assert!(party.application().requirements.is_some());
+}
+
 /// The community's manifest 0.2 reply, as its dispatcher sends it.
 fn manifest_reply() -> Message {
     let body = manifest_body();

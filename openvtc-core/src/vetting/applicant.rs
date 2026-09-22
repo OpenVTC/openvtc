@@ -44,6 +44,9 @@ use crate::persona::disclosure::ReleasedClaim;
 /// Why an applicant-side step was refused.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicantError {
+    /// The criterion asks for something this build cannot honour ([`super::hidden`]).
+    #[error(transparent)]
+    Hidden(#[from] super::hidden::HiddenError),
     /// Nothing we sent matches this reply.
     #[error("no request of ours matches this reply")]
     NoMatchingRequest,
@@ -168,6 +171,11 @@ pub struct Application {
     /// The criterion's `requirementsDigest`, sent with requests and the join.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requirements_digest: Option<String>,
+    /// The hidden-vetter parameters this community published for the chosen criterion, when it
+    /// publishes any ([`super::hidden`]). Absent is the named path, which is every community
+    /// today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<super::hidden::HiddenParams>,
     /// One salt for the whole application, so every vetter sees the same
     /// identity commitment. Goes to vetters, never to the community.
     pub commitment_salt: String,
@@ -444,6 +452,7 @@ impl Application {
             criterion_id: None,
             requirements: None,
             requirements_digest: None,
+            hidden: None,
             commitment_salt: new_commitment_salt()?,
             identity_claims: Vec::new(),
             requests: Vec::new(),
@@ -462,9 +471,14 @@ impl Application {
     ///
     /// [`ApplicantError::NoVettingCriterion`] or
     /// [`ApplicantError::InvalidRequirements`].
+    /// `raw` is the manifest payload **as received**. The criterion is read from it rather
+    /// than from `manifest`, because a generated type drops the members it does not name and
+    /// `vetting.ext` is where a community publishes what this version does not enumerate
+    /// ([`super::hidden`]).
     pub fn adopt_manifest(
         &mut self,
         manifest: &manifest::v0_2::Response,
+        raw: &Value,
     ) -> Result<bool, ApplicantError> {
         let with_vetting = |c: &&manifest::v0_2::Criterion| c.vetting.is_some();
         let chosen = self
@@ -492,9 +506,28 @@ impl Application {
             .as_ref()
             .is_some_and(|r| super::book::same_requirements(r, &requirements))
             || self.requirements_digest != digest;
+        // What the criterion asks of this client. A criterion that marks a namespace critical
+        // which this build cannot honour is refused here: applying without it would send the
+        // community something it does not accept, and neither side would learn why.
+        let raw_criterion = raw
+            .get("criteria")
+            .and_then(Value::as_array)
+            .and_then(|cs| {
+                cs.iter()
+                    .find(|c| c.get("id").and_then(Value::as_str) == Some(chosen.id.as_str()))
+            });
+        let hidden = match raw_criterion {
+            Some(raw) => match super::hidden::read_mode(raw)? {
+                super::hidden::Mode::Hidden(params) => Some(*params),
+                super::hidden::Mode::Named => None,
+            },
+            None => None,
+        };
+        let changed = changed || self.hidden != hidden;
         self.criterion_id = Some(chosen.id.as_str().to_string());
         self.requirements = Some(requirements);
         self.requirements_digest = digest;
+        self.hidden = hidden;
         Ok(changed)
     }
 
