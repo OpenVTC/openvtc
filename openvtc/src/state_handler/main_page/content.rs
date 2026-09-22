@@ -1055,6 +1055,41 @@ pub enum PersonaMode {
     PlaceFace(FacePlacer),
     Bind(BindPicker),
     Compose(ComposeForm),
+    LocalFaces(LocalFacesView),
+}
+
+/// The faces made inside one community, and the one-way step that makes a
+/// value reusable across the holder's faces (`persona/attribute/promote`).
+#[derive(Clone, Debug, Default)]
+pub struct LocalFacesView {
+    pub context_id: String,
+    pub community: String,
+    /// `None` while being read.
+    pub faces: Option<Result<Vec<openvtc_core::persona::lifecycle::LocalFace>, String>>,
+    /// Index into [`Self::rows`].
+    pub cursor: usize,
+    /// The chosen values: one face, and positions within it. Choosing in a
+    /// second face starts over — a promotion moves one face.
+    pub chosen: Option<(String, Vec<u64>)>,
+    /// The one-way question is on screen; ⏎ again promotes.
+    pub confirming: bool,
+    pub working: bool,
+    pub error: Option<String>,
+}
+
+impl LocalFacesView {
+    /// Every value, as `(face index, entry index)`, in display order.
+    #[must_use]
+    pub fn rows(&self) -> Vec<(usize, usize)> {
+        match &self.faces {
+            Some(Ok(faces)) => faces
+                .iter()
+                .enumerate()
+                .flat_map(|(f, face)| (0..face.entries.len()).map(move |e| (f, e)))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// One value typed into a face being made for a community.

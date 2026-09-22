@@ -280,6 +280,8 @@ pub enum PersonaAction {
     UnbindArm(usize),
     /// Open the form: make a face for this community and wear it here.
     ComposeOpen(usize),
+    /// Show the faces made inside this community, to make a value reusable.
+    LocalFacesOpen(usize),
 
     // ── The shared confirmation slot ─────────────────────────────────────
     ConfirmYes,

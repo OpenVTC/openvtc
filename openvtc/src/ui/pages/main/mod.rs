@@ -630,6 +630,19 @@ impl MainPage {
                     _ => send(PA::FormKey(key)),
                 };
             }
+            PersonaMode::LocalFaces(view) => {
+                if view.working {
+                    return true;
+                }
+                return match key.code {
+                    KeyCode::Esc => send(PA::FormCancel),
+                    KeyCode::Enter => send(PA::FormSubmit),
+                    KeyCode::Down => send(PA::FormCycle(true)),
+                    KeyCode::Up => send(PA::FormCycle(false)),
+                    KeyCode::Char(' ') => send(PA::FormToggleEntry),
+                    _ => true,
+                };
+            }
             PersonaMode::View => {}
         }
 
@@ -833,6 +846,7 @@ impl MainPage {
                     KeyCode::Down if count > 0 => send(PA::Select((selected + 1).min(count - 1))),
                     KeyCode::Char('b') if selected < count => send(PA::BindOpen(selected)),
                     KeyCode::Char('c') if selected < count => send(PA::ComposeOpen(selected)),
+                    KeyCode::Char('f') if selected < count => send(PA::LocalFacesOpen(selected)),
                     KeyCode::Char('u') if selected < count => send(PA::UnbindArm(selected)),
                     _ => false,
                 }

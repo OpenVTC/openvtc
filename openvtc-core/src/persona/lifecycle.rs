@@ -266,6 +266,109 @@ pub async fn history(client: &VtaClient, profile_id: &str) -> Result<FaceHistory
     })
 }
 
+/// One value a face made inside a community carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalEntry {
+    /// Its position in the face — what promotion addresses.
+    pub position: u64,
+    pub claim_type: String,
+}
+
+/// A face made inside one community: its values live there alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalFace {
+    pub profile_id: String,
+    pub name: String,
+    /// The version read — promotion is addressed against it.
+    pub version: u64,
+    pub entries: Vec<LocalEntry>,
+}
+
+/// The faces made inside `context_id`, each read whole: the listing carries
+/// names and counts, and promotion addresses entries by position against a
+/// version.
+pub async fn local_faces(
+    client: &VtaClient,
+    context_id: &str,
+) -> Result<Vec<LocalFace>, OpenVTCError> {
+    let listing = client
+        .persona_local_profile_list(context_id, std::num::NonZeroU64::new(500), None)
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("could not list the faces made here: {e}")))?;
+    let mut faces = Vec::new();
+    for summary in listing
+        .get("profiles")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let Some(id) = summary.get("profileId").and_then(Value::as_str) else {
+            continue;
+        };
+        let read = client
+            .persona_local_profile_get(context_id, id)
+            .await
+            .map_err(|e| OpenVTCError::Vta(format!("could not read a face made here: {e}")))?;
+        let profile = read.get("profile").unwrap_or(&Value::Null);
+        faces.push(LocalFace {
+            profile_id: id.to_string(),
+            name: profile
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unnamed face")
+                .to_string(),
+            version: profile.get("version").and_then(Value::as_u64).unwrap_or(0),
+            entries: profile
+                .get("entries")
+                .and_then(Value::as_array)
+                .map(|es| {
+                    es.iter()
+                        .enumerate()
+                        .filter_map(|(i, e)| {
+                            let t = e.get("inline")?.get("type")?.as_str()?;
+                            Some(LocalEntry {
+                                position: i as u64,
+                                claim_type: t.to_string(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
+    }
+    faces.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(faces)
+}
+
+/// What a promotion did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Promoted {
+    /// Values that were already kept, so the face now shares them.
+    pub reused: usize,
+    /// Personas that wore the face and still do, from the pool now.
+    pub rebound: usize,
+}
+
+/// Make `positions` of a face made in `context_id` reusable across the
+/// holder's faces. **One-way**: the face moves into the pool with its id and
+/// everyone wearing it; there is no undo to offer.
+pub async fn promote(
+    client: &VtaClient,
+    context_id: &str,
+    profile_id: &str,
+    positions: &[u64],
+    expected_version: u64,
+) -> Result<Promoted, OpenVTCError> {
+    let out = client
+        .persona_attribute_promote(context_id, profile_id, positions, expected_version)
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("could not make the values reusable: {e}")))?;
+    Ok(Promoted {
+        reused: out.promoted.iter().filter(|p| !p.created).count(),
+        rebound: out.rebound_persona_dids.len(),
+    })
+}
+
 /// "disclosed to N parties across M contexts — deleting does not un-tell
 /// them", or `None` when the face told no one.
 #[must_use]
