@@ -272,11 +272,16 @@ fn build_join_submit_document(
     presentation: impl Into<JoinPresentation>,
     document_id: &str,
 ) -> Result<Value, OpenVTCError> {
-    let JoinPresentation { vp, extensions } = presentation.into();
+    let JoinPresentation {
+        vp,
+        extensions,
+        attributes,
+    } = presentation.into();
     let payload = JoinRequestSubmitBody {
         vp,
         registry_consent: false,
         extensions,
+        attributes,
     };
     // `document_id` is supplied rather than minted here: on the DIDComm path this
     // same id is the message id, which is what makes the two transports' reply
@@ -389,6 +394,10 @@ pub struct JoinPresentation {
     pub vp: Value,
     /// Submission extensions; `Null` for none.
     pub extensions: Value,
+    /// Answers to the community's `requestedAttributes`, released through a
+    /// disclosure ([`crate::persona::join_answers`]). Empty when it asks
+    /// nothing.
+    pub attributes: Vec<vta_sdk::protocols::join_requests::JoinRequestAttribute>,
 }
 
 impl From<Value> for JoinPresentation {
@@ -396,6 +405,7 @@ impl From<Value> for JoinPresentation {
         Self {
             vp,
             extensions: Value::Null,
+            attributes: Vec::new(),
         }
     }
 }
@@ -820,6 +830,7 @@ mod tests {
             JoinPresentation {
                 vp,
                 extensions: json!({ "requirementsDigest": "zDigest" }),
+                attributes: Vec::new(),
             },
             "urn:uuid:submit-2",
         )
