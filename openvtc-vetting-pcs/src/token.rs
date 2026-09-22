@@ -124,6 +124,62 @@ fn opening_context(
 // VTC side
 // -------------------------------------------------------------------------------------------
 
+/// Where spent serials are remembered. A serial that un-spends is a double spend, so the VTC
+/// backs this with durable storage; the in-memory default is for tests and for a client that
+/// is predicting a verdict.
+pub trait SpentLedger: std::any::Any + Send {
+    /// Record `(label, serial)` as spent by `(id, tag)`, and say what was there before.
+    fn record(
+        &mut self,
+        label: &str,
+        serial: &str,
+        id: &str,
+        tag: &str,
+    ) -> Result<SpendOutcome, ProtoError>;
+
+    /// Forget everything under `label`: its tokens can no longer be spent, so nothing under it
+    /// needs remembering.
+    fn forget_label(&mut self, label: &str);
+
+    /// For [`TokenVerifier::take_ledger`]; the blanket implementation below is the only one.
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
+}
+
+/// The default: one process, no durability.
+#[derive(Default)]
+pub struct MemoryLedger {
+    /// label → serial → (id, tag)
+    spent: HashMap<String, HashMap<String, (String, String)>>,
+}
+
+impl SpentLedger for MemoryLedger {
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+
+    fn record(
+        &mut self,
+        label: &str,
+        serial: &str,
+        id: &str,
+        tag: &str,
+    ) -> Result<SpendOutcome, ProtoError> {
+        let set = self.spent.entry(label.to_string()).or_default();
+        match set.get(serial) {
+            None => {
+                set.insert(serial.to_string(), (id.to_string(), tag.to_string()));
+                Ok(SpendOutcome::Fresh)
+            }
+            Some((i, t)) if i == id && t == tag => Ok(SpendOutcome::AlreadyCounted),
+            Some(_) => Ok(SpendOutcome::DoubleSpend),
+        }
+    }
+
+    fn forget_label(&mut self, label: &str) {
+        self.spent.remove(label);
+    }
+}
+
 /// What a VERIFIER needs about tokens: the public key, the live labels, and the spent set. The
 /// VTC service holds one of these; so does anything that re-checks a submission from public
 /// data alone (the fixture tests do).
@@ -131,8 +187,7 @@ pub struct TokenVerifier {
     params: TokenParams,
     tvk: PSVerificationKey<E>,
     live: BTreeSet<String>,
-    /// label → serial → (id, tag)
-    spent: HashMap<String, HashMap<String, (String, String)>>,
+    spent: Box<dyn SpentLedger>,
     pub anomalies: Vec<String>,
 }
 
@@ -157,9 +212,27 @@ impl TokenVerifier {
             params: TokenParams::new(community)?,
             tvk,
             live: live.into_iter().collect(),
-            spent: HashMap::new(),
+            spent: Box::new(MemoryLedger::default()),
             anomalies: Vec::new(),
         })
+    }
+
+    /// Swap in a durable ledger (the VTC service does this at startup).
+    #[must_use]
+    pub fn with_ledger(mut self, ledger: Box<dyn SpentLedger>) -> Self {
+        self.spent = ledger;
+        self
+    }
+
+    /// Put a ledger in for one call.
+    pub fn set_ledger(&mut self, ledger: Box<dyn SpentLedger>) {
+        self.spent = ledger;
+    }
+
+    /// Take the ledger back out, leaving an empty in-memory one. A caller that has to write
+    /// what was spent to storage gets it this way, and downcasts to its own type.
+    pub fn take_ledger(&mut self) -> Box<dyn std::any::Any> {
+        std::mem::replace(&mut self.spent, Box::new(MemoryLedger::default())).into_any()
     }
 
     pub fn tvk(&self) -> &PSVerificationKey<E> {
@@ -178,7 +251,7 @@ impl TokenVerifier {
     /// spent any more, so nothing needs remembering.
     pub fn close_label(&mut self, label: &str) {
         self.live.remove(label);
-        self.spent.remove(label);
+        self.spent.forget_label(label);
     }
 
     /// The signature check alone: valid under a live label. Also what the applicant's engine
@@ -198,21 +271,14 @@ impl TokenVerifier {
         tag: &str,
     ) -> Result<SpendOutcome, ProtoError> {
         let serial = scalar_text(&spend.serial)?;
-        let set = self.spent.entry(spend.label.clone()).or_default();
-        match set.get(&serial) {
-            None => {
-                set.insert(serial, (id.to_string(), tag.to_string()));
-                Ok(SpendOutcome::Fresh)
-            }
-            Some((i, t)) if i == id && t == tag => Ok(SpendOutcome::AlreadyCounted),
-            Some(_) => {
-                self.anomalies.push(format!(
-                    "serial {serial} under {} presented twice",
-                    spend.label
-                ));
-                Ok(SpendOutcome::DoubleSpend)
-            }
+        let outcome = self.spent.record(&spend.label, &serial, id, tag)?;
+        if outcome == SpendOutcome::DoubleSpend {
+            self.anomalies.push(format!(
+                "serial {serial} under {} presented twice",
+                spend.label
+            ));
         }
+        Ok(outcome)
     }
 }
 
