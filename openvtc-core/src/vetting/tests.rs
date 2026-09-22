@@ -242,13 +242,25 @@ fn manifest_raw_with_ext(ext: Value, critical: Option<Value>) -> Value {
     raw
 }
 
+/// Real published parameters: the keys have to decode, because adopting the criterion starts
+/// the applicant's engine against them.
 fn hidden_params() -> Value {
+    use openvtc_vetting_pcs::{scheme::key_text, vtc::Vtc};
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x0BED);
+    let vtc = Vtc::new(
+        COMMUNITY,
+        "2026-10",
+        serde_json::to_value(requirements()).unwrap(),
+        &mut rng,
+    )
+    .expect("a community");
     json!({
         "suite": super::hidden::SUITE,
-        "helperKey": "zHelperKey",
-        "tokenKey": "zTokenKey",
+        "helperKey": key_text(vtc.hvk()).unwrap(),
+        "tokenKey": key_text(vtc.tvk()).unwrap(),
         "vetterLabels": ["vetter/2026-10"],
-        "tokenLabels": ["token/2026-10"]
+        "tokenLabels": [vtc.current_token_label()]
     })
 }
 
@@ -273,8 +285,13 @@ async fn an_application_adopts_the_hidden_vetting_parameters_a_community_publish
         .hidden
         .clone()
         .expect("the parameters were adopted");
-    assert_eq!(hidden.helper_key, "zHelperKey");
+    let published = hidden_params();
+    assert_eq!(hidden.helper_key, published["helperKey"].as_str().unwrap());
+    assert_eq!(hidden.token_key, published["tokenKey"].as_str().unwrap());
     assert_eq!(hidden.vetter_labels, vec!["vetter/2026-10".to_string()]);
+    // Adopting a hidden criterion mints this application's own key, which is what a vetter
+    // attests and what the proof is built from.
+    assert!(party.application().hidden_id().is_some());
     // The named members are adopted exactly as before.
     assert!(party.application().requirements.is_some());
 }

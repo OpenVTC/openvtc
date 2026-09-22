@@ -14,7 +14,7 @@ use predicate_credential_system::{
     hash::bls12_381::G1Hasher,
     kiprf::DDH,
     pcs::{AllowList, PCS, Predicate},
-    serialization::{to_bytes, to_multibase},
+    serialization::{from_bytes, from_multibase, to_bytes, to_multibase},
 };
 
 use crate::ProtoError;
@@ -62,6 +62,23 @@ pub fn event_token_label(event_id: &str) -> String {
 /// Multibase text of a group element (identifiers, tags).
 pub fn point_text(p: &G1) -> Result<String, ProtoError> {
     Ok(to_multibase(&to_bytes(p)?))
+}
+
+/// Multibase text of a verification key (`hvk`, `tvk`), as a manifest publishes it.
+///
+/// # Errors
+/// [`ProtoError::Pcs`] if the key cannot be encoded.
+pub fn key_text<T: ark_serialize::CanonicalSerialize>(key: &T) -> Result<String, ProtoError> {
+    Ok(to_multibase(&to_bytes(key)?))
+}
+
+/// A group element from its multibase text; the inverse of [`point_text`].
+///
+/// # Errors
+/// [`ProtoError::Pcs`] if the text is not multibase base58btc, or the bytes are not a point in
+/// the prime-order subgroup (decoding is validated).
+pub fn point_from_text(text: &str) -> Result<G1, ProtoError> {
+    Ok(from_bytes(&from_multibase(text)?)?)
 }
 
 /// Multibase text of a scalar (serials).

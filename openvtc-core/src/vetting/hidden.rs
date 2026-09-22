@@ -130,6 +130,144 @@ pub fn read_mode(raw: &Value) -> Result<Mode, HiddenError> {
     Ok(Mode::Hidden(Box::new(params)))
 }
 
+// ---------------------------------------------------------------------------------------------
+// Driving the flow
+// ---------------------------------------------------------------------------------------------
+
+pub use openvtc_vetting_pcs::wire::EXTENSIONS_MEMBER;
+use openvtc_vetting_pcs::{
+    applicant::ApplicantEngine,
+    community::CommunityParams,
+    meta::StatementMeta,
+    snapshot::{ApplicantSnapshot, VetterSnapshot},
+    vetter::{HiddenAttestation, VetterEngine},
+    wire::SubmissionWire,
+};
+
+/// The community's published parameters, in the form the engines take.
+///
+/// # Errors
+/// [`HiddenError::Unreadable`] if a published key or label cannot be decoded.
+pub fn community(
+    community_did: &str,
+    params: &HiddenParams,
+) -> Result<CommunityParams, HiddenError> {
+    CommunityParams::published(
+        community_did,
+        &params.helper_key,
+        &params.token_key,
+        params.vetter_labels.clone(),
+        params.token_labels.clone(),
+    )
+    .map_err(|e| HiddenError::Unreadable(e.to_string()))
+}
+
+/// Start an application under a hidden-vetting criterion: a fresh key, used for this
+/// application and no other.
+///
+/// # Errors
+/// [`HiddenError::Unreadable`] if the community's parameters cannot be read.
+pub fn start<R: rand::RngCore + rand::CryptoRng>(
+    community_did: &str,
+    params: &HiddenParams,
+    join_did: &str,
+    rng: &mut R,
+) -> Result<ApplicantSnapshot, HiddenError> {
+    let community = community(community_did, params)?;
+    let engine = ApplicantEngine::new(&community, join_did, rng)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    engine
+        .snapshot()
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))
+}
+
+/// Take an attestation a vetter sent, after checking it here rather than at submit: an
+/// attestation that does not verify, or whose token does not, is refused at the session while
+/// the vetter is still there to ask.
+///
+/// # Errors
+/// [`HiddenError::Unreadable`] if the attestation does not verify under the community's
+/// published parameters.
+pub fn receive(
+    community_did: &str,
+    params: &HiddenParams,
+    state: &mut ApplicantSnapshot,
+    attestation: &Value,
+) -> Result<(), HiddenError> {
+    let community = community(community_did, params)?;
+    // The wire form of an attestation is its storable form: same members, same encoding.
+    let held: openvtc_vetting_pcs::snapshot::HeldAttestation =
+        serde_json::from_value(attestation.clone())
+            .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    let att: HiddenAttestation = held
+        .restore()
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    let mut engine =
+        ApplicantEngine::restore(state).map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    engine
+        .receive(&community, att)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    *state = engine
+        .snapshot()
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    Ok(())
+}
+
+/// Prove, for `challenge`, that `k` distinct vetters vetted this applicant. The result goes
+/// into the submission's `extensions` under [`EXTENSIONS_MEMBER`].
+///
+/// # Errors
+/// [`HiddenError::Unreadable`] if no attestation is usable, or the proof cannot be built.
+pub fn prove<R: rand::RngCore + rand::CryptoRng>(
+    community_did: &str,
+    params: &HiddenParams,
+    requirements_digest: &str,
+    state: &ApplicantSnapshot,
+    challenge: &str,
+    rng: &mut R,
+) -> Result<Value, HiddenError> {
+    let community = community(community_did, params)?;
+    let engine =
+        ApplicantEngine::restore(state).map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    let submission = engine
+        .submit(&community, requirements_digest, challenge, rng)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    let wire = SubmissionWire::from_submission(&submission)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    serde_json::to_value(&wire).map_err(|e| HiddenError::Unreadable(e.to_string()))
+}
+
+/// The vetter's half: attest for `applicant_id` after the human check, spending one token.
+///
+/// # Errors
+/// [`HiddenError::Unreadable`] if the vetter holds no live credential or no free token.
+pub fn attest<R: rand::RngCore + rand::CryptoRng>(
+    community_did: &str,
+    params: &HiddenParams,
+    state: &mut VetterSnapshot,
+    applicant_id: &str,
+    meta: StatementMeta,
+    rng: &mut R,
+) -> Result<Value, HiddenError> {
+    let community = community(community_did, params)?;
+    let mut engine = VetterEngine::restore(state, community_did)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    let id = openvtc_vetting_pcs::scheme::point_from_text(applicant_id)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    let reservation = engine
+        .accept(None, 0)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    let attestation = engine
+        .attest(&community, &reservation, &id, meta, rng)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    *state = engine
+        .snapshot()
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    let held = openvtc_vetting_pcs::snapshot::HeldAttestation::of(&attestation)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    serde_json::to_value(&held).map_err(|e| HiddenError::Unreadable(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

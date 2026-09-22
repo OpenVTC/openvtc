@@ -123,6 +123,28 @@ impl Vtc {
     pub fn live_vetter_phis(&self) -> Result<Vec<Fr>, ProtoError> {
         self.verifier.live_vetter_phis()
     }
+    /// What this community publishes: the same view a member works from, so a test drives the
+    /// code path a client does (`vetting.ext` of the manifest, design §8).
+    ///
+    /// # Errors
+    /// [`ProtoError::Pcs`] if the deployment parameters cannot be re-derived.
+    pub fn params(&self) -> Result<crate::community::CommunityParams, ProtoError> {
+        crate::community::CommunityParams::new(
+            &self.community,
+            self.hvk.clone(),
+            self.tvk().clone(),
+            self.live_periods()
+                .iter()
+                .map(|p| format!("vetter/{p}"))
+                .collect(),
+            self.token_verifier()
+                .live_labels()
+                .iter()
+                .cloned()
+                .collect(),
+        )
+    }
+
     /// The token side of the public parameters, and the spent set.
     pub fn token_verifier(&self) -> &TokenVerifier {
         &self.verifier.tokens

@@ -176,6 +176,14 @@ pub struct Application {
     /// today.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<super::hidden::HiddenParams>,
+    /// The applicant's own engine state for a hidden-vetting application: its key, and the
+    /// attestations gathered so far ([`super::hidden`]). Absent on the named path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_state: Option<openvtc_vetting_pcs::snapshot::ApplicantSnapshot>,
+    /// The proof built for the next submit, held between building it and sending it. Not
+    /// persisted: it is bound to a challenge that does not outlive the exchange.
+    #[serde(skip)]
+    pub hidden_submission: Option<Value>,
     /// One salt for the whole application, so every vetter sees the same
     /// identity commitment. Goes to vetters, never to the community.
     pub commitment_salt: String,
@@ -453,6 +461,8 @@ impl Application {
             requirements: None,
             requirements_digest: None,
             hidden: None,
+            hidden_state: None,
+            hidden_submission: None,
             commitment_salt: new_commitment_salt()?,
             identity_claims: Vec::new(),
             requests: Vec::new(),
@@ -524,6 +534,18 @@ impl Application {
             None => None,
         };
         let changed = changed || self.hidden != hidden;
+        // A key of this application's own, minted once. Every tag a vetter produces for this
+        // applicant is derived from it, so it never moves between applications.
+        if let Some(params) = &hidden
+            && self.hidden_state.is_none()
+        {
+            self.hidden_state = Some(super::hidden::start(
+                &self.community,
+                params,
+                &self.join_did,
+                &mut rand::rngs::OsRng,
+            )?);
+        }
         self.criterion_id = Some(chosen.id.as_str().to_string());
         self.requirements = Some(requirements);
         self.requirements_digest = digest;
@@ -1236,12 +1258,85 @@ impl Application {
 
     /// The join submission's `extensions`: the digest of the requirements the
     /// statements were gathered against, so the community applies the same
-    /// criterion.
+    /// criterion, and — under a hidden-vetting criterion — the proof that `k`
+    /// distinct vetters vetted this applicant.
     #[must_use]
     pub fn join_extensions(&self) -> Value {
-        match &self.requirements_digest {
-            Some(digest) => json!({ REQUIREMENTS_DIGEST_MEMBER: digest }),
-            None => Value::Null,
+        let mut members = serde_json::Map::new();
+        if let Some(digest) = &self.requirements_digest {
+            members.insert(REQUIREMENTS_DIGEST_MEMBER.into(), json!(digest));
         }
+        if let Some(hidden) = &self.hidden_submission {
+            members.insert(super::hidden::EXTENSIONS_MEMBER.into(), hidden.clone());
+        }
+        if members.is_empty() {
+            Value::Null
+        } else {
+            Value::Object(members)
+        }
+    }
+
+    /// Record the proof this application will submit, built by
+    /// [`super::hidden::prove`] against the attestations it holds.
+    pub fn set_hidden_submission(&mut self, submission: Value) {
+        self.hidden_submission = Some(submission);
+    }
+
+    /// Build the proof this application submits, from the attestations it holds.
+    ///
+    /// `Ok(false)` when this is not a hidden-vetting application, which is every application
+    /// today. The proof is bound to `challenge`; the community rebuilds the same binding and
+    /// refuses a proof built for another one.
+    ///
+    /// # Errors
+    ///
+    /// [`super::hidden::HiddenError`] when the application holds no usable attestation, or the
+    /// community's published parameters cannot be read.
+    pub fn prepare_hidden_submission(
+        &mut self,
+        challenge: &str,
+    ) -> Result<bool, super::hidden::HiddenError> {
+        let (Some(params), Some(state)) = (&self.hidden, &self.hidden_state) else {
+            return Ok(false);
+        };
+        let digest = self.requirements_digest.clone().unwrap_or_default();
+        let submission = super::hidden::prove(
+            &self.community,
+            params,
+            &digest,
+            state,
+            challenge,
+            &mut rand::rngs::OsRng,
+        )?;
+        self.hidden_submission = Some(submission);
+        Ok(true)
+    }
+
+    /// Take an attestation a vetter sent under a hidden-vetting criterion.
+    ///
+    /// # Errors
+    ///
+    /// [`super::hidden::HiddenError`] if this is not a hidden-vetting application, or the
+    /// attestation does not verify under the community's published parameters.
+    pub fn receive_hidden_attestation(
+        &mut self,
+        attestation: &Value,
+    ) -> Result<(), super::hidden::HiddenError> {
+        let params = self.hidden.clone().ok_or_else(|| {
+            super::hidden::HiddenError::Unreadable(
+                "this application is not under a hidden-vetting criterion".into(),
+            )
+        })?;
+        let state = self.hidden_state.as_mut().ok_or_else(|| {
+            super::hidden::HiddenError::Unreadable("the application has no key yet".into())
+        })?;
+        super::hidden::receive(&self.community, &params, state, attestation)
+    }
+
+    /// The applicant's PCS identifier, which is what a vetter attests. `None` on the named
+    /// path.
+    #[must_use]
+    pub fn hidden_id(&self) -> Option<&str> {
+        self.hidden_state.as_ref().map(|s| s.id.as_str())
     }
 }

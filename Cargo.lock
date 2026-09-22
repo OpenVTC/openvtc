@@ -6376,6 +6376,7 @@ dependencies = [
  "openpgp-card",
  "openpgp-card-rpgp",
  "openssl-sys",
+ "openvtc-vetting-pcs",
  "pgp",
  "rand 0.8.8",
  "regex",

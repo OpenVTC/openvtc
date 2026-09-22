@@ -466,6 +466,34 @@ impl TokenWallet {
         self.held.retain(|h| live.contains(&h.label));
     }
 
+    /// The unspent tokens, for storage. A reserved token stores as unreserved: a reservation
+    /// belongs to a session that did not survive the restart either.
+    pub fn snapshot(&self) -> Result<Vec<crate::snapshot::HeldToken>, ProtoError> {
+        self.held
+            .iter()
+            .map(|h| crate::snapshot::HeldToken::of(&h.label, &h.serial, h.minted_tick, &h.cred))
+            .collect()
+    }
+
+    /// Restore a bucket from storage.
+    pub fn restore(
+        community: &str,
+        tokens: &[crate::snapshot::HeldToken],
+    ) -> Result<Self, ProtoError> {
+        let mut wallet = Self::new(community)?;
+        for t in tokens {
+            let (serial, cred) = t.parts()?;
+            wallet.held.push(Held {
+                label: t.label.clone(),
+                serial,
+                minted_tick: t.minted_tick,
+                cred,
+                reserved: false,
+            });
+        }
+        Ok(wallet)
+    }
+
     pub fn free(&self) -> usize {
         self.held.iter().filter(|h| !h.reserved).count()
     }

@@ -2833,6 +2833,28 @@ async fn run_join_sequence(
     // Peer identity vetting: present the statements gathered for this community
     // under this persona, and name the requirements they were gathered against
     // so the community applies the same criterion (vetting-process.md §10.1).
+    // Under a hidden-vetting criterion the proof is built here, bound to a challenge of this
+    // submission's own, and rides in `extensions` (design §8). The statements themselves never
+    // travel: there are none that name a vetter.
+    if let Some(application) = config
+        .private
+        .vetting
+        .application_mut(&vtc_did, persona_id)
+        .filter(|a| a.join_did == applicant_did && a.hidden.is_some())
+    {
+        let challenge = uuid::Uuid::new_v4().to_string();
+        match application.prepare_hidden_submission(&challenge) {
+            Ok(true) => state
+                .join
+                .info("Proving that enough vetters vetted you, without naming them…".to_string()),
+            Ok(false) => {}
+            Err(e) => {
+                state
+                    .join
+                    .info(format!("The proof could not be built: {e}"));
+            }
+        }
+    }
     let presentation = match config.private.vetting.application(&vtc_did, persona_id) {
         Some(application) if application.join_did == applicant_did => {
             let statements = application.presentable_statements(chrono::Utc::now());

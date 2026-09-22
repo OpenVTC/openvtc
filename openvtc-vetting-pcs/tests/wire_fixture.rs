@@ -54,13 +54,15 @@ fn a_submission_round_trips_through_extensions_and_pins_the_fixture() {
         v.drip(&mut vtc, 1, &token_label, 2, &mut rng).unwrap();
         vetters.push(v);
     }
-    let mut bob = ApplicantEngine::new(&vtc, "did:example:bob-kernel", &mut rng).unwrap();
+    let mut bob =
+        ApplicantEngine::new(&vtc.params().unwrap(), "did:example:bob-kernel", &mut rng).unwrap();
     for (j, method) in [
         (0usize, VettingMethod::InPerson),
         (1usize, VettingMethod::Video),
     ] {
         let meta = bob.statement_meta(
-            &vtc,
+            &vtc.params().unwrap(),
+            vtc.requirements_digest(),
             StatementMeta {
                 community: String::new(),
                 requirements_digest: String::new(),
@@ -78,13 +80,26 @@ fn a_submission_round_trips_through_extensions_and_pins_the_fixture() {
         );
         let reservation = vetters[j].accept(None, 2).unwrap();
         let att = vetters[j]
-            .attest(&vtc, &reservation, bob.id(), meta, &mut rng)
+            .attest(
+                &vtc.params().unwrap(),
+                &reservation,
+                bob.id(),
+                meta,
+                &mut rng,
+            )
             .unwrap();
-        bob.receive(&vtc, att).unwrap();
+        bob.receive(&vtc.params().unwrap(), att).unwrap();
     }
 
     let challenge = vtc.challenge(&mut rng);
-    let submission = bob.submit(&vtc, &challenge, &mut rng).unwrap();
+    let submission = bob
+        .submit(
+            &vtc.params().unwrap(),
+            vtc.requirements_digest(),
+            &challenge,
+            &mut rng,
+        )
+        .unwrap();
 
     // Round trip: engine → wire → `extensions` → wire → engine, and the decoded submission is
     // accepted exactly like the original.

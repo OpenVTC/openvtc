@@ -24,6 +24,10 @@ openpgp-card = [
 arbitrary = ["dep:arbitrary", "chrono/arbitrary"]
 
 [dependencies]
+# Hidden-vetter admission (ZKP), development branch `zkp-pcs`. The library it
+# builds on is vendored; see `vendor/PROVENANCE.md`.
+openvtc-vetting-pcs = { version = "0.3.1", path = "../openvtc-vetting-pcs" }
+
 aes-gcm.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true

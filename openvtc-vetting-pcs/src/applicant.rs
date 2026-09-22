@@ -6,11 +6,12 @@ use rand::{CryptoRng, RngCore};
 
 use crate::{
     ProtoError,
+    community::CommunityParams,
     meta::{ProofContext, StatementMeta, id_binding},
     scheme::{E, G1, hidden_vetting_predicate, point_text, scalar_text},
-    token::{TokenParams, verify_spend},
+    snapshot::{ApplicantSnapshot, HeldAttestation},
     vetter::HiddenAttestation,
-    vtc::{Submission, Vtc},
+    vtc::Submission,
 };
 
 pub struct ApplicantEngine {
@@ -22,11 +23,11 @@ pub struct ApplicantEngine {
 
 impl ApplicantEngine {
     pub fn new<R: RngCore + CryptoRng>(
-        vtc: &Vtc,
+        params: &CommunityParams,
         join_did: &str,
         rng: &mut R,
     ) -> Result<Self, ProtoError> {
-        let (id, usk) = vtc.open().user_keygen(rng)?;
+        let (id, usk) = params.open().user_keygen(rng)?;
         Ok(Self {
             usk,
             id,
@@ -39,27 +40,60 @@ impl ApplicantEngine {
         &self.id
     }
 
+    /// The storable form, for openvtc's encrypted config. Carries `usk`: see
+    /// [`crate::snapshot`].
+    pub fn snapshot(&self) -> Result<ApplicantSnapshot, ProtoError> {
+        let mut snap = ApplicantSnapshot::new(&self.usk, &self.id, &self.join_did)?;
+        snap.held = self
+            .held
+            .iter()
+            .map(HeldAttestation::of)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(snap)
+    }
+
+    /// Restore an application from storage.
+    pub fn restore(snap: &ApplicantSnapshot) -> Result<Self, ProtoError> {
+        let (usk, id, held) = snap.parts()?;
+        Ok(Self {
+            usk,
+            id,
+            join_did: snap.join_did.clone(),
+            held,
+        })
+    }
+
     pub fn held(&self) -> usize {
         self.held.len()
     }
 
     /// A metadata template the vetter completes; the token fields are the vetter's to fill.
-    pub fn statement_meta(&self, vtc: &Vtc, base: StatementMeta) -> StatementMeta {
+    pub fn statement_meta(
+        &self,
+        params: &CommunityParams,
+        requirements_digest: &str,
+        base: StatementMeta,
+    ) -> StatementMeta {
         StatementMeta {
-            community: vtc.community.clone(),
-            requirements_digest: vtc.requirements_digest().to_string(),
+            community: params.community().to_string(),
+            requirements_digest: requirements_digest.to_string(),
             ..base
         }
     }
 
     /// Check an attestation on receipt, so `no-token` or a bad attestation shows up at the
     /// session and not at submit.
-    pub fn receive(&mut self, vtc: &Vtc, att: HiddenAttestation) -> Result<(), ProtoError> {
+    pub fn receive(
+        &mut self,
+        params: &CommunityParams,
+        att: HiddenAttestation,
+    ) -> Result<(), ProtoError> {
         let app = att.meta.context_bytes()?;
-        vtc.open()
-            .check_attestation_in_context(vtc.hvk(), &self.id, &att.attestation, &app)
+        params
+            .open()
+            .check_attestation_in_context(params.hvk(), &self.id, &att.attestation, &app)
             .map_err(|e| ProtoError::AttestationRejected(e.to_string()))?;
-        if !vtc.live_vetter_phis()?.contains(&att.attestation.phi) {
+        if !params.live_phis()?.contains(&att.attestation.phi) {
             return Err(ProtoError::AttestationRejected(
                 "class is not a live vetter label".into(),
             ));
@@ -71,8 +105,7 @@ impl ApplicantEngine {
                 "token does not match its statement".into(),
             ));
         }
-        let params = TokenParams::new(&vtc.community)?;
-        if !verify_spend(&params, vtc.token_verifier().tvk(), &att.token)? {
+        if !params.token_ok(&att.token)? {
             return Err(ProtoError::AttestationRejected(
                 "token signature does not verify".into(),
             ));
@@ -82,25 +115,30 @@ impl ApplicantEngine {
     }
 
     /// Replace what a vetter refreshed: same tag, newer attestation.
-    pub fn replace(&mut self, vtc: &Vtc, att: HiddenAttestation) -> Result<(), ProtoError> {
+    pub fn replace(
+        &mut self,
+        params: &CommunityParams,
+        att: HiddenAttestation,
+    ) -> Result<(), ProtoError> {
         let tag = att.attestation.tag;
         self.held.retain(|h| h.attestation.tag != tag);
-        self.receive(vtc, att)
+        self.receive(params, att)
     }
 
     /// Build the submission from every held attestation that is still usable: its class is a
     /// live vetter label and its token label is live. One per tag (a proof refuses duplicates).
     pub fn submit<R: RngCore + CryptoRng>(
         &self,
-        vtc: &Vtc,
+        params: &CommunityParams,
+        requirements_digest: &str,
         challenge: &str,
         rng: &mut R,
     ) -> Result<Submission, ProtoError> {
-        let phis = vtc.live_vetter_phis()?;
+        let phis = params.live_phis()?;
         let mut usable: Vec<&HiddenAttestation> = Vec::new();
         for h in &self.held {
             let live = phis.contains(&h.attestation.phi)
-                && vtc.token_verifier().live_labels().contains(&h.token.label);
+                && params.tokens().live_labels().contains(&h.token.label);
             if live
                 && !usable
                     .iter()
@@ -118,20 +156,20 @@ impl ApplicantEngine {
         let id_text = point_text(&self.id)?;
         let binding = id_binding(
             &id_text,
-            &vtc.community,
-            vtc.requirements_digest(),
+            params.community(),
+            requirements_digest,
             &self.join_did,
         );
         let app0 = ProofContext {
             challenge: challenge.to_string(),
-            audience: vtc.audience().to_string(),
+            audience: params.community().to_string(),
             join_did: self.join_did.clone(),
             id_binding: binding.clone(),
         }
         .context_bytes()?;
         let f = hidden_vetting_predicate(u32::try_from(atts.len()).unwrap_or(u32::MAX));
-        let (proof, _state) = vtc.open().prove_in_context(
-            vtc.hvk(),
+        let (proof, _state) = params.open().prove_in_context(
+            params.hvk(),
             &f,
             &self.id,
             &self.usk,

@@ -68,7 +68,8 @@ fn world(seed: u64, n: usize) -> World {
 
 fn meta(app: &ApplicantEngine, vtc: &Vtc, method: VettingMethod) -> StatementMeta {
     app.statement_meta(
-        vtc,
+        &vtc.params().unwrap(),
+        vtc.requirements_digest(),
         StatementMeta {
             community: String::new(),
             requirements_digest: String::new(),
@@ -91,13 +92,18 @@ fn vet(w: &mut World, j: usize, app: &ApplicantEngine, method: VettingMethod) ->
     let m = meta(app, &w.vtc, method);
     let r = w.vetters[j].accept(None, 2).unwrap();
     w.vetters[j]
-        .attest(&w.vtc, &r, app.id(), m, &mut w.rng)
+        .attest(&w.vtc.params().unwrap(), &r, app.id(), m, &mut w.rng)
         .unwrap()
 }
 
 fn submit(w: &mut World, app: &ApplicantEngine) -> Result<Decision, ProtoError> {
     let c = w.vtc.challenge(&mut w.rng);
-    let sub = app.submit(&w.vtc, &c, &mut w.rng)?;
+    let sub = app.submit(
+        &w.vtc.params().unwrap(),
+        w.vtc.requirements_digest(),
+        &c,
+        &mut w.rng,
+    )?;
     w.vtc.submit(&sub, now())
 }
 
@@ -106,11 +112,16 @@ fn submit(w: &mut World, app: &ApplicantEngine) -> Result<Decision, ProtoError> 
 #[test]
 fn admits_on_two_hidden_vetters_and_names_none() {
     let mut w = world(1, 3);
-    let mut bob = ApplicantEngine::new(&w.vtc, "did:example:bob-kernel", &mut w.rng).unwrap();
+    let mut bob = ApplicantEngine::new(
+        &w.vtc.params().unwrap(),
+        "did:example:bob-kernel",
+        &mut w.rng,
+    )
+    .unwrap();
     let a = vet(&mut w, 0, &bob, VettingMethod::InPerson);
-    bob.receive(&w.vtc, a).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), a).unwrap();
     let b = vet(&mut w, 1, &bob, VettingMethod::Video);
-    bob.receive(&w.vtc, b).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), b).unwrap();
 
     let d = submit(&mut w, &bob).unwrap();
     assert!(d.evaluation.satisfied(), "{:?}", d.evaluation);
@@ -132,9 +143,10 @@ fn admits_on_two_hidden_vetters_and_names_none() {
 #[test]
 fn request_more_then_admit_on_resubmission() {
     let mut w = world(2, 3);
-    let mut bob = ApplicantEngine::new(&w.vtc, "did:example:bob", &mut w.rng).unwrap();
+    let mut bob =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:bob", &mut w.rng).unwrap();
     let v = vet(&mut w, 1, &bob, VettingMethod::Video);
-    bob.receive(&w.vtc, v).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), v).unwrap();
 
     let d = submit(&mut w, &bob).unwrap();
     assert!(!d.evaluation.satisfied());
@@ -147,7 +159,7 @@ fn request_more_then_admit_on_resubmission() {
     );
 
     let p = vet(&mut w, 0, &bob, VettingMethod::InPerson);
-    bob.receive(&w.vtc, p).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), p).unwrap();
     let d = submit(&mut w, &bob).unwrap();
     assert!(d.evaluation.satisfied(), "{:?}", d.evaluation);
     // The first vetter's token came back with the same (id, tag): already counted, no anomaly.
@@ -161,14 +173,15 @@ fn request_more_then_admit_on_resubmission() {
 #[test]
 fn one_vetter_counts_once_across_submissions() {
     let mut w = world(3, 3);
-    let mut bob = ApplicantEngine::new(&w.vtc, "did:example:bob", &mut w.rng).unwrap();
+    let mut bob =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:bob", &mut w.rng).unwrap();
     let first = vet(&mut w, 0, &bob, VettingMethod::Video);
-    bob.receive(&w.vtc, first).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), first).unwrap();
     submit(&mut w, &bob).unwrap();
 
     // The same vetter vets again, e.g. in person, and the client swaps it in.
     let second = vet(&mut w, 0, &bob, VettingMethod::InPerson);
-    bob.replace(&w.vtc, second).unwrap();
+    bob.replace(&w.vtc.params().unwrap(), second).unwrap();
     let d = submit(&mut w, &bob).unwrap();
     // Two statements on record, one tag: counted once.
     assert_eq!(d.statements.len(), 2);
@@ -183,22 +196,31 @@ fn one_vetter_counts_once_across_submissions() {
 #[test]
 fn a_double_spent_token_does_not_count() {
     let mut w = world(4, 3);
-    let mut alice = ApplicantEngine::new(&w.vtc, "did:example:alice", &mut w.rng).unwrap();
-    let mut bob = ApplicantEngine::new(&w.vtc, "did:example:bob", &mut w.rng).unwrap();
+    let mut alice =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:alice", &mut w.rng).unwrap();
+    let mut bob =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:bob", &mut w.rng).unwrap();
 
     let for_alice = vet(&mut w, 0, &alice, VettingMethod::InPerson);
     let reused = for_alice.token.clone();
-    alice.receive(&w.vtc, for_alice).unwrap();
+    alice.receive(&w.vtc.params().unwrap(), for_alice).unwrap();
     submit(&mut w, &alice).unwrap();
 
     // A cheating vetter reuses Alice's spent token for Bob.
     let m = meta(&bob, &w.vtc, VettingMethod::InPerson);
     let cheat = w.vetters[0]
-        .attest_with_token(&w.vtc, "2026-09", reused, bob.id(), m, &mut w.rng)
+        .attest_with_token(
+            &w.vtc.params().unwrap(),
+            "2026-09",
+            reused,
+            bob.id(),
+            m,
+            &mut w.rng,
+        )
         .unwrap();
-    bob.receive(&w.vtc, cheat).unwrap(); // the signature itself is valid
+    bob.receive(&w.vtc.params().unwrap(), cheat).unwrap(); // the signature itself is valid
     let honest = vet(&mut w, 1, &bob, VettingMethod::Video);
-    bob.receive(&w.vtc, honest).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), honest).unwrap();
 
     let d = submit(&mut w, &bob).unwrap();
     assert!(!d.evaluation.satisfied());
@@ -218,15 +240,23 @@ fn a_double_spent_token_does_not_count() {
 #[test]
 fn tokens_and_metadata_cannot_move_between_attestations() {
     let mut w = world(5, 3);
-    let mut bob = ApplicantEngine::new(&w.vtc, "did:example:bob", &mut w.rng).unwrap();
+    let mut bob =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:bob", &mut w.rng).unwrap();
     let a = vet(&mut w, 0, &bob, VettingMethod::InPerson);
-    bob.receive(&w.vtc, a).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), a).unwrap();
     let b = vet(&mut w, 1, &bob, VettingMethod::Video);
-    bob.receive(&w.vtc, b).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), b).unwrap();
 
     // Swap the tokens only: the metadata names the other serial.
     let c = w.vtc.challenge(&mut w.rng);
-    let mut sub = bob.submit(&w.vtc, &c, &mut w.rng).unwrap();
+    let mut sub = bob
+        .submit(
+            &w.vtc.params().unwrap(),
+            w.vtc.requirements_digest(),
+            &c,
+            &mut w.rng,
+        )
+        .unwrap();
     let (t0, t1) = (sub.statements[0].1.clone(), sub.statements[1].1.clone());
     sub.statements[0].1 = t1;
     sub.statements[1].1 = t0;
@@ -240,7 +270,14 @@ fn tokens_and_metadata_cannot_move_between_attestations() {
 
     // Swap the metadata too (claim "inPerson" for the video vetter): the proof breaks.
     let c = w.vtc.challenge(&mut w.rng);
-    let mut sub = bob.submit(&w.vtc, &c, &mut w.rng).unwrap();
+    let mut sub = bob
+        .submit(
+            &w.vtc.params().unwrap(),
+            w.vtc.requirements_digest(),
+            &c,
+            &mut w.rng,
+        )
+        .unwrap();
     sub.statements.swap(0, 1);
     assert_eq!(
         w.vtc.submit(&sub, now()).err(),
@@ -251,11 +288,19 @@ fn tokens_and_metadata_cannot_move_between_attestations() {
 #[test]
 fn a_challenge_is_single_use_and_bound_to_the_proof() {
     let mut w = world(6, 2);
-    let mut bob = ApplicantEngine::new(&w.vtc, "did:example:bob", &mut w.rng).unwrap();
+    let mut bob =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:bob", &mut w.rng).unwrap();
     let a = vet(&mut w, 0, &bob, VettingMethod::InPerson);
-    bob.receive(&w.vtc, a).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), a).unwrap();
     let c = w.vtc.challenge(&mut w.rng);
-    let sub = bob.submit(&w.vtc, &c, &mut w.rng).unwrap();
+    let sub = bob
+        .submit(
+            &w.vtc.params().unwrap(),
+            w.vtc.requirements_digest(),
+            &c,
+            &mut w.rng,
+        )
+        .unwrap();
     w.vtc.submit(&sub, now()).unwrap();
     assert_eq!(
         w.vtc.submit(&sub, now()).err(),
@@ -273,7 +318,14 @@ fn a_challenge_is_single_use_and_bound_to_the_proof() {
     // ... nor for another join DID: the binding of `id` to the persona is checked before the
     // proof, so swapping the DID is refused as a binding mismatch rather than a bad proof.
     let c3 = w.vtc.challenge(&mut w.rng);
-    let mut other = bob.submit(&w.vtc, &c3, &mut w.rng).unwrap();
+    let mut other = bob
+        .submit(
+            &w.vtc.params().unwrap(),
+            w.vtc.requirements_digest(),
+            &c3,
+            &mut w.rng,
+        )
+        .unwrap();
     other.join_did = "did:example:mallory".into();
     assert!(matches!(
         w.vtc.submit(&other, now()),
@@ -281,7 +333,14 @@ fn a_challenge_is_single_use_and_bound_to_the_proof() {
     ));
     // And with a binding recomputed for the new DID, the proof itself fails: `app_0` carries it.
     let c4 = w.vtc.challenge(&mut w.rng);
-    let mut forged = bob.submit(&w.vtc, &c4, &mut w.rng).unwrap();
+    let mut forged = bob
+        .submit(
+            &w.vtc.params().unwrap(),
+            w.vtc.requirements_digest(),
+            &c4,
+            &mut w.rng,
+        )
+        .unwrap();
     forged.join_did = "did:example:mallory".into();
     forged.id_binding = openvtc_vetting_pcs::meta::id_binding(
         &point_text(bob.id()).unwrap(),
@@ -298,13 +357,21 @@ fn a_challenge_is_single_use_and_bound_to_the_proof() {
 #[test]
 fn a_closed_token_label_means_no_token() {
     let mut w = world(7, 3);
-    let mut bob = ApplicantEngine::new(&w.vtc, "did:example:bob", &mut w.rng).unwrap();
+    let mut bob =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:bob", &mut w.rng).unwrap();
     let a = vet(&mut w, 0, &bob, VettingMethod::InPerson);
-    bob.receive(&w.vtc, a).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), a).unwrap();
     let b = vet(&mut w, 1, &bob, VettingMethod::Video);
-    bob.receive(&w.vtc, b).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), b).unwrap();
     let c = w.vtc.challenge(&mut w.rng);
-    let sub = bob.submit(&w.vtc, &c, &mut w.rng).unwrap();
+    let sub = bob
+        .submit(
+            &w.vtc.params().unwrap(),
+            w.vtc.requirements_digest(),
+            &c,
+            &mut w.rng,
+        )
+        .unwrap();
 
     let label = w.vtc.current_token_label().to_string();
     w.vtc.verifier.tokens.close_label(&label);
@@ -320,10 +387,11 @@ fn a_closed_token_label_means_no_token() {
 #[test]
 fn rotation_mixes_epochs_in_one_proof_and_refresh_keeps_the_tag() {
     let mut w = world(8, 3);
-    let mut bob = ApplicantEngine::new(&w.vtc, "did:example:bob", &mut w.rng).unwrap();
+    let mut bob =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:bob", &mut w.rng).unwrap();
     let old = vet(&mut w, 0, &bob, VettingMethod::InPerson);
     let old_tag = old.attestation.tag;
-    bob.receive(&w.vtc, old).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), old).unwrap();
 
     // Rotate: 2026-10 is current, 2026-09 still live. Vetter 1 re-enrols and gets new tokens.
     w.vtc.rotate("2026-10").unwrap();
@@ -333,7 +401,7 @@ fn rotation_mixes_epochs_in_one_proof_and_refresh_keeps_the_tag() {
         .drip(&mut w.vtc, 31, &label, R, &mut w.rng)
         .unwrap();
     let new = vet(&mut w, 1, &bob, VettingMethod::Video);
-    bob.receive(&w.vtc, new).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), new).unwrap();
 
     // One proof over a 2026-09 and a 2026-10 attestation (§13 C1).
     let d = submit(&mut w, &bob).unwrap();
@@ -345,12 +413,14 @@ fn rotation_mixes_epochs_in_one_proof_and_refresh_keeps_the_tag() {
         .drip(&mut w.vtc, 31, &label, R, &mut w.rng)
         .unwrap();
     w.vtc.drop_period("2026-09").unwrap();
-    let refreshed = w.vetters[0].refresh(&w.vtc, bob.id(), &mut w.rng).unwrap();
+    let refreshed = w.vetters[0]
+        .refresh(&w.vtc.params().unwrap(), bob.id(), &mut w.rng)
+        .unwrap();
     assert_eq!(
         refreshed.attestation.tag, old_tag,
         "same usk, same tag (§13 C2)"
     );
-    bob.replace(&w.vtc, refreshed).unwrap();
+    bob.replace(&w.vtc.params().unwrap(), refreshed).unwrap();
     let d = submit(&mut w, &bob).unwrap();
     assert!(d.evaluation.satisfied(), "{:?}", d.evaluation);
     assert_eq!(d.evaluation.distinct_vetters(), 2);
@@ -359,11 +429,19 @@ fn rotation_mixes_epochs_in_one_proof_and_refresh_keeps_the_tag() {
 #[test]
 fn a_dropped_period_fails_the_whole_proof() {
     let mut w = world(9, 3);
-    let mut bob = ApplicantEngine::new(&w.vtc, "did:example:bob", &mut w.rng).unwrap();
+    let mut bob =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:bob", &mut w.rng).unwrap();
     let a = vet(&mut w, 0, &bob, VettingMethod::InPerson);
-    bob.receive(&w.vtc, a).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), a).unwrap();
     let c = w.vtc.challenge(&mut w.rng);
-    let sub = bob.submit(&w.vtc, &c, &mut w.rng).unwrap();
+    let sub = bob
+        .submit(
+            &w.vtc.params().unwrap(),
+            w.vtc.requirements_digest(),
+            &c,
+            &mut w.rng,
+        )
+        .unwrap();
 
     w.vtc.rotate("2026-10").unwrap();
     w.vtc.drop_period("2026-09").unwrap();
@@ -406,16 +484,21 @@ fn a_member_is_bound_to_one_identifier() {
 #[test]
 fn withdrawal_by_tag_stops_counting_and_cannot_be_forged() {
     let mut w = world(11, 3);
-    let mut bob = ApplicantEngine::new(&w.vtc, "did:example:bob", &mut w.rng).unwrap();
+    let mut bob =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:bob", &mut w.rng).unwrap();
     let a = vet(&mut w, 0, &bob, VettingMethod::InPerson);
-    bob.receive(&w.vtc, a).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), a).unwrap();
     let b = vet(&mut w, 1, &bob, VettingMethod::Video);
-    bob.receive(&w.vtc, b).unwrap();
+    bob.receive(&w.vtc.params().unwrap(), b).unwrap();
     assert!(submit(&mut w, &bob).unwrap().evaluation.satisfied());
 
     // Vetter 2 cannot withdraw vetter 1's statement: its proof is for its own tag.
-    let (tag2, proof2) = w.vetters[2].withdraw(&w.vtc, bob.id(), &mut w.rng).unwrap();
-    let (tag1, proof1) = w.vetters[1].withdraw(&w.vtc, bob.id(), &mut w.rng).unwrap();
+    let (tag2, proof2) = w.vetters[2]
+        .withdraw(&w.vtc.params().unwrap(), bob.id(), &mut w.rng)
+        .unwrap();
+    let (tag1, proof1) = w.vetters[1]
+        .withdraw(&w.vtc.params().unwrap(), bob.id(), &mut w.rng)
+        .unwrap();
     assert!(!w.vtc.withdraw(bob.id(), &tag1, &proof2).unwrap());
     assert!(!w.vtc.withdraw(bob.id(), &tag2, &proof1).unwrap() || tag1 == tag2);
 
@@ -458,7 +541,8 @@ fn drip_is_once_per_tick_and_reservations_bound_capacity() {
     // A personal limit below the drip: local, never sent, still refuses.
     let mut w = world(13, 1);
     w.vetters[0].personal_limit = Some(1);
-    let bob = ApplicantEngine::new(&w.vtc, "did:example:bob", &mut w.rng).unwrap();
+    let bob =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:bob", &mut w.rng).unwrap();
     vet(&mut w, 0, &bob, VettingMethod::InPerson);
     assert!(w.vetters[0].tokens_free() > 0);
     assert!(matches!(
@@ -516,18 +600,26 @@ fn event_mode_needs_a_group_an_outside_approver_and_dies_after_the_event() {
         .unwrap();
 
     // Event tokens are preferred during the event and verify like any other.
-    let mut bob = ApplicantEngine::new(&w.vtc, "did:example:bob", &mut w.rng).unwrap();
+    let mut bob =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:bob", &mut w.rng).unwrap();
     for (j, method) in [(0, VettingMethod::InPerson), (1, VettingMethod::Video)] {
         let m = meta(&bob, &w.vtc, method);
         let r = w.vetters[j].accept(Some(&event), 3).unwrap();
         assert_eq!(r.label, event);
         let att = w.vetters[j]
-            .attest(&w.vtc, &r, bob.id(), m, &mut w.rng)
+            .attest(&w.vtc.params().unwrap(), &r, bob.id(), m, &mut w.rng)
             .unwrap();
-        bob.receive(&w.vtc, att).unwrap();
+        bob.receive(&w.vtc.params().unwrap(), att).unwrap();
     }
     let c = w.vtc.challenge(&mut w.rng);
-    let late = bob.submit(&w.vtc, &c, &mut w.rng).unwrap();
+    let late = bob
+        .submit(
+            &w.vtc.params().unwrap(),
+            w.vtc.requirements_digest(),
+            &c,
+            &mut w.rng,
+        )
+        .unwrap();
     assert!(submit(&mut w, &bob).unwrap().evaluation.satisfied());
 
     // After the grace period the event label closes: 19 leftover event tokens are gone, the
@@ -545,4 +637,33 @@ fn event_mode_needs_a_group_an_outside_approver_and_dies_after_the_event() {
             .iter()
             .all(|s| s.failures.contains(&"no-token".to_string()))
     );
+}
+
+#[test]
+fn engine_state_survives_a_restart() {
+    let mut w = world(16, 2);
+    let mut bob =
+        ApplicantEngine::new(&w.vtc.params().unwrap(), "did:example:bob", &mut w.rng).unwrap();
+    let a = vet(&mut w, 0, &bob, VettingMethod::InPerson);
+    bob.receive(&w.vtc.params().unwrap(), a).unwrap();
+
+    // Both engines round-trip through their storable forms, as openvtc's config would.
+    let bob_json = serde_json::to_string(&bob.snapshot().unwrap()).unwrap();
+    let vetter_json = serde_json::to_string(&w.vetters[1].snapshot().unwrap()).unwrap();
+    let mut bob = ApplicantEngine::restore(&serde_json::from_str(&bob_json).unwrap()).unwrap();
+    let restored_vetter =
+        VetterEngine::restore(&serde_json::from_str(&vetter_json).unwrap(), COMMUNITY).unwrap();
+    w.vetters[1] = restored_vetter;
+
+    // The restored vetter attests with the same key: a stable tag is what stops one vetter
+    // counting twice (§13 C2).
+    let before = point_text(w.vetters[1].id()).unwrap();
+    let b = vet(&mut w, 1, &bob, VettingMethod::Video);
+    bob.receive(&w.vtc.params().unwrap(), b).unwrap();
+    assert_eq!(point_text(w.vetters[1].id()).unwrap(), before);
+
+    // And the restored applicant proves over the attestation it gathered before the restart.
+    let d = submit(&mut w, &bob).unwrap();
+    assert!(d.evaluation.satisfied(), "{:?}", d.evaluation);
+    assert_eq!(d.evaluation.distinct_vetters(), 2);
 }

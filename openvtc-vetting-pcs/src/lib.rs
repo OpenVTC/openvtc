@@ -18,9 +18,11 @@
 //! VTC (`vtc`). Nothing here is production code.
 
 pub mod applicant;
+pub mod community;
 pub mod error;
 pub mod meta;
 pub mod scheme;
+pub mod snapshot;
 pub mod token;
 pub mod verifier;
 pub mod vetter;

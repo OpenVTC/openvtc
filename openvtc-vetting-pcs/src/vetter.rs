@@ -13,8 +13,10 @@ use rand::{CryptoRng, RngCore};
 
 use crate::{
     ProtoError,
+    community::CommunityParams,
     meta::StatementMeta,
     scheme::{Base, E, Fr, G1, point_text, scalar_text, vetter_predicate},
+    snapshot::VetterSnapshot,
     token::{Reservation, TokenWallet},
     vtc::{Vtc, withdraw_context},
 };
@@ -62,6 +64,49 @@ impl VetterEngine {
 
     pub fn id(&self) -> &G1 {
         &self.id
+    }
+
+    /// The storable form, for openvtc's encrypted config. Carries `usk`, the key every tag of
+    /// this vetter derives from: see [`crate::snapshot`].
+    pub fn snapshot(&self) -> Result<VetterSnapshot, ProtoError> {
+        let mut snap = VetterSnapshot::new(&self.member, &self.usk, &self.id)?;
+        for (period, cred) in &self.creds {
+            snap.put_credential(period, cred)?;
+        }
+        snap.tokens = self.wallet.snapshot()?;
+        snap.personal_limit = self.personal_limit;
+        for (id, meta) in &self.log {
+            snap.record(id, meta)?;
+        }
+        Ok(snap)
+    }
+
+    /// Restore a vetter's engine from storage.
+    pub fn restore(snap: &VetterSnapshot, community: &str) -> Result<Self, ProtoError> {
+        let (usk, id) = snap.key()?;
+        let mut creds = BTreeMap::new();
+        for period in snap.credentials.keys() {
+            if let Some(c) = snap.credential(period)? {
+                creds.insert(period.clone(), c);
+            }
+        }
+        let mut log = Vec::new();
+        for (raw, meta) in &snap.log {
+            let id: G1 = predicate_credential_system::serialization::from_bytes(
+                &predicate_credential_system::serialization::from_multibase(raw)?,
+            )?;
+            log.push((id, meta.clone()));
+        }
+        Ok(Self {
+            member: snap.member.clone(),
+            usk,
+            id,
+            creds,
+            wallet: TokenWallet::restore(community, &snap.tokens)?,
+            personal_limit: snap.personal_limit,
+            attested: 0,
+            log,
+        })
     }
 
     /// Root request for the VTC's current period, with the SAME `usk` every time.
@@ -139,22 +184,20 @@ impl VetterEngine {
     /// serial and the statement metadata into `ctx_j`, attest under the newest live period.
     pub fn attest<R: RngCore + CryptoRng>(
         &mut self,
-        vtc: &Vtc,
+        params: &CommunityParams,
         reservation: &Reservation,
         applicant_id: &G1,
         meta: StatementMeta,
         rng: &mut R,
     ) -> Result<HiddenAttestation, ProtoError> {
-        let period = vtc
-            .live_periods()
+        let period = params
+            .vetter_labels()
             .iter()
-            .find(|p| self.creds.contains_key(*p))
-            .cloned()
+            .map(|l| l.trim_start_matches("vetter/").to_string())
+            .find(|p| self.creds.contains_key(p))
             .ok_or(ProtoError::NoLiveCredential)?;
-        let token = self
-            .wallet
-            .spend(vtc.token_verifier().tvk(), reservation, rng)?;
-        self.attest_with_token(vtc, &period, token, applicant_id, meta, rng)
+        let token = self.wallet.spend(params.tokens().tvk(), reservation, rng)?;
+        self.attest_with_token(params, &period, token, applicant_id, meta, rng)
     }
 
     /// ADVERSARY HOOK for tests: attest with a token of the caller's choosing, e.g. one already
@@ -162,7 +205,7 @@ impl VetterEngine {
     #[doc(hidden)]
     pub fn attest_with_token<R: RngCore + CryptoRng>(
         &mut self,
-        vtc: &Vtc,
+        params: &CommunityParams,
         period: &str,
         token: crate::token::TokenSpend,
         applicant_id: &G1,
@@ -173,8 +216,8 @@ impl VetterEngine {
         meta.token_label = token.label.clone();
         meta.token_serial = scalar_text(&token.serial)?;
         let app = meta.context_bytes()?;
-        let attestation = vtc.open().attest_in_context(
-            vtc.hvk(),
+        let attestation = params.open().attest_in_context(
+            params.hvk(),
             &self.usk,
             &vetter_predicate(&period),
             &self.creds[&period],
@@ -195,7 +238,7 @@ impl VetterEngine {
     /// tag is the same as before (§13 C2), so the two cannot count as two vetters.
     pub fn refresh<R: RngCore + CryptoRng>(
         &mut self,
-        vtc: &Vtc,
+        params: &CommunityParams,
         applicant_id: &G1,
         rng: &mut R,
     ) -> Result<HiddenAttestation, ProtoError> {
@@ -208,23 +251,23 @@ impl VetterEngine {
             .ok_or(ProtoError::NoLiveCredential)?;
         let reservation = self.accept(None, 0)?;
         self.attested -= 1; // a refresh is not a new vetting
-        self.attest(vtc, &reservation, applicant_id, meta, rng)
+        self.attest(params, &reservation, applicant_id, meta, rng)
     }
 
     /// Withdraw one statement: the tag, and a proof of knowledge of the key behind it that
     /// does not link to this vetter's `id` (§4.4).
     pub fn withdraw<R: RngCore + CryptoRng>(
         &self,
-        vtc: &Vtc,
+        params: &CommunityParams,
         applicant_id: &G1,
         rng: &mut R,
     ) -> Result<(G1, FSProof<Fr>), ProtoError> {
-        let prf = vtc.open().tag();
-        let s = vtc.open().tag_point(applicant_id)?;
+        let prf = params.open().tag();
+        let s = params.open().tag_point(applicant_id)?;
         let tag = prf
             .eval(self.usk.expose_scalar(), &s)
             .ok_or(predicate_credential_system::Error::UndefinedTag)?;
-        let ctx = withdraw_context(&vtc.community, &point_text(applicant_id)?);
+        let ctx = withdraw_context(params.community(), &point_text(applicant_id)?);
         let proof = prove_tag(prf, self.usk.expose_scalar(), &tag, &s, &ctx, rng)?;
         Ok((tag, proof))
     }
