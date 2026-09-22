@@ -124,29 +124,39 @@ fn opening_context(
 // VTC side
 // -------------------------------------------------------------------------------------------
 
-pub struct TokenIssuer {
+/// What a VERIFIER needs about tokens: the public key, the live labels, and the spent set. The
+/// VTC service holds one of these; so does anything that re-checks a submission from public
+/// data alone (the fixture tests do).
+pub struct TokenVerifier {
     params: TokenParams,
     tvk: PSVerificationKey<E>,
-    tsk: PSSigningKey<E>,
-    /// One lock per signing key: blind signing is sequential (§13 C3).
-    sign_lock: Mutex<()>,
     live: BTreeSet<String>,
-    served: HashSet<(String, String, u32)>,
     /// label → serial → (id, tag)
     spent: HashMap<String, HashMap<String, (String, String)>>,
     pub anomalies: Vec<String>,
 }
 
-impl TokenIssuer {
-    pub fn new<R: RngCore + CryptoRng>(community: &str, rng: &mut R) -> Result<Self, ProtoError> {
-        let (tvk, tsk) = Base::keygen(&(), rng);
+/// The signing half: only the community that mints tokens has one. It takes the
+/// [`TokenVerifier`] as an argument rather than owning it, so that one spent set and one set of
+/// live labels serve both minting and verification.
+pub struct TokenIssuer {
+    tsk: PSSigningKey<E>,
+    /// One lock per signing key: blind signing is sequential (§13 C3).
+    sign_lock: Mutex<()>,
+    served: HashSet<(String, String, u32)>,
+}
+
+impl TokenVerifier {
+    /// From public data only: the token key and the labels that are live.
+    pub fn new(
+        community: &str,
+        tvk: PSVerificationKey<E>,
+        live: impl IntoIterator<Item = String>,
+    ) -> Result<Self, ProtoError> {
         Ok(Self {
             params: TokenParams::new(community)?,
             tvk,
-            tsk,
-            sign_lock: Mutex::new(()),
-            live: BTreeSet::new(),
-            served: HashSet::new(),
+            live: live.into_iter().collect(),
             spent: HashMap::new(),
             anomalies: Vec::new(),
         })
@@ -169,43 +179,6 @@ impl TokenIssuer {
     pub fn close_label(&mut self, label: &str) {
         self.live.remove(label);
         self.spent.remove(label);
-    }
-
-    /// Blind-sign one tick's drip for `member` under `label`. The caller has checked that
-    /// `member` holds a live grant (and, for an event label, belongs to the event group).
-    pub fn issue<R: RngCore + CryptoRng>(
-        &mut self,
-        member: &str,
-        tick: u32,
-        label: &str,
-        requests: &[TokenRequest],
-        rng: &mut R,
-    ) -> Result<Vec<PSPreCredential<E>>, ProtoError> {
-        if !self.live.contains(label) {
-            return Err(ProtoError::LabelNotLive(label.to_string()));
-        }
-        let key = (member.to_string(), label.to_string(), tick);
-        if self.served.contains(&key) {
-            return Err(ProtoError::AlreadyServedThisTick {
-                member: member.to_string(),
-                tick,
-            });
-        }
-        for (i, req) in requests.iter().enumerate() {
-            let rel = opening_relation(&self.tvk, &req.commitment)?;
-            let ctx = opening_context(&self.tvk, label, member, tick, i, &req.commitment)?;
-            if !fiat_shamir::verify(&rel, &ctx, &req.opening_proof) {
-                return Err(ProtoError::BadOpeningProof(i));
-            }
-        }
-        let phi = self.params.phi(label)?;
-        let _guard = self.sign_lock.lock().expect("token signing lock");
-        let pres = requests
-            .iter()
-            .map(|req| Base::blind_issue(&(), &self.tsk, &req.commitment, &phi, rng))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.served.insert(key);
-        Ok(pres)
     }
 
     /// The signature check alone: valid under a live label. Also what the applicant's engine
@@ -240,6 +213,64 @@ impl TokenIssuer {
                 Ok(SpendOutcome::DoubleSpend)
             }
         }
+    }
+}
+
+impl TokenIssuer {
+    /// A fresh token key pair: the verifier half is returned with it, because the two are one
+    /// key and the caller keeps them together.
+    pub fn new<R: RngCore + CryptoRng>(
+        community: &str,
+        rng: &mut R,
+    ) -> Result<(Self, TokenVerifier), ProtoError> {
+        let (tvk, tsk) = Base::keygen(&(), rng);
+        let verifier = TokenVerifier::new(community, tvk, [])?;
+        Ok((
+            Self {
+                tsk,
+                sign_lock: Mutex::new(()),
+                served: HashSet::new(),
+            },
+            verifier,
+        ))
+    }
+
+    /// Blind-sign one tick's drip for `member` under `label`. The caller has checked that
+    /// `member` holds a live grant (and, for an event label, belongs to the event group).
+    pub fn issue<R: RngCore + CryptoRng>(
+        &mut self,
+        verifier: &TokenVerifier,
+        member: &str,
+        tick: u32,
+        label: &str,
+        requests: &[TokenRequest],
+        rng: &mut R,
+    ) -> Result<Vec<PSPreCredential<E>>, ProtoError> {
+        if !verifier.live.contains(label) {
+            return Err(ProtoError::LabelNotLive(label.to_string()));
+        }
+        let key = (member.to_string(), label.to_string(), tick);
+        if self.served.contains(&key) {
+            return Err(ProtoError::AlreadyServedThisTick {
+                member: member.to_string(),
+                tick,
+            });
+        }
+        for (i, req) in requests.iter().enumerate() {
+            let rel = opening_relation(verifier.tvk(), &req.commitment)?;
+            let ctx = opening_context(verifier.tvk(), label, member, tick, i, &req.commitment)?;
+            if !fiat_shamir::verify(&rel, &ctx, &req.opening_proof) {
+                return Err(ProtoError::BadOpeningProof(i));
+            }
+        }
+        let phi = verifier.params.phi(label)?;
+        let _guard = self.sign_lock.lock().expect("token signing lock");
+        let pres = requests
+            .iter()
+            .map(|req| Base::blind_issue(&(), &self.tsk, &req.commitment, &phi, rng))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.served.insert(key);
+        Ok(pres)
     }
 }
 

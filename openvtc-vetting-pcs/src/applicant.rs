@@ -72,7 +72,7 @@ impl ApplicantEngine {
             ));
         }
         let params = TokenParams::new(&vtc.community)?;
-        if !verify_spend(&params, vtc.tokens.tvk(), &att.token)? {
+        if !verify_spend(&params, vtc.token_verifier().tvk(), &att.token)? {
             return Err(ProtoError::AttestationRejected(
                 "token signature does not verify".into(),
             ));
@@ -100,7 +100,7 @@ impl ApplicantEngine {
         let mut usable: Vec<&HiddenAttestation> = Vec::new();
         for h in &self.held {
             let live = phis.contains(&h.attestation.phi)
-                && vtc.tokens.live_labels().contains(&h.token.label);
+                && vtc.token_verifier().live_labels().contains(&h.token.label);
             if live
                 && !usable
                     .iter()
@@ -116,16 +116,17 @@ impl ApplicantEngine {
             .collect::<Result<_, _>>()?;
         let app_refs: Vec<&[u8]> = apps.iter().map(Vec::as_slice).collect();
         let id_text = point_text(&self.id)?;
+        let binding = id_binding(
+            &id_text,
+            &vtc.community,
+            vtc.requirements_digest(),
+            &self.join_did,
+        );
         let app0 = ProofContext {
             challenge: challenge.to_string(),
             audience: vtc.audience().to_string(),
             join_did: self.join_did.clone(),
-            id_binding: id_binding(
-                &id_text,
-                &vtc.community,
-                vtc.requirements_digest(),
-                &self.join_did,
-            ),
+            id_binding: binding.clone(),
         }
         .context_bytes()?;
         let f = hidden_vetting_predicate(u32::try_from(atts.len()).unwrap_or(u32::MAX));
@@ -142,6 +143,7 @@ impl ApplicantEngine {
         Ok(Submission {
             id: self.id,
             join_did: self.join_did.clone(),
+            id_binding: binding,
             challenge: challenge.to_string(),
             statements: usable
                 .iter()

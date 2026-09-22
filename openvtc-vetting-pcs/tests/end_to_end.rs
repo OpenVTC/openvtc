@@ -152,9 +152,9 @@ fn request_more_then_admit_on_resubmission() {
     assert!(d.evaluation.satisfied(), "{:?}", d.evaluation);
     // The first vetter's token came back with the same (id, tag): already counted, no anomaly.
     assert!(
-        w.vtc.tokens.anomalies.is_empty(),
+        w.vtc.token_verifier().anomalies.is_empty(),
         "{:?}",
-        w.vtc.tokens.anomalies
+        w.vtc.token_verifier().anomalies
     );
 }
 
@@ -209,7 +209,7 @@ fn a_double_spent_token_does_not_count() {
             .any(|s| s.failures.contains(&"token-double-spend".to_string()))
     );
     assert_eq!(
-        w.vtc.tokens.anomalies.len(),
+        w.vtc.token_verifier().anomalies.len(),
         1,
         "the VTC notices, without naming anyone"
     );
@@ -270,12 +270,27 @@ fn a_challenge_is_single_use_and_bound_to_the_proof() {
         w.vtc.submit(&replay, now()).err(),
         Some(ProtoError::ProofRejected(PcsError::InvalidProof))
     );
-    // ... nor for another join DID (the id binding is in app_0).
+    // ... nor for another join DID: the binding of `id` to the persona is checked before the
+    // proof, so swapping the DID is refused as a binding mismatch rather than a bad proof.
     let c3 = w.vtc.challenge(&mut w.rng);
     let mut other = bob.submit(&w.vtc, &c3, &mut w.rng).unwrap();
     other.join_did = "did:example:mallory".into();
+    assert!(matches!(
+        w.vtc.submit(&other, now()),
+        Err(ProtoError::AttestationRejected(_))
+    ));
+    // And with a binding recomputed for the new DID, the proof itself fails: `app_0` carries it.
+    let c4 = w.vtc.challenge(&mut w.rng);
+    let mut forged = bob.submit(&w.vtc, &c4, &mut w.rng).unwrap();
+    forged.join_did = "did:example:mallory".into();
+    forged.id_binding = openvtc_vetting_pcs::meta::id_binding(
+        &point_text(bob.id()).unwrap(),
+        COMMUNITY,
+        w.vtc.requirements_digest(),
+        "did:example:mallory",
+    );
     assert_eq!(
-        w.vtc.submit(&other, now()).err(),
+        w.vtc.submit(&forged, now()).err(),
         Some(ProtoError::ProofRejected(PcsError::InvalidProof))
     );
 }
@@ -292,7 +307,7 @@ fn a_closed_token_label_means_no_token() {
     let sub = bob.submit(&w.vtc, &c, &mut w.rng).unwrap();
 
     let label = w.vtc.current_token_label().to_string();
-    w.vtc.tokens.close_label(&label);
+    w.vtc.verifier.tokens.close_label(&label);
     let d = w.vtc.submit(&sub, now()).unwrap();
     assert_eq!(d.evaluation.distinct_vetters(), 0);
     assert!(
@@ -456,7 +471,7 @@ fn drip_is_once_per_tick_and_reservations_bound_capacity() {
 fn opening_proofs_are_bound_to_their_request() {
     let mut w = world(14, 1);
     let label = w.vtc.current_token_label().to_string();
-    let tvk = w.vtc.tokens.tvk().clone();
+    let tvk = w.vtc.tvk().clone();
     let mut wallet = TokenWallet::new(COMMUNITY).unwrap();
     // Proofs made for tick 5, presented for tick 6.
     let reqs = wallet

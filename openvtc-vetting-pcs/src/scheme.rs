@@ -29,6 +29,8 @@ pub type Tag = DDH<G1, G1Hasher>;
 pub type Open = PCS<E, Base, Tag>;
 /// The scheme as the helper runs it: never with the default policy.
 pub type Helper = PCS<E, Base, Tag, AllowList<Fr>>;
+/// The helper's verification key, published in the manifest.
+pub type Hvk = <Base as predicate_credential_system::cred::CredentialBase>::VerificationKey;
 
 pub fn deployment_label(community: &str) -> Vec<u8> {
     format!("{community}#vetting-pcs").into_bytes()

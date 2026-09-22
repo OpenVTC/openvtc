@@ -22,7 +22,9 @@ pub mod error;
 pub mod meta;
 pub mod scheme;
 pub mod token;
+pub mod verifier;
 pub mod vetter;
 pub mod vtc;
+pub mod wire;
 
 pub use error::ProtoError;

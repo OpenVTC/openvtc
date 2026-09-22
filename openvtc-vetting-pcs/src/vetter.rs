@@ -90,19 +90,19 @@ impl VetterEngine {
         r: usize,
         rng: &mut R,
     ) -> Result<(), ProtoError> {
-        let tvk = vtc.tokens.tvk().clone();
+        let tvk = vtc.token_verifier().tvk().clone();
         let reqs = self
             .wallet
             .prepare(&tvk, label, &self.member, tick, r, rng)?;
         let pres = vtc.drip(&self.member, tick, label, &reqs, rng)?;
         self.wallet.receive(&tvk, &pres)?;
-        self.wallet.expire(vtc.tokens.live_labels());
+        self.wallet.expire(vtc.token_verifier().live_labels());
         Ok(())
     }
 
     /// Tokens whose label closed are gone.
     pub fn expire(&mut self, vtc: &Vtc) {
-        self.wallet.expire(vtc.tokens.live_labels());
+        self.wallet.expire(vtc.token_verifier().live_labels());
     }
 
     pub fn tokens_held(&self) -> usize {
@@ -151,7 +151,9 @@ impl VetterEngine {
             .find(|p| self.creds.contains_key(*p))
             .cloned()
             .ok_or(ProtoError::NoLiveCredential)?;
-        let token = self.wallet.spend(vtc.tokens.tvk(), reservation, rng)?;
+        let token = self
+            .wallet
+            .spend(vtc.token_verifier().tvk(), reservation, rng)?;
         self.attest_with_token(vtc, &period, token, applicant_id, meta, rng)
     }
 
