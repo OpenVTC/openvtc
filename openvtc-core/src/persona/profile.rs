@@ -254,7 +254,9 @@ impl ProfileDetail {
 /// names. [`get`] resolves the one the holder opened.
 pub async fn list(client: &VtaClient) -> Result<Vec<ProfileSummary>, OpenVTCError> {
     let value = client
-        .persona_profile_list(None, None)
+        // Retired faces are left out, as at the agent: a picker that offered
+        // one back would undo the holder's decision.
+        .persona_profile_list(None, None, false)
         .await
         .map_err(|e| OpenVTCError::Vta(format!("persona profile list failed: {e}")))?;
 
@@ -350,7 +352,16 @@ pub async fn put(
         .collect();
 
     let response = client
-        .persona_profile_put(name, entries, Vec::new(), profile_id, expected_version)
+        // `reach: None` keeps the face's stored reach — the one member a put
+        // does not reset by omission. This editor has no control for it.
+        .persona_profile_put(
+            name,
+            entries,
+            Vec::new(),
+            None,
+            profile_id,
+            expected_version,
+        )
         .await
         .map_err(|e| OpenVTCError::Vta(format!("persona profile write failed: {e}")))?;
 

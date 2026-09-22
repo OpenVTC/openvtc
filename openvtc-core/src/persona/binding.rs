@@ -62,6 +62,9 @@ pub struct BindingSummary {
     pub claim_count: u64,
     /// When the binding was last written.
     pub bound_at: Option<String>,
+    /// When wearing the face here ends on its own. Carried so a face change
+    /// sends it back: `binding/set` replaces the binding.
+    pub until: Option<String>,
     /// True when the agent could not be asked, as distinct from having
     /// answered "nothing is bound".
     ///
@@ -188,6 +191,10 @@ pub async fn get(
             .get("boundAt")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        until: value
+            .get("until")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
         unknown: false,
         // Filled by `get_or_unknown` when this answer is "nothing", not here:
         // `get` reports one context, which is exactly what the agent was asked.
@@ -292,10 +299,17 @@ pub async fn set(
     // (`pnm`, the console). Read it and send it back. A failed read fails the
     // write rather than guessing: "unnamed" is not a safe default for a
     // decision the holder made.
-    let label = match profile_id {
-        // Taking the face off: the agent drops the label with it.
-        None => None,
-        Some(_) => get(client, context_id, persona_did).await?.label,
+    //
+    // The same for its end. A binding worn "until Sunday" and changed to
+    // another face here would otherwise last forever — the opposite of what
+    // the holder set.
+    let (label, until) = match profile_id {
+        // Taking the face off: the agent drops the label and the end with it.
+        None => (None, None),
+        Some(_) => {
+            let current = get(client, context_id, persona_did).await?;
+            (current.label, current.until)
+        }
     };
     client
         .persona_binding_set(
@@ -304,6 +318,7 @@ pub async fn set(
             profile_id,
             Vec::new(),
             label.as_deref(),
+            until.as_deref(),
             None,
         )
         .await
