@@ -653,6 +653,7 @@ fn form_submit(state: &mut State) -> PersonaEffect {
                 label: (!label.is_empty()).then(|| label.to_string()),
                 value,
                 value_type,
+                endorsements: form.endorsements.clone(),
             }))
         }
         PersonaMode::Profile(form) => {
@@ -787,6 +788,7 @@ fn form_for(attr: &PoolAttribute) -> AttributeForm {
             Some(other) => other.to_string(),
             None => String::new(),
         }),
+        endorsements: attr.endorsements.clone(),
         field: AttributeField::default(),
         error: None,
         working: false,

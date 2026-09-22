@@ -881,6 +881,8 @@ pub struct AttributeForm {
     /// Index into [`VALUE_TYPES`].
     pub value_type: usize,
     pub value: tui_input::Input,
+    /// The attribute's endorsements, carried through an edit unchanged.
+    pub endorsements: Vec<String>,
     pub field: AttributeField,
     /// Why the last submit did not go through — a parse failure on the value,
     /// or the VTA's own refusal. Shown against the form, not the list, so the
