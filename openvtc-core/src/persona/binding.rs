@@ -314,7 +314,10 @@ pub async fn set(
     client
         .persona_binding_set(
             context_id,
-            persona_did,
+            // The caller knows which persona the community holds, so it is
+            // named. Omitting it asks the VTA to find the one used here,
+            // which only helps a caller that does not know.
+            Some(persona_did),
             profile_id,
             Vec::new(),
             label.as_deref(),
