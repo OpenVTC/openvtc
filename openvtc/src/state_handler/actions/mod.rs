@@ -278,6 +278,8 @@ pub enum PersonaAction {
     BindOpen(usize),
     /// Arm "present nothing here".
     UnbindArm(usize),
+    /// Open the form: make a face for this community and wear it here.
+    ComposeOpen(usize),
 
     // ── The shared confirmation slot ─────────────────────────────────────
     ConfirmYes,

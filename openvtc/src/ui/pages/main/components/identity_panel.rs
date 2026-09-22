@@ -51,9 +51,9 @@ use crate::colors::{
 };
 use crate::state_handler::{
     main_page::content::{
-        AttributeField, AttributeForm, BindPicker, FacePlacer, FacetForm, FacetFormFocus,
-        IdentityState, PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus,
-        VALUE_TYPES,
+        AttributeField, AttributeForm, BindPicker, ComposeForm, FacePlacer, FacetForm,
+        FacetFormFocus, IdentityState, PersonaConfirm, PersonaMode, PersonaTab, ProfileForm,
+        ProfileFormFocus, VALUE_TYPES,
     },
     state::ConnectionState,
 };
@@ -97,6 +97,7 @@ pub fn render(state: &IdentityState) -> Vec<Line<'static>> {
         PersonaMode::Facet(form) => render_facet_form(form),
         PersonaMode::PlaceFace(picker) => render_face_placer(state, picker),
         PersonaMode::Bind(picker) => render_bind_picker(state, picker),
+        PersonaMode::Compose(form) => render_compose_form(form),
         PersonaMode::View => render_tabs(state),
     }
 }
@@ -264,7 +265,8 @@ fn hints(state: &IdentityState) -> &'static str {
             "↑/↓ select   n: new world   e: edit   d: delete   r: refresh   ⇥/⇧⇥: tab"
         }
         PersonaTab::Communities => {
-            "↑/↓ select   b: change face   u: take it off   r: refresh   ⇥/⇧⇥: tab"
+            "↑/↓ select   b: change face   c: make a face for it   u: take it off   r: refresh   \
+             ⇥/⇧⇥: tab"
         }
         PersonaTab::Disclosures => "↑/↓ select   r: refresh   ⇥/⇧⇥: tab",
     }
@@ -1492,6 +1494,75 @@ fn render_profile_form(state: &IdentityState, form: &ProfileForm) -> Vec<Line<'s
 /// face being moved is on screen — see `PersonaAction::FacePlaceOpen`. What this
 /// form does carry, invisibly, is the membership it was opened with, so that
 /// saving a rename puts it back untouched.
+fn render_compose_form(form: &ComposeForm) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("")];
+    lines.push(
+        Line::from(format!(" A face for {}", form.community))
+            .fg(COLOR_SUCCESS)
+            .bold(),
+    );
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(
+            " What you type here stays in this face and this community, unless you say a value \
+             may be used in your other faces too. It is worn here as soon as it is made.",
+        )
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+    let style = |field: usize| {
+        if form.field == field {
+            Style::new().fg(COLOR_SUCCESS).bold()
+        } else {
+            Style::new().fg(COLOR_TEXT_DEFAULT)
+        }
+    };
+    let caret = |field: usize| if form.field == field { "▏" } else { "" };
+    lines.push(Line::from(vec![
+        Span::styled(" Your name for it   ", style(0)),
+        Span::styled(form.name.value().to_string(), style(0)),
+        Span::styled(caret(0), style(0)),
+    ]));
+    lines.push(Line::from("   Only you ever see it.").fg(COLOR_DARK_GRAY));
+    lines.push(Line::from(""));
+    for (i, row) in form.rows.iter().enumerate() {
+        let (t, v) = (1 + 2 * i, 2 + 2 * i);
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<18}", "What it is"), style(t)),
+            Span::styled(row.claim_type.value().to_string(), style(t)),
+            Span::styled(caret(t), style(t)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<18}", "Value"), style(v)),
+            Span::styled(row.value.value().to_string(), style(v)),
+            Span::styled(caret(v), style(v)),
+        ]));
+        lines.push(
+            Line::from(if row.share {
+                "   ☑ used in my other faces too — it becomes reusable"
+            } else {
+                "   ☐ kept in this face alone"
+            })
+            .fg(COLOR_DARK_GRAY),
+        );
+    }
+    lines.push(Line::from(""));
+    if let Some(e) = &form.error {
+        lines.push(Line::from(format!(" {e}")).fg(COLOR_ORANGE));
+        lines.push(Line::from(""));
+    }
+    lines.push(
+        Line::from(if form.working {
+            " Making it…"
+        } else {
+            " ⇥/⇧⇥ field   ↓ on the last: add a value   Ctrl-T: use in other faces   ⏎: make it   \
+             Esc: cancel"
+        })
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines
+}
+
 fn render_facet_form(form: &FacetForm) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("")];
     lines.push(
@@ -3098,5 +3169,33 @@ mod tests {
         assert!(shown.contains("does not un-tell"), "{shown}");
         assert!(shown.contains("told did:web:v name.display"), "{shown}");
         assert!(shown.contains("never holds a value"), "{shown}");
+    }
+
+    /// The compose form says what stays where, and shows each row's choice.
+    #[test]
+    fn the_compose_form_says_what_stays_where() {
+        use crate::state_handler::main_page::content::{ComposeForm, ComposeRow};
+        let mut state = populated(PersonaTab::Communities);
+        state.mode = PersonaMode::Compose(ComposeForm {
+            community: "Co-op".into(),
+            name: tui_input::Input::new("Co-op".into()),
+            rows: vec![
+                ComposeRow {
+                    claim_type: tui_input::Input::new("name.display".into()),
+                    value: tui_input::Input::new("Ada".into()),
+                    share: false,
+                },
+                ComposeRow {
+                    claim_type: tui_input::Input::new("email.personal".into()),
+                    value: tui_input::Input::new("a@p.test".into()),
+                    share: true,
+                },
+            ],
+            ..ComposeForm::default()
+        });
+        let shown = text(&render(&state));
+        assert!(shown.contains("A face for Co-op"), "{shown}");
+        assert!(shown.contains("kept in this face alone"), "{shown}");
+        assert!(shown.contains("used in my other faces too"), "{shown}");
     }
 }

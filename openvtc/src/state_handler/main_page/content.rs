@@ -1054,6 +1054,48 @@ pub enum PersonaMode {
     Facet(FacetForm),
     PlaceFace(FacePlacer),
     Bind(BindPicker),
+    Compose(ComposeForm),
+}
+
+/// One value typed into a face being made for a community.
+#[derive(Clone, Debug, Default)]
+pub struct ComposeRow {
+    pub claim_type: tui_input::Input,
+    pub value: tui_input::Input,
+    /// Use it in the holder's other faces too. Off — the default — it stays in
+    /// this face alone.
+    pub share: bool,
+}
+
+/// Making a face for one community, where it is asked for, and wearing it
+/// there — `persona/profile/compose`. Local by default: nothing typed here
+/// reaches another face unless its row says so.
+#[derive(Clone, Debug, Default)]
+pub struct ComposeForm {
+    pub context_id: String,
+    pub persona_did: String,
+    pub community: String,
+    /// The holder's own name for the face. Never shown to anyone.
+    pub name: tui_input::Input,
+    pub rows: Vec<ComposeRow>,
+    /// 0 is the name; then each row's type and value, in order.
+    pub field: usize,
+    pub error: Option<String>,
+    pub working: bool,
+}
+
+impl ComposeForm {
+    /// The number of fields: the name, and two per row.
+    #[must_use]
+    pub fn field_count(&self) -> usize {
+        1 + 2 * self.rows.len()
+    }
+
+    /// The row the focus is in, when it is not on the name.
+    #[must_use]
+    pub fn focused_row(&self) -> Option<usize> {
+        self.field.checked_sub(1).map(|f| f / 2)
+    }
 }
 
 /// The persona pane: every surface for the holder's own identity, in one place.

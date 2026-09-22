@@ -46,8 +46,9 @@ use vta_sdk::client::VtaClient;
 
 use crate::state_handler::actions::PersonaAction;
 use crate::state_handler::main_page::content::{
-    AttributeField, AttributeForm, BindPicker, FacePlacer, FacetForm, FacetFormFocus,
-    PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus, VALUE_TYPES,
+    AttributeField, AttributeForm, BindPicker, ComposeForm, ComposeRow, FacePlacer, FacetForm,
+    FacetFormFocus, PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus,
+    VALUE_TYPES,
 };
 use crate::state_handler::persona_binding_refresh::{self, BindingTarget};
 use crate::state_handler::state::State;
@@ -89,6 +90,14 @@ pub(crate) enum PersonaJob {
     },
     ProfileRetire {
         profile_id: String,
+    },
+    /// Make a face for one community and wear it there.
+    Compose {
+        context_id: String,
+        persona_did: String,
+        community: String,
+        name: String,
+        values: Vec<lifecycle::ComposeValue>,
     },
     ProfileReinstate {
         profile_id: String,
@@ -483,6 +492,27 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             });
             PersonaEffect::None
         }
+        PersonaAction::ComposeOpen(index) => {
+            let p = &mut state.main_page.content_panel.identity;
+            let Some(membership) = p.memberships.get(*index).cloned() else {
+                return PersonaEffect::None;
+            };
+            p.mode = PersonaMode::Compose(ComposeForm {
+                context_id: membership.sub_context_id.clone(),
+                persona_did: membership.persona_did.clone(),
+                name: tui_input::Input::new(membership.community_name.clone()),
+                community: membership.community_name,
+                rows: vec![ComposeRow {
+                    claim_type: tui_input::Input::new("name.display".to_string()),
+                    ..ComposeRow::default()
+                }],
+                // Straight to the first value: the name and the type are
+                // prefilled, and what the holder came to type is the value.
+                field: 2,
+                ..ComposeForm::default()
+            });
+            PersonaEffect::None
+        }
         PersonaAction::UnbindArm(index) => {
             let p = &mut state.main_page.content_panel.identity;
             let Some(m) = p.memberships.get(*index) else {
@@ -535,6 +565,23 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                     // a keystroke here is not an edit.
                     FacetFormFocus::Colour => {}
                 },
+                PersonaMode::Compose(form) => {
+                    let field = form.field;
+                    match form.focused_row() {
+                        None => {
+                            form.name.handle_event(&event);
+                        }
+                        Some(row) => {
+                            if let Some(r) = form.rows.get_mut(row) {
+                                if (field - 1) % 2 == 0 {
+                                    r.claim_type.handle_event(&event);
+                                } else {
+                                    r.value.handle_event(&event);
+                                }
+                            }
+                        }
+                    }
+                }
                 PersonaMode::PlaceFace(_) | PersonaMode::Bind(_) | PersonaMode::View => {}
             }
             PersonaEffect::None
@@ -560,6 +607,14 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                         form.focus.next()
                     } else {
                         form.focus.prev()
+                    };
+                }
+                PersonaMode::Compose(form) => {
+                    let n = form.field_count();
+                    form.field = if *forwards {
+                        (form.field + 1) % n
+                    } else {
+                        (form.field + n - 1) % n
                     };
                 }
                 PersonaMode::PlaceFace(_) | PersonaMode::Bind(_) | PersonaMode::View => {}
@@ -598,11 +653,41 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                 PersonaMode::Bind(picker) => {
                     picker.cursor = step(picker.cursor, option_count, *forwards);
                 }
+                // ↓ on the last field adds a value; ↑ on an empty last row
+                // takes it away again. Elsewhere they move between fields.
+                PersonaMode::Compose(form) => {
+                    let last = form.field_count() - 1;
+                    if *forwards && form.field == last {
+                        form.rows.push(ComposeRow::default());
+                        form.field = form.field_count() - 2;
+                    } else if !*forwards
+                        && form.rows.len() > 1
+                        && form.focused_row() == Some(form.rows.len() - 1)
+                        && form.rows.last().is_some_and(|r| {
+                            r.claim_type.value().is_empty() && r.value.value().is_empty()
+                        })
+                    {
+                        form.rows.pop();
+                        form.field = form.field_count() - 1;
+                    } else if *forwards {
+                        form.field += 1;
+                    } else {
+                        form.field = form.field.saturating_sub(1);
+                    }
+                }
                 PersonaMode::View => {}
             }
             PersonaEffect::None
         }
         PersonaAction::FormToggleEntry => {
+            // In the compose form this is "use in my other faces too" for the
+            // row the focus is in.
+            if let PersonaMode::Compose(form) = &mut state.main_page.content_panel.identity.mode {
+                if let Some(row) = form.focused_row().and_then(|r| form.rows.get_mut(r)) {
+                    row.share = !row.share;
+                }
+                return PersonaEffect::None;
+            }
             let attribute_id = {
                 let p = &state.main_page.content_panel.identity;
                 match &p.mode {
@@ -798,6 +883,29 @@ fn form_submit(state: &mut State) -> PersonaEffect {
                 into,
             })
         }
+        PersonaMode::Compose(form) => {
+            let name = form.name.value().trim().to_string();
+            if name.is_empty() {
+                form.error = Some("A face needs a name — only you ever see it.".to_string());
+                return PersonaEffect::None;
+            }
+            let values = match compose_values(&form.rows) {
+                Ok(v) => v,
+                Err(why) => {
+                    form.error = Some(why);
+                    return PersonaEffect::None;
+                }
+            };
+            form.error = None;
+            form.working = true;
+            PersonaEffect::Job(PersonaJob::Compose {
+                context_id: form.context_id.clone(),
+                persona_did: form.persona_did.clone(),
+                community: form.community.clone(),
+                name,
+                values,
+            })
+        }
         PersonaMode::Bind(picker) => {
             // Row 0 is "nothing"; the rest index the profile list.
             let profile_id = picker
@@ -847,8 +955,52 @@ pub(crate) fn release_form(state: &mut State, reason: String) {
             picker.working = false;
             picker.error = Some(reason);
         }
+        PersonaMode::Compose(form) => {
+            form.working = false;
+            form.error = Some(reason);
+        }
         PersonaMode::View => p.status_message = Some(reason),
     }
+}
+
+/// The compose form's rows as the values a face is made from, or why they
+/// cannot be sent. Blank rows are dropped; a half-filled one is refused; the
+/// claim type is checked here so the holder is told on the row rather than by
+/// the agent refusing the whole face.
+pub(crate) fn compose_values(rows: &[ComposeRow]) -> Result<Vec<lifecycle::ComposeValue>, String> {
+    let mut out = Vec::new();
+    for row in rows {
+        let claim_type = row.claim_type.value().trim();
+        let value = row.value.value().trim();
+        if claim_type.is_empty() && value.is_empty() {
+            continue;
+        }
+        if claim_type.is_empty() || value.is_empty() {
+            return Err("A row needs both what it is and its value.".to_string());
+        }
+        let well_formed = claim_type
+            .strip_prefix("x:")
+            .unwrap_or(claim_type)
+            .split('.')
+            .all(|seg| {
+                seg.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                    && seg.chars().all(|c| c.is_ascii_alphanumeric())
+            });
+        if !well_formed {
+            return Err(format!(
+                "\"{claim_type}\" is not a claim type — dotted and lower-case, like name.display."
+            ));
+        }
+        out.push(lifecycle::ComposeValue {
+            claim_type: claim_type.to_string(),
+            value: value.to_string(),
+            share: row.share,
+        });
+    }
+    if out.is_empty() {
+        return Err("A face needs at least one thing to show.".to_string());
+    }
+    Ok(out)
 }
 
 /// Prefill the editor from an existing attribute.
@@ -1104,6 +1256,39 @@ impl PersonaJobRun {
                     },
                 }
             }
+            PersonaJob::Compose {
+                context_id,
+                persona_did,
+                community,
+                name,
+                values,
+            } => match lifecycle::compose(&client, &context_id, &name, &persona_did, &values).await
+            {
+                Ok(made) => PersonaOutcome::Deleted {
+                    message: format!(
+                        "Made \"{name}\" and wore it in {community}. {}{}",
+                        if made.local {
+                            "It lives there alone — nothing you typed is in your other faces."
+                        } else {
+                            "It is in your pool, so it can be worn elsewhere too."
+                        },
+                        if made.reused > 0 {
+                            format!(
+                                " {} value{} already kept, so this face shares a fact with \
+                                 whatever else shows it.",
+                                made.reused,
+                                if made.reused == 1 { " was" } else { "s were" }
+                            )
+                        } else {
+                            String::new()
+                        }
+                    ),
+                },
+                Err(e) => PersonaOutcome::Written {
+                    verb: "Made the face",
+                    error: Some(format!("{e}")),
+                },
+            },
             PersonaJob::ProfileReinstate { profile_id } => PersonaOutcome::Written {
                 verb: "Reinstated the face — wearable again, and worn nowhere until you wear it",
                 error: lifecycle::reinstate(&client, &profile_id)
@@ -1415,6 +1600,10 @@ impl PersonaOutcome {
                             PersonaMode::PlaceFace(picker) => {
                                 picker.working = false;
                                 picker.error = Some(e.clone());
+                            }
+                            PersonaMode::Compose(form) => {
+                                form.working = false;
+                                form.error = Some(e.clone());
                             }
                             _ => p.status_message = Some(e.clone()),
                         }
@@ -2509,5 +2698,91 @@ mod tests {
             &personas(&state).confirm,
             PersonaConfirm::DeleteProfile { untell: Some(w), .. } if w.contains("2 parties")
         ));
+    }
+
+    /// Making a face for a community: typed values stay local unless shared,
+    /// the persona the community sees is the one that wears it, and a half row
+    /// is refused before anything is sent.
+    #[test]
+    fn a_face_made_for_a_community_is_local_unless_a_value_is_shared() {
+        let mut state = state_with(IdentityState {
+            memberships: vec![PersonaMembership {
+                community_name: "Co-op".into(),
+                sub_context_id: "ctx-coop".into(),
+                persona_did: "did:key:zCoop".into(),
+                ..PersonaMembership::default()
+            }]
+            .into(),
+            ..IdentityState::default()
+        });
+        apply(&mut state, &PersonaAction::ComposeOpen(0));
+        let type_into = |state: &mut State, text: &str| {
+            for c in text.chars() {
+                apply(
+                    state,
+                    &PersonaAction::FormKey(crossterm::event::KeyEvent::from(
+                        crossterm::event::KeyCode::Char(c),
+                    )),
+                );
+            }
+        };
+        // The focus opens on the first value; name and type are prefilled.
+        type_into(&mut state, "Ada");
+        // ↓ on the last field adds a row, focused on its type.
+        apply(&mut state, &PersonaAction::FormCycle(true));
+        type_into(&mut state, "email.personal");
+        apply(&mut state, &PersonaAction::FormField(true));
+        // Half a row is refused, naming why.
+        assert!(matches!(
+            apply(&mut state, &PersonaAction::FormSubmit),
+            PersonaEffect::None
+        ));
+        match &personas(&state).mode {
+            PersonaMode::Compose(form) => assert!(form.error.as_deref().unwrap().contains("both")),
+            _ => panic!("the form stays open"),
+        }
+        type_into(&mut state, "ada@example.org");
+        apply(&mut state, &PersonaAction::FormToggleEntry);
+        match apply(&mut state, &PersonaAction::FormSubmit) {
+            PersonaEffect::Job(PersonaJob::Compose {
+                context_id,
+                persona_did,
+                name,
+                values,
+                ..
+            }) => {
+                assert_eq!(context_id, "ctx-coop");
+                assert_eq!(persona_did, "did:key:zCoop");
+                assert_eq!(name, "Co-op");
+                assert_eq!(
+                    values,
+                    vec![
+                        lifecycle::ComposeValue {
+                            claim_type: "name.display".into(),
+                            value: "Ada".into(),
+                            share: false,
+                        },
+                        lifecycle::ComposeValue {
+                            claim_type: "email.personal".into(),
+                            value: "ada@example.org".into(),
+                            share: true,
+                        },
+                    ]
+                );
+            }
+            _ => panic!("expected a compose"),
+        }
+    }
+
+    #[test]
+    fn a_claim_type_is_checked_on_the_row() {
+        let row = |t: &str, v: &str| ComposeRow {
+            claim_type: tui_input::Input::new(t.into()),
+            value: tui_input::Input::new(v.into()),
+            share: false,
+        };
+        assert!(compose_values(&[row("Name Display", "x")]).is_err());
+        assert!(compose_values(&[row("", "")]).is_err(), "nothing to show");
+        assert!(compose_values(&[row("x:nickname", "Ada"), row("", "")]).is_ok());
     }
 }
