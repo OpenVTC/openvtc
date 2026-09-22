@@ -834,6 +834,18 @@ pub enum PersonaConfirm {
         expected_version: Option<u64>,
         faces: usize,
     },
+    /// Forget the earlier versions of one attribute.
+    ///
+    /// Named, not indexed, for the reason above. `used_by` is how many faces
+    /// use the attribute at all — the listing does not say which of them pin an
+    /// old version, so the prompt names the faces at risk rather than claiming
+    /// a number it cannot know. How many pins actually went stale comes back
+    /// from the purge itself and is reported then.
+    PurgeAttribute {
+        attribute_id: String,
+        name: String,
+        used_by: usize,
+    },
     /// Clear what one persona presents in one context — the pair the binding is
     /// addressed by, carried whole for the same reason as above.
     Unbind {
@@ -841,6 +853,111 @@ pub enum PersonaConfirm {
         persona_did: String,
         community: String,
     },
+}
+
+/// The people one community has told the holder about — and, when one is open,
+/// what they said.
+///
+/// The mirror of the Disclosures tab: that is what left, this is what arrived.
+/// Both live per community, because a contact is filed in the context it was
+/// received in and against the persona that received it.
+#[derive(Clone, Debug, Default)]
+pub struct PeopleView {
+    pub context_id: String,
+    pub community: String,
+    /// The persona the holder is in this community — what a new contact is
+    /// filed against.
+    pub persona_did: String,
+    pub contacts: Option<Result<Vec<openvtc_core::persona::contacts::ContactSummary>, String>>,
+    pub selected: usize,
+    /// One contact read in full, with what they said before.
+    pub open: Option<Result<openvtc_core::persona::contacts::ContactDetail, String>>,
+    /// The "record what they told you" form, when it is up.
+    pub form: Option<ContactForm>,
+    /// A delete armed against a named contact, never an index.
+    pub deleting: Option<(String, String)>,
+    pub working: bool,
+    pub error: Option<String>,
+}
+
+/// Making a face that lives inside one community.
+///
+/// Inline values only, and that is the boundary rather than a simplification:
+/// a context-local face has nowhere in its wire type to name a pool attribute.
+#[derive(Clone, Debug, Default)]
+pub struct LocalFaceForm {
+    pub name: tui_input::Input,
+    pub rows: Vec<ComposeRow>,
+    /// 0 = the name, then two per row.
+    pub field: usize,
+}
+
+impl LocalFaceForm {
+    /// One empty row, so the form opens with somewhere to type.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            rows: vec![ComposeRow::default()],
+            ..Self::default()
+        }
+    }
+
+    /// How many fields the form has.
+    #[must_use]
+    pub fn field_count(&self) -> usize {
+        1 + 2 * self.rows.len()
+    }
+}
+
+/// Recording what someone told the holder about themselves.
+///
+/// Self-asserted by construction: the holder is typing what a peer said, so
+/// nothing here claims a provenance on the peer's behalf.
+#[derive(Clone, Debug, Default)]
+pub struct ContactForm {
+    pub subject_did: tui_input::Input,
+    pub rows: Vec<ComposeRow>,
+    pub notes: tui_input::Input,
+    /// 0 = their DID, then two per row, then the note.
+    pub field: usize,
+}
+
+impl ContactForm {
+    /// One empty row, so the form opens with somewhere to type.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            rows: vec![ComposeRow::default()],
+            ..Self::default()
+        }
+    }
+
+    /// The note field's index — after the DID and two fields per row.
+    #[must_use]
+    pub fn notes_field(&self) -> usize {
+        1 + 2 * self.rows.len()
+    }
+}
+
+/// The formats this agent can produce, and what each one discards.
+///
+/// Read-only. It is here because this client always asks for one renderer
+/// without the holder having chosen it, and what a format drops is the
+/// difference between "my employer attested this" and "they said so".
+#[derive(Clone, Debug, Default)]
+pub struct RenderersView {
+    pub formats: Option<Result<Vec<openvtc_core::persona::disclosure::Renderer>, String>>,
+}
+
+/// Every persona of the holder's that one community has a binding record for.
+///
+/// Read-only, and the point is the count: a community that knows someone under
+/// two personas can put them together, and no other row in this pane says so.
+#[derive(Clone, Debug, Default)]
+pub struct KnownHereView {
+    pub context_id: String,
+    pub community: String,
+    pub personas: Option<Result<Vec<openvtc_core::persona::binding::KnownHere>, String>>,
 }
 
 /// Which field of the attribute editor has the keyboard.
@@ -1045,6 +1162,12 @@ pub struct FacePlacer {
 }
 
 /// What owns the keyboard inside the pane.
+//
+// One variant per screen, each carrying that screen's whole state, so the
+// largest form sets the size of every value. Boxing them to even that out would
+// put an allocation between a keystroke and the field it types into, for a
+// value that lives in one place on the stack and is replaced whole.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Default)]
 pub enum PersonaMode {
     #[default]
@@ -1056,12 +1179,34 @@ pub enum PersonaMode {
     Bind(BindPicker),
     Compose(ComposeForm),
     LocalFaces(LocalFacesView),
+    /// The output formats the agent can produce (read-only).
+    Renderers(RenderersView),
+    /// Who one community knows the holder as (read-only).
+    KnownHere(KnownHereView),
+    /// What people in one community have told the holder about themselves.
+    People(PeopleView),
+}
+
+/// A face made inside a community, named so a question can outlive the
+/// listing it was asked from.
+#[derive(Clone, Debug)]
+pub struct LocalFaceRef {
+    pub profile_id: String,
+    pub name: String,
 }
 
 /// The faces made inside one community, and the one-way step that makes a
 /// value reusable across the holder's faces (`persona/attribute/promote`).
 #[derive(Clone, Debug, Default)]
 pub struct LocalFacesView {
+    /// The persona the holder is in this community — who wears a local face
+    /// when one is worn from here.
+    pub persona_did: String,
+    /// The "make a face here" form, when it is up. Name plus inline values:
+    /// a face made here cannot reach the pool, so there is nothing to tick.
+    pub form: Option<LocalFaceForm>,
+    /// A delete armed against a named face, never an index.
+    pub deleting: Option<(String, String)>,
     pub context_id: String,
     pub community: String,
     /// `None` while being read.
@@ -1089,6 +1234,23 @@ impl LocalFacesView {
                 .collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// The face the cursor is in, whichever of its values the cursor sits on.
+    ///
+    /// Returns its id and name rather than a borrow, so a caller can arm a
+    /// question against what it named while the listing behind it changes.
+    #[must_use]
+    pub fn face_under_cursor(&self) -> Option<LocalFaceRef> {
+        let (f, _) = *self.rows().get(self.cursor)?;
+        let face = match &self.faces {
+            Some(Ok(faces)) => faces.get(f)?,
+            _ => return None,
+        };
+        Some(LocalFaceRef {
+            profile_id: face.profile_id.clone(),
+            name: face.name.clone(),
+        })
     }
 }
 
