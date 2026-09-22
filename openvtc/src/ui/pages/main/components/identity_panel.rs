@@ -52,8 +52,8 @@ use crate::colors::{
 use crate::state_handler::{
     main_page::content::{
         AttributeField, AttributeForm, BindPicker, ComposeForm, FacePlacer, FacetForm,
-        FacetFormFocus, IdentityState, PersonaConfirm, PersonaMode, PersonaTab, ProfileForm,
-        ProfileFormFocus, VALUE_TYPES,
+        FacetFormFocus, IdentityState, LocalFacesView, PersonaConfirm, PersonaMode, PersonaTab,
+        ProfileForm, ProfileFormFocus, VALUE_TYPES,
     },
     state::ConnectionState,
 };
@@ -98,6 +98,7 @@ pub fn render(state: &IdentityState) -> Vec<Line<'static>> {
         PersonaMode::PlaceFace(picker) => render_face_placer(state, picker),
         PersonaMode::Bind(picker) => render_bind_picker(state, picker),
         PersonaMode::Compose(form) => render_compose_form(form),
+        PersonaMode::LocalFaces(view) => render_local_faces(view),
         PersonaMode::View => render_tabs(state),
     }
 }
@@ -265,8 +266,8 @@ fn hints(state: &IdentityState) -> &'static str {
             "↑/↓ select   n: new world   e: edit   d: delete   r: refresh   ⇥/⇧⇥: tab"
         }
         PersonaTab::Communities => {
-            "↑/↓ select   b: change face   c: make a face for it   u: take it off   r: refresh   \
-             ⇥/⇧⇥: tab"
+            "↑/↓ select   b: change face   c: make a face for it   f: faces made here   \
+             u: take it off   r: refresh   ⇥/⇧⇥: tab"
         }
         PersonaTab::Disclosures => "↑/↓ select   r: refresh   ⇥/⇧⇥: tab",
     }
@@ -1557,6 +1558,103 @@ fn render_compose_form(form: &ComposeForm) -> Vec<Line<'static>> {
         } else {
             " ⇥/⇧⇥ field   ↓ on the last: add a value   Ctrl-T: use in other faces   ⏎: make it   \
              Esc: cancel"
+        })
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines
+}
+
+/// The faces made inside one community, and the one-way step that lets their
+/// values be used elsewhere. A face made here keeps what it shows to itself; a
+/// promotion moves chosen values into the pool, and cannot be taken back.
+fn render_local_faces(view: &LocalFacesView) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("")];
+    lines.push(
+        Line::from(format!(" Faces made for {}", view.community))
+            .fg(COLOR_SUCCESS)
+            .bold(),
+    );
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(
+            " What these faces show stays here. Choose values with space to make them reusable: \
+             they move into your attributes, and your other faces may show them.",
+        )
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+
+    let faces = match &view.faces {
+        None => {
+            lines.push(Line::from(" Reading…").fg(COLOR_DARK_GRAY));
+            return lines;
+        }
+        Some(Err(e)) => {
+            lines.push(Line::from(format!(" Could not read them: {e}")).fg(COLOR_ORANGE));
+            lines.push(Line::from(""));
+            lines.push(Line::from(" Esc: back").fg(COLOR_DARK_GRAY));
+            return lines;
+        }
+        Some(Ok(faces)) => faces,
+    };
+    if faces.is_empty() {
+        lines.push(Line::from(" No face has been made for this community.").fg(COLOR_DARK_GRAY));
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(" `c` on the Communities tab makes one. Esc: back").fg(COLOR_DARK_GRAY),
+        );
+        return lines;
+    }
+
+    let rows = view.rows();
+    let under = rows.get(view.cursor).copied();
+    for (f, face) in faces.iter().enumerate() {
+        lines.push(
+            Line::from(format!(" {}", face.name))
+                .fg(COLOR_SOFT_PURPLE)
+                .bold(),
+        );
+        if face.entries.is_empty() {
+            lines.push(Line::from("     nothing kept here alone").fg(COLOR_DARK_GRAY));
+        }
+        for (e, entry) in face.entries.iter().enumerate() {
+            let chosen = matches!(&view.chosen, Some((id, positions))
+                if *id == face.profile_id && positions.contains(&entry.position));
+            let is_under = under == Some((f, e));
+            let style = if is_under {
+                Style::new().fg(COLOR_SUCCESS).bold()
+            } else {
+                Style::new().fg(COLOR_TEXT_DEFAULT)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(if is_under { " ▸ " } else { "   " }, style),
+                Span::styled(if chosen { "☑ " } else { "☐ " }, style),
+                Span::styled(entry.claim_type.clone(), style),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+
+    if let Some(e) = &view.error {
+        lines.push(Line::from(format!(" {e}")).fg(COLOR_ORANGE));
+        lines.push(Line::from(""));
+    }
+    if view.confirming {
+        lines.push(
+            Line::from(
+                " This cannot be undone. Once reusable, a value stays in your attributes; a \
+                 community that has seen it keeps what it saw. ⏎ again to make it reusable, Esc to \
+                 leave it as it is.",
+            )
+            .fg(COLOR_ORANGE),
+        );
+        lines.push(Line::from(""));
+    }
+    lines.push(
+        Line::from(if view.working {
+            " Making it reusable…"
+        } else {
+            " ↑/↓ value   space: choose   ⏎: make reusable   Esc: back"
         })
         .fg(COLOR_DARK_GRAY),
     );
@@ -3197,5 +3295,35 @@ mod tests {
         assert!(shown.contains("A face for Co-op"), "{shown}");
         assert!(shown.contains("kept in this face alone"), "{shown}");
         assert!(shown.contains("used in my other faces too"), "{shown}");
+    }
+    /// The faces made here list their values, mark the chosen ones, and put
+    /// the one-way warning before a promotion.
+    #[test]
+    fn faces_made_here_warn_before_a_value_is_made_reusable() {
+        use openvtc_core::persona::lifecycle::{LocalEntry, LocalFace};
+        let mut state = populated(PersonaTab::Communities);
+        let mut view = LocalFacesView {
+            community: "Co-op".into(),
+            faces: Some(Ok(vec![LocalFace {
+                profile_id: "p-a".into(),
+                name: "Market".into(),
+                version: 1,
+                entries: vec![LocalEntry {
+                    position: 0,
+                    claim_type: "email.personal".into(),
+                }],
+            }])),
+            chosen: Some(("p-a".into(), vec![0])),
+            ..LocalFacesView::default()
+        };
+        state.mode = PersonaMode::LocalFaces(view.clone());
+        let shown = text(&render(&state));
+        assert!(shown.contains("Faces made for Co-op"), "{shown}");
+        assert!(shown.contains("☑ email.personal"), "{shown}");
+        assert!(!shown.contains("cannot be undone"), "{shown}");
+        view.confirming = true;
+        state.mode = PersonaMode::LocalFaces(view);
+        let shown = text(&render(&state));
+        assert!(shown.contains("cannot be undone"), "{shown}");
     }
 }

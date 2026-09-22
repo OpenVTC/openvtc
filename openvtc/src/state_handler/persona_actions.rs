@@ -47,8 +47,8 @@ use vta_sdk::client::VtaClient;
 use crate::state_handler::actions::PersonaAction;
 use crate::state_handler::main_page::content::{
     AttributeField, AttributeForm, BindPicker, ComposeForm, ComposeRow, FacePlacer, FacetForm,
-    FacetFormFocus, PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus,
-    VALUE_TYPES,
+    FacetFormFocus, LocalFacesView, PersonaConfirm, PersonaMode, PersonaTab, ProfileForm,
+    ProfileFormFocus, VALUE_TYPES,
 };
 use crate::state_handler::persona_binding_refresh::{self, BindingTarget};
 use crate::state_handler::state::State;
@@ -90,6 +90,17 @@ pub(crate) enum PersonaJob {
     },
     ProfileRetire {
         profile_id: String,
+    },
+    /// Read the faces made inside one community.
+    LocalFacesRead {
+        context_id: String,
+    },
+    /// Make chosen values of a face made here reusable. One-way.
+    Promote {
+        context_id: String,
+        profile_id: String,
+        positions: Vec<u64>,
+        expected_version: u64,
     },
     /// Make a face for one community and wear it there.
     Compose {
@@ -513,6 +524,20 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             });
             PersonaEffect::None
         }
+        PersonaAction::LocalFacesOpen(index) => {
+            let p = &mut state.main_page.content_panel.identity;
+            let Some(membership) = p.memberships.get(*index).cloned() else {
+                return PersonaEffect::None;
+            };
+            p.mode = PersonaMode::LocalFaces(LocalFacesView {
+                context_id: membership.sub_context_id.clone(),
+                community: membership.community_name,
+                ..LocalFacesView::default()
+            });
+            PersonaEffect::Job(PersonaJob::LocalFacesRead {
+                context_id: membership.sub_context_id,
+            })
+        }
         PersonaAction::UnbindArm(index) => {
             let p = &mut state.main_page.content_panel.identity;
             let Some(m) = p.memberships.get(*index) else {
@@ -582,7 +607,10 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                         }
                     }
                 }
-                PersonaMode::PlaceFace(_) | PersonaMode::Bind(_) | PersonaMode::View => {}
+                PersonaMode::PlaceFace(_)
+                | PersonaMode::Bind(_)
+                | PersonaMode::LocalFaces(_)
+                | PersonaMode::View => {}
             }
             PersonaEffect::None
         }
@@ -617,7 +645,10 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                         (form.field + n - 1) % n
                     };
                 }
-                PersonaMode::PlaceFace(_) | PersonaMode::Bind(_) | PersonaMode::View => {}
+                PersonaMode::PlaceFace(_)
+                | PersonaMode::Bind(_)
+                | PersonaMode::LocalFaces(_)
+                | PersonaMode::View => {}
             }
             PersonaEffect::None
         }
@@ -653,6 +684,12 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                 PersonaMode::Bind(picker) => {
                     picker.cursor = step(picker.cursor, option_count, *forwards);
                 }
+                PersonaMode::LocalFaces(view) => {
+                    let n = view.rows().len();
+                    view.cursor = step(view.cursor, n, *forwards);
+                    // Moving on is not agreeing: the question is put again.
+                    view.confirming = false;
+                }
                 // ↓ on the last field adds a value; ↑ on an empty last row
                 // takes it away again. Elsewhere they move between fields.
                 PersonaMode::Compose(form) => {
@@ -680,6 +717,32 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             PersonaEffect::None
         }
         PersonaAction::FormToggleEntry => {
+            // Among the faces made here, choose (or unchoose) the value under
+            // the cursor. One face at a time: a promotion moves one face.
+            if let PersonaMode::LocalFaces(view) = &mut state.main_page.content_panel.identity.mode
+            {
+                let rows = view.rows();
+                if let (Some(&(f, e)), Some(Ok(faces))) = (rows.get(view.cursor), &view.faces) {
+                    let face = &faces[f];
+                    let position = face.entries[e].position;
+                    match &mut view.chosen {
+                        Some((id, positions)) if *id == face.profile_id => {
+                            match positions.iter().position(|p| *p == position) {
+                                Some(i) => {
+                                    positions.remove(i);
+                                }
+                                None => positions.push(position),
+                            }
+                            if positions.is_empty() {
+                                view.chosen = None;
+                            }
+                        }
+                        _ => view.chosen = Some((face.profile_id.clone(), vec![position])),
+                    }
+                    view.confirming = false;
+                }
+                return PersonaEffect::None;
+            }
             // In the compose form this is "use in my other faces too" for the
             // row the focus is in.
             if let PersonaMode::Compose(form) = &mut state.main_page.content_panel.identity.mode {
@@ -883,6 +946,36 @@ fn form_submit(state: &mut State) -> PersonaEffect {
                 into,
             })
         }
+        PersonaMode::LocalFaces(view) => {
+            let Some((profile_id, positions)) = view.chosen.clone() else {
+                view.error = Some("Choose a value with space first.".to_string());
+                return PersonaEffect::None;
+            };
+            // Asked once, on screen, before anything moves: it cannot be undone.
+            if !view.confirming {
+                view.confirming = true;
+                view.error = None;
+                return PersonaEffect::None;
+            }
+            let version = match &view.faces {
+                Some(Ok(faces)) => faces
+                    .iter()
+                    .find(|f| f.profile_id == profile_id)
+                    .map(|f| f.version),
+                _ => None,
+            };
+            let Some(version) = version else {
+                return PersonaEffect::None;
+            };
+            view.working = true;
+            view.confirming = false;
+            PersonaEffect::Job(PersonaJob::Promote {
+                context_id: view.context_id.clone(),
+                profile_id,
+                positions,
+                expected_version: version,
+            })
+        }
         PersonaMode::Compose(form) => {
             let name = form.name.value().trim().to_string();
             if name.is_empty() {
@@ -958,6 +1051,10 @@ pub(crate) fn release_form(state: &mut State, reason: String) {
         PersonaMode::Compose(form) => {
             form.working = false;
             form.error = Some(reason);
+        }
+        PersonaMode::LocalFaces(view) => {
+            view.working = false;
+            view.error = Some(reason);
         }
         PersonaMode::View => p.status_message = Some(reason),
     }
@@ -1256,6 +1353,44 @@ impl PersonaJobRun {
                     },
                 }
             }
+            PersonaJob::LocalFacesRead { context_id } => PersonaOutcome::LocalFacesRead {
+                result: lifecycle::local_faces(&client, &context_id)
+                    .await
+                    .map_err(|e| format!("{e}")),
+                context_id,
+            },
+            PersonaJob::Promote {
+                context_id,
+                profile_id,
+                positions,
+                expected_version,
+            } => match lifecycle::promote(
+                &client,
+                &context_id,
+                &profile_id,
+                &positions,
+                expected_version,
+            )
+            .await
+            {
+                Ok(done) => PersonaOutcome::Deleted {
+                    message: format!(
+                        "Made reusable. The face is in your pool now, with the same persona{} \
+                         wearing it.{}",
+                        if done.rebound == 1 { "" } else { "s" },
+                        if done.reused > 0 {
+                            " A value was already kept, so it now shares that fact with \
+                             whatever else shows it."
+                        } else {
+                            ""
+                        }
+                    ),
+                },
+                Err(e) => PersonaOutcome::Written {
+                    verb: "Made the values reusable",
+                    error: Some(format!("{e}")),
+                },
+            },
             PersonaJob::Compose {
                 context_id,
                 persona_did,
@@ -1438,6 +1573,11 @@ pub(crate) enum PersonaOutcome {
         cleared: bool,
         error: Option<String>,
     },
+    /// The faces made inside a community, for the view that asked.
+    LocalFacesRead {
+        context_id: String,
+        result: Result<Vec<lifecycle::LocalFace>, String>,
+    },
     /// How far a face has spoken, for a delete prompt that may still be up.
     Spoken {
         profile_id: String,
@@ -1605,12 +1745,25 @@ impl PersonaOutcome {
                                 form.working = false;
                                 form.error = Some(e.clone());
                             }
+                            PersonaMode::LocalFaces(view) => {
+                                view.working = false;
+                                view.error = Some(e.clone());
+                            }
                             _ => p.status_message = Some(e.clone()),
                         }
                         state
                             .main_page
                             .log_error(format!("{verb} failed"), e.as_str());
                     }
+                }
+            }
+
+            PersonaOutcome::LocalFacesRead { context_id, result } => {
+                if let PersonaMode::LocalFaces(view) = &mut p.mode
+                    && view.context_id == context_id
+                {
+                    view.faces = Some(result);
+                    view.cursor = 0;
                 }
             }
 
@@ -2784,5 +2937,118 @@ mod tests {
         assert!(compose_values(&[row("Name Display", "x")]).is_err());
         assert!(compose_values(&[row("", "")]).is_err(), "nothing to show");
         assert!(compose_values(&[row("x:nickname", "Ada"), row("", "")]).is_ok());
+    }
+    fn local_face(id: &str, name: &str, version: u64, types: &[&str]) -> lifecycle::LocalFace {
+        lifecycle::LocalFace {
+            profile_id: id.into(),
+            name: name.into(),
+            version,
+            entries: types
+                .iter()
+                .enumerate()
+                .map(|(i, t)| lifecycle::LocalEntry {
+                    position: i as u64,
+                    claim_type: (*t).into(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Promoting from a community's own faces: values are chosen within one
+    /// face, the one-way question is put before anything is sent, and a
+    /// listing for another community is not taken for this one.
+    #[test]
+    fn values_made_here_are_promoted_only_after_the_one_way_question() {
+        let mut state = state_with(IdentityState {
+            memberships: vec![PersonaMembership {
+                community_name: "Co-op".into(),
+                sub_context_id: "ctx-coop".into(),
+                persona_did: "did:key:zCoop".into(),
+                ..PersonaMembership::default()
+            }]
+            .into(),
+            ..IdentityState::default()
+        });
+        match apply(&mut state, &PersonaAction::LocalFacesOpen(0)) {
+            PersonaEffect::Job(PersonaJob::LocalFacesRead { context_id }) => {
+                assert_eq!(context_id, "ctx-coop")
+            }
+            _ => panic!("expected a read"),
+        }
+        // A late listing for somewhere else changes nothing.
+        PersonaOutcome::LocalFacesRead {
+            context_id: "ctx-other".into(),
+            result: Ok(vec![local_face("p-x", "X", 1, &["name.display"])]),
+        }
+        .apply(&mut state);
+        match &personas(&state).mode {
+            PersonaMode::LocalFaces(view) => assert!(view.faces.is_none()),
+            _ => panic!("the view stays open"),
+        }
+        PersonaOutcome::LocalFacesRead {
+            context_id: "ctx-coop".into(),
+            result: Ok(vec![
+                local_face("p-a", "Market", 3, &["name.display", "email.personal"]),
+                local_face("p-b", "Stall", 7, &["phone.mobile"]),
+            ]),
+        }
+        .apply(&mut state);
+
+        // Nothing chosen: Enter says so and sends nothing.
+        assert!(matches!(
+            apply(&mut state, &PersonaAction::FormSubmit),
+            PersonaEffect::None
+        ));
+        // Choose the first face's second value, then the second face's only
+        // one: a choice in another face replaces, it does not mix.
+        apply(&mut state, &PersonaAction::FormCycle(true));
+        apply(&mut state, &PersonaAction::FormToggleEntry);
+        apply(&mut state, &PersonaAction::FormCycle(true));
+        apply(&mut state, &PersonaAction::FormToggleEntry);
+        match &personas(&state).mode {
+            PersonaMode::LocalFaces(view) => {
+                assert_eq!(view.chosen, Some(("p-b".to_string(), vec![0])));
+                assert!(view.error.is_some(), "the empty Enter was answered");
+            }
+            _ => panic!("the view stays open"),
+        }
+        // The first Enter asks; moving away withdraws the question.
+        assert!(matches!(
+            apply(&mut state, &PersonaAction::FormSubmit),
+            PersonaEffect::None
+        ));
+        apply(&mut state, &PersonaAction::FormCycle(true));
+        match &personas(&state).mode {
+            PersonaMode::LocalFaces(view) => assert!(!view.confirming),
+            _ => panic!("the view stays open"),
+        }
+        apply(&mut state, &PersonaAction::FormSubmit);
+        match apply(&mut state, &PersonaAction::FormSubmit) {
+            PersonaEffect::Job(PersonaJob::Promote {
+                context_id,
+                profile_id,
+                positions,
+                expected_version,
+            }) => {
+                assert_eq!(context_id, "ctx-coop");
+                assert_eq!(profile_id, "p-b");
+                assert_eq!(positions, vec![0]);
+                assert_eq!(expected_version, 7);
+            }
+            _ => panic!("expected a promotion"),
+        }
+        // A refusal lands on the view, which stays open.
+        PersonaOutcome::Written {
+            verb: "Made the values reusable",
+            error: Some("version conflict".into()),
+        }
+        .apply(&mut state);
+        match &personas(&state).mode {
+            PersonaMode::LocalFaces(view) => {
+                assert!(!view.working);
+                assert!(view.error.as_deref().unwrap().contains("version conflict"));
+            }
+            _ => panic!("the view stays open on a refusal"),
+        }
     }
 }
