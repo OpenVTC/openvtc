@@ -64,6 +64,23 @@ pub fn point_text(p: &G1) -> Result<String, ProtoError> {
     Ok(to_multibase(&to_bytes(p)?))
 }
 
+/// Multibase text of any canonically-encodable value.
+///
+/// # Errors
+/// [`ProtoError::Pcs`] if the value cannot be encoded.
+pub fn enc<T: ark_serialize::CanonicalSerialize>(v: &T) -> Result<String, ProtoError> {
+    Ok(to_multibase(&to_bytes(v)?))
+}
+
+/// The inverse of [`enc`], with validated decoding.
+///
+/// # Errors
+/// [`ProtoError::Pcs`] if the text is not multibase base58btc, or the bytes are not a valid
+/// encoding of `T`.
+pub fn dec<T: ark_serialize::CanonicalDeserialize>(s: &str) -> Result<T, ProtoError> {
+    Ok(from_bytes(&from_multibase(s)?)?)
+}
+
 /// Multibase text of a verification key (`hvk`, `tvk`), as a manifest publishes it.
 ///
 /// # Errors

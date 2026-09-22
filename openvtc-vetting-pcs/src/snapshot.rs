@@ -15,27 +15,21 @@
 use std::collections::BTreeMap;
 
 use predicate_credential_system::{
-    cred::ps::{PSCredential, PSShownCredential},
+    cred::ps::PSShownCredential,
     pcs::{Attestation, Credential, UserSecretKey},
-    serialization::{from_bytes, from_multibase, to_bytes, to_multibase},
+    serialization::to_multibase,
 };
 use serde::{Deserialize, Serialize};
+
+pub use crate::token::HeldToken;
 
 use crate::{
     ProtoError,
     meta::StatementMeta,
-    scheme::{Base, E, Fr, G1},
+    scheme::{Base, E, Fr, G1, dec, enc},
     token::TokenSpend,
     vetter::HiddenAttestation,
 };
-
-fn enc<T: ark_serialize::CanonicalSerialize>(v: &T) -> Result<String, ProtoError> {
-    Ok(to_multibase(&to_bytes(v)?))
-}
-
-fn dec<T: ark_serialize::CanonicalDeserialize>(s: &str) -> Result<T, ProtoError> {
-    Ok(from_bytes(&from_multibase(s)?)?)
-}
 
 /// One attestation the applicant holds, with what it needs to present it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,17 +101,6 @@ impl ApplicantSnapshot {
     }
 }
 
-/// One token the vetter holds, unspent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct HeldToken {
-    pub label: String,
-    /// SECRET until spent: the serial is what the community records.
-    pub serial: String,
-    pub minted_tick: u32,
-    pub credential: String,
-}
-
 /// The vetter's engine, stored. One per community.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -182,28 +165,5 @@ impl VetterSnapshot {
     pub(crate) fn record(&mut self, id: &G1, meta: &StatementMeta) -> Result<(), ProtoError> {
         self.log.push((enc(id)?, meta.clone()));
         Ok(())
-    }
-}
-
-impl HeldToken {
-    pub(crate) fn of(
-        label: &str,
-        serial: &Fr,
-        minted_tick: u32,
-        cred: &PSCredential<E>,
-    ) -> Result<Self, ProtoError> {
-        Ok(Self {
-            label: label.to_string(),
-            serial: enc(serial)?,
-            minted_tick,
-            credential: enc(cred)?,
-        })
-    }
-
-    pub(crate) fn parts(&self) -> Result<(Fr, PSCredential<E>), ProtoError> {
-        Ok((
-            dec::<Fr>(&self.serial)?,
-            dec::<PSCredential<E>>(&self.credential)?,
-        ))
     }
 }
