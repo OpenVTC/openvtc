@@ -612,6 +612,24 @@ impl MainPage {
                     _ => true,
                 };
             }
+            PersonaMode::Compose(form) => {
+                if form.working {
+                    return true;
+                }
+                return match key.code {
+                    KeyCode::Esc => send(PA::FormCancel),
+                    KeyCode::Enter => send(PA::FormSubmit),
+                    KeyCode::Tab => send(PA::FormField(true)),
+                    KeyCode::BackTab => send(PA::FormField(false)),
+                    KeyCode::Down => send(PA::FormCycle(true)),
+                    KeyCode::Up => send(PA::FormCycle(false)),
+                    // Not space: a value is text, and "Ada King" has one.
+                    KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        send(PA::FormToggleEntry)
+                    }
+                    _ => send(PA::FormKey(key)),
+                };
+            }
             PersonaMode::View => {}
         }
 
@@ -746,10 +764,29 @@ impl MainPage {
                         // only thing between it and the screen.
                         KeyCode::Char('s') if claim < claims => send(PA::RevealFaceClaim(claim)),
                         KeyCode::Char('e') => send(PA::ProfileEdit(selected)),
+                        KeyCode::Char('h') => send(PA::FaceHistory),
+                        _ => false,
+                    };
+                }
+                // The retired view walks its own list and offers two verbs:
+                // bring one back, or return to the faces the holder wears.
+                if personas.show_retired {
+                    let retired = personas.retired_faces.len();
+                    return match key.code {
+                        KeyCode::Up if retired > 0 => send(PA::Select(selected.saturating_sub(1))),
+                        KeyCode::Down if retired > 0 => {
+                            send(PA::Select((selected + 1).min(retired - 1)))
+                        }
+                        KeyCode::Char('x') if selected < retired => {
+                            send(PA::ProfileReinstate(selected))
+                        }
+                        KeyCode::Char('z') => send(PA::ToggleRetired),
                         _ => false,
                     };
                 }
                 match key.code {
+                    KeyCode::Char('z') => send(PA::ToggleRetired),
+                    KeyCode::Char('x') if selected < count => send(PA::ProfileRetireArm(selected)),
                     KeyCode::Up if count > 0 => send(PA::Select(selected.saturating_sub(1))),
                     KeyCode::Down if count > 0 => send(PA::Select((selected + 1).min(count - 1))),
                     KeyCode::Enter if selected < count => send(PA::ProfileOpen(selected)),
@@ -795,6 +832,7 @@ impl MainPage {
                     KeyCode::Up if count > 0 => send(PA::Select(selected.saturating_sub(1))),
                     KeyCode::Down if count > 0 => send(PA::Select((selected + 1).min(count - 1))),
                     KeyCode::Char('b') if selected < count => send(PA::BindOpen(selected)),
+                    KeyCode::Char('c') if selected < count => send(PA::ComposeOpen(selected)),
                     KeyCode::Char('u') if selected < count => send(PA::UnbindArm(selected)),
                     _ => false,
                 }

@@ -61,6 +61,10 @@ pub struct ProfileSummary {
     pub credential_ref_count: usize,
     pub version: u64,
     pub updated_at: String,
+    /// Retired: worn nowhere, out of every picker, kept with its history.
+    pub retired: bool,
+    /// Where the face may be worn: `None` for anywhere, else the contexts.
+    pub reach_only: Option<Vec<String>>,
 }
 
 impl ProfileSummary {
@@ -89,7 +93,24 @@ impl ProfileSummary {
                 .map_or(0, Vec::len),
             version: value.get("version").and_then(Value::as_u64).unwrap_or(0),
             updated_at: string_at(value, "updatedAt"),
+            retired: value.get("status").and_then(Value::as_str) == Some("retired"),
+            reach_only: value
+                .get("reach")
+                .filter(|r| r.get("kind").and_then(Value::as_str) == Some("only"))
+                .and_then(|r| r.get("contextIds"))
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|i| i.as_str().map(str::to_string))
+                        .collect()
+                }),
         }
+    }
+
+    /// Read one listing row. For the other listings over the same records —
+    /// `persona::lifecycle::list_retired` — so both parse one way.
+    pub(crate) fn from_wire_pub(value: &Value) -> Self {
+        Self::from_wire(value)
     }
 
     /// The name to show. Never empty: an unnamed face still has to be
@@ -213,6 +234,10 @@ pub struct ProfileDetail {
     pub unreadable_entries: usize,
     /// What the profile would present, when the read asked for it.
     pub resolved: Vec<ResolvedClaim>,
+    /// How many parties, across how many contexts, this face has disclosed
+    /// to — `None` from an agent that does not say. Shown before a delete:
+    /// deleting a face does not un-tell anyone.
+    pub disclosed_to: Option<(u64, u64)>,
 }
 
 impl ProfileDetail {
@@ -292,6 +317,12 @@ pub async fn get(
             .and_then(Value::as_array)
             .map(|rows| rows.iter().map(ResolvedClaim::from_wire).collect())
             .unwrap_or_default(),
+        disclosed_to: value.get("disclosedTo").map(|d| {
+            (
+                d.get("partyCount").and_then(Value::as_u64).unwrap_or(0),
+                d.get("contextCount").and_then(Value::as_u64).unwrap_or(0),
+            )
+        }),
         ..ProfileDetail::default()
     };
 

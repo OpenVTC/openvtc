@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 
 use openvtc_core::persona::{
-    binding, claim_types, correlation, disclosure, facet, family,
+    binding, claim_types, correlation, disclosure, facet, family, lifecycle,
     pool::{self, AttributeDraft, PoolAttribute},
     profile::{self, ProfileDetail, ProfileSummary},
 };
@@ -46,8 +46,9 @@ use vta_sdk::client::VtaClient;
 
 use crate::state_handler::actions::PersonaAction;
 use crate::state_handler::main_page::content::{
-    AttributeField, AttributeForm, BindPicker, FacePlacer, FacetForm, FacetFormFocus,
-    PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus, VALUE_TYPES,
+    AttributeField, AttributeForm, BindPicker, ComposeForm, ComposeRow, FacePlacer, FacetForm,
+    FacetFormFocus, PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus,
+    VALUE_TYPES,
 };
 use crate::state_handler::persona_binding_refresh::{self, BindingTarget};
 use crate::state_handler::state::State;
@@ -86,6 +87,28 @@ pub(crate) enum PersonaJob {
     ProfileDelete {
         profile_id: String,
         unbind: bool,
+    },
+    ProfileRetire {
+        profile_id: String,
+    },
+    /// Make a face for one community and wear it there.
+    Compose {
+        context_id: String,
+        persona_did: String,
+        community: String,
+        name: String,
+        values: Vec<lifecycle::ComposeValue>,
+    },
+    ProfileReinstate {
+        profile_id: String,
+    },
+    /// How far a face has spoken, for the delete prompt.
+    ProfileSpoken {
+        profile_id: String,
+    },
+    /// Where the opened face is worn and what it has done.
+    FaceHistoryRead {
+        profile_id: String,
     },
     /// Read one profile — to show what it presents, or to fill the editor.
     ProfileGet {
@@ -273,7 +296,56 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             let p = &mut state.main_page.content_panel.identity;
             p.open_profile = None;
             p.revealed_face_claim = None;
+            p.face_history = None;
             PersonaEffect::None
+        }
+        PersonaAction::FaceHistory => {
+            let p = &mut state.main_page.content_panel.identity;
+            let Some(detail) = p.open_profile.as_ref() else {
+                return PersonaEffect::None;
+            };
+            if p.face_history.take().is_some() {
+                return PersonaEffect::None;
+            }
+            PersonaEffect::Job(PersonaJob::FaceHistoryRead {
+                profile_id: detail.summary.profile_id.clone(),
+            })
+        }
+        PersonaAction::ToggleRetired => {
+            let p = &mut state.main_page.content_panel.identity;
+            p.show_retired = !p.show_retired;
+            p.profile_selected = 0;
+            p.open_profile = None;
+            p.face_history = None;
+            PersonaEffect::None
+        }
+        PersonaAction::ProfileRetireArm(index) => {
+            let p = &mut state.main_page.content_panel.identity;
+            let Some(profile) = p.profiles.get(*index) else {
+                return PersonaEffect::None;
+            };
+            let worn = p
+                .bindings
+                .values()
+                .filter(|b| b.profile_id.as_deref() == Some(profile.profile_id.as_str()))
+                .count();
+            p.confirm = PersonaConfirm::RetireFace {
+                profile_id: profile.profile_id.clone(),
+                name: profile.display_name().to_string(),
+                worn,
+            };
+            PersonaEffect::None
+        }
+        PersonaAction::ProfileReinstate(index) => {
+            let p = &mut state.main_page.content_panel.identity;
+            let Some(face) = p.retired_faces.get(*index) else {
+                return PersonaEffect::None;
+            };
+            // No question: reinstating binds nothing and removes nothing, so
+            // there is nothing to confirm.
+            PersonaEffect::Job(PersonaJob::ProfileReinstate {
+                profile_id: face.profile_id.clone(),
+            })
         }
         PersonaAction::FaceClaimSelect(index) => {
             let p = &mut state.main_page.content_panel.identity;
@@ -320,12 +392,25 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                 .bindings
                 .values()
                 .any(|b| b.profile_id.as_deref() == Some(profile.profile_id.as_str()));
+            // How far this face has spoken, said before it is deleted: a delete
+            // does not un-tell anyone. Known already when the face is open;
+            // otherwise asked for, and the prompt fills in when it answers.
+            let known = p
+                .open_profile
+                .as_ref()
+                .filter(|d| d.summary.profile_id == profile.profile_id)
+                .map(|d| lifecycle::untell_words(d.disclosed_to));
+            let profile_id = profile.profile_id.clone();
             p.confirm = PersonaConfirm::DeleteProfile {
-                profile_id: profile.profile_id.clone(),
+                profile_id: profile_id.clone(),
                 name: profile.display_name().to_string(),
                 unbind,
+                untell: known.clone().flatten(),
             };
-            PersonaEffect::None
+            match known {
+                Some(_) => PersonaEffect::None,
+                None => PersonaEffect::Job(PersonaJob::ProfileSpoken { profile_id }),
+            }
         }
 
         PersonaAction::FacePlaceOpen(index) => {
@@ -407,6 +492,27 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             });
             PersonaEffect::None
         }
+        PersonaAction::ComposeOpen(index) => {
+            let p = &mut state.main_page.content_panel.identity;
+            let Some(membership) = p.memberships.get(*index).cloned() else {
+                return PersonaEffect::None;
+            };
+            p.mode = PersonaMode::Compose(ComposeForm {
+                context_id: membership.sub_context_id.clone(),
+                persona_did: membership.persona_did.clone(),
+                name: tui_input::Input::new(membership.community_name.clone()),
+                community: membership.community_name,
+                rows: vec![ComposeRow {
+                    claim_type: tui_input::Input::new("name.display".to_string()),
+                    ..ComposeRow::default()
+                }],
+                // Straight to the first value: the name and the type are
+                // prefilled, and what the holder came to type is the value.
+                field: 2,
+                ..ComposeForm::default()
+            });
+            PersonaEffect::None
+        }
         PersonaAction::UnbindArm(index) => {
             let p = &mut state.main_page.content_panel.identity;
             let Some(m) = p.memberships.get(*index) else {
@@ -459,6 +565,23 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                     // a keystroke here is not an edit.
                     FacetFormFocus::Colour => {}
                 },
+                PersonaMode::Compose(form) => {
+                    let field = form.field;
+                    match form.focused_row() {
+                        None => {
+                            form.name.handle_event(&event);
+                        }
+                        Some(row) => {
+                            if let Some(r) = form.rows.get_mut(row) {
+                                if (field - 1) % 2 == 0 {
+                                    r.claim_type.handle_event(&event);
+                                } else {
+                                    r.value.handle_event(&event);
+                                }
+                            }
+                        }
+                    }
+                }
                 PersonaMode::PlaceFace(_) | PersonaMode::Bind(_) | PersonaMode::View => {}
             }
             PersonaEffect::None
@@ -484,6 +607,14 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                         form.focus.next()
                     } else {
                         form.focus.prev()
+                    };
+                }
+                PersonaMode::Compose(form) => {
+                    let n = form.field_count();
+                    form.field = if *forwards {
+                        (form.field + 1) % n
+                    } else {
+                        (form.field + n - 1) % n
                     };
                 }
                 PersonaMode::PlaceFace(_) | PersonaMode::Bind(_) | PersonaMode::View => {}
@@ -522,11 +653,41 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                 PersonaMode::Bind(picker) => {
                     picker.cursor = step(picker.cursor, option_count, *forwards);
                 }
+                // ↓ on the last field adds a value; ↑ on an empty last row
+                // takes it away again. Elsewhere they move between fields.
+                PersonaMode::Compose(form) => {
+                    let last = form.field_count() - 1;
+                    if *forwards && form.field == last {
+                        form.rows.push(ComposeRow::default());
+                        form.field = form.field_count() - 2;
+                    } else if !*forwards
+                        && form.rows.len() > 1
+                        && form.focused_row() == Some(form.rows.len() - 1)
+                        && form.rows.last().is_some_and(|r| {
+                            r.claim_type.value().is_empty() && r.value.value().is_empty()
+                        })
+                    {
+                        form.rows.pop();
+                        form.field = form.field_count() - 1;
+                    } else if *forwards {
+                        form.field += 1;
+                    } else {
+                        form.field = form.field.saturating_sub(1);
+                    }
+                }
                 PersonaMode::View => {}
             }
             PersonaEffect::None
         }
         PersonaAction::FormToggleEntry => {
+            // In the compose form this is "use in my other faces too" for the
+            // row the focus is in.
+            if let PersonaMode::Compose(form) = &mut state.main_page.content_panel.identity.mode {
+                if let Some(row) = form.focused_row().and_then(|r| form.rows.get_mut(r)) {
+                    row.share = !row.share;
+                }
+                return PersonaEffect::None;
+            }
             let attribute_id = {
                 let p = &state.main_page.content_panel.identity;
                 match &p.mode {
@@ -581,6 +742,9 @@ fn confirm_yes(state: &mut State) -> PersonaEffect {
         PersonaConfirm::DeleteProfile {
             profile_id, unbind, ..
         } => PersonaEffect::Job(PersonaJob::ProfileDelete { profile_id, unbind }),
+        PersonaConfirm::RetireFace { profile_id, .. } => {
+            PersonaEffect::Job(PersonaJob::ProfileRetire { profile_id })
+        }
         PersonaConfirm::DeleteFacet {
             facet_id,
             expected_version,
@@ -719,6 +883,29 @@ fn form_submit(state: &mut State) -> PersonaEffect {
                 into,
             })
         }
+        PersonaMode::Compose(form) => {
+            let name = form.name.value().trim().to_string();
+            if name.is_empty() {
+                form.error = Some("A face needs a name — only you ever see it.".to_string());
+                return PersonaEffect::None;
+            }
+            let values = match compose_values(&form.rows) {
+                Ok(v) => v,
+                Err(why) => {
+                    form.error = Some(why);
+                    return PersonaEffect::None;
+                }
+            };
+            form.error = None;
+            form.working = true;
+            PersonaEffect::Job(PersonaJob::Compose {
+                context_id: form.context_id.clone(),
+                persona_did: form.persona_did.clone(),
+                community: form.community.clone(),
+                name,
+                values,
+            })
+        }
         PersonaMode::Bind(picker) => {
             // Row 0 is "nothing"; the rest index the profile list.
             let profile_id = picker
@@ -768,8 +955,52 @@ pub(crate) fn release_form(state: &mut State, reason: String) {
             picker.working = false;
             picker.error = Some(reason);
         }
+        PersonaMode::Compose(form) => {
+            form.working = false;
+            form.error = Some(reason);
+        }
         PersonaMode::View => p.status_message = Some(reason),
     }
+}
+
+/// The compose form's rows as the values a face is made from, or why they
+/// cannot be sent. Blank rows are dropped; a half-filled one is refused; the
+/// claim type is checked here so the holder is told on the row rather than by
+/// the agent refusing the whole face.
+pub(crate) fn compose_values(rows: &[ComposeRow]) -> Result<Vec<lifecycle::ComposeValue>, String> {
+    let mut out = Vec::new();
+    for row in rows {
+        let claim_type = row.claim_type.value().trim();
+        let value = row.value.value().trim();
+        if claim_type.is_empty() && value.is_empty() {
+            continue;
+        }
+        if claim_type.is_empty() || value.is_empty() {
+            return Err("A row needs both what it is and its value.".to_string());
+        }
+        let well_formed = claim_type
+            .strip_prefix("x:")
+            .unwrap_or(claim_type)
+            .split('.')
+            .all(|seg| {
+                seg.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                    && seg.chars().all(|c| c.is_ascii_alphanumeric())
+            });
+        if !well_formed {
+            return Err(format!(
+                "\"{claim_type}\" is not a claim type — dotted and lower-case, like name.display."
+            ));
+        }
+        out.push(lifecycle::ComposeValue {
+            claim_type: claim_type.to_string(),
+            value: value.to_string(),
+            share: row.share,
+        });
+    }
+    if out.is_empty() {
+        return Err("A face needs at least one thing to show.".to_string());
+    }
+    Ok(out)
 }
 
 /// Prefill the editor from an existing attribute.
@@ -896,6 +1127,9 @@ impl PersonaReadJob {
         let profiles = profile::list(&self.admin_vta)
             .await
             .map_err(|e| format!("{e}"));
+        let retired = lifecycle::list_retired(&self.admin_vta)
+            .await
+            .map_err(|e| format!("{e}"));
         let facets = facet::list(&self.admin_vta)
             .await
             .map_err(|e| format!("{e}"));
@@ -921,6 +1155,7 @@ impl PersonaReadJob {
         PersonaOutcome::Read {
             attributes,
             profiles,
+            retired,
             facets,
             links,
             disclosures,
@@ -1000,6 +1235,79 @@ impl PersonaJobRun {
                 result: profile::get(&client, &profile_id, !edit)
                     .await
                     .map_err(|e| format!("{e}")),
+            },
+            PersonaJob::ProfileRetire { profile_id } => {
+                match lifecycle::retire(&client, &profile_id).await {
+                    Ok(0) => PersonaOutcome::Deleted {
+                        message:
+                            "Retired the face. It was worn nowhere; it is kept, and z shows it."
+                                .to_string(),
+                    },
+                    Ok(n) => PersonaOutcome::Deleted {
+                        message: format!(
+                            "Retired the face — taken off {n} communit{} and kept. z shows retired \
+                         faces; x there reinstates.",
+                            if n == 1 { "y" } else { "ies" }
+                        ),
+                    },
+                    Err(e) => PersonaOutcome::Written {
+                        verb: "Retired the face",
+                        error: Some(format!("{e}")),
+                    },
+                }
+            }
+            PersonaJob::Compose {
+                context_id,
+                persona_did,
+                community,
+                name,
+                values,
+            } => match lifecycle::compose(&client, &context_id, &name, &persona_did, &values).await
+            {
+                Ok(made) => PersonaOutcome::Deleted {
+                    message: format!(
+                        "Made \"{name}\" and wore it in {community}. {}{}",
+                        if made.local {
+                            "It lives there alone — nothing you typed is in your other faces."
+                        } else {
+                            "It is in your pool, so it can be worn elsewhere too."
+                        },
+                        if made.reused > 0 {
+                            format!(
+                                " {} value{} already kept, so this face shares a fact with \
+                                 whatever else shows it.",
+                                made.reused,
+                                if made.reused == 1 { " was" } else { "s were" }
+                            )
+                        } else {
+                            String::new()
+                        }
+                    ),
+                },
+                Err(e) => PersonaOutcome::Written {
+                    verb: "Made the face",
+                    error: Some(format!("{e}")),
+                },
+            },
+            PersonaJob::ProfileReinstate { profile_id } => PersonaOutcome::Written {
+                verb: "Reinstated the face — wearable again, and worn nowhere until you wear it",
+                error: lifecycle::reinstate(&client, &profile_id)
+                    .await
+                    .err()
+                    .map(|e| format!("{e}")),
+            },
+            PersonaJob::ProfileSpoken { profile_id } => {
+                let untell = profile::get(&client, &profile_id, false)
+                    .await
+                    .ok()
+                    .and_then(|d| lifecycle::untell_words(d.disclosed_to));
+                PersonaOutcome::Spoken { profile_id, untell }
+            }
+            PersonaJob::FaceHistoryRead { profile_id } => PersonaOutcome::FaceHistoryRead {
+                result: lifecycle::history(&client, &profile_id)
+                    .await
+                    .map_err(|e| format!("{e}")),
+                profile_id,
             },
             PersonaJob::FacetPut(draft) => PersonaOutcome::Written {
                 verb: match draft.facet_id.is_some() {
@@ -1088,6 +1396,9 @@ pub(crate) enum PersonaOutcome {
     Read {
         attributes: Result<Vec<PoolAttribute>, String>,
         profiles: Result<Vec<ProfileSummary>, String>,
+        /// The retired faces. Its own result: it feeds an optional view, and a
+        /// failure there must not blank the faces the holder wears.
+        retired: Result<Vec<ProfileSummary>, String>,
         facets: Result<Vec<facet::Facet>, String>,
         links: Result<Vec<correlation::Finding>, String>,
         disclosures: Result<Vec<disclosure::DisclosureRow>, String>,
@@ -1127,6 +1438,16 @@ pub(crate) enum PersonaOutcome {
         cleared: bool,
         error: Option<String>,
     },
+    /// How far a face has spoken, for a delete prompt that may still be up.
+    Spoken {
+        profile_id: String,
+        untell: Option<String>,
+    },
+    /// Where a face is worn and what it has done.
+    FaceHistoryRead {
+        profile_id: String,
+        result: Result<lifecycle::FaceHistory, String>,
+    },
 }
 
 impl PersonaOutcome {
@@ -1139,6 +1460,7 @@ impl PersonaOutcome {
             PersonaOutcome::Read {
                 attributes,
                 profiles,
+                retired,
                 facets,
                 links,
                 disclosures,
@@ -1217,8 +1539,22 @@ impl PersonaOutcome {
                             .cmp(&world_rank(&p.facets, &b.profile_id))
                             .then_with(|| a.display_name().cmp(b.display_name()))
                     });
-                    p.profile_selected = p.profile_selected.min(list.len().saturating_sub(1));
+                    if !p.show_retired {
+                        p.profile_selected = p.profile_selected.min(list.len().saturating_sub(1));
+                    }
                     p.profiles = list.into();
+                }
+                match retired {
+                    Ok(list) => {
+                        // The cursor walks whichever list the tab shows.
+                        if p.show_retired {
+                            p.profile_selected =
+                                p.profile_selected.min(list.len().saturating_sub(1));
+                        }
+                        p.retired_faces = list.into();
+                        p.retired_error = None;
+                    }
+                    Err(e) => p.retired_error = Some(e),
                 }
                 if let Ok(list) = disclosures {
                     p.disclosure_selected = p.disclosure_selected.min(list.len().saturating_sub(1));
@@ -1265,12 +1601,39 @@ impl PersonaOutcome {
                                 picker.working = false;
                                 picker.error = Some(e.clone());
                             }
+                            PersonaMode::Compose(form) => {
+                                form.working = false;
+                                form.error = Some(e.clone());
+                            }
                             _ => p.status_message = Some(e.clone()),
                         }
                         state
                             .main_page
                             .log_error(format!("{verb} failed"), e.as_str());
                     }
+                }
+            }
+
+            PersonaOutcome::Spoken { profile_id, untell } => {
+                // Only into the prompt it was asked for: a different face's
+                // question may be up by now, and it must not borrow this one's.
+                if let PersonaConfirm::DeleteProfile {
+                    profile_id: armed,
+                    untell: slot,
+                    ..
+                } = &mut p.confirm
+                    && *armed == profile_id
+                {
+                    *slot = untell;
+                }
+            }
+
+            PersonaOutcome::FaceHistoryRead { profile_id, result } => {
+                if p.open_profile
+                    .as_ref()
+                    .is_some_and(|d| d.summary.profile_id == profile_id)
+                {
+                    p.face_history = Some(result);
                 }
             }
 
@@ -1499,7 +1862,9 @@ mod tests {
             PersonaConfirm::DeleteProfile {
                 profile_id: "01P".into(),
                 name: "unnamed face".into(),
-                unbind: true
+                unbind: true,
+                // Not yet known: the face is not open, so the agent is asked.
+                untell: None,
             }
         );
         apply(&mut state, &PersonaAction::ProfileDeleteArm(1));
@@ -1508,7 +1873,9 @@ mod tests {
             PersonaConfirm::DeleteProfile {
                 profile_id: "01Q".into(),
                 name: "unnamed face".into(),
-                unbind: false
+                unbind: false,
+                // Not yet known: the face is not open, so the agent is asked.
+                untell: None,
             }
         );
     }
@@ -1534,6 +1901,7 @@ mod tests {
         PersonaOutcome::Read {
             attributes: Ok(vec![attribute("01B"), attribute("01A")]),
             profiles: Ok(Vec::new()),
+            retired: Ok(vec![]),
             disclosures: Ok(Vec::new()),
             facets: Ok(Vec::new()),
             links: Ok(Vec::new()),
@@ -1863,6 +2231,7 @@ mod tests {
         PersonaOutcome::Read {
             attributes: Ok(vec![attribute("01B"), attribute("01A")]),
             profiles: Ok(Vec::new()),
+            retired: Ok(vec![]),
             disclosures: Ok(Vec::new()),
             facets: Ok(Vec::new()),
             links: Ok(Vec::new()),
@@ -1897,6 +2266,7 @@ mod tests {
         PersonaOutcome::Read {
             attributes: Ok(vec![attribute("01B"), attribute("01C")]),
             profiles: Ok(Vec::new()),
+            retired: Ok(vec![]),
             disclosures: Ok(Vec::new()),
             facets: Ok(Vec::new()),
             links: Ok(Vec::new()),
@@ -1926,6 +2296,7 @@ mod tests {
         PersonaOutcome::Read {
             attributes: Err("connection refused".to_string()),
             profiles: Ok(Vec::new()),
+            retired: Ok(vec![]),
             disclosures: Ok(Vec::new()),
             facets: Ok(Vec::new()),
             links: Ok(Vec::new()),
@@ -2219,5 +2590,199 @@ mod tests {
             apply(&mut state, &PersonaAction::TabNext),
             PersonaEffect::None
         ));
+    }
+
+    fn two_faces_one_worn() -> State {
+        let mut bindings = HashMap::new();
+        bindings.insert(
+            ("ctx".to_string(), "did:key:zP".to_string()),
+            BindingSummary {
+                bound: true,
+                profile_id: Some("01P".into()),
+                ..BindingSummary::default()
+            },
+        );
+        state_with(IdentityState {
+            profiles: vec![
+                ProfileSummary {
+                    profile_id: "01P".into(),
+                    name: "Conference".into(),
+                    ..ProfileSummary::default()
+                },
+                ProfileSummary {
+                    profile_id: "01Q".into(),
+                    name: "Club".into(),
+                    ..ProfileSummary::default()
+                },
+            ]
+            .into(),
+            retired_faces: vec![ProfileSummary {
+                profile_id: "01R".into(),
+                name: "Old job".into(),
+                retired: true,
+                ..ProfileSummary::default()
+            }]
+            .into(),
+            bindings,
+            ..IdentityState::default()
+        })
+    }
+
+    /// Retiring asks first, says where the face comes off, and retires the
+    /// face that was armed.
+    #[test]
+    fn retiring_a_worn_face_asks_and_says_where_it_comes_off() {
+        let mut state = two_faces_one_worn();
+        apply(&mut state, &PersonaAction::ProfileRetireArm(0));
+        assert_eq!(
+            personas(&state).confirm,
+            PersonaConfirm::RetireFace {
+                profile_id: "01P".into(),
+                name: "Conference".into(),
+                worn: 1,
+            }
+        );
+        match apply(&mut state, &PersonaAction::ConfirmYes) {
+            PersonaEffect::Job(PersonaJob::ProfileRetire { profile_id }) => {
+                assert_eq!(profile_id, "01P")
+            }
+            _ => panic!("expected a retire"),
+        }
+    }
+
+    /// Reinstating is addressed in the retired list, binds nothing, and so asks
+    /// nothing.
+    #[test]
+    fn reinstating_works_from_the_retired_list_without_a_question() {
+        let mut state = two_faces_one_worn();
+        apply(&mut state, &PersonaAction::ToggleRetired);
+        assert!(personas(&state).show_retired);
+        match apply(&mut state, &PersonaAction::ProfileReinstate(0)) {
+            PersonaEffect::Job(PersonaJob::ProfileReinstate { profile_id }) => {
+                assert_eq!(
+                    profile_id, "01R",
+                    "the retired face, not the worn one at index 0"
+                )
+            }
+            _ => panic!("expected a reinstate"),
+        }
+        assert_eq!(personas(&state).confirm, PersonaConfirm::None);
+    }
+
+    /// A delete prompt learns how far the face has spoken, and only its own
+    /// prompt does.
+    #[test]
+    fn a_delete_prompt_learns_that_deleting_does_not_un_tell() {
+        let mut state = two_faces_one_worn();
+        match apply(&mut state, &PersonaAction::ProfileDeleteArm(1)) {
+            PersonaEffect::Job(PersonaJob::ProfileSpoken { profile_id }) => {
+                assert_eq!(profile_id, "01Q")
+            }
+            _ => panic!("the agent is asked how far the face has spoken"),
+        }
+        PersonaOutcome::Spoken {
+            profile_id: "01P".into(),
+            untell: Some("wrong face".into()),
+        }
+        .apply(&mut state);
+        assert!(matches!(
+            &personas(&state).confirm,
+            PersonaConfirm::DeleteProfile { untell: None, .. }
+        ));
+        PersonaOutcome::Spoken {
+            profile_id: "01Q".into(),
+            untell: Some("It has disclosed to 2 parties".into()),
+        }
+        .apply(&mut state);
+        assert!(matches!(
+            &personas(&state).confirm,
+            PersonaConfirm::DeleteProfile { untell: Some(w), .. } if w.contains("2 parties")
+        ));
+    }
+
+    /// Making a face for a community: typed values stay local unless shared,
+    /// the persona the community sees is the one that wears it, and a half row
+    /// is refused before anything is sent.
+    #[test]
+    fn a_face_made_for_a_community_is_local_unless_a_value_is_shared() {
+        let mut state = state_with(IdentityState {
+            memberships: vec![PersonaMembership {
+                community_name: "Co-op".into(),
+                sub_context_id: "ctx-coop".into(),
+                persona_did: "did:key:zCoop".into(),
+                ..PersonaMembership::default()
+            }]
+            .into(),
+            ..IdentityState::default()
+        });
+        apply(&mut state, &PersonaAction::ComposeOpen(0));
+        let type_into = |state: &mut State, text: &str| {
+            for c in text.chars() {
+                apply(
+                    state,
+                    &PersonaAction::FormKey(crossterm::event::KeyEvent::from(
+                        crossterm::event::KeyCode::Char(c),
+                    )),
+                );
+            }
+        };
+        // The focus opens on the first value; name and type are prefilled.
+        type_into(&mut state, "Ada");
+        // ↓ on the last field adds a row, focused on its type.
+        apply(&mut state, &PersonaAction::FormCycle(true));
+        type_into(&mut state, "email.personal");
+        apply(&mut state, &PersonaAction::FormField(true));
+        // Half a row is refused, naming why.
+        assert!(matches!(
+            apply(&mut state, &PersonaAction::FormSubmit),
+            PersonaEffect::None
+        ));
+        match &personas(&state).mode {
+            PersonaMode::Compose(form) => assert!(form.error.as_deref().unwrap().contains("both")),
+            _ => panic!("the form stays open"),
+        }
+        type_into(&mut state, "ada@example.org");
+        apply(&mut state, &PersonaAction::FormToggleEntry);
+        match apply(&mut state, &PersonaAction::FormSubmit) {
+            PersonaEffect::Job(PersonaJob::Compose {
+                context_id,
+                persona_did,
+                name,
+                values,
+                ..
+            }) => {
+                assert_eq!(context_id, "ctx-coop");
+                assert_eq!(persona_did, "did:key:zCoop");
+                assert_eq!(name, "Co-op");
+                assert_eq!(
+                    values,
+                    vec![
+                        lifecycle::ComposeValue {
+                            claim_type: "name.display".into(),
+                            value: "Ada".into(),
+                            share: false,
+                        },
+                        lifecycle::ComposeValue {
+                            claim_type: "email.personal".into(),
+                            value: "ada@example.org".into(),
+                            share: true,
+                        },
+                    ]
+                );
+            }
+            _ => panic!("expected a compose"),
+        }
+    }
+
+    #[test]
+    fn a_claim_type_is_checked_on_the_row() {
+        let row = |t: &str, v: &str| ComposeRow {
+            claim_type: tui_input::Input::new(t.into()),
+            value: tui_input::Input::new(v.into()),
+            share: false,
+        };
+        assert!(compose_values(&[row("Name Display", "x")]).is_err());
+        assert!(compose_values(&[row("", "")]).is_err(), "nothing to show");
+        assert!(compose_values(&[row("x:nickname", "Ada"), row("", "")]).is_ok());
     }
 }

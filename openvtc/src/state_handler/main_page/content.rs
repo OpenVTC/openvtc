@@ -808,6 +808,18 @@ pub enum PersonaConfirm {
         profile_id: String,
         name: String,
         unbind: bool,
+        /// "disclosed to N parties … deleting does not un-tell them", once the
+        /// agent has said how far the face has spoken. `None` while unknown, or
+        /// when it told no one.
+        untell: Option<String>,
+    },
+    /// Retire a face: taken off every community it is worn in, kept with its
+    /// values and history, out of every picker until reinstated. `worn` is how
+    /// many places it is worn now, so the prompt can say what it takes off.
+    RetireFace {
+        profile_id: String,
+        name: String,
+        worn: usize,
     },
     /// Delete a world. Named, not indexed, for the reason above.
     ///
@@ -1042,6 +1054,48 @@ pub enum PersonaMode {
     Facet(FacetForm),
     PlaceFace(FacePlacer),
     Bind(BindPicker),
+    Compose(ComposeForm),
+}
+
+/// One value typed into a face being made for a community.
+#[derive(Clone, Debug, Default)]
+pub struct ComposeRow {
+    pub claim_type: tui_input::Input,
+    pub value: tui_input::Input,
+    /// Use it in the holder's other faces too. Off — the default — it stays in
+    /// this face alone.
+    pub share: bool,
+}
+
+/// Making a face for one community, where it is asked for, and wearing it
+/// there — `persona/profile/compose`. Local by default: nothing typed here
+/// reaches another face unless its row says so.
+#[derive(Clone, Debug, Default)]
+pub struct ComposeForm {
+    pub context_id: String,
+    pub persona_did: String,
+    pub community: String,
+    /// The holder's own name for the face. Never shown to anyone.
+    pub name: tui_input::Input,
+    pub rows: Vec<ComposeRow>,
+    /// 0 is the name; then each row's type and value, in order.
+    pub field: usize,
+    pub error: Option<String>,
+    pub working: bool,
+}
+
+impl ComposeForm {
+    /// The number of fields: the name, and two per row.
+    #[must_use]
+    pub fn field_count(&self) -> usize {
+        1 + 2 * self.rows.len()
+    }
+
+    /// The row the focus is in, when it is not on the name.
+    #[must_use]
+    pub fn focused_row(&self) -> Option<usize> {
+        self.field.checked_sub(1).map(|f| f / 2)
+    }
 }
 
 /// The persona pane: every surface for the holder's own identity, in one place.
@@ -1135,6 +1189,17 @@ pub struct IdentityState {
     // ── Profiles (from the agent) ────────────────────────────────────────
     pub profiles: Arc<[openvtc_core::persona::profile::ProfileSummary]>,
     pub profile_selected: usize,
+    /// Faces the holder retired — kept, worn nowhere, out of every picker.
+    /// Listed on the Faces tab only when asked for (`z`), so one can be
+    /// brought back; nowhere else.
+    pub retired_faces: Arc<[openvtc_core::persona::profile::ProfileSummary]>,
+    /// Why the retired faces could not be read, shown in that view only: it is
+    /// an optional listing, and must not blank the faces the holder wears.
+    pub retired_error: Option<String>,
+    /// The Faces tab is showing the retired faces.
+    pub show_retired: bool,
+    /// Where the opened face is worn and what it has done (`h`), once read.
+    pub face_history: Option<Result<openvtc_core::persona::lifecycle::FaceHistory, String>>,
     /// The profile opened with Enter, resolved to what it would present.
     pub open_profile: Option<openvtc_core::persona::profile::ProfileDetail>,
     /// The claim under the cursor inside that opened face.
