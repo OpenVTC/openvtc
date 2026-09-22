@@ -1,0 +1,51 @@
+<!--
+  Math in the API documentation (KaTeX). rustdoc gets this file through `--html-in-header`:
+  on docs.rs via `[package.metadata.docs.rs]` in Cargo.toml, locally via `cargo docs`
+  (the alias in .cargo/config.toml).
+
+  Math is written INSIDE CODE, so that Markdown never touches the LaTeX source:
+
+      inline     $`T = H_2(s)^{K}`$
+      display    a fenced code block with the language tag `math`
+
+  This is also the math syntax of GitHub-flavoured Markdown, so README.md and docs/*.md render
+  the same way on GitHub. Without JavaScript, or without access to the CDN, the LaTeX source
+  stays readable as code.
+
+  KaTeX 0.17.0 from jsDelivr. The integrity values are the SHA-384 digests of the files of the
+  npm package katex@0.17.0 (`openssl dgst -sha384 -binary FILE | openssl base64 -A`), compared
+  with the CDN copies on 2026-09-20. Update all three places together.
+-->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/katex.min.css" integrity="sha384-vlBdW0r3AcZO/HboRPznQNowvexd3fY8qHOWkBi5q7KGgqJ+F48+DceybYmrVbmB" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/katex.min.js" integrity="sha384-AtrdNsnxl/75rvBneBVH7DtOvCxSVahR2zWqle1coBKd8DEmLoviqNeJSx64gNAs" crossorigin="anonymous"></script>
+<style>
+  .docblock .math-display { overflow-x: auto; overflow-y: hidden; margin: 1em 0; }
+</style>
+<script>
+  // Deferred scripts have run when DOMContentLoaded fires, so `katex` is defined unless the CDN
+  // was unreachable; in that case the page is left as it is.
+  document.addEventListener("DOMContentLoaded", function () {
+    if (typeof katex === "undefined") { return; }
+
+    // display math: ```math ... ```  ->  <pre class="language-math"><code>...</code></pre>
+    document.querySelectorAll("pre.language-math").forEach(function (pre) {
+      var block = document.createElement("div");
+      block.className = "math-display";
+      katex.render(pre.textContent, block, { displayMode: true, throwOnError: false });
+      var wrap = pre.parentElement;
+      (wrap && wrap.classList.contains("example-wrap") ? wrap : pre).replaceWith(block);
+    });
+
+    // inline math: $`...`$  ->  $<code>...</code>$
+    document.querySelectorAll("code").forEach(function (code) {
+      var prev = code.previousSibling, next = code.nextSibling;
+      if (!prev || !next || prev.nodeType !== 3 || next.nodeType !== 3) { return; }
+      if (prev.nodeValue.slice(-1) !== "$" || next.nodeValue.charAt(0) !== "$") { return; }
+      var span = document.createElement("span");
+      katex.render(code.textContent, span, { throwOnError: false });
+      prev.nodeValue = prev.nodeValue.slice(0, -1);
+      next.nodeValue = next.nodeValue.slice(1);
+      code.replaceWith(span);
+    });
+  });
+</script>
