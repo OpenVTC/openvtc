@@ -73,6 +73,38 @@ impl VetterEngine {
         })
     }
 
+    /// A vetter's key pair from a community's **published** parameters.
+    ///
+    /// [`Self::new`] takes a [`Vtc`], which only the community has. This is the same act on the
+    /// other side of the wire: a member who has read a manifest and holds a vetter grant mints
+    /// the key pair every tag of theirs will derive from, and enrols with it.
+    ///
+    /// `member` is the DID this vetter will sign its requests with. It is bound into the opening
+    /// proofs the token drip sends and checked by the community against the signer, so it is not
+    /// a display name and cannot be changed later without abandoning the wallet.
+    ///
+    /// # Errors
+    ///
+    /// [`ProtoError::Pcs`] if the key pair cannot be generated, or the wallet cannot be opened
+    /// for this community.
+    pub fn enrol_new<R: RngCore + CryptoRng>(
+        member: &str,
+        params: &CommunityParams,
+        rng: &mut R,
+    ) -> Result<Self, ProtoError> {
+        let (id, usk) = params.open().user_keygen(rng)?;
+        Ok(Self {
+            member: member.to_string(),
+            usk,
+            id,
+            creds: BTreeMap::new(),
+            wallet: TokenWallet::new(params.community())?,
+            personal_limit: None,
+            attested: 0,
+            log: Vec::new(),
+        })
+    }
+
     pub fn id(&self) -> &G1 {
         &self.id
     }

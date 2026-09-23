@@ -1382,6 +1382,35 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
         changed: book.learn_manifest(sender, &body, ctx.now),
         ..Handled::default()
     };
+    // What this community publishes about hidden vetting, kept whether or not we have an
+    // application here — a vetter has no application, and this is how its client learns the
+    // community runs the mode at all. The first criterion that publishes parameters wins: a
+    // community running two hidden criteria under different keys is not a shape this build
+    // serves, and picking one silently is better than picking one silently *and* saying so.
+    let published = raw
+        .get("criteria")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|c| match super::hidden::read_mode(c) {
+            Ok(super::hidden::Mode::Hidden(p)) => Some(*p),
+            _ => None,
+        });
+    match published {
+        Some(params) => {
+            if book.hidden_published.get(sender) != Some(&params) {
+                book.hidden_published.insert(sender.to_string(), params);
+                handled.changed = true;
+            }
+        }
+        // It stopped publishing them, so stop believing it does. An engine we already hold is
+        // left alone: a credential does not become worthless because the advertisement moved.
+        None => {
+            if book.hidden_published.remove(sender).is_some() {
+                handled.changed = true;
+            }
+        }
+    }
     for application in book
         .applications
         .iter_mut()

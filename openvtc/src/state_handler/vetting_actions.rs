@@ -785,9 +785,17 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 // is free: the community keeps one per applicant, and asking again replaces it.
                 ask_for_challenge(ctx, &row.id).await;
             }
-            // And whatever this community's vetter schedule owes us — enrolment or a tick of
+            // A vetter has no application, so nothing else would ever fetch the manifest of a
+            // community it vets for — and the manifest is where a community says it hides its
+            // vetters. Asking here is what lets a vetter-only member reach the mode at all.
+            refresh_vetter_communities(ctx).await;
+            // And whatever each community's vetter schedule owes us — enrolment or a tick of
             // the drip. On a schedule, never in response to a balance (design §5.1).
-            let communities: Vec<String> = ctx
+            //
+            // Over the communities that publish the mode as well as those we already hold an
+            // engine for: the first pass through has no engine yet, and `hidden_vetting_tick`
+            // is what makes one.
+            let mut communities: Vec<String> = ctx
                 .config
                 .private
                 .vetting
@@ -795,6 +803,11 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 .iter()
                 .map(|h| h.community.clone())
                 .collect();
+            for community in ctx.config.private.vetting.hidden_published.keys() {
+                if !communities.contains(community) {
+                    communities.push(community.clone());
+                }
+            }
             for community in communities {
                 hidden_vetting_tick(ctx, &community).await;
             }
@@ -2550,6 +2563,7 @@ pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &
 /// the timing of the requests alone, that those three days were a conference.
 pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str) {
     let now = Utc::now();
+    ensure_hidden_vetter(ctx, community);
     let Some(state) = ctx
         .config
         .private
@@ -2598,6 +2612,110 @@ pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str
     for owed in plan {
         hidden_vetting_send(ctx, community, &state, &did, owed, now).await;
     }
+}
+
+/// Ask every community that has named us a vetter what it requires.
+///
+/// An applicant refreshes a manifest because it is applying. A vetter has no application, so
+/// without this nothing ever asks — and a community that hides its vetters says so in its
+/// manifest and nowhere else. The answer is what [`ensure_hidden_vetter`] acts on.
+///
+/// Skips a community we already hold an engine for: the parameters we enrolled under are the
+/// ones that matter, and re-reading them changes nothing until a rotation, which the schedule
+/// notices on its own.
+async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>) {
+    let standing: Vec<(String, PersonaId)> = {
+        let book = &ctx.config.private.vetting;
+        book.vetter_standing(Utc::now())
+            .into_iter()
+            .filter(|s| s.live)
+            .filter(|s| {
+                !book
+                    .hidden_vetter
+                    .iter()
+                    .any(|h| h.community == s.community)
+            })
+            .map(|s| (s.community, s.persona))
+            .collect()
+    };
+    for (community, persona) in standing {
+        let Some(did) = persona_did(ctx.config, persona) else {
+            continue;
+        };
+        let Ok(document) = wire::manifest_request(&did, &community) else {
+            continue;
+        };
+        let sent = Sent::Manifest {
+            community: community.clone(),
+        };
+        if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
+            tracing::warn!(community = %community, error = %e, "could not ask a community what it requires");
+        }
+    }
+}
+
+/// Mint this vetter's engine for a community, the first time we learn it runs hidden vetting
+/// and has named us a vetter.
+///
+/// Both halves of that condition matter. A community's published parameters say the mode exists,
+/// never that we are in it; the grant says we vet here, and nothing about how. Only together do
+/// they mean there is an engine to make — and making one we have no grant for would enrol us
+/// into a refusal.
+///
+/// Once. The key pair is what every tag of ours derives from, so a second one would make the
+/// same person count twice in one proof. An engine already held is left alone even if the
+/// community republishes different parameters: the credential we hold was issued under the old
+/// ones, and a rotation is an enrolment, which the schedule handles.
+fn ensure_hidden_vetter(ctx: &mut ActionCtx<'_>, community: &str) {
+    let book = &ctx.config.private.vetting;
+    if book.hidden_vetter.iter().any(|h| h.community == community) {
+        return;
+    }
+    let Some(params) = book.hidden_published.get(community).cloned() else {
+        return;
+    };
+    let Some(standing) = book
+        .vetter_standing(Utc::now())
+        .into_iter()
+        .find(|s| s.community == community && s.live)
+    else {
+        return;
+    };
+    let Some(did) = persona_did(ctx.config, standing.persona) else {
+        return;
+    };
+    let snapshot = {
+        let mut rng = rand::thread_rng();
+        match openvtc_core::vetting::hidden::vetter_start(community, &params, &did, &mut rng) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                return status(
+                    ctx,
+                    format!("Could not set up hidden vetting for this community: {e}"),
+                );
+            }
+        }
+    };
+    ctx.config
+        .private
+        .vetting
+        .hidden_vetter
+        .push(openvtc_core::vetting::book::HiddenVetterState {
+            community: community.to_string(),
+            persona: standing.persona,
+            params,
+            snapshot,
+            last_ticks: std::collections::BTreeMap::new(),
+            last_drawn_at: None,
+            events: Vec::new(),
+        });
+    status(
+        ctx,
+        format!(
+            "{} hides its vetters. Enrolling you — your attestations there will name nobody.",
+            community_display(ctx.config, community)
+        ),
+    );
 }
 
 /// Send one thing the schedule owes.

@@ -1026,7 +1026,41 @@ where `HiddenParams.events` takes the community's `events` verbatim. `approvedBy
 the offer type, so it is dropped on the way in rather than shown to a vetter who has no use for
 it.
 
-### 19.5 Still open, and what it is actually waiting for
+### 19.5 A live run
+
+The three gaps between "the wire is closed" and "two processes can do this" are closed, and they
+were not where this document said they were.
+
+**The parameters reach the client.** §8 said they could not — that a generated
+`deny_unknown_fields` type would refuse them, so a client would get them out of band. That was
+wrong: `VettingRequirements` is `additionalProperties: true` and carries no `deny_unknown_fields`,
+so an unknown member is *dropped* by the typed parse rather than rejected by it. The community
+therefore serves the criterion as JSON with `vetting.ext` injected, the client reads the mode from
+those bytes, and the typed parse beside it is untroubled. The injection happens **before** the
+digest, because the digest is what a proof binds to and the parameters are part of what the
+applicant received.
+
+That also settled a bug this document would not have caught: the community stores `hvk`, `tvk`
+and `livePeriods`, and a client reads `helperKey`, `tokenKey` and `vetterLabels`. Serving the
+stored shape would have parsed as nothing at all, and `read_mode` would have answered `Named` for
+a community hiding every one of its vetters — silently, because unreadable parameters are only
+fatal when marked critical. `HiddenVettingConfig::published()` is the translation, and a test on
+each side pins it.
+
+**An operator can turn it on.** `POST /v1/vetting/hidden` derives the keys from the credential
+signer and publishes them on a criterion. Before it, `pcs_issue::publish` was called from the test
+harness and nowhere else — the minting half was reachable only by a test.
+
+**A vetter's client creates its engine.** `hidden::vetter_start` mints the key pair from the
+community's published parameters, and the desk's schedule calls it the first time it finds a
+community that both publishes the mode and has named us a vetter. Nothing did before: a
+`HiddenVetterState` existed only in a test and in the reference example, so a running client had
+no vetter half at all. A vetter has no application, so nothing would have fetched the manifest
+either; `m` on the desk now asks every community that named us a vetter.
+
+The walkthrough is [`hidden-vetting-live-run.md`](hidden-vetting-live-run.md).
+
+### 19.6 Still open, and what it is actually waiting for
 
 One thing, and it was described wrongly for most of this branch's life. Both halves hand-write
 the payload types and validate them against the published schemas; something deletes both copies.

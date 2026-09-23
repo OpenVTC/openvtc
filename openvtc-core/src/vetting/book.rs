@@ -448,6 +448,14 @@ pub struct VettingBook {
     /// than here — see `openvtc_vetting_pcs::snapshot`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_vetter: Vec<HiddenVetterState>,
+    /// Hidden-vetting parameters each community published in its manifest, by community DID.
+    ///
+    /// Kept whether or not we vet for that community, and separately from
+    /// [`HiddenVetterState::params`], because the two answer different questions: this is *what
+    /// the community publishes*, refreshed every time a manifest arrives, and that is *what we
+    /// enrolled under*, which must not move beneath a credential we already hold.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hidden_published: std::collections::BTreeMap<String, super::hidden::HiddenParams>,
     /// Questions put to communities and not yet answered. Memory only — see
     /// [`super::queries`].
     #[serde(skip)]

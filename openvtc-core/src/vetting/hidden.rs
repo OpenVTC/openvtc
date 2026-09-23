@@ -211,6 +211,36 @@ pub fn community(
     .map_err(|e| HiddenError::Unreadable(e.to_string()))
 }
 
+/// Mint this vetter's key pair for a community, and return the engine to store.
+///
+/// The counterpart of [`start`] on the other side of the desk, and the step that was missing
+/// for the whole of this branch's life: everything after it — enrolment, the drip, attesting —
+/// operates on a [`VetterSnapshot`], and nothing created the first one outside a test.
+///
+/// **`member_did` is load-bearing and is not a label.** It is bound into every opening proof the
+/// token drip sends, and the community checks the binding against the DID that signed the
+/// request. A snapshot built under any other name draws tokens the community refuses, and the
+/// refusal says nothing about why.
+///
+/// One key pair per (vetter, community), minted once and kept: every tag this vetter ever
+/// produces for this community derives from it, so a second one would make the same person count
+/// twice in one proof (§13 C2).
+///
+/// # Errors
+///
+/// [`HiddenError::Unreadable`] if the community's published parameters cannot be read.
+pub fn vetter_start<R: rand::RngCore + rand::CryptoRng>(
+    community_did: &str,
+    params: &HiddenParams,
+    member_did: &str,
+    rng: &mut R,
+) -> Result<VetterSnapshot, HiddenError> {
+    let community = community(community_did, params)?;
+    VetterEngine::enrol_new(member_did, &community, rng)
+        .and_then(|engine| engine.snapshot())
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))
+}
+
 /// Start an application under a hidden-vetting criterion: a fresh key, used for this
 /// application and no other.
 ///
@@ -675,6 +705,7 @@ pub fn tick_of(now: chrono::DateTime<chrono::Utc>) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
     use serde_json::json;
 
     fn params() -> Value {
@@ -685,6 +716,110 @@ mod tests {
             "vetterLabels": ["vetter/2026-10", "vetter/2026-09"],
             "tokenLabels": ["token/2026-10"]
         })
+    }
+
+    /// A criterion exactly as `vtc-service` serves one, copied from what
+    /// `HiddenVettingConfig::published()` emits.
+    ///
+    /// The two halves of this feature live in different repositories and neither can compile the
+    /// other, so what stands in for an integration test is this: the community's emitted shape,
+    /// pinned here, read by the code that will read it live. It has already caught the thing it
+    /// exists for — the service stores `hvk`/`tvk`/`livePeriods` and a client reads
+    /// `helperKey`/`tokenKey`/`vetterLabels`, so a straight `to_value` of the stored
+    /// configuration parses as nothing at all and `read_mode` answers `Named` for a community
+    /// that hides every one of its vetters.
+    fn as_the_service_serves_it() -> Value {
+        // Real keys, from a seeded community, because the shape is only half the contract: the
+        // other half is that what a community publishes decodes into the group elements the
+        // engines take. Placeholder multibase parses as JSON and fails there.
+        let mut rng = rand::rngs::StdRng::from_seed([9u8; 32]);
+        let vtc = openvtc_vetting_pcs::vtc::Vtc::new(
+            "did:example:kernel-vtc",
+            "2026-09",
+            json!({
+                "version": "0.1",
+                "statementType":
+                    "https://firstperson.network/endorsements/identity-vetting/0.1",
+                "minStatements": 3,
+                "acceptedMethods": ["inPerson", "video"],
+                "eligibleVetters": { "role": "vetter" }
+            }),
+            &mut rng,
+        )
+        .expect("a community");
+        let hvk = openvtc_vetting_pcs::scheme::key_text(vtc.hvk()).expect("hvk");
+        let tvk = openvtc_vetting_pcs::scheme::key_text(vtc.tvk()).expect("tvk");
+        json!({
+            "id": "kernel-developer",
+            "vetting": {
+                "version": "0.1",
+                "statementType": "https://firstperson.network/endorsements/identity-vetting/0.1",
+                "minStatements": 3,
+                "acceptedMethods": ["inPerson", "video"],
+                "eligibleVetters": { "role": "vetter" },
+                "ext": {
+                    HIDDEN_VETTING_NS: {
+                        "suite": SUITE,
+                        "helperKey": hvk,
+                        "tokenKey": tvk,
+                        "vetterLabels": ["vetter/2026-09"],
+                        "tokenLabels": ["token/2026-09", "token/event/kernel-summit-2026"],
+                        "dripPerTick": 3,
+                        "events": [{
+                            "eventId": "kernel-summit-2026",
+                            "startDate": "2026-10-12",
+                            "endDate": "2026-10-14",
+                            "groupFloor": 3,
+                            "tiers": [{ "name": "desk", "dripPerTick": 20 }]
+                        }]
+                    }
+                }
+            },
+            "requirementsDigest": "zQmDigest"
+        })
+    }
+
+    #[test]
+    fn the_shape_the_service_serves_is_the_shape_this_client_reads() {
+        let params = match read_mode(&as_the_service_serves_it()).expect("readable") {
+            Mode::Hidden(p) => *p,
+            Mode::Named => panic!("the criterion publishes parameters; this read them as named"),
+        };
+        assert_eq!(params.suite, SUITE);
+        assert_eq!(params.vetter_labels, ["vetter/2026-09"]);
+        assert_eq!(params.drip_per_tick, 3);
+        assert_eq!(params.token_labels.len(), 2);
+
+        // The menu a vetter picks an event tier from.
+        let event = params.events.first().expect("the event menu is published");
+        assert_eq!(event.event_id, "kernel-summit-2026");
+        assert_eq!(event.group_floor, 3);
+        assert_eq!(event.tiers[0].drip_per_tick, 20);
+
+        // And the keys decode, which is the part a wrong multibase alphabet would fail.
+        community("did:example:kernel-vtc", &params)
+            .expect("the published keys decode into engine parameters");
+    }
+
+    /// The service stores one shape and publishes another, and this is why: the stored one does
+    /// not parse. If a future change makes `to_value(config)` the published form, this starts
+    /// passing and the assertion below should be read as the warning it is.
+    #[test]
+    fn the_stored_shape_is_not_the_published_one() {
+        let stored = json!({
+            "suite": SUITE,
+            "hvk": "zHelperKey",
+            "tvk": "zTokenKey",
+            "livePeriods": ["2026-09"],
+            "liveTokenLabels": ["token/2026-09"],
+            "dripPerTick": 3,
+            "events": []
+        });
+        assert_eq!(
+            read_mode(&criterion(json!({ HIDDEN_VETTING_NS: stored }), None)).unwrap(),
+            Mode::Named,
+            "the stored configuration must not be mistaken for the published parameters"
+        );
     }
 
     fn criterion(ext: Value, critical: Option<Value>) -> Value {
