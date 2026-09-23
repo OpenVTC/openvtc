@@ -2842,7 +2842,17 @@ async fn run_join_sequence(
         .application_mut(&vtc_did, persona_id)
         .filter(|a| a.join_did == applicant_did && a.hidden.is_some())
     {
-        let challenge = uuid::Uuid::new_v4().to_string();
+        // The challenge is the COMMUNITY's, asked for over `vtc/vetting/pcs-challenge/0.1` and
+        // recorded on the application when it arrives. A proof over one we minted ourselves
+        // verifies and is refused, which is the whole point of the exchange: the community
+        // accepts each challenge exactly once, so a submission cannot be replayed.
+        let Some(challenge) = application.hidden_challenge.clone() else {
+            state.join.info(
+                "Waiting for this community's submission challenge — it is asked for once per                  submission, and a proof cannot be built without it."
+                    .to_string(),
+            );
+            return;
+        };
         match application.prepare_hidden_submission(&challenge) {
             Ok(true) => state
                 .join

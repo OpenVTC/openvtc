@@ -359,6 +359,241 @@ pub fn statement_meta(
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Enrolment and the drip, from the vetter's side
+// ---------------------------------------------------------------------------------------------
+
+/// Build the enrolment request for `period`, and the blinding state that unblinds the answer.
+///
+/// The state is **not** persisted: it is useless without the answer and dangerous to keep past
+/// it, so a client holds it for the round trip and drops it. An enrolment whose answer never
+/// arrives is re-asked from scratch, which costs nothing — the community refuses a second
+/// credential under the same label, and a request that was never answered issued none.
+///
+/// # Errors
+///
+/// [`HiddenError::Unreadable`] if the community's parameters cannot be read, or the request
+/// cannot be built.
+pub fn enrolment_request<R: rand::RngCore + rand::CryptoRng>(
+    community_did: &str,
+    params: &HiddenParams,
+    snapshot: &VetterSnapshot,
+    period: &str,
+    rng: &mut R,
+) -> Result<(crate::vetting::wire::pcs::RootRequest, Blinding), HiddenError> {
+    let params = community(community_did, params)?;
+    let engine = VetterEngine::restore(snapshot, community_did)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    let (wire, state) = engine
+        .enrolment_request(&params, period, rng)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    Ok((
+        crate::vetting::wire::pcs::RootRequest {
+            label: wire.label,
+            id: wire.id,
+            request: wire.request,
+        },
+        state,
+    ))
+}
+
+/// The blinding state of an enrolment in flight, as this module hands it back.
+///
+/// Deliberately not serialisable: it belongs to one round trip, and an answer that arrives after
+/// a restart is re-asked rather than kept.
+pub type Blinding = openvtc_vetting_pcs::vetter::EnrolmentBlinding;
+
+/// Take the community's answer into the engine.
+///
+/// # Errors
+///
+/// [`HiddenError::Unreadable`] if the answer cannot be decoded, or does not unblind under the
+/// published key — which is what a wrong or swapped answer looks like from here.
+pub fn accept_enrolment(
+    community_did: &str,
+    params: &HiddenParams,
+    snapshot: &mut VetterSnapshot,
+    answer: &crate::vetting::wire::pcs::RootResponse,
+    blinding: &Blinding,
+) -> Result<(), HiddenError> {
+    let params = community(community_did, params)?;
+    let mut engine = VetterEngine::restore(snapshot, community_did)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    engine
+        .accept_enrolment(
+            &params,
+            &openvtc_vetting_pcs::issuer::RootCredentialWire {
+                label: answer.label.clone(),
+                pre_credential: answer.pre_credential.clone(),
+            },
+            blinding,
+        )
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    *snapshot = engine
+        .snapshot()
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    Ok(())
+}
+
+/// Build one tick of the drip: `rate` blinded serials under `label`.
+///
+/// The wallet's pending state lives in the snapshot, so a client that asks and then restarts can
+/// still take the answer.
+///
+/// # Errors
+///
+/// [`HiddenError::Unreadable`] if the requests cannot be built.
+pub fn drip_request<R: rand::RngCore + rand::CryptoRng>(
+    community_did: &str,
+    params: &HiddenParams,
+    snapshot: &mut VetterSnapshot,
+    tick: u32,
+    label: &str,
+    rate: usize,
+    rng: &mut R,
+) -> Result<crate::vetting::wire::pcs::TokensRequest, HiddenError> {
+    let params_built = community(community_did, params)?;
+    let mut engine = VetterEngine::restore(snapshot, community_did)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    let batch = engine
+        .drip_request(&params_built, tick, label, rate, rng)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    *snapshot = engine
+        .snapshot()
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    Ok(crate::vetting::wire::pcs::TokensRequest {
+        label: batch.label,
+        tick: batch.tick,
+        requests: batch
+            .requests
+            .into_iter()
+            .map(|r| crate::vetting::wire::pcs::TokenRequest {
+                commitment: r.commitment,
+                opening_proof: r.opening_proof,
+            })
+            .collect(),
+    })
+}
+
+/// Take a served batch into the wallet. Returns how many tokens it added.
+///
+/// # Errors
+///
+/// [`HiddenError::Unreadable`] if a token cannot be decoded or does not verify under the
+/// published token key.
+pub fn accept_drip(
+    community_did: &str,
+    params: &HiddenParams,
+    snapshot: &mut VetterSnapshot,
+    served: &crate::vetting::wire::pcs::TokensResponse,
+) -> Result<usize, HiddenError> {
+    let params_built = community(community_did, params)?;
+    let mut engine = VetterEngine::restore(snapshot, community_did)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    let taken = engine
+        .accept_drip(
+            &params_built,
+            &openvtc_vetting_pcs::issuer::TokenBatchWire {
+                label: served.label.clone(),
+                tick: served.tick,
+                pre_credentials: served.pre_credentials.clone(),
+            },
+        )
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    *snapshot = engine
+        .snapshot()
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    Ok(taken)
+}
+
+// ---------------------------------------------------------------------------------------------
+// The schedule
+// ---------------------------------------------------------------------------------------------
+
+/// How long a drip tick lasts. A day: long enough that a client which is off for an evening
+/// loses nothing, short enough that a vetter who runs out is not stuck for a week.
+pub const TICK: chrono::Duration = chrono::Duration::days(1);
+
+/// What a vetter's client should do for one community, now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Due {
+    /// Nothing: enrolled for the current label and already served this tick.
+    Nothing,
+    /// Ask to enrol under this class label.
+    Enrol {
+        /// `vetter/<period>`.
+        period: String,
+    },
+    /// Draw this tick of the drip under this label.
+    Draw {
+        /// The token label to draw under.
+        label: String,
+        /// The tick to ask for.
+        tick: u32,
+        /// How many to ask for — the community's published rate.
+        rate: usize,
+    },
+}
+
+/// Decide what a vetter's client owes this community now.
+///
+/// Two rules, and the second is the one that matters:
+///
+/// - Enrol when we hold no credential under the current class label. A rotation is an
+///   enrolment, so this covers both the first time and every month after.
+/// - **Draw on the schedule, not on demand.** The tick is derived from the clock, never from
+///   how many tokens are left: a client that drew when it ran low would turn its token balance
+///   into a public signal of how much vetting it had done, which is the one thing this whole
+///   exchange exists to hide. A vetter with a full wallet still asks.
+///
+/// A client that has been offline does **not** get to claim the ticks it missed: `tick` is the
+/// current one, and the community serves each at most once. The tokens for a week away are
+/// simply not minted — which is the same answer a vetter who was present but idle gets, and
+/// that symmetry is the point.
+#[must_use]
+pub fn due(
+    params: &HiddenParams,
+    snapshot: Option<&VetterSnapshot>,
+    last_tick: u32,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Due {
+    let Some(period) = params
+        .vetter_labels
+        .first()
+        .map(|l| l.trim_start_matches("vetter/").to_string())
+    else {
+        return Due::Nothing;
+    };
+    let Some(snapshot) = snapshot else {
+        return Due::Enrol { period };
+    };
+    if !snapshot.credentials.contains_key(&period) {
+        return Due::Enrol { period };
+    }
+    let tick = tick_of(now);
+    if tick <= last_tick {
+        return Due::Nothing;
+    }
+    let Some(label) = params.token_labels.first().cloned() else {
+        return Due::Nothing;
+    };
+    Due::Draw {
+        label,
+        tick,
+        rate: params.drip_per_tick,
+    }
+}
+
+/// The tick `now` falls in: whole days since the epoch.
+///
+/// Derived from the clock rather than counted locally, so two clients of the same vetter — or
+/// one client that lost its state — agree about which tick they are in, and the community's
+/// once-per-tick rule stays enforceable rather than becoming a race.
+#[must_use]
+pub fn tick_of(now: chrono::DateTime<chrono::Utc>) -> u32 {
+    u32::try_from(now.timestamp().max(0) / TICK.num_seconds()).unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +688,92 @@ mod tests {
             Some(json!([HIDDEN_VETTING_NS])),
         );
         assert!(matches!(read_mode(&raw), Err(HiddenError::Unreadable(_))));
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn params(drip: usize) -> HiddenParams {
+        HiddenParams {
+            suite: SUITE.into(),
+            helper_key: "zHelper".into(),
+            token_key: "zToken".into(),
+            vetter_labels: vec!["vetter/2026-09".into()],
+            token_labels: vec!["token/2026-09".into()],
+            drip_per_tick: drip,
+        }
+    }
+
+    /// A vetter with no engine enrols; a vetter with no credential under the *current* label
+    /// enrols again, which is what a rotation is.
+    #[test]
+    fn enrolment_is_owed_before_the_first_credential_and_after_every_rotation() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 20, 9, 0, 0).unwrap();
+        assert_eq!(
+            due(&params(3), None, 0, now),
+            Due::Enrol {
+                period: "2026-09".into()
+            }
+        );
+    }
+
+    /// The tick comes from the clock, not from a local counter: two clients of one vetter, or
+    /// one client that lost its state, agree about which tick they are in — so the community's
+    /// once-per-tick rule stays a rule rather than a race.
+    #[test]
+    fn the_tick_is_derived_from_the_clock() {
+        let a = Utc.with_ymd_and_hms(2026, 9, 20, 0, 0, 1).unwrap();
+        let b = Utc.with_ymd_and_hms(2026, 9, 20, 23, 59, 59).unwrap();
+        let c = Utc.with_ymd_and_hms(2026, 9, 21, 0, 0, 1).unwrap();
+        assert_eq!(tick_of(a), tick_of(b), "one day is one tick");
+        assert_eq!(tick_of(c), tick_of(a) + 1, "the next day is the next tick");
+    }
+
+    /// The property the whole drip rests on: a vetter asks on the schedule whether or not it
+    /// has anything to spend the tokens on. A client that drew when it ran low would turn its
+    /// balance into a public account of how much vetting it had done.
+    ///
+    /// `due` is given no wallet at all, which is the proof: it cannot consult a balance it
+    /// never sees.
+    #[test]
+    fn the_draw_is_owed_by_the_clock_and_not_by_the_balance() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 20, 9, 0, 0).unwrap();
+        let tick = tick_of(now);
+        let mut snapshot = VetterSnapshot::without_keys("member-1");
+        snapshot
+            .credentials
+            .insert("2026-09".into(), "zCredential".into());
+
+        // Served this tick already: nothing owed, however empty the wallet is.
+        assert_eq!(due(&params(3), Some(&snapshot), tick, now), Due::Nothing);
+
+        // A new tick: owed, however full it is.
+        assert_eq!(
+            due(&params(3), Some(&snapshot), tick - 1, now),
+            Due::Draw {
+                label: "token/2026-09".into(),
+                tick,
+                rate: 3,
+            }
+        );
+    }
+
+    /// A vetter that has been away does not get to claim the ticks it missed — it asks for the
+    /// current one. The tokens for a week away are simply not minted, which is the same answer
+    /// a vetter who was present and idle gets.
+    #[test]
+    fn a_vetter_who_was_offline_asks_for_this_tick_not_the_missed_ones() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 20, 9, 0, 0).unwrap();
+        let mut snapshot = VetterSnapshot::without_keys("member-1");
+        snapshot
+            .credentials
+            .insert("2026-09".into(), "zCredential".into());
+        let Due::Draw { tick, .. } = due(&params(3), Some(&snapshot), tick_of(now) - 7, now) else {
+            panic!("a draw is owed");
+        };
+        assert_eq!(tick, tick_of(now), "this tick, not the seven behind it");
     }
 }

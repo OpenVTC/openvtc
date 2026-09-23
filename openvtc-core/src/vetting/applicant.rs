@@ -184,6 +184,13 @@ pub struct Application {
     /// persisted: it is bound to a challenge that does not outlive the exchange.
     #[serde(skip)]
     pub hidden_submission: Option<Value>,
+    /// The challenge the community issued for this submission, once one has been asked for.
+    ///
+    /// Persisted, unlike the proof above: the community spends it at submit, so an applicant
+    /// that restarts between asking and submitting keeps the one it was given rather than
+    /// asking for a second and stranding the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_challenge: Option<String>,
     /// One salt for the whole application, so every vetter sees the same
     /// identity commitment. Goes to vetters, never to the community.
     pub commitment_salt: String,
@@ -463,6 +470,7 @@ impl Application {
             hidden: None,
             hidden_state: None,
             hidden_submission: None,
+            hidden_challenge: None,
             commitment_salt: new_commitment_salt()?,
             identity_claims: Vec::new(),
             requests: Vec::new(),
@@ -1257,7 +1265,54 @@ impl Application {
                 revoked: false,
             })
             .collect();
+        // Under a hidden criterion there are no named statements to count, and counting zero
+        // would tell an applicant it had gathered nothing while it held three attestations.
+        // The facts come from what those attestations bind instead.
+        //
+        // Each held attestation counts as one vetter. The applicant cannot check that for
+        // itself — two attestations from the same vetter carry the same tag, and the tag is
+        // inside the proof, deliberately out of reach here — so this is the applicant's own
+        // estimate of its progress, and the community's count at submit is the authority. An
+        // applicant that asked three different people will find the two agree.
+        let facts = if facts.is_empty() && self.hidden_state.is_some() {
+            self.hidden_facts(now)
+        } else {
+            facts
+        };
         Some(evaluate(requirements, &facts, now))
+    }
+
+    /// The facts a hidden application's held attestations bind, for its own checklist.
+    fn hidden_facts(&self, now: DateTime<Utc>) -> Vec<StatementFacts> {
+        let Some(state) = self.hidden_state.as_ref() else {
+            return Vec::new();
+        };
+        state
+            .held
+            .iter()
+            .enumerate()
+            .filter(|(_, held)| held.meta.valid_until >= now.date_naive())
+            .map(|(i, held)| StatementFacts {
+                statement_id: format!("hidden-{i}"),
+                // An ordinal, never an identifier: the applicant holds no name for the vetter
+                // here, and inventing a stable one is how a store becomes the link the
+                // exchange removes.
+                vetter: format!("hidden-vetter-{i}"),
+                method: held.meta.method,
+                claims_verified: held.meta.claims_verified.clone(),
+                document_classes: Vec::new(),
+                declared_relationship: held.meta.declared_relationship,
+                identity_commitment: held.meta.identity_commitment.clone(),
+                valid_from: held
+                    .meta
+                    .valid_from
+                    .and_hms_opt(0, 0, 0)
+                    .map_or(now, |d| d.and_utc()),
+                community_matches: true,
+                eligible: true,
+                revoked: false,
+            })
+            .collect()
     }
 
     /// The statements to present with the join request.

@@ -387,6 +387,12 @@ pub struct VettingBook {
     /// [`super::queries`].
     #[serde(skip)]
     pub queries: Vec<CommunityQuery>,
+    /// The blinding state of an enrolment in flight. **Memory only, and deliberately**: it is
+    /// useless without the community's answer and dangerous to keep past it, so an answer that
+    /// arrives after a restart is dropped and the vetter asks again. That costs nothing — a
+    /// request whose answer was never unblinded issued no credential anyone will count.
+    #[serde(skip)]
+    pub pending_enrolment: Option<std::sync::Arc<openvtc_vetting_pcs::vetter::EnrolmentBlinding>>,
     /// Fields written by a newer build, preserved verbatim (D19).
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,

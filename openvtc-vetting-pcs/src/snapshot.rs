@@ -124,6 +124,24 @@ pub struct VetterSnapshot {
 }
 
 impl VetterSnapshot {
+    /// A snapshot with no key material, for exercising the parts that read only its
+    /// bookkeeping — which labels it holds a credential under, and how many tokens it has.
+    ///
+    /// Not `Default`: a snapshot without a key is not a vetter, and making one implicitly
+    /// constructible would let that mistake compile.
+    #[must_use]
+    pub fn without_keys(member: &str) -> Self {
+        Self {
+            member: member.to_string(),
+            usk: String::new(),
+            id: String::new(),
+            credentials: BTreeMap::new(),
+            tokens: Vec::new(),
+            personal_limit: None,
+            log: Vec::new(),
+        }
+    }
+
     pub fn new(member: &str, usk: &UserSecretKey<E>, id: &G1) -> Result<Self, ProtoError> {
         Ok(Self {
             member: member.to_string(),

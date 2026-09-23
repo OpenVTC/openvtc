@@ -25,6 +25,13 @@ use crate::{
     vtc::{Vtc, withdraw_context},
 };
 
+/// The blinding state of an enrolment in flight.
+///
+/// Named here so a caller can hold one across a round trip without depending on the PCS crate
+/// directly. It is deliberately not serialisable: it is useless without the community's answer
+/// and dangerous to keep past it.
+pub type EnrolmentBlinding = IssuanceState<E, Base>;
+
 /// An attestation as the applicant receives it (`vetting/attestation/0.1`).
 #[derive(Debug, Clone)]
 pub struct HiddenAttestation {

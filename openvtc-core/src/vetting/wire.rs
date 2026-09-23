@@ -261,6 +261,143 @@ pub fn vetter_profile_request(
     )
 }
 
+/// The three Trust Tasks hidden vetting's community half serves.
+///
+/// Published specifications (`dtgwg-trust-tasks-tf`, branch `hidden-vetting-tasks`); the payload
+/// types are written here rather than taken from `trust_tasks_rs::specs` because the generated
+/// bindings are 0.22 and this workspace pins `^0.21`. `vetting::hidden::tests` validates each of
+/// them against the published schema, which is the check the generated type would have carried.
+pub mod pcs {
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+
+    /// `vtc/vetting/vetters/pcs-root/0.1`.
+    pub const ROOT_TYPE: &str = "https://trusttasks.org/spec/vtc/vetting/vetters/pcs-root/0.1";
+    /// `vtc/vetting/vetters/pcs-tokens/0.1`.
+    pub const TOKENS_TYPE: &str = "https://trusttasks.org/spec/vtc/vetting/vetters/pcs-tokens/0.1";
+    /// `vtc/vetting/pcs-challenge/0.1`.
+    pub const CHALLENGE_TYPE: &str = "https://trusttasks.org/spec/vtc/vetting/pcs-challenge/0.1";
+
+    /// `#response` of each, which is what an inbound arm matches on.
+    #[must_use]
+    pub fn response_of(type_uri: &str) -> String {
+        format!("{type_uri}#response")
+    }
+
+    /// What a vetter sends to enrol.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct RootRequest {
+        pub label: String,
+        pub id: String,
+        pub request: Value,
+    }
+
+    /// What the community answers with.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct RootResponse {
+        pub label: String,
+        pub pre_credential: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ext: Option<Value>,
+    }
+
+    /// One tick of the drip, asked for.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct TokensRequest {
+        pub label: String,
+        pub tick: u32,
+        pub requests: Vec<TokenRequest>,
+    }
+
+    /// One blinded serial with its opening proof.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct TokenRequest {
+        pub commitment: String,
+        pub opening_proof: String,
+    }
+
+    /// One tick of the drip, served.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct TokensResponse {
+        pub label: String,
+        pub tick: u32,
+        pub pre_credentials: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ext: Option<Value>,
+    }
+
+    /// An applicant asking for the challenge its proof must bind. Every member is optional: the
+    /// applicant is identified by `issuer`.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct ChallengeRequest {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub criterion_id: Option<String>,
+    }
+
+    /// The challenge, and when it stops being accepted.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct ChallengeResponse {
+        pub challenge: String,
+        pub expires_at: chrono::DateTime<chrono::Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ext: Option<Value>,
+    }
+}
+
+/// A `vtc/vetting/vetters/pcs-root/0.1` request: enrol this persona for a class label.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the document cannot be built.
+pub fn pcs_root_request(
+    vetter_did: &str,
+    community_did: &str,
+    body: &pcs::RootRequest,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    document(pcs::ROOT_TYPE, vetter_did, community_did, new_id(), body)
+}
+
+/// A `vtc/vetting/vetters/pcs-tokens/0.1` request: draw one tick of the drip.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the document cannot be built.
+pub fn pcs_tokens_request(
+    vetter_did: &str,
+    community_did: &str,
+    body: &pcs::TokensRequest,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    document(pcs::TOKENS_TYPE, vetter_did, community_did, new_id(), body)
+}
+
+/// A `vtc/vetting/pcs-challenge/0.1` request: ask for the nonce this submission must bind.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the document cannot be built.
+pub fn pcs_challenge_request(
+    applicant_did: &str,
+    community_did: &str,
+    criterion_id: Option<&str>,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    document(
+        pcs::CHALLENGE_TYPE,
+        applicant_did,
+        community_did,
+        new_id(),
+        &pcs::ChallengeRequest {
+            criterion_id: criterion_id.map(ToString::to_string),
+        },
+    )
+}
+
 /// A `vtc/vetting/vetters/resend/0.1` request asking `community_did` to
 /// deliver our live vetter grant credential again.
 pub fn vetter_resend_request(
