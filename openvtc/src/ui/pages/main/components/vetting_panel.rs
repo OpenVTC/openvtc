@@ -1384,6 +1384,14 @@ fn standing(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         lines.push(Line::from(""));
         return;
     }
+    // The name column is as wide as the longest name, so the grant always
+    // starts after a gap — a shortened DID is wider than any fixed pad.
+    let width = v
+        .standing
+        .iter()
+        .map(|row| row.community.chars().count())
+        .max()
+        .unwrap_or(0);
     for (i, row) in v.standing.iter().enumerate() {
         let mut spans = vec![
             Span::styled(
@@ -1395,7 +1403,7 @@ fn standing(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 label(),
             ),
             accent_swatch(row.accent),
-            Span::styled(format!("{:<30}", row.community), value()),
+            Span::styled(format!("{:<width$}   ", row.community), value()),
             Span::styled(
                 row.grant.clone(),
                 if row.grant_warns {
@@ -1443,7 +1451,7 @@ fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         lines.push(hint(
             "Requests arrive only with one of your tickets — hand them out under Tickets (→).",
         ));
-        lines.push(hint("p: your vetter profile"));
+        lines.push(hint(DESK_KEYS));
         return;
     }
     for (i, row) in v.desk.iter().enumerate() {
@@ -1505,9 +1513,12 @@ fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         DeskStage::Card => "a: check and attest  x: decline",
         DeskStage::Closed => "",
     };
-    lines.push(hint(
-        format!("{keys}  {DESK_KEYS}").trim_start().to_string(),
-    ));
+    // The row's keys, then the desk's, on a line of their own as every other
+    // desk view has them: run together they read as one undivided list.
+    if !keys.is_empty() {
+        lines.push(hint(keys));
+    }
+    lines.push(hint(DESK_KEYS));
 }
 
 /// The keys every desk view carries, on its last line. `p` and `g` are the
@@ -1721,7 +1732,7 @@ fn issued(lines: &mut Vec<Line<'static>>, v: &VettingState) {
 #[cfg(test)]
 mod desk_tests {
     use super::*;
-    use crate::state_handler::main_page::content::VetterStandingRow;
+    use crate::state_handler::main_page::content::{DeskRow, VetterStandingRow};
 
     fn drawn(v: &VettingState) -> String {
         render(v)
@@ -1781,6 +1792,72 @@ mod desk_tests {
             text.contains("p: your vetter profile"),
             "the profile is reachable from the desk itself: {text}"
         );
+    }
+
+    /// A community known only by its DID is shortened to 48 characters, wider
+    /// than the fixed 30-column pad the header used to have, and the grant ran
+    /// straight into it: `…:pcs-vtcuntil 2027-09-23`.
+    #[test]
+    fn the_desk_header_keeps_a_long_name_apart_from_its_grant() {
+        let did = "did:webvh:QmZM…VxW1:webvh.storm.ws:pcs-vtc";
+        let v = VettingState {
+            tab: VettingTab::Desk,
+            standing: vec![
+                standing_row(did, "until 2027-09-23", false, "no profile sent"),
+                standing_row("first-vtc", "until 2027-01-18", false, "no profile sent"),
+            ]
+            .into(),
+            ..VettingState::default()
+        };
+        let text = drawn(&v);
+
+        assert!(
+            text.contains(&format!("{did}   until 2027-09-23")),
+            "{text}"
+        );
+        // The names form a column, so the grants line up beneath each other.
+        let column = |grant: &str| {
+            text.lines()
+                .find_map(|l| l.find(grant).map(|i| l[..i].chars().count()))
+                .unwrap()
+        };
+        assert_eq!(
+            column("until 2027-09-23"),
+            column("until 2027-01-18"),
+            "{text}"
+        );
+    }
+
+    /// The selected request's own keys and the desk's keys sit on separate
+    /// lines, as on every other desk view — run together they read as one list.
+    #[test]
+    fn a_request_keeps_its_keys_apart_from_the_desks() {
+        let v = VettingState {
+            tab: VettingTab::Desk,
+            desk: vec![DeskRow {
+                request_id: "r1".into(),
+                applicant: "did:example:applicant".into(),
+                applicant_name: None,
+                community: "did:example:community".into(),
+                state: "accepted".into(),
+                stage: DeskStage::Accepted,
+                method: None,
+                match_code: None,
+                claims: Vec::new(),
+                required_claims: Vec::new(),
+                message: None,
+            }]
+            .into(),
+            ..VettingState::default()
+        };
+        let text = drawn(&v);
+
+        assert!(
+            text.lines()
+                .any(|l| l.trim() == "o: open session  x: decline"),
+            "{text}"
+        );
+        assert!(!text.contains("decline  p:"), "{text}");
     }
 
     /// Someone no community has named. The page must say so rather than simply
