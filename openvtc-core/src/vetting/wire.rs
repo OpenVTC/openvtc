@@ -147,7 +147,7 @@ fn carriage_type(doc: &TrustTask<Value>) -> String {
 /// Wrap `doc` for DIDComm. The message id is the document id, and the thread is
 /// the document's, so a reply correlates the same way on DIDComm and TSP.
 ///
-/// The DIDComm `type` is [`carriage_type`]'s: the binding envelope toward a
+/// The DIDComm `type` is `carriage_type`'s: the binding envelope toward a
 /// community, the task URI toward a peer. The body is the document either way —
 /// the envelope *is* the DIDComm message, not a second wrapper inside it.
 pub fn to_message(doc: &TrustTask<Value>) -> Result<Message, OpenVTCError> {

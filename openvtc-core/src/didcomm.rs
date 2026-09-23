@@ -1437,7 +1437,7 @@ fn tsp_document_to_message(
 ///
 /// `from` in particular stays the authcrypt-proven sender; the document's own
 /// `issuer` is never promoted into it. This is the DIDComm twin of the TSP
-/// mapping in [`tsp_document_to_message`].
+/// mapping in `tsp_document_to_message`.
 #[must_use]
 pub fn open_didcomm_envelope(message: &Message) -> Option<Message> {
     if message.typ != crate::capabilities::TRUST_TASK_ENVELOPE_TYPE {
