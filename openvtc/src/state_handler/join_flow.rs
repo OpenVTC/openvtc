@@ -818,6 +818,10 @@ impl StateHandler {
         // Surface the launch-supplied invitation on the entry page (reset clears
         // the transient join sub-state, so mirror the flag back in afterwards).
         state.join.has_invitation = state.invitation_credential.is_some();
+        state.join.invitation_foreign_subject = state
+            .invitation_credential
+            .as_ref()
+            .and_then(|vic| foreign_invitation_subject(config, vic));
         state.active_page = ActivePage::Join;
         let hears_replies = match &entry {
             JoinEntry::Fresh { hears_replies } | JoinEntry::ForCommunity { hears_replies, .. } => {
@@ -916,6 +920,10 @@ impl StateHandler {
                             };
                             state.join.messages.clear();
                             load_pasted_vic(state, &text, vtc.as_deref());
+                            state.join.invitation_foreign_subject = state
+                                .invitation_credential
+                                .as_ref()
+                                .and_then(|vic| foreign_invitation_subject(config, vic));
                             let _ = self.state_tx.send(state.clone());
                         }
                         Action::JoinClipboardFailed(why) => {
@@ -938,6 +946,7 @@ impl StateHandler {
                             state.invitation_credential = None;
                             state.join.has_invitation = false;
                             state.join.invitation_issuer = None;
+                            state.join.invitation_foreign_subject = None;
                             state.join.vic_cleared = true;
                             state.join.messages.clear();
                             let _ = self.state_tx.send(state.clone());
@@ -1008,9 +1017,8 @@ impl StateHandler {
                                 let Some(vtc_did) = state.join.pending_vtc.clone() else {
                                     continue;
                                 };
-                                // A freshly minted persona holds no invitation.
-                                state.invitation_credential = None;
-                                state.join.present_invitation = false;
+                                state.join.present_invitation =
+                                    mint_can_present(config, state, &vtc_did);
                                 if let Some(context_id) =
                                     offer_contexts(state, config, IdentityPick::Mint, &vtc_did)
                                     && let Some(interrupted) = self
@@ -1814,10 +1822,11 @@ impl StateHandler {
         ensure_invitations(state, admin_vta, &vtc_did).await;
         let options = build_persona_options(config, &state.join.available_vics);
         if options.is_empty() {
-            // First join — nothing to reuse; mint a fresh identity.
-            // A new persona can't hold an existing invitation.
-            state.invitation_credential = None;
-            state.join.present_invitation = false;
+            // First join — nothing to reuse; mint a fresh identity. With no
+            // persona to vouch for it, the new one cannot present an invitation
+            // (`mint_can_present` is false); the loaded one is kept so the
+            // sequence stores it in the vault and says why it went unused.
+            state.join.present_invitation = mint_can_present(config, state, &vtc_did);
             state.join.pending_vtc = Some(vtc_did.clone());
             if let Some(context_id) = offer_contexts(state, config, IdentityPick::Mint, &vtc_did) {
                 return self
@@ -1967,11 +1976,14 @@ fn open_invitation_choice(state: &mut State, config: &Config, persona_id: Person
     // deliberately supplied invitation could disappear
     // between the entry page and the submit; a subject that
     // is not the presenting persona is what
-    // `build_linkage_proof` exists for, not a reason to
-    // drop it.
+    // drop it. A subject that is none of our personas is: no
+    // persona here can sign the linkage, the community
+    // refuses it, and the entry page has already said the
+    // join will be an open request (#373).
     let loaded = state
         .invitation_credential
         .as_ref()
+        .filter(|v| foreign_invitation_subject(config, v).is_none())
         .and_then(|v| openvtc_core::join::invitation_id(v))
         .map(str::to_string);
     let invitations: Vec<AvailableVic> = state
@@ -2073,6 +2085,36 @@ fn offer_contexts(
     state.join.messages.clear();
     state.join.page = JoinPage::ContextChoice;
     None
+}
+
+/// The DID `vic` names, when no persona in this account is that DID.
+///
+/// `None` for an invitation that names one of our personas, and for one that
+/// names no subject at all (validation refuses those before they get here).
+fn foreign_invitation_subject(config: &Config, vic: &serde_json::Value) -> Option<String> {
+    let subject = openvtc_core::join::invitation_subject(vic)?;
+    (!config.account.personas.values().any(|p| p.did == subject)).then(|| subject.to_string())
+}
+
+/// Whether a persona minted for this join can present the loaded invitation.
+///
+/// A new persona is never the invitation's subject, so the community accepts
+/// the invitation from it only with a subject-linkage proof, signed by the
+/// subject (`build_linkage_proof`). That is possible exactly when the subject
+/// is one of our personas. The invitation must also be for this community and
+/// unexpired: otherwise the sequence would fall back to whichever vault
+/// invitation matches, which a new persona was never meant to present.
+///
+/// This used to be `false` whatever the invitation, and the flow cleared it:
+/// a pasted invitation was thrown away and the join went out as an open
+/// request, with no word until the progress page (issue #373).
+fn mint_can_present(config: &Config, state: &State, vtc_did: &str) -> bool {
+    state.invitation_credential.as_ref().is_some_and(|vic| {
+        openvtc_core::join::invitation_subject(vic).is_some()
+            && foreign_invitation_subject(config, vic).is_none()
+            && openvtc_core::join::invitation_matches_community(vic, vtc_did)
+            && !openvtc_core::join::invitation_is_expired(vic, Utc::now())
+    })
 }
 
 /// Build the reuse options for the identity-choice page (R-B-3): every existing
@@ -2840,12 +2882,22 @@ async fn run_join_sequence(
         // The operator chose to join *without* an invitation. Still store a
         // loaded VIC in the vault (its durable home) but present nothing — this
         // is what honours the choice over the vault fallback above.
+        let foreign = foreign_invitation_subject(config, &vic);
         if let Err(e) = admin_vta.cred_vault_receive(vic, None).await {
             debug!(error = %e, "storing invitation in the VTA vault failed (continuing)");
         }
-        state.join.info(
-            "Joining without an invitation — submitting an open request (awaiting approval).",
-        );
+        match foreign {
+            // Not a choice the operator made: say what stopped the invitation.
+            Some(subject) => state.join.info(format!(
+                "Your invitation names {}, which is not one of your personas — \
+                 the community accepts it only from that DID, so this is an open \
+                 request (awaiting approval).",
+                shorten_did(&sanitize_display(&subject, 256), 48)
+            )),
+            None => state.join.info(
+                "Joining without an invitation — submitting an open request (awaiting approval).",
+            ),
+        }
     }
     // Completeness gate before presenting: a VIC resolved from the vault may
     // predate the ingest-time validation (or have lost fields in storage). An
@@ -2901,6 +2953,23 @@ async fn run_join_sequence(
     // subject, prove the subject authorized this presenter (signed with the
     // subject persona's key). On the join-as-subject path (#1a) this is `None`.
     let linkage = build_linkage_proof(config, admin_vta, state, &applicant_did).await;
+    if linkage.is_some()
+        && let Some(subject) = state
+            .invitation_credential
+            .as_ref()
+            .and_then(|vic| openvtc_core::join::invitation_subject(vic))
+    {
+        // Presenting through another persona is a disclosure: the community
+        // learns that the persona it invited vouches for this one.
+        let name = config
+            .agent_name_for(subject)
+            .map(|n| sanitize_display(n, 256))
+            .unwrap_or_else(|| shorten_did(subject, 48));
+        state.join.info(format!(
+            "The invitation names {name}, which signs for this persona — the community \
+             will see that the two are linked."
+        ));
+    }
     let mut vp = openvtc_core::join::build_join_vp(
         &applicant_did,
         state.invitation_credential.as_ref(),
@@ -3800,6 +3869,85 @@ mod tests {
             "credentialStatus": { "type": "BitstringStatusListEntry" },
             "proof": { "type": "DataIntegrityProof" }
         })
+    }
+
+    /// A config holding one persona, `did`.
+    fn config_with_persona(did: &str) -> openvtc_core::config::Config {
+        use openvtc_core::config::account::PersonaRecord;
+        let mut config = test_config();
+        let persona_id = PersonaId::new();
+        config.account.personas.insert(
+            persona_id,
+            PersonaRecord {
+                extra: serde_json::Map::new(),
+                persona_id,
+                did: did.into(),
+                did_document: None,
+                key_refs: vec![],
+                mediator_did: None,
+                origin_context_id: "openvtc".into(),
+                created_at: chrono::Utc::now(),
+                label: None,
+            },
+        );
+        config
+    }
+
+    // ---- Issue #373: an invitation on a join that mints a persona ----
+
+    /// A first join: no persona can vouch for a new one, so the invitation is
+    /// not presented — but it is kept (the sequence vaults it and says why), and
+    /// its subject is named on the entry page before anything is sent.
+    #[test]
+    fn a_first_join_names_the_invitation_it_cannot_present() {
+        let config = test_config();
+        let vic = pasteable_vic("urn:uuid:first");
+        let state = State {
+            invitation_credential: Some(vic.clone()),
+            ..State::default()
+        };
+
+        assert_eq!(
+            super::foreign_invitation_subject(&config, &vic).as_deref(),
+            Some("did:webvh:example.com:alice")
+        );
+        assert!(!super::mint_can_present(&config, &state, COMMUNITY));
+        assert!(state.invitation_credential.is_some(), "kept, not discarded");
+    }
+
+    /// "Be someone new" with an invitation naming one of our personas: the new
+    /// persona presents it through a subject-linkage proof, as a reused persona
+    /// already could. It used to be dropped for an open request.
+    #[test]
+    fn a_new_persona_presents_an_invitation_one_of_ours_can_vouch_for() {
+        let config = config_with_persona("did:webvh:example.com:alice");
+        let vic = pasteable_vic("urn:uuid:ours");
+        let state = State {
+            invitation_credential: Some(vic.clone()),
+            ..State::default()
+        };
+
+        assert_eq!(super::foreign_invitation_subject(&config, &vic), None);
+        assert!(super::mint_can_present(&config, &state, COMMUNITY));
+        // Not for this community: presenting would fall back to whatever the
+        // vault holds, which a new persona was never meant to present.
+        assert!(!super::mint_can_present(
+            &config,
+            &state,
+            "did:webvh:example.com:elsewhere"
+        ));
+    }
+
+    /// An invitation naming a stranger stays unpresentable however many
+    /// personas the account holds.
+    #[test]
+    fn an_invitation_for_a_stranger_is_foreign_to_every_persona() {
+        let config = config_with_persona("did:webvh:example.com:bob");
+        let state = State {
+            invitation_credential: Some(pasteable_vic("urn:uuid:stranger")),
+            ..State::default()
+        };
+        assert!(!super::mint_can_present(&config, &state, COMMUNITY));
     }
 
     fn first_error(state: &State) -> Option<&str> {
