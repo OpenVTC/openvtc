@@ -1,0 +1,464 @@
+{
+  "step1_community": {
+    "communityDid": "did:webvh:QmKernelVtcScid:kernel-vtc.example",
+    "helperKeyHvk": "zMiNW3oobdAHXfjokZ4rr6edndN63PnXzRsQjpYrpahKGA4vjryDATQPTTEBPYz9BnYRUffzp5drP1cDS1q9z5ootP8uathVszAFKajikqARxNar2J5Ge8RGzczQmuoKqhAMG8EK6Qtu1eycLWeoitdbkXX616CB8N7raCd3ke3owVdnpezZsMdp39iE9oZ9BRzYCnd5MDvbUSJNzL9TuwtWdKAfY2x1uBD9NLnGZnEUYbzJQeRRmGjeC7XkxCAuDpr3GugfqTgck173KGhqm8Cz7WyC8XTM5xinV9vy6dUMsDh2wSu7z4pjm1jixk44JW2QeY2HZude5Wg7ktPdZPnFxtJMsUWDMqcs5MHomv9PqLhMhgzukqiRkYoNLzjJELvdER5GwTn7r94x25NX5HLAFZg1w415SLYWZGnksvC8zAYGHiCUx6duREZQFYcKRE9KC1rJ7afD",
+    "requirements": {
+      "acceptedMethods": [
+        "inPerson",
+        "video",
+        "priorAcquaintance"
+      ],
+      "eligibleVetters": {
+        "role": "vetter"
+      },
+      "independence": {
+        "maxByDeclaredRelationship": {
+          "family": 0,
+          "sameEmployer": 1
+        },
+        "requireConsistentIdentityCommitment": true
+      },
+      "maxStatementAge": "P120D",
+      "minByMethod": {
+        "inPerson": 1
+      },
+      "minStatements": 3,
+      "requiredClaims": [
+        "name.legal"
+      ],
+      "statementType": "https://firstperson.network/endorsements/identity-vetting/0.1",
+      "version": "0.1"
+    },
+    "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
+    "tokenKeyTvk": "zHsug8oA2yLzp1uMbhTpbLc5iBn9fSeDtXAC37Egsr5LCYetkR64gdybgcvACnusdkXdV3A4anhHA4N73AdohW9Dg4mMzPXxTStQcGW61P5vkgPW5zUN17XG6KenTq8Hj88WT7ExTjyCtErqYAgHaDBGmU2eucfai68AFMNccb4kWAbpLy7Y8b1MpxXv8jcFFPPWhXwvp3iVtnv3GLupwq12vJigYcnt1BPcSZiPLcDWsSkhfAVsxUazpFtzgTSVpfz5PvoJxtsV6Psor9tPDipNusgrDy937VTjcY71UePVvEskfQzHcWGTMr9kSLi5rRSbRg6zxWEha3cde3ubRUdby7c7DRjkRptovGekbmaHmiiQQedHAKzL6AKr8P2jUebVSd7ZUqdtUQjPpfQDmURwauTR1xzyJ1iFFHGBZEkQdpth1gyJ5nQaw8AoEb6S7H3FwQRadYHT",
+    "tokenLabel": "token/2026-09",
+    "vetterLabel": "vetter/2026-09"
+  },
+  "step2_vetters": {
+    "count": 10,
+    "credentialLabel": "vetter/2026-09",
+    "enrolled": [
+      {
+        "memberDid": "did:webvh:QmKernelVtcScid:vetter-00",
+        "pcsIdentifier": "z5qxeFvndiW3qTAZRmHacJcHYx4Z9vtWGzVap4c2uQ8aLdRGC3vVNWS75Lbx68NLpqN",
+        "rootCredential": "zqGihANDU5hNDSfe6EA3wiXNc7XjetNGPg5J9L2vfwQdDq2gxZPdMdJvziwCS7whxgJeNg2bpCiR7pPtYJGJZMuU1a827sRicFeQvLaksUkSDSmUswsEKryQh8y3M9Er5APA",
+        "tokensHeld": 3
+      },
+      {
+        "memberDid": "did:webvh:QmKernelVtcScid:vetter-01",
+        "pcsIdentifier": "z6PjbEwBeyVS1ZxPazB5Mty6sZ7B9ndAxJr9UzxJxEM8rz3aypGnoDpRz5udsSA4AaP",
+        "rootCredential": "z21CJdqVKUb1nLKJVajQoaxUaQp8SYeAfkgojM8RziXeNYjEr6kzPP8bTHqbCBfLqMXdYf3mTTaax6vhiNAp4UL8LsX6CYhrUppd8cvC9E94Dj9SUeMuaARE54R2iexe8EQ6o",
+        "tokensHeld": 3
+      },
+      {
+        "memberDid": "did:webvh:QmKernelVtcScid:vetter-02",
+        "pcsIdentifier": "z5jokfsiZx1sk1mJyQnBnR519B9mcQhw9a8LrF9VQdAjExwoLzcdVdZ2aXaH14a3mdF",
+        "rootCredential": "zpmLHxb19uxhdGGvBTCs9Vv72JVL9piVMtNGeS9zZMb3VVCKaNHqM5Dt14mhVKUey1WX7D5hQxdpbeZ4yVjwtQVgNwDkxwZSQvCHP63zpsm3qWaFKRNvHLdstBPni3m6vqLh",
+        "tokensHeld": 3
+      },
+      {
+        "memberDid": "did:webvh:QmKernelVtcScid:vetter-03",
+        "pcsIdentifier": "z7nnmQHspvxN1He3NfifTKgh3CHeKRsHgz3NBTBKdfb9FZaMt3acCAeXaMHXqc1UDJ4",
+        "rootCredential": "znehu2fHtuiBKGC3JkAXdEYF4FgBjwfDbvtV5MLwaCEds6MVFQWoAC9f7piavZW83sLYACCC4zFSoF4r5pscSiMXHzDwHKxo7Vrw6YJ4Ead687EdoX414jUYRRZw3Div8Dki",
+        "tokensHeld": 3
+      },
+      {
+        "memberDid": "did:webvh:QmKernelVtcScid:vetter-04",
+        "pcsIdentifier": "z5xde71yqrcP5gDTZpyQP2spzLdghp6UexKL4sTFsaE6zp628FW5wAJanYYH2UzyJoT",
+        "rootCredential": "zuEiPk4EJDAcauCUzA4hDAdyADqBmFcDS3MkoNNT5ndvM4Xfq2wp82nJZiLEzF5UPgvYJzVUULy1MwPZCyoHi86CW34SPsrJnhXgpPjACBQZKWFPmBWXhm5LukJXbtNirex5",
+        "tokensHeld": 3
+      },
+      {
+        "memberDid": "did:webvh:QmKernelVtcScid:vetter-05",
+        "pcsIdentifier": "z7NZtvcib7T2Ay1EEwYEynLb6qbwxyTgmxvu88hvSKzJid1UyyKRasdK7rqEAzsVRwx",
+        "rootCredential": "zrKLhnHj5uixHaLRRxTdAfrUajWBTevg4CMZSoBPMuZcoPeErkNaLc4UaqUzTk6cpZd9K8YpaRsBfddq26EhSKCZy6iPmFWLrocXvU6xuF5w4WjxoNx43BCpCvXhDuEDMGJW",
+        "tokensHeld": 3
+      },
+      {
+        "memberDid": "did:webvh:QmKernelVtcScid:vetter-06",
+        "pcsIdentifier": "z6RuzZi2sCeW17qFWCBjckr9yhX9njmmVKT9UiqmDA5oqXWGHHa2qHTLdqP9y6B4S5z",
+        "rootCredential": "znqve62iJP7kZ6ogmdHnXu7cqiVmsLDsUwhQWyfhEVorxH4x8FCdEjJrPTceSqjuDoMt3xWwfJagEQgrCmkQ9UbbBs1HVAJHv1WKP224MiVNg4f9ske8oLNowPqM9DjP9Zmr",
+        "tokensHeld": 3
+      },
+      {
+        "memberDid": "did:webvh:QmKernelVtcScid:vetter-07",
+        "pcsIdentifier": "z7KgmZhGYdURUM98R4Poknz2bGTRoS3Po2UJaFo1rnK9sAo68GgafPSuM7biznFFUM3",
+        "rootCredential": "zrTbwaBajMAVZjW1nZwTedcsTR6RJmjCEgaaXAH6AusJMw69oTvGPoRm3feWASv5KvSwa2oJqRpxTsn79m9NeadZyPXpTtNPpbM7enWbcmcY18S19obFwxhDhE4mx3CLrUae",
+        "tokensHeld": 3
+      },
+      {
+        "memberDid": "did:webvh:QmKernelVtcScid:vetter-08",
+        "pcsIdentifier": "z5qnfFXXK297r1E1K6jZHWy3y6Jdyr89P75Q2Ne7FseLAC4r6wWycM5W1RPdTfypgdV",
+        "rootCredential": "zycmi3S8StcaaCKS1oVXWppqsUqhQCNQdW1E6xxyxpMC3gGhCbrYDNgeVwwKKVXv5RmJttxLqsVNv8hV7xb4sprJhASEmvRMY4rCAwNsuFXfCoBXerYv3zPdCgVWwuDJMBND",
+        "tokensHeld": 3
+      },
+      {
+        "memberDid": "did:webvh:QmKernelVtcScid:vetter-09",
+        "pcsIdentifier": "z6vnNcz5c2eR8i9HAqz9yN4t2ZaZQv6beyTtoxpiHktYXCEjvsCsPbnfiaxcBj2GG58",
+        "rootCredential": "z243xj8zW53zgHbTpxCvy3bBsdNriuUVeM3MCeVcqkshrPchDsPgWgvmuxd6iK39Awf4gFFhQGmq5ohjVBPVPcJbd32sL7EjgcjHfjbnvaKcTnk4XZpYUU2Mo6eVjb9tvujiA",
+        "tokensHeld": 3
+      }
+    ],
+    "exampleCredentialBytes": 132,
+    "exampleToken": {
+      "label": "token/2026-09",
+      "serial": "z31yGjW2gELLTQWJm49inmCGU22p5dSAhcjTTBJFerLGU",
+      "signatureBytes": 133
+    }
+  },
+  "step3_manifest_criterion": {
+    "description": "Three kernel vetters must confirm who you are. At least one must meet you in person.",
+    "id": "kernel-developer-private",
+    "presentationDefinition": {
+      "credentials": []
+    },
+    "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
+    "vetting": {
+      "acceptedMethods": [
+        "inPerson",
+        "video",
+        "priorAcquaintance"
+      ],
+      "eligibleVetters": {
+        "role": "vetter"
+      },
+      "ext": {
+        "org.openvtc.hidden-vetting": {
+          "helperKey": "zMiNW3oobdAHXfjokZ4rr6edndN63PnXzRsQjpYrpahKGA4vjryDATQPTTEBPYz9BnYRUffzp5drP1cDS1q9z5ootP8uathVszAFKajikqARxNar2J5Ge8RGzczQmuoKqhAMG8EK6Qtu1eycLWeoitdbkXX616CB8N7raCd3ke3owVdnpezZsMdp39iE9oZ9BRzYCnd5MDvbUSJNzL9TuwtWdKAfY2x1uBD9NLnGZnEUYbzJQeRRmGjeC7XkxCAuDpr3GugfqTgck173KGhqm8Cz7WyC8XTM5xinV9vy6dUMsDh2wSu7z4pjm1jixk44JW2QeY2HZude5Wg7ktPdZPnFxtJMsUWDMqcs5MHomv9PqLhMhgzukqiRkYoNLzjJELvdER5GwTn7r94x25NX5HLAFZg1w415SLYWZGnksvC8zAYGHiCUx6duREZQFYcKRE9KC1rJ7afD",
+          "suite": "ps-ddh-bls12381",
+          "tokenKey": "zHsug8oA2yLzp1uMbhTpbLc5iBn9fSeDtXAC37Egsr5LCYetkR64gdybgcvACnusdkXdV3A4anhHA4N73AdohW9Dg4mMzPXxTStQcGW61P5vkgPW5zUN17XG6KenTq8Hj88WT7ExTjyCtErqYAgHaDBGmU2eucfai68AFMNccb4kWAbpLy7Y8b1MpxXv8jcFFPPWhXwvp3iVtnv3GLupwq12vJigYcnt1BPcSZiPLcDWsSkhfAVsxUazpFtzgTSVpfz5PvoJxtsV6Psor9tPDipNusgrDy937VTjcY71UePVvEskfQzHcWGTMr9kSLi5rRSbRg6zxWEha3cde3ubRUdby7c7DRjkRptovGekbmaHmiiQQedHAKzL6AKr8P2jUebVSd7ZUqdtUQjPpfQDmURwauTR1xzyJ1iFFHGBZEkQdpth1gyJ5nQaw8AoEb6S7H3FwQRadYHT",
+          "tokenLabels": [
+            "token/2026-09"
+          ],
+          "vetterLabels": [
+            "vetter/2026-09"
+          ]
+        }
+      },
+      "extCritical": [
+        "org.openvtc.hidden-vetting"
+      ],
+      "independence": {
+        "maxByDeclaredRelationship": {
+          "family": 0,
+          "sameEmployer": 1
+        },
+        "requireConsistentIdentityCommitment": true
+      },
+      "maxStatementAge": "P120D",
+      "minByMethod": {
+        "inPerson": 1
+      },
+      "minStatements": 3,
+      "requiredClaims": [
+        "name.legal"
+      ],
+      "statementType": "https://firstperson.network/endorsements/identity-vetting/0.1",
+      "version": "0.1"
+    }
+  },
+  "step4_applicant": {
+    "joinDid": "did:webvh:QmBobScid:bob-kernel",
+    "note": "Minted for this application and no other. A vetter attests this identifier; the community later binds it to the join DID.",
+    "pcsIdentifier": "z6ULBFxQmokeAoccY5Ueq3a265W5Mnaxtkr6azU5iVRKSF6hos45BRaRovk4iy5WoG2"
+  },
+  "step5_sessions": {
+    "ofEligible": 10,
+    "sessions": [
+      {
+        "attestation": {
+          "attestation": "z97EDnAPCAtgSZmWo7yhExKfYMkrk8c4ch6ECqAFF82XdJXRq1FLC1oaR3zEdB4WoRC4L7NkU88pP7cXDdZxZZBUjQzhYtmJ7ers9WrX6zwxKeSATKUjUBBsWX7HiQo8CxPaUX7ocZ9M7jhDa7PHsRqWwWvV5NC9oLtsAKWxZ6Wb8B9qJFPAd9BQdzb9rbQfQ93y72LShiDkP4mafGpz1Zj1CkEiyFKgZys18uEoVSGvLf1w2Kr9YMjhmeax1yR6yX4msfPZPjr96XY6ZSjzU1pPDLHPndNfxQgN6YRSnxgbs9NpUR7x74vAQHgTXHiCfRUdWKJfA24rrYtNxW6V",
+          "meta": {
+            "cardDigestMultibase": "zQmCardDigestOfBobsVettingCardAsTransmitted",
+            "claimsVerified": [
+              "name.legal"
+            ],
+            "community": "did:webvh:QmKernelVtcScid:kernel-vtc.example",
+            "declaredRelationship": "none",
+            "identityCommitment": "zHbFqTnG8sPz3VtKmXwRc4dYjLnQ2pAe7BvNsKdRxMwT",
+            "livenessConfirmed": true,
+            "method": "inPerson",
+            "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
+            "tokenLabel": "token/2026-09",
+            "tokenSerial": "zkHRSmnTz9TCJwGC5uFygjdwzQB64qyEC9xAzq162iR2",
+            "validFrom": "2026-09-20",
+            "validUntil": "2027-01-18"
+          },
+          "tokenLabel": "token/2026-09",
+          "tokenSerial": "zkHRSmnTz9TCJwGC5uFygjdwzQB64qyEC9xAzq162iR2",
+          "tokenShown": "zsTu2EutpP3aV5aRTV9fuk8oLov9WfrKnh3pzEGdVKJDo7sxznq1QUGhNBdd4HjWxgJouHJd4HkZGWdiZCtm3XyyPAuPM1LzSZRRjEjqXrZz1PvUeSg8PqJdnxzCaYz5v4mW"
+        },
+        "attestationBytes": 1119,
+        "statementMetadata": {
+          "cardDigestMultibase": "zQmCardDigestOfBobsVettingCardAsTransmitted",
+          "claimsVerified": [
+            "name.legal"
+          ],
+          "community": "did:webvh:QmKernelVtcScid:kernel-vtc.example",
+          "declaredRelationship": "none",
+          "identityCommitment": "zHbFqTnG8sPz3VtKmXwRc4dYjLnQ2pAe7BvNsKdRxMwT",
+          "livenessConfirmed": true,
+          "method": "inPerson",
+          "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
+          "tokenLabel": "",
+          "tokenSerial": "",
+          "validFrom": "2026-09-20",
+          "validUntil": "2027-01-18"
+        },
+        "vetterMemberDid": "did:webvh:QmKernelVtcScid:vetter-02",
+        "vetterPcsIdentifier": "z5jokfsiZx1sk1mJyQnBnR519B9mcQhw9a8LrF9VQdAjExwoLzcdVdZ2aXaH14a3mdF"
+      },
+      {
+        "attestation": {
+          "attestation": "zC9JC6a77tAsimPTxJiMA4XhCuSUzJ64tk1zwQdJz4eYUK7xLEnUMdKfe4Somw6g39rhRz9xBXJqhBThgaQqN7q6QUBYeLpGo3g8TkPvMJd3EyBCHgXnj6Q7y46xnJZoSGZpYMMYKh9VNDfSEyiJ46pEN1FKysDpacdYtsKnUYdK1C9hLa9MBepdSWJYpSeEYTBZtm5HqER8ZWzSrCBEPoNwyBUNLszhhsrpti7TnZgwFBqZRbqJKwdqY4CxydAL8AtaX2AkvcCWvAu7EZDuZLTBxK1JctKLxvkFDetTTqn8oyPNX35b6h2XynTYA9PpwE1A2FG4kstR7fkPvtcQ",
+          "meta": {
+            "cardDigestMultibase": "zQmCardDigestOfBobsVettingCardAsTransmitted",
+            "claimsVerified": [
+              "name.legal"
+            ],
+            "community": "did:webvh:QmKernelVtcScid:kernel-vtc.example",
+            "declaredRelationship": "none",
+            "identityCommitment": "zHbFqTnG8sPz3VtKmXwRc4dYjLnQ2pAe7BvNsKdRxMwT",
+            "livenessConfirmed": true,
+            "method": "video",
+            "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
+            "tokenLabel": "token/2026-09",
+            "tokenSerial": "z6R8SM4p3gN7sHgv59vnLyMMEesfUUJkYj3oaZjZbCWb5",
+            "validFrom": "2026-09-21",
+            "validUntil": "2027-01-18"
+          },
+          "tokenLabel": "token/2026-09",
+          "tokenSerial": "z6R8SM4p3gN7sHgv59vnLyMMEesfUUJkYj3oaZjZbCWb5",
+          "tokenShown": "zuXsM3iG5dyTiXtuKMRezBS8DxFWYPPN69zQrUz7YdgWyUz4mcA2jRCxJtdgZ4d3fXdyz6WexDX1tgrAvUwHqkbLv13x993jz2S1QU4RF5xQQsCoSB5kEpQAGvKYgj82QAYP"
+        },
+        "attestationBytes": 1118,
+        "statementMetadata": {
+          "cardDigestMultibase": "zQmCardDigestOfBobsVettingCardAsTransmitted",
+          "claimsVerified": [
+            "name.legal"
+          ],
+          "community": "did:webvh:QmKernelVtcScid:kernel-vtc.example",
+          "declaredRelationship": "none",
+          "identityCommitment": "zHbFqTnG8sPz3VtKmXwRc4dYjLnQ2pAe7BvNsKdRxMwT",
+          "livenessConfirmed": true,
+          "method": "video",
+          "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
+          "tokenLabel": "",
+          "tokenSerial": "",
+          "validFrom": "2026-09-21",
+          "validUntil": "2027-01-18"
+        },
+        "vetterMemberDid": "did:webvh:QmKernelVtcScid:vetter-05",
+        "vetterPcsIdentifier": "z7NZtvcib7T2Ay1EEwYEynLb6qbwxyTgmxvu88hvSKzJid1UyyKRasdK7rqEAzsVRwx"
+      },
+      {
+        "attestation": {
+          "attestation": "z9CFYG1g5mAe5ipLmmn97fmFw3e7oUFZJX5HLHQhHngm6nLyLrtfEV35Xo9NDD3qWUdGfnZt61UqVQz7hLr9NXri9fBsC2xBaJ1itD7EHpJCEqsW5CM8izvoA3ebnc62vtZN2pU3CVuLUUpqiK9Ra3gtxZ6se95u2pi2D7yGWthzkjZnkxkgk9iqwm6MG4Nnya4dE9LHfLMYrsYTfiwzfhjzQkHpiDuVjhXPDf1cSiSPzZeQ1eez1dspVkD75NwmTEDJGDCczFoDTtJMpthAxS3bYud87qeWyPfFkfFfxLrjUBxKMrPSx7QrEZtTimyAdUziVCvdUCCGgwM6Lp9i",
+          "meta": {
+            "cardDigestMultibase": "zQmCardDigestOfBobsVettingCardAsTransmitted",
+            "claimsVerified": [
+              "name.legal"
+            ],
+            "community": "did:webvh:QmKernelVtcScid:kernel-vtc.example",
+            "declaredRelationship": "none",
+            "identityCommitment": "zHbFqTnG8sPz3VtKmXwRc4dYjLnQ2pAe7BvNsKdRxMwT",
+            "livenessConfirmed": true,
+            "method": "inPerson",
+            "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
+            "tokenLabel": "token/2026-09",
+            "tokenSerial": "z9N22VhviJWtQ4iFU7ASn9WypRhQqe7bM4ZVhBeVh6Ddm",
+            "validFrom": "2026-09-22",
+            "validUntil": "2027-01-18"
+          },
+          "tokenLabel": "token/2026-09",
+          "tokenSerial": "z9N22VhviJWtQ4iFU7ASn9WypRhQqe7bM4ZVhBeVh6Ddm",
+          "tokenShown": "znCGPZdkpFm1EKhemr5HmFPmSWax4QoXpHfWnv7e2gVUhKs7LfqMUJcVK89NnEmiAa6HSuXwZFrbJyySk6U3fgQ8NW9QEn9vfpyXHdnGpcmbNZpbdeTyKLAH1FdfzRptP3wU"
+        },
+        "attestationBytes": 1121,
+        "statementMetadata": {
+          "cardDigestMultibase": "zQmCardDigestOfBobsVettingCardAsTransmitted",
+          "claimsVerified": [
+            "name.legal"
+          ],
+          "community": "did:webvh:QmKernelVtcScid:kernel-vtc.example",
+          "declaredRelationship": "none",
+          "identityCommitment": "zHbFqTnG8sPz3VtKmXwRc4dYjLnQ2pAe7BvNsKdRxMwT",
+          "livenessConfirmed": true,
+          "method": "inPerson",
+          "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
+          "tokenLabel": "",
+          "tokenSerial": "",
+          "validFrom": "2026-09-22",
+          "validUntil": "2027-01-18"
+        },
+        "vetterMemberDid": "did:webvh:QmKernelVtcScid:vetter-07",
+        "vetterPcsIdentifier": "z7KgmZhGYdURUM98R4Poknz2bGTRoS3Po2UJaFo1rnK9sAo68GgafPSuM7biznFFUM3"
+      }
+    ],
+    "vetted": 3
+  },
+  "step6_submission": {
+    "capBytes": 16384,
+    "extensions": {
+      "hiddenVetting": {
+        "challenge": "fb17db0cadac428538dbbccf2c617022",
+        "id": "z6ULBFxQmokeAoccY5Ueq3a265W5Mnaxtkr6azU5iVRKSF6hos45BRaRovk4iy5WoG2",
+        "idBinding": "a7cb47e679fd447e39945762f06707f140a0968e579ae24aad56140d82b31e25",
+        "joinDid": "did:webvh:QmBobScid:bob-kernel",
+        "proof": "z23nVxAWUpMWBvGfgTbGJJwfXyDCmQnUZvXQexxVDu6twiqcK7UK5DSDVsAyT63dr2C32P5BxubmHm6EvEYVrmhtkP7yYBotJKc8wdNZsFM8iau5WQbVGjCyKB1kao858ExGYwZEHsMemQTZErGPXGWdJgJe6XawFLFwawdmHYCYAs6Vxir4ZMJHB8CXDGabH5ZjPKC2TSfeo7sFhTiKkxmW7xi5xcAsTHBdKzcKiPRFUG3ECjPWe3HnRCW22b3k73Je7wyeoyrd6YvYmLHKVtkbYu63UEKTh2asBeu4XjeUDVCVLnsbk86Tene8mYwa8BS96i6MvsKgjVTADVrD21kYZJ7zXsH9c4qQShhYtoHVmYgAS13SDbX6sMKM9NuYnSoG7fkDSB14sStQV8ELAU29xp6cxt6h2frTLFt2D6wNpDETYA5QDuuxdStsR4bVsdCPLu1ZNjhjVbJknrFhVrS1iBxC9PewZSnHpwD9P6LSKGrERppcU9sJUfHZC1e3rQQt9PuT11Cv5vuXs4VnDaqUpG9b6naRdAf4yJfKGHvSEZyrfkdbHzJpyRPDT7UXzmqDCe3MWVaTzr7g5THFKYfGyX7WP1Y7jxXUNw9noXPZ2r5uWJ1XkprApDZxHr2H6QaxUrnhRTWz12xx4eV4VhG4X3SQxxoqEstsWJzCYEHSAYQXWFoqRLLcqcjuVceaaG1QFEpKMingEJKkZV679xuojunZKn4ofHYvqnvQfjkWrxad1tZtFbbwHS49qRmceqJVpT8Wjd7Yw7564GS2MTvE5SSXPKnqG11nvrVwefZDVYdXEy7YRnq17dJ4PtS1xArnahgTaNeCzobe2XESgK37Eyccnwoyb3NDX6Q5im84qAYk88M5r6JvjCVTmnSC8duMMsXfqr5ipJ4j1xRDDjMSEpePqcD5LzMXPp7RrVfuGTSpNAXiRGr6ETf2fpvz5hoXkMsudomHbxzQ93rGrADntrTriqQxQpAAaEJudXuR62m1pChNUh7qTnzXYp5YmB54kNQwNTLE8QmqNr87aPhT6dJgmgjHuBXr77cwZm2DHuTCjN6LYAUWgvYVRuuVKCBm4X9M6xgF9qd7AG8wB2wHvoT3XCyziESN9iPcoSu9MhhoEnxmzRLEhX9VUyXfvkrT3Cye3kb3M38o8rExVf4VRpKt5fMo8teFqsM4ShMyr9yJgMtYTsJQhFKWW6dPVqgKwmYdK1KWzTDFhp4NpkTWmv8vFhxrNsHoPZsAhRgydxU8ZrjgEvDDsnufez6dw4JaKt54Km1xQXus2PeR7",
+        "statements": [
+          {
+            "meta": {
+              "cardDigestMultibase": "zQmCardDigestOfBobsVettingCardAsTransmitted",
+              "claimsVerified": [
+                "name.legal"
+              ],
+              "community": "did:webvh:QmKernelVtcScid:kernel-vtc.example",
+              "declaredRelationship": "none",
+              "identityCommitment": "zHbFqTnG8sPz3VtKmXwRc4dYjLnQ2pAe7BvNsKdRxMwT",
+              "livenessConfirmed": true,
+              "method": "inPerson",
+              "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
+              "tokenLabel": "token/2026-09",
+              "tokenSerial": "zkHRSmnTz9TCJwGC5uFygjdwzQB64qyEC9xAzq162iR2",
+              "validFrom": "2026-09-20",
+              "validUntil": "2027-01-18"
+            },
+            "token": {
+              "label": "token/2026-09",
+              "serial": "zkHRSmnTz9TCJwGC5uFygjdwzQB64qyEC9xAzq162iR2",
+              "shown": "zsTu2EutpP3aV5aRTV9fuk8oLov9WfrKnh3pzEGdVKJDo7sxznq1QUGhNBdd4HjWxgJouHJd4HkZGWdiZCtm3XyyPAuPM1LzSZRRjEjqXrZz1PvUeSg8PqJdnxzCaYz5v4mW"
+            }
+          },
+          {
+            "meta": {
+              "cardDigestMultibase": "zQmCardDigestOfBobsVettingCardAsTransmitted",
+              "claimsVerified": [
+                "name.legal"
+              ],
+              "community": "did:webvh:QmKernelVtcScid:kernel-vtc.example",
+              "declaredRelationship": "none",
+              "identityCommitment": "zHbFqTnG8sPz3VtKmXwRc4dYjLnQ2pAe7BvNsKdRxMwT",
+              "livenessConfirmed": true,
+              "method": "video",
+              "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
+              "tokenLabel": "token/2026-09",
+              "tokenSerial": "z6R8SM4p3gN7sHgv59vnLyMMEesfUUJkYj3oaZjZbCWb5",
+              "validFrom": "2026-09-21",
+              "validUntil": "2027-01-18"
+            },
+            "token": {
+              "label": "token/2026-09",
+              "serial": "z6R8SM4p3gN7sHgv59vnLyMMEesfUUJkYj3oaZjZbCWb5",
+              "shown": "zuXsM3iG5dyTiXtuKMRezBS8DxFWYPPN69zQrUz7YdgWyUz4mcA2jRCxJtdgZ4d3fXdyz6WexDX1tgrAvUwHqkbLv13x993jz2S1QU4RF5xQQsCoSB5kEpQAGvKYgj82QAYP"
+            }
+          },
+          {
+            "meta": {
+              "cardDigestMultibase": "zQmCardDigestOfBobsVettingCardAsTransmitted",
+              "claimsVerified": [
+                "name.legal"
+              ],
+              "community": "did:webvh:QmKernelVtcScid:kernel-vtc.example",
+              "declaredRelationship": "none",
+              "identityCommitment": "zHbFqTnG8sPz3VtKmXwRc4dYjLnQ2pAe7BvNsKdRxMwT",
+              "livenessConfirmed": true,
+              "method": "inPerson",
+              "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
+              "tokenLabel": "token/2026-09",
+              "tokenSerial": "z9N22VhviJWtQ4iFU7ASn9WypRhQqe7bM4ZVhBeVh6Ddm",
+              "validFrom": "2026-09-22",
+              "validUntil": "2027-01-18"
+            },
+            "token": {
+              "label": "token/2026-09",
+              "serial": "z9N22VhviJWtQ4iFU7ASn9WypRhQqe7bM4ZVhBeVh6Ddm",
+              "shown": "znCGPZdkpFm1EKhemr5HmFPmSWax4QoXpHfWnv7e2gVUhKs7LfqMUJcVK89NnEmiAa6HSuXwZFrbJyySk6U3fgQ8NW9QEn9vfpyXHdnGpcmbNZpbdeTyKLAH1FdfzRptP3wU"
+            }
+          }
+        ],
+        "suite": "ps-ddh-bls12381"
+      },
+      "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE"
+    },
+    "extensionsBytes": 3962,
+    "proofBytes": 1301,
+    "statementsCarried": 3
+  },
+  "step7_decision": {
+    "byMethod": {
+      "inPerson": 2,
+      "video": 1
+    },
+    "distinctVetters": 3,
+    "facts": [
+      {
+        "counted": true,
+        "declaredRelationship": "none",
+        "eligible": true,
+        "failures": [],
+        "id": "58372ddfdfd140e53464ebbcbaf79d7aeed97a070f43e80e98b01554ab56281a",
+        "issuer": "z7XgsbkdVnXT9bRrBzh52Pt7C4HgAyZTZLbmN59LJ3Zo91B6mXEyf4F39B2hZrwrcR7",
+        "method": "video",
+        "revoked": false,
+        "verified": true
+      },
+      {
+        "counted": true,
+        "declaredRelationship": "none",
+        "eligible": true,
+        "failures": [],
+        "id": "f477770bd1cba628bb17f2edb6815727ccefd48491fa672a82e3b26f3fa6ef01",
+        "issuer": "z5oU2538uNAvTrA9mDZhBLfnGoUNY9Yrxg3juq3n7NkTuC24CyFUmbJnRdgzaSHiBZe",
+        "method": "inPerson",
+        "revoked": false,
+        "verified": true
+      },
+      {
+        "counted": true,
+        "declaredRelationship": "none",
+        "eligible": true,
+        "failures": [],
+        "id": "f8294b79ef33ec3091c29eb213e114d3409f4ce0457dd30836d33341a6161318",
+        "issuer": "z5kXKqWkPCXm3iZtb1nKqfHP77H4jmm6xrGeCDs7CPQFULqrAvPeSUFTKN7TxrvfMWT",
+        "method": "inPerson",
+        "revoked": false,
+        "verified": true
+      }
+    ],
+    "needs": [],
+    "satisfied": true
+  },
+  "step8_what_the_community_learns": {
+    "anonymitySet": 10,
+    "anyTagEqualsAnEnrolledIdentifier": false,
+    "doesNotLearn": [
+      "which three of the ten vetted",
+      "whether the same vetter has vetted anyone else",
+      "any vetter's member DID or PCS identifier"
+    ],
+    "eligibleVetterIdentifiers": [
+      "z5qxeFvndiW3qT…8NLpqN",
+      "z6PjbEwBeyVS1Z…SA4AaP",
+      "z5jokfsiZx1sk1…4a3mdF",
+      "z7nnmQHspvxN1H…c1UDJ4",
+      "z5xde71yqrcP5g…UzyJoT",
+      "z7NZtvcib7T2Ay…zsVRwx",
+      "z6RuzZi2sCeW17…6B4S5z",
+      "z7KgmZhGYdURUM…nFFUM3",
+      "z5qnfFXXK297r1…fypgdV",
+      "z6vnNcz5c2eR8i…j2GG58"
+    ],
+    "learns": [
+      "three distinct eligible vetters attested, and none of them is the applicant",
+      "each statement's method, claims verified and day-granular validity",
+      "that all three carry the same identity commitment",
+      "which token label each spent, and that no serial was spent twice"
+    ],
+    "tagsOnTheFacts": [
+      "z7XgsbkdVnXT9b…rwrcR7",
+      "z5oU2538uNAvTr…SHiBZe",
+      "z5kXKqWkPCXm3i…rvfMWT"
+    ]
+  }
+}
