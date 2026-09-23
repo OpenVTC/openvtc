@@ -101,8 +101,55 @@ pub async fn sign(doc: &mut TrustTask<Value>, signer: &Secret) -> Result<(), Ope
     crate::capabilities::sign_document(doc, signer).await
 }
 
+/// Whether a document of `type_uri` is addressed to a **community** (a VTC)
+/// rather than to another member.
+///
+/// A community is a Trust Tasks consumer that follows the DIDComm binding
+/// (`bindings/didcomm/0.2` §2–§4): a Trust Task reaches it only inside the
+/// binding envelope, and a message typed as its own task URI is refused with a
+/// problem-report (VTI #1687, Keyring VTI-42). Every question this client puts
+/// to a community is one of these.
+///
+/// The peer legs — request, session, decline and their responses, between an
+/// applicant's client and a vetter's — stay typed as the task. Both ends of
+/// those are OpenVTC, and a client that predates reading the envelope routes
+/// on the DIDComm `type`, so moving the sender alone would silently drop every
+/// request a not-yet-updated vetter receives. Reading the envelope ships first
+/// (`didcomm::open_didcomm_envelope`); moving these sends is a later release.
+#[must_use]
+pub fn is_community_bound(type_uri: &str) -> bool {
+    use vta_sdk::protocols::vetting::{
+        VETTING_REVOKE_STATEMENT_TYPE, VETTING_VETTER_GRANT_TYPE, VETTING_VETTER_LIST_TYPE,
+        VETTING_VETTER_PROFILE_TYPE, VETTING_VETTER_RESEND_TYPE,
+    };
+    matches!(
+        type_uri,
+        vta_sdk::protocols::join_requests::JOIN_REQUEST_MANIFEST_0_2_TYPE
+            | VETTING_REVOKE_STATEMENT_TYPE
+            | VETTING_VETTER_GRANT_TYPE
+            | VETTING_VETTER_LIST_TYPE
+            | VETTING_VETTER_PROFILE_TYPE
+            | VETTING_VETTER_RESEND_TYPE
+    )
+}
+
+/// The DIDComm `type` that carries `doc`: the binding envelope for a document
+/// addressed to a community ([`is_community_bound`]), the task URI for a peer.
+fn carriage_type(doc: &TrustTask<Value>) -> String {
+    let type_uri = doc.type_uri.to_string();
+    if is_community_bound(&type_uri) {
+        crate::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string()
+    } else {
+        type_uri
+    }
+}
+
 /// Wrap `doc` for DIDComm. The message id is the document id, and the thread is
 /// the document's, so a reply correlates the same way on DIDComm and TSP.
+///
+/// The DIDComm `type` is [`carriage_type`]'s: the binding envelope toward a
+/// community, the task URI toward a peer. The body is the document either way —
+/// the envelope *is* the DIDComm message, not a second wrapper inside it.
 pub fn to_message(doc: &TrustTask<Value>) -> Result<Message, OpenVTCError> {
     let from = doc
         .issuer
@@ -114,7 +161,7 @@ pub fn to_message(doc: &TrustTask<Value>) -> Result<Message, OpenVTCError> {
         .ok_or_else(|| OpenVTCError::Config("vetting document has no recipient".into()))?;
     let body = serde_json::to_value(doc).map_err(|e| config_error("vetting document", e))?;
     let now = unix_now();
-    let mut builder = Message::build(doc.id.clone(), doc.type_uri.to_string(), body)
+    let mut builder = Message::build(doc.id.clone(), carriage_type(doc), body)
         .from(from)
         .to(to)
         .created_time(now)
@@ -480,6 +527,63 @@ pub(crate) mod tests {
             .await,
             Err(WireError::Proof(_))
         ));
+    }
+
+    /// Toward a community the DIDComm `type` is the binding envelope, which a
+    /// VTC requires (VTI #1687); toward a peer it stays the task URI, which a
+    /// peer on an older release still routes on. The body is the document and
+    /// the message id is its id either way, so a reply correlates the same.
+    #[test]
+    fn a_community_gets_the_envelope_and_a_peer_the_task_type() {
+        use vta_sdk::protocols::vetting::{VETTING_REVOKE_STATEMENT_TYPE, vetters};
+        let community_bound = [
+            manifest_request("did:key:zApplicant", "did:key:zVtc").unwrap(),
+            vetter_resend_request("did:key:zVetter", "did:key:zVtc").unwrap(),
+            vetter_list_request(
+                "did:key:zApplicant",
+                "did:key:zVtc",
+                &vetters::list::v0_1::Payload::try_from(vetters::list::v0_1::Payload::builder())
+                    .unwrap(),
+            )
+            .unwrap(),
+            document(
+                VETTING_REVOKE_STATEMENT_TYPE,
+                "did:key:zVetter",
+                "did:key:zVtc",
+                new_id(),
+                &json!({}),
+            )
+            .unwrap(),
+        ];
+        for doc in &community_bound {
+            let message = to_message(doc).unwrap();
+            assert_eq!(
+                message.typ,
+                crate::capabilities::TRUST_TASK_ENVELOPE_TYPE,
+                "{} must ride the envelope",
+                doc.type_uri
+            );
+            assert_eq!(message.id, doc.id);
+            assert_eq!(message.body, serde_json::to_value(doc).unwrap());
+            assert!(is_community_bound(&doc.type_uri.to_string()));
+        }
+
+        for type_uri in [VETTING_REQUEST_TYPE, VETTING_DECLINE_TYPE] {
+            let doc = document(
+                type_uri,
+                "did:key:zApplicant",
+                "did:key:zVetter",
+                new_id(),
+                &json!({}),
+            )
+            .unwrap();
+            let message = to_message(&doc).unwrap();
+            assert_eq!(message.typ, type_uri, "a peer leg stays typed as its task");
+        }
+        // A response is never community-bound: this client answers peers only.
+        let request = manifest_request("did:key:zApplicant", "did:key:zVtc").unwrap();
+        let reply = response(&request, &json!({})).unwrap();
+        assert!(!is_community_bound(&reply.type_uri.to_string()));
     }
 
     #[test]
