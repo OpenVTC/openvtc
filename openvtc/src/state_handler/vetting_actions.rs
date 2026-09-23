@@ -2364,6 +2364,68 @@ async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, method_index: u
     }
 }
 
+/// Attest the hidden way: no statement, no signature, nothing that names this vetter.
+///
+/// Split from [`attest`] rather than branched inside it because the two paths diverge at every
+/// step after the draft — what is produced, what is recorded, what is sent, and what the operator
+/// is told. The refusals an operator can act on are surfaced in their own words: a vetter with no
+/// tokens left has not failed, it is at capacity until the next drip.
+async fn attest_hidden(
+    ctx: &mut ActionCtx<'_>,
+    request_id: &str,
+    entry: &openvtc_core::vetting::vetter::DeskEntry,
+    vetter_did: &str,
+    attestation: Attestation,
+    now: DateTime<Utc>,
+) -> () {
+    let previous = entry.state.clone();
+    let wire = {
+        let mut rng = rand::thread_rng();
+        match ctx.config.private.vetting.attest_hidden(
+            request_id,
+            vetter_did,
+            attestation,
+            now,
+            &mut rng,
+        ) {
+            Ok(wire) => wire,
+            Err(e) => return status(ctx, format!("Cannot attest: {e}")),
+        }
+    };
+
+    let Some(session_id) = session_id_of(entry) else {
+        return status(ctx, "This request has no open session to attest on.");
+    };
+    let message = match wire::hidden_attestation(vetter_did, &entry.applicant, &wire, &session_id) {
+        Ok(message) => message,
+        Err(e) => {
+            // Put the desk back: the token is spent either way, but the request is not closed on
+            // a delivery that never left.
+            if let Some(e2) = ctx.config.private.vetting.desk_entry_mut(request_id) {
+                e2.state = previous;
+            }
+            return abandon(ctx, "Could not send the attestation", e);
+        }
+    };
+    page(ctx).mode = VettingMode::List;
+    persist(ctx, "Sending your attestation — it names nobody.");
+    let sent = Sent::Attestation {
+        request_id: request_id.to_string(),
+        previous: entry.state.clone(),
+    };
+    spawn_send(ctx, message, vetter_did, &entry.applicant, sent);
+}
+
+/// The session id a desk entry is at, if it has one.
+fn session_id_of(entry: &openvtc_core::vetting::vetter::DeskEntry) -> Option<String> {
+    match &entry.state {
+        DeskState::Session { session, .. } | DeskState::CardReceived { session, .. } => {
+            Some(session.id.clone())
+        }
+        _ => None,
+    }
+}
+
 async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
     if !form.attested {
         return status(
@@ -2407,6 +2469,19 @@ async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
             [form.relationship_index.min(VETTING_RELATIONSHIPS.len() - 1)],
         attestation_text_digest: None,
     };
+    // Hidden vetting: this community counts a proof, not a signature. The desk builds the same
+    // draft from the same checklist and then does not sign it — what goes to the applicant
+    // carries a tag where an issuer would be, and nothing on the way names this persona.
+    if ctx
+        .config
+        .private
+        .vetting
+        .hidden_vetter(&entry.community, entry.persona)
+        .is_some()
+    {
+        return attest_hidden(ctx, request_id, &entry, &vetter_did, attestation, now).await;
+    }
+
     let draft =
         match ctx
             .config
@@ -2596,6 +2671,11 @@ pub(crate) enum Sent {
     Statement {
         request_id: String,
         statement_id: String,
+        previous: DeskState,
+    },
+    /// A hidden attestation, which has no statement id because it names nobody.
+    Attestation {
+        request_id: String,
         previous: DeskState,
     },
     Decline {
@@ -3371,6 +3451,14 @@ fn sent_result(sent: Sent, error: Option<String>, config: &mut Config) -> (Strin
                 clear(tasks, format!("vetting-card-{request_id}"));
                 ("Statement signed and sent.".to_string(), true)
             }
+            (Sent::Attestation { request_id, .. }, None) => {
+                clear(tasks, format!("vetting-card-{request_id}"));
+                (
+                    "Attestation sent. The community will count it without learning it was you."
+                        .to_string(),
+                    true,
+                )
+            }
             (Sent::Decline { request_id, .. }, None) => {
                 clear(tasks, format!("vetting-card-{request_id}"));
                 clear(tasks, format!("vetting-request-{request_id}"));
@@ -3458,6 +3546,24 @@ fn sent_result(sent: Sent, error: Option<String>, config: &mut Config) -> (Strin
                 }
                 (
                     format!("Could not send the statement, so it was not issued: {e}"),
+                    true,
+                )
+            }
+            (
+                Sent::Attestation {
+                    request_id,
+                    previous,
+                },
+                Some(e),
+            ) => {
+                if let Some(entry) = book.desk_entry_mut(&request_id) {
+                    entry.state = previous;
+                }
+                (
+                    format!(
+                        "Could not send the attestation: {e}. The token it spent is gone — \
+                         attesting again draws on the next one."
+                    ),
                     true,
                 )
             }

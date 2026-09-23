@@ -204,6 +204,16 @@ pub enum Notice {
         /// What it asked for, in the applicant's words.
         detail: String,
     },
+    /// Applicant: a vetter's hidden attestation arrived and verified.
+    ///
+    /// It names no vetter, deliberately — the applicant knows who it sat with, and nothing
+    /// in the notice or the store repeats it.
+    AttestationReceived {
+        /// The application.
+        application_id: String,
+        /// How many attestations this application now holds.
+        held: usize,
+    },
     /// Vetter: the community recorded our withdrawal.
     WithdrawalRecorded {
         /// The statement.
@@ -301,6 +311,9 @@ impl Notice {
                 format!("Vetting requirements for {community} updated.")
             }
             Notice::RequirementsUnsupported { detail, .. } => detail.clone(),
+            Notice::AttestationReceived { held, .. } => format!(
+                "An attestation arrived and verified. You now hold {held} for this application."
+            ),
             Notice::WithdrawalRecorded { statement_id } => {
                 format!("The community recorded the withdrawal of statement {statement_id}.")
             }
@@ -417,6 +430,7 @@ pub async fn handle(
         VETTING_VETTER_RESEND_RESPONSE_TYPE => resent(book, message, sender),
         JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE => manifest(book, ctx, message, sender),
         CREDENTIAL_ISSUE_TYPE => return statement(book, ctx, message, sender).await,
+        wire::HIDDEN_ATTESTATION_TYPE => return attestation(book, ctx, message, sender),
         t if is_trust_task_error_type(t) => return refused(book, ctx, message, sender),
         _ => return None,
     };
@@ -828,6 +842,48 @@ async fn statement(
                 });
             }
             Err(e) => warn!(%sender, error = %e, "vetting statement refused"),
+        }
+    }
+    Some(Handled::default())
+}
+
+/// `vetting/attestation/0.1` — a hidden attestation from a vetter we asked.
+///
+/// The applicant verifies it **here**, on arrival, rather than discovering at submit that it
+/// holds something unusable: an attestation that does not verify under the community's published
+/// parameters, or is not bound to the card it showed, is dropped with a warning and never
+/// reaches the application.
+///
+/// The sender is authenticated by the envelope and is deliberately **not** recorded beside the
+/// attestation. Keeping it would rebuild, in the applicant's own store, the link the whole
+/// exchange removes (design §18).
+fn attestation(
+    book: &mut VettingBook,
+    ctx: &Context<'_>,
+    message: &Message,
+    sender: &str,
+) -> Option<Handled> {
+    let Some((persona, _)) = ctx.recipient else {
+        return Some(Handled::default());
+    };
+    for application in book
+        .applications
+        .iter_mut()
+        .filter(|a| a.persona == persona && a.hidden.is_some())
+    {
+        match application.receive_hidden_attestation(&message.body) {
+            Ok(()) => {
+                return Some(Handled {
+                    changed: true,
+                    notice: Some(Notice::AttestationReceived {
+                        application_id: application.id.clone(),
+                        held: application.hidden_held(),
+                    }),
+                    ..Handled::default()
+                });
+            }
+            // Not for this application — try the next one; the last error is reported.
+            Err(e) => warn!(%sender, error = %e, "hidden attestation refused"),
         }
     }
     Some(Handled::default())

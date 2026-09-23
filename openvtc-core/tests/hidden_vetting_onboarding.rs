@@ -256,3 +256,140 @@ fn the_join_submission_carries_the_proof_in_its_extensions() {
     let bytes = serde_json::to_vec(&extensions).unwrap().len();
     assert!(bytes < 16 * 1024, "extensions is {bytes} bytes");
 }
+
+/// The vetter's half, through the desk — the path the screen calls.
+///
+/// A vetter with an engine for the community takes an ordinary request, runs an ordinary
+/// session, and attests *without signing anything*: the desk closes the request exactly as the
+/// named path closes it, and what it hands back is an attestation carrying a tag where an issuer
+/// would be. The applicant then verifies it on arrival, which is where an unusable attestation
+/// is caught rather than at submit.
+#[test]
+fn a_vetter_attests_through_the_desk_without_signing_a_statement() {
+    use openvtc_core::config::account::PersonaId;
+    use openvtc_core::vetting::book::{HiddenVetterState, VettingBook};
+    use openvtc_core::vetting::vetter::Attestation;
+
+    let mut rng = StdRng::seed_from_u64(0x2026_0925);
+    let mut vtc = Vtc::new(COMMUNITY, PERIOD, requirements(), &mut rng).unwrap();
+    let token_label = vtc.current_token_label().to_string();
+    let digest = vtc.requirements_digest().to_string();
+    let params: HiddenParams = match hidden::read_mode(&published_criterion(&vtc)).unwrap() {
+        hidden::Mode::Hidden(p) => *p,
+        hidden::Mode::Named => panic!("hidden"),
+    };
+
+    // A vetter the community has enrolled and served a tick of the drip.
+    const VETTER: &str = "did:webvh:QmVtcScid:vetter-1";
+    vtc.grant(VETTER);
+    let mut engine = VetterEngine::new(VETTER, &vtc, &mut rng).unwrap();
+    engine.enroll(&mut vtc, &mut rng).unwrap();
+    engine.drip(&mut vtc, 1, &token_label, 3, &mut rng).unwrap();
+
+    let persona = PersonaId::new();
+    let mut desk = VettingBook::default();
+    desk.hidden_vetter.push(HiddenVetterState {
+        community: COMMUNITY.into(),
+        persona,
+        params: params.clone(),
+        snapshot: engine.snapshot().unwrap(),
+        last_tick: 1,
+        last_drawn_at: None,
+    });
+
+    // The applicant's side: an application, and the request that carries its identifier.
+    let mut book = VettingBook::default();
+    let applicant_persona = PersonaId::new();
+    book.start_application(COMMUNITY, applicant_persona, JOIN_DID, Utc::now())
+        .unwrap();
+    let manifest_payload = json!({
+        "communityDid": COMMUNITY,
+        "criteria": [published_criterion(&vtc)],
+    });
+    let parsed = serde_json::from_value(manifest_payload.clone()).unwrap();
+    let application = book.application_mut(COMMUNITY, applicant_persona).unwrap();
+    application
+        .adopt_manifest(&parsed, &manifest_payload)
+        .unwrap();
+    let document_id = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+    let ticket = openvtc_core::vetting::tickets::Ticket::issue(
+        COMMUNITY.to_string(),
+        persona,
+        vec![VettingMethod::InPerson],
+        1,
+        chrono::Duration::days(1),
+        Utc::now(),
+    );
+    let code = ticket.code.clone();
+    desk.tickets.push(ticket);
+    let request = application
+        .prepare_request(
+            &document_id,
+            VETTER,
+            vta_sdk::protocols::vetting::request::v0_1::Ticket::ShortCodeTicket(
+                vta_sdk::protocols::vetting::request::v0_1::ShortCodeTicket::try_from(
+                    vta_sdk::protocols::vetting::request::v0_1::ShortCodeTicket::builder()
+                        .code(code),
+                )
+                .unwrap(),
+            ),
+            openvtc_core::vetting::applicant::RequestDraft {
+                preferred_method: Some(VettingMethod::InPerson),
+                languages: vec![],
+                message: None,
+                availability: None,
+            },
+            Utc::now(),
+        )
+        .expect("a well-formed request");
+
+    // The request carries the identifier the vetter will attest to — and nothing else new.
+    let raw = serde_json::to_value(&request).unwrap();
+    assert!(
+        raw["ext"][hidden::HIDDEN_VETTING_NS]["id"].is_string(),
+        "{raw}"
+    );
+
+    // The desk takes it, opens a session, and receives the card. (Covered in full by the
+    // reference example; here it is the shortest path to `CardReceived`.)
+    let accepted = desk.take_request(
+        openvtc_core::vetting::vetter::IncomingRequest {
+            document_id: &document_id,
+            sender: JOIN_DID,
+            persona,
+            body: request,
+            eligible: true,
+        },
+        Utc::now(),
+    );
+    let openvtc_core::vetting::vetter::Intake::Accepted(response) = accepted else {
+        panic!("the desk accepts it");
+    };
+    let request_id = desk
+        .desk
+        .iter()
+        .find(|e| e.request_document_id == document_id)
+        .map(|e| e.request_id.clone())
+        .expect("the desk took it");
+    let _ = response;
+
+    // Without a card there is nothing to attest to, and the desk says so rather than attesting.
+    let err = desk
+        .attest_hidden(
+            &request_id,
+            VETTER,
+            Attestation {
+                method: VettingMethod::InPerson,
+                document_classes: vec!["passport".into()],
+                claims_verified: vec!["name.legal".into()],
+                liveness_confirmed: true,
+                declared_relationship: VettingRelationship::None,
+                attestation_text_digest: None,
+            },
+            Utc::now(),
+            &mut rng,
+        )
+        .expect_err("no card yet");
+    assert!(format!("{err}").contains("cannot"), "{err}");
+    let _ = digest;
+}

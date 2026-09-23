@@ -279,6 +279,86 @@ pub fn attest<R: rand::RngCore + rand::CryptoRng>(
     serde_json::to_value(&held).map_err(|e| HiddenError::Unreadable(e.to_string()))
 }
 
+// ---------------------------------------------------------------------------------------------
+// The vetter's half
+// ---------------------------------------------------------------------------------------------
+
+/// The member of a `vetting/request` payload's `ext` that carries the applicant's PCS identifier.
+///
+/// A vetter cannot attest to somebody it cannot name in the scheme's own terms, and the join DID
+/// is not that name. The identifier travels in the request's framework extension point rather
+/// than in a new member of the payload, because `ext` is what the framework put there for
+/// exactly this (SPEC §4.5.1) — and because a community that does not run hidden vetting sees a
+/// request it already understands.
+pub const REQUEST_EXT_MEMBER: &str = HIDDEN_VETTING_NS;
+
+/// What an applicant puts in its request's `ext` so a vetter can attest to it.
+#[must_use]
+pub fn request_ext(suite: &str, applicant_id: &str) -> serde_json::Value {
+    serde_json::json!({ REQUEST_EXT_MEMBER: { "suite": suite, "id": applicant_id } })
+}
+
+/// The applicant's PCS identifier from a request's `ext`, if it carried one.
+///
+/// Returns `None` for every request from an applicant that is not applying under a hidden
+/// criterion — which is most of them, and is not an error.
+///
+/// # Errors
+///
+/// [`HiddenError::UnsupportedSuite`] if the applicant names a suite this build does not
+/// implement: it is applying under rules we cannot honour, and attesting anyway would hand it
+/// something the community refuses.
+pub fn read_request_ext(ext: Option<&serde_json::Value>) -> Result<Option<String>, HiddenError> {
+    let Some(ours) = ext.and_then(|e| e.get(REQUEST_EXT_MEMBER)) else {
+        return Ok(None);
+    };
+    let suite = ours
+        .get("suite")
+        .and_then(|s| s.as_str())
+        .unwrap_or_default();
+    if suite != SUITE {
+        return Err(HiddenError::UnsupportedSuite(suite.to_string()));
+    }
+    match ours.get("id").and_then(|s| s.as_str()) {
+        Some(id) if !id.is_empty() => Ok(Some(id.to_string())),
+        _ => Err(HiddenError::Unreadable(
+            "the request names this namespace but carries no identifier".into(),
+        )),
+    }
+}
+
+/// The statement metadata an attestation binds, from the draft the named path would have signed.
+///
+/// One function, so the two paths cannot drift about what a statement says. Dates, never
+/// timestamps: an exact time would let a community line an attestation up with a vetter's
+/// activity, which undoes the proof without touching it (design §6).
+#[must_use]
+pub fn statement_meta(
+    draft: &vta_sdk::vetting::statement::StatementDraft,
+    community: &str,
+    requirements_digest: &str,
+) -> StatementMeta {
+    let e = &draft.endorsement;
+    StatementMeta {
+        community: community.to_string(),
+        requirements_digest: requirements_digest.to_string(),
+        method: e.method,
+        claims_verified: e
+            .claims_verified
+            .iter()
+            .map(|c| c.as_str().to_string())
+            .collect(),
+        liveness_confirmed: e.liveness_confirmed,
+        declared_relationship: e.declared_relationship,
+        identity_commitment: e.identity_commitment.clone(),
+        card_digest_multibase: e.card_digest_multibase.clone(),
+        valid_from: draft.valid_from.date_naive(),
+        valid_until: draft.valid_until.date_naive(),
+        token_label: String::new(),
+        token_serial: String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

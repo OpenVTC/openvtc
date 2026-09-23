@@ -828,3 +828,129 @@ adding the Trust Tasks is plumbing rather than design.
 passes `OsRng`; the fixture test passes a seeded one, and that is what keeps the cross-repo wire
 fixture reproducible. A signing routine that samples its own randomness cannot be pinned by a
 test, and the drift protection between the two repos is exactly a pinned fixture.
+## 18. Quantum posture, and what is kept (2026-09-23)
+
+Σ-PS, the Fiat–Shamir proofs and the DDH tag all rest on discrete log in a bilinear group, so a
+cryptographically relevant quantum computer breaks all three. That much is unsurprising. What is
+worth writing down is the asymmetry, because it decides what to protect.
+
+**Two harms, with different clocks.**
+
+- *Forgery* — credentials and tokens become mintable and proofs become unsound. The exposure
+  begins when a CRQC exists, and migrating fixes it: re-enrol under a new suite, drop the old
+  class label from the AllowList, done.
+- *Retroactive deanonymisation* — a tag is `T = usk·H₀(id)`. One discrete log recovers `usk`;
+  the community's own enrolment table maps that key to a member DID; every archived tag that
+  vetter produced then links up. The exposure begins **today**, because the material is already
+  recorded. Migrating does not reach it.
+
+**What survives a quantum adversary.** The Σ-protocol proofs are statistically zero-knowledge —
+a transcript is simulatable, so it leaks nothing to any adversary, quantum or not. Blind
+issuance hides the identifier behind a perfectly-hiding commitment, so enrolment transcripts do
+not retro-leak either. The unlinkability of a *showing* rests on group assumptions and should be
+assumed exposed until someone checks the PS variant we vendored. The part that certainly leaks
+is the tag, which means the protection worth building is retention, not more proof machinery.
+
+### 18.1 What the code now keeps
+
+Two changes, both about keeping less:
+
+- **Tags are masked before they are stored.** `vetting::pcs::mask` is
+  `HKDF(key, salt = applicant DID, info = tag)` under a key derived from the community's master
+  secret (`vtc-vetting-pcs-tagmask/v1`). Every path that used to keep the group element — the
+  `VettingFacts.statements[].issuer` rows and the spent-token ledger's `(id, tag)` pair — keeps
+  the mask instead. Equality is all either needed: distinctness within a submission, and "same
+  applicant, same vetter" for a resubmission, both survive it.
+- **A decided proof is not kept.** `vetting::redact_hidden_submission` replaces the
+  `hiddenVetting` member of the stored join request with `{ redacted, suite, bytes, sha256 }`.
+  The facts row is what every reader downstream actually uses; the submission was being kept for
+  nobody. It runs whether or not this build implements the suite, which is why the member name
+  is spelled in `vetting/mod.rs` and pinned against the crate's constant by a test.
+
+**What the mask is not.** A community that keeps both the masking key and the applicant DID can
+recompute it, so this raises the cost of a future deanonymisation rather than removing it. The
+stronger variant — storing a per-submission ordinal (`hidden-vetter-1`) instead of a pseudonym —
+loses nothing functional and is available if a community wants it; it is not the default only
+because a stable pseudonym is worth something for audit. The other half of the join is the
+**enrolment table**, which exists to enforce one credential per member per label; its retention
+window is a privacy decision, not bookkeeping. Spent serials can stay — they are random scalars
+and link to nobody.
+
+### 18.2 If the suite has to change
+
+The wire was built for it, which is the one piece of good luck here. The criterion publishes
+`suite`, both halves check it, and `extCritical` makes a client that cannot honour a suite refuse
+rather than guess. So a post-quantum suite is *additive*: dual-publish during an overlap, vetters
+enrol in both, applicants prove in whichever they implement, retire the old label. The facts
+shape, `requirements::evaluate`, `join.rego`, the spent-serial ledger, the enrolment and drip
+rules and the Trust Tasks are all suite-independent.
+
+The likely shape of such a suite is Merkle commitments plus nullifiers plus a hash-based proof —
+`C = H(usk ‖ label)` in a tree whose root is the class label, `T = H(usk ‖ id)` as the tag, the
+same token trick, one proof over the lot. It removes the pairing and the blind signature
+entirely. The open question is size: we are at a 952-byte proof inside a 4 KB submission against
+a **16 KiB `extensions` cap**, and a hash-based proof of this statement plausibly does not fit —
+so the cap, which is a number we published, is the first thing a prototype puts pressure on.
+
+A cheaper lever, available now and needing no new cryptography: **per-period vetter keys**. Today
+a vetter keeps one key for life and re-binds the same identifier at every rotation, because two
+class labels overlap and a member with two identifiers could count twice in one proof. A
+community that gives up the overlap can give its vetters a fresh key each period, which bounds
+any future deanonymisation to one period instead of a career — at the cost of proofs that can no
+longer span a rotation.
+
+## 19. The vetter's half, and the four tasks (2026-09-23)
+
+### 19.1 The tasks exist now
+
+`vetting/attestation/0.1`, `vtc/vetting/vetters/pcs-root/0.1`,
+`vtc/vetting/vetters/pcs-tokens/0.1` and `vtc/vetting/pcs-challenge/0.1` are written, validated
+and generated for all four languages on branch `hidden-vetting-tasks` of
+`dtgwg-trust-tasks-tf`. The schemas carry the shapes this branch already speaks, so nothing on
+either side had to be reshaped to fit them.
+
+One decision worth keeping: `vetting/attestation` declares `identifierScope: any`. Nothing in it
+needs a reusable identifier — the community never sees the document, and the applicant only needs
+the identifier the session was held under — so a pair running the whole vetting exchange under
+pairwise identifiers loses nothing. It also states, as a conformance requirement, that a consumer
+MUST NOT record the delivering `issuer` beside the attestation: doing so rebuilds, in the
+applicant's own store, exactly the link the exchange removes.
+
+**The bindings are not consumable yet.** `trust-tasks-rs` generates them as 0.22.0, and published
+crates in both workspaces (`affinidi-messaging-sdk`, `affinidi-tdk`) pin `^0.21`, so a
+`[patch.crates-io]` cannot apply: two incompatible `trust-tasks-rs` nodes do not unify. Until the
+release lands, `wire::hidden_attestation` builds the payload directly under the published type
+URI. Swapping to the generated types is a mechanical follow-up, not a redesign.
+
+### 19.2 The vetter attests through the desk
+
+`VettingBook::attest_hidden` is the whole vetter half, and it deliberately reuses
+`statement_draft` to build what it will *not* sign: one checklist, one set of refusals, one place
+where "the card has no such claim" or "a documentary method with nothing to rely on" is decided.
+Only the last step differs.
+
+- The applicant's PCS identifier reaches the vetter in the **request's `ext`**
+  (`hidden::request_ext`), which is the framework's own extension point. A community that does
+  not run hidden vetting sees a `vetting/request` it already understands.
+- The engine lives on the book as `HiddenVetterState`, one per community and persona, carrying
+  the published parameters beside the snapshot — because a parsed `VettingRequirements` has
+  dropped `ext` by then, and the parameters are in `ext`.
+- The desk closes the request into `Attested` exactly as the named path does, and adds nothing to
+  `issued`: there is no statement to withdraw, and hidden withdrawal is the token spend-set and
+  label rotation (§4.4).
+- The TUI's attest action branches on whether this persona holds an engine for the community. The
+  operator-facing words differ where the situation differs: sending succeeds with "the community
+  will count it without learning it was you", and a failed send says the token it spent is gone.
+
+The reference example now drives this path rather than calling the engine directly, so the run
+that produces the vector set is the run the screen makes.
+
+### 19.3 Still open
+
+- **Enrolment and the drip over the wire.** The tasks are specified and the service side mints
+  (§17.2); what is missing is the client half and a scheduler, which is where `last_tick` and
+  `last_drawn_at` on `HiddenVetterState` are already waiting.
+- **The challenge over the wire**, for the same reason.
+- **The applicant's and admin's screens**: "this community hides its vetters" is the whole feature
+  and nothing says it yet; a join request reviewed by an admin shows tags where DIDs normally are
+  and needs a label saying so.

@@ -609,6 +609,20 @@ impl Application {
                 .availability(availability),
         )
         .map_err(|e| schema(&e))?;
+        // Under a hidden criterion the vetter needs the identifier it will attest to, and the
+        // join DID is not that name. It travels in the framework's own extension point, so a
+        // community that does not run hidden vetting sees a request it already understands.
+        let body = match self.hidden_id() {
+            Some(id) => {
+                let ext = super::hidden::request_ext(super::hidden::SUITE, id);
+                let mut raw = serde_json::to_value(&body).map_err(|e| schema(&e))?;
+                if let Some(obj) = raw.as_object_mut() {
+                    obj.insert("ext".into(), ext);
+                }
+                serde_json::from_value(raw).map_err(|e| schema(&e))?
+            }
+            None => body,
+        };
         check_request(&body, &self.join_did)?;
         self.requests.push(OutboundRequest {
             document_id: document_id.to_string(),
@@ -1338,5 +1352,12 @@ impl Application {
     #[must_use]
     pub fn hidden_id(&self) -> Option<&str> {
         self.hidden_state.as_ref().map(|s| s.id.as_str())
+    }
+
+    /// How many hidden attestations this application holds. Zero on the named path, where the
+    /// count that matters is [`Self::presentable_statements`].
+    #[must_use]
+    pub fn hidden_held(&self) -> usize {
+        self.hidden_state.as_ref().map_or(0, |s| s.held.len())
     }
 }

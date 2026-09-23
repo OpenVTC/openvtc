@@ -70,6 +70,13 @@ pub enum VetterError {
     /// The community already recorded the withdrawal.
     #[error("the community has already recorded this withdrawal")]
     AlreadyWithdrawn,
+    /// The hidden path could not produce an attestation.
+    ///
+    /// Distinct from [`Self::Vetting`] because the causes are the community's rather than this
+    /// desk's: no engine for the community, no live class credential, no free token, or a
+    /// request that carries no identifier to attest to.
+    #[error(transparent)]
+    Hidden(#[from] crate::vetting::hidden::HiddenError),
 }
 
 /// One request at the desk.

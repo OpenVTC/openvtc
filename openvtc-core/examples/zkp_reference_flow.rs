@@ -627,6 +627,19 @@ async fn main() {
         .await
         .expect("the card verifies");
 
+        // The vetter attests through its desk — the path the screen calls. The desk builds the
+        // same statement draft the named path would sign, and then does not sign it: what comes
+        // back carries a tag where an issuer would be.
+        desk.hidden_vetter
+            .push(openvtc_core::vetting::book::HiddenVetterState {
+                community: community.clone(),
+                persona,
+                params: params.clone(),
+                snapshot: engines[index].clone(),
+                last_tick: 1,
+                last_drawn_at: None,
+            });
+
         // The statement the vetter would sign on the named path. Here it is the source of the
         // facts the attestation carries: the commitment and card digest are the ceremony's.
         let statement_draft = desk
@@ -665,15 +678,29 @@ async fn main() {
             token_label: String::new(),
             token_serial: String::new(),
         };
-        let attestation = hidden::attest(
-            &community,
-            &params,
-            &mut engines[index],
-            &applicant_pcs_id,
-            meta,
-            &mut rng,
-        )
-        .expect("the vetter holds a live credential and a free token");
+        let _ = meta; // the desk builds its own from the same draft
+        let attestation = desk
+            .attest_hidden(
+                &request_id,
+                vetter_did,
+                Attestation {
+                    method: *method,
+                    document_classes: documents.clone(),
+                    claims_verified: vec!["name.legal".into()],
+                    liveness_confirmed: true,
+                    declared_relationship: VettingRelationship::None,
+                    attestation_text_digest: None,
+                },
+                Utc::now(),
+                &mut rng,
+            )
+            .expect("the vetter holds a live credential and a free token");
+        // The desk closed the request, and spent a token doing it: the engine goes back.
+        engines[index] = desk
+            .hidden_vetter(&community, persona)
+            .expect("the engine is still there")
+            .snapshot
+            .clone();
         book.application_mut(&community, persona)
             .unwrap()
             .receive_hidden_attestation(&attestation)

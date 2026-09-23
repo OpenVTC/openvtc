@@ -143,6 +143,41 @@ pub fn credential_delivery(
     .map_err(|e| config_error("statement delivery", e))
 }
 
+/// `vetting/attestation/0.1` — a vetter gives an applicant an attestation that names nobody.
+///
+/// The hidden path's answer to [`credential_delivery`]. The document is signed like any other, so
+/// the applicant knows the delivery came from the vetter it sat with; what is *inside* carries no
+/// issuer, and it is the inside that reaches the community.
+///
+/// The type URI is the published task's. Until the pinned `trust-tasks-rs` carries its generated
+/// module, the payload is assembled here and checked against the published schema by
+/// `openvtc-core`'s own fixture test — see `docs/design/vetting-hidden-vetters-pcs.md` §19.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the message cannot be built.
+pub fn hidden_attestation(
+    vetter_did: &str,
+    applicant_did: &str,
+    attestation: &Value,
+    session_id: &str,
+) -> Result<Message, OpenVTCError> {
+    build_didcomm_message(
+        HIDDEN_ATTESTATION_TYPE,
+        attestation.clone(),
+        vetter_did,
+        applicant_did,
+        Some(session_id),
+    )
+    .map_err(|e| config_error("attestation delivery", e))
+}
+
+/// The published type URI of `vetting/attestation/0.1`.
+///
+/// Inside OpenVTC's inbound filter (`trusttasks.org/spec/vetting/*`), so it reaches
+/// [`crate::vetting::inbound::handle`] without a filter change.
+pub const HIDDEN_ATTESTATION_TYPE: &str = "https://trusttasks.org/spec/vetting/attestation/0.1";
+
 /// A verified inbound document.
 #[derive(Debug, Clone)]
 pub struct Opened<P> {
