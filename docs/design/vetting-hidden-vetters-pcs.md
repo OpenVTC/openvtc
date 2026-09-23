@@ -977,8 +977,8 @@ with a note that the count came from a proof.
 
 ### 19.4 Event mode, over the wire
 
-`vtc/vetting/vetters/event-mode/0.1` is authored and served, and §5.1's design survives the
-transit intact — which was the point of writing it as a task rather than a setting.
+`vtc/vetting/vetters/event-mode/0.1` is **merged upstream** (#620) and served, and §5.1's design
+survives the transit intact — which was the point of writing it as a task rather than a setting.
 
 **The task carries the request and nothing else.** A vetter asks; the answer says `pending` or
 `approved`, and `pending` is an answer rather than a refusal. There is deliberately no task for
@@ -1032,8 +1032,8 @@ One thing, and it was described wrongly for most of this branch's life. Both hal
 the payload types and validate them against the published schemas; something deletes both copies.
 That something is **not** a release of `trust-tasks-rs`.
 
-The four specifications are merged (`trustoverip/dtgwg-trust-tasks-tf` #618), event mode follows
-in its own PR, and 0.22 is already on crates.io — #619 publishes 0.22.2 carrying them. What
+All five specifications are merged (`trustoverip/dtgwg-trust-tasks-tf` #618 and #620), and 0.22
+is already on crates.io — the open release PR publishes the line carrying them. What
 blocks the generated types is that the VTI graph resolves **0.21.17**, and not by choice:
 `affinidi-messaging-sdk`, `affinidi-messaging-mediator` and the
 `trust-tasks-{proof,https,tsp,capability-client}` companions are all on the 0.21 line and
