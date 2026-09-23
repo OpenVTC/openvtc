@@ -130,6 +130,10 @@ pub fn is_community_bound(type_uri: &str) -> bool {
             | VETTING_VETTER_LIST_TYPE
             | VETTING_VETTER_PROFILE_TYPE
             | VETTING_VETTER_RESEND_TYPE
+            | pcs::ROOT_TYPE
+            | pcs::TOKENS_TYPE
+            | pcs::EVENT_MODE_TYPE
+            | pcs::CHALLENGE_TYPE
     )
 }
 
@@ -810,6 +814,32 @@ pub(crate) mod tests {
             assert_eq!(message.body, serde_json::to_value(doc).unwrap());
             assert!(is_community_bound(&doc.type_uri.to_string()));
         }
+
+        // Hidden vetting's four community-side tasks go to the community too. They were written
+        // before the envelope rule and name a string constant rather than a generated type, so
+        // nothing else would notice them going task-typed — and a community refuses that.
+        for type_uri in [
+            pcs::ROOT_TYPE,
+            pcs::TOKENS_TYPE,
+            pcs::EVENT_MODE_TYPE,
+            pcs::CHALLENGE_TYPE,
+        ] {
+            let doc = document(
+                type_uri,
+                "did:key:zVetter",
+                "did:key:zVtc",
+                new_id(),
+                &json!({}),
+            )
+            .unwrap();
+            assert_eq!(
+                to_message(&doc).unwrap().typ,
+                crate::capabilities::TRUST_TASK_ENVELOPE_TYPE,
+                "{type_uri} must ride the envelope"
+            );
+        }
+        // The attestation is a peer leg: vetter to applicant.
+        assert!(!is_community_bound(HIDDEN_ATTESTATION_TYPE));
 
         for type_uri in [VETTING_REQUEST_TYPE, VETTING_DECLINE_TYPE] {
             let doc = document(
