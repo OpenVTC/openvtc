@@ -983,9 +983,17 @@ transit intact — which was the point of writing it as a task rather than a set
 **The task carries the request and nothing else.** A vetter asks; the answer says `pending` or
 `approved`, and `pending` is an answer rather than a refusal. There is deliberately no task for
 the *approval*: a task the vetter could send is a task a vetter could be made to send, so
-approving an event is an act by an admin through the criterion that publishes it. The
-specification says so in its Authorization section, which is where a future implementer will look
-for permission to add the convenience.
+approving an event is an act by an admin through the criterion that publishes it — `POST
+/v1/schemas/accepts`, which is admin-authenticated and already carries these parameters verbatim.
+The specification says so in its Authorization section, which is where a future implementer will
+look for permission to add the convenience.
+
+That is a narrowing of §5.1, which said an admin **or moderator** approves via `vetter_rate.rego`.
+The policy hook is not built; what is built is the admin route. The rule §5.1 was protecting — the
+vetter cannot be the approver — is not in the route either, because a route is the wrong place for
+it: an approver's DID in a configuration file is a claim, and the check belongs where the tokens
+are. `pcs_event::gate` refuses an event whose `approvedBy` holds a request row of its own, so a
+self-approval opens nothing however it was written and whoever wrote it.
 
 **Four conditions, checked where tokens are served.** `vetting::pcs_event::gate` stands between
 an event being configured and its label being drawn under: an approver has named themselves and
