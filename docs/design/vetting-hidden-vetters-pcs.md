@@ -975,13 +975,54 @@ inside the proof); and it binds the community's challenge rather than one it min
 while it waits. The admin panel renders a tag as a tag instead of passing it to a DID renderer,
 with a note that the count came from a proof.
 
-### 19.4 Still open
+### 19.4 Event mode, over the wire
+
+`vtc/vetting/vetters/event-mode/0.1` is authored and served, and §5.1's design survives the
+transit intact — which was the point of writing it as a task rather than a setting.
+
+**The task carries the request and nothing else.** A vetter asks; the answer says `pending` or
+`approved`, and `pending` is an answer rather than a refusal. There is deliberately no task for
+the *approval*: a task the vetter could send is a task a vetter could be made to send, so
+approving an event is an act by an admin through the criterion that publishes it. The
+specification says so in its Authorization section, which is where a future implementer will look
+for permission to add the convenience.
+
+**Four conditions, checked where tokens are served.** `vetting::pcs_event::gate` stands between
+an event being configured and its label being drawn under: an approver has named themselves and
+is not one of the group; the group is at least the floor; the day is inside the window and its
+grace; and this member asked. They are checked at the drip rather than at approval because
+approval is a configuration edit, and a configuration edit is what a coerced approver would be
+asked for. A refusal carries `pcs-tokens:eventRefused` rather than `notAVetter` — the vetter
+holds the grant, and sending them to chase one would be the wrong answer to the right complaint.
+
+**A count, never a roster.** The response says how many vetters have asked and how many the
+community needs. Who they are is the anonymity set the event's smaller label is bought with, so
+the number is the most a member is told — enough to tell "nobody has approved it" from "not
+enough people have asked", which are the two reasons a request waits and have different answers.
+
+**The client draws under both labels.** `hidden::due` now keys its tick per label, because a
+vetter at a conference owes two draws a day: the event's, and the ordinary monthly one. Dropping
+the monthly draw for the three days of a summit would say, in the timing of the requests alone,
+that those three days were a summit. The schedule reads only the events the community has
+approved us for — a published label says an event exists, never that we are in it — and stops
+asking once the label closes.
+
+**The screen offers a menu, not a number.** `e` on the desk lists each (event, tier) the
+community publishes, with the event's own days as the window, and says the price before it is
+asked for: an attestation made there says *someone vetting at this event* rather than *someone in
+this community*. The window is the event's rather than the vetter's, because a vetter naming
+their own days would say which days of a conference they expect to be at the desk.
+
+The menu reaches the client the same way the rest of these parameters do — out of band, §8 —
+where `HiddenParams.events` takes the community's `events` verbatim. `approvedBy` is not part of
+the offer type, so it is dropped on the way in rather than shown to a vetter who has no use for
+it.
+
+### 19.5 Still open
 
 - **The `trust-tasks-rs` release.** Both halves hand-write the payload types and validate them
   against the published schemas; the release deletes both copies. That is a queue, not a design
-  question.
-- **Event mode over the wire** (`vtc/vetting/vetters/event-mode`), which §5.1 designs and no task
-  yet carries. The engine supports it; nothing asks for it.
+  question: the specifications are in `trustoverip/dtgwg-trust-tasks-tf` PR #618.
 
 ## 20. The protocol on its own
 

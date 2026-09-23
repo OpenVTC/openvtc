@@ -636,8 +636,9 @@ async fn main() {
                 persona,
                 params: params.clone(),
                 snapshot: engines[index].clone(),
-                last_tick: 1,
+                last_ticks: std::collections::BTreeMap::new(),
                 last_drawn_at: None,
+                events: Vec::new(),
             });
 
         // The statement the vetter would sign on the named path. Here it is the source of the

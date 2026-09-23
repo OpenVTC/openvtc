@@ -275,6 +275,9 @@ pub mod pcs {
     pub const ROOT_TYPE: &str = "https://trusttasks.org/spec/vtc/vetting/vetters/pcs-root/0.1";
     /// `vtc/vetting/vetters/pcs-tokens/0.1`.
     pub const TOKENS_TYPE: &str = "https://trusttasks.org/spec/vtc/vetting/vetters/pcs-tokens/0.1";
+    /// `vtc/vetting/vetters/event-mode/0.1`.
+    pub const EVENT_MODE_TYPE: &str =
+        "https://trusttasks.org/spec/vtc/vetting/vetters/event-mode/0.1";
     /// `vtc/vetting/pcs-challenge/0.1`.
     pub const CHALLENGE_TYPE: &str = "https://trusttasks.org/spec/vtc/vetting/pcs-challenge/0.1";
 
@@ -331,6 +334,55 @@ pub mod pcs {
         pub ext: Option<Value>,
     }
 
+    /// A vetter asking to vet at a named event, at one of the rates the community publishes.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct EventModeRequest {
+        pub event_id: String,
+        pub tier: String,
+        pub window: EventWindow,
+    }
+
+    /// The days a vetter expects to be vetting at an event. Dates, never timestamps: an hour
+    /// would say when this vetter expects to be at a desk.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct EventWindow {
+        pub start_date: chrono::NaiveDate,
+        pub end_date: chrono::NaiveDate,
+    }
+
+    /// Where the request stands.
+    ///
+    /// `pending` is the ordinary answer to a first request and is not a refusal — a refusal
+    /// arrives as a `trust-task-error`. The three optional members are present only once the
+    /// label is live; reading them as permission while `state` is `pending` is the mistake this
+    /// shape is arranged to make awkward.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct EventModeResponse {
+        pub event_id: String,
+        pub state: String,
+        pub tier: String,
+        pub window: EventWindow,
+        /// How many vetters have asked, including us. A count and never a list: who else is at
+        /// the event is the anonymity set.
+        pub group_size: usize,
+        /// How many this community needs before the event may be approved at all.
+        pub group_floor: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub drip_per_tick: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub closes_after: Option<chrono::NaiveDate>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ext: Option<Value>,
+    }
+
+    /// The word the community uses for a live event.
+    pub const EVENT_APPROVED: &str = "approved";
+
     /// An applicant asking for the challenge its proof must bind. Every member is optional: the
     /// applicant is identified by `issuer`.
     #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -375,6 +427,25 @@ pub fn pcs_tokens_request(
     body: &pcs::TokensRequest,
 ) -> Result<TrustTask<Value>, OpenVTCError> {
     document(pcs::TOKENS_TYPE, vetter_did, community_did, new_id(), body)
+}
+
+/// A `vtc/vetting/vetters/event-mode/0.1` request: ask to vet at a named event.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the document cannot be built.
+pub fn pcs_event_mode_request(
+    vetter_did: &str,
+    community_did: &str,
+    body: &pcs::EventModeRequest,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    document(
+        pcs::EVENT_MODE_TYPE,
+        vetter_did,
+        community_did,
+        new_id(),
+        body,
+    )
 }
 
 /// A `vtc/vetting/pcs-challenge/0.1` request: ask for the nonce this submission must bind.

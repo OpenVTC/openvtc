@@ -57,8 +57,8 @@ use crate::state_handler::join_flow;
 use crate::state_handler::main_page::content::{
     ApplicationRow, AttestForm, CardPreview, DIRECTORY_FIELDS, DIRECTORY_LABELS, DIRECTORY_METHODS,
     DeskRow, DeskStage, DeskView, DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS,
-    EventForm, FaceChoice, IssuedRow, LineTone, ListedVetterRow, NewFaceFocus, NewFaceForm,
-    PROFILE_FIELDS, PROFILE_LABELS, PoolRow, RequestRow, TicketRow, VETTING_METHODS,
+    EventForm, EventOffer, FaceChoice, IssuedRow, LineTone, ListedVetterRow, NewFaceFocus,
+    NewFaceForm, PROFILE_FIELDS, PROFILE_LABELS, PoolRow, RequestRow, TicketRow, VETTING_METHODS,
     VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm,
     VetterStandingRow, VettingMembership, VettingMode, VettingPersona, VettingState, VettingTab,
     method_label, row_of,
@@ -170,6 +170,34 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
             accent: accent(&m.vtc_did),
         })
         .collect();
+
+    // The event menu, one row per (event, tier), with where our own request
+    // stands beside it. Read from the parameters each community published —
+    // what is on offer — never from anything that would say who else asked.
+    let mut offers = Vec::new();
+    for held in &book.hidden_vetter {
+        let name =
+            community_name(&held.community).unwrap_or_else(|| shorten_did(&held.community, 48));
+        for event in &held.params.events {
+            let ours = held.events.iter().find(|e| e.event_id == event.event_id);
+            for tier in &event.tiers {
+                offers.push(EventOffer {
+                    community: held.community.clone(),
+                    community_name: name.clone(),
+                    persona: held.persona,
+                    event_id: event.event_id.clone(),
+                    tier: tier.name.clone(),
+                    drip_per_tick: tier.drip_per_tick,
+                    start_date: event.start_date,
+                    end_date: event.end_date,
+                    group_floor: event.group_floor,
+                    state: ours.map(|e| e.state.clone()),
+                    group_size: ours.map(|e| e.group_size),
+                });
+            }
+        }
+    }
+    vetting.event_offers = offers.into();
 
     // The desk's header. Built from `vetter_standing`, which — alone among the
     // vetter-side reads — keeps lapsed grants, so a vetter who has quietly
@@ -659,6 +687,17 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 page(ctx).mode = VettingMode::Resend { index: 0 };
             }
         }
+        VettingAction::AskEventMode => {
+            if page(ctx).event_offers.is_empty() {
+                status(
+                    ctx,
+                    "No community you vet for is running an event. Event mode is the exception, \
+                     not the setting — an ordinary week is the slow drip.",
+                );
+            } else {
+                page(ctx).mode = VettingMode::EventMode { index: 0 };
+            }
+        }
         VettingAction::Status(message) => status(ctx, message),
         VettingAction::Input(text) => {
             input(&mut page(ctx).mode, text);
@@ -968,6 +1007,7 @@ fn cycle(v: &mut VettingState, forward: bool) {
     let (personas, memberships, documentation) =
         (v.personas.len(), v.memberships.len(), v.documentation.len());
     let (communities, resend) = (v.directory_communities.len(), v.resend_candidates.len());
+    let offers = v.event_offers.len();
     match &mut v.mode {
         VettingMode::Directory(view) => match view.field {
             0 => turn(&mut view.community_index, communities),
@@ -978,6 +1018,7 @@ fn cycle(v: &mut VettingState, forward: bool) {
             turn(&mut form.membership_index, memberships);
         }
         VettingMode::Resend { index } => turn(index, resend),
+        VettingMode::EventMode { index } => turn(index, offers),
         VettingMode::NewApplication {
             persona_index,
             field: 1,
@@ -1060,6 +1101,7 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
         },
         VettingMode::Profile(form) => profile_submit(ctx, *form).await,
         VettingMode::Resend { index } => ask_resend(ctx, index).await,
+        VettingMode::EventMode { index } => ask_event_mode(ctx, index).await,
         VettingMode::SendCard {
             application_id,
             session_id,
@@ -1790,6 +1832,66 @@ async fn publish_profile(ctx: &mut ActionCtx<'_>, form: &VetterProfileForm) {
     }
 }
 
+/// Ask a community to let us vet at one of its events, at one of its published tiers.
+///
+/// The window we ask for is the event's own. A vetter naming their own days would say which
+/// days of a conference they expect to be at the desk, and a community that had to compare two
+/// vetters' windows would learn more from the difference than from either.
+///
+/// What comes back is never a grant — approval is somebody else's act — so the answer is
+/// recorded and the label opens later, or not at all.
+async fn ask_event_mode(ctx: &mut ActionCtx<'_>, index: usize) {
+    let Some(offer) = page(ctx).event_offers.get(index).cloned() else {
+        return;
+    };
+    let Some(did) = persona_did(ctx.config, offer.persona) else {
+        return status(
+            ctx,
+            "The persona that belongs to this community is not available.",
+        );
+    };
+    if !begin(ctx) {
+        return;
+    }
+    let body = openvtc_core::vetting::wire::pcs::EventModeRequest {
+        event_id: offer.event_id.clone(),
+        tier: offer.tier.clone(),
+        window: openvtc_core::vetting::wire::pcs::EventWindow {
+            start_date: offer.start_date,
+            end_date: offer.end_date,
+        },
+    };
+    let document = match wire::pcs_event_mode_request(&did, &offer.community, &body) {
+        Ok(d) => d,
+        Err(e) => return abandon(ctx, "Could not ask to vet at the event", e),
+    };
+    let document_id = document.id.clone();
+    ctx.config.private.vetting.ask(CommunityQuery {
+        document_id: document_id.clone(),
+        community: offer.community.clone(),
+        persona: offer.persona,
+        kind: QueryKind::PcsEventMode,
+        sent_at: Utc::now(),
+    });
+    page(ctx).mode = VettingMode::List;
+    status(
+        ctx,
+        format!(
+            "Asking {} to vet at {} ({})…",
+            offer.community_name, offer.event_id, offer.tier
+        ),
+    );
+    let sent = Sent::Query {
+        document_id: document_id.clone(),
+        community: offer.community.clone(),
+        kind: QueryKind::PcsEventMode,
+    };
+    if let Err(e) = sign_and_send(ctx, offer.persona, document, sent).await {
+        ctx.config.private.vetting.forget_query(&document_id);
+        abandon(ctx, "Could not ask to vet at the event", e);
+    }
+}
+
 async fn ask_resend(ctx: &mut ActionCtx<'_>, index: usize) {
     let Some(target) = page(ctx).resend_candidates.get(index).cloned() else {
         return;
@@ -2436,12 +2538,16 @@ pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &
 }
 
 /// Do whatever this community's hidden-vetting schedule owes it now: enrol under the current
-/// class label, or draw this tick of the drip.
+/// class label, or draw this tick of the drip — under every label it owes one for.
 ///
 /// Driven by the clock and never by the wallet. A client that drew when it was running low
 /// would publish, in the timing of its own requests, how much vetting it had been doing — which
 /// is the one thing the whole exchange is built to withhold. So this runs on a tick whether the
 /// vetter has attested to nobody or to three people, and asks for the same number either way.
+///
+/// A vetter in event mode owes two draws a tick, and the loop below is why the ordinary one is
+/// still among them: dropping the monthly draw for the three days of a conference would say, in
+/// the timing of the requests alone, that those three days were a conference.
 pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str) {
     let now = Utc::now();
     let Some(state) = ctx
@@ -2458,12 +2564,52 @@ pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str
     let Some(did) = persona_did(ctx.config, state.persona) else {
         return;
     };
-    match openvtc_core::vetting::hidden::due(
-        &state.params,
-        Some(&state.snapshot),
-        state.last_tick,
-        now,
-    ) {
+    // Only the events this community has approved us for, and only while their labels are still
+    // accepted. A label the community publishes says an event exists, never that we are in it.
+    let events = state.event_draws(now.date_naive());
+
+    // Plan first, then send. `last_ticks` only advances when the community answers, so a
+    // working copy is what stops one pass asking for the same label over and over; the bound is
+    // there so that a schedule which somehow never settles cannot spin.
+    let mut ticks = state.last_ticks.clone();
+    let mut plan = Vec::new();
+    for _ in 0..8 {
+        match openvtc_core::vetting::hidden::due(
+            &state.params,
+            Some(&state.snapshot),
+            &ticks,
+            &events,
+            now,
+        ) {
+            openvtc_core::vetting::hidden::Due::Nothing => break,
+            // Enrolment blocks every draw behind it, so it is the whole plan.
+            enrol @ openvtc_core::vetting::hidden::Due::Enrol { .. } => {
+                plan.push(enrol);
+                break;
+            }
+            draw @ openvtc_core::vetting::hidden::Due::Draw { .. } => {
+                if let openvtc_core::vetting::hidden::Due::Draw { label, tick, .. } = &draw {
+                    ticks.insert(label.clone(), *tick);
+                }
+                plan.push(draw);
+            }
+        }
+    }
+    for owed in plan {
+        hidden_vetting_send(ctx, community, &state, &did, owed, now).await;
+    }
+}
+
+/// Send one thing the schedule owes.
+async fn hidden_vetting_send(
+    ctx: &mut ActionCtx<'_>,
+    community: &str,
+    state: &openvtc_core::vetting::book::HiddenVetterState,
+    did: &str,
+    owed: openvtc_core::vetting::hidden::Due,
+    now: DateTime<Utc>,
+) {
+    match owed {
         openvtc_core::vetting::hidden::Due::Nothing => {}
         openvtc_core::vetting::hidden::Due::Enrol { period } => {
             let mut rng = rand::thread_rng();
@@ -2477,7 +2623,7 @@ pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str
                 Ok(pair) => pair,
                 Err(e) => return status(ctx, format!("Could not ask to enrol: {e}")),
             };
-            let document = match wire::pcs_root_request(&did, community, &body) {
+            let document = match wire::pcs_root_request(did, community, &body) {
                 Ok(d) => d,
                 Err(e) => return abandon(ctx, "Could not ask to enrol", e),
             };
@@ -2525,7 +2671,7 @@ pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str
             {
                 held.snapshot = snapshot;
             }
-            let document = match wire::pcs_tokens_request(&did, community, &body) {
+            let document = match wire::pcs_tokens_request(did, community, &body) {
                 Ok(d) => d,
                 Err(e) => return abandon(ctx, "Could not draw tokens", e),
             };

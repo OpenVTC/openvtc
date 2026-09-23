@@ -2545,6 +2545,7 @@ impl MainPage {
             // asking one to reissue a grant that has lapsed.
             (VettingTab::Desk, KeyCode::Char('p')) => V::EditProfile,
             (VettingTab::Desk, KeyCode::Char('g')) => V::AskResend,
+            (VettingTab::Desk, KeyCode::Char('e')) => V::AskEventMode,
             (VettingTab::Desk, KeyCode::Char('o')) if view == DeskView::Requests => V::OpenSession,
             (VettingTab::Desk, KeyCode::Char('a') | KeyCode::Enter)
                 if view == DeskView::Requests =>

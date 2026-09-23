@@ -42,6 +42,8 @@ pub enum QueryKind {
     PcsRoot,
     /// `vtc/vetting/vetters/pcs-tokens/0.1` — one tick of the drip.
     PcsTokens,
+    /// `vtc/vetting/vetters/event-mode/0.1` — a place at a named event.
+    PcsEventMode,
     /// `vtc/vetting/pcs-challenge/0.1` — the nonce a submission binds.
     PcsChallenge,
 }
@@ -57,6 +59,7 @@ impl QueryKind {
             QueryKind::VetterResend => "your vetter credential",
             QueryKind::PcsRoot => "your hidden-vetting credential",
             QueryKind::PcsTokens => "your attestation tokens",
+            QueryKind::PcsEventMode => "your place at the event",
             QueryKind::PcsChallenge => "the challenge for your submission",
         }
     }

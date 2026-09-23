@@ -142,13 +142,73 @@ pub struct HiddenVetterState {
     pub params: super::hidden::HiddenParams,
     /// The engine, as [`openvtc_vetting_pcs::snapshot::VetterSnapshot`] stores it.
     pub snapshot: openvtc_vetting_pcs::snapshot::VetterSnapshot,
-    /// The last drip tick we asked for, so the next ask is the next tick and a restart does not
-    /// re-ask for one the community has already served.
+    /// The last drip tick we were served, **per token label**, so the next ask is the next tick
+    /// and a restart does not re-ask for one the community has already served.
+    ///
+    /// Per label because a vetter in event mode owes two draws a tick: the event's, and the
+    /// ordinary monthly one that must not be skipped while the event runs (§5.1). One counter
+    /// would make the second draw look already served.
     #[serde(default)]
-    pub last_tick: u32,
+    pub last_ticks: std::collections::BTreeMap<String, u32>,
     /// When we last drew tokens. The drip is a schedule, not a response to demand (§5.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_drawn_at: Option<DateTime<Utc>>,
+    /// Events we have asked to vet at, with where each request stands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<HiddenEventState>,
+}
+
+impl HiddenVetterState {
+    /// The event labels this vetter may draw under today, with the rate each yields.
+    ///
+    /// Only the approved ones, and only while their label is still accepted. A label the
+    /// community publishes says an event exists; it never says we are in its group, and drawing
+    /// under one we were not approved for would be refused — and would announce that we tried.
+    #[must_use]
+    pub fn event_draws(&self, today: chrono::NaiveDate) -> Vec<super::hidden::EventDraw> {
+        self.events
+            .iter()
+            .filter(|e| e.state == super::wire::pcs::EVENT_APPROVED)
+            .filter_map(|e| {
+                let label = e.label.clone()?;
+                let closes_after = e.closes_after?;
+                (today <= closes_after).then_some(super::hidden::EventDraw {
+                    label,
+                    rate: e.drip_per_tick.unwrap_or(self.params.drip_per_tick),
+                    closes_after,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Where one event-mode request stands, as the community last answered it.
+///
+/// `group_size` is a count and never a roster: who else is at the event is the anonymity set the
+/// event's smaller token label is bought with. It is kept because it is the only way a vetter
+/// can tell the two reasons for waiting apart — nobody has approved it, or not enough people
+/// have asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HiddenEventState {
+    /// The community's name for the gathering.
+    pub event_id: String,
+    /// The tier we asked for.
+    pub tier: String,
+    /// `pending` or `approved`, in the community's own words.
+    pub state: String,
+    pub group_size: usize,
+    pub group_floor: usize,
+    /// The token label, once the event is live. Absent while pending — reading one as
+    /// permission to draw is the mistake this shape makes awkward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drip_per_tick: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closes_after: Option<chrono::NaiveDate>,
+    /// When we last heard about it.
+    pub answered_at: DateTime<Utc>,
 }
 
 /// Where one community has put us as a vetter: its grant, and the profile we

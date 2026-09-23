@@ -293,8 +293,9 @@ fn a_vetter_attests_through_the_desk_without_signing_a_statement() {
         persona,
         params: params.clone(),
         snapshot: engine.snapshot().unwrap(),
-        last_tick: 1,
+        last_ticks: std::collections::BTreeMap::new(),
         last_drawn_at: None,
+        events: Vec::new(),
     });
 
     // The applicant's side: an application, and the request that carries its identifier.

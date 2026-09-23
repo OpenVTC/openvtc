@@ -1775,6 +1775,37 @@ pub struct VettingState {
     /// Where we stand as a vetter with each community that has named us one —
     /// the desk's header. Includes lapsed grants, which nothing else does.
     pub standing: Arc<[VetterStandingRow]>,
+    /// Event tiers a community we vet for is offering, one row per (event,
+    /// tier). The menu §5.1 asks for: a vetter picks a published rate rather
+    /// than naming one, so that what they asked for is not itself a
+    /// distinguishing detail.
+    pub event_offers: Arc<[EventOffer]>,
+}
+
+/// One (event, tier) a community we vet for is offering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventOffer {
+    /// The community running it.
+    pub community: String,
+    /// Its display name.
+    pub community_name: String,
+    /// Our persona there.
+    pub persona: PersonaId,
+    /// The community's name for the gathering.
+    pub event_id: String,
+    /// The tier, as the menu names it.
+    pub tier: String,
+    /// What that tier yields a tick.
+    pub drip_per_tick: usize,
+    /// The event's own days, which are the window we ask for.
+    pub start_date: chrono::NaiveDate,
+    pub end_date: chrono::NaiveDate,
+    /// How many vetters the community needs before it opens the label at all.
+    pub group_floor: usize,
+    /// Where our request stands, if we have made one.
+    pub state: Option<String>,
+    /// How many have asked so far, if the community has told us.
+    pub group_size: Option<usize>,
 }
 
 impl VettingState {
@@ -1970,6 +2001,9 @@ pub enum VettingMode {
     Profile(Box<VetterProfileForm>),
     /// Ask a community to send our vetter credential again.
     Resend { index: usize },
+    /// Ask to vet at one of a community's published events, at one of its
+    /// published tiers.
+    EventMode { index: usize },
     /// Read the match code with the vetter, preview what the face shows, then
     /// send the card.
     SendCard {

@@ -347,6 +347,8 @@ pub enum VettingAction {
     RemoveEvent,
     /// Ask a community to send our vetter credential again.
     AskResend,
+    /// Ask a community to let us vet at one of its published events.
+    AskEventMode,
     /// Arm the confirmation for abandoning the highlighted application.
     ///
     /// Confirming is `Enter`, which the open mode already routes — the same

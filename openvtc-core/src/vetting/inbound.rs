@@ -218,6 +218,23 @@ pub enum Notice {
         /// How many tokens it added.
         taken: usize,
     },
+    /// Vetter: where our event-mode request stands.
+    ///
+    /// Sent on every answer, including the ones that change nothing, because the two reasons a
+    /// request waits — nobody has approved it, not enough people have asked — look identical
+    /// from the outside and only the counts tell them apart.
+    HiddenEventMode {
+        /// The community.
+        community: String,
+        /// The event, as the community names it.
+        event_id: String,
+        /// Whether the label is live for us yet.
+        approved: bool,
+        /// How many vetters have asked, including us.
+        group_size: usize,
+        /// How many this community needs.
+        group_floor: usize,
+    },
     /// Applicant: the community issued the challenge this submission must bind.
     ChallengeIssued {
         /// The application.
@@ -347,6 +364,20 @@ impl Notice {
             Notice::HiddenTokensDrawn { taken, .. } => format!(
                 "Drew {taken} attestation token{}.",
                 if *taken == 1 { "" } else { "s" }
+            ),
+            Notice::HiddenEventMode {
+                event_id,
+                approved: true,
+                ..
+            } => format!("You are in {event_id}. Your tokens there draw at the event's rate."),
+            Notice::HiddenEventMode {
+                event_id,
+                group_size,
+                group_floor,
+                ..
+            } => format!(
+                "Asked to vet at {event_id}. {group_size} of {group_floor} vetters so far, and \
+                 it still needs an approver."
             ),
             Notice::ChallengeIssued { expires_at, .. } => format!(
                 "The community issued your submission challenge; it stands until {}.",
@@ -482,6 +513,9 @@ pub async fn handle(
         }
         t if t == wire::pcs::response_of(wire::pcs::TOKENS_TYPE) => {
             tokens_served(book, ctx, message, sender)
+        }
+        t if t == wire::pcs::response_of(wire::pcs::EVENT_MODE_TYPE) => {
+            event_mode_answered(book, ctx, message, sender)
         }
         t if t == wire::pcs::response_of(wire::pcs::CHALLENGE_TYPE) => {
             challenge_issued(book, message, sender)
@@ -984,7 +1018,7 @@ fn tokens_served(
         Ok(taken) => {
             if let Some(state) = book.hidden_vetter_mut(sender, query.persona) {
                 state.snapshot = snapshot;
-                state.last_tick = body.tick;
+                state.last_ticks.insert(body.label.clone(), body.tick);
                 state.last_drawn_at = Some(ctx.now);
             }
             Handled {
@@ -1000,6 +1034,64 @@ fn tokens_served(
             warn!(community = %sender, error = %e, "served tokens did not verify");
             Handled::default()
         }
+    }
+}
+
+/// `vtc/vetting/vetters/event-mode/0.1#response` — where our event-mode request stands.
+///
+/// The answer is recorded whatever it says, and `pending` is an answer. What it is **not** is a
+/// grant: only an `approved` answer carrying a label opens one, and [`HiddenVetterState::
+/// event_draws`](super::book::HiddenVetterState::event_draws) is what the schedule reads, so a
+/// pending row can never put a label into the drip.
+fn event_mode_answered(
+    book: &mut VettingBook,
+    ctx: &Context<'_>,
+    message: &Message,
+    sender: &str,
+) -> Handled {
+    let Some((query, body)) =
+        answer_to::<wire::pcs::EventModeResponse>(book, message, sender, QueryKind::PcsEventMode)
+    else {
+        return Handled::default();
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(unreadable) => {
+            return Handled {
+                answer: Some(unreadable),
+                ..Handled::default()
+            };
+        }
+    };
+    let approved = body.state == wire::pcs::EVENT_APPROVED;
+    let Some(state) = book.hidden_vetter_mut(sender, query.persona) else {
+        return Handled::default();
+    };
+    let row = super::book::HiddenEventState {
+        event_id: body.event_id.clone(),
+        tier: body.tier,
+        state: body.state,
+        group_size: body.group_size,
+        group_floor: body.group_floor,
+        label: body.label,
+        drip_per_tick: body.drip_per_tick,
+        closes_after: body.closes_after,
+        answered_at: ctx.now,
+    };
+    match state.events.iter_mut().find(|e| e.event_id == row.event_id) {
+        Some(existing) => *existing = row,
+        None => state.events.push(row),
+    }
+    Handled {
+        changed: true,
+        notice: Some(Notice::HiddenEventMode {
+            community: sender.to_string(),
+            event_id: body.event_id,
+            approved,
+            group_size: body.group_size,
+            group_floor: body.group_floor,
+        }),
+        ..Handled::default()
     }
 }
 
@@ -1198,7 +1290,10 @@ fn refused(
             // issue a challenge. Each is worth saying in the operator's own terms, because
             // each has a different answer — a vetter who is not granted, a tick already
             // served, a criterion that does not run hidden vetting at all.
-            QueryKind::PcsRoot | QueryKind::PcsTokens | QueryKind::PcsChallenge => (
+            QueryKind::PcsRoot
+            | QueryKind::PcsTokens
+            | QueryKind::PcsEventMode
+            | QueryKind::PcsChallenge => (
                 false,
                 Some(Notice::HiddenVettingRefused {
                     community: sender.to_string(),

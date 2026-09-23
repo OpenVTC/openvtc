@@ -47,6 +47,44 @@ pub struct HiddenParams {
     /// what to ask for on its schedule; the community enforces it either way.
     #[serde(default = "default_drip_per_tick")]
     pub drip_per_tick: usize,
+    /// Events this community is running, if any (§5.1). The menu a vetter picks from: a vetter
+    /// names a tier rather than a number, so that a requested rate is not itself a
+    /// distinguishing detail.
+    ///
+    /// What is published is the offer. Whether *we* are in an event's group is the community's
+    /// answer to [`crate::vetting::wire::pcs::EventModeRequest`], never this list.
+    #[serde(default)]
+    pub events: Vec<HiddenEventOffer>,
+}
+
+/// One event a community is running, as it publishes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiddenEventOffer {
+    /// The community's name for the gathering.
+    pub event_id: String,
+    /// First day, inclusive.
+    pub start_date: chrono::NaiveDate,
+    /// Last day, inclusive.
+    pub end_date: chrono::NaiveDate,
+    /// How many vetters the community needs before it will open the event's label at all. Shown
+    /// because it is the price of the higher rate: a spend under an event label came from
+    /// someone in that group, and the floor is what keeps the group from being a name.
+    #[serde(default)]
+    pub group_floor: usize,
+    /// The rates on offer.
+    #[serde(default)]
+    pub tiers: Vec<HiddenEventTier>,
+}
+
+/// One rate on an event's menu.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiddenEventTier {
+    /// How the menu names it.
+    pub name: String,
+    /// How many tokens a tick under it yields.
+    pub drip_per_tick: usize,
 }
 
 /// What a community that publishes no rate is taken to mean — the same default the VTC's own
@@ -535,6 +573,22 @@ pub enum Due {
     },
 }
 
+/// An event label this vetter has been approved to draw under, and what it yields.
+///
+/// It is separate from [`HiddenParams`] because the community publishes the label to everyone
+/// and the approval only to the group: a label appearing in `token_labels` says an event exists,
+/// never that this vetter is in it. Drawing under a label we were not approved for would be
+/// refused, and would announce that we tried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventDraw {
+    /// `token/event/<eventId>`.
+    pub label: String,
+    /// The rate of the tier this vetter asked for — not the community's ordinary drip.
+    pub rate: usize,
+    /// The last day this label is issued or accepted.
+    pub closes_after: chrono::NaiveDate,
+}
+
 /// Decide what a vetter's client owes this community now.
 ///
 /// Two rules, and the second is the one that matters:
@@ -550,11 +604,22 @@ pub enum Due {
 /// current one, and the community serves each at most once. The tokens for a week away are
 /// simply not minted — which is the same answer a vetter who was present but idle gets, and
 /// that symmetry is the point.
+///
+/// # One label at a time, and the event's is not the exception
+///
+/// A vetter in event mode owes this community **two** draws a tick: the event's, and the
+/// ordinary monthly one. Skipping the monthly draw for the three days of a conference would say,
+/// in the timing of the requests alone, that those three days were a conference — so the
+/// ordinary label is drawn throughout, exactly as it would be in an ordinary week.
+///
+/// `last_ticks` is therefore per label, and this answers the first outstanding one. A caller
+/// with more than one owing calls again, recording each label as it goes.
 #[must_use]
 pub fn due(
     params: &HiddenParams,
     snapshot: Option<&VetterSnapshot>,
-    last_tick: u32,
+    last_ticks: &std::collections::BTreeMap<String, u32>,
+    events: &[EventDraw],
     now: chrono::DateTime<chrono::Utc>,
 ) -> Due {
     let Some(period) = params
@@ -571,17 +636,30 @@ pub fn due(
         return Due::Enrol { period };
     }
     let tick = tick_of(now);
-    if tick <= last_tick {
-        return Due::Nothing;
+    let today = now.date_naive();
+    let outstanding = |label: &str| last_ticks.get(label).is_none_or(|&t| tick > t);
+
+    // The ordinary label first: it is the one that must never be skipped.
+    if let Some(label) = params.token_labels.first()
+        && outstanding(label)
+    {
+        return Due::Draw {
+            label: label.clone(),
+            tick,
+            rate: params.drip_per_tick,
+        };
     }
-    let Some(label) = params.token_labels.first().cloned() else {
-        return Due::Nothing;
-    };
-    Due::Draw {
-        label,
-        tick,
-        rate: params.drip_per_tick,
+    // Then each event this vetter was approved for, while its label is still accepted.
+    for event in events {
+        if today <= event.closes_after && outstanding(&event.label) {
+            return Due::Draw {
+                label: event.label.clone(),
+                tick,
+                rate: event.rate,
+            };
+        }
     }
+    Due::Nothing
 }
 
 /// The tick `now` falls in: whole days since the epoch.
@@ -694,7 +772,18 @@ mod tests {
 #[cfg(test)]
 mod schedule_tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
+    use chrono::{NaiveDate, TimeZone, Utc};
+    use std::collections::BTreeMap;
+
+    /// Nothing drawn yet, for any label.
+    fn fresh() -> BTreeMap<String, u32> {
+        BTreeMap::new()
+    }
+
+    /// `label` last drawn at `tick`.
+    fn drawn(label: &str, tick: u32) -> BTreeMap<String, u32> {
+        BTreeMap::from([(label.to_string(), tick)])
+    }
 
     fn params(drip: usize) -> HiddenParams {
         HiddenParams {
@@ -704,6 +793,7 @@ mod schedule_tests {
             vetter_labels: vec!["vetter/2026-09".into()],
             token_labels: vec!["token/2026-09".into()],
             drip_per_tick: drip,
+            events: Vec::new(),
         }
     }
 
@@ -713,7 +803,7 @@ mod schedule_tests {
     fn enrolment_is_owed_before_the_first_credential_and_after_every_rotation() {
         let now = Utc.with_ymd_and_hms(2026, 9, 20, 9, 0, 0).unwrap();
         assert_eq!(
-            due(&params(3), None, 0, now),
+            due(&params(3), None, &fresh(), &[], now),
             Due::Enrol {
                 period: "2026-09".into()
             }
@@ -748,11 +838,26 @@ mod schedule_tests {
             .insert("2026-09".into(), "zCredential".into());
 
         // Served this tick already: nothing owed, however empty the wallet is.
-        assert_eq!(due(&params(3), Some(&snapshot), tick, now), Due::Nothing);
+        assert_eq!(
+            due(
+                &params(3),
+                Some(&snapshot),
+                &drawn("token/2026-09", tick),
+                &[],
+                now
+            ),
+            Due::Nothing
+        );
 
         // A new tick: owed, however full it is.
         assert_eq!(
-            due(&params(3), Some(&snapshot), tick - 1, now),
+            due(
+                &params(3),
+                Some(&snapshot),
+                &drawn("token/2026-09", tick - 1),
+                &[],
+                now
+            ),
             Due::Draw {
                 label: "token/2026-09".into(),
                 tick,
@@ -771,9 +876,85 @@ mod schedule_tests {
         snapshot
             .credentials
             .insert("2026-09".into(), "zCredential".into());
-        let Due::Draw { tick, .. } = due(&params(3), Some(&snapshot), tick_of(now) - 7, now) else {
+        let Due::Draw { tick, .. } = due(
+            &params(3),
+            Some(&snapshot),
+            &drawn("token/2026-09", tick_of(now) - 7),
+            &[],
+            now,
+        ) else {
             panic!("a draw is owed");
         };
         assert_eq!(tick, tick_of(now), "this tick, not the seven behind it");
+    }
+
+    /// A vetter in event mode owes two draws a tick, and the **ordinary** one is not the one
+    /// that gives. Skipping the monthly draw for the three days of a conference would say, in
+    /// the timing of the requests alone, that those three days were a conference.
+    #[test]
+    fn an_event_draw_is_owed_beside_the_ordinary_one_and_never_instead_of_it() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 20, 9, 0, 0).unwrap();
+        let tick = tick_of(now);
+        let mut snapshot = VetterSnapshot::without_keys("member-1");
+        snapshot
+            .credentials
+            .insert("2026-09".into(), "zCredential".into());
+        let summit = [EventDraw {
+            label: "token/event/summit".into(),
+            rate: 20,
+            closes_after: NaiveDate::from_ymd_opt(2026, 10, 4).unwrap(),
+        }];
+
+        // Both outstanding: the ordinary label is answered first.
+        assert_eq!(
+            due(&params(3), Some(&snapshot), &fresh(), &summit, now),
+            Due::Draw {
+                label: "token/2026-09".into(),
+                tick,
+                rate: 3,
+            }
+        );
+        // Once it is recorded, the event's — at the tier's rate, not the community's.
+        assert_eq!(
+            due(
+                &params(3),
+                Some(&snapshot),
+                &drawn("token/2026-09", tick),
+                &summit,
+                now
+            ),
+            Due::Draw {
+                label: "token/event/summit".into(),
+                tick,
+                rate: 20,
+            }
+        );
+    }
+
+    /// An event's label dies shortly after the event, and a client stops asking for it then —
+    /// the tokens would be refused, and asking would announce that we tried.
+    #[test]
+    fn a_closed_event_is_no_longer_drawn_under() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 5, 9, 0, 0).unwrap();
+        let tick = tick_of(now);
+        let mut snapshot = VetterSnapshot::without_keys("member-1");
+        snapshot
+            .credentials
+            .insert("2026-09".into(), "zCredential".into());
+        let closed = [EventDraw {
+            label: "token/event/summit".into(),
+            rate: 20,
+            closes_after: NaiveDate::from_ymd_opt(2026, 10, 4).unwrap(),
+        }];
+        assert_eq!(
+            due(
+                &params(3),
+                Some(&snapshot),
+                &drawn("token/2026-09", tick),
+                &closed,
+                now
+            ),
+            Due::Nothing
+        );
     }
 }
