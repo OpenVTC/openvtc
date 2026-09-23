@@ -41,8 +41,13 @@ use openvtc_core::vetting::{
     vetter::{Attestation, IncomingRequest, Intake},
 };
 use openvtc_vetting_pcs::{
-    meta::StatementMeta, scheme::key_text, snapshot::VetterSnapshot, vetter::VetterEngine,
-    vtc::Vtc, wire::SubmissionWire,
+    issuer::{RootCredentialWire, TokenBatchWire},
+    meta::StatementMeta,
+    scheme::key_text,
+    snapshot::VetterSnapshot,
+    vetter::VetterEngine,
+    vtc::Vtc,
+    wire::SubmissionWire,
 };
 use rand::{SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
@@ -245,23 +250,141 @@ async fn main() {
     );
 
     // --- 3. Ten real role credentials, then ten PCS enrolments ------------------------------
+    //
+    // Both exchanges are driven through their wire halves, so what the report shows is what a
+    // transport would carry: the vetter asks blinded, the community checks its own records and
+    // signs, the vetter unblinds something the community has never seen.
+    let params = vtc.params().expect("published parameters");
     let mut engines: Vec<VetterSnapshot> = Vec::new();
     let mut role_credentials: Vec<Value> = Vec::new();
-    for (_, did) in vetter_ids.iter() {
+    let mut enrolment_exchange = Value::Null;
+    let mut drip_exchange = Value::Null;
+    for (n, (_, did)) in vetter_ids.iter().enumerate() {
         let credential = role_credential(&community_secret, &community, did, VETTER_ROLE).await;
         assert!(
             proof_verifies(&credential, &community_secret),
             "the role credential must verify as issued"
         );
         role_credentials.push(credential);
+        // The community's record of who holds the vetter role. On the VTI side this is the ACL
+        // and the role endorsement the credential above was written from — `pcs_issue::enrol`
+        // reads those, never a list of its own.
         vtc.grant(did);
+
         let mut engine = VetterEngine::new(did, &vtc, &mut rng).expect("engine");
-        engine.enroll(&mut vtc, &mut rng).expect("root credential");
+
+        // Enrolment, in two halves.
+        let (request, blinding) = engine
+            .enrolment_request(&params, PERIOD, &mut rng)
+            .expect("a blinded request for the current label");
+        let pre = vtc
+            .issue_vetter_root(
+                did,
+                &openvtc_vetting_pcs::scheme::point_from_text(&request.id).unwrap(),
+                &serde_json::from_value(request.request.clone()).unwrap(),
+                &mut rng,
+            )
+            .expect("a granted vetter, enrolling once under this label");
+        let answer = RootCredentialWire {
+            label: request.label.clone(),
+            pre_credential: openvtc_vetting_pcs::scheme::enc(&pre).unwrap(),
+        };
         engine
-            .drip(&mut vtc, 1, &token_label, 3, &mut rng)
-            .expect("tokens");
+            .accept_enrolment(&params, &answer, &blinding)
+            .expect("what came back unblinds under the published key");
+
+        // One tick of the drip, in two halves.
+        let batch = engine
+            .drip_request(&params, 1, &token_label, params.drip_per_tick(), &mut rng)
+            .expect("a blinded batch");
+        let served = vtc
+            .drip(
+                did,
+                1,
+                &token_label,
+                &batch
+                    .requests
+                    .iter()
+                    .map(|r| r.to_request().unwrap())
+                    .collect::<Vec<_>>(),
+                &mut rng,
+            )
+            .expect("within the published rate, and the first tick");
+        let served = TokenBatchWire {
+            label: batch.label.clone(),
+            tick: batch.tick,
+            pre_credentials: served
+                .iter()
+                .map(|p| openvtc_vetting_pcs::scheme::enc(p).unwrap())
+                .collect(),
+        };
+        let taken = engine
+            .accept_drip(&params, &served)
+            .expect("the tokens verify under the published token key");
+
+        if n == VETTING[0] {
+            enrolment_exchange = json!({
+                "request": request,
+                "answer": answer,
+                "note":
+                    "The request carries a commitment and a proof, never the vetter's key. What comes back is a \
+                    pre-credential only this vetter can unblind — which is why the community cannot recognise \
+                    the credential it just made.",
+            });
+            drip_exchange = json!({
+                "request": batch,
+                "answer": served,
+                "tokensTaken": taken,
+                "note":
+                    "Asked for on a schedule, not on demand: a fetch that happened only when a vetter was busy \
+                    would announce that they were busy.",
+            });
+        }
         engines.push(engine.snapshot().expect("snapshot"));
     }
+
+    // The two refusals that make the drip a cap rather than a suggestion. Neither depends on
+    // the vetter's restraint: the community enforces both, and on the VTI side both are rows in
+    // a keyspace rather than memory.
+    let mut greedy = VetterEngine::new(&vetter_ids[0].1, &vtc, &mut rng).unwrap();
+    let over = greedy
+        .drip_request(
+            &params,
+            2,
+            &token_label,
+            params.drip_per_tick() + 5,
+            &mut rng,
+        )
+        .unwrap();
+    let over_quota = vtc
+        .drip(
+            &vetter_ids[0].1,
+            2,
+            &token_label,
+            &over
+                .requests
+                .iter()
+                .map(|r| r.to_request().unwrap())
+                .collect::<Vec<_>>(),
+            &mut rng,
+        )
+        .expect_err("more than the published rate");
+    let again = greedy
+        .drip_request(&params, 1, &token_label, params.drip_per_tick(), &mut rng)
+        .unwrap();
+    let twice_a_tick = vtc
+        .drip(
+            &vetter_ids[0].1,
+            1,
+            &token_label,
+            &again
+                .requests
+                .iter()
+                .map(|r| r.to_request().unwrap())
+                .collect::<Vec<_>>(),
+            &mut rng,
+        )
+        .expect_err("the first tick was already served");
     report.insert(
         "step02_vetter_role_credentials".into(),
         json!({
@@ -277,11 +400,23 @@ async fn main() {
             "enrolled": VETTERS,
             "label": format!("vetter/{PERIOD}"),
             "tokenLabel": token_label,
-            "tokensMintedThisTick": VETTERS * 3,
+            "dripPerTick": params.drip_per_tick(),
+            "tokensMintedThisTick": VETTERS * params.drip_per_tick(),
+            "enrolmentExchange": enrolment_exchange,
+            "dripExchange": drip_exchange,
+            "refusals": {
+                "overTheDripRate": over_quota.to_string(),
+                "twiceInOneTick": twice_a_tick.to_string(),
+                "note":
+                    "Both are the community's, not the vetter's: a vetter that asks for more is \
+                     refused the batch, and one that asks twice for the same tick is refused \
+                     outright.",
+            },
             "note":
-                "The root credential is the vetter's blind PCS credential for the label; the tokens are \
-                 PS blind signatures on secret serials. Both are secrets held by the vetter — they are \
-                 printed here because this is a reference vector, not because they travel.",
+                "The root credential is the vetter's blind PCS credential for the label; the \
+                 tokens are PS blind signatures on secret serials. Both are secrets held by the \
+                 vetter — they are printed here because this is a reference vector, not because \
+                 they travel.",
             "vetters": engines
                 .iter()
                 .enumerate()
@@ -564,6 +699,11 @@ async fn main() {
     );
 
     // --- 7. The applicant proves and submits ---------------------------------------------------
+    //
+    // The challenge is the COMMUNITY's: it mints one for this applicant, records it, and spends
+    // it when the proof is counted. A proof bound to a challenge nobody issued is refused, and
+    // so is the same proof submitted twice — both are demonstrated below. On the VTI side this
+    // is `pcs_challenge`, a row in the join keyspace with a TTL.
     let challenge = vtc.challenge(&mut rng);
     let application = book.application_mut(&community, persona).unwrap();
     application
@@ -573,6 +713,8 @@ async fn main() {
     report.insert(
         "step07_submission".into(),
         json!({
+            "challenge": challenge,
+            "challengeIssuedBy": community,
             "extensions": extensions.clone(),
             "extensionsBytes": size_of(&extensions),
             "capBytes": 16 * 1024,
@@ -583,9 +725,23 @@ async fn main() {
     // --- 8. The community decides ---------------------------------------------------------------
     let carried = extensions[hidden::EXTENSIONS_MEMBER].clone();
     let wire: SubmissionWire = serde_json::from_value(carried).expect("wire");
+    let submission = wire.to_submission().expect("decode");
     let decision = vtc
-        .submit(&wire.to_submission().expect("decode"), Utc::now())
+        .submit(&submission, Utc::now())
         .expect("the proof verifies");
+
+    // The same submission again: the proof still verifies, and it is refused anyway, because the
+    // challenge it is bound to was spent by the first one. Replay is a freshness question, not a
+    // cryptographic one.
+    let replayed = vtc
+        .submit(&submission, Utc::now())
+        .expect_err("the challenge is gone");
+    // And a proof bound to a challenge the applicant minted for itself never had one.
+    let mut forged = submission.clone();
+    forged.challenge = "00000000000000000000000000000000".into();
+    let unissued = vtc
+        .submit(&forged, Utc::now())
+        .expect_err("this community never issued that challenge");
     let tags: Vec<String> = decision
         .statements
         .iter()
@@ -606,6 +762,8 @@ async fn main() {
                 .map(|(m, n)| (m.to_string(), json!(n)))
                 .collect::<serde_json::Map<String, Value>>(),
             "commitmentsConsistent": decision.evaluation.commitments_consistent,
+            "replayRefused": replayed.to_string(),
+            "unissuedChallengeRefused": unissued.to_string(),
         }),
     );
     // --- 9. Admission: the membership credentials ---------------------------------------------

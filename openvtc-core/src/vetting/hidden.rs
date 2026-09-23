@@ -43,6 +43,16 @@ pub struct HiddenParams {
     pub vetter_labels: Vec<String>,
     /// Live token labels (`["token/2026-10", "token/event/summit"]`).
     pub token_labels: Vec<String>,
+    /// How many attestation tokens a vetter may draw per tick. Published so a vetter knows
+    /// what to ask for on its schedule; the community enforces it either way.
+    #[serde(default = "default_drip_per_tick")]
+    pub drip_per_tick: usize,
+}
+
+/// What a community that publishes no rate is taken to mean — the same default the VTC's own
+/// minting half carries.
+fn default_drip_per_tick() -> usize {
+    openvtc_vetting_pcs::vtc::DEFAULT_DRIP_PER_TICK
 }
 
 /// Why a criterion could not be adopted.
@@ -158,6 +168,7 @@ pub fn community(
         &params.token_key,
         params.vetter_labels.clone(),
         params.token_labels.clone(),
+        params.drip_per_tick,
     )
     .map_err(|e| HiddenError::Unreadable(e.to_string()))
 }

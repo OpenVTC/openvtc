@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use predicate_credential_system::{
     kiprf::{KIPRF, prove_tag},
-    pcs::{Credential, PredicateCredentialSystem, UserSecretKey},
+    pcs::{Credential, IssuanceState, PredicateCredentialSystem, UserSecretKey},
     sigma::FSProof,
 };
 use rand::{CryptoRng, RngCore};
@@ -14,6 +14,10 @@ use rand::{CryptoRng, RngCore};
 use crate::{
     ProtoError,
     community::CommunityParams,
+    issuer::{
+        RootCredentialWire, RootRequestWire, TokenBatchRequestWire, TokenBatchWire,
+        TokenRequestWire,
+    },
     meta::StatementMeta,
     scheme::{Base, E, Fr, G1, point_text, scalar_text, vetter_predicate},
     snapshot::VetterSnapshot,
@@ -109,24 +113,133 @@ impl VetterEngine {
         })
     }
 
-    /// Root request for the VTC's current period, with the SAME `usk` every time.
+    /// The vetter's half of enrolment: a blinded request for `period`, built with the SAME
+    /// `usk` every time, and the blinding state that unblinds what comes back.
+    ///
+    /// Split from [`Self::accept_enrolment`] because the two halves are a round trip in a
+    /// deployment — the request is what a Trust Task carries, and the community's answer comes
+    /// back later. The community sees a commitment; it never sees the credential it made.
+    ///
+    /// # Errors
+    /// [`ProtoError::Pcs`] if the request cannot be built, [`ProtoError::Serialization`] if it
+    /// cannot be encoded.
+    pub fn enrolment_request<R: RngCore + CryptoRng>(
+        &self,
+        params: &CommunityParams,
+        period: &str,
+        rng: &mut R,
+    ) -> Result<(RootRequestWire, IssuanceState<E, Base>), ProtoError> {
+        let f = vetter_predicate(period);
+        let (request, state) =
+            params
+                .open()
+                .root_request(params.hvk(), &f, &self.id, &self.usk, rng)?;
+        Ok((
+            RootRequestWire {
+                label: format!("vetter/{period}"),
+                id: point_text(&self.id)?,
+                request: serde_json::to_value(&request)
+                    .map_err(|e| ProtoError::Serialization(e.to_string()))?,
+            },
+            state,
+        ))
+    }
+
+    /// Unblind the community's answer into this vetter's class credential.
+    ///
+    /// # Errors
+    /// [`ProtoError::Serialization`] if the answer cannot be decoded, [`ProtoError::Pcs`] if it
+    /// does not unblind under the published key — which is what a wrong or swapped answer looks
+    /// like from here.
+    pub fn accept_enrolment(
+        &mut self,
+        params: &CommunityParams,
+        answer: &RootCredentialWire,
+        state: &IssuanceState<E, Base>,
+    ) -> Result<(), ProtoError> {
+        let period = answer.label.trim_start_matches("vetter/").to_string();
+        let f = vetter_predicate(&period);
+        let pre = crate::scheme::dec(&answer.pre_credential)?;
+        let cred = params
+            .open()
+            .unblind(params.hvk(), &self.usk, &f, &pre, state)?;
+        self.creds.insert(period, cred);
+        Ok(())
+    }
+
+    /// The vetter's half of one scheduled drip fetch: `r` blinded serials for `tick`.
+    ///
+    /// Unconditional by design (§5.1) — a vetter asks on its schedule whether or not it has
+    /// vetted anyone, because a fetch that tracked activity would report activity.
+    ///
+    /// # Errors
+    /// [`ProtoError::Pcs`] or [`ProtoError::Serialization`] if a request cannot be built.
+    pub fn drip_request<R: RngCore + CryptoRng>(
+        &mut self,
+        params: &CommunityParams,
+        tick: u32,
+        label: &str,
+        r: usize,
+        rng: &mut R,
+    ) -> Result<TokenBatchRequestWire, ProtoError> {
+        let reqs = self
+            .wallet
+            .prepare(params.tokens().tvk(), label, &self.member, tick, r, rng)?;
+        Ok(TokenBatchRequestWire {
+            label: label.to_string(),
+            tick,
+            requests: reqs
+                .iter()
+                .map(TokenRequestWire::of)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
+    /// Take a served batch into the wallet, and drop anything whose label has closed.
+    ///
+    /// # Errors
+    /// [`ProtoError::Serialization`] if a token cannot be decoded, [`ProtoError::Pcs`] if one
+    /// does not verify under the published token key.
+    pub fn accept_drip(
+        &mut self,
+        params: &CommunityParams,
+        served: &TokenBatchWire,
+    ) -> Result<usize, ProtoError> {
+        let pres = served
+            .pre_credentials
+            .iter()
+            .map(|p| crate::scheme::dec(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.wallet.receive(params.tokens().tvk(), &pres)?;
+        self.wallet.expire(params.tokens().live_labels());
+        Ok(pres.len())
+    }
+
+    /// Root request for the VTC's current period, with the SAME `usk` every time. The two
+    /// halves above, against the in-process community object.
     pub fn enroll<R: RngCore + CryptoRng>(
         &mut self,
         vtc: &mut Vtc,
         rng: &mut R,
     ) -> Result<(), ProtoError> {
         let period = vtc.current_period().to_string();
-        let f = vetter_predicate(&period);
-        let (request, state) = vtc
-            .open()
-            .root_request(vtc.hvk(), &f, &self.id, &self.usk, rng)?;
+        let params = vtc.params()?;
+        let (wire, state) = self.enrolment_request(&params, &period, rng)?;
+        let request = serde_json::from_value(wire.request.clone())
+            .map_err(|e| ProtoError::Serialization(e.to_string()))?;
         let pre = vtc.issue_vetter_root(&self.member, &self.id, &request, rng)?;
-        let cred = vtc.open().unblind(vtc.hvk(), &self.usk, &f, &pre, &state)?;
-        self.creds.insert(period, cred);
-        Ok(())
+        self.accept_enrolment(
+            &params,
+            &RootCredentialWire {
+                label: wire.label.clone(),
+                pre_credential: crate::scheme::enc(&pre)?,
+            },
+            &state,
+        )
     }
 
-    /// One scheduled drip fetch: unconditional, `r` tokens.
+    /// One scheduled drip fetch: unconditional, `r` tokens. The two halves above, against the
+    /// in-process community object.
     pub fn drip<R: RngCore + CryptoRng>(
         &mut self,
         vtc: &mut Vtc,
@@ -135,13 +248,25 @@ impl VetterEngine {
         r: usize,
         rng: &mut R,
     ) -> Result<(), ProtoError> {
-        let tvk = vtc.token_verifier().tvk().clone();
-        let reqs = self
-            .wallet
-            .prepare(&tvk, label, &self.member, tick, r, rng)?;
+        let params = vtc.params()?;
+        let batch = self.drip_request(&params, tick, label, r, rng)?;
+        let reqs = batch
+            .requests
+            .iter()
+            .map(|r| r.to_request())
+            .collect::<Result<Vec<_>, _>>()?;
         let pres = vtc.drip(&self.member, tick, label, &reqs, rng)?;
-        self.wallet.receive(&tvk, &pres)?;
-        self.wallet.expire(vtc.token_verifier().live_labels());
+        self.accept_drip(
+            &params,
+            &TokenBatchWire {
+                label: label.to_string(),
+                tick,
+                pre_credentials: pres
+                    .iter()
+                    .map(crate::scheme::enc)
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+        )?;
         Ok(())
     }
 

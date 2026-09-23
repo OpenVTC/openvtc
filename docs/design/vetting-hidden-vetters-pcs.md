@@ -713,16 +713,15 @@ cargo test -p vtc-service --features vetting-pcs --lib vetting::
 
 ### What a real run still needs
 
-- **A VTC-issued challenge.** The proof binds one, but the client mints it and the service does
-  not yet check that it issued it. Replay is held off meanwhile by the spent-token set and the
-  one-open-request rule. The fix is a nonce on the manifest or submit round trip.
+Two of the four are now built — see §17. What is left:
+
 - **The vetter's screen.** `vetting::hidden::attest` is the whole vetter half, but no TUI action
   calls it: the attest action still signs a named statement. The applicant's PCS identifier also
   has to reach the vetter through the session for the vetter to attest it.
-- **Vetter enrolment and the token drip over the wire.** Today the community issues the root
-  credential and the tokens through the in-process `Vtc`. In a deployment both are Trust Tasks
-  (`vtc/vetting/vetters/pcs-root`, `.../tokens`), and the VTC's minting half — its `hsk` and
-  `tsk` — is not built: `vti-vetting-pcs` verifies, it does not mint.
+- **The transport.** Enrolment, the drip and the challenge are service functions with durable
+  state; nothing carries them over the wire yet. Each is one Trust Task
+  (`vtc/vetting/vetters/pcs-root/0.1`, `.../pcs-tokens/0.1`, `vtc/vetting/pcs-challenge/0.1`)
+  over the shapes in `issuer.rs`, which is deliberately where they already live.
 - **A trust-tasks-rs release** carrying manifest 0.2's `ext`, after which the client reads the
   typed member instead of parsing the raw criterion.
 
@@ -760,3 +759,71 @@ Deliberately **not** issued on this path, and each for its own reason:
 The status-list credential itself is referenced by the VMC's `credentialStatus` and served by a
 running `vtc-service`; the in-process example has no HTTP host, so it points at an example URL
 and says so.
+
+
+## 17. The challenge and the minting half (2026-09-24)
+
+Two of the three gaps §15 listed are closed. Both were the same shape of gap: a rule that
+existed on the client but had no half in the community that enforced it.
+
+### 17.1 The challenge is the community's
+
+`vtc-service/src/vetting/pcs_challenge.rs`, modelled on `credentials::present_challenge` because
+it is the same problem: `issue` mints 16 random bytes for an applicant DID and stores them with a
+15-minute TTL; `consume` removes the row **before** checking expiry, then compares. `pcs::decide`
+consumes it as step 0, before it reads the spent-token rows, so a replay costs nothing.
+
+What this buys, precisely: a proof verifies as often as it is submitted, so without a freshness
+anchor the second submission of the same bytes counts. Now the second one finds no challenge.
+A proof bound to a challenge the applicant minted for itself never had a row at all. The
+reference run demonstrates both — `step08_decision.replayRefused` and
+`unissuedChallengeRefused`.
+
+The cost is deliberate: a supplement after `requestMore` needs a *new* challenge and a new
+proof, because a challenge that survives its first use is not a freshness anchor.
+
+Rows share the `join_requests` keyspace under a prefix of their own and are swept by the same
+retention pass, so an applicant who asks and walks away leaves nothing behind.
+
+### 17.2 The community mints
+
+`vti-vetting-pcs/src/issuer.rs` holds the keys and signs; `vtc-service/src/vetting/pcs_issue.rs`
+holds the rules and the records. The split is the point: **an in-memory set is not a rule, it is
+a rule until the process exits**, and every question about whether to sign is a question about
+the community's own records.
+
+- **The keys are derived, not stored.** HKDF-SHA256 from the same master secret the credential
+  signer uses, with `vtc-vetting-pcs-secret/v1`, then ChaCha20 seeded from
+  `SHA-256(info ‖ len(community) ‖ community ‖ secret)` — the community is in the seed, so two
+  communities under one master secret cannot share a helper key. Nothing new to provision or
+  back up. The consequence is stated where it lives: **the master secret is the vetter class**,
+  so `pcs_issue::issuer` refuses to mint if the derived `hvk` is not the published one.
+  `pcs_issue::publish` is where a deployment's published parameters come from, so an operator
+  never types a key in.
+- **Enrolment** is once per member per class label, with the PCS identifier bound at the first
+  one — a member who came back with a second identifier would hold two class credentials and
+  count twice in one proof (§13 C2). Across a rotation the same member re-enrols under the new
+  label with the *same* identifier, which the test pins.
+- **The grant check is the community's own**, not a list of the minting half's: `vetter_eligible`
+  — membership row, not removed, joined before the grant, live role endorsement — the same
+  function the named path calls.
+- **The drip is capped by the issuer.** This closed a real hole: `TokenIssuer::issue` checked the
+  label, the tick and every opening proof, and never checked *how many* requests were in the
+  batch. A vetter could ask for a thousand tokens in one tick and be served. The quota is now a
+  parameter of `Issuer::issue_tokens`, enforced before anything is signed, and published as
+  `dripPerTick` so a vetter knows what to ask for. Event labels carry their own, higher rate
+  (`DEFAULT_EVENT_DRIP_PER_TICK = 20`), which is the reason event labels exist (§5.1).
+- **Once per tick is a row**, keyed `(member, label, tick)`, length-framed. The issuer's own
+  in-memory `served` set stays as a second guard within a process.
+
+Both exchanges have wire shapes in `issuer.rs` (`RootRequestWire` / `RootCredentialWire`,
+`TokenBatchRequestWire` / `TokenBatchWire`) and the vetter half is split to match
+(`VetterEngine::enrolment_request` / `accept_enrolment`, `drip_request` / `accept_drip`), so
+adding the Trust Tasks is plumbing rather than design.
+
+### 17.3 Why issuance randomness is an argument
+
+`Issuer::issue_root` and `issue_tokens` take an RNG rather than reaching for `OsRng`. A service
+passes `OsRng`; the fixture test passes a seeded one, and that is what keeps the cross-repo wire
+fixture reproducible. A signing routine that samples its own randomness cannot be pinned by a
+test, and the drift protection between the two repos is exactly a pinned fixture.

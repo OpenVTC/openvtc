@@ -5,45 +5,47 @@
 //! In production this is `vtc-service` (VTI). The copy here is what the client tests against
 //! and what the VTI branch mirrors.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Mutex,
-};
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use predicate_credential_system::{
-    cred::CredentialBase,
-    pcs::{HelperSecretKey, PredicateCredentialSystem, RootRequest, SetupParams},
-    sigma::FSProof,
-};
+use predicate_credential_system::{cred::CredentialBase, pcs::RootRequest, sigma::FSProof};
 use rand::{CryptoRng, RngCore};
 use vta_sdk::protocols::vetting::VettingRequirements;
 
 use crate::{
     ProtoError,
-    scheme::{
-        Base, E, Fr, G1, Hvk, Open, deployment_label, event_token_label, monthly_token_label,
-        point_text, vetter_predicate,
-    },
-    token::{TokenIssuer, TokenRequest, TokenVerifier},
+    issuer::Issuer,
+    scheme::{Base, E, Fr, G1, Hvk, Open, event_token_label, monthly_token_label, point_text},
+    token::{TokenRequest, TokenVerifier},
     verifier::{Verifier, VerifierParams},
 };
 
 pub use crate::verifier::{Decision, StatementRecord, Submission, withdraw_context};
 
+/// Three a tick unless the community says otherwise — the same default `vtc-service` carries.
+pub const DEFAULT_DRIP_PER_TICK: usize = 3;
+
+/// An event label's rate. Event mode exists because a vetter at a conference meets twenty
+/// people in a day, and the ordinary drip would make them turn people away (§5.1); the point of
+/// the separate label is that the higher rate ends with the event.
+pub const DEFAULT_EVENT_DRIP_PER_TICK: usize = 20;
+
 pub struct Vtc {
     pub community: String,
     /// Everything a submission is checked against: public parameters only.
     pub verifier: Verifier,
-    hvk: Hvk,
-    hsk: HelperSecretKey<Base>,
-    /// One lock per signing key (§13 C3).
-    hsk_lock: Mutex<()>,
+    /// The keys, and the signing they do. The same type `vtc-service` mints with, so what this
+    /// object does in a test is what the service does in a deployment; the bookkeeping around
+    /// it differs (in memory here, in a keyspace there) and nothing else.
+    issuer: Issuer,
+    /// The published drip rate: the most this community signs for one vetter in one tick.
+    drip_rate: usize,
+    /// The rate under an event label, which is the reason event labels exist.
+    event_drip_rate: usize,
     grants: HashSet<String>,
     /// member → PCS id, bound at first root issuance (§13 C2).
     bound_ids: HashMap<String, String>,
     issued: HashSet<(String, String)>,
-    tokens: TokenIssuer,
     current_token_label: String,
     events: HashMap<String, HashSet<String>>,
     challenges: HashSet<String>,
@@ -56,15 +58,13 @@ impl Vtc {
         requirements: serde_json::Value,
         rng: &mut R,
     ) -> Result<Self, ProtoError> {
-        let open = Open::setup(SetupParams::new(deployment_label(community)))?;
-        // `hvk` is long-lived: generated once, bound to the fixed `pp` (§13 C1).
-        let (hvk, hsk) = open.helper_keygen(rng);
+        let issuer = Issuer::generate(community, rng)?;
         let requirements_digest =
             vta_sdk::vetting::requirements::requirements_digest(&requirements)
                 .map_err(|e| ProtoError::Serialization(e.to_string()))?;
         let requirements: VettingRequirements = serde_json::from_value(requirements)
             .map_err(|e| ProtoError::Serialization(e.to_string()))?;
-        let (tokens, mut token_verifier) = TokenIssuer::new(community, rng)?;
+        let mut token_verifier = TokenVerifier::new(community, issuer.tvk().clone(), [])?;
         let current_token_label = monthly_token_label(period);
         token_verifier.open_label(&current_token_label);
         let verifier = Verifier::new(
@@ -74,24 +74,55 @@ impl Vtc {
                 requirements,
                 requirements_digest,
             },
-            hvk.clone(),
+            issuer.hvk().clone(),
             token_verifier,
             vec![period.to_string()],
         )?;
         Ok(Self {
             community: community.to_string(),
             verifier,
-            hvk,
-            hsk,
-            hsk_lock: Mutex::new(()),
+            issuer,
+            drip_rate: DEFAULT_DRIP_PER_TICK,
+            event_drip_rate: DEFAULT_EVENT_DRIP_PER_TICK,
             grants: HashSet::new(),
             bound_ids: HashMap::new(),
             issued: HashSet::new(),
-            tokens,
             current_token_label,
             events: HashMap::new(),
             challenges: HashSet::new(),
         })
+    }
+
+    /// Set this community's drip rate. Published, and enforced on every tick.
+    #[must_use]
+    pub fn with_drip_rate(mut self, tokens_per_tick: usize) -> Self {
+        self.drip_rate = tokens_per_tick;
+        self
+    }
+
+    pub fn drip_rate(&self) -> usize {
+        self.drip_rate
+    }
+
+    /// Set the rate an event label drips at.
+    #[must_use]
+    pub fn with_event_drip_rate(mut self, tokens_per_tick: usize) -> Self {
+        self.event_drip_rate = tokens_per_tick;
+        self
+    }
+
+    pub fn event_drip_rate(&self) -> usize {
+        self.event_drip_rate
+    }
+
+    /// The rate that applies to `label`: the event rate for an event label, the ordinary drip
+    /// otherwise.
+    pub fn quota_for(&self, label: &str) -> usize {
+        if label.starts_with("token/event/") {
+            self.event_drip_rate
+        } else {
+            self.drip_rate
+        }
     }
 
     // --- public parameters, as the manifest's `vetting.anonymity` carries them --------------
@@ -100,7 +131,7 @@ impl Vtc {
         self.verifier.open()
     }
     pub fn hvk(&self) -> &Hvk {
-        &self.hvk
+        self.issuer.hvk()
     }
     pub fn tvk(&self) -> &<Base as CredentialBase>::VerificationKey {
         self.verifier.tokens.tvk()
@@ -131,7 +162,7 @@ impl Vtc {
     pub fn params(&self) -> Result<crate::community::CommunityParams, ProtoError> {
         crate::community::CommunityParams::new(
             &self.community,
-            self.hvk.clone(),
+            self.hvk().clone(),
             self.tvk().clone(),
             self.live_periods()
                 .iter()
@@ -142,6 +173,7 @@ impl Vtc {
                 .iter()
                 .cloned()
                 .collect(),
+            self.drip_rate,
         )
     }
 
@@ -186,17 +218,7 @@ impl Vtc {
                 label: format!("vetter/{period}"),
             });
         }
-        let pre = {
-            let _guard = self.hsk_lock.lock().expect("helper signing lock");
-            self.verifier.open().issue_root(
-                &self.hvk,
-                &self.hsk,
-                &vetter_predicate(&period),
-                id,
-                request,
-                rng,
-            )?
-        };
+        let pre = self.issuer.issue_root(&period, id, request, rng)?;
         self.bound_ids.insert(member.to_string(), id_text);
         self.issued.insert((member.to_string(), period));
         Ok(pre)
@@ -256,8 +278,17 @@ impl Vtc {
                 "{member} is not in event {event}"
             )));
         }
-        self.tokens
-            .issue(&self.verifier.tokens, member, tick, label, requests, rng)
+        self.issuer.issue_tokens(
+            &self.verifier.tokens,
+            crate::issuer::DripOrder {
+                member,
+                tick,
+                label,
+                requests,
+                quota: self.quota_for(label),
+            },
+            rng,
+        )
     }
 
     /// Event mode (§5.1): approved by someone outside the group, for a group of at least

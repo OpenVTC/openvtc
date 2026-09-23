@@ -26,6 +26,9 @@ pub struct CommunityParams {
     tokens: TokenVerifier,
     /// Live vetter class labels, current first, exactly as published (`vetter/2026-10`).
     vetter_labels: Vec<String>,
+    /// How many tokens a vetter may draw per tick. Published because the vetter has to know
+    /// what to ask for, and because the community enforces it whatever the vetter asks.
+    drip_per_tick: usize,
 }
 
 impl CommunityParams {
@@ -41,10 +44,18 @@ impl CommunityParams {
         tvk: &str,
         vetter_labels: Vec<String>,
         token_labels: Vec<String>,
+        drip_per_tick: usize,
     ) -> Result<Self, ProtoError> {
         let hvk: Hvk = from_bytes(&from_multibase(hvk)?)?;
         let tvk = from_bytes(&from_multibase(tvk)?)?;
-        Self::new(community, hvk, tvk, vetter_labels, token_labels)
+        Self::new(
+            community,
+            hvk,
+            tvk,
+            vetter_labels,
+            token_labels,
+            drip_per_tick,
+        )
     }
 
     /// From values already decoded.
@@ -57,6 +68,7 @@ impl CommunityParams {
         tvk: <crate::scheme::Base as predicate_credential_system::cred::CredentialBase>::VerificationKey,
         vetter_labels: Vec<String>,
         token_labels: Vec<String>,
+        drip_per_tick: usize,
     ) -> Result<Self, ProtoError> {
         Ok(Self {
             community: community.to_string(),
@@ -64,6 +76,7 @@ impl CommunityParams {
             hvk,
             tokens: TokenVerifier::new(community, tvk, token_labels)?,
             vetter_labels,
+            drip_per_tick,
         })
     }
 
@@ -82,6 +95,11 @@ impl CommunityParams {
     /// Live vetter labels, current first.
     pub fn vetter_labels(&self) -> &[String] {
         &self.vetter_labels
+    }
+    /// The published drip rate: what a vetter asks for each tick, and the most the community
+    /// will sign.
+    pub fn drip_per_tick(&self) -> usize {
+        self.drip_per_tick
     }
 
     /// The root predicate of a published vetter label.

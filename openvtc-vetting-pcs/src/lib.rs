@@ -20,6 +20,7 @@
 pub mod applicant;
 pub mod community;
 pub mod error;
+pub mod issuer;
 pub mod meta;
 pub mod scheme;
 pub mod snapshot;
@@ -30,3 +31,11 @@ pub mod vtc;
 pub mod wire;
 
 pub use error::ProtoError;
+
+/// The `rand` the PCS algorithms take — 0.8, because `ark_std::rand` re-exports it and its
+/// traits are what the randomized algorithms are written against.
+///
+/// Re-exported so a consumer on a newer `rand` (`vtc-service` is on 0.9) can still drive the
+/// member-side calls that need an RNG, without a second `rand` in its own manifest pinned for
+/// reasons that live here.
+pub use rand;

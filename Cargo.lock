@@ -6415,6 +6415,7 @@ dependencies = [
  "hex",
  "predicate-credential-system",
  "rand 0.8.8",
+ "rand_chacha 0.3.1",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",

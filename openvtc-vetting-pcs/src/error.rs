@@ -16,6 +16,8 @@ pub enum ProtoError {
     AlreadyIssued { member: String, label: String },
     #[error("member {member} was already served tokens for tick {tick}")]
     AlreadyServedThisTick { member: String, tick: u32 },
+    #[error("asked for {asked} tokens; this community drips {quota} a tick")]
+    OverQuota { asked: usize, quota: usize },
     #[error("token opening proof {0} does not verify")]
     BadOpeningProof(usize),
     #[error("vetter is at capacity; next free token from tick {available_from}")]
