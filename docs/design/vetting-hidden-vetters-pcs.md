@@ -945,12 +945,58 @@ Only the last step differs.
 The reference example now drives this path rather than calling the engine directly, so the run
 that produces the vector set is the run the screen makes.
 
-### 19.3 Still open
+### 19.3 The wire, closed
 
-- **Enrolment and the drip over the wire.** The tasks are specified and the service side mints
-  (§17.2); what is missing is the client half and a scheduler, which is where `last_tick` and
-  `last_drawn_at` on `HiddenVetterState` are already waiting.
-- **The challenge over the wire**, for the same reason.
-- **The applicant's and admin's screens**: "this community hides its vetters" is the whole feature
-  and nothing says it yet; a join request reviewed by an admin shows tags where DIDs normally are
-  and needs a label saying so.
+All three exchanges now run end to end.
+
+**The community serves them.** `vetting::pcs_tasks` binds the three published URIs into the same
+dispatcher every other task goes through, with each refusal carrying its declared code.
+`tests/hidden_vetting_tasks.rs` drives them as an agent would — signed documents posted to
+`/v1/trust-tasks` — and checks what a client actually needs: the pre-credential *unblinds*, the
+served tokens *verify* under the published key, the challenge is 16 bytes of lowercase hex as the
+schema says. Then the refusals that make each one a rule: a stranger enrolling, a second
+enrolment under one label, a second draw for one tick, a batch over the published rate.
+
+**The client asks for them.** Enrolment and the drip are split into request and accept on both
+sides. The enrolment blinding is held in memory for one round trip and deliberately not
+persisted — it is useless without the answer and dangerous to keep past it — so an answer that
+arrives after a restart is dropped and the client asks again.
+
+**The schedule reads the clock, never the wallet.** `hidden::due` decides what a vetter owes a
+community from the labels and the time, and is not given a balance to consult: a client that drew
+when it ran low would publish, in the timing of its own requests, how much vetting it had done. A
+vetter back after a week asks for the current tick and not the seven it missed — the same answer
+an idle vetter gets, which is the property worth having. Four tests hold it.
+
+**The screens say what is happening.** The applicant's requirements line ends "their names never
+reach this community"; its checklist counts held attestations rather than reporting zero while it
+holds three (its own estimate — two attestations from one vetter carry one tag, and the tag is
+inside the proof); and it binds the community's challenge rather than one it minted, saying so
+while it waits. The admin panel renders a tag as a tag instead of passing it to a DID renderer,
+with a note that the count came from a proof.
+
+### 19.4 Still open
+
+- **The `trust-tasks-rs` release.** Both halves hand-write the payload types and validate them
+  against the published schemas; the release deletes both copies. That is a queue, not a design
+  question.
+- **Event mode over the wire** (`vtc/vetting/vetters/event-mode`), which §5.1 designs and no task
+  yet carries. The engine supports it; nothing asks for it.
+
+## 20. The protocol on its own
+
+`openvtc-vetting-pcs/examples/hidden_vetting.rs` runs the whole thing with no ceremony around it:
+
+```sh
+cargo run --release -p openvtc-vetting-pcs --example hidden_vetting
+```
+
+Ten members enrol, three of them vet one applicant, he proves it once, the community counts it —
+and the example then prints what the community holds afterwards (ten enrolled identifiers, three
+tags, overlap zero) and submits the same proof a second time to show the challenge is what stops
+it. Every step says what it gives up, so the privacy argument can be read in one file rather than
+assembled from five.
+
+It is deliberately separable from everything else in this document. The ticket, the session, the
+Vetting Card, the Trust Tasks, the membership credential — none of it changes what happens in the
+example, which is why the example is the thing to hand someone who asks how this works.
