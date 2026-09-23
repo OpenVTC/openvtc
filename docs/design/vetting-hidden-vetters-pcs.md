@@ -761,7 +761,7 @@ running `vtc-service`; the in-process example has no HTTP host, so it points at 
 and says so.
 
 
-## 17. The challenge and the minting half (2026-09-24)
+## 17. The challenge and the minting half (2026-09-23)
 
 Two of the three gaps §15 listed are closed. Both were the same shape of gap: a rule that
 existed on the client but had no half in the community that enforced it.
@@ -777,7 +777,8 @@ What this buys, precisely: a proof verifies as often as it is submitted, so with
 anchor the second submission of the same bytes counts. Now the second one finds no challenge.
 A proof bound to a challenge the applicant minted for itself never had a row at all. The
 reference run demonstrates both — `step08_decision.replayRefused` and
-`unissuedChallengeRefused`.
+`unissuedChallengeRefused` — and `vetting::pcs`'s own test drives the *service* path with the
+cross-repo fixture: no challenge → refused, recorded challenge → counted, replayed → refused.
 
 The cost is deliberate: a supplement after `requestMore` needs a *new* challenge and a new
 proof, because a challenge that survives its first use is not a freshness anchor.
