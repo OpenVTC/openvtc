@@ -195,14 +195,25 @@ pub struct Route<'a> {
     pub tsp_mediator_did: Option<&'a str>,
 }
 
+/// The DIDComm message carrying a personhood document to its community: the
+/// binding envelope, with the document as the body and its id as the message
+/// id — so the reply's `thid` and the document's `threadId` coincide.
+fn didcomm_request(document_id: String, body: Value, member_did: &str, vtc_did: &str) -> Message {
+    let now = Utc::now().timestamp().max(0) as u64;
+    Message::build(
+        document_id,
+        crate::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
+        body,
+    )
+    .from(member_did.to_string())
+    .to(vtc_did.to_string())
+    .created_time(now)
+    .finalize()
+}
+
 impl Route<'_> {
     /// Send a built document over whichever transport this route selects.
-    async fn send(
-        &self,
-        body: Value,
-        type_uri: &str,
-        document_id: String,
-    ) -> Result<(), OpenVTCError> {
+    async fn send(&self, body: Value, document_id: String) -> Result<(), OpenVTCError> {
         match self.tsp_mediator_did {
             Some(tsp_mediator) => {
                 crate::tsp::send_trust_task(
@@ -215,12 +226,10 @@ impl Route<'_> {
                 .await?;
             }
             None => {
-                let now = Utc::now().timestamp().max(0) as u64;
-                let msg = Message::build(document_id, type_uri.to_string(), body)
-                    .from(self.member_did.to_string())
-                    .to(self.vtc_did.to_string())
-                    .created_time(now)
-                    .finalize();
+                // The binding envelope, not the task URI: a community refuses
+                // a Trust Task typed as itself (`bindings/didcomm/0.2` §2–§4,
+                // VTI #1687).
+                let msg = didcomm_request(document_id, body, self.member_did, self.vtc_did);
                 crate::pack_and_send(
                     self.atm,
                     self.profile,
@@ -266,9 +275,7 @@ pub async fn request_challenge(route: &Route<'_>, subject_did: &str) -> Result<U
         json!({ "did": subject_did }),
     )?;
 
-    route
-        .send(body, PERSONHOOD_CHALLENGE_TYPE, document_id)
-        .await?;
+    route.send(body, document_id).await?;
 
     Ok(request_id)
 }
@@ -363,9 +370,7 @@ pub async fn assert_personhood(
     )
     .await?;
 
-    route
-        .send(body, PERSONHOOD_ASSERT_TYPE, document_id)
-        .await?;
+    route.send(body, document_id).await?;
 
     Ok(request_id)
 }
@@ -476,6 +481,25 @@ pub fn parse_assert_reply(body: &Value) -> Result<AssertReply, OpenVTCError> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Over DIDComm a personhood document rides the binding envelope — a VTC
+    /// refuses one typed as its task URI (VTI #1687) — with the document as the
+    /// body and its id as the message id.
+    #[test]
+    fn a_personhood_document_rides_the_binding_envelope() {
+        let body = serde_json::json!({ "type": PERSONHOOD_CHALLENGE_TYPE, "id": "urn:uuid:1" });
+        let msg = didcomm_request(
+            "urn:uuid:1".into(),
+            body.clone(),
+            "did:key:zMember",
+            "did:key:zVtc",
+        );
+        assert_eq!(msg.typ, crate::capabilities::TRUST_TASK_ENVELOPE_TYPE);
+        assert_eq!(msg.id, "urn:uuid:1");
+        assert_eq!(msg.body, body);
+        assert_eq!(msg.from.as_deref(), Some("did:key:zMember"));
+    }
+
     use super::*;
 
     const MEMBER: &str = "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG";

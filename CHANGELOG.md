@@ -26,6 +26,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Vetting questions and personhood reach a community again.** A community
+  (VTI #1687, Keyring VTI-42) now takes a Trust Task over DIDComm only inside
+  the binding envelope (`https://trusttasks.org/binding/didcomm/0.1/envelope`),
+  as the DIDComm binding requires, and refuses one typed as its own task URI.
+  Joins, self-removal, the member credential and capability toggles already
+  used the envelope; the manifest request, the vetter directory, profile and
+  resend, statement withdrawal and both personhood legs did not, so each of
+  them was refused. They now use the envelope too.
+
+  Replies are read in either carriage: typed as the response document (what a
+  community sends today) or in the envelope (what the binding requires and a
+  community will move to), so that switch drops nothing. A problem-report
+  threaded on a vetting question now refuses it at once, rather than leaving it
+  to time out. Vetting legs between two members still travel typed as the task,
+  so a vetter on an older release keeps receiving them; this release reads
+  them in the envelope as well, ready for a later one to send them that way.
+
 - **"Could not read your faces" now says what to do about it.** Faces are built
   over the holder's attribute pool, which sits above every trust context, so
   reaching them needs the VTA's `persona-holder` capability — the one capability

@@ -55,6 +55,10 @@ fn routed_types() -> Vec<&'static str> {
         vta_sdk::protocols::members::MEMBER_REQUEST_VMC_TYPE,
         vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE,
         openvtc_core::join::COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE,
+        // Capability replies in the document's own type, routed by prefix
+        // (`is_capability_reply_type`).
+        "https://trusttasks.org/spec/governance/capability/list/0.1#response",
+        "https://trusttasks.org/spec/governance/capability/enable/0.1#response",
     ]
 }
 

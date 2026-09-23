@@ -1414,6 +1414,48 @@ fn tsp_document_to_message(
     Some(builder.to(recipient.to_string()).finalize())
 }
 
+/// Take the DIDComm binding envelope off an inbound message, so it routes on
+/// the Trust Task it carries.
+///
+/// `None` when `message` is not typed as the envelope — it is already routable
+/// as it stands — or when the envelope's body is not a typed document, which
+/// nothing downstream could route either.
+///
+/// The binding (`bindings/didcomm/0.2` §5) carries a reply in the envelope type
+/// too, and a VTC is moving to it (VTI #1687 left its replies typed as the
+/// response document only so that this client could learn to read the envelope
+/// first). Every handler here dispatches on `message.typ`, so an enveloped reply
+/// would otherwise land on no handler at all and the ask it answers would wait
+/// out its timeout. After this, both carriages arrive at the same handler:
+///
+/// | field  | value |
+/// |--------|-------|
+/// | `typ`  | the document's `type` |
+/// | `thid` | the message's, else the document's `threadId` |
+/// | `body` | the document, unchanged — what the handlers read today |
+/// | `id`, `from`, `to`, timestamps | the message's, unchanged |
+///
+/// `from` in particular stays the authcrypt-proven sender; the document's own
+/// `issuer` is never promoted into it. This is the DIDComm twin of the TSP
+/// mapping in `tsp_document_to_message`.
+#[must_use]
+pub fn open_didcomm_envelope(message: &Message) -> Option<Message> {
+    if message.typ != crate::capabilities::TRUST_TASK_ENVELOPE_TYPE {
+        return None;
+    }
+    let typ = message.body.get("type").and_then(|t| t.as_str())?;
+    let mut opened = message.clone();
+    opened.typ = typ.to_string();
+    if opened.thid.is_none() {
+        opened.thid = message
+            .body
+            .get("threadId")
+            .and_then(|t| t.as_str())
+            .map(str::to_string);
+    }
+    Some(opened)
+}
+
 /// Catch-all pattern for OpenVTC protocol messages + VTC Trust-Task
 /// replies (e.g. `join-requests/submit-receipt`). The state handler
 /// dispatches by type and ignores any it doesn't handle.
@@ -1463,6 +1505,10 @@ pub const OPENVTC_CATCH_ALL_PATTERN: &str = concat!(
     r"|https://trusttasks\.org/spec/credential-exchange/.*",
     r"|https://trusttasks\.org/spec/vetting/.*",
     r"|https://trusttasks\.org/spec/trust-task-error/.*",
+    // Capability replies typed as the response document, which is how a VTC
+    // answers today (the envelope arm below is how it will once it follows the
+    // binding's §5 fully). `message_dispatch` reads both.
+    r"|https://trusttasks\.org/spec/governance/capability/.*",
     // The **binding envelopes**, whose type says "a Trust Task is inside" and
     // names no task. A peer built on `trust-tasks-didcomm` types every message
     // this way, and so does this crate's own `capabilities::
@@ -2549,7 +2595,8 @@ mod supervisor_policy_tests {
 
 #[cfg(test)]
 mod tsp_carriage_tests {
-    use super::tsp_document_to_message;
+    use super::{open_didcomm_envelope, tsp_document_to_message};
+    use affinidi_tdk::didcomm::Message;
 
     /// A Trust Task document, as a peer would put one on the wire.
     fn document(type_uri: &str) -> serde_json::Value {
@@ -2583,6 +2630,55 @@ mod tsp_carriage_tests {
     /// opening it still finds a string, still builds a message, and routes every
     /// reply to a handler that does not exist — the send succeeded, the peer
     /// answered, and the answer evaporated on arrival.
+    #[test]
+    fn a_didcomm_envelope_opens_to_the_task_it_carries() {
+        const REPLY: &str = "https://trusttasks.org/spec/vtc/join-requests/submit/0.1#response";
+        let doc =
+            serde_json::json!({ "type": REPLY, "id": "urn:uuid:r", "threadId": "urn:uuid:q" });
+        let enveloped = Message::build(
+            "m1",
+            crate::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
+            doc.clone(),
+        )
+        .from("did:key:zVtc".to_string())
+        .finalize();
+        let opened = open_didcomm_envelope(&enveloped).expect("an envelope opens");
+        assert_eq!(opened.typ, REPLY);
+        assert_eq!(opened.body, doc, "the handlers read the document unchanged");
+        assert_eq!(opened.id, "m1");
+        assert_eq!(
+            opened.thid.as_deref(),
+            Some("urn:uuid:q"),
+            "no DIDComm thid: the document's threadId correlates"
+        );
+        assert_eq!(opened.from.as_deref(), Some("did:key:zVtc"));
+
+        // The message's own thid wins over the document's.
+        let threaded = Message::build(
+            "m2",
+            crate::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
+            doc.clone(),
+        )
+        .thid("urn:uuid:msg".to_string())
+        .finalize();
+        assert_eq!(
+            open_didcomm_envelope(&threaded).unwrap().thid.as_deref(),
+            Some("urn:uuid:msg")
+        );
+
+        // Already typed as the task: nothing to open.
+        let bare = Message::build("m3", REPLY, doc).finalize();
+        assert!(open_didcomm_envelope(&bare).is_none());
+        // An envelope with no typed document inside cannot be routed.
+        let empty = Message::build(
+            "m4",
+            crate::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
+            serde_json::json!({ "payload": {} }),
+        )
+        .finalize();
+        assert!(open_didcomm_envelope(&empty).is_none());
+    }
+
     #[test]
     fn a_binding_envelope_yields_the_task_type_not_the_bindings() {
         let payload = vta_sdk::tsp_binding::wrap_envelope(

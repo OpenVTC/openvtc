@@ -108,6 +108,12 @@ pub(crate) async fn issue_member_vmc_for(
     .await
 }
 
+/// Whether a document of `typ` may be a reply to a capability request.
+fn is_capability_reply_type(typ: &str) -> bool {
+    typ.starts_with("https://trusttasks.org/spec/governance/capability/")
+        || is_trust_task_error_type(typ)
+}
+
 /// What an inbound message asks the loop to do, beyond mutating `Config`.
 ///
 /// These are things this function cannot do itself: tearing down a session
@@ -225,6 +231,42 @@ pub async fn process_inbound_message(
         return Ok(false);
     }
 
+    // The DIDComm binding envelope comes off before anything routes. Every
+    // handler below dispatches on `message.typ`; an enveloped document names
+    // its task only inside the body, so without this an enveloped reply would
+    // match no handler and the ask it answers would wait out its timeout. A
+    // community replies in the document's own type today and in the envelope
+    // once it follows the binding (§5) fully — this reads both, the same way
+    // (VTI #1687, Keyring VTI-42).
+    let opened = openvtc_core::didcomm::open_didcomm_envelope(message);
+    if opened.is_none() && message.typ == openvtc_core::capabilities::TRUST_TASK_ENVELOPE_TYPE {
+        warn!(id = %message.id, from = %from_did, "binding envelope carries no typed document — dropped");
+        return Ok(false);
+    }
+    let message = opened.as_ref().unwrap_or(message);
+
+    // Capability replies (governance/capability/*), in either carriage: hand
+    // them to the state loop keyed by the document's `threadId` (== our request
+    // id). This is a fan-in point waiting on nothing in particular, so the
+    // document is classified against its own `threadId`; the correlation that
+    // matters is `apply_capability_replies` matching it to the open view's
+    // `pending_thid`, and an uncorrelated reply is dropped there.
+    //
+    // A `trust-task-error` is ambiguous here — it may refuse a capability
+    // toggle or anything else we asked — so it is offered to the capability
+    // view *and* falls through to the handlers below; each side drops an error
+    // that threads on nothing of its own.
+    if is_capability_reply_type(&message.typ)
+        && let Some((thid, doc)) =
+            openvtc_core::capabilities::parse_envelope_document(&message.body)
+        && let Some(reply) = openvtc_core::capabilities::parse_capability_reply(&doc, &thid)
+    {
+        capability_replies.push((thid, reply));
+        if !is_trust_task_error_type(&message.typ) {
+            return Ok(false);
+        }
+    }
+
     // Peer identity vetting (docs/design/vetting-process.md): requests,
     // sessions, cards, statements, declines and refusals between members, and a
     // community's vetting requirements. Tried before the join and credential
@@ -274,27 +316,6 @@ pub async fn process_inbound_message(
             }
             return Ok(handled.changed || noticed);
         }
-    }
-
-    // Trust Task envelope replies (governance/capability/*): parse the body
-    // document, classify it, and hand it to the state loop keyed by the
-    // document's `threadId` (== our request id). Foreign trust tasks riding
-    // the same envelope type are ignored here.
-    if message.typ == openvtc_core::capabilities::TRUST_TASK_ENVELOPE_TYPE {
-        // trust-tasks-capability-client 0.17 folded the §4.9 correlation check
-        // into the parse: `parse_envelope_reply` now takes the thread id the
-        // caller is waiting on. This is a fan-in point that is waiting on
-        // nothing in particular, so the document is read first and classified
-        // against its own `threadId`; the correlation that matters is still
-        // `apply_capability_replies` matching it to the open view's
-        // `pending_thid`, and an uncorrelated reply is dropped there.
-        if let Some((thid, doc)) =
-            openvtc_core::capabilities::parse_envelope_document(&message.body)
-            && let Some(reply) = openvtc_core::capabilities::parse_capability_reply(&doc, &thid)
-        {
-            capability_replies.push((thid, reply));
-        }
-        return Ok(false);
     }
 
     // VTC join-requests submit-receipt: the VTC's asynchronous reply to our
