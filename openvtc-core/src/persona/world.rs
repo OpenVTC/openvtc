@@ -1,8 +1,8 @@
 //! Worlds — the parts of a life, and the faces that belong to them.
 //!
-//! `persona/facet/*` on the wire (VTI #1338); **world** on screen, per
-//! `design-docs/persona-vocabulary.md`. "Facet" is the analyst's word — nobody
-//! says "my work facet" to a friend — and "group" carries no model while
+//! `persona/world/*` on the wire (VTI #1338); **world** on screen, per
+//! `design-docs/persona-vocabulary.md`. "World" is the analyst's word — nobody
+//! says "my work world" to a friend — and "group" carries no model while
 //! colliding with grouping attributes by family.
 //!
 //! A world is *a part of your life, and the faces that belong to it*: Work,
@@ -20,10 +20,10 @@
 //!
 //! # `put` is a replace, and that is the trap
 //!
-//! `persona/facet/put` replaces the whole record. Omitting `faceIds` means *an
+//! `persona/world/put` replaces the whole record. Omitting `faceIds` means *an
 //! empty list*, not "leave them as they were" — the spec is explicit, because a
 //! member whose absence meant "keep" would make it impossible to empty one. So
-//! every write from this module goes through [`FacetDraft`], which carries the
+//! every write from this module goes through [`WorldDraft`], which carries the
 //! full membership, and every caller that wants to change one thing has to
 //! start from what [`list`] returned. There is no partial update to reach for
 //! by accident.
@@ -34,7 +34,7 @@
 //! maintainer does not prune those and neither does this module: a dangling id
 //! is how a consumer can offer to tidy, and silently dropping it turns a
 //! deletion the holder may not have intended into one they cannot see. It
-//! shows up wherever a caller resolves [`Facet::face_ids`] against a face list
+//! shows up wherever a caller resolves [`World::face_ids`] against a face list
 //! and finds fewer faces than the world names.
 
 use serde_json::{Value, json};
@@ -44,11 +44,11 @@ use vta_sdk::trust_tasks;
 
 use crate::errors::OpenVTCError;
 
-/// Round-trip budget for a facet task, in seconds. The same 30s the rest of the
+/// Round-trip budget for a world task, in seconds. The same 30s the rest of the
 /// persona surface gets — these are local-store operations at the agent (VTI
 /// R1.2: an outbound call with no finite timeout turns a hung service into a
 /// hung command).
-const FACET_TIMEOUT: u64 = 30;
+const WORLD_TIMEOUT: u64 = 30;
 
 /// How many worlds one page asks for.
 ///
@@ -138,8 +138,8 @@ impl Colour {
 
 /// One world, as the agent holds it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Facet {
-    pub facet_id: String,
+pub struct World {
+    pub world_id: String,
     /// The holder's name for this part of their life.
     ///
     /// Never disclosed to a verifier — it is how the holder finds it again. The
@@ -166,7 +166,7 @@ pub struct Facet {
     pub updated_at: String,
 }
 
-impl Facet {
+impl World {
     fn from_wire(value: &Value) -> Self {
         let ids = |member: &str| {
             value
@@ -181,8 +181,8 @@ impl Facet {
                 .unwrap_or_default()
         };
         Self {
-            facet_id: value
-                .get("facetId")
+            world_id: value
+                .get("worldId")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
@@ -232,9 +232,9 @@ impl Facet {
     /// that built a draft from scratch to rename a world would empty its
     /// membership on the way past.
     #[must_use]
-    pub fn to_draft(&self) -> FacetDraft {
-        FacetDraft {
-            facet_id: Some(self.facet_id.clone()),
+    pub fn to_draft(&self) -> WorldDraft {
+        WorldDraft {
+            world_id: Some(self.world_id.clone()),
             name: self.name.clone(),
             colour: self.colour,
             icon: self.icon.clone(),
@@ -247,9 +247,9 @@ impl Facet {
 
 /// A world about to be written.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FacetDraft {
+pub struct WorldDraft {
     /// Absent to create; present to replace.
-    pub facet_id: Option<String>,
+    pub world_id: Option<String>,
     pub name: String,
     pub colour: Colour,
     pub icon: Option<String>,
@@ -257,13 +257,13 @@ pub struct FacetDraft {
     pub attribute_ids: Vec<String>,
     /// The version a prior read returned, making the write conditional.
     ///
-    /// Supplied on every edit built by [`Facet::to_draft`], so a world someone
+    /// Supplied on every edit built by [`World::to_draft`], so a world someone
     /// changed from `pnm` or the console between the read and the write is
     /// refused rather than silently overwritten.
     pub expected_version: Option<u64>,
 }
 
-impl FacetDraft {
+impl WorldDraft {
     /// A brand-new world with nothing in it yet.
     #[must_use]
     pub fn new(name: String, colour: Colour) -> Self {
@@ -281,8 +281,8 @@ impl FacetDraft {
 
 /// What a write did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FacetWrite {
-    pub facet_id: String,
+pub struct WorldWrite {
+    pub world_id: String,
     pub version: u64,
     /// True when the write created the world, false when it replaced one.
     pub created: bool,
@@ -305,13 +305,13 @@ pub struct Deletion {
 /// List the holder's worlds, following the cursor to the end.
 ///
 /// Returns an empty list — not an error — when the agent does not serve
-/// `persona/facet/*`, which means it predates VTI #1338. A holder on such an
+/// `persona/world/*`, which means it predates VTI #1338. A holder on such an
 /// agent has no worlds and cannot have any, and that is exactly what an empty
 /// list says; every other failure is returned, because "we could not ask" and
 /// "you have none" are one glance apart and one of them is a confident wrong
 /// answer about the holder's own arrangement (VTI R6.4).
-pub async fn list(client: &VtaClient) -> Result<Vec<Facet>, OpenVTCError> {
-    let mut facets: Vec<Facet> = Vec::new();
+pub async fn list(client: &VtaClient) -> Result<Vec<World>, OpenVTCError> {
+    let mut worlds: Vec<World> = Vec::new();
     let mut cursor: Option<String> = None;
 
     for _ in 0..MAX_PAGES {
@@ -322,22 +322,22 @@ pub async fn list(client: &VtaClient) -> Result<Vec<Facet>, OpenVTCError> {
 
         let value = match client
             .dispatch_trust_task(
-                trust_tasks::TASK_PERSONA_FACET_LIST_1_0,
+                trust_tasks::TASK_PERSONA_WORLD_LIST_1_0,
                 payload,
-                FACET_TIMEOUT,
+                WORLD_TIMEOUT,
             )
             .await
         {
             Ok(value) => value,
             Err(VtaError::UnsupportedTaskType { .. }) => return Ok(Vec::new()),
-            Err(e) => return Err(OpenVTCError::Vta(format!("persona facet list failed: {e}"))),
+            Err(e) => return Err(OpenVTCError::Vta(format!("persona world list failed: {e}"))),
         };
 
-        facets.extend(
+        worlds.extend(
             value
-                .get("facets")
+                .get("worlds")
                 .and_then(Value::as_array)
-                .map(|rows| rows.iter().map(Facet::from_wire))
+                .map(|rows| rows.iter().map(World::from_wire))
                 .into_iter()
                 .flatten(),
         );
@@ -358,22 +358,22 @@ pub async fn list(client: &VtaClient) -> Result<Vec<Facet>, OpenVTCError> {
     // Display order the holder can predict, which is the order they named them
     // in — the store returns creation order and a name sort would reshuffle the
     // whole screen the first time somebody renamed one.
-    Ok(facets)
+    Ok(worlds)
 }
 
 /// Create or replace one world.
 ///
 /// A replace in the full sense: the draft's membership is what the world will
-/// have afterwards. Build it with [`Facet::to_draft`] unless the world is new.
-pub async fn put(client: &VtaClient, draft: FacetDraft) -> Result<FacetWrite, OpenVTCError> {
+/// have afterwards. Build it with [`World::to_draft`] unless the world is new.
+pub async fn put(client: &VtaClient, draft: WorldDraft) -> Result<WorldWrite, OpenVTCError> {
     let mut payload = json!({
         "name": draft.name,
         "colour": draft.colour.as_wire(),
         "faceIds": draft.face_ids,
         "attributeIds": draft.attribute_ids,
     });
-    if let Some(id) = &draft.facet_id {
-        payload["facetId"] = json!(id);
+    if let Some(id) = &draft.world_id {
+        payload["worldId"] = json!(id);
     }
     if let Some(icon) = draft.icon.as_deref().filter(|s| !s.is_empty()) {
         payload["icon"] = json!(icon);
@@ -384,16 +384,16 @@ pub async fn put(client: &VtaClient, draft: FacetDraft) -> Result<FacetWrite, Op
 
     let value = client
         .dispatch_trust_task(
-            trust_tasks::TASK_PERSONA_FACET_PUT_1_0,
+            trust_tasks::TASK_PERSONA_WORLD_PUT_1_0,
             payload,
-            FACET_TIMEOUT,
+            WORLD_TIMEOUT,
         )
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona facet write failed: {e}")))?;
+        .map_err(|e| OpenVTCError::Vta(format!("persona world write failed: {e}")))?;
 
-    Ok(FacetWrite {
-        facet_id: value
-            .get("facetId")
+    Ok(WorldWrite {
+        world_id: value
+            .get("worldId")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
@@ -409,22 +409,22 @@ pub async fn put(client: &VtaClient, draft: FacetDraft) -> Result<FacetWrite, Op
 /// untouched.
 pub async fn delete(
     client: &VtaClient,
-    facet_id: &str,
+    world_id: &str,
     expected_version: Option<u64>,
 ) -> Result<Deletion, OpenVTCError> {
-    let mut payload = json!({ "facetId": facet_id });
+    let mut payload = json!({ "worldId": world_id });
     if let Some(version) = expected_version {
         payload["expectedVersion"] = json!(version);
     }
 
     let value = client
         .dispatch_trust_task(
-            trust_tasks::TASK_PERSONA_FACET_DELETE_1_0,
+            trust_tasks::TASK_PERSONA_WORLD_DELETE_1_0,
             payload,
-            FACET_TIMEOUT,
+            WORLD_TIMEOUT,
         )
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona facet delete failed: {e}")))?;
+        .map_err(|e| OpenVTCError::Vta(format!("persona world delete failed: {e}")))?;
 
     Ok(Deletion {
         existed: value
@@ -450,18 +450,18 @@ pub async fn delete(
 /// somewhere is fine too.
 pub async fn place_face(
     client: &VtaClient,
-    facets: &[Facet],
+    worlds: &[World],
     profile_id: &str,
     into: Option<&str>,
 ) -> Result<(), OpenVTCError> {
-    for facet in facets.iter().filter(|f| f.holds_face(profile_id)) {
-        if Some(facet.facet_id.as_str()) == into {
+    for world in worlds.iter().filter(|f| f.holds_face(profile_id)) {
+        if Some(world.world_id.as_str()) == into {
             // Already where it is being asked to go. Writing anyway would burn
             // a version and turn a no-op into a conflict for anyone else
             // holding this world.
             return Ok(());
         }
-        let mut draft = facet.to_draft();
+        let mut draft = world.to_draft();
         draft.face_ids.retain(|id| id != profile_id);
         put(client, draft).await?;
     }
@@ -469,14 +469,14 @@ pub async fn place_face(
     let Some(target) = into else {
         return Ok(());
     };
-    let Some(facet) = facets.iter().find(|f| f.facet_id == target) else {
+    let Some(world) = worlds.iter().find(|f| f.world_id == target) else {
         return Err(OpenVTCError::Vta(format!(
             "no such world: {target}. It may have been deleted from another \
              client since this list was read"
         )));
     };
 
-    let mut draft = facet.to_draft();
+    let mut draft = world.to_draft();
     // The version this draft carries came from the read, and the removal above
     // may have just moved it — but only on a *different* world, so this one is
     // still at the version we saw. A conflict here is a genuine one.
@@ -491,7 +491,7 @@ mod tests {
 
     fn wire(name: &str, faces: &[&str]) -> Value {
         json!({
-            "facetId": "01FACET",
+            "worldId": "01FACET",
             "name": name,
             "colour": "moss",
             "icon": "🏠",
@@ -505,14 +505,14 @@ mod tests {
     /// A served world is read whole, membership included.
     #[test]
     fn a_world_is_read_whole() {
-        let facet = Facet::from_wire(&wire("Home", &["01FACE"]));
-        assert_eq!(facet.facet_id, "01FACET");
-        assert_eq!(facet.name, "Home");
-        assert_eq!(facet.colour, Colour::Moss);
-        assert_eq!(facet.icon.as_deref(), Some("🏠"));
-        assert_eq!(facet.face_ids, vec!["01FACE".to_string()]);
-        assert_eq!(facet.attribute_ids, vec!["01ATTR".to_string()]);
-        assert_eq!(facet.version, 3);
+        let world = World::from_wire(&wire("Home", &["01FACE"]));
+        assert_eq!(world.world_id, "01FACET");
+        assert_eq!(world.name, "Home");
+        assert_eq!(world.colour, Colour::Moss);
+        assert_eq!(world.icon.as_deref(), Some("🏠"));
+        assert_eq!(world.face_ids, vec!["01FACE".to_string()]);
+        assert_eq!(world.attribute_ids, vec!["01ATTR".to_string()]);
+        assert_eq!(world.version, 3);
     }
 
     /// A colour this build has never heard of is decoration that failed to
@@ -521,9 +521,9 @@ mod tests {
     fn an_unknown_colour_does_not_lose_the_world() {
         let mut value = wire("Home", &[]);
         value["colour"] = json!("chartreuse");
-        let facet = Facet::from_wire(&value);
-        assert_eq!(facet.colour, Colour::Slate);
-        assert_eq!(facet.name, "Home");
+        let world = World::from_wire(&value);
+        assert_eq!(world.colour, Colour::Slate);
+        assert_eq!(world.name, "Home");
     }
 
     /// Every colour round-trips through its wire token, so a value read back is
@@ -542,8 +542,8 @@ mod tests {
     /// empty list rather than "leave them alone".
     #[test]
     fn an_edit_carries_the_whole_membership_forward() {
-        let facet = Facet::from_wire(&wire("Home", &["01FACE", "02FACE"]));
-        let mut draft = facet.to_draft();
+        let world = World::from_wire(&wire("Home", &["01FACE", "02FACE"]));
+        let mut draft = world.to_draft();
         draft.name = "Home life".to_string();
 
         assert_eq!(
@@ -552,16 +552,16 @@ mod tests {
         );
         assert_eq!(draft.attribute_ids, vec!["01ATTR".to_string()]);
         assert_eq!(draft.expected_version, Some(3));
-        assert_eq!(draft.facet_id.as_deref(), Some("01FACET"));
+        assert_eq!(draft.world_id.as_deref(), Some("01FACET"));
     }
 
     /// A new world is create-only, so a retry after a lost response cannot
     /// replace what the first attempt made.
     #[test]
     fn a_new_world_is_create_only() {
-        let draft = FacetDraft::new("Play".to_string(), Colour::Rose);
+        let draft = WorldDraft::new("Play".to_string(), Colour::Rose);
         assert_eq!(draft.expected_version, Some(0));
-        assert!(draft.facet_id.is_none());
+        assert!(draft.world_id.is_none());
         assert!(draft.face_ids.is_empty());
     }
 
@@ -570,15 +570,15 @@ mod tests {
     fn an_unnamed_world_still_has_something_to_draw() {
         let mut value = wire("", &[]);
         value["name"] = json!("   ");
-        assert_eq!(Facet::from_wire(&value).display_name(), "(unnamed world)");
+        assert_eq!(World::from_wire(&value).display_name(), "(unnamed world)");
     }
 
     /// Membership is asked as a question, and a world that does not hold a face
     /// says so.
     #[test]
     fn a_world_knows_which_faces_it_holds() {
-        let facet = Facet::from_wire(&wire("Home", &["01FACE"]));
-        assert!(facet.holds_face("01FACE"));
-        assert!(!facet.holds_face("02FACE"));
+        let world = World::from_wire(&wire("Home", &["01FACE"]));
+        assert!(world.holds_face("01FACE"));
+        assert!(!world.holds_face("02FACE"));
     }
 }
