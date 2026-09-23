@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use affinidi_tdk::secrets_resolver::secrets::Secret;
 use affinidi_tdk::{
     didcomm::Message,
     messaging::{ATM, profiles::ATMProfile},
@@ -52,6 +53,30 @@ pub const COMMUNITY_PROFILE_SHOW_TYPE: &str = <trust_tasks_rs::specs::vtc::commu
 /// `CommunityProfileView` (and its `relationshipIdentifierDefault`).
 pub const COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE: &str = <trust_tasks_rs::specs::vtc::community::profile::show::v0_1::Response as trust_tasks_rs::Payload>::TYPE_URI;
 
+/// Who is speaking to which community, and over what.
+///
+/// Grouped rather than passed loose, matching [`crate::personhood::Route`] and
+/// [`crate::members::Delivery`]: the applicant verbs take the same six values,
+/// and a sixth positional `&str` is how one call ends up with two of them
+/// swapped.
+pub struct Applicant<'a> {
+    pub atm: &'a ATM,
+    pub profile: &'a Arc<ATMProfile>,
+    /// The persona applying — the authcrypt sender / TSP sender VID, and the
+    /// `issuer` of every document sent through this route.
+    pub persona_did: &'a str,
+    /// The persona's signing key. Every task here declares `proof` REQUIRED,
+    /// so the route carries the key rather than each verb asking for it.
+    pub signer: &'a Secret,
+    /// The community being addressed.
+    pub vtc_did: &'a str,
+    /// The persona's own mediator, for the DIDComm leg.
+    pub mediator_did: &'a str,
+    /// The community's advertised TSP mediator, when it advertises `#tsp`.
+    /// `Some` sends the bare document over TSP; `None` wraps it in DIDComm.
+    pub tsp_mediator_did: Option<&'a str>,
+}
+
 /// Submit a join request to a VTC (`vtc_did`) over DIDComm, presenting
 /// `persona_did` as the applicant.
 ///
@@ -80,19 +105,24 @@ pub const COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE: &str = <trust_tasks_rs::specs::v
 /// which does not advertise `#tsp` simply degrades to DIDComm rather than
 /// failing.
 pub async fn submit_join_request(
-    atm: &ATM,
-    profile: &Arc<ATMProfile>,
-    persona_did: &str,
-    vtc_did: &str,
-    mediator_did: &str,
+    route: &Applicant<'_>,
     presentation: impl Into<JoinPresentation>,
-    tsp_mediator_did: Option<&str>,
 ) -> Result<Uuid, OpenVTCError> {
+    let Applicant {
+        atm,
+        profile,
+        persona_did,
+        signer,
+        vtc_did,
+        mediator_did,
+        tsp_mediator_did,
+    } = *route;
     // One id, used as both the document id and — on the DIDComm path — the
     // message id, so the two transports' threading conventions coincide.
     let request_id = Uuid::new_v4();
     let document_id = format!("urn:uuid:{request_id}");
-    let body = build_join_submit_document(persona_did, vtc_did, presentation, &document_id)?;
+    let body = build_join_submit_document(persona_did, signer, vtc_did, presentation, &document_id)
+        .await?;
 
     // Fail loudly on an oversized submit rather than letting a mediator/bridge
     // drop it silently into a stuck `Pending` (PR #137). This is the largest
@@ -155,23 +185,29 @@ fn oversized_join_submit(body: &Value) -> Option<usize> {
 ///
 /// [`CommunityRecord::request_id_confirmed`]: crate::config::account::CommunityRecord::request_id_confirmed
 pub async fn poll_join_status(
-    atm: &ATM,
-    profile: &Arc<ATMProfile>,
-    persona_did: &str,
-    vtc_did: &str,
-    mediator_did: &str,
+    route: &Applicant<'_>,
     request_id: Option<Uuid>,
-    tsp_mediator_did: Option<&str>,
 ) -> Result<(), OpenVTCError> {
+    let Applicant {
+        atm,
+        profile,
+        persona_did,
+        signer,
+        vtc_did,
+        mediator_did,
+        tsp_mediator_did,
+    } = *route;
     let document_id = format!("urn:uuid:{}", Uuid::new_v4());
     let payload = JoinRequestStatusBody { request_id };
-    let body = build_trust_task_document(
+    let body = crate::trust_task_doc::build_signed_value(
         JOIN_REQUEST_STATUS_TYPE,
         persona_did,
         vtc_did,
         &document_id,
         payload,
-    )?;
+        signer,
+    )
+    .await?;
 
     match tsp_mediator_did {
         Some(tsp_mediator) => {
@@ -263,11 +299,13 @@ fn build_trust_task_document<T: serde::Serialize>(
 /// `malformedRequest` ("missing field `id`") when handed the bare payload, so the
 /// payload must ride as the document's `payload` field. The document carries the
 /// required `id` (a fresh `urn:uuid`) and `type`, plus the audience-binding
-/// `issuer` (the applicant persona) and `recipient` (the VTC). No `proof` is
-/// attached — over DIDComm the authcrypt sender authenticates the applicant (the
-/// VTC reads it from the envelope), matching the SDK's documented DIDComm shape.
-fn build_join_submit_document(
+/// `issuer` (the applicant persona) and `recipient` (the VTC), and it is
+/// **signed** by the persona: `vtc/join-requests/submit/0.2` declares `proof`
+/// REQUIRED, and the authcrypt sender or TSP sender VID attributes the carriage
+/// rather than the document.
+async fn build_join_submit_document(
     persona_did: &str,
+    signer: &Secret,
     vtc_did: &str,
     presentation: impl Into<JoinPresentation>,
     document_id: &str,
@@ -286,13 +324,15 @@ fn build_join_submit_document(
     // `document_id` is supplied rather than minted here: on the DIDComm path this
     // same id is the message id, which is what makes the two transports' reply
     // threading agree (see [`submit_join_request`]).
-    build_trust_task_document(
+    crate::trust_task_doc::build_signed_value(
         JOIN_REQUEST_SUBMIT_TYPE,
         persona_did,
         vtc_did,
         document_id,
         payload,
+        signer,
     )
+    .await
 }
 
 /// Send a member self-removal (`MEMBER_SELF_REMOVE`) to a VTC over DIDComm to
@@ -309,6 +349,7 @@ pub async fn submit_self_remove(
     atm: &ATM,
     profile: &Arc<ATMProfile>,
     member_did: &str,
+    signer: &Secret,
     vtc_did: &str,
     mediator_did: &str,
     disposition: Option<String>,
@@ -320,13 +361,15 @@ pub async fn submit_self_remove(
     // unattributable" is not a property to leave in place on purpose.
     let msg_id = Uuid::new_v4();
     let document_id = format!("urn:uuid:{msg_id}");
-    let body = crate::trust_task_doc::build_value(
+    let body = crate::trust_task_doc::build_signed_value(
         MEMBER_SELF_REMOVE_TYPE,
         member_did,
         vtc_did,
         &document_id,
         SelfRemoveBody { disposition },
-    )?;
+        signer,
+    )
+    .await?;
 
     let now = Utc::now().timestamp().max(0) as u64;
     let msg = Message::build(document_id, TRUST_TASK_ENVELOPE_TYPE.to_string(), body)
@@ -653,25 +696,34 @@ mod tests {
     /// The outbound size guard: an ordinary submit passes, an oversized one is
     /// reported (so `submit_join_request` fails loudly instead of the mediator
     /// dropping it into a stuck `Pending`).
-    #[test]
-    fn oversized_join_submit_is_flagged() {
+    #[tokio::test]
+    async fn oversized_join_submit_is_flagged() {
+        // A real key, because the submit is signed: the guard measures what
+        // goes on the wire, and the proof is part of it.
+        let (applicant, signer) =
+            affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
+                .expect("did:key generates");
         let ordinary = build_join_submit_document(
-            "did:key:alice",
+            &applicant,
+            &signer,
             "did:webvh:example.com:vtc",
             json!({}),
             "urn:uuid:1",
         )
+        .await
         .expect("builds");
         assert_eq!(oversized_join_submit(&ordinary), None);
 
         // A presentation larger than the ceiling.
         let huge = json!({ "vp": "x".repeat(MAX_JOIN_SUBMIT_BYTES + 1) });
         let body = build_join_submit_document(
-            "did:key:alice",
+            &applicant,
+            &signer,
             "did:webvh:example.com:vtc",
             huge,
             "urn:uuid:2",
         )
+        .await
         .expect("builds");
         assert!(
             oversized_join_submit(&body).is_some_and(|n| n > MAX_JOIN_SUBMIT_BYTES),
@@ -715,23 +767,36 @@ mod tests {
     /// not have moved: the payload still nests under `payload`, and the supplied
     /// document id is used verbatim (it doubles as the DIDComm message id, which
     /// is what makes DIDComm and TSP reply threading agree).
-    #[test]
-    fn the_submit_document_keeps_its_shape_through_the_shared_builder() {
+    #[tokio::test]
+    async fn the_submit_document_keeps_its_shape_through_the_shared_builder() {
+        let (applicant, signer) =
+            affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
+                .expect("did:key generates");
         let doc = build_join_submit_document(
-            "did:webvh:example.com:alice",
+            &applicant,
+            &signer,
             "did:webvh:example.com:community",
             json!({ "type": ["VerifiablePresentation"] }),
             "urn:uuid:submit-1",
         )
+        .await
         .expect("the submit document builds");
 
         assert_eq!(doc["id"], json!("urn:uuid:submit-1"));
         assert_eq!(doc["type"], json!(JOIN_REQUEST_SUBMIT_TYPE));
-        assert_eq!(doc["issuer"], json!("did:webvh:example.com:alice"));
+        assert_eq!(doc["issuer"], json!(applicant));
         assert_eq!(doc["recipient"], json!("did:webvh:example.com:community"));
         assert_eq!(
             doc["payload"]["vp"]["type"],
             json!(["VerifiablePresentation"])
+        );
+        // `join-requests/submit/0.2` declares `proof` REQUIRED, and this is the
+        // one document in the join flow a community cannot refuse for anything
+        // else first — so its proof is part of the shape.
+        assert_eq!(
+            doc["proof"]["cryptosuite"],
+            json!("eddsa-jcs-2022"),
+            "the submit must be signed: {doc}"
         );
     }
 
@@ -802,8 +867,8 @@ mod tests {
         assert_eq!(vp["subjectLinkage"]["signature"], "deadbeef");
     }
 
-    #[test]
-    fn vetting_statements_ride_beside_the_invitation_and_the_digest_in_extensions() {
+    #[tokio::test]
+    async fn vetting_statements_ride_beside_the_invitation_and_the_digest_in_extensions() {
         let vic = sample_vic();
         let mut vp = build_join_vp("did:webvh:example.com:alice", Some(&vic), None);
         attach_credentials(
@@ -824,8 +889,12 @@ mod tests {
             "nothing to attach adds nothing"
         );
 
+        let (applicant, signer) =
+            affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
+                .expect("did:key generates");
         let doc = build_join_submit_document(
-            "did:webvh:example.com:alice",
+            &applicant,
+            &signer,
             "did:webvh:example.com:community",
             JoinPresentation {
                 vp,
@@ -834,6 +903,7 @@ mod tests {
             },
             "urn:uuid:submit-2",
         )
+        .await
         .unwrap();
         assert_eq!(
             doc["payload"]["extensions"]["requirementsDigest"],
@@ -933,17 +1003,22 @@ mod tests {
         assert_eq!(invitation_subject(&json!({})), None);
     }
 
-    #[test]
-    fn join_submit_body_is_a_trust_task_document_the_vtc_can_parse() {
+    #[tokio::test]
+    async fn join_submit_body_is_a_trust_task_document_the_vtc_can_parse() {
         use trust_tasks_rs::TrustTask;
 
-        let vp = build_join_vp("did:webvh:example.com:alice", Some(&sample_vic()), None);
+        let (applicant, signer) =
+            affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
+                .expect("did:key generates");
+        let vp = build_join_vp(&applicant, Some(&sample_vic()), None);
         let body = build_join_submit_document(
-            "did:webvh:example.com:alice",
+            &applicant,
+            &signer,
             "did:webvh:example.com:community",
             vp,
             &format!("urn:uuid:{}", Uuid::new_v4()),
         )
+        .await
         .expect("build document");
 
         // The exact deserialization the VTC performs — this is what was failing
@@ -957,17 +1032,23 @@ mod tests {
             JOIN_REQUEST_SUBMIT_TYPE,
             "type URI is the submit type"
         );
-        assert_eq!(doc.issuer.as_deref(), Some("did:webvh:example.com:alice"));
+        assert_eq!(doc.issuer.as_deref(), Some(applicant.as_str()));
         assert_eq!(
             doc.recipient.as_deref(),
             Some("did:webvh:example.com:community")
         );
+        // The submit is signed. It used to be unsigned deliberately — the
+        // authcrypt sender authenticated the applicant — and this assertion
+        // said so. But `join-requests/submit/0.2` declares `proof` REQUIRED,
+        // and transport attribution says who handed the document over, not who
+        // wrote it: only one of the two survives being relayed, and `issuer` is
+        // what a community reads downstream (VTI #1641).
         assert!(
-            doc.proof.is_none(),
-            "DIDComm submit is unsigned (authcrypt)"
+            doc.proof.is_some(),
+            "the submit carries the proof its specification declares REQUIRED"
         );
         // The submit body rides as the document payload, VIC and all.
-        assert_eq!(doc.payload["vp"]["holder"], "did:webvh:example.com:alice");
+        assert_eq!(doc.payload["vp"]["holder"], applicant);
         assert!(doc.payload["vp"]["verifiableCredential"].is_array());
     }
 

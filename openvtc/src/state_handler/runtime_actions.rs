@@ -218,8 +218,14 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 .filter(|c| c.status.is_active())
                 .map(|c| (c.vtc_did.clone(), c.persona_ref));
             if let Some((vtc, persona_id)) = target {
-                match capability_sender(ctx.config, ctx.tdk, persona_id) {
-                    Some((atm, profile, member_did, mediator)) => {
+                // The key comes along: `members/self-remove` is signed, so a
+                // persona whose key cannot be read cannot leave — and saying so
+                // is better than sending a document the community will refuse.
+                match (
+                    capability_sender(ctx.config, ctx.tdk, persona_id),
+                    ctx.config.get_persona_keys_for(persona_id, ctx.tdk).await,
+                ) {
+                    (Some((atm, profile, member_did, mediator)), Ok(keys)) => {
                         spawn_community_job(
                             ctx.dispatch_tx,
                             ctx.in_flight,
@@ -231,11 +237,17 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                                 mediator,
                                 vtc_did: vtc,
                                 persona: persona_id,
-                                verb: community_actions::Verb::Leave,
+                                verb: community_actions::Verb::Leave {
+                                    signing_secret: Box::new(keys.signing.secret.clone()),
+                                },
                             },
                         );
                     }
-                    None => {
+                    (_, Err(e)) => {
+                        ctx.state.main_page.content_panel.communities.status_message =
+                            Some(format!("Couldn't sign the departure: {e}"));
+                    }
+                    (None, _) => {
                         ctx.state.main_page.content_panel.communities.status_message =
                             Some("Messaging unavailable — cannot leave right now.".to_string());
                     }

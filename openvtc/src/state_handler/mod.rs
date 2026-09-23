@@ -1823,7 +1823,7 @@ impl StateHandler {
                         && let Some(atm) = tdk.atm.clone()
                     {
                         let due = join_status_pacer.due(candidates, std::time::Instant::now());
-                        let polls = join_status_poll::build(&config, due);
+                        let polls = join_status_poll::build(&config, &tdk, due).await;
                         if !polls.is_empty() {
                             tokio::spawn(join_status_poll::send_all(atm, polls));
                         }

@@ -19,10 +19,16 @@
 //! # What belongs here and what does not
 //!
 //! The *envelope*: the fields every Trust Task document carries regardless of
-//! verb. Not the payload, not the proof, and not the carriage — a document is
-//! addressed and dated here, signed by whoever owns the key, and wrapped by
-//! whichever binding carries it.
+//! verb. Not the payload and not the carriage — a document is addressed and
+//! dated here, and wrapped by whichever binding carries it.
+//!
+//! The *proof* is here too, as `build_signed_value`, for the same reason the
+//! envelope is: a verb that signs its own way is how one of them ends up
+//! subtly different. Signing stays a separate function rather than something
+//! `build` does, because a consumer of a document (a reply, an error) builds
+//! one it does not sign.
 
+use affinidi_tdk::secrets_resolver::secrets::Secret;
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value;
@@ -59,6 +65,35 @@ pub fn build<P: Serialize>(
     Ok(doc)
 }
 
+/// [`build`], signed by the issuer and serialised — what a verb sends.
+///
+/// The document carries an `eddsa-jcs-2022` Data-Integrity proof by the key
+/// behind `issuer_did`, which is what a consumer enforcing SPEC §7.2 item 7
+/// requires of a task whose specification declares `proof` REQUIRED. Five of
+/// this client's verbs declare exactly that — `join-requests/{submit, status}`,
+/// `members/{self-remove, vmc}` and `members/personhood/assert` — and until
+/// they signed, a VTC could only accept them by relaxing that rule for every
+/// task and every sender (VTI #1641, and the `require_declared_proof` escape
+/// hatch VTI #1659 had to add).
+///
+/// Transport attribution is not a substitute: an authcrypt sender or a TSP
+/// sender VID says who handed the document over, and the proof says who wrote
+/// it. They are the same party here, but only one of them survives being
+/// relayed, and `issuer` is what the consumer reads downstream.
+pub async fn build_signed_value<P: Serialize>(
+    type_uri: &str,
+    issuer_did: &str,
+    recipient_did: &str,
+    document_id: impl Into<String>,
+    payload: P,
+    signer: &Secret,
+) -> Result<Value, OpenVTCError> {
+    let mut doc = build(type_uri, issuer_did, recipient_did, document_id, payload)?;
+    crate::capabilities::sign_document(&mut doc, signer).await?;
+    serde_json::to_value(&doc)
+        .map_err(|e| OpenVTCError::Config(format!("trust task document serialize: {e}")))
+}
+
 /// [`build`], serialised — for the callers that hand a `Value` straight to a
 /// DIDComm message body.
 pub fn build_value<P: Serialize>(
@@ -79,6 +114,58 @@ mod tests {
     use serde_json::json;
 
     const TYPE_URI: &str = "https://trusttasks.org/spec/vtc/members/self-remove/0.1";
+
+    /// A signed document carries a proof by the key behind its own `issuer`.
+    ///
+    /// Five of this client's verbs send tasks whose specification declares
+    /// `proof` REQUIRED, and until they signed, a VTC could accept them only by
+    /// relaxing that rule for every task and every sender (VTI #1641). The
+    /// verification method must name the issuer's own key: a proof by some
+    /// other party establishes that somebody signed something, which is not
+    /// what `issuer` is read as downstream (SPEC §4.7).
+    #[tokio::test]
+    async fn a_signed_document_carries_a_proof_by_its_issuer() {
+        use affinidi_tdk::dids::{DID, KeyType};
+
+        let (issuer_did, signer) =
+            DID::generate_did_key(KeyType::Ed25519).expect("did:key generates");
+        let doc = build_signed_value(
+            TYPE_URI,
+            &issuer_did,
+            "did:webvh:community",
+            "urn:uuid:1",
+            json!({}),
+            &signer,
+        )
+        .await
+        .expect("builds and signs");
+
+        let proof = doc.get("proof").expect("a proof is attached");
+        assert_eq!(
+            proof.get("cryptosuite").and_then(Value::as_str),
+            Some("eddsa-jcs-2022"),
+        );
+        let vm = proof
+            .get("verificationMethod")
+            .and_then(Value::as_str)
+            .expect("the proof names a verification method");
+        assert!(
+            vm.starts_with(&issuer_did),
+            "the proof must be by the issuer's own key: {vm} is not under {issuer_did}"
+        );
+
+        // The envelope is unchanged by signing — a document that gains a proof
+        // and loses its addressing is refused for the addressing.
+        assert_eq!(
+            doc.get("issuer").and_then(Value::as_str),
+            Some(issuer_did.as_str())
+        );
+        assert_eq!(
+            doc.get("recipient").and_then(Value::as_str),
+            Some("did:webvh:community")
+        );
+        assert!(doc.get("issuedAt").is_some());
+    }
 
     /// Every field a peer's framework checks is present.
     ///
