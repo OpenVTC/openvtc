@@ -29,6 +29,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 use trust_tasks_rs::TrustTask;
+use vta_sdk::protocols::PROBLEM_REPORT_TYPE;
 use vta_sdk::protocols::credential_exchange::ISSUE as CREDENTIAL_ISSUE_TYPE;
 use vta_sdk::protocols::join_requests::{
     JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, manifest as join_manifest,
@@ -382,6 +383,7 @@ pub fn may_claim(typ: &str) -> bool {
                 | VETTING_VETTER_RESEND_RESPONSE_TYPE
                 | JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE
                 | CREDENTIAL_ISSUE_TYPE
+                | PROBLEM_REPORT_TYPE
         )
         || is_trust_task_error_type(typ)
 }
@@ -406,6 +408,7 @@ pub async fn handle(
         JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE => manifest(book, ctx, message, sender),
         CREDENTIAL_ISSUE_TYPE => return statement(book, ctx, message, sender).await,
         t if is_trust_task_error_type(t) => return refused(book, ctx, message, sender),
+        PROBLEM_REPORT_TYPE => return problem_reported(book, ctx, message, sender),
         _ => return None,
     };
     Some(handled)
@@ -899,7 +902,43 @@ fn refused(
         .pointer("/payload/message")
         .and_then(Value::as_str)
         .map(str::to_string);
+    refusal_of(book, ctx, thread, sender, code, detail)
+}
 
+/// A DIDComm problem-report threaded on something vetting is waiting for.
+///
+/// A community refuses at the DIDComm layer — before the Trust Task pipeline,
+/// so with no `trust-task-error` — when it cannot take the message at all: a
+/// document typed as its task URI rather than carried in the binding envelope
+/// is the case VTI #1687 made universal. The report threads on the message id,
+/// which is the document id the question is filed under, so it answers the
+/// question exactly as a `trust-task-error` would. Without this the person
+/// asking waited out the timeout and was told nobody answered.
+///
+/// `None` when it threads on nothing of vetting's, so the join handler after
+/// this still sees the reports that are its own.
+fn problem_reported(
+    book: &mut VettingBook,
+    ctx: &Context<'_>,
+    message: &Message,
+    sender: &str,
+) -> Option<Handled> {
+    let thread = message.thid.as_deref()?;
+    let (code, comment) = vta_sdk::protocols::extract_problem_report(&message.body);
+    let detail = (!comment.is_empty()).then_some(comment);
+    refusal_of(book, ctx, thread, sender, code, detail)
+}
+
+/// Apply a refusal of whatever vetting sent on `thread`: an application's
+/// request to a vetter, a question to a community, or a statement withdrawal.
+fn refusal_of(
+    book: &mut VettingBook,
+    ctx: &Context<'_>,
+    thread: &str,
+    sender: &str,
+    code: String,
+    detail: Option<String>,
+) -> Option<Handled> {
     if let Some(application) = book.applications.iter_mut().find(|a| a.sent(thread)) {
         return Some(
             match application.on_refused(thread, sender, code.clone(), detail, ctx.now) {

@@ -877,8 +877,11 @@ async fn a_vetter_publishes_a_profile_and_hears_the_communitys_answer() {
     // What the community receives is signed by the vetter and opens as a profile.
     let mut request = wire::vetter_profile_request(&vetter.did, COMMUNITY, &body).unwrap();
     wire::sign(&mut request, &vetter.secret).await.unwrap();
+    // It travels in the binding envelope; the community takes that off first.
+    let sent = wire::to_message(&request).unwrap();
+    assert_eq!(sent.typ, crate::capabilities::TRUST_TASK_ENVELOPE_TYPE);
     let opened: wire::Opened<vetters::profile::v0_1::Payload> = wire::open(
-        &wire::to_message(&request).unwrap(),
+        &crate::didcomm::open_didcomm_envelope(&sent).unwrap(),
         &vetter.did,
         &TrustTaskVmResolver::did_key_only(),
     )
@@ -1052,6 +1055,130 @@ async fn the_directory_answers_only_what_was_asked() {
         })
     ));
     assert!(applicant.book.queries.is_empty());
+}
+
+/// `message` as a community that follows the DIDComm binding (§5) sends it:
+/// typed as the envelope, with the same document as the body.
+fn enveloped(message: &Message) -> Message {
+    let mut enveloped = message.clone();
+    enveloped.typ = crate::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string();
+    enveloped
+}
+
+/// A community answers in the response document's own type today and in the
+/// binding envelope once it follows §5 fully (the follow-up to VTI #1687). Both
+/// must reach the same handler, or the switch silently drops every answer.
+#[tokio::test]
+async fn a_community_answer_is_read_in_either_carriage() {
+    let mut applicant = Party::new(1);
+    let page = vetters::list::v0_1::Response::try_from(
+        vetters::list::v0_1::Response::builder().vetters(vec![listed_vetter()]),
+    )
+    .unwrap();
+    for in_envelope in [false, true] {
+        let request =
+            wire::vetter_list_request(&applicant.did, COMMUNITY, &unfiltered_list()).unwrap();
+        applicant
+            .book
+            .ask(asked(&request, applicant.persona, QueryKind::VetterList));
+        let reply = community_answer(&request, &page);
+        let reply = if in_envelope {
+            crate::didcomm::open_didcomm_envelope(&enveloped(&reply))
+                .expect("an enveloped document opens")
+        } else {
+            assert!(
+                crate::didcomm::open_didcomm_envelope(&reply).is_none(),
+                "a document-typed reply needs no opening"
+            );
+            reply
+        };
+        let handled = applicant.receive(&reply, COMMUNITY).await;
+        assert!(
+            matches!(&handled.answer, Some(CommunityAnswer::Vetters { query, .. }) if *query == request.id),
+            "answered in the envelope: {in_envelope}"
+        );
+
+        // And a refusal, in the same carriage.
+        let request =
+            wire::vetter_list_request(&applicant.did, COMMUNITY, &unfiltered_list()).unwrap();
+        applicant
+            .book
+            .ask(asked(&request, applicant.persona, QueryKind::VetterList));
+        let refusal = community_refusal(&request, "permissionDenied");
+        let refusal = if in_envelope {
+            crate::didcomm::open_didcomm_envelope(&enveloped(&refusal)).unwrap()
+        } else {
+            refusal
+        };
+        let handled = applicant.receive(&refusal, COMMUNITY).await;
+        assert!(matches!(
+            &handled.answer,
+            Some(CommunityAnswer::Refused { kind: QueryKind::VetterList, code, .. })
+                if code == "permissionDenied"
+        ));
+    }
+    assert!(applicant.book.queries.is_empty());
+}
+
+/// A community refusing at the DIDComm layer — a problem-report, as a VTC sends
+/// for a Trust Task typed as its task URI (VTI #1687) — refuses the question it
+/// threads on at once, instead of leaving it to time out.
+#[tokio::test]
+async fn a_problem_report_refuses_the_question_it_threads_on() {
+    let mut applicant = Party::new(1);
+    let request = wire::vetter_list_request(&applicant.did, COMMUNITY, &unfiltered_list()).unwrap();
+    applicant
+        .book
+        .ask(asked(&request, applicant.persona, QueryKind::VetterList));
+    let report = |thid: &str| {
+        Message::build(
+            wire::new_id(),
+            vta_sdk::protocols::PROBLEM_REPORT_TYPE.to_string(),
+            json!({
+                "code": "e.p.msg.bad-request",
+                "comment": "unsupported message type: … — Trust Tasks must be carried in the \
+                            DIDComm binding envelope",
+            }),
+        )
+        .from(COMMUNITY.to_string())
+        .thid(thid.to_string())
+        .finalize()
+    };
+
+    let handled = applicant.receive(&report(&request.id), COMMUNITY).await;
+    let Some(CommunityAnswer::Refused {
+        query,
+        kind: QueryKind::VetterList,
+        code,
+        message,
+        ..
+    }) = handled.answer
+    else {
+        panic!("the question is refused");
+    };
+    assert_eq!(query, request.id);
+    assert_eq!(code, "e.p.msg.bad-request");
+    assert!(message.unwrap().contains("binding envelope"));
+    assert!(applicant.book.queries.is_empty());
+
+    // One threading on nothing of vetting's is left for the join handler.
+    let resolver = TrustTaskVmResolver::did_key_only();
+    let ctx = Context {
+        account: &applicant.account,
+        resolver: &resolver,
+        recipient: Some((applicant.persona, &applicant.did)),
+        now: Utc::now(),
+    };
+    assert!(
+        handle(
+            &mut applicant.book,
+            &ctx,
+            &report("urn:uuid:not-ours"),
+            COMMUNITY
+        )
+        .await
+        .is_none()
+    );
 }
 
 #[tokio::test]
