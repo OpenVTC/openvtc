@@ -515,6 +515,13 @@ pub struct JoinState {
     /// someone else, so the community it points at stays visible and editable
     /// before Enter commits to joining it.
     pub invitation_issuer: Option<String>,
+    /// The DID the loaded invitation names, when it is none of this account's
+    /// personas. The community accepts an invitation only from its subject, or
+    /// from a DID the subject signs for — so no persona here can present this
+    /// one, a new one least of all, and the entry page says so before the join
+    /// goes out as an open request rather than claiming the invitation will be
+    /// presented (issue #373).
+    pub invitation_foreign_subject: Option<String>,
     /// True when the operator explicitly cleared a loaded VIC on the entry page,
     /// so the status text reads "joining without an invitation" rather than the
     /// generic "no VIC" tip. Distinguishes a deliberate clear from never having
