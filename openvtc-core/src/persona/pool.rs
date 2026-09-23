@@ -404,26 +404,35 @@ pub async fn list(
 /// reveal (`s`) — so the holder gets the one value they asked for without the
 /// bulk [`list`] having carried every sensitive value into memory.
 ///
-/// The SDK has no by-id read, so this is a `type_prefix`-scoped list (a prefix
-/// match on the claim type, which may return several rows) filtered to
-/// `attribute_id`. Returns `Ok(None)` when the store no longer has it (deleted
-/// or renamed out from under the pane).
+/// One task, one attribute. This used to be a `typePrefix`-scoped listing
+/// filtered here to `attribute_id`, because the family had no by-id read: to
+/// show one email address the agent decrypted every email address the holder
+/// has and sent them all, and its audit trail recorded a listing of the pool
+/// rather than a decision about one value. `persona/attribute/get` is that
+/// read, and the claim type is no longer a parameter because nothing needs it.
+///
+/// Returns `Ok(None)` when the store no longer has it — deleted, or renamed
+/// out from under the pane.
 pub async fn reveal(
     client: &VtaClient,
-    claim_type: &str,
     attribute_id: &str,
 ) -> Result<Option<PoolAttribute>, OpenVTCError> {
-    let value = client
-        .persona_attribute_list(Some(claim_type), true, true, None, None, None)
+    match client
+        .persona_attribute_get(attribute_id, true, true, None)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona attribute reveal failed: {e}")))?;
-    Ok(value
-        .get("attributes")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(PoolAttribute::from_wire)
-        .find(|a| a.attribute_id == attribute_id))
+    {
+        Ok(response) => Ok(Some(PoolAttribute::from_wire(
+            &serde_json::to_value(&response.attribute)
+                .map_err(|e| OpenVTCError::Vta(format!("persona attribute get: {e}")))?,
+        ))),
+        // `notFound` is the answer to "is it still there", not a failure: the
+        // pane asks about a row the holder is looking at, and the row can have
+        // gone since it was drawn.
+        Err(e) if format!("{e}").contains("notFound") => Ok(None),
+        Err(e) => Err(OpenVTCError::Vta(format!(
+            "persona attribute reveal failed: {e}"
+        ))),
+    }
 }
 
 /// Create or update a self-asserted attribute.

@@ -20,7 +20,7 @@
 
 use serde_json::{Value, json};
 use vta_sdk::client::VtaClient;
-use vta_sdk::protocols::persona::{InlineValue, LocalProfileEntry, Provenance, ValueType};
+use vta_sdk::protocols::persona::{LocalInlineValue, LocalProfileEntry, ValueType};
 
 use crate::errors::OpenVTCError;
 use crate::persona::profile::ProfileSummary;
@@ -357,15 +357,21 @@ pub async fn local_face_put(
     let entries = values
         .into_iter()
         .map(|v| LocalProfileEntry {
-            inline: InlineValue {
+            // No provenance, and its absence is the rule rather than an
+            // omission: the schema has no such member for a context-local
+            // entry and refuses one. A credential-backed value names a
+            // credentialId and a claimPath, and a value authored inside a
+            // context has nowhere to put either — so it is self-asserted by
+            // construction and saying so would be this client asserting what
+            // nobody checked.
+            //
+            // It used to send one, through the SDK's own type, and every write
+            // was refused (VTI #1676): `LocalInlineValue` is that type without
+            // the member, so this no longer compiles the wrong way round.
+            inline: LocalInlineValue {
                 claim_type: v.claim_type,
                 value: Value::String(v.value),
                 value_type: ValueType::String,
-                // Typed here, by the holder, about themselves. A local face
-                // has no other provenance available to it: a credential-backed
-                // value lives in the pool, which is the half a context-local
-                // face deliberately cannot reach.
-                provenance: Provenance::SelfAsserted,
                 label: None,
             },
             slot: None,

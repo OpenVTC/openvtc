@@ -522,7 +522,7 @@ impl MainPage {
     fn handle_personas_key(&mut self, key: KeyEvent) -> bool {
         use crate::state_handler::actions::PersonaAction as PA;
         use crate::state_handler::main_page::content::{
-            FacetFormFocus, PersonaConfirm, PersonaMode, PersonaTab, ProfileFormFocus,
+            PersonaConfirm, PersonaMode, PersonaTab, ProfileFormFocus, WorldFormFocus,
         };
 
         let personas = &self.props.main_page.content_panel.identity;
@@ -568,11 +568,11 @@ impl MainPage {
                     _ => send(PA::FormKey(key)),
                 };
             }
-            PersonaMode::Facet(form) => {
+            PersonaMode::World(form) => {
                 if form.working {
                     return true;
                 }
-                let on_colour = form.focus == FacetFormFocus::Colour;
+                let on_colour = form.focus == WorldFormFocus::Colour;
                 return match key.code {
                     KeyCode::Esc => send(PA::FormCancel),
                     KeyCode::Enter => send(PA::FormSubmit),
@@ -871,16 +871,16 @@ impl MainPage {
                     _ => false,
                 }
             }
-            PersonaTab::Facets => {
-                let count = personas.facets.len();
-                let selected = personas.facet_selected;
+            PersonaTab::Worlds => {
+                let count = personas.worlds.len();
+                let selected = personas.world_selected;
                 match key.code {
                     KeyCode::Up if count > 0 => send(PA::Select(selected.saturating_sub(1))),
                     KeyCode::Down if count > 0 => send(PA::Select((selected + 1).min(count - 1))),
-                    KeyCode::Char('n') => send(PA::FacetNew),
-                    KeyCode::Char('e') if selected < count => send(PA::FacetEdit(selected)),
+                    KeyCode::Char('n') => send(PA::WorldNew),
+                    KeyCode::Char('e') if selected < count => send(PA::WorldEdit(selected)),
                     KeyCode::Char('d') | KeyCode::Delete if selected < count => {
-                        send(PA::FacetDeleteArm(selected))
+                        send(PA::WorldDeleteArm(selected))
                     }
                     _ => false,
                 }

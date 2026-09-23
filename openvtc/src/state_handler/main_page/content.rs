@@ -659,8 +659,8 @@ pub enum PersonaTab {
     Attributes,
     /// Named projections over the pool.
     Profiles,
-    /// The facets: parts of a life, and the projections that belong to them.
-    Facets,
+    /// The worlds: parts of a life, and the projections that belong to them.
+    Worlds,
     /// Which persona each community sees, and what it presents there.
     Communities,
     /// What has actually left, and to whom.
@@ -675,7 +675,7 @@ impl PersonaTab {
             PersonaTab::Personas,
             PersonaTab::Attributes,
             PersonaTab::Profiles,
-            PersonaTab::Facets,
+            PersonaTab::Worlds,
             PersonaTab::Communities,
             PersonaTab::Disclosures,
         ]
@@ -688,15 +688,15 @@ impl PersonaTab {
     /// The variants keep the spec's nouns because that is what they address:
     /// `Profiles` is `persona/profile/*`. The screen says *Faces*, because
     /// "profile" already means three things in this product and "my LinkedIn
-    /// page" to everyone else; `Facets` is `persona/facet/*` and the screen
-    /// says *Worlds*, because nobody says "my work facet" to a friend.
+    /// page" to everyone else; `Worlds` is `persona/world/*` and the screen
+    /// says *Worlds*, because nobody says "my work world" to a friend.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             PersonaTab::Personas => "Personas",
             PersonaTab::Attributes => "Your attributes",
             PersonaTab::Profiles => "Faces",
-            PersonaTab::Facets => "Worlds",
+            PersonaTab::Worlds => "Worlds",
             PersonaTab::Communities => "Communities",
             PersonaTab::Disclosures => "What has left",
         }
@@ -714,7 +714,7 @@ impl PersonaTab {
             self,
             PersonaTab::Attributes
                 | PersonaTab::Profiles
-                | PersonaTab::Facets
+                | PersonaTab::Worlds
                 | PersonaTab::Communities
                 | PersonaTab::Disclosures
         )
@@ -725,8 +725,8 @@ impl PersonaTab {
         match self {
             PersonaTab::Personas => PersonaTab::Attributes,
             PersonaTab::Attributes => PersonaTab::Profiles,
-            PersonaTab::Profiles => PersonaTab::Facets,
-            PersonaTab::Facets => PersonaTab::Communities,
+            PersonaTab::Profiles => PersonaTab::Worlds,
+            PersonaTab::Worlds => PersonaTab::Communities,
             PersonaTab::Communities => PersonaTab::Disclosures,
             PersonaTab::Disclosures => PersonaTab::Personas,
         }
@@ -738,8 +738,8 @@ impl PersonaTab {
             PersonaTab::Personas => PersonaTab::Disclosures,
             PersonaTab::Attributes => PersonaTab::Personas,
             PersonaTab::Profiles => PersonaTab::Attributes,
-            PersonaTab::Facets => PersonaTab::Profiles,
-            PersonaTab::Communities => PersonaTab::Facets,
+            PersonaTab::Worlds => PersonaTab::Profiles,
+            PersonaTab::Communities => PersonaTab::Worlds,
             PersonaTab::Disclosures => PersonaTab::Communities,
         }
     }
@@ -828,8 +828,8 @@ pub enum PersonaConfirm {
     /// Work" reads to almost everyone as though the faces in it go too. The
     /// count is resolved against the face list rather than taken from the
     /// record, so it is the number the holder can see on screen.
-    DeleteFacet {
-        facet_id: String,
+    DeleteWorld {
+        world_id: String,
         name: String,
         expected_version: Option<u64>,
         faces: usize,
@@ -1085,22 +1085,22 @@ pub struct BindPicker {
 /// Membership is **not** edited here, and the omission is deliberate. A world's
 /// faces are changed from the Faces tab, where the holder can see the face they
 /// are moving; a second membership editor would be a second place to get the
-/// replace semantics of `persona/facet/put` wrong. What the form does carry is
+/// replace semantics of `persona/world/put` wrong. What the form does carry is
 /// the whole membership as read, so that saving a rename puts it back untouched
 /// — the field below is that copy, and it is why this form cannot be built from
 /// nothing.
 #[derive(Clone, Debug, Default)]
-pub struct FacetForm {
+pub struct WorldForm {
     /// The world being edited; `None` creates a new one.
-    pub facet_id: Option<String>,
+    pub world_id: Option<String>,
     pub expected_version: Option<u64>,
     pub name: tui_input::Input,
-    /// Cursor into [`Colour::all`](openvtc_core::persona::facet::Colour::all).
+    /// Cursor into [`Colour::all`](openvtc_core::persona::world::Colour::all).
     pub colour: usize,
     /// One or two emoji, or nothing. Optional, and a terminal that cannot draw
     /// it loses nothing that carries meaning.
     pub icon: tui_input::Input,
-    pub focus: FacetFormFocus,
+    pub focus: WorldFormFocus,
     /// The membership as it was read, written back unchanged.
     ///
     /// `put` is a replace: omitting these means *empty them*, not "leave them
@@ -1113,16 +1113,16 @@ pub struct FacetForm {
     pub working: bool,
 }
 
-/// Which field of [`FacetForm`] has the keyboard.
+/// Which field of [`WorldForm`] has the keyboard.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum FacetFormFocus {
+pub enum WorldFormFocus {
     #[default]
     Name,
     Colour,
     Icon,
 }
 
-impl FacetFormFocus {
+impl WorldFormFocus {
     #[must_use]
     pub fn next(self) -> Self {
         match self {
@@ -1174,7 +1174,7 @@ pub enum PersonaMode {
     View,
     Attribute(AttributeForm),
     Profile(ProfileForm),
-    Facet(FacetForm),
+    World(WorldForm),
     PlaceFace(FacePlacer),
     Bind(BindPicker),
     Compose(ComposeForm),
@@ -1299,7 +1299,7 @@ impl ComposeForm {
 ///
 /// Five of the six tabs are served by the agent and one by `Config`, and the
 /// difference is load-bearing rather than incidental. Personas are on disk, so
-/// they draw at launch with no session; the pool, the profiles, the facets and
+/// they draw at launch with no session; the pool, the profiles, the worlds and
 /// the bindings are the agent's, so each of them has to be able to say "I could
 /// not ask" distinctly from "you hold nothing" — see
 /// [`load_error`](Self::load_error).
@@ -1377,11 +1377,11 @@ pub struct IdentityState {
     /// The parts of the holder's life, and which faces belong to them.
     ///
     /// Empty is a real answer and means the holder has arranged nothing yet —
-    /// or that the agent predates `persona/facet/*`, which amounts to the same
+    /// or that the agent predates `persona/world/*`, which amounts to the same
     /// thing from here, because such a holder cannot have a world to show. A
     /// read that *failed* lands in [`load_error`](Self::load_error) instead.
-    pub facets: Arc<[openvtc_core::persona::facet::Facet]>,
-    pub facet_selected: usize,
+    pub worlds: Arc<[openvtc_core::persona::world::World]>,
+    pub world_selected: usize,
 
     // ── Profiles (from the agent) ────────────────────────────────────────
     pub profiles: Arc<[openvtc_core::persona::profile::ProfileSummary]>,

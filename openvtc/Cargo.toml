@@ -87,7 +87,7 @@ anyhow.workspace = true
 # rather than as a wall of satisfied constraints — 0.4.5 was the first release on
 # vta-sdk 0.25, 0.4.3 the first on 0.23, and 0.4.0/0.4.1 were on `^0.19` and put
 # a second vta-sdk *and* a second trust-tasks in the binary.
-did-git-sign = "0.4.12"
+did-git-sign = "0.4.13"
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true
