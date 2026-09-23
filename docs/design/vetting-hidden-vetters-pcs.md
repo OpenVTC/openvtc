@@ -1026,11 +1026,24 @@ where `HiddenParams.events` takes the community's `events` verbatim. `approvedBy
 the offer type, so it is dropped on the way in rather than shown to a vetter who has no use for
 it.
 
-### 19.5 Still open
+### 19.5 Still open, and what it is actually waiting for
 
-- **The `trust-tasks-rs` release.** Both halves hand-write the payload types and validate them
-  against the published schemas; the release deletes both copies. That is a queue, not a design
-  question: the specifications are in `trustoverip/dtgwg-trust-tasks-tf` PR #618.
+One thing, and it was described wrongly for most of this branch's life. Both halves hand-write
+the payload types and validate them against the published schemas; something deletes both copies.
+That something is **not** a release of `trust-tasks-rs`.
+
+The four specifications are merged (`trustoverip/dtgwg-trust-tasks-tf` #618), event mode follows
+in its own PR, and 0.22 is already on crates.io — #619 publishes 0.22.2 carrying them. What
+blocks the generated types is that the VTI graph resolves **0.21.17**, and not by choice:
+`affinidi-messaging-sdk`, `affinidi-messaging-mediator` and the
+`trust-tasks-{proof,https,tsp,capability-client}` companions are all on the 0.21 line and
+re-export `trust-tasks-rs` types in their own public APIs. Bumping this workspace alone produces
+two `trust-tasks-rs` nodes and a wall of `expected X, found X` — the hazard the workspace's own
+CLAUDE.md states as *a re-export makes the re-exported crate's version part of your public API*.
+
+So the queue is five crates long and none of it is ours. Until it moves, the schema pins in
+`vtc-service/src/vetting/schemas/` are what holds the hand-written types to the specification,
+and they hold it at the same place a generated type would: the wire shape, checked by a test.
 
 ## 20. The protocol on its own
 
