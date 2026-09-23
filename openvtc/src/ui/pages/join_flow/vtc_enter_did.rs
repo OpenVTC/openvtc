@@ -210,11 +210,30 @@ impl VtcEnterDid {
 fn invitation_lines(state: &JoinState, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if state.has_invitation {
-        lines.extend(wrapped(
-            "✓ Invitation credential loaded — it will be presented to the community.",
-            width,
-            Style::new().fg(COLOR_SUCCESS).bold(),
-        ));
+        match &state.invitation_foreign_subject {
+            None => lines.extend(wrapped(
+                "✓ Invitation credential loaded — it will be presented to the community.",
+                width,
+                Style::new().fg(COLOR_SUCCESS).bold(),
+            )),
+            // Said here, before Enter, because nothing later can change it: the
+            // community takes an invitation only from its subject or from a DID
+            // the subject signs for, and neither is in this account (#373).
+            Some(subject) => lines.extend(wrapped(
+                &format!(
+                    "Invitation loaded, but it names {}, which is not one of your \
+                     personas. The community accepts it only from that DID, so this join \
+                     will go as an open request. To be admitted by invitation, create a \
+                     persona under My Identity and ask the community to invite that one.",
+                    openvtc_core::display::truncate_did_centered(
+                        &crate::state_handler::main_page::sanitize_display(subject, 256),
+                        width.saturating_sub(16).max(16),
+                    )
+                ),
+                width,
+                Style::new().fg(COLOR_ORANGE),
+            )),
+        }
         if let Some(issuer) = &state.invitation_issuer {
             const LABEL: &str = "  Community: ";
             lines.push(Line::from(vec![
@@ -522,6 +541,24 @@ mod tests {
         let drawn = rows(&state, ISSUER, 100);
         let row = &drawn[row_of(&drawn, "Community:")];
         assert!(row.contains("community.example.com"), "got {row:?}");
+    }
+
+    /// An invitation none of your personas can present says so on this page,
+    /// before Enter — not only on the progress page after the join has gone out
+    /// as an open request (issue #373).
+    #[test]
+    fn an_invitation_for_someone_else_is_not_promised() {
+        let state = JoinState {
+            has_invitation: true,
+            invitation_issuer: Some(ISSUER.to_string()),
+            invitation_foreign_subject: Some("did:webvh:example.com:alice".to_string()),
+            ..JoinState::default()
+        };
+        let drawn = rows(&state, ISSUER, 100).join("\n");
+        assert!(!drawn.contains("it will be presented"), "{drawn}");
+        assert!(drawn.contains("not one of your"), "{drawn}");
+        assert!(drawn.contains("did:webvh:example.com:alice"), "{drawn}");
+        assert!(drawn.contains("will go as an open"), "{drawn}");
     }
 
     /// On a terminal too small for the whole status block the prose clips, but
