@@ -47,6 +47,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use affinidi_tdk::TDK;
 use affinidi_tdk::messaging::ATM;
 use openvtc_core::config::Config;
 use openvtc_core::config::account::{PendingPoll, PersonaId, VtcDid};
@@ -144,6 +145,9 @@ impl PollPacer {
 /// and can therefore be moved into a spawned task.
 pub(crate) struct Poll {
     applicant_did: String,
+    /// The persona's signing key: `join-requests/status/0.1` declares `proof`
+    /// REQUIRED, so a poll is a signed document like the submit it chases.
+    signing_secret: affinidi_tdk::secrets_resolver::secrets::Secret,
     profile: std::sync::Arc<affinidi_tdk::messaging::profiles::ATMProfile>,
     mediator_did: String,
     vtc_did: String,
@@ -158,26 +162,41 @@ pub(crate) struct Poll {
 /// Resolve each due record to a sendable [`Poll`], dropping any whose persona no
 /// longer resolves to a runtime identity (a deleted DID mid-flight): there is
 /// nothing to speak as, and the record's own repair path is elsewhere.
-pub(crate) fn build(config: &Config, due: Vec<PendingPoll>) -> Vec<Poll> {
-    due.into_iter()
-        .filter_map(|record| {
-            let Some(identity) = config.identities.get(&record.persona_ref) else {
+///
+/// A persona whose signing key cannot be read is dropped the same way: the poll
+/// is a signed document, and an unsigned one would be refused by a community
+/// enforcing the requirement rather than answered.
+pub(crate) async fn build(config: &Config, tdk: &TDK, due: Vec<PendingPoll>) -> Vec<Poll> {
+    let mut polls = Vec::new();
+    for record in due {
+        let Some(identity) = config.identities.get(&record.persona_ref) else {
+            debug!(
+                vtc = %record.vtc_did,
+                "skipping status poll: the join's persona has no runtime identity"
+            );
+            continue;
+        };
+        let signing_secret = match config.get_persona_keys_for(record.persona_ref, tdk).await {
+            Ok(keys) => keys.signing.secret.clone(),
+            Err(e) => {
                 debug!(
-                    vtc = %record.vtc_did,
-                    "skipping status poll: the join's persona has no runtime identity"
+                    vtc = %record.vtc_did, error = %e,
+                    "skipping status poll: the join's persona has no readable signing key"
                 );
-                return None;
-            };
-            Some(Poll {
-                applicant_did: identity.persona_did().to_string(),
-                profile: identity.profile().clone(),
-                mediator_did: identity.mediator_did.clone().unwrap_or_default(),
-                vtc_did: record.vtc_did,
-                request_id: record.request_id,
-                over_tsp: record.submit_transport == Some(MessagingTransport::Tsp),
-            })
-        })
-        .collect()
+                continue;
+            }
+        };
+        polls.push(Poll {
+            signing_secret,
+            applicant_did: identity.persona_did().to_string(),
+            profile: identity.profile().clone(),
+            mediator_did: identity.mediator_did.clone().unwrap_or_default(),
+            vtc_did: record.vtc_did,
+            request_id: record.request_id,
+            over_tsp: record.submit_transport == Some(MessagingTransport::Tsp),
+        });
+    }
+    polls
 }
 
 /// Send each poll, one at a time. The reply is asynchronous — it arrives on the
@@ -200,17 +219,16 @@ pub(crate) async fn send_all(atm: ATM, polls: Vec<Poll>) {
         } else {
             None
         };
-        match openvtc_core::join::poll_join_status(
-            &atm,
-            &poll.profile,
-            &poll.applicant_did,
-            &poll.vtc_did,
-            &poll.mediator_did,
-            poll.request_id,
-            tsp_mediator.as_deref(),
-        )
-        .await
-        {
+        let route = openvtc_core::join::Applicant {
+            atm: &atm,
+            profile: &poll.profile,
+            persona_did: &poll.applicant_did,
+            signer: &poll.signing_secret,
+            vtc_did: &poll.vtc_did,
+            mediator_did: &poll.mediator_did,
+            tsp_mediator_did: tsp_mediator.as_deref(),
+        };
+        match openvtc_core::join::poll_join_status(&route, poll.request_id).await {
             Ok(()) => debug!(
                 vtc = %poll.vtc_did,
                 request_id = ?poll.request_id,

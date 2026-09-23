@@ -3033,17 +3033,28 @@ async fn run_join_sequence(
     // the invitation + VP work to come up, so this is normally already true.
     let applicant_online = await_persona_online(handler, state, messaging, &applicant_did).await;
 
-    let request_id = match openvtc_core::join::submit_join_request(
+    // The submit is signed: `join-requests/submit/0.2` declares `proof`
+    // REQUIRED, and a persona whose key cannot be read cannot apply — better
+    // said here than as a refusal from the community.
+    let signing_secret = match config.get_persona_keys_for(persona_id, tdk).await {
+        Ok(keys) => keys.signing.secret.clone(),
+        Err(e) => {
+            state
+                .join
+                .fail(format!("Couldn't sign the application: {e}"));
+            return;
+        }
+    };
+    let route = openvtc_core::join::Applicant {
         atm,
-        &persona_profile,
-        &applicant_did,
-        &vtc_did,
-        &persona_mediator,
-        presentation,
-        vtc_tsp_mediator.as_deref(),
-    )
-    .await
-    {
+        profile: &persona_profile,
+        persona_did: &applicant_did,
+        signer: &signing_secret,
+        vtc_did: &vtc_did,
+        mediator_did: &persona_mediator,
+        tsp_mediator_did: vtc_tsp_mediator.as_deref(),
+    };
+    let request_id = match openvtc_core::join::submit_join_request(&route, presentation).await {
         Ok(id) => id,
         Err(e) => {
             state
