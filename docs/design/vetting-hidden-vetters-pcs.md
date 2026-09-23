@@ -726,3 +726,37 @@ cargo test -p vtc-service --features vetting-pcs --lib vetting::
 - **A trust-tasks-rs release** carrying manifest 0.2's `ext`, after which the client reads the
   typed member instead of parsing the raw criterion.
 
+
+## 16. Admission credentials: what a hidden admission issues (2026-09-23)
+
+Checked against `vtc-service`'s own issuance paths, because a proof that gets Bob past the
+criterion is only half an admission — the other half is the membership credential he walks away
+with, and the question is whether hiding the vetters costs him any of it.
+
+It does not, and the reason is structural: the hidden path rejoins the named one at
+`vetting::vetting_facts`. `join::orchestrate` calls it, gets the same `VettingFacts` shape with a
+tag where each vetter's DID would be, and everything downstream — `requirements::evaluate`,
+`join.rego`, `EffectPlan::Admit`, `ceremony::execute::issue_member_credentials` — is untouched.
+So a live hidden admission already mints the VMC against a revocation slot, the role VEC at the
+granted role, and solicits the member's reciprocal VMC, exactly as a named one does. Nothing in
+the hidden branch had to be taught about credentials.
+
+The reference example (`openvtc-core/examples/zkp_reference_flow.rs`) now mints the same three
+in-process, and asserts each proof verifies, that the reciprocal's subject is the community, and
+that its `digestMultibase` matches a digest of the grant **as it arrived** — the wire-form rule
+`DTGCredential::new_member_vmc` exists to enforce. It also asserts no vetter DID appears in any
+of the three.
+
+Deliberately **not** issued on this path, and each for its own reason:
+
+| credential | why not |
+| --- | --- |
+| Vetting statement VEC (`IdentityVettingEndorsement`) | it names its issuer. This is the whole point: the endorsement is still built — it is where the attested facts come from — but never signed and never sent. `presentable_statements()` returns 0. |
+| VRC pair | not part of admission on any path; VRCs are the peer relationship layer, and D8 does not require one for V0 membership. Worth stating plainly: a community that required a VRC pair **with its vetters** could not run hidden vetting at all, because a VRC names both ends. |
+| VIC | invitation-gated admission only. |
+| Personhood (VPC / `personhood: true`) | a separate evaluation; `admit` mints the VMC with `personhood = false`. |
+| VWC | withdraws a *named* statement. Hidden withdrawal is the token spend-set and class-label rotation (§4.4). |
+
+The status-list credential itself is referenced by the VMC's `credentialStatus` and served by a
+running `vtc-service`; the in-process example has no HTTP host, so it points at an example URL
+and says so.
