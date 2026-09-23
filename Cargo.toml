@@ -63,7 +63,8 @@ aes-gcm = "0.11"
 argon2 = "0.6"
 # The floor is set by the graph, not chosen here: `vta-sdk` 0.42 and
 # `vta-service` 0.32 both declare `^0.16`, and `affinidi-messaging-test-mediator`
-# 0.9 does too. This line only records it.
+# 0.9 does too. This line only records it. 0.17 is the TDK under messaging-sdk
+# 0.27, and follows it (see below) rather than moving alone.
 affinidi-tdk = "0.16"
 affinidi-data-integrity = "0.7"
 # The delivery layer (D1). Replaced `affinidi-messaging-didcomm-service`, the
@@ -90,10 +91,31 @@ affinidi-messaging-core = "0.1.8"
 # This crate carries `trust-tasks-rs` types in its own API (`MediatorAcl` reaches
 # `atm.trust_tasks().account_update`), so its line is not independent of the one
 # below: a copy left on an older trust-tasks is a *second* semver-incompatible
-# `trust-tasks-rs` whose types do not unify. 0.26.7 is the line built on
-# trust-tasks 0.21, and it is also what `vta-sdk` 0.42 and
-# `affinidi-messaging-test-mediator` 0.9 declare — so it is the graph's floor
-# whether or not this line states it.
+# `trust-tasks-rs` whose types do not unify. The 0.26 line is the one built on
+# trust-tasks 0.21, and it is what `vta-sdk` 0.49 *and* 0.50 and
+# `affinidi-messaging-test-mediator` 0.9 declare.
+#
+# The floor is 0.26.27, and it names two TSP fixes this repo had no lever over,
+# both surfaced by Keyring. 0.26.26 (VTI-39): `TspOps::send_raw` — the POST
+# behind every TSP send — made one attempt, so a pooled keep-alive connection
+# closed under it (an ngrok tunnel, a load balancer: hyper `IncompleteMessage`)
+# lost the message and left the caller to wait out its own timeout; it now
+# re-POSTs the identical bytes up to twice when no HTTP answer came back, which
+# the mediator's hash-keyed idempotent store makes safe. 0.26.27 (VTI-41): a
+# relationship across two mediators never completed — the peer's accept was
+# posted to its own mediator for a first hop on ours and refused with 403; the
+# profile's mediator is now put in front of such a route, and `send_control`
+# routes an invite / accept / cancel via a known foreign peer mediator.
+#
+# **Not 0.27, and that is the graph's call rather than this line's.** 0.27 is
+# built on trust-tasks 0.22 (and the 0.29 mediator / 0.10 test-mediator / TDK
+# 0.17 around it), while every published `vta-sdk` — 0.50 included — still
+# declares `affinidi-messaging-sdk ^0.26.12` and `trust-tasks-rs ^0.21`. Taking
+# it here would put a second messaging sdk and a second `trust-tasks-rs` in the
+# graph, the split the note below exists to prevent. It moves when `vta-sdk`
+# does. Nothing here needs porting when it does: 0.27.1 answers a mutual TSP
+# cancellation inside `record_incoming_control`, and this repo answers no
+# relationship control at all yet (`dispatch_inbound` records and drops — WS5).
 #
 # Older floors are below this one by construction and kept in git history rather
 # than as a wall of satisfied constraints. Each named a defect this repo had no
@@ -105,7 +127,7 @@ affinidi-messaging-core = "0.1.8"
 # geometric reconnect cascade behind `#231`–`#234`; and 0.19.4 (#694) was the
 # `live_stream_next*` read guard that blocked `stop_websocket` for the remainder
 # of a 10s poll window.
-affinidi-messaging-sdk = "0.26.7"
+affinidi-messaging-sdk = "0.26.27"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
@@ -325,7 +347,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # `persona/binding/set` with an optional `personaDid` — wearing a face in a
 # community as the persona already used there, without naming it (VTI #1654,
 # spec §9.7). A line below it has the field as required.
-trust-tasks-rs = "0.21.17"
+#
+# The floor is now 0.21.20 because `affinidi-messaging-sdk` 0.26.25 onward
+# declares `^0.21.20`, so the TSP fixes above cannot resolve on anything older.
+# The 0.22 line is out of reach for the same reason 0.27 is: no published
+# `vta-sdk` is built on it yet.
+trust-tasks-rs = "0.21.20"
 trust-tasks-capability-client = "0.21.0"
 tui-input = "0.15"
 url = "2.5"
@@ -418,23 +445,23 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 #   0.42 line while the runtime sat one behind, splitting `vti-common` (0.18/0.19)
 #   in the dev graph — bumping this line to 0.32 collapsed it. `cargo tree -d` is
 #   what catches it; a `did-git-sign` bump alone always looks like it worked.
-# - `did-git-sign`, the standing obligation, **satisfied on this line since VGI
-#   cut 0.4.12**. 0.4.12 requires `vta-sdk ^0.42` — the line this workspace is on
-#   — so the second sdk is gone; on 0.4.11 (`^0.39`) it dragged in a `vta-sdk`
-#   0.39 whose `affinidi-messaging-sdk` 0.24 does **not** compile against the
-#   shared `affinidi-messaging-core` 0.1.8 (the `Inbound` struct went
-#   `#[non_exhaustive]`), so this time the duplicate was a build *failure*, not a
-#   tolerable `cargo tree -d` row. It had blocked seven consecutive minors, each
-#   carried by a rev-pin or tolerated as a duplicate, because VGI could not
-#   publish while it held a git dependency of its own; `trql-client` 0.18 shipping
-#   is what let 0.4.12 out.
-#
-#   The narrow reason the duplicate was ever *tolerable* still holds where it
-#   applies: we use `did_git_sign::{config, init}` only, so no sdk type crosses
-#   that boundary — but a *shared* crate below it (messaging-core) removed that
-#   grace this cycle. The floor names the exact release for the same reason a bare
-#   `"0.4"` never would — a clean checkout would resolve back to 0.4.11 and
-#   reintroduce the broken chain.
+# - `did-git-sign`, the standing obligation, **open again since the 0.49 move**.
+#   The latest release, 0.4.12, requires `vta-sdk ^0.42`, so the graph holds a
+#   second `vta-sdk` 0.42.1 beside 0.49 (`cargo tree -i vta-sdk@0.42.1` — its
+#   only holder is `did-git-sign`). This time it is a tolerable `cargo tree -d`
+#   row rather than a build failure: 0.42.1 resolves onto the *same* shared
+#   crates as the rest of the stack — one messaging sdk, one messaging-core, one
+#   `trust-tasks-rs`, one `dtg-credentials` — so the only duplicated node is
+#   `vta-sdk` itself, and we use `did_git_sign::{config, init}` only, so no sdk
+#   type crosses that boundary. VGI main has already moved to `vta-sdk 0.50`
+#   (VGI #63) but has not published it; that release is what closes this row.
+#   On 0.4.11 (`^0.39`) the duplicate was a build *failure* — its
+#   `affinidi-messaging-sdk` 0.24 did not compile against the shared
+#   `affinidi-messaging-core` (the `Inbound` struct went `#[non_exhaustive]`) —
+#   so `cargo tree -d` staying free of every row but `vta-sdk` is the check that
+#   the grace still holds. The floor names the exact release for the same reason
+#   a bare `"0.4"` never would — a clean checkout would resolve back to 0.4.11
+#   and reintroduce the broken chain.
 #
 # `trql-client`, the third git-pinned edge in this ecosystem, does **not**
 # depend on `vta-sdk` at all, so the trust registry needs no release for an sdk
