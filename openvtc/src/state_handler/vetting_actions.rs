@@ -252,7 +252,16 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                 accent: accent(&app.community),
                 next_step: Some(next_step_words(&app.next_step(now))),
                 join_did: app.join_did.clone(),
-                requirements: app.requirements.as_ref().map(requirements_line),
+                requirements: app.requirements.as_ref().map(|r| {
+                    let mut line = requirements_line(r);
+                    // The whole feature, in the one place the applicant reads what is being
+                    // asked of them. Without it, a criterion that hides its vetters looks
+                    // exactly like one that does not, and the difference is the point.
+                    if app.hidden.is_some() {
+                        line.push_str(" — their names never reach this community");
+                    }
+                    line
+                }),
                 progress: evaluation.as_ref().map(progress_line),
                 satisfied: evaluation.as_ref().is_some_and(Evaluation::satisfied),
                 face: app.face.as_ref().map(|f| f.name.clone()),
