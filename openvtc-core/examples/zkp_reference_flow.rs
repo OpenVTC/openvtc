@@ -8,15 +8,31 @@
 //! Nothing here is a stand-in: every identity is a `did:key` with a real Ed25519 key, the role
 //! credentials and the Vetting Cards carry real Data Integrity proofs, and the identity
 //! commitment and card digest bound into each attestation are the ones the ceremony computed.
+//! Admission mints the same credentials `vtc-service` mints — the community's VMC against a
+//! revocation slot, the role VEC, and the member's own reciprocal VMC that closes the edge.
+//!
+//! Every credential is emitted in full, so the output doubles as a test-vector set: each VC is
+//! self-contained and verifies against the `did:key` in its `issuer` with no network.
 //!
 //! ```sh
 //! cargo run -p openvtc-core --example zkp_reference_flow > /tmp/zkp-reference.json
 //! ```
+//!
+//! # Replicating it
+//!
+//! Every key is derived from a fixed seed byte repeated 32 times ([`identity`]), and the PCS
+//! engine runs on a seeded `StdRng`, so the DIDs, the class labels and the requirements digest
+//! are the same on every machine. See `step00_seeds` in the output for the table, and for what
+//! is *not* stable: document ids (`urn:uuid:`), wall-clock timestamps, the card salt the
+//! identity commitment is computed over, the match codes, and therefore every signature and
+//! proof taken over them.
 
+use affinidi_data_integrity::{DataIntegrityProof, SignOptions, VerifyOptions};
 use affinidi_tdk::secrets_resolver::secrets::Secret;
-use chrono::{Duration, Utc};
-use dtg_credentials::DTGCredential;
+use chrono::{DateTime, Duration, Utc};
+use dtg_credentials::{DTGCredential, digest_multibase_json};
 use openvtc_core::config::account::PersonaId;
+use openvtc_core::members::build_member_vmc;
 use openvtc_core::vetting::{
     VettingBook,
     applicant::{RequestDraft, VetterEligibility},
@@ -69,7 +85,9 @@ fn requirements() -> Value {
 }
 
 /// A real community role credential: a DTG endorsement credential, signed by the community.
-async fn role_credential(issuer: &Secret, community: &str, subject: &str) -> Value {
+/// The shape `vtc-service` mints in `credentials::dtg::issue_role` — `{ type: CommunityRole,
+/// role, communityDid }` at `credentialSubject.endorsement`.
+async fn role_credential(issuer: &Secret, community: &str, subject: &str, role: &str) -> Value {
     let now = Utc::now();
     let mut credential = DTGCredential::new_vec(
         community.to_string(),
@@ -78,13 +96,83 @@ async fn role_credential(issuer: &Secret, community: &str, subject: &str) -> Val
         Some(now + Duration::days(365)),
         json!({
             "type": COMMUNITY_ROLE_ENDORSEMENT_TYPE,
-            "role": VETTER_ROLE,
+            "role": role,
             "communityDid": community,
         }),
     )
     .with_id(format!("urn:uuid:{}", uuid::Uuid::new_v4()));
     credential.sign(issuer, None).await.unwrap();
     serde_json::to_value(&credential).unwrap()
+}
+
+/// Sign a credential **document** — the body plus the members the catalog type does not model.
+///
+/// A VMC issued against a status list carries `credentialStatus`, and `DTGCredential` has no
+/// field for it, so signing the parsed credential would leave the status reference outside the
+/// proof: a revoked credential could have it stripped without breaking the signature. This is
+/// `vtc-service`'s `LocalSigner::sign_doc`, which splices `id` + `credentialStatus` onto the
+/// serialised body and signs the whole document.
+async fn sign_doc(doc: &mut Value, signer: &Secret) {
+    doc.as_object_mut().expect("a JSON object").remove("proof");
+    let proof = DataIntegrityProof::sign(&*doc, signer, SignOptions::new())
+        .await
+        .expect("sign");
+    doc.as_object_mut()
+        .unwrap()
+        .insert("proof".into(), serde_json::to_value(&proof).unwrap());
+}
+
+/// Verify a signed credential document against the signer's own public key — no resolver, which
+/// is the point of a `did:key` test vector: the key is in the DID.
+fn proof_verifies(doc: &Value, signer: &Secret) -> bool {
+    let mut body = doc.clone();
+    let Some(proof) = body.as_object_mut().and_then(|o| o.remove("proof")) else {
+        return false;
+    };
+    let Ok(proof) = serde_json::from_value::<DataIntegrityProof>(proof) else {
+        return false;
+    };
+    proof
+        .verify_with_public_key(&body, signer.get_public_bytes(), VerifyOptions::new())
+        .is_ok()
+}
+
+/// The community's VMC for a new member: the catalog body, an `id`, and the
+/// `BitstringStatusListEntry` that makes it revocable — all three covered by one proof.
+/// `vtc-service` builds this under the status-list lock, in `issue_member_credentials`.
+async fn membership_grant(
+    issuer: &Secret,
+    community: &str,
+    member: &str,
+    status_list: &str,
+    slot: u32,
+    now: DateTime<Utc>,
+) -> Value {
+    let dtg = DTGCredential::new_vmc(
+        community.to_string(),
+        member.to_string(),
+        now,
+        Some(now + Duration::days(30)),
+        false,
+    );
+    let mut doc = serde_json::to_value(dtg.credential()).unwrap();
+    let obj = doc.as_object_mut().unwrap();
+    obj.insert(
+        "id".into(),
+        json!(format!("urn:uuid:{}", uuid::Uuid::new_v4())),
+    );
+    obj.insert(
+        "credentialStatus".into(),
+        json!({
+            "id": format!("{status_list}#{slot}"),
+            "type": "BitstringStatusListEntry",
+            "statusPurpose": "revocation",
+            "statusListIndex": slot.to_string(),
+            "statusListCredential": status_list,
+        }),
+    );
+    sign_doc(&mut doc, issuer).await;
+    doc
 }
 
 fn size_of(v: &Value) -> usize {
@@ -102,12 +190,47 @@ async fn main() {
     let (applicant_secret, applicant_did) = identity(0xB0);
     let vetter_ids: Vec<(Secret, String)> = (0..VETTERS).map(|i| identity(i as u8 + 1)).collect();
 
+    // Everything anyone needs to reproduce the identities in this run.
+    report.insert(
+        "step00_seeds".into(),
+        json!({
+            "command": "cargo run -p openvtc-core --example zkp_reference_flow",
+            "keyDerivation":
+                "Ed25519 from a 32-byte seed of one repeated byte: Secret::generate_ed25519(None, Some(&[seed; 32])), \
+                 then did:key over the multibase public key",
+            "seeds": {
+                "communityDid": { "seedByte": "0xC0", "did": community },
+                "applicantDid": { "seedByte": "0xB0", "did": applicant_did },
+                "vetterDids": vetter_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, d))| json!({ "seedByte": format!("0x{:02X}", i + 1), "did": d }))
+                    .collect::<Vec<_>>(),
+            },
+            "pcsRngSeed": "StdRng::seed_from_u64(0x2026_0923)",
+            "period": PERIOD,
+            "whichVettersVet": VETTING,
+            "stableAcrossRuns": [
+                "every DID and public key",
+                "the PCS class labels and the requirements digest",
+                "the structure and byte sizes of the attestations, proof and submission",
+            ],
+            "variesPerRun": [
+                "urn:uuid document ids",
+                "wall-clock validFrom / validUntil / proof.created",
+                "the Vetting Card salt, and so the identityCommitment and card digest",
+                "the session match codes",
+                "every signature and PCS value taken over the above",
+            ],
+        }),
+    );
+
     // --- 2. The community stands up its hidden-vetting deployment ---------------------------
     let mut vtc = Vtc::new(&community, PERIOD, requirements(), &mut rng).expect("vtc");
     let token_label = vtc.current_token_label().to_string();
     let digest = vtc.requirements_digest().to_string();
     report.insert(
-        "step1_identities_and_deployment".into(),
+        "step01_identities_and_deployment".into(),
         json!({
             "communityDid": community,
             "applicantJoinDid": applicant_did,
@@ -123,11 +246,14 @@ async fn main() {
 
     // --- 3. Ten real role credentials, then ten PCS enrolments ------------------------------
     let mut engines: Vec<VetterSnapshot> = Vec::new();
-    for (i, (_, did)) in vetter_ids.iter().enumerate() {
-        let credential = role_credential(&community_secret, &community, did).await;
-        if i == VETTING[0] {
-            report.insert("step2_vetter_role_credential".into(), credential);
-        }
+    let mut role_credentials: Vec<Value> = Vec::new();
+    for (_, did) in vetter_ids.iter() {
+        let credential = role_credential(&community_secret, &community, did, VETTER_ROLE).await;
+        assert!(
+            proof_verifies(&credential, &community_secret),
+            "the role credential must verify as issued"
+        );
+        role_credentials.push(credential);
         vtc.grant(did);
         let mut engine = VetterEngine::new(did, &vtc, &mut rng).expect("engine");
         engine.enroll(&mut vtc, &mut rng).expect("root credential");
@@ -136,18 +262,40 @@ async fn main() {
             .expect("tokens");
         engines.push(engine.snapshot().expect("snapshot"));
     }
-    let one = &engines[VETTING[0]];
     report.insert(
-        "step3_pcs_enrolment".into(),
+        "step02_vetter_role_credentials".into(),
+        json!({
+            "issuedBy": community,
+            "count": role_credentials.len(),
+            "allProofsVerify": true,
+            "credentials": role_credentials,
+        }),
+    );
+    report.insert(
+        "step03_pcs_enrolment".into(),
         json!({
             "enrolled": VETTERS,
             "label": format!("vetter/{PERIOD}"),
-            "exampleVetterDid": vetter_ids[VETTING[0]].1,
-            "examplePcsIdentifier": one.id,
-            "exampleRootCredential": one.credentials.get(PERIOD),
-            "exampleTokenSerial": one.tokens[0].serial,
-            "exampleTokenSignature": one.tokens[0].credential,
+            "tokenLabel": token_label,
             "tokensMintedThisTick": VETTERS * 3,
+            "note":
+                "The root credential is the vetter's blind PCS credential for the label; the tokens are \
+                 PS blind signatures on secret serials. Both are secrets held by the vetter — they are \
+                 printed here because this is a reference vector, not because they travel.",
+            "vetters": engines
+                .iter()
+                .enumerate()
+                .map(|(i, e)| json!({
+                    "vetterDid": vetter_ids[i].1,
+                    "pcsIdentifier": e.id,
+                    "rootCredential": e.credentials.get(PERIOD),
+                    "tokens": e.tokens.iter().map(|t| json!({
+                        "label": t.label,
+                        "serial": t.serial,
+                        "signature": t.credential,
+                    })).collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
         }),
     );
 
@@ -171,7 +319,7 @@ async fn main() {
         "requirementsDigest": digest,
     });
     let manifest_payload = json!({ "communityDid": community, "criteria": [criterion.clone()] });
-    report.insert("step4_manifest_criterion".into(), criterion);
+    report.insert("step04_manifest_criterion".into(), criterion);
 
     // --- 5. The applicant adopts it ----------------------------------------------------------
     let mut book = VettingBook::default();
@@ -192,7 +340,7 @@ async fn main() {
         .expect("a key of its own")
         .to_string();
     report.insert(
-        "step5_application".into(),
+        "step05_application".into(),
         json!({
             "joinDid": applicant_did,
             "pcsIdentifier": applicant_pcs_id,
@@ -399,14 +547,19 @@ async fn main() {
         sessions.push(json!({
             "vetterDid": vetter_did,
             "matchCode": open.match_code,
-            "vettingCard": if n == 0 { card } else { json!("one per session; the first is shown in full") },
+            "vettingCard": card,
             "namedPathStatementEndorsement": endorsement,
+            "namedPathStatementNote":
+                "On the named path the vetter signs this endorsement into a statement credential \
+                 addressed to the applicant. On the hidden path it is never signed and never \
+                 issued — a signed statement carries the vetter's DID, which is the thing being \
+                 withheld. Its facts go into the attestation instead.",
             "hiddenAttestation": attestation.clone(),
             "hiddenAttestationBytes": size_of(&attestation),
         }));
     }
     report.insert(
-        "step6_sessions".into(),
+        "step06_sessions".into(),
         json!({ "vetted": VETTING.len(), "ofEligible": VETTERS, "sessions": sessions }),
     );
 
@@ -418,7 +571,7 @@ async fn main() {
         .expect("a proof over what it holds");
     let extensions = application.join_extensions();
     report.insert(
-        "step7_submission".into(),
+        "step07_submission".into(),
         json!({
             "extensions": extensions.clone(),
             "extensionsBytes": size_of(&extensions),
@@ -441,7 +594,7 @@ async fn main() {
     let pcs_ids: Vec<String> = engines.iter().map(|e| e.id.clone()).collect();
     let submitted = serde_json::to_string(&extensions).unwrap();
     report.insert(
-        "step8_decision".into(),
+        "step08_decision".into(),
         json!({
             "facts": serde_json::to_value(&decision.statements).unwrap(),
             "distinctVetters": decision.evaluation.distinct_vetters(),
@@ -455,8 +608,62 @@ async fn main() {
             "commitmentsConsistent": decision.evaluation.commitments_consistent,
         }),
     );
+    // --- 9. Admission: the membership credentials ---------------------------------------------
+    // The decision satisfied the criterion, so the community admits. This is what
+    // `vtc-service`'s `Admit` effect mints (`ceremony::execute::issue_member_credentials`): a
+    // VMC against the next free revocation slot and a role VEC at the granted role, both signed
+    // by the community. The member then issues the other half of the edge with `openvtc-core`'s
+    // own `build_member_vmc` — the same call the TUI makes — which digests the grant **as it
+    // arrived**, `credentialStatus` and all.
+    assert!(decision.evaluation.satisfied(), "admission follows a pass");
+    let admitted_at = Utc::now();
+    let status_list = "https://kernel-vtc.example/v1/status-lists/revocation";
+    let status_slot = 0u32; // the first admission against a fresh list
+    let grant = membership_grant(
+        &community_secret,
+        &community,
+        &applicant_did,
+        status_list,
+        status_slot,
+        admitted_at,
+    )
+    .await;
+    let member_role_vec =
+        role_credential(&community_secret, &community, &applicant_did, "member").await;
+    // The member's half. Signed by the applicant's own key, subject = the community.
+    let reciprocal = build_member_vmc(&applicant_secret, &grant)
+        .await
+        .expect("the grant is a membership grant this member can acknowledge");
+
+    let grant_digest = digest_multibase_json(&grant).expect("digest the grant as it arrived");
     report.insert(
-        "step9_what_the_community_learns".into(),
+        "step09_admission_credentials".into(),
+        json!({
+            "membershipGrantVmc": grant,
+            "memberRoleVec": member_role_vec,
+            "reciprocalMemberVmc": reciprocal,
+            "checks": {
+                "grantProofVerifies": proof_verifies(&grant, &community_secret),
+                "roleVecProofVerifies": proof_verifies(&member_role_vec, &community_secret),
+                "reciprocalProofVerifies": proof_verifies(&reciprocal, &applicant_secret),
+                "reciprocalSubjectIsTheCommunity":
+                    reciprocal["credentialSubject"]["id"] == json!(community),
+                "reciprocalIssuerIsTheMember": reciprocal["issuer"] == json!(applicant_did),
+                "reciprocalDigestsTheGrantAsItArrived":
+                    reciprocal["credentialSubject"]["digestMultibase"] == json!(grant_digest),
+                "grantDigestMultibase": grant_digest,
+            },
+            "note":
+                "The pair is the membership edge: the community's grant and the member's \
+                 acknowledgement, bound by a digest over the grant's wire form. Neither half \
+                 names a vetter — admission carries no trace of who vetted.",
+        }),
+    );
+
+    let admission_json =
+        serde_json::to_string(&json!([grant, member_role_vec, reciprocal])).unwrap();
+    report.insert(
+        "step10_what_the_community_learns".into(),
         json!({
             "tags": tags,
             "enrolledPcsIdentifiers": pcs_ids,
@@ -469,6 +676,67 @@ async fn main() {
                 .iter()
                 .map(|i| vetter_ids[*i].1.clone())
                 .collect::<Vec<_>>(),
+            "anyVetterDidAppearsInTheAdmissionCredentials": vetter_ids
+                .iter()
+                .any(|(_, d)| admission_json.contains(d)),
+        }),
+    );
+
+    // --- 11. What a real admission issues, and what this run does with each -------------------
+    // Measured against `vtc-service`'s issuance paths and the DTG credentials catalog, so the
+    // gaps are stated rather than implied.
+    report.insert(
+        "step11_credential_inventory".into(),
+        json!({
+            "issuedHere": [
+                { "credential": "Vetting Card (VDS)", "issuer": "applicant", "count": VETTING.len(),
+                  "note": "one per session, signed by the applicant's key and verified by the vetter" },
+                { "credential": "Vetter role VEC (CommunityRole)", "issuer": "community", "count": VETTERS,
+                  "note": "the eligibility the criterion's `eligibleVetters.role` names" },
+                { "credential": "PCS root credential", "issuer": "community (as PCS helper)", "count": VETTERS,
+                  "note": "not a W3C VC — a blind PS credential on the class label `vetter/<period>`" },
+                { "credential": "PCS attestation token", "issuer": "community (as PCS helper)", "count": VETTERS * 3,
+                  "note": "not a W3C VC — a PS blind signature on a secret serial; the velocity cap" },
+                { "credential": "PCS attestation", "issuer": "vetter", "count": VETTING.len(),
+                  "note": "stands in for the named path's signed vetting statement" },
+                { "credential": "Membership grant (VMC)", "issuer": "community", "count": 1,
+                  "note": "against revocation slot 0, the shape `issue_member_credentials` mints" },
+                { "credential": "Member role VEC (CommunityRole, role=member)", "issuer": "community", "count": 1 },
+                { "credential": "Reciprocal member VMC", "issuer": "the new member", "count": 1,
+                  "note": "closes the membership edge; digests the grant's wire form" },
+            ],
+            "deliberatelyNotIssued": [
+                { "credential": "Vetting statement credential (IdentityVettingEndorsement VEC)",
+                  "why": "this is the point of the hidden path — a signed statement names its vetter. \
+                          The endorsement is still built (it is where the attested facts come from) \
+                          but never signed and never sent. `presentable_statements()` is 0." },
+                { "credential": "Relationship credential pair (VRC)",
+                  "why": "not part of admission in any path — VRCs are the peer relationship layer, and \
+                          design D8 records that a VRC pair is not required for V0 membership. A \
+                          community that required one *of its vetters* could not run hidden vetting: a \
+                          VRC names both ends." },
+                { "credential": "Invitation credential (VIC)",
+                  "why": "invitation-gated admission only; this community is vetting-gated" },
+                { "credential": "Personhood credential (VPC / personhood VMC)",
+                  "why": "a separate evaluation (`personhood.rego`); this VMC carries personhood = false, \
+                          as `admit` mints it" },
+                { "credential": "Withdrawal credential (VWC)",
+                  "why": "withdraws a named statement, which the hidden path does not produce. Hidden \
+                          withdrawal is by token spend-set and class-label rotation instead" },
+            ],
+            "referencedButNotMintedHere": [
+                { "artifact": "BitstringStatusList credential",
+                  "detail": format!("the VMC's credentialStatus points at {status_list}#{status_slot}; the \
+                                     list credential itself is served by a running vtc-service, which this \
+                                     in-process run has no HTTP host for") },
+            ],
+            "notRunHere": [
+                "delivery: a live flow carries all of this over DIDComm (`members/vmc/1.0`, the vetting \
+                 Trust Tasks) between agents with mediators. This run drives the same library calls \
+                 in-process, so the documents are real and the transport is not.",
+                "the VTI side's decision path: `vtc-service`'s `vetting-pcs` feature runs the same \
+                 verifier crate against the same wire fixture, but it is not started in this example.",
+            ],
         }),
     );
 

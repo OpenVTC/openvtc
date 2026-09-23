@@ -1,5 +1,80 @@
 {
-  "step1_identities_and_deployment": {
+  "step00_seeds": {
+    "command": "cargo run -p openvtc-core --example zkp_reference_flow",
+    "keyDerivation": "Ed25519 from a 32-byte seed of one repeated byte: Secret::generate_ed25519(None, Some(&[seed; 32])), then did:key over the multibase public key",
+    "pcsRngSeed": "StdRng::seed_from_u64(0x2026_0923)",
+    "period": "2026-09",
+    "seeds": {
+      "applicantDid": {
+        "did": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc",
+        "seedByte": "0xB0"
+      },
+      "communityDid": {
+        "did": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+        "seedByte": "0xC0"
+      },
+      "vetterDids": [
+        {
+          "did": "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX",
+          "seedByte": "0x01"
+        },
+        {
+          "did": "did:key:z6Mko9hTggMwjSTEaJaPUfE6tqcy2xvU6BnNq3e3o8qVBiyH",
+          "seedByte": "0x02"
+        },
+        {
+          "did": "did:key:z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2",
+          "seedByte": "0x03"
+        },
+        {
+          "did": "did:key:z6Mkt6316e2PN3mZdB6N9CrzomJYUd1s5yBZi1XYHmwT9TUP",
+          "seedByte": "0x04"
+        },
+        {
+          "did": "did:key:z6MkmtWtY63GQVBrpMyRJWEzsnxfsGkemu6CtMDwGTv4RYj2",
+          "seedByte": "0x05"
+        },
+        {
+          "did": "did:key:z6Mkon22vwz9JoNpGDxCrGZRgeNFTdRTwXYYN3fvAhA3K19x",
+          "seedByte": "0x06"
+        },
+        {
+          "did": "did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "seedByte": "0x07"
+        },
+        {
+          "did": "did:key:z6Mkfmm57fsb6VL7zVusP8zeA9SYkCKdvUhby2G7Yh8vvQ1P",
+          "seedByte": "0x08"
+        },
+        {
+          "did": "did:key:z6MkwVDfCg9LbbY6xjH3EZk8YSFQZujV5Y4y1ZWeER9tDiN3",
+          "seedByte": "0x09"
+        },
+        {
+          "did": "did:key:z6Mkj1MDZKcfx9AX5CeXHdysiGkRLzBbALyFuShD6wNeY1E3",
+          "seedByte": "0x0A"
+        }
+      ]
+    },
+    "stableAcrossRuns": [
+      "every DID and public key",
+      "the PCS class labels and the requirements digest",
+      "the structure and byte sizes of the attestations, proof and submission"
+    ],
+    "variesPerRun": [
+      "urn:uuid document ids",
+      "wall-clock validFrom / validUntil / proof.created",
+      "the Vetting Card salt, and so the identityCommitment and card digest",
+      "the session match codes",
+      "every signature and PCS value taken over the above"
+    ],
+    "whichVettersVet": [
+      2,
+      5,
+      7
+    ]
+  },
+  "step01_identities_and_deployment": {
     "applicantJoinDid": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc",
     "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
     "helperKeyHvk": "zMiNW3oobdAHXfjokZ4rr6edndN63PnXzRsQjpYrpahKGA4vjryDATQPTTEBPYz9BnYRUffzp5drP1cDS1q9z5ootP8uathVszAFKajikqARxNar2J5Ge8RGzczQmuoKqhAMG8EK6Qtu1eycLWeoitdbkXX616CB8N7raCd3ke3owVdnpezZsMdp39iE9oZ9BRzYCnd5MDvbUSJNzL9TuwtWdKAfY2x1uBD9NLnGZnEUYbzJQeRRmGjeC7XkxCAuDpr3GugfqTgck173KGhqm8Cz7WyC8XTM5xinV9vy6dUMsDh2wSu7z4pjm1jixk44JW2QeY2HZude5Wg7ktPdZPnFxtJMsUWDMqcs5MHomv9PqLhMhgzukqiRkYoNLzjJELvdER5GwTn7r94x25NX5HLAFZg1w415SLYWZGnksvC8zAYGHiCUx6duREZQFYcKRE9KC1rJ7afD",
@@ -47,48 +122,553 @@
     ],
     "vetterLabel": "vetter/2026-09"
   },
-  "step2_vetter_role_credential": {
-    "@context": [
-      "https://www.w3.org/ns/credentials/v2",
-      "https://firstperson.network/credentials/dtg/v1"
-    ],
-    "credentialSubject": {
-      "endorsement": {
-        "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
-        "role": "vetter",
-        "type": "CommunityRole"
+  "step02_vetter_role_credentials": {
+    "allProofsVerify": true,
+    "count": 10,
+    "credentials": [
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1"
+        ],
+        "credentialSubject": {
+          "endorsement": {
+            "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+            "role": "vetter",
+            "type": "CommunityRole"
+          },
+          "id": "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX"
+        },
+        "id": "urn:uuid:57760f05-996f-4316-ab49-666628e32baf",
+        "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+        "proof": {
+          "created": "2026-09-23T05:46:35Z",
+          "cryptosuite": "eddsa-jcs-2022",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z4oe33hVQ4dUZimRVTqgZifNSjiYmjx4YHEjUFrGjKwVviVRJ2dxYNSfjMm9Amx1nVzuh3pbfoj7MRLhPmTeJPGX7",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+        },
+        "type": [
+          "VerifiableCredential",
+          "DTGCredential",
+          "EndorsementCredential"
+        ],
+        "validFrom": "2026-09-23T05:45:35Z",
+        "validUntil": "2027-09-23T05:46:35Z"
       },
-      "id": "did:key:z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2"
-    },
-    "id": "urn:uuid:77630a0e-6632-489d-b903-06d4cd3e89f6",
-    "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
-    "proof": {
-      "created": "2026-09-23T04:58:07Z",
-      "cryptosuite": "eddsa-jcs-2022",
-      "proofPurpose": "assertionMethod",
-      "proofValue": "z3KegSkRQTFS4V3nBoHgFZfRhZTdBhi7Gn3zmWTSeunUey9yDTMi39qocbKP1grw1ZJ5jhTPhSvb8DqpxAmgW9m9N",
-      "type": "DataIntegrityProof",
-      "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
-    },
-    "type": [
-      "VerifiableCredential",
-      "DTGCredential",
-      "EndorsementCredential"
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1"
+        ],
+        "credentialSubject": {
+          "endorsement": {
+            "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+            "role": "vetter",
+            "type": "CommunityRole"
+          },
+          "id": "did:key:z6Mko9hTggMwjSTEaJaPUfE6tqcy2xvU6BnNq3e3o8qVBiyH"
+        },
+        "id": "urn:uuid:30736abd-aa8a-439c-8029-714d462438e7",
+        "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+        "proof": {
+          "created": "2026-09-23T05:46:36Z",
+          "cryptosuite": "eddsa-jcs-2022",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "zPFsghVGiEnZ7BaCNa7kh8PpXskWncb9wiZ6Tn1zzZuFjqu4YanrmPNSwdiRcmpKtTu8NoSy6WQcCU63DDqQ52J1",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+        },
+        "type": [
+          "VerifiableCredential",
+          "DTGCredential",
+          "EndorsementCredential"
+        ],
+        "validFrom": "2026-09-23T05:45:36Z",
+        "validUntil": "2027-09-23T05:46:36Z"
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1"
+        ],
+        "credentialSubject": {
+          "endorsement": {
+            "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+            "role": "vetter",
+            "type": "CommunityRole"
+          },
+          "id": "did:key:z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2"
+        },
+        "id": "urn:uuid:99dfb026-c4f2-449b-9053-322462000f78",
+        "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+        "proof": {
+          "created": "2026-09-23T05:46:36Z",
+          "cryptosuite": "eddsa-jcs-2022",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z3SyFeFVRS9ZDHtbdh9gc8J2mgSYvNsCn9Hvn3Mc6exgbe5zmpYSS4AGi9BYVtFbsBLniNx6jSFqGK1bPvTvsqZDK",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+        },
+        "type": [
+          "VerifiableCredential",
+          "DTGCredential",
+          "EndorsementCredential"
+        ],
+        "validFrom": "2026-09-23T05:45:36Z",
+        "validUntil": "2027-09-23T05:46:36Z"
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1"
+        ],
+        "credentialSubject": {
+          "endorsement": {
+            "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+            "role": "vetter",
+            "type": "CommunityRole"
+          },
+          "id": "did:key:z6Mkt6316e2PN3mZdB6N9CrzomJYUd1s5yBZi1XYHmwT9TUP"
+        },
+        "id": "urn:uuid:dd8482ed-adfa-4832-a53e-5a68d37a96c1",
+        "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+        "proof": {
+          "created": "2026-09-23T05:46:36Z",
+          "cryptosuite": "eddsa-jcs-2022",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z22Se6kBMYowpEZuCSF1BEWzxgQ9pcJppYu1au14MAg6Scp5VgkNrz97Yq5mnct5NTARqbiJ1HXgC8qAZ7c3ayYSn",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+        },
+        "type": [
+          "VerifiableCredential",
+          "DTGCredential",
+          "EndorsementCredential"
+        ],
+        "validFrom": "2026-09-23T05:45:36Z",
+        "validUntil": "2027-09-23T05:46:36Z"
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1"
+        ],
+        "credentialSubject": {
+          "endorsement": {
+            "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+            "role": "vetter",
+            "type": "CommunityRole"
+          },
+          "id": "did:key:z6MkmtWtY63GQVBrpMyRJWEzsnxfsGkemu6CtMDwGTv4RYj2"
+        },
+        "id": "urn:uuid:0055ee9d-4bf4-4c0f-bb20-ab05209ada1d",
+        "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+        "proof": {
+          "created": "2026-09-23T05:46:37Z",
+          "cryptosuite": "eddsa-jcs-2022",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z3rrM5Vn4yC6q759eBQHngmxfScfvuD87rkSWrzpYLjEK31qfLnfMV6bugor2BmxnER7BXzKm4m1649Wff9Gn7czJ",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+        },
+        "type": [
+          "VerifiableCredential",
+          "DTGCredential",
+          "EndorsementCredential"
+        ],
+        "validFrom": "2026-09-23T05:45:37Z",
+        "validUntil": "2027-09-23T05:46:37Z"
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1"
+        ],
+        "credentialSubject": {
+          "endorsement": {
+            "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+            "role": "vetter",
+            "type": "CommunityRole"
+          },
+          "id": "did:key:z6Mkon22vwz9JoNpGDxCrGZRgeNFTdRTwXYYN3fvAhA3K19x"
+        },
+        "id": "urn:uuid:e00bce24-1ca3-493c-be48-a15b08b50666",
+        "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+        "proof": {
+          "created": "2026-09-23T05:46:37Z",
+          "cryptosuite": "eddsa-jcs-2022",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z3QBAE54sRiHb3WVvW8qmJ7QsRMCsBrt46saN5wGknD7da5V8J4RxEPHD51uTAu8mBNaf8zaY853xVM6rtAZDTFa2",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+        },
+        "type": [
+          "VerifiableCredential",
+          "DTGCredential",
+          "EndorsementCredential"
+        ],
+        "validFrom": "2026-09-23T05:45:37Z",
+        "validUntil": "2027-09-23T05:46:37Z"
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1"
+        ],
+        "credentialSubject": {
+          "endorsement": {
+            "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+            "role": "vetter",
+            "type": "CommunityRole"
+          },
+          "id": "did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+        },
+        "id": "urn:uuid:ed946b19-f17d-4d11-b012-e93a2e4eeaf1",
+        "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+        "proof": {
+          "created": "2026-09-23T05:46:37Z",
+          "cryptosuite": "eddsa-jcs-2022",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z2WUZD9rzriYf9LJNHUGoFjrpQ2MPdt7CpSS9Z4wRki7JHRiYoAouHSeyfabrxJsFiRnRk8owHs6srYVFkehUofh6",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+        },
+        "type": [
+          "VerifiableCredential",
+          "DTGCredential",
+          "EndorsementCredential"
+        ],
+        "validFrom": "2026-09-23T05:45:37Z",
+        "validUntil": "2027-09-23T05:46:37Z"
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1"
+        ],
+        "credentialSubject": {
+          "endorsement": {
+            "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+            "role": "vetter",
+            "type": "CommunityRole"
+          },
+          "id": "did:key:z6Mkfmm57fsb6VL7zVusP8zeA9SYkCKdvUhby2G7Yh8vvQ1P"
+        },
+        "id": "urn:uuid:04cd1d2e-bf53-43e5-be1c-61519edf23b7",
+        "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+        "proof": {
+          "created": "2026-09-23T05:46:38Z",
+          "cryptosuite": "eddsa-jcs-2022",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z5twmY9JC5pkALQcjptH75wRxbRth3ie2pL4tD5y5ctCEx6CaiCZsVSCVyNEhsLxr5VaAhjrkrjf4P3P1rXTpuZhk",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+        },
+        "type": [
+          "VerifiableCredential",
+          "DTGCredential",
+          "EndorsementCredential"
+        ],
+        "validFrom": "2026-09-23T05:45:38Z",
+        "validUntil": "2027-09-23T05:46:38Z"
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1"
+        ],
+        "credentialSubject": {
+          "endorsement": {
+            "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+            "role": "vetter",
+            "type": "CommunityRole"
+          },
+          "id": "did:key:z6MkwVDfCg9LbbY6xjH3EZk8YSFQZujV5Y4y1ZWeER9tDiN3"
+        },
+        "id": "urn:uuid:c4464989-f0f9-49b4-a90b-a4f0ad2726a1",
+        "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+        "proof": {
+          "created": "2026-09-23T05:46:38Z",
+          "cryptosuite": "eddsa-jcs-2022",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z5kJxYBSiEdqAG7WWUfANTvasq4FAdE9fq2FM7Efx5LevjjguJS179QkBWNWEaLacC24GrUzBN7jYg5T5uKJS2gSC",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+        },
+        "type": [
+          "VerifiableCredential",
+          "DTGCredential",
+          "EndorsementCredential"
+        ],
+        "validFrom": "2026-09-23T05:45:38Z",
+        "validUntil": "2027-09-23T05:46:38Z"
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1"
+        ],
+        "credentialSubject": {
+          "endorsement": {
+            "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+            "role": "vetter",
+            "type": "CommunityRole"
+          },
+          "id": "did:key:z6Mkj1MDZKcfx9AX5CeXHdysiGkRLzBbALyFuShD6wNeY1E3"
+        },
+        "id": "urn:uuid:5ad9caae-122d-4fdc-9b2c-a2fe2baace91",
+        "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+        "proof": {
+          "created": "2026-09-23T05:46:38Z",
+          "cryptosuite": "eddsa-jcs-2022",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z2R4e5yfwbngvTyieACShtKHMQRGP5drSuV9QxqMenZ3a97mKAWvcTz7qTwqqBFhy4Hq1rtufNvKiWqV5X9zM89z1",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+        },
+        "type": [
+          "VerifiableCredential",
+          "DTGCredential",
+          "EndorsementCredential"
+        ],
+        "validFrom": "2026-09-23T05:45:38Z",
+        "validUntil": "2027-09-23T05:46:38Z"
+      }
     ],
-    "validFrom": "2026-09-23T04:57:07Z",
-    "validUntil": "2027-09-23T04:58:07Z"
+    "issuedBy": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
   },
-  "step3_pcs_enrolment": {
+  "step03_pcs_enrolment": {
     "enrolled": 10,
-    "examplePcsIdentifier": "z5jokfsiZx1sk1mJyQnBnR519B9mcQhw9a8LrF9VQdAjExwoLzcdVdZ2aXaH14a3mdF",
-    "exampleRootCredential": "zpmLHxb19uxhdGGvBTCs9Vv72JVL9piVMtNGeS9zZMb3VVCKaNHqM5Dt14mhVKUey1VmTSn86USspFDBWcXkntXXYg1K8tLYrGdPSgh3o59FgWffXZdfh6Dz99PL8B1nSJ6C",
-    "exampleTokenSerial": "z31yGjW2gELLTQWJm49inmCGU22p5dSAhcjTTBJFerLGU",
-    "exampleTokenSignature": "z26LFVmmzjrtPuZ3W3i3zprBXQu2m4kSVYSX1AnkzzKyoAUBmRwWPYZVzXAtFZtpF9b5pCDYvBAjFSRap9tmp4pZPfEvDjgEUe8PykUJ7haM2pZn5VMjnCiTippKDR2T8uaiQ",
-    "exampleVetterDid": "did:key:z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2",
     "label": "vetter/2026-09",
-    "tokensMintedThisTick": 30
+    "note": "The root credential is the vetter's blind PCS credential for the label; the tokens are PS blind signatures on secret serials. Both are secrets held by the vetter — they are printed here because this is a reference vector, not because they travel.",
+    "tokenLabel": "token/2026-09",
+    "tokensMintedThisTick": 30,
+    "vetters": [
+      {
+        "pcsIdentifier": "z5qxeFvndiW3qTAZRmHacJcHYx4Z9vtWGzVap4c2uQ8aLdRGC3vVNWS75Lbx68NLpqN",
+        "rootCredential": "zqGihANDU5hNDSfe6EA3wiXNc7XjetNGPg5J9L2vfwQdDq2gxZPdMdJvziwCS7whxgHBCTF71vQuRA7d3yKVEogk4Gavd4TpGgXgSkPotSPC2AdcfxT3FBBahNMyWSBHD3DU",
+        "tokens": [
+          {
+            "label": "token/2026-09",
+            "serial": "z2umykFwGKzcv489j6x7UWRueZb9DLXNJ9wdc98rHUurD",
+            "signature": "z26smwZFs5v9pep9JsPDc5QQRE9EmuPcVNJHFytuBPo3Y9Naazo1pQFy6WKSSzPh7c2FNr957VMJXi6KUTkZtQTDaz41VjiriC97hmMi2RvtYyodsjA3Bq95ETfhKehj8P7ET"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zCXHQ3Zi2nVY4e6FJ6mk3vqEmwPdJGPCAmjqvYaLAB1wF",
+            "signature": "zpSJuVhaWUQSRXMJqu3QgbgKT7dR2pFt4QC1KVkUgNU3gDjpdEXv2vTP7uR8gZgYGpzWza4E6sVoTj6f6BM1AkGSwoUEgTaguXuN37L6oEymCzWfuTz6nnYwMSrkgXQTU5TP"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zAWcbVU594dxkcQ9a2vXDvmmHTrz7ANd3ZoxTHq1c8FA3",
+            "signature": "zsfKpWTkSmdjZGZjqrnr4z3nc2H6dB7Dc6PrdA8JwtduA7DWnVHRu3Tz6DnjEHkQbNhcsvGWpLtyJfCQYt7AhURezmqcNXqqFX2prprg1EoWm3AbrcE1YG3ZapZ5Gpi5YFNT"
+          }
+        ],
+        "vetterDid": "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX"
+      },
+      {
+        "pcsIdentifier": "z6PjbEwBeyVS1ZxPazB5Mty6sZ7B9ndAxJr9UzxJxEM8rz3aypGnoDpRz5udsSA4AaP",
+        "rootCredential": "z21CJdqVKUb1nLKJVajQoaxUaQp8SYeAfkgojM8RziXeNYjEr6kzPP8bTHqbCBfLqMXcSZSc7qJSxo2ZPPxmfJdiHeQi9M3HQ2dhdqiG58YCxxj7AEoEjwjNuHW1nx4U2rUvu",
+        "tokens": [
+          {
+            "label": "token/2026-09",
+            "serial": "zAeVrnFwzU6R2SYPxRyvUyhXHf27g7wkmK8Y3u1BwWvjR",
+            "signature": "zrSyNX4FEtvDLDYv3LcwFz9yZVicq2qg4rdutSsu4c9i5TgawLE5XiBAtiYvLGUEncMauJcS9Y84zNm8NCN1rxwH2wDs8ZrYNxDRbxuV4jVcSBTroFvdAMZCN7rW9jKvyPxN"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zGhyDYCPoCoonrYWCPmp4xsGVJpVCsz4tdHa9FH5EVbMn",
+            "signature": "z214sVWjdoYvAy6fVknjpAszXPc6mUCysddDTxs9gLqPiz3NsPqARMTuafNEHZibUZNosQH29FsYNzEeXrYdhCjPKvAFzv8e4Xp3oZLh2uZ9ihwUqin4kpSmAMBwzXusuXxmM"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zCUMYwg6kgNag2gZ6bDmfMMwhHdudVxTWBxA3tKsTrKNs",
+            "signature": "znCKcffsMyA2U8ZCTLL36cCNnUxmhJpPQe22yRdgXGJqUxPRWH8RFw25hmJzeiHivQ9vdv3wDdj9NopwSCXr3aCXPzbNwF6TSnc3yyS4e3SyA5XLv8eqKyp6fpFjvzW5h1fV"
+          }
+        ],
+        "vetterDid": "did:key:z6Mko9hTggMwjSTEaJaPUfE6tqcy2xvU6BnNq3e3o8qVBiyH"
+      },
+      {
+        "pcsIdentifier": "z5jokfsiZx1sk1mJyQnBnR519B9mcQhw9a8LrF9VQdAjExwoLzcdVdZ2aXaH14a3mdF",
+        "rootCredential": "zpmLHxb19uxhdGGvBTCs9Vv72JVL9piVMtNGeS9zZMb3VVCKaNHqM5Dt14mhVKUey1VmTSn86USspFDBWcXkntXXYg1K8tLYrGdPSgh3o59FgWffXZdfh6Dz99PL8B1nSJ6C",
+        "tokens": [
+          {
+            "label": "token/2026-09",
+            "serial": "z31yGjW2gELLTQWJm49inmCGU22p5dSAhcjTTBJFerLGU",
+            "signature": "z26LFVmmzjrtPuZ3W3i3zprBXQu2m4kSVYSX1AnkzzKyoAUBmRwWPYZVzXAtFZtpF9b5pCDYvBAjFSRap9tmp4pZPfEvDjgEUe8PykUJ7haM2pZn5VMjnCiTippKDR2T8uaiQ"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zD8qkbbBPszBm29w5ZgBnk46PTPy82fU8HK4FHedxFhZW",
+            "signature": "znTHGsGzCWQyny1pdySZ2k5umZgaLySbjo8ArCeGBWRt84P4gDFJ91yNkuY3T92PaeJoDpA77ydidtJEWDdx3EqY1WBVcrVA5VrmaBRovQW8A2Ye34N14jpdfg6HgGEwnon8"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zkHRSmnTz9TCJwGC5uFygjdwzQB64qyEC9xAzq162iR2",
+            "signature": "z256oAZENjn6L98aphopUYcLRwwFQRqwUteYPpH5e1jwzSztpKKJbyQEsM49EFkpH3fPvonLfyAabAcDwu4nkb8cTUg75wVkK5cKdKWCJcSsR4f2DFmiqBLEPvoftxWCHQVw6"
+          }
+        ],
+        "vetterDid": "did:key:z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2"
+      },
+      {
+        "pcsIdentifier": "z7nnmQHspvxN1He3NfifTKgh3CHeKRsHgz3NBTBKdfb9FZaMt3acCAeXaMHXqc1UDJ4",
+        "rootCredential": "znehu2fHtuiBKGC3JkAXdEYF4FgBjwfDbvtV5MLwaCEds6MVFQWoAC9f7piavZW83sM9bip43rQLocBDNLawDjSH9DFoDjwp6uJq6vJNZfpmTvD1DMSHtFrMaFyd4qS9TM5r",
+        "tokens": [
+          {
+            "label": "token/2026-09",
+            "serial": "zE5LXXzKajnL4d22Vt3soLPQb6XL1e866VcKM8pUD6dQZ",
+            "signature": "z22TMdyBNqk1sJkdGswZVXMMwoUKQrBoajZZjhfXqaabEB6epPiZb7AL38qFB5ged4Ur85QXvz5J3QBFXbJPLLz5cFkWLxrmBL7FWnZZfxN8zRzEQ1zFjDi82dcWmRad5Kr3t"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "z2PiR3nMbYrmZMJ7DeNx1sFErcJzyHSaL5HBVDi6ccFKu",
+            "signature": "zt2dUDgq5dV5bvASjSuwymEUdPA8VEDT5a1feA7iFC7UW4cXmxQmsTCpShsaKMrBAxW2qyTBY1kg42eSZrtZuwmJm3xA8aXobSfdpB7xyNgutSdYuh23oWp5FdvLZ1t9MRuL"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "z532Gt4DeeYn14aPNxB6y8G1W9iZzFa14Ua3sbrCjs7TT",
+            "signature": "z22BcyGF6ZVora2SRbD4kehkSBxHtPS4jouXhCk8xEzvQEtYbfz86h2uxoBAkgH1KmKkzk32SxQVqB7Z9w4bzZNnhSts6Xq7jN6rAib9Rsa2KuUJR3zpypT8MFgLddaPQdEqw"
+          }
+        ],
+        "vetterDid": "did:key:z6Mkt6316e2PN3mZdB6N9CrzomJYUd1s5yBZi1XYHmwT9TUP"
+      },
+      {
+        "pcsIdentifier": "z5xde71yqrcP5gDTZpyQP2spzLdghp6UexKL4sTFsaE6zp628FW5wAJanYYH2UzyJoT",
+        "rootCredential": "zuEiPk4EJDAcauCUzA4hDAdyADqBmFcDS3MkoNNT5ndvM4Xfq2wp82nJZiLEzF5UPguZF22v4Ve9rEvZGLP2B9wqDy39D71iuk5SHe3e6uEG2zy1qNevyqJKgSvT7dbSzqRz",
+        "tokens": [
+          {
+            "label": "token/2026-09",
+            "serial": "zBWUvU921zg7ExRQDYEMwdDRdgfPfkjSUctrNSvjMKwGx",
+            "signature": "zo68giUDw2Jc7GABy2LzZj2qwCdRMHDopNMCp62TZueJs87gnXjwCQYk8R3aZuynkARKxTfie89gETnU6zHcuJL347t1JmWamDFSmkeAGYBQQw8cAUaQY3KtEDCXWbBjrqF6"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "z3UTWiWSUqT4mML7oBLwMBzisatejvYn5LfHAUqM3R31p",
+            "signature": "z22pji8E37YZ4cPnA3bNQJpg97AHnv7Vq6Po1QLpvrqsCpgCciU1kkFwxQ514oKjfzZTYEgh9Yb2o5rWQUSMGSDbJvm2i4Zxa9uLfTeF27S5Vh28b7unGV7tdGh1VX6JebGMd"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "z4ndKXZUomEVJSYbu3FtxNsfaVFDo1zzsZ7Q5dt42MPQ9",
+            "signature": "z26ZiS7noF7DpwhfGtXJyE3dHCmDLnBbFXmVVu8RogNdw7MjrLntM4HbZDUWKSPZ2uTK97LeK3ac8jrvpZWPPntjFBzeHv4Mseeq6kbG2BiDvFUPaaWLJ82GG9PxhG6FTSVkV"
+          }
+        ],
+        "vetterDid": "did:key:z6MkmtWtY63GQVBrpMyRJWEzsnxfsGkemu6CtMDwGTv4RYj2"
+      },
+      {
+        "pcsIdentifier": "z7NZtvcib7T2Ay1EEwYEynLb6qbwxyTgmxvu88hvSKzJid1UyyKRasdK7rqEAzsVRwx",
+        "rootCredential": "zrKLhnHj5uixHaLRRxTdAfrUajWBTevg4CMZSoBPMuZcoPeErkNaLc4UaqUzTk6cpZbscKf1cUBZ7TGzXENQYZcjTAKGq4x3FSrLLp4dJLuq8mfKx9RsfxqBVuemqqZogEsF",
+        "tokens": [
+          {
+            "label": "token/2026-09",
+            "serial": "zCrq7vQz336bgwyKSRdV5dyUr3H4jP4VTz1crTq2hacbq",
+            "signature": "z25bDiQNe55ybVzqmMNjek3vwvwB7na8857Bb8S4cf1n59YuM2CBXc9H9RbQtGMoY1WvBVP1eFTYhyM8SdCfobGLm1DmcPTmKduaGuZ81ajcwNVohF1jcWGBgKozYvt6nctR7"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zEon9JyzPKSsDuxsR96PgVnALXsQY553jcoDfcnzhLpy4",
+            "signature": "zxhnW35kCa9K4SjEzeNJjVYUpPMmupreFAwBaTkvwmLV8183MmTCFQGdgLEjgBDeZntoR39mNuL6oE4behmcRx8o5kzhu96JSu4DmLdmqJWFENfqgujaFqAAKAooUdcNs9WB"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "z6R8SM4p3gN7sHgv59vnLyMMEesfUUJkYj3oaZjZbCWb5",
+            "signature": "zu6Uw7ePB8bFSGrNM6fu6aPjxyGuuAHpwKvmYrVcGwT4eiAAeJWT27fbKmTx3uRdqBb13PDPgqRPn7H6L776NTJTTXQJpbQL67TcCa7tPiNaS2rVP9bvtG2MnZLMukckY2rd"
+          }
+        ],
+        "vetterDid": "did:key:z6Mkon22vwz9JoNpGDxCrGZRgeNFTdRTwXYYN3fvAhA3K19x"
+      },
+      {
+        "pcsIdentifier": "z6RuzZi2sCeW17qFWCBjckr9yhX9njmmVKT9UiqmDA5oqXWGHHa2qHTLdqP9y6B4S5z",
+        "rootCredential": "znqve62iJP7kZ6ogmdHnXu7cqiVmsLDsUwhQWyfhEVorxH4x8FCdEjJrPTceSqjuDoPSNKk1mahsS7gyuDFzvsq9vSGWS5yFtB81qFBqXyeq2Jm8ddAmnK3dEyDdBmZcVEFA",
+        "tokens": [
+          {
+            "label": "token/2026-09",
+            "serial": "z95KjboiXU8Rcr6WRTPcyPfufQjzQqMg1XGMoLUPTj5iC",
+            "signature": "zukXVPpfMxjzPaqyMHJJ1eD1KYK3BfTGx6mq2BoffJTHNQekBQtyJPsQzdQrgvuR8MikDXkrKphjj8s5eKSniXwYVmAPLgoxFad5CqnyZRsJCdsXpwaPC7Z2kcy7p98ErzDd"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zE1Lce64UCSdpGXinaVkDD1jokAVDso2fVoyP7ynJzBjr",
+            "signature": "zxAU9Ad3gb5UHFoUPzSre8FUvx8MVBgnHSLom8fmJwH6qU7ZKnA1KJM2MFzkQXpxWgbDr4uE6PUMWNNeArXp1pexKh6cV7TMwHgjeZKekDnMS4y6R8dR2uLn7bfoQ7Y9xME3"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zAxxcD9bCmAeggtPMCSGndvkWPHGA5xP3qR4Ndg3GMWnN",
+            "signature": "zyRpBLTmxYwAUPCLQexcuQMMnWUdo19NZ6242RxRpHzSjAJoBvnsVVVUM4fwN7ckenYAVJccSn4ZaLmoV6yhGqHgX5pm4oegN8oNL8jWw6XB5F8kTunYJp7EM9YJSJYjLXV5"
+          }
+        ],
+        "vetterDid": "did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+      },
+      {
+        "pcsIdentifier": "z7KgmZhGYdURUM98R4Poknz2bGTRoS3Po2UJaFo1rnK9sAo68GgafPSuM7biznFFUM3",
+        "rootCredential": "zrTbwaBajMAVZjW1nZwTedcsTR6RJmjCEgaaXAH6AusJMw69oTvGPoRm3feWASv5KvTzB7cTv2hiieXPumof6Q1DVJEGprSFQwmPsQ5zqa2xr6jTLDnX6tRNXVMa6QdngEhS",
+        "tokens": [
+          {
+            "label": "token/2026-09",
+            "serial": "zAqc5xE7WAyKyWkChsx1s4XHXArgoCqKJM263iEAqQFAr",
+            "signature": "zudPJSwLKHaJcszyyQiL6xMXuqVJZ6cyv1tr1KAGtMSUTzDSUxQLanEHk1S3REP3ddZ9WWvJNh3eoJGu8fcRfRJTTHhPnonVray5Xy6H3PwqbZ3qdiWoymzHdFnDcAepBkWA"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zGfAG4oBWyyTTPDz8mNTVfNMfATronY73LaYorwVuvbtC",
+            "signature": "zzJS7TVU1A8k3168oks1mb81VU6YGCP7PVJSuRfxkMFCAWUPb2XNHVdiRTnxFsbSStigH5on1G3MVEErrKgGR5YQ8f9cLkauXFs9h4oZSRsioLQCDcfB5ZM9TJqocrCbZGuq"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "z9N22VhviJWtQ4iFU7ASn9WypRhQqe7bM4ZVhBeVh6Ddm",
+            "signature": "zr8oZQzjH5spdKM66aXYJx8HxByz9MvKZNX7DTZFhHi7FhKtn4CG7dedu5fMc6JDVJM3rsbV6Aa6jQV3fpJM2XpimzydvLdsPSDsLD3JNQpA9sYr4xUYh9v6bWXaTGxjNjzY"
+          }
+        ],
+        "vetterDid": "did:key:z6Mkfmm57fsb6VL7zVusP8zeA9SYkCKdvUhby2G7Yh8vvQ1P"
+      },
+      {
+        "pcsIdentifier": "z5qnfFXXK297r1E1K6jZHWy3y6Jdyr89P75Q2Ne7FseLAC4r6wWycM5W1RPdTfypgdV",
+        "rootCredential": "zycmi3S8StcaaCKS1oVXWppqsUqhQCNQdW1E6xxyxpMC3gGhCbrYDNgeVwwKKVXv5RkcaVF9qW5dqjAVi6kaRfy5QtHgQKCjJL65i2KhukCRfDMK6UtokggXNoeaonTvrTQu",
+        "tokens": [
+          {
+            "label": "token/2026-09",
+            "serial": "zwm5NJ9iAuzaUcW5hBwg1GE45bof94NqmVhshPioTptC",
+            "signature": "zxTRpgBUbpNMLF4WEHCJctN8yGtFBgGCko7N7Y7x58WDWGadagbsQcZg18Ygn5CYR4SQEWwwLDorqT81G5RjSZB5kQP7Lz4Vob4vVb2Qn43XppsGxMgqXUCjd7bkxwP4fSGd"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zEFwYDjpWng2GHiH7Y2skvRdSPS6SsqdYbWvgXAw3md5y",
+            "signature": "zptrwYmeKr2JwqFzJYkschQ6VgvdpzZVvmeXN2MSQPUivcGJmMudV7b2hR19zgMHLuj3SQzN9fQwFEFZ6fDfk3KTFCbcWhKs6CdUscqDNNj7prxnZaDACBihSoU27YKHQP17"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zHxAqLD6Qj8pvQJGpkNqV1sG48X6ReJUEcgzCmxETqoW6",
+            "signature": "z26o41xPaMGRuV7kPfUsJpihBQoQHREMyrCZPK5me1fQY1Rd9m2KeSe181asmZVM8zUZnh3wmfEmDNXn14j6rGprvzYUDZBrPDPCCaBSL5PYskYHtU2DLWynX5Hb4jcqkF196"
+          }
+        ],
+        "vetterDid": "did:key:z6MkwVDfCg9LbbY6xjH3EZk8YSFQZujV5Y4y1ZWeER9tDiN3"
+      },
+      {
+        "pcsIdentifier": "z6vnNcz5c2eR8i9HAqz9yN4t2ZaZQv6beyTtoxpiHktYXCEjvsCsPbnfiaxcBj2GG58",
+        "rootCredential": "z243xj8zW53zgHbTpxCvy3bBsdNriuUVeM3MCeVcqkshrPchDsPgWgvmuxd6iK39Awf3feS5a199nZ1oUEzo2WAGiAPJimPuWe7YzWWQuek9A3QjVNNybDAjvBKStXxQNCZqm",
+        "tokens": [
+          {
+            "label": "token/2026-09",
+            "serial": "zGuskTPSNwRyN2FK5vgWDvFWqwojwiY87TQEoNAZBy7wG",
+            "signature": "zxkCZ6dHmDuVEDRgZLfRMxDjHS7emTL37tmqbzyKQATUKTXp5ffwfYLN7Wxdxn54QSRerGSyQpxAowH5ZYfztfmZLuSEoKnm8dsT8KjC4cTbLNCieUKx72oMAAB4kJhepJTR"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "z3FRfZ61nYhSnEMKj745yYEPN99j7iAAjaSfn8FoiQBPd",
+            "signature": "z24GLomvspZXAP1NUvz3tWKJj9mwRwrqkfajakTL6w6e4oB9iiWDRs8C1GP48gtXMGhm84jxhXqzYEKFKZRKnLnfJkDYnJhLWTLRjArRaSLALuiC6AzTrCffEWazq6vighAbQ"
+          },
+          {
+            "label": "token/2026-09",
+            "serial": "zGC7JJHbBvQ2hccHQ7Y6m1213bjAViTRUyFSh9jdmabCf",
+            "signature": "z22nLG2gPYfJTu6r54ajpyZewMSXhJy6FsPypsGG9eCJGYFfVRA5K12pC1hnoAQZGk3vBWumjaeiXVJc4DfB9G7opLS3Ei67gYnFJqj23uPu5vTRYszMMQ7b4hACpbWJFDLba"
+          }
+        ],
+        "vetterDid": "did:key:z6Mkj1MDZKcfx9AX5CeXHdysiGkRLzBbALyFuShD6wNeY1E3"
+      }
+    ]
   },
-  "step4_manifest_criterion": {
+  "step04_manifest_criterion": {
     "description": "Three kernel vetters must confirm who you are. At least one must meet you in person.",
     "id": "kernel-developer-private",
     "presentationDefinition": {
@@ -139,25 +719,25 @@
       "version": "0.1"
     }
   },
-  "step5_application": {
+  "step05_application": {
     "joinDid": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc",
     "note": "The commitment salt stays local; the identity commitment below is computed over it.",
-    "pcsIdentifier": "z7TYpsMLo1vfGzG6K245FxCQ8JjGQh3B6RzGtJzgojZCe3U6TfBbkhrhLb1AXMy4ZgV"
+    "pcsIdentifier": "z5zAjxovwv2NcWiWa6iGy6AoDVsHYHzSdM3zDKiAcoWLd1Y4U7Xcm7syg5nHtupx4wc"
   },
-  "step6_sessions": {
+  "step06_sessions": {
     "ofEligible": 10,
     "sessions": [
       {
         "hiddenAttestation": {
-          "attestation": "zBbsywyzdGiuJ3aCc147SQheEgDJFJHkgNKctAcZJVhQjPb6ouWdacLxmNRaAZJGB4ExoSAtjjs2udDhqRV13RJgqWikNPYqT3Ax9Cyf1vcBMPCVQ2CcqKg6Df4DjNEgWKK49KA21mBhgJVir8uULjdKzAir3HBeSFmuUNY7nXbCC6zNemuEH2g53PYVWS7S4wo47auMV9ADcAb9pWqhEiAEe2C1MknrgTd7Q1pzpDSd9AjNmWfNw6PDUdmhscqWics8JSVuw8hDENRKSPHLX1cQG7Dqej4j9mrcdsvtj7c79oQaqDL6CsRQupiix5yFjWVCT1F2Bw9eCFBW8DUf",
+          "attestation": "zCNgS4yeU8fyZggM2BhthHuFvmi3HHrHLAGB99LN137vmyv5C31FBWiEj4Dp9QoigQpFjzTxsH3vxMJdxHJgQbvyYdDeB2CUBTgmFr8ZdKNXBoAg9mUxsYYaHznoBU1AVAx5wYSvsoD76qvuLu5TkHtGnJxmJFEs44ybwH3ZFiWehf9BmWgkeMXj5JUGJwPGRP58xntmmQCmGu4PmixFJUTjmWMPmUtmBzwmL5JjrqGwiNd9zXu2kWhAkRS63JELq1g8udUcDGpBieqLvvqsPDPMCuSraNwo1tXJz4dUTY6cRo4GpZfmSjYYNsuEiXD2TykzjahtHQ6gWRhgzdFb",
           "meta": {
-            "cardDigestMultibase": "zQmRnZq46vDQnAzSuEnWz3zvfQoigbe23KtSp6S1Vm1UXuL",
+            "cardDigestMultibase": "zQmbFegCp7dv2LuigghuNEa3DwW6fiAzS4k81gtYi9ZDH3K",
             "claimsVerified": [
               "name.legal"
             ],
             "community": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
             "declaredRelationship": "none",
-            "identityCommitment": "zQmPRccGTPKwUUB8nUdSGuK7oN8Ht7c6iEDsLqdK7LNsxKz",
+            "identityCommitment": "zQmegg1hyCJnJxQCrKprph3LrVnz77S3xXxthhdbLPhwVgh",
             "livenessConfirmed": true,
             "method": "inPerson",
             "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
@@ -171,9 +751,9 @@
           "tokenShown": "zyyuZWdvkpepqkgJ1D8jPP6mYWsWbf4cUbGg5hdXQQnLV7v3z2Gax4gD1zDuDfpSE4gTSys6C8UwFDLtpmhBXs13psxipV2auC5BQC9hDbeAFV5cuzuogP5g6tUp35v24r56"
         },
         "hiddenAttestationBytes": 1138,
-        "matchCode": "P0DM-Y2QC",
+        "matchCode": "02PS-6QT4",
         "namedPathStatementEndorsement": {
-          "cardDigestMultibase": "zQmRnZq46vDQnAzSuEnWz3zvfQoigbe23KtSp6S1Vm1UXuL",
+          "cardDigestMultibase": "zQmbFegCp7dv2LuigghuNEa3DwW6fiAzS4k81gtYi9ZDH3K",
           "claimsVerified": [
             "name.legal"
           ],
@@ -182,16 +762,17 @@
           "documentClasses": [
             "passport"
           ],
-          "identityCommitment": "zQmPRccGTPKwUUB8nUdSGuK7oN8Ht7c6iEDsLqdK7LNsxKz",
+          "identityCommitment": "zQmegg1hyCJnJxQCrKprph3LrVnz77S3xXxthhdbLPhwVgh",
           "livenessConfirmed": true,
           "method": "inPerson",
           "type": "https://firstperson.network/endorsements/identity-vetting/0.1"
         },
+        "namedPathStatementNote": "On the named path the vetter signs this endorsement into a statement credential addressed to the applicant. On the hidden path it is never signed and never issued — a signed statement carries the vetter's DID, which is the thing being withheld. Its facts go into the attestation instead.",
         "vetterDid": "did:key:z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2",
         "vettingCard": {
           "audience": "did:key:z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2",
           "cardVersion": 1,
-          "challenge": "9tobJLcQSX6GDuDkJ9qTRfLb7GJEFcT3VG8Pv_90ImY",
+          "challenge": "jlUiP6WJS698JcuzQLWCgE5OzFkZRl3wSOUsMXjBJaE",
           "claims": [
             {
               "provenance": "selfAsserted",
@@ -199,18 +780,18 @@
               "value": "Bob Example"
             }
           ],
-          "commitmentSalt": "56KAYDyTcu5b4cNmwBAcE6poLtiLS4uBevPlFpC9tnA",
+          "commitmentSalt": "lqMj3pYmR5elmtovhzW1baZH-TNZ4YUR63xKMsBRo0U",
           "community": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
           "domain": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
-          "expiresAt": "2026-09-23T05:13:10.509926Z",
-          "id": "urn:uuid:d4a8e90b-15fb-4a56-a30b-0ac8fd1f5972",
-          "identityCommitment": "zQmPRccGTPKwUUB8nUdSGuK7oN8Ht7c6iEDsLqdK7LNsxKz",
-          "issuedAt": "2026-09-23T04:58:10.513627Z",
+          "expiresAt": "2026-09-23T06:01:39.107015Z",
+          "id": "urn:uuid:257bb1ef-7cd9-4a83-ab49-9667a3bd364f",
+          "identityCommitment": "zQmegg1hyCJnJxQCrKprph3LrVnz77S3xXxthhdbLPhwVgh",
+          "issuedAt": "2026-09-23T05:46:39.109914Z",
           "proof": {
-            "created": "2026-09-23T04:58:10Z",
+            "created": "2026-09-23T05:46:39Z",
             "cryptosuite": "eddsa-jcs-2022",
             "proofPurpose": "assertionMethod",
-            "proofValue": "z3ewnEUGVBK4j6zSsGt4QqYVyy48UmjYgaPUZzyQwWyYo7TCsmDxdjLgiRJ7SFvdEiGFgk9DWD6UPzLqhrUyMemeo",
+            "proofValue": "z2WFebRJD2J9n2Ta9qpXZ1v2MUyKvoZ1KUcBrxeQK8aQfEo2y1HjuLEkeuiWMeHnVw9RmwvAa1LFUvJaf1g3gaRqv",
             "type": "DataIntegrityProof",
             "verificationMethod": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc#z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc"
           },
@@ -224,15 +805,15 @@
       },
       {
         "hiddenAttestation": {
-          "attestation": "zAEDdVqQrjcjcsoQogu2dfGZ1NkktzKyJetC4fL3QCbKRjmtA9BCYdQVpbaYuGRcvURGurwhyPgbnT3vFrH4GLHMefwW9ZQeM7ZpHoC5uBw2pVEmpVHvm73JEo6tajtp2M664hheaUPizNGJTGApjZ6zTD2BSY1G5y5vfqBrT6aHCTco2yxB1nc3SNSJXhVDTvkpfvmLqEd7bX3hwfnjXAXw2g9AU9Ero4DM3wt9hS7cZAAesrGVQPHCWH4TiDMajBqC2fJqTysVtjb2vosduQy3dK8kCQ7Fjjf3svgjtqL7id5QPy5UAeCfuDC1YgRVzQXEVZTdS5M39RipEbHU",
+          "attestation": "zC4KNaib1tizuGTyKqxMy6mmS4BGoUvrk2HaEHrs83u74AFimx5b9JCfCBXS5KL44CDd584SmFwuoEYz5HPq5PTWsZ8hSCHBGDWPZZFZipDfmNV36LhjNuobsFxyUEphNj4ydpy7ux233qw5YvC6yu2rCypfJzhDmkBxa159H7xbBBSeNa9Je5mrLR6zrBBoYHLXcsP1wFrHmT1CZzTxMu8bR1KfbS4Shr6oVyQBWLKddgFGMXrQh1NaX7nsmCuxprZGFGKvKmRL6TV4ZN84j2UdARvYBdNGhrnbjcG1TgNWwtjiRoxXUHRgivaf28zdQ2pz4ZbWhLsLsqNmykeA",
           "meta": {
-            "cardDigestMultibase": "zQmPMsDSm5iX4wL4kdsZPwxJx1f6wq7dEsP36CgYHqJwLvE",
+            "cardDigestMultibase": "zQmdMrcZH4jJytahj2HeoKGU3PxE8gUBuH8662mh7AMSK5y",
             "claimsVerified": [
               "name.legal"
             ],
             "community": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
             "declaredRelationship": "none",
-            "identityCommitment": "zQmPRccGTPKwUUB8nUdSGuK7oN8Ht7c6iEDsLqdK7LNsxKz",
+            "identityCommitment": "zQmegg1hyCJnJxQCrKprph3LrVnz77S3xXxthhdbLPhwVgh",
             "livenessConfirmed": true,
             "method": "video",
             "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
@@ -246,9 +827,9 @@
           "tokenShown": "z26HVvJmJqxeAPT4eR1bQSV5R4yz3Mfoeg4bf4wA9yNHot9bxgjsW3DaweVFSjV1ZdXggXReSdTiJJ68GvY2QGFgD2J79qb57avBaw5dMYatKiFg7iBvhmZgnisVKzcgH3u3p"
         },
         "hiddenAttestationBytes": 1138,
-        "matchCode": "A2T1-ZCWF",
+        "matchCode": "7MF4-XRWA",
         "namedPathStatementEndorsement": {
-          "cardDigestMultibase": "zQmPMsDSm5iX4wL4kdsZPwxJx1f6wq7dEsP36CgYHqJwLvE",
+          "cardDigestMultibase": "zQmdMrcZH4jJytahj2HeoKGU3PxE8gUBuH8662mh7AMSK5y",
           "claimsVerified": [
             "name.legal"
           ],
@@ -257,25 +838,58 @@
           "documentClasses": [
             "nationalId"
           ],
-          "identityCommitment": "zQmPRccGTPKwUUB8nUdSGuK7oN8Ht7c6iEDsLqdK7LNsxKz",
+          "identityCommitment": "zQmegg1hyCJnJxQCrKprph3LrVnz77S3xXxthhdbLPhwVgh",
           "livenessConfirmed": true,
           "method": "video",
           "type": "https://firstperson.network/endorsements/identity-vetting/0.1"
         },
+        "namedPathStatementNote": "On the named path the vetter signs this endorsement into a statement credential addressed to the applicant. On the hidden path it is never signed and never issued — a signed statement carries the vetter's DID, which is the thing being withheld. Its facts go into the attestation instead.",
         "vetterDid": "did:key:z6Mkon22vwz9JoNpGDxCrGZRgeNFTdRTwXYYN3fvAhA3K19x",
-        "vettingCard": "one per session; the first is shown in full"
+        "vettingCard": {
+          "audience": "did:key:z6Mkon22vwz9JoNpGDxCrGZRgeNFTdRTwXYYN3fvAhA3K19x",
+          "cardVersion": 1,
+          "challenge": "qQt2TPHlHc-JH27hP240Pgpy3tf1y9ZbkvbsujOYVq4",
+          "claims": [
+            {
+              "provenance": "selfAsserted",
+              "type": "name.legal",
+              "value": "Bob Example"
+            }
+          ],
+          "commitmentSalt": "lqMj3pYmR5elmtovhzW1baZH-TNZ4YUR63xKMsBRo0U",
+          "community": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+          "domain": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+          "expiresAt": "2026-09-23T06:01:39.350148Z",
+          "id": "urn:uuid:43a503ba-357d-43b7-906a-e269501ff5ce",
+          "identityCommitment": "zQmegg1hyCJnJxQCrKprph3LrVnz77S3xXxthhdbLPhwVgh",
+          "issuedAt": "2026-09-23T05:46:39.352814Z",
+          "proof": {
+            "created": "2026-09-23T05:46:39Z",
+            "cryptosuite": "eddsa-jcs-2022",
+            "proofPurpose": "assertionMethod",
+            "proofValue": "z5LrCScaprdsf679j16t8q4kzjf39z59gSqHSiYY9WvJc1PXw1BLQ1h7zb2y2s6QThKg8xXW4g5XgRgiig4kTMgxp",
+            "type": "DataIntegrityProof",
+            "verificationMethod": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc#z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc"
+          },
+          "publisher": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc",
+          "type": [
+            "VerifiableDataStructure",
+            "RelationshipCard",
+            "VettingCard"
+          ]
+        }
       },
       {
         "hiddenAttestation": {
-          "attestation": "zC9Zoo5taYmmpVyh8FZ8iZS6KTNPAuqAJmvieRb29cBVc3X51sYBmb74LqR3XzhmkANdHBU6XPxcK2va5n6Q6v59n8ywfnB9djNKsLRE4pN5ojMHzABzA7hmPaeNJmD7MfUQVKWUX2i93vzu3vts3K4BDDfX25t1AuCVZs1bqGegVwkRUjpwd7WrjA56PbbLLTZq4c7mpc1SXBiBrAh8fE6Gj1SUnmQqe5QXxa6WTC3fUbUFDoCMYssiX6AziDRbmNxRDJAhnz53fpVk1vt8N4RhusHioXiXqyiU8rBX8L38iunDuRJU6FXp9Dbzcat2CF4KpUQhXFrFAq1sLVX9",
+          "attestation": "zA5fPE6eivrK5HCyj3PtSiycqEWyNJQjH7M1zYi6BwTpC9T1RARGppbb9cRs21PsNhBd14ykBarPiVNAtCyHhqT7UF3uZetjeFEJrnBnCpse2DRvVSudnKhUa3qPGYgtK2KSSN1emn2UrYU1c4QjgeawjmSe8yNH8rMyVZCsZd2gTh61DyQztUGY1S29j3BrkNgWLZMBdYaoJnFa5QpxH9dJYaV2qxYvr446tEbvqJNMcJzfAeaZBUGhrEWvYHqNZbKazi8tP5ssRofALxZUpDAUEs1bWizmikFd2zBGu43VxENZxSGn75f6qkqoTZL5MnG9qBXBirf1TTAA4ToJ",
           "meta": {
-            "cardDigestMultibase": "zQmU7gExMZxkNQV7yktJred7afwWfXLNYrxRrvdfZ5mTdCU",
+            "cardDigestMultibase": "zQmRJopNuTYcBRLCcHuW98Y4uAKi92WQHGV3kc2Q1w47Hxj",
             "claimsVerified": [
               "name.legal"
             ],
             "community": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
             "declaredRelationship": "none",
-            "identityCommitment": "zQmPRccGTPKwUUB8nUdSGuK7oN8Ht7c6iEDsLqdK7LNsxKz",
+            "identityCommitment": "zQmegg1hyCJnJxQCrKprph3LrVnz77S3xXxthhdbLPhwVgh",
             "livenessConfirmed": true,
             "method": "inPerson",
             "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
@@ -289,9 +903,9 @@
           "tokenShown": "z22XfNZ5mvPwAEYjk7MAL4G8w8s8fEHd7ojDhDJbBMhX4RVbZE9Dek3y5hL428UtpAnpZEaadNH2J6XD4Mx6z529hpGEQ8wPJZLHEAYyWtoHRaynbvv8Ja2W345Ez6MXpAq71"
         },
         "hiddenAttestationBytes": 1141,
-        "matchCode": "H2JK-ANHG",
+        "matchCode": "WP3S-CCBW",
         "namedPathStatementEndorsement": {
-          "cardDigestMultibase": "zQmU7gExMZxkNQV7yktJred7afwWfXLNYrxRrvdfZ5mTdCU",
+          "cardDigestMultibase": "zQmRJopNuTYcBRLCcHuW98Y4uAKi92WQHGV3kc2Q1w47Hxj",
           "claimsVerified": [
             "name.legal"
           ],
@@ -300,36 +914,69 @@
           "documentClasses": [
             "passport"
           ],
-          "identityCommitment": "zQmPRccGTPKwUUB8nUdSGuK7oN8Ht7c6iEDsLqdK7LNsxKz",
+          "identityCommitment": "zQmegg1hyCJnJxQCrKprph3LrVnz77S3xXxthhdbLPhwVgh",
           "livenessConfirmed": true,
           "method": "inPerson",
           "type": "https://firstperson.network/endorsements/identity-vetting/0.1"
         },
+        "namedPathStatementNote": "On the named path the vetter signs this endorsement into a statement credential addressed to the applicant. On the hidden path it is never signed and never issued — a signed statement carries the vetter's DID, which is the thing being withheld. Its facts go into the attestation instead.",
         "vetterDid": "did:key:z6Mkfmm57fsb6VL7zVusP8zeA9SYkCKdvUhby2G7Yh8vvQ1P",
-        "vettingCard": "one per session; the first is shown in full"
+        "vettingCard": {
+          "audience": "did:key:z6Mkfmm57fsb6VL7zVusP8zeA9SYkCKdvUhby2G7Yh8vvQ1P",
+          "cardVersion": 1,
+          "challenge": "STPVjHbsan1rCnmHnS19romBspScXbYd2d7-B3qccGE",
+          "claims": [
+            {
+              "provenance": "selfAsserted",
+              "type": "name.legal",
+              "value": "Bob Example"
+            }
+          ],
+          "commitmentSalt": "lqMj3pYmR5elmtovhzW1baZH-TNZ4YUR63xKMsBRo0U",
+          "community": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+          "domain": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+          "expiresAt": "2026-09-23T06:01:39.595087Z",
+          "id": "urn:uuid:e757f234-af90-419c-b9af-a8aaebea9fb3",
+          "identityCommitment": "zQmegg1hyCJnJxQCrKprph3LrVnz77S3xXxthhdbLPhwVgh",
+          "issuedAt": "2026-09-23T05:46:39.597730Z",
+          "proof": {
+            "created": "2026-09-23T05:46:39Z",
+            "cryptosuite": "eddsa-jcs-2022",
+            "proofPurpose": "assertionMethod",
+            "proofValue": "z4AVWD2PMw8qLD5V7cCUtr5BFAUhT5Xm61aYiFukJwLM8yCtyPK7tKsoVrohsfcWFPYHuwPZa1jUagbvxdRDv4tom",
+            "type": "DataIntegrityProof",
+            "verificationMethod": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc#z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc"
+          },
+          "publisher": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc",
+          "type": [
+            "VerifiableDataStructure",
+            "RelationshipCard",
+            "VettingCard"
+          ]
+        }
       }
     ],
     "vetted": 3
   },
-  "step7_submission": {
+  "step07_submission": {
     "capBytes": 16384,
     "extensions": {
       "hiddenVetting": {
         "challenge": "68396145acf57f957cc7dc6baa9556f8",
-        "id": "z7TYpsMLo1vfGzG6K245FxCQ8JjGQh3B6RzGtJzgojZCe3U6TfBbkhrhLb1AXMy4ZgV",
-        "idBinding": "f4a7fc1cce79b7cec1610661208d58d3de1566b357ca148ddf47c016be39db76",
+        "id": "z5zAjxovwv2NcWiWa6iGy6AoDVsHYHzSdM3zDKiAcoWLd1Y4U7Xcm7syg5nHtupx4wc",
+        "idBinding": "87e9238be401c6ad46520d51283790c507e99f010892e747a8ec1d33d051d6fd",
         "joinDid": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc",
-        "proof": "z23nVxAWUpMWWmagrUZpg3FK5m4iqbjyfAPKscQuHCqgh7dbNao57h851kckmRTnrcfyiBbdBQucbbe1AixJHT5iLiESuEPB4Zd7gU5hb5Mv7HdC1Vg5rde4kH5K5NGK6pjACw3K6tCHzx9oZaxoiQj7aYiTXwAxLQJrEip9vkp3DEHezuVYMQs2Sn9AKRtFWs4rfRXztjyGrJuhRiL1uDTwnTbADsEhmXfTGaA74gvLWU8js3t1PHJRkKL9kYp7bALVUii7ChNu9qsX1rfx2Vuh7ait7XuBV575nZiahuRHk35Si2yBT9FM8PftUGpLhfhwD8dVEgQmzArzG8DBBvRF8iLEthcECSy4PDZEdU1cvnWfbppU8TVHYFZ1n5Ncod9k98sYjwTsaTbU3RZ48D2BdLHcLuBWCfEMgPdtJfKsKaDjqhUroDJmZigtjS25CjmwjWZjcacNdJidbKBxtgT5xdyAvbNekKQKwNzmi9bacMrZSpCVuPExBfwBJgdWXzPmZieTdibmHG6J1TNXFrMe3Tpd44C7Wg3ZoRyEMMm8SXbrJd8TpGk8JdfDacG2fayHJpsS1f3rvjEsN9JGDZtbknEk55XAeWuzavwCZep1oKzxxBbY44qMZZfcP1E2CChNUbz2BLecGgBbNpa5U3z8R31TqioG37GKxyFwQtiZerVgbHSJy9xBkUazMPWY6XBQ7VVrsSqG84jiBvuhm67G7TCDJjcbWxMr98UVmgua49jGTiJzd8QvvandT95cPzGG42uikxrcRVmQqzdL3WRiQd7WoDuvR84ZftFyPnMaT8Dbxu3g7rAqNhj7gnUYUAHSeJGHSiuxxCSpi4MuXA4EkJZDZbmYqRSb1H7rm257roa4qMLmYitSGSowpJuT4U3QryJkDiPo23nrbe2mKqw9uXa4e2VqW7qSETj1RUhCYHWhsPQjACox8ZFZu1SbWpGxam9hSZw5gDRWNY4tGufYWwwDHDatxJh5ppQaBqkhTfbA9PssCobvXtzBCjidoy7WCzDMEZfehbWPKFq9eUiJdioJspj9sVAfnKFxuEuXApYy7enzAaVMfY19RDLkorfXR6ivgwhf8QS8diuXVFY71i4wiTo4Z6WbqzxAccaBFG7fE1cKwur3vsmWsXixgre4AEfK3GQDaNKruaXJJLWH2UiNLkrWK7eHF6JJsCwG5fMkXq4qrQdCmXEED6JRgpoxmT2VTD57hfDHd2fiRPhe6F86SGvX1ZLevckpTrGwsPoVpH28UWsTK7M7k7BoMkkiGh5wVgqeyJPPc3nGz",
+        "proof": "z23nVxAWUpMWccCTWXraFEYpoTnWBhNzJ1pNhcsMSbYcZwp86iNzrdm44q1pZ5Zqa7yHKyQSd6tPisx5HCL9xbQAq6hQ2iRsznRfsVysFL2nFF6i348BRS1G19Z97q2MKCiaMowfYw4MYyMkYajp1mMTnDQ1CiG1LwRqxt77Un1fbWVA6jS3NKzJ6sY3BfBwvC69MzYTRcuruuNDCwbvCfxeAdfuafd2if9LXskruQk5g93kgf9q4aotsNfKXs8yrDXzLTzuBmE4iYobQAiQcV5qSwzvfAkwsaMXBmVBC8N3JTrfeXmRVDQ5BGXw2rZzzgXyNw7RqammLnoLRwLeRXky1ZF9doT4qpVyefck2WyVNuDXhKCBtBmhbmqjcUFbLXJDANmA8JNgEAbxBHyeuCUigHzH1cMKu3j9CUXSSaG3V98EwUr1bt3gRPVz7oh1p5vvfJTShpDpSkfdarah46pHo8tEVJ1v4CPNz57LkLGTL9Ykk9XXxfgpmj9EpPNWBhaboahfsjY3QPNZaZAxwQQRi93NTE6q9egiksR7niv5J4HZcTsmncbEHKDcenUotvHcDfhnGxHc51yuQcaNwC5fT4Wb7WUyancfXqvMnLKwzed2dbiqq9w5kYC165R7JKb3Lo2q4Bkx2oWEjHu6p8b4V9N4zSu6QN1NE1WsYGyTrZcQ7wksHSxfvzvuZGzkRgpstqki7cLsCiTPCTxwq5AvKBaYNUHYtShY6bXaZ2oLdJWJRToe2AxWGZAo5vnidoJaas5PUkrQ5QQUtoaCzJEbcfYkqMhnubUnnTKXqDLnBSk3h5UxG8CCgXa6jYFE2jpZJ6LLbmWywJSxfvwCHp7Qrbo8vs5CSeB3LVkWaNUePMAdzQZeEBbcpz6N1fgB1nvgkV76wotD74LEoQAfpbGkawWqb2jPhREvYzxUxk9Wv2ChUxnksnG65WnnJ2W7uvkwVjyrm7kjC6dXuJNaHEK5HEugVW89KsY2fDupTWS8izFbZUrjLszTkBWBBTswfTNuMk1MYdiX612TVcYBHoN7uRYgTDtsoL9ae5WemNbekqmifSVxLSx3BmPSF1ueUHuReuHviCXHku3pdk5a2eqSh2ZddmvXPvFV6EwLTVSANe6yjh2dKUw4TVbXv6wbqHsUfifmRcnU94joqcJkpv18z7SUAfKvMQh2FC6zMGQk3WmzCJMGon6qmUretvBzbSgz4hHxt7DD8bDCfLNj275CyAgbdNupXLQi3oVRFMvxdnLXKuQmwQQsa3xDwMr1L5m1XigUvTexJRDUMyYc2",
         "statements": [
           {
             "meta": {
-              "cardDigestMultibase": "zQmRnZq46vDQnAzSuEnWz3zvfQoigbe23KtSp6S1Vm1UXuL",
+              "cardDigestMultibase": "zQmbFegCp7dv2LuigghuNEa3DwW6fiAzS4k81gtYi9ZDH3K",
               "claimsVerified": [
                 "name.legal"
               ],
               "community": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
               "declaredRelationship": "none",
-              "identityCommitment": "zQmPRccGTPKwUUB8nUdSGuK7oN8Ht7c6iEDsLqdK7LNsxKz",
+              "identityCommitment": "zQmegg1hyCJnJxQCrKprph3LrVnz77S3xXxthhdbLPhwVgh",
               "livenessConfirmed": true,
               "method": "inPerson",
               "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
@@ -346,13 +993,13 @@
           },
           {
             "meta": {
-              "cardDigestMultibase": "zQmPMsDSm5iX4wL4kdsZPwxJx1f6wq7dEsP36CgYHqJwLvE",
+              "cardDigestMultibase": "zQmdMrcZH4jJytahj2HeoKGU3PxE8gUBuH8662mh7AMSK5y",
               "claimsVerified": [
                 "name.legal"
               ],
               "community": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
               "declaredRelationship": "none",
-              "identityCommitment": "zQmPRccGTPKwUUB8nUdSGuK7oN8Ht7c6iEDsLqdK7LNsxKz",
+              "identityCommitment": "zQmegg1hyCJnJxQCrKprph3LrVnz77S3xXxthhdbLPhwVgh",
               "livenessConfirmed": true,
               "method": "video",
               "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
@@ -369,13 +1016,13 @@
           },
           {
             "meta": {
-              "cardDigestMultibase": "zQmU7gExMZxkNQV7yktJred7afwWfXLNYrxRrvdfZ5mTdCU",
+              "cardDigestMultibase": "zQmRJopNuTYcBRLCcHuW98Y4uAKi92WQHGV3kc2Q1w47Hxj",
               "claimsVerified": [
                 "name.legal"
               ],
               "community": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
               "declaredRelationship": "none",
-              "identityCommitment": "zQmPRccGTPKwUUB8nUdSGuK7oN8Ht7c6iEDsLqdK7LNsxKz",
+              "identityCommitment": "zQmegg1hyCJnJxQCrKprph3LrVnz77S3xXxthhdbLPhwVgh",
               "livenessConfirmed": true,
               "method": "inPerson",
               "requirementsDigest": "zQmdmF2WvyXF9dgZeb2W2VxxwYeSzqN3fBykoLTkru5QUYE",
@@ -398,7 +1045,7 @@
     "extensionsBytes": 4047,
     "namedStatementsPresented": 0
   },
-  "step8_decision": {
+  "step08_decision": {
     "byMethod": {
       "inPerson": 2,
       "video": 1
@@ -411,39 +1058,142 @@
         "declaredRelationship": "none",
         "eligible": true,
         "failures": [],
-        "id": "11f7598a104af34156fe16d323b542bef3391e0ff76eaabecee8354ae55cd09b",
-        "issuer": "z7DHBFaHEHPjLR1vuWn5v33vCqPUNa2uDkt8WeNE7JYBN4HRXCN1SeeHLwn3NeeSLhS",
-        "method": "inPerson",
-        "revoked": false,
-        "verified": true
-      },
-      {
-        "counted": true,
-        "declaredRelationship": "none",
-        "eligible": true,
-        "failures": [],
-        "id": "4c4edbb425bc015b3976779b73ee9578fac624d936f23cb63f531362b834fbf0",
-        "issuer": "z7Xr2HCcVcoLGaF6WsQZhiBmAie5i6BkVdqWjXnUdpZH4umwfHa2vEywozuQj1hH1Sr",
-        "method": "inPerson",
-        "revoked": false,
-        "verified": true
-      },
-      {
-        "counted": true,
-        "declaredRelationship": "none",
-        "eligible": true,
-        "failures": [],
-        "id": "aa8a114724fea8ce6ed481e78fd2764bf6ffbf7959448b9ceede7cbecb362197",
-        "issuer": "z6QbxDm1PrRqAyWkDFhv2d5sao6cD2uXfLG3R4qBHtqAihRWugaVMiCdJHH7WyBJyMz",
+        "id": "b0986761ce23a1bd7dd0b96d4de9290042de7c88c6d700d69eaf6a48ed8476f5",
+        "issuer": "z7UmeJmLqNk6A1QsegzUK6XPNS8JqJbaMvPwEPB2WnCTwT5iKTVzUcb3td99811a4Lb",
         "method": "video",
+        "revoked": false,
+        "verified": true
+      },
+      {
+        "counted": true,
+        "declaredRelationship": "none",
+        "eligible": true,
+        "failures": [],
+        "id": "f561a07c5a014670de0ec63450041686d4e63a0a8962eb60a576fe272cf470d9",
+        "issuer": "z7fXhXuR3R18YCUE4SArdBf7UdQibK5VwHBqucDwJHz7cEDyHbYSV2tT7fg4A4mGEMT",
+        "method": "inPerson",
+        "revoked": false,
+        "verified": true
+      },
+      {
+        "counted": true,
+        "declaredRelationship": "none",
+        "eligible": true,
+        "failures": [],
+        "id": "fcfc8507ab8dcd20d6270673906bc3d89b1720b3e61b09e3d14c9e76eba401c8",
+        "issuer": "z6KbBh1xJwK2A6GZfCRyYr9Ee6eCd5oUa1NAnBQQu8eFkGSvUoACr1gGqANsR5ZbaqR",
+        "method": "inPerson",
         "revoked": false,
         "verified": true
       }
     ],
     "satisfied": true
   },
-  "step9_what_the_community_learns": {
+  "step09_admission_credentials": {
+    "checks": {
+      "grantDigestMultibase": "zQmaErYuue7TSTw6bh9qycY4sknh1b1HVhQae5JQXWCGqjF",
+      "grantProofVerifies": true,
+      "reciprocalDigestsTheGrantAsItArrived": true,
+      "reciprocalIssuerIsTheMember": true,
+      "reciprocalProofVerifies": true,
+      "reciprocalSubjectIsTheCommunity": true,
+      "roleVecProofVerifies": true
+    },
+    "memberRoleVec": {
+      "@context": [
+        "https://www.w3.org/ns/credentials/v2",
+        "https://firstperson.network/credentials/dtg/v1"
+      ],
+      "credentialSubject": {
+        "endorsement": {
+          "communityDid": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+          "role": "member",
+          "type": "CommunityRole"
+        },
+        "id": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc"
+      },
+      "id": "urn:uuid:75f43d04-0e18-443a-a85e-d2bec2392c42",
+      "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+      "proof": {
+        "created": "2026-09-23T05:46:40Z",
+        "cryptosuite": "eddsa-jcs-2022",
+        "proofPurpose": "assertionMethod",
+        "proofValue": "z3kGqDfkKXFSMbqB1hGEgXqkHRoxjZQ3X9mq8c3WYXqGeSmCSndPTna3JD4dx5tDnTG9wMqW8wR1gcJ4MUkUihLBn",
+        "type": "DataIntegrityProof",
+        "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+      },
+      "type": [
+        "VerifiableCredential",
+        "DTGCredential",
+        "EndorsementCredential"
+      ],
+      "validFrom": "2026-09-23T05:45:40Z",
+      "validUntil": "2027-09-23T05:46:40Z"
+    },
+    "membershipGrantVmc": {
+      "@context": [
+        "https://www.w3.org/ns/credentials/v2",
+        "https://firstperson.network/credentials/dtg/v1"
+      ],
+      "credentialStatus": {
+        "id": "https://kernel-vtc.example/v1/status-lists/revocation#0",
+        "statusListCredential": "https://kernel-vtc.example/v1/status-lists/revocation",
+        "statusListIndex": "0",
+        "statusPurpose": "revocation",
+        "type": "BitstringStatusListEntry"
+      },
+      "credentialSubject": {
+        "id": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc"
+      },
+      "id": "urn:uuid:78070b4d-9b92-4795-bad3-a88cddb171e0",
+      "issuer": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p",
+      "proof": {
+        "created": "2026-09-23T05:46:40Z",
+        "cryptosuite": "eddsa-jcs-2022",
+        "proofPurpose": "assertionMethod",
+        "proofValue": "zYkgJiGCmbnRqtJS1vL6Q4iKDRkTXAg6A5w2Yu3N7knxcViFA6LwtrHTCfsJW3FkZRCRgbvUMHAZ6WRvtRQstC7h",
+        "type": "DataIntegrityProof",
+        "verificationMethod": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p#z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+      },
+      "type": [
+        "VerifiableCredential",
+        "DTGCredential",
+        "MembershipCredential"
+      ],
+      "validFrom": "2026-09-23T05:46:40Z",
+      "validUntil": "2026-10-23T05:46:40Z"
+    },
+    "note": "The pair is the membership edge: the community's grant and the member's acknowledgement, bound by a digest over the grant's wire form. Neither half names a vetter — admission carries no trace of who vetted.",
+    "reciprocalMemberVmc": {
+      "@context": [
+        "https://www.w3.org/ns/credentials/v2",
+        "https://firstperson.network/credentials/dtg/v1"
+      ],
+      "credentialSubject": {
+        "digestMultibase": "zQmaErYuue7TSTw6bh9qycY4sknh1b1HVhQae5JQXWCGqjF",
+        "id": "did:key:z6MkkckEJvRiDoUSv2KFGPFuUoNjJbWTZUvWThqshF7g1u4p"
+      },
+      "id": "urn:uuid:d7a97486-c521-41d7-bcc1-66494a7369fd",
+      "issuer": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc",
+      "proof": {
+        "created": "2026-09-23T05:46:40Z",
+        "cryptosuite": "eddsa-jcs-2022",
+        "proofPurpose": "assertionMethod",
+        "proofValue": "z2gunXP4r9DMp4iuTC93bMWQiaLRcjbm8BGyhSVP5FhDxkGHGWeiSdmfTmoKxnEy8Z98ffVMgw3Gmz154s6HzTPmU",
+        "type": "DataIntegrityProof",
+        "verificationMethod": "did:key:z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc#z6Mkn1vNVEZYu4dKzmXsX3BGuT3PGaKuCtWJ1kqxQTuuVMNc"
+      },
+      "type": [
+        "VerifiableCredential",
+        "DTGCredential",
+        "MembershipCredential"
+      ],
+      "validFrom": "2026-09-23T05:46:40Z"
+    }
+  },
+  "step10_what_the_community_learns": {
     "anyTagEqualsAnEnrolledIdentifier": false,
+    "anyVetterDidAppearsInTheAdmissionCredentials": false,
     "anyVetterDidAppearsInTheSubmission": false,
     "enrolledPcsIdentifiers": [
       "z5qxeFvndiW3qTAZRmHacJcHYx4Z9vtWGzVap4c2uQ8aLdRGC3vVNWS75Lbx68NLpqN",
@@ -470,14 +1220,97 @@
       "did:key:z6Mkj1MDZKcfx9AX5CeXHdysiGkRLzBbALyFuShD6wNeY1E3"
     ],
     "tags": [
-      "z7DHBFaHEHPjLR1vuWn5v33vCqPUNa2uDkt8WeNE7JYBN4HRXCN1SeeHLwn3NeeSLhS",
-      "z7Xr2HCcVcoLGaF6WsQZhiBmAie5i6BkVdqWjXnUdpZH4umwfHa2vEywozuQj1hH1Sr",
-      "z6QbxDm1PrRqAyWkDFhv2d5sao6cD2uXfLG3R4qBHtqAihRWugaVMiCdJHH7WyBJyMz"
+      "z7UmeJmLqNk6A1QsegzUK6XPNS8JqJbaMvPwEPB2WnCTwT5iKTVzUcb3td99811a4Lb",
+      "z7fXhXuR3R18YCUE4SArdBf7UdQibK5VwHBqucDwJHz7cEDyHbYSV2tT7fg4A4mGEMT",
+      "z6KbBh1xJwK2A6GZfCRyYr9Ee6eCd5oUa1NAnBQQu8eFkGSvUoACr1gGqANsR5ZbaqR"
     ],
     "whoActuallyVetted": [
       "did:key:z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2",
       "did:key:z6Mkon22vwz9JoNpGDxCrGZRgeNFTdRTwXYYN3fvAhA3K19x",
       "did:key:z6Mkfmm57fsb6VL7zVusP8zeA9SYkCKdvUhby2G7Yh8vvQ1P"
+    ]
+  },
+  "step11_credential_inventory": {
+    "deliberatelyNotIssued": [
+      {
+        "credential": "Vetting statement credential (IdentityVettingEndorsement VEC)",
+        "why": "this is the point of the hidden path — a signed statement names its vetter. The endorsement is still built (it is where the attested facts come from) but never signed and never sent. `presentable_statements()` is 0."
+      },
+      {
+        "credential": "Relationship credential pair (VRC)",
+        "why": "not part of admission in any path — VRCs are the peer relationship layer, and design D8 records that a VRC pair is not required for V0 membership. A community that required one *of its vetters* could not run hidden vetting: a VRC names both ends."
+      },
+      {
+        "credential": "Invitation credential (VIC)",
+        "why": "invitation-gated admission only; this community is vetting-gated"
+      },
+      {
+        "credential": "Personhood credential (VPC / personhood VMC)",
+        "why": "a separate evaluation (`personhood.rego`); this VMC carries personhood = false, as `admit` mints it"
+      },
+      {
+        "credential": "Withdrawal credential (VWC)",
+        "why": "withdraws a named statement, which the hidden path does not produce. Hidden withdrawal is by token spend-set and class-label rotation instead"
+      }
+    ],
+    "issuedHere": [
+      {
+        "count": 3,
+        "credential": "Vetting Card (VDS)",
+        "issuer": "applicant",
+        "note": "one per session, signed by the applicant's key and verified by the vetter"
+      },
+      {
+        "count": 10,
+        "credential": "Vetter role VEC (CommunityRole)",
+        "issuer": "community",
+        "note": "the eligibility the criterion's `eligibleVetters.role` names"
+      },
+      {
+        "count": 10,
+        "credential": "PCS root credential",
+        "issuer": "community (as PCS helper)",
+        "note": "not a W3C VC — a blind PS credential on the class label `vetter/<period>`"
+      },
+      {
+        "count": 30,
+        "credential": "PCS attestation token",
+        "issuer": "community (as PCS helper)",
+        "note": "not a W3C VC — a PS blind signature on a secret serial; the velocity cap"
+      },
+      {
+        "count": 3,
+        "credential": "PCS attestation",
+        "issuer": "vetter",
+        "note": "stands in for the named path's signed vetting statement"
+      },
+      {
+        "count": 1,
+        "credential": "Membership grant (VMC)",
+        "issuer": "community",
+        "note": "against revocation slot 0, the shape `issue_member_credentials` mints"
+      },
+      {
+        "count": 1,
+        "credential": "Member role VEC (CommunityRole, role=member)",
+        "issuer": "community"
+      },
+      {
+        "count": 1,
+        "credential": "Reciprocal member VMC",
+        "issuer": "the new member",
+        "note": "closes the membership edge; digests the grant's wire form"
+      }
+    ],
+    "notRunHere": [
+      "delivery: a live flow carries all of this over DIDComm (`members/vmc/1.0`, the vetting Trust Tasks) between agents with mediators. This run drives the same library calls in-process, so the documents are real and the transport is not.",
+      "the VTI side's decision path: `vtc-service`'s `vetting-pcs` feature runs the same verifier crate against the same wire fixture, but it is not started in this example."
+    ],
+    "referencedButNotMintedHere": [
+      {
+        "artifact": "BitstringStatusList credential",
+        "detail": "the VMC's credentialStatus points at https://kernel-vtc.example/v1/status-lists/revocation#0; the list credential itself is served by a running vtc-service, which this in-process run has no HTTP host for"
+      }
     ]
   }
 }
