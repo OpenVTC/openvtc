@@ -60,16 +60,7 @@ pub async fn issue_and_send_member_vmc(
     closes_request: Option<Uuid>,
 ) -> Result<(Uuid, Value), OpenVTCError> {
     let vc = build_member_vmc(signing_secret, grant).await?;
-    let msg_id = submit_member_vmc(
-        route.atm,
-        route.profile,
-        route.member_did,
-        route.vtc_did,
-        route.mediator_did,
-        vc.clone(),
-        closes_request,
-    )
-    .await?;
+    let msg_id = submit_member_vmc(route, signing_secret, vc.clone(), closes_request).await?;
     Ok((msg_id, vc))
 }
 
@@ -139,14 +130,18 @@ pub async fn build_member_vmc(
 /// issuer proof. Returns the DIDComm message id (the thread root the VTC's
 /// `#response` receipt references).
 pub async fn submit_member_vmc(
-    atm: &ATM,
-    profile: &Arc<ATMProfile>,
-    member_did: &str,
-    vtc_did: &str,
-    mediator_did: &str,
+    route: &Delivery<'_>,
+    signer: &Secret,
     vc: Value,
     closes_request: Option<Uuid>,
 ) -> Result<Uuid, OpenVTCError> {
+    let Delivery {
+        atm,
+        profile,
+        member_did,
+        vtc_did,
+        mediator_did,
+    } = *route;
     // `closes_request` closes an *approved join request* as a side effect of
     // the delivery — `vtc/members/vmc/0.1`'s `requestId`, carrying the retired
     // `join-requests/accept` semantics.
@@ -172,13 +167,18 @@ pub async fn submit_member_vmc(
     // matching.
     let msg_id = Uuid::new_v4();
     let document_id = format!("urn:uuid:{msg_id}");
-    let body = crate::trust_task_doc::build_value(
+    // `vtc/members/vmc/0.1` declares `proof` REQUIRED: the member's half of the
+    // membership pair is a document the community keeps, so who wrote it must
+    // survive being relayed.
+    let body = crate::trust_task_doc::build_signed_value(
         MEMBER_VMC_TYPE,
         member_did,
         vtc_did,
         &document_id,
         body,
-    )?;
+        signer,
+    )
+    .await?;
 
     let now = Utc::now().timestamp().max(0) as u64;
     let msg = Message::build(

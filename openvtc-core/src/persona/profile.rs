@@ -61,6 +61,10 @@ pub struct ProfileSummary {
     pub credential_ref_count: usize,
     pub version: u64,
     pub updated_at: String,
+    /// Retired: worn nowhere, out of every picker, kept with its history.
+    pub retired: bool,
+    /// Where the face may be worn: `None` for anywhere, else the contexts.
+    pub reach_only: Option<Vec<String>>,
 }
 
 impl ProfileSummary {
@@ -89,7 +93,24 @@ impl ProfileSummary {
                 .map_or(0, Vec::len),
             version: value.get("version").and_then(Value::as_u64).unwrap_or(0),
             updated_at: string_at(value, "updatedAt"),
+            retired: value.get("status").and_then(Value::as_str) == Some("retired"),
+            reach_only: value
+                .get("reach")
+                .filter(|r| r.get("kind").and_then(Value::as_str) == Some("only"))
+                .and_then(|r| r.get("contextIds"))
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|i| i.as_str().map(str::to_string))
+                        .collect()
+                }),
         }
+    }
+
+    /// Read one listing row. For the other listings over the same records —
+    /// `persona::lifecycle::list_retired` — so both parse one way.
+    pub(crate) fn from_wire_pub(value: &Value) -> Self {
+        Self::from_wire(value)
     }
 
     /// The name to show. Never empty: an unnamed face still has to be
@@ -213,6 +234,10 @@ pub struct ProfileDetail {
     pub unreadable_entries: usize,
     /// What the profile would present, when the read asked for it.
     pub resolved: Vec<ResolvedClaim>,
+    /// How many parties, across how many contexts, this face has disclosed
+    /// to — `None` from an agent that does not say. Shown before a delete:
+    /// deleting a face does not un-tell anyone.
+    pub disclosed_to: Option<(u64, u64)>,
 }
 
 impl ProfileDetail {
@@ -254,7 +279,9 @@ impl ProfileDetail {
 /// names. [`get`] resolves the one the holder opened.
 pub async fn list(client: &VtaClient) -> Result<Vec<ProfileSummary>, OpenVTCError> {
     let value = client
-        .persona_profile_list(None, None)
+        // Retired faces are left out, as at the agent: a picker that offered
+        // one back would undo the holder's decision.
+        .persona_profile_list(None, None, false)
         .await
         .map_err(|e| OpenVTCError::Vta(format!("persona profile list failed: {e}")))?;
 
@@ -290,6 +317,12 @@ pub async fn get(
             .and_then(Value::as_array)
             .map(|rows| rows.iter().map(ResolvedClaim::from_wire).collect())
             .unwrap_or_default(),
+        disclosed_to: value.get("disclosedTo").map(|d| {
+            (
+                d.get("partyCount").and_then(Value::as_u64).unwrap_or(0),
+                d.get("contextCount").and_then(Value::as_u64).unwrap_or(0),
+            )
+        }),
         ..ProfileDetail::default()
     };
 
@@ -299,15 +332,29 @@ pub async fn get(
         .map(Vec::as_slice)
         .unwrap_or_default()
     {
-        match serde_json::from_value::<ProfileEntry>(entry.clone()) {
-            Ok(ProfileEntry::Ref { attribute_id }) => detail.live_refs.push(attribute_id),
-            Ok(other) => detail.other_entries.push(other),
-            // Counted, never dropped-and-forgotten: this is what makes the
-            // profile read-only rather than silently rewritable.
-            Err(_) => detail.unreadable_entries += 1,
-        }
+        file_entry(&mut detail, entry);
     }
     Ok(detail)
+}
+
+/// Sort one wire entry into what the editor may rebuild and what it must carry
+/// through untouched.
+fn file_entry(detail: &mut ProfileDetail, entry: &Value) {
+    match serde_json::from_value::<ProfileEntry>(entry.clone()) {
+        // Only an unslotted live reference is the tick list's to rebuild. One
+        // carrying a `slot` — `displayName`, what the face calls itself — is
+        // carried through like a pinned entry: `put` writes live refs back
+        // bare, so treating it as a tick would drop the face's name on the
+        // first save.
+        Ok(ProfileEntry::Ref {
+            attribute_id,
+            slot: None,
+        }) => detail.live_refs.push(attribute_id),
+        Ok(other) => detail.other_entries.push(other),
+        // Counted, never dropped-and-forgotten: this is what makes the
+        // profile read-only rather than silently rewritable.
+        Err(_) => detail.unreadable_entries += 1,
+    }
 }
 
 /// Create or update a profile.
@@ -330,12 +377,22 @@ pub async fn put(
         .iter()
         .map(|id| ProfileEntry::Ref {
             attribute_id: id.clone(),
+            slot: None,
         })
         .chain(other_entries.iter().cloned())
         .collect();
 
     let response = client
-        .persona_profile_put(name, entries, Vec::new(), profile_id, expected_version)
+        // `reach: None` keeps the face's stored reach — the one member a put
+        // does not reset by omission. This editor has no control for it.
+        .persona_profile_put(
+            name,
+            entries,
+            Vec::new(),
+            None,
+            profile_id,
+            expected_version,
+        )
         .await
         .map_err(|e| OpenVTCError::Vta(format!("persona profile write failed: {e}")))?;
 
@@ -421,11 +478,7 @@ mod tests {
             ..ProfileDetail::default()
         };
         for entry in profile.get("entries").unwrap().as_array().unwrap() {
-            match serde_json::from_value::<ProfileEntry>(entry.clone()) {
-                Ok(ProfileEntry::Ref { attribute_id }) => detail.live_refs.push(attribute_id),
-                Ok(other) => detail.other_entries.push(other),
-                Err(_) => detail.unreadable_entries += 1,
-            }
+            file_entry(&mut detail, entry);
         }
 
         assert_eq!(detail.live_refs, vec!["01A".to_string()]);
@@ -577,16 +630,42 @@ mod tests {
                 "provenance": { "kind": "selfAsserted" }
             }))
             .unwrap(),
+            slot: None,
         }];
         let entries: Vec<ProfileEntry> = refs
             .iter()
             .map(|id| ProfileEntry::Ref {
                 attribute_id: id.clone(),
+                slot: None,
             })
             .chain(other.iter().cloned())
             .collect();
         assert_eq!(entries.len(), 3);
-        assert!(matches!(&entries[0], ProfileEntry::Ref { attribute_id } if attribute_id == "01A"));
+        assert!(
+            matches!(&entries[0], ProfileEntry::Ref { attribute_id, .. } if attribute_id == "01A")
+        );
         assert!(matches!(entries[2], ProfileEntry::Inline { .. }));
+    }
+
+    /// A face's name survives a save from OpenVTC.
+    ///
+    /// `put` writes live references back bare, so a slotted one filed as a tick
+    /// would lose its `displayName` the first time the holder saved the face
+    /// here — silently, with the face still resolving and simply no longer
+    /// saying which name is its own.
+    #[test]
+    fn a_slotted_reference_is_carried_through_not_rebuilt() {
+        let mut detail = ProfileDetail::default();
+        file_entry(
+            &mut detail,
+            &serde_json::json!({ "ref": "01N", "slot": "displayName" }),
+        );
+        file_entry(&mut detail, &serde_json::json!({ "ref": "01A" }));
+        assert_eq!(detail.live_refs, vec!["01A".to_string()]);
+        assert!(matches!(
+            detail.other_entries.as_slice(),
+            [ProfileEntry::Ref { attribute_id, slot: Some(s) }]
+                if attribute_id == "01N" && s == "displayName"
+        ));
     }
 }

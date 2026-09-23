@@ -40,6 +40,43 @@ pub enum JoinPage {
     /// open, each said to be available or not and why. Also the page shown
     /// while the community is being asked.
     Vetting,
+    /// A community that asks the applicant to tell it about themselves: what it
+    /// asks and why, which face answers, and exactly what that face would send
+    /// — before anything is. See [`JoinAnswers`].
+    Answers,
+}
+
+/// The community's questions and the holder's answer, as the Answers page
+/// shows them.
+///
+/// The holder approves *values*, not a face: [`Self::approved`] is what the
+/// chosen face showed when they pressed Enter, and the join sequence refuses to
+/// send anything different (`join_answers::preview_matches`).
+#[derive(Clone, Debug, Default)]
+pub struct JoinAnswers {
+    /// What the community asks, in its order.
+    pub asked: Vec<openvtc_core::persona::join_answers::Asked>,
+    /// The holder's faces: `(profile id, name)`.
+    pub faces: Vec<(String, String)>,
+    /// The highlighted face.
+    pub selected: usize,
+    /// What the highlighted face would answer, per asked type, in order.
+    /// `None` inside: the face shows nothing of that type.
+    pub shown: Vec<(String, Option<serde_json::Value>)>,
+    /// A read that failed, said on the page.
+    pub error: Option<String>,
+    /// The face chosen and the values approved. Set by Enter.
+    pub approved: Option<(String, Vec<(String, serde_json::Value)>)>,
+    /// The join launch waiting on this page: `(identity, community, context)`.
+    pub parked: Option<(IdentityPick, String, String)>,
+}
+
+impl JoinAnswers {
+    /// Required questions the highlighted face leaves unanswered.
+    #[must_use]
+    pub fn unanswered(&self) -> Vec<String> {
+        openvtc_core::persona::join_answers::unanswered_required(&self.asked, &self.shown)
+    }
 }
 
 /// A community that vets, as the join flow's vetting page shows it.
@@ -430,6 +467,9 @@ pub struct AvailableVic {
 pub struct JoinState {
     /// Active page within the join flow.
     pub page: JoinPage,
+    /// What the community asks the applicant to tell it, and how they answer.
+    /// `None` when it asks nothing, or before the join reaches that point.
+    pub answers: Option<JoinAnswers>,
     /// Display name resolved from the VTC DID document (best-effort).
     pub display_name: Option<String>,
     /// The VTC DID awaiting an identity choice (set on `EnterDid` submit, read

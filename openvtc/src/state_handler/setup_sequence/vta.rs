@@ -80,6 +80,12 @@ where
 /// SDK ever exports the predicate, use it instead.
 const TSP_REPLY_TIMEOUT_PREFIX: &str = "timed out waiting for the TSP reply";
 
+/// How the SDK renders a Trust Task rejected with the framework's
+/// `internalError` code: `trust task failed [internalError]: …`. Matched as a
+/// literal because that rejection has no typed variant — it arrives as
+/// [`VtaError::Protocol`].
+const INTERNAL_ERROR_MARKER: &str = "[internalError]";
+
 /// Render a [`VtaError`] with what an operator can act on (R6.4).
 ///
 /// The raw `Display` is written for a developer reading a stack of SDK errors,
@@ -107,6 +113,34 @@ fn explain(e: &VtaError) -> String {
              Check the VTA's log for the peer it was waiting on — if the task \
              is one the VTA relays onward (minting a DID calls the hosting \
              server), the silent leg is that peer's, not ours.",
+        );
+    }
+    // An upstream peer failing is not the VTA failing. A VTA new enough to
+    // say so answers `taskFailed` / `upstream_unavailable`, which the SDK
+    // recovers as the same `Server { status: 502 }` a REST call produces.
+    if matches!(
+        e,
+        VtaError::Server {
+            status: 502 | 504,
+            ..
+        }
+    ) {
+        out.push_str(
+            "\nA service the VTA had to call did not answer or refused — minting \
+             a DID calls the DID hosting server. Neither this request nor the \
+             VTA is at fault; the VTA's log names the service and why.",
+        );
+    }
+    // An `internalError` carries fixed text on purpose — the cause stays in the
+    // VTA's log — and its "the request itself was accepted" reads, on a join
+    // screen, like a partial success. It is not: nothing was created.
+    if matches!(e, VtaError::Protocol(msg) if msg.contains(INTERNAL_ERROR_MARKER)) {
+        out.push_str(
+            "\nNothing was created. \"Accepted\" only means the request was \
+             well-formed; the VTA failed while carrying it out and kept the cause \
+             in its own log — look for \"trust task failed\" at this time. An \
+             older VTA reports a DID hosting server that did not answer this way \
+             too.",
         );
     }
     if let Some(fix) = e.suggested_fix() {
@@ -601,6 +635,45 @@ mod tests {
                 .map(str::trim),
             "the closing line is the SDK hint verbatim: {out}"
         );
+    }
+
+    /// REGRESSION (2026-09-21): a join failed because the DID hosting server
+    /// never answered the VTA, and the screen said only "internal error: the
+    /// consumer could not complete this task; the request itself was
+    /// accepted" — which reads as a fault in the user's own VTA, and as though
+    /// something had half-happened.
+    #[test]
+    fn an_internal_error_says_nothing_was_created_and_where_the_cause_is() {
+        let out = explain(&VtaError::Protocol(
+            "trust task failed [internalError]: internal error: the consumer could not \
+             complete this task; the request itself was accepted"
+                .into(),
+        ));
+        assert!(out.contains("request itself was accepted"), "{out}");
+        assert!(out.contains("Nothing was created"), "{out}");
+        assert!(out.contains("VTA") && out.contains("log"), "{out}");
+    }
+
+    /// A VTA that names an upstream failure (a `502`) points at that service,
+    /// not at the VTA or the request.
+    #[test]
+    fn an_upstream_failure_points_at_the_service_the_vta_called() {
+        let out = explain(&VtaError::Server {
+            status: 502,
+            body: "task failed: a service this VTA depends on did not answer".into(),
+        });
+        assert!(out.contains("hosting server"), "{out}");
+        assert!(!out.contains("Nothing was created. \"Accepted\""), "{out}");
+    }
+
+    /// Any other protocol error is not an `internalError` and must not be told
+    /// that nothing was created — it may be a caller fault with its own fix.
+    #[test]
+    fn a_plain_protocol_error_gets_no_internal_error_note() {
+        let out = explain(&VtaError::Protocol(
+            "trust task failed [malformedRequest]: payload parse".into(),
+        ));
+        assert!(!out.contains("Nothing was created"), "{out}");
     }
 
     /// Every other TSP transport fault — a seal or socket failure — is a

@@ -251,6 +251,14 @@ pub enum PersonaAction {
     ProfileNew,
     ProfileEdit(usize),
     ProfileDeleteArm(usize),
+    /// Arm retiring the face: taken off every community, kept with its history.
+    ProfileRetireArm(usize),
+    /// Make a retired face (index into the retired list) wearable again.
+    ProfileReinstate(usize),
+    /// Show the retired faces instead of the active ones, or back.
+    ToggleRetired,
+    /// Show where the opened face is worn and what it has done, or hide it.
+    FaceHistory,
 
     /// Open the picker: which world does this face belong to?
     ///
@@ -270,6 +278,30 @@ pub enum PersonaAction {
     BindOpen(usize),
     /// Arm "present nothing here".
     UnbindArm(usize),
+    /// Open the form: make a face for this community and wear it here.
+    ComposeOpen(usize),
+    /// Show the faces made inside this community, to make a value reusable.
+    LocalFacesOpen(usize),
+    /// Ask whether to forget the earlier versions of the attribute at this row.
+    AttributePurgeArm(usize),
+    /// Show the formats the agent can produce, and what each discards.
+    RenderersOpen,
+    /// Show every persona this community has a binding record for.
+    KnownHereOpen(usize),
+    /// Show what people in this community have told the holder.
+    PeopleOpen(usize),
+    /// Read the contact under the cursor in full.
+    ContactOpen,
+    /// Start recording what someone told the holder.
+    ContactNew,
+    /// Ask whether to forget the contact under the cursor.
+    ContactDeleteArm,
+    /// Start making a face inside this community.
+    LocalFaceNew,
+    /// Ask whether to delete the face under the cursor, made here.
+    LocalFaceDeleteArm,
+    /// Wear the face under the cursor as the persona used here.
+    LocalFaceWear,
 
     // ── The shared confirmation slot ─────────────────────────────────────
     ConfirmYes,
@@ -491,6 +523,12 @@ pub enum Action {
 
     /// Commit the highlighted context and launch the join in it.
     JoinContextChoose,
+
+    /// Answers page: highlight this face.
+    JoinAnswersSelect(usize),
+
+    /// Answers page: answer with the highlighted face, as shown, and go on.
+    JoinAnswersChoose,
 
     /// Vetting page: take the highlighted way in. A route the page drew as
     /// blocked answers with why instead.

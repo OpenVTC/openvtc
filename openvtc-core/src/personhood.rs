@@ -351,13 +351,17 @@ pub async fn assert_personhood(
 
     let request_id = Uuid::new_v4();
     let document_id = format!("urn:uuid:{request_id}");
-    let body = build_document(
+    // Signed with the same key that signed the presentation inside it:
+    // `vtc/members/personhood/assert/0.1` declares `proof` REQUIRED.
+    let body = crate::trust_task_doc::build_signed_value(
         PERSONHOOD_ASSERT_TYPE,
         route.member_did,
         route.vtc_did,
         &document_id,
         json!({ "did": route.member_did, "presentation": presentation }),
-    )?;
+        signing_secret,
+    )
+    .await?;
 
     route
         .send(body, PERSONHOOD_ASSERT_TYPE, document_id)

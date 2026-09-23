@@ -337,6 +337,82 @@ fn artifact_claims(artifact: &Value) -> Result<Vec<ReleasedClaim>, String> {
 /// `limit` caps the read: a history is append-only and unbounded, and a panel
 /// that asked for all of it would grow slower for the whole life of the
 /// account.
+/// One output format the agent can produce, and what it cannot carry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Renderer {
+    pub id: String,
+    pub description: Option<String>,
+    /// What this format discards. A renderer that drops provenance turns
+    /// "my employer attested this" into something the holder merely said.
+    pub drops: Vec<String>,
+    /// Whether it can carry a claim proved rather than shown. Most cannot.
+    pub carries_predicates: bool,
+    /// The agent's own lossless form, used when nobody names one.
+    pub canonical: bool,
+    /// The format this client asks for ([`RCARD_RENDERER`]).
+    pub used_here: bool,
+}
+
+/// The formats this agent can produce.
+///
+/// Worth reading before a disclosure rather than after: the renderer decides
+/// what survives the trip, and this client always asks for one
+/// ([`RCARD_RENDERER`]) without the holder having chosen it.
+pub async fn renderers(client: &VtaClient) -> Result<Vec<Renderer>, OpenVTCError> {
+    let value = client
+        .persona_renderers_list()
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("persona renderers list failed: {e}")))?;
+    let mut rows: Vec<Renderer> = value
+        .get("renderers")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(|r| {
+                    let id = r
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    Renderer {
+                        used_here: id == RCARD_RENDERER,
+                        id,
+                        description: r
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        drops: r
+                            .get("drops")
+                            .and_then(Value::as_array)
+                            .map(|d| {
+                                d.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        carries_predicates: r
+                            .get("canCarryPredicates")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        canonical: r.get("canonical").and_then(Value::as_bool).unwrap_or(false),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // The one this client uses first, then the agent's own form, then the rest
+    // alphabetically — a holder reading this is asking "what am I sending?"
+    // before "what else is there".
+    rows.sort_by(|a, b| {
+        b.used_here
+            .cmp(&a.used_here)
+            .then_with(|| b.canonical.cmp(&a.canonical))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(rows)
+}
+
 pub async fn history(
     client: &VtaClient,
     limit: std::num::NonZeroU64,

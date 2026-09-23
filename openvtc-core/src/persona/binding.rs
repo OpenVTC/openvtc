@@ -33,6 +33,7 @@
 //! returned rather than softened.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use vta_sdk::client::VtaClient;
 
 use crate::errors::OpenVTCError;
@@ -47,8 +48,14 @@ use crate::errors::OpenVTCError;
 pub struct BindingSummary {
     /// Whether this persona presents anything at all in this context.
     pub bound: bool,
-    /// The holder's label for the bound profile, if it has one.
+    /// The holder's own name for the bound face, if it has one. The agent
+    /// returns it only to the holder — which OpenVTC is — and never to the
+    /// community.
     pub profile_name: Option<String>,
+    /// What the holder said this community may call the face — the only name
+    /// the community itself is given. `None` when they chose none.
+    #[serde(default)]
+    pub label: Option<String>,
     /// Identifier of the bound profile.
     pub profile_id: Option<String>,
     /// How many claims the binding carries. `0` for an unbound persona — a
@@ -56,6 +63,9 @@ pub struct BindingSummary {
     pub claim_count: u64,
     /// When the binding was last written.
     pub bound_at: Option<String>,
+    /// When wearing the face here ends on its own. Carried so a face change
+    /// sends it back: `binding/set` replaces the binding.
+    pub until: Option<String>,
     /// True when the agent could not be asked, as distinct from having
     /// answered "nothing is bound".
     ///
@@ -135,7 +145,12 @@ impl BindingSummary {
         } else {
             format!("{} attributes", self.claim_count)
         };
-        format!("wears: {label} ({attributes})")
+        // Two names, for two audiences: the first is the holder's own and the
+        // community never sees it; the second is what the community is told.
+        match &self.label {
+            Some(shown) => format!("wears: {label} ({attributes}) — known here as “{shown}”"),
+            None => format!("wears: {label} ({attributes})"),
+        }
     }
 }
 
@@ -165,12 +180,20 @@ pub async fn get(
             .get("profileId")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        label: value
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
         claim_count: value
             .get("claimCount")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
         bound_at: value
             .get("boundAt")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        until: value
+            .get("until")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
         unknown: false,
@@ -248,6 +271,71 @@ pub async fn get_or_unknown(
     }
 }
 
+/// One persona of the holder's that a context knows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KnownHere {
+    pub persona_did: String,
+    /// The name the holder gave this context for the face, if any.
+    pub label: Option<String>,
+    pub bound: bool,
+    /// The bound face was composed inside the context rather than pushed down
+    /// from the pool.
+    pub local: bool,
+    pub claim_count: u64,
+}
+
+/// Every persona of the holder's with a binding record in one context.
+///
+/// The privacy question behind it: a community that knows a holder under two
+/// personas can put them together, and nothing else in the pane says so — a
+/// membership row shows the one persona that joined, not the others that have
+/// worn something here since.
+pub async fn list(client: &VtaClient, context_id: &str) -> Result<Vec<KnownHere>, OpenVTCError> {
+    let value = client
+        .persona_binding_list(context_id, None, None)
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("persona binding list failed: {e}")))?;
+    let mut rows: Vec<KnownHere> = value
+        .get("personas")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(|r| KnownHere {
+                    persona_did: r
+                        .get("personaDid")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    label: r.get("label").and_then(Value::as_str).map(str::to_string),
+                    bound: r.get("bound").and_then(Value::as_bool).unwrap_or(false),
+                    local: r.get("isLocal").and_then(Value::as_bool).unwrap_or(false),
+                    claim_count: r.get("claimCount").and_then(Value::as_u64).unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    rows.sort_by(|a, b| a.persona_did.cmp(&b.persona_did));
+    Ok(rows)
+}
+
+/// Wear a face that lives inside the context, rather than one from the pool.
+///
+/// The context-local counterpart of [`set`]. Nothing is materialised down from
+/// above, because a local face never reached above: its values were typed here
+/// and stay here.
+pub async fn set_local(
+    client: &VtaClient,
+    context_id: &str,
+    persona_did: &str,
+    profile_id: Option<&str>,
+) -> Result<(), OpenVTCError> {
+    client
+        .persona_local_binding_set(context_id, persona_did, profile_id, None, None, None)
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("persona local binding write failed: {e}")))?;
+    Ok(())
+}
+
 /// Decide what one persona presents in one context.
 ///
 /// `profile_id: None` clears the binding — a persona that presents nothing is a
@@ -271,8 +359,37 @@ pub async fn set(
     persona_did: &str,
     profile_id: Option<&str>,
 ) -> Result<(), OpenVTCError> {
+    // `binding/set` REPLACES the binding, label included, and OpenVTC has no
+    // way to set one — so a face change sent without the current label would
+    // silently take away the name the holder gave this community elsewhere
+    // (`pnm`, the console). Read it and send it back. A failed read fails the
+    // write rather than guessing: "unnamed" is not a safe default for a
+    // decision the holder made.
+    //
+    // The same for its end. A binding worn "until Sunday" and changed to
+    // another face here would otherwise last forever — the opposite of what
+    // the holder set.
+    let (label, until) = match profile_id {
+        // Taking the face off: the agent drops the label and the end with it.
+        None => (None, None),
+        Some(_) => {
+            let current = get(client, context_id, persona_did).await?;
+            (current.label, current.until)
+        }
+    };
     client
-        .persona_binding_set(context_id, persona_did, profile_id, Vec::new(), None)
+        .persona_binding_set(
+            context_id,
+            // The caller knows which persona the community holds, so it is
+            // named. Omitting it asks the VTA to find the one used here,
+            // which only helps a caller that does not know.
+            Some(persona_did),
+            profile_id,
+            Vec::new(),
+            label.as_deref(),
+            until.as_deref(),
+            None,
+        )
         .await
         .map_err(|e| OpenVTCError::Vta(format!("persona binding write failed: {e}")))?;
     Ok(())
@@ -371,6 +488,23 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(s.describe(), "wears: work (3 attributes)");
+    }
+
+    /// The holder sees both names: their own, and what this community is told.
+    /// Without the second, a holder cannot tell what the community calls them.
+    #[test]
+    fn a_labelled_binding_says_what_the_community_is_told() {
+        let s = BindingSummary {
+            bound: true,
+            profile_name: Some("the divorce".into()),
+            label: Some("Ada at the co-op".into()),
+            claim_count: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            s.describe(),
+            "wears: the divorce (2 attributes) — known here as “Ada at the co-op”"
+        );
     }
 
     /// One claim is not "1 claims". Small, and the kind of thing that makes a

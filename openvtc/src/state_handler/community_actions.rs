@@ -29,7 +29,11 @@ use openvtc_core::config::account::PersonaId;
 pub(crate) enum Verb {
     /// `members/self-remove` — leave. On success the membership is marked Left
     /// and its session torn down; the community's receipt is advisory.
-    Leave,
+    ///
+    /// Carries the persona's signing key because the task declares `proof`
+    /// REQUIRED: leaving is a document the community keeps, and the authcrypt
+    /// sender attributes the carriage rather than the document.
+    Leave { signing_secret: Box<Secret> },
     /// `members/vmc` — issue the reciprocal membership credential, signed by the
     /// member, acknowledging `grant`.
     ///
@@ -85,7 +89,7 @@ impl CommunityJob {
     /// Do the send. I/O only.
     pub(crate) async fn run(self) -> CommunityOutcome {
         let performed = match &self.verb {
-            Verb::Leave => Performed::Leave,
+            Verb::Leave { .. } => Performed::Leave,
             Verb::IssueVmc { .. } => Performed::IssueVmc,
             Verb::RequestPersonhoodChallenge => Performed::RequestPersonhoodChallenge,
             Verb::AssertPersonhood { .. } => Performed::AssertPersonhood,
@@ -107,10 +111,11 @@ impl CommunityJob {
         // that nothing on this side used to retain.
         let mut issued: Option<serde_json::Value> = None;
         let result = match &self.verb {
-            Verb::Leave => openvtc_core::join::submit_self_remove(
+            Verb::Leave { signing_secret } => openvtc_core::join::submit_self_remove(
                 &self.atm,
                 &self.profile,
                 &self.member_did,
+                signing_secret,
                 &self.vtc_did,
                 &self.mediator,
                 None,

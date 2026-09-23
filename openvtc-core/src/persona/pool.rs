@@ -49,6 +49,10 @@ pub enum ProvenanceKind {
     CredentialBacked,
     /// Minted by the agent, usually per verifier (a relay address, an alias).
     Generated,
+    /// Taken from a source the holder connected or supplied — a profile, a CV
+    /// — that nobody signed. Not editable here: rewriting it would make a
+    /// derived value self-asserted by an edit the holder did not mean as one.
+    Derived,
 }
 
 impl ProvenanceKind {
@@ -66,6 +70,7 @@ impl ProvenanceKind {
         match value.and_then(|p| p.get("kind")).and_then(Value::as_str) {
             Some("selfAsserted") => Self::SelfAsserted,
             Some("generated") => Self::Generated,
+            Some("derived") => Self::Derived,
             _ => Self::CredentialBacked,
         }
     }
@@ -86,6 +91,7 @@ impl ProvenanceKind {
             Self::SelfAsserted => "you said so",
             Self::CredentialBacked => "credential",
             Self::Generated => "made per verifier",
+            Self::Derived => "from a source you connected",
         }
     }
 
@@ -103,6 +109,9 @@ impl ProvenanceKind {
         match self {
             // Passed on, never proven, and no signature to join on.
             Self::SelfAsserted => None,
+            // Nobody signed it either: it links exactly as a typed value does,
+            // when it is reused.
+            Self::Derived => None,
             Self::CredentialBacked => Some("same signature everywhere — links you"),
             Self::Generated => Some("different for everyone — cannot link you"),
         }
@@ -136,6 +145,11 @@ pub struct PoolAttribute {
     /// silently overwrite each other.
     pub version: u64,
     pub updated_at: String,
+    /// Vault ids of credentials in which someone endorses this value.
+    /// Inventory, not evidence: it never changes the provenance. Carried so an
+    /// edit sends them back — a put replaces the record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endorsements: Vec<String>,
 }
 
 impl PoolAttribute {
@@ -164,6 +178,15 @@ impl PoolAttribute {
                 .map(str::to_string),
             version: value.get("version").and_then(Value::as_u64).unwrap_or(0),
             updated_at: str_field("updatedAt"),
+            endorsements: value
+                .get("endorsements")
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| id.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -275,6 +298,10 @@ pub struct AttributeDraft {
     pub label: Option<String>,
     pub value: Value,
     pub value_type: ValueType,
+    /// The endorsements the attribute already has, sent back unchanged. This
+    /// editor has no control for them; dropping them would lose a vouch by
+    /// fixing a label.
+    pub endorsements: Vec<String>,
 }
 
 impl Default for AttributeDraft {
@@ -290,6 +317,7 @@ impl Default for AttributeDraft {
             label: None,
             value: Value::Null,
             value_type: ValueType::String,
+            endorsements: Vec::new(),
         }
     }
 }
@@ -317,6 +345,11 @@ impl AttributeEdit {
             ProvenanceKind::Generated => {
                 "Your agent makes this one per verifier — a different value for everyone, so \
                  there is no single value to edit."
+                    .to_string()
+            }
+            ProvenanceKind::Derived => {
+                "This one was taken from a source you connected — typing over it here would \
+                 make it something you said instead. Change it at the source and take it again."
                     .to_string()
             }
             ProvenanceKind::SelfAsserted => {
@@ -404,6 +437,7 @@ pub async fn put(client: &VtaClient, draft: AttributeDraft) -> Result<AttributeE
             draft.value_type,
             Provenance::SelfAsserted,
             draft.label.as_deref(),
+            draft.endorsements,
             draft.attribute_id.as_deref(),
             draft.expected_version,
         )
@@ -437,6 +471,39 @@ pub async fn delete(
         .await
         .map_err(|e| OpenVTCError::Vta(format!("persona attribute delete failed: {e}")))?;
     Ok(())
+}
+
+/// What a purge took away, and what it cost.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Purged {
+    /// The versions actually removed. Empty when none named was still held.
+    pub versions: Vec<u64>,
+    /// Faces that pinned one of them and now present nothing for that entry.
+    ///
+    /// The count is the point: a purge that quietly shortened what three faces
+    /// show is exactly the surprise this family exists to prevent, so a caller
+    /// is expected to say so rather than report a bare "done".
+    pub stale_pins: usize,
+}
+
+/// Forget earlier versions of one attribute.
+///
+/// `versions: None` purges every version but the current one. Irreversible —
+/// retention by reference is what makes "what did I show them in March"
+/// answerable, and this is the holder's explicit override of it.
+pub async fn purge_versions(
+    client: &VtaClient,
+    attribute_id: &str,
+    versions: Option<&[u64]>,
+) -> Result<Purged, OpenVTCError> {
+    let value = client
+        .persona_attribute_purge_version(attribute_id, versions)
+        .await
+        .map_err(|e| OpenVTCError::Vta(format!("persona attribute purge failed: {e}")))?;
+    Ok(Purged {
+        versions: value.purged.iter().map(|v| v.0.get()).collect(),
+        stale_pins: value.stale_pins.len(),
+    })
 }
 
 /// Parse the `valueType` string a [`PoolAttribute`] carries back into the typed

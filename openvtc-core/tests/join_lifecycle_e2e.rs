@@ -131,6 +131,7 @@ async fn submit_and_assert(
         vp: vp.clone(),
         registry_consent: false,
         extensions: serde_json::Value::Null,
+        attributes: Vec::new(),
     };
     let submit = Message::build(
         Uuid::new_v4().to_string(),

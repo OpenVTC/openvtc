@@ -51,8 +51,9 @@ use crate::colors::{
 };
 use crate::state_handler::{
     main_page::content::{
-        AttributeField, AttributeForm, BindPicker, FacePlacer, FacetForm, FacetFormFocus,
-        IdentityState, PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus,
+        AttributeField, AttributeForm, BindPicker, ComposeForm, ContactForm, FacePlacer, FacetForm,
+        FacetFormFocus, IdentityState, KnownHereView, LocalFaceForm, LocalFacesView, PeopleView,
+        PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus, RenderersView,
         VALUE_TYPES,
     },
     state::ConnectionState,
@@ -97,6 +98,11 @@ pub fn render(state: &IdentityState) -> Vec<Line<'static>> {
         PersonaMode::Facet(form) => render_facet_form(form),
         PersonaMode::PlaceFace(picker) => render_face_placer(state, picker),
         PersonaMode::Bind(picker) => render_bind_picker(state, picker),
+        PersonaMode::Compose(form) => render_compose_form(form),
+        PersonaMode::LocalFaces(view) => render_local_faces(view),
+        PersonaMode::Renderers(view) => render_renderers(view),
+        PersonaMode::KnownHere(view) => render_known_here(view),
+        PersonaMode::People(view) => render_people(view),
         PersonaMode::View => render_tabs(state),
     }
 }
@@ -186,18 +192,48 @@ fn confirm_prompt(state: &IdentityState) -> Option<String> {
                 Some(format!("Forget \"{name}\"?   y: confirm    n: cancel"))
             }
         }
-        PersonaConfirm::DeleteProfile { name, unbind, .. } => {
+        PersonaConfirm::DeleteProfile {
+            name,
+            unbind,
+            untell,
+            ..
+        } => {
+            // How far it has spoken, when the agent has said: deleting a face
+            // does not un-tell anyone, and the moment to say so is before.
+            let spoken = untell
+                .as_deref()
+                .map(|w| format!("   {w}"))
+                .unwrap_or_default();
             if *unbind {
                 Some(format!(
                     "A persona wears \"{name}\". Delete it and leave that persona showing \
-                     nothing?   Nothing already shared is affected — that has left.   \
-                     y: confirm    n: cancel"
+                     nothing?{spoken}   To stop being it without losing it, press n and retire \
+                     it with x.   y: confirm    n: cancel"
                 ))
             } else {
                 Some(format!(
-                    "Delete the face \"{name}\"?   y: confirm    n: cancel"
+                    "Delete the face \"{name}\"?{spoken}   y: confirm    n: cancel"
                 ))
             }
+        }
+        PersonaConfirm::PurgeAttribute { name, used_by, .. } => {
+            // Two consequences, and the second is the one nobody expects: a
+            // face pinned to an old version stops showing anything for it.
+            // Said before, because "what did I show them in March" is exactly
+            // what this takes away.
+            let faces = match used_by {
+                0 => String::new(),
+                1 => "   One face uses it; if it pins an old version it will show nothing for \
+                      it."
+                .to_string(),
+                n => format!(
+                    "   {n} faces use it; any that pin an old version will show nothing for it."
+                ),
+            };
+            Some(format!(
+                "Forget every earlier version of \"{name}\", keeping only what it says now?\
+                 {faces}   This cannot be undone.   y: confirm    n: cancel"
+            ))
         }
         PersonaConfirm::DeleteFacet { name, faces, .. } => Some(match faces {
             // The sentence a holder needs is about what *survives*. "Delete
@@ -214,6 +250,18 @@ fn confirm_prompt(state: &IdentityState) -> Option<String> {
                  world afterwards.   y: confirm    n: cancel"
             ),
         }),
+        PersonaConfirm::RetireFace { name, worn, .. } => Some(match worn {
+            0 => format!(
+                "Retire \"{name}\"? It is worn nowhere now; it is kept with its history and left \
+                 out of every picker until you reinstate it.   y: confirm    n: cancel"
+            ),
+            n => format!(
+                "Retire \"{name}\"? It comes off the {n} communit{} wearing it, and is kept with \
+                 its history — reinstate it later with z, then x. Nothing already shared is \
+                 affected.   y: confirm    n: cancel",
+                if *n == 1 { "y" } else { "ies" }
+            ),
+        }),
         PersonaConfirm::Unbind { community, .. } => Some(format!(
             "Take it off — show {community} nothing?   Nothing already shared is affected \
              — that has left.   y: confirm    n: cancel"
@@ -227,20 +275,24 @@ fn hints(state: &IdentityState) -> &'static str {
             "↑/↓ select   n: new persona   g: agent names   d: remove unused   ⇥/⇧⇥: tab"
         }
         PersonaTab::Attributes => {
-            "↑/↓ select   n: add an attribute   e: edit   d: delete   v: values   s: show one   \
-             r: refresh   ⇥/⇧⇥: tab"
+            "↑/↓ select   n: add an attribute   e: edit   d: delete   p: forget earlier   \
+             v: values   s: show one   r: refresh   ⇥/⇧⇥: tab"
+        }
+        PersonaTab::Profiles if state.show_retired => {
+            "↑/↓ select   x: reinstate   z: back to your faces   r: refresh   ⇥/⇧⇥: tab"
         }
         PersonaTab::Profiles => {
             "↑/↓ select   ⏎: what it shows   n: make a face   e: edit   m: move to a world   \
-             d: delete   r: refresh   ⇥/⇧⇥: tab"
+             x: retire   d: delete   z: retired   r: refresh   ⇥/⇧⇥: tab"
         }
         PersonaTab::Facets => {
             "↑/↓ select   n: new world   e: edit   d: delete   r: refresh   ⇥/⇧⇥: tab"
         }
         PersonaTab::Communities => {
-            "↑/↓ select   b: change face   u: take it off   r: refresh   ⇥/⇧⇥: tab"
+            "↑/↓ select   b: change face   c: make a face for it   f: faces made here   \
+             k: who it knows you as   p: people   u: take it off   r: refresh   ⇥/⇧⇥: tab"
         }
-        PersonaTab::Disclosures => "↑/↓ select   r: refresh   ⇥/⇧⇥: tab",
+        PersonaTab::Disclosures => "↑/↓ select   f: formats   r: refresh   ⇥/⇧⇥: tab",
     }
 }
 
@@ -629,14 +681,164 @@ fn push_link_summary(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
 // Profiles
 // ---------------------------------------------------------------------------
 
+/// A context's name as the holder knows it — the community whose context it
+/// is, or the identifier when none is known here.
+fn community_name(state: &IdentityState, context_id: &str) -> String {
+    state
+        .memberships
+        .iter()
+        .find(|m| m.sub_context_id == context_id)
+        .map(|m| m.community_name.clone())
+        .unwrap_or_else(|| context_id.to_string())
+}
+
+/// Where the opened face is worn and what it has done (`h`). Types, parties
+/// and communities only — the history the agent serves has no value in it.
+fn render_face_history(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
+    let Some(history) = &state.face_history else {
+        return;
+    };
+    match history {
+        Err(e) => {
+            lines.push(
+                Line::from(format!(" Could not read where this face has been: {e}"))
+                    .fg(COLOR_ORANGE),
+            );
+        }
+        Ok(h) => {
+            lines.push(Line::from(" Worn now:").fg(COLOR_TEXT_DEFAULT));
+            if h.usage.is_empty() {
+                lines.push(Line::from("   nowhere").fg(COLOR_DARK_GRAY));
+            }
+            for u in &h.usage {
+                lines.push(
+                    Line::from(format!(
+                        "   in {}{}",
+                        community_name(state, &u.context_id),
+                        u.until
+                            .as_deref()
+                            .map(|t| format!(" · until {t}"))
+                            .unwrap_or_default()
+                    ))
+                    .fg(COLOR_DARK_GRAY),
+                );
+            }
+            lines.push(Line::from(" What it has done:").fg(COLOR_TEXT_DEFAULT));
+            for e in &h.events {
+                lines.push(
+                    Line::from(format!(
+                        "   {}  {}",
+                        e.at.get(..16).unwrap_or(&e.at).replace('T', " "),
+                        e.words(|c| community_name(state, c))
+                    ))
+                    .fg(COLOR_DARK_GRAY),
+                );
+            }
+            lines.push(
+                Line::from(" Types and parties only — the history never holds a value, or a name you gave something.")
+                    .fg(COLOR_DARK_GRAY),
+            );
+        }
+    }
+    lines.push(Line::from(""));
+}
+
+/// The retired faces (`z`): kept, worn nowhere, out of every picker.
+fn render_retired_faces(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
+    lines.push(
+        Line::from(format!(
+            " {} retired face{}",
+            state.retired_faces.len(),
+            if state.retired_faces.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ))
+        .fg(COLOR_TEXT_DEFAULT),
+    );
+    lines.push(Line::from(""));
+    if let Some(e) = &state.retired_error {
+        lines.push(Line::from(format!(" Could not ask your agent for them: {e}")).fg(COLOR_ORANGE));
+        return;
+    }
+    if state.retired_faces.is_empty() {
+        lines.push(
+            Line::from(
+                " None. Retiring a face (x) takes it off every community and keeps it — it \
+                 comes back here, where x reinstates it.",
+            )
+            .fg(COLOR_DARK_GRAY),
+        );
+        return;
+    }
+    for (i, face) in state.retired_faces.iter().enumerate() {
+        let selected = i == state.profile_selected;
+        lines.push(Line::from(vec![
+            Span::styled(
+                if selected { " ▸ " } else { "   " },
+                Style::new().fg(COLOR_SUCCESS).bold(),
+            ),
+            Span::styled(
+                face.display_name().to_string(),
+                if selected {
+                    Style::new().fg(COLOR_SUCCESS).bold()
+                } else {
+                    Style::new().fg(COLOR_DARK_GRAY)
+                },
+            ),
+            Span::styled(
+                "   retired — kept, worn nowhere",
+                Style::new().fg(COLOR_DARK_GRAY),
+            ),
+        ]));
+    }
+}
+
+/// Faces at which arranging them starts to be worth offering.
+const NUDGE_AT_FACES: usize = 4;
+
+/// Whether to offer worlds rather than wait to be asked for them.
+///
+/// The same threshold the browser console uses, for the same reason: a holder
+/// who has never been shown the feature meets it by clicking a tab they had no
+/// reason to look for, and "discoverable to someone already hunting for it" is
+/// not discoverable.
+fn suggests_worlds(faces: usize, worlds: usize) -> bool {
+    worlds == 0 && faces >= NUDGE_AT_FACES
+}
+
 fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
+    if state.show_retired && state.open_profile.is_none() {
+        render_retired_faces(state, lines);
+        return;
+    }
     if let Some(detail) = &state.open_profile {
         lines.push(
             Line::from(format!(" {}", detail.summary.display_name()))
                 .fg(COLOR_SUCCESS)
                 .bold(),
         );
+        // Where it may be worn, and how far it has spoken — the two facts a
+        // holder needs before widening, retiring or deleting it.
+        lines.push(
+            Line::from(match &detail.summary.reach_only {
+                None => " May be worn anywhere.".to_string(),
+                Some(ids) => format!(
+                    " May be worn only in {} — your agent refuses anywhere else.",
+                    ids.iter()
+                        .map(|id| community_name(state, id))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            })
+            .fg(COLOR_DARK_GRAY),
+        );
+        if let Some(words) = openvtc_core::persona::lifecycle::untell_words(detail.disclosed_to) {
+            lines.push(Line::from(format!(" {words}")).fg(COLOR_DARK_GRAY));
+        }
         lines.push(Line::from(""));
+        render_face_history(state, lines);
         if !detail.is_editable_here() {
             super::status::push_status(lines, &detail.refusal(), " ");
             lines.push(Line::from(""));
@@ -731,9 +933,9 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         }
         lines.push(
             Line::from(if detail.resolved.is_empty() {
-                " ⏎/Esc: back   e: edit".to_string()
+                " ⏎/Esc: back   e: edit   h: where and when".to_string()
             } else {
-                " ↑/↓ select   s: show one   ⏎/Esc: back   e: edit".to_string()
+                " ↑/↓ select   s: show one   ⏎/Esc: back   e: edit   h: where and when".to_string()
             })
             .fg(COLOR_DARK_GRAY),
         );
@@ -772,6 +974,23 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
     // own is a question asked of somebody who has not been offered the answer.
     let arranged = !state.facets.is_empty();
     let mut current_world: Option<Option<usize>> = None;
+
+    // The offer, and only when the answer is worth something (§5.8 of the
+    // persona design note): several faces, and nothing arranging them. A
+    // "make a world" step shown on arrival asks the holder to pre-think a
+    // taxonomy before they have the members, which is the pool-first mistake
+    // one level up. Below the threshold a world would arrange one thing.
+    if suggests_worlds(state.profiles.len(), state.facets.len()) {
+        lines.push(
+            Line::from(
+                " You have a few faces now. Worlds group them — \"Work\", \"Home\" — and warn \
+                 you when one part of your life shares a value with another. The Worlds tab \
+                 makes one; nothing moves if you would rather not.",
+            )
+            .fg(COLOR_SOFT_PURPLE),
+        );
+        lines.push(Line::from(""));
+    }
 
     for (i, profile) in state.profiles.iter().enumerate() {
         if arranged {
@@ -1329,6 +1548,621 @@ fn render_profile_form(state: &IdentityState, form: &ProfileForm) -> Vec<Line<'s
 /// face being moved is on screen — see `PersonaAction::FacePlaceOpen`. What this
 /// form does carry, invisibly, is the membership it was opened with, so that
 /// saving a rename puts it back untouched.
+fn render_compose_form(form: &ComposeForm) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("")];
+    lines.push(
+        Line::from(format!(" A face for {}", form.community))
+            .fg(COLOR_SUCCESS)
+            .bold(),
+    );
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(
+            " What you type here stays in this face and this community, unless you say a value \
+             may be used in your other faces too. It is worn here as soon as it is made.",
+        )
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+    let style = |field: usize| {
+        if form.field == field {
+            Style::new().fg(COLOR_SUCCESS).bold()
+        } else {
+            Style::new().fg(COLOR_TEXT_DEFAULT)
+        }
+    };
+    let caret = |field: usize| if form.field == field { "▏" } else { "" };
+    lines.push(Line::from(vec![
+        Span::styled(" Your name for it   ", style(0)),
+        Span::styled(form.name.value().to_string(), style(0)),
+        Span::styled(caret(0), style(0)),
+    ]));
+    lines.push(Line::from("   Only you ever see it.").fg(COLOR_DARK_GRAY));
+    lines.push(Line::from(""));
+    for (i, row) in form.rows.iter().enumerate() {
+        let (t, v) = (1 + 2 * i, 2 + 2 * i);
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<18}", "What it is"), style(t)),
+            Span::styled(row.claim_type.value().to_string(), style(t)),
+            Span::styled(caret(t), style(t)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<18}", "Value"), style(v)),
+            Span::styled(row.value.value().to_string(), style(v)),
+            Span::styled(caret(v), style(v)),
+        ]));
+        lines.push(
+            Line::from(if row.share {
+                "   ☑ used in my other faces too — it becomes reusable"
+            } else {
+                "   ☐ kept in this face alone"
+            })
+            .fg(COLOR_DARK_GRAY),
+        );
+    }
+    lines.push(Line::from(""));
+    if let Some(e) = &form.error {
+        lines.push(Line::from(format!(" {e}")).fg(COLOR_ORANGE));
+        lines.push(Line::from(""));
+    }
+    lines.push(
+        Line::from(if form.working {
+            " Making it…"
+        } else {
+            " ⇥/⇧⇥ field   ↓ on the last: add a value   Ctrl-T: use in other faces   ⏎: make it   \
+             Esc: cancel"
+        })
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines
+}
+
+/// The faces made inside one community, and the one-way step that lets their
+/// values be used elsewhere. A face made here keeps what it shows to itself; a
+/// promotion moves chosen values into the pool, and cannot be taken back.
+fn render_local_faces(view: &LocalFacesView) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("")];
+    lines.push(
+        Line::from(format!(" Faces made for {}", view.community))
+            .fg(COLOR_SUCCESS)
+            .bold(),
+    );
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(
+            " What these faces show stays here. Choose values with space to make them reusable: \
+             they move into your attributes, and your other faces may show them.",
+        )
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+
+    if let Some(form) = &view.form {
+        return render_local_face_form(view, form, lines);
+    }
+    let faces = match &view.faces {
+        None => {
+            lines.push(Line::from(" Reading…").fg(COLOR_DARK_GRAY));
+            return lines;
+        }
+        Some(Err(e)) => {
+            lines.push(Line::from(format!(" Could not read them: {e}")).fg(COLOR_ORANGE));
+            lines.push(Line::from(""));
+            lines.push(Line::from(" Esc: back").fg(COLOR_DARK_GRAY));
+            return lines;
+        }
+        Some(Ok(faces)) => faces,
+    };
+    if faces.is_empty() {
+        lines.push(Line::from(" No face has been made for this community.").fg(COLOR_DARK_GRAY));
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(" `c` on the Communities tab makes one. Esc: back").fg(COLOR_DARK_GRAY),
+        );
+        return lines;
+    }
+
+    let rows = view.rows();
+    let under = rows.get(view.cursor).copied();
+    for (f, face) in faces.iter().enumerate() {
+        lines.push(
+            Line::from(format!(" {}", face.name))
+                .fg(COLOR_SOFT_PURPLE)
+                .bold(),
+        );
+        if face.entries.is_empty() {
+            lines.push(Line::from("     nothing kept here alone").fg(COLOR_DARK_GRAY));
+        }
+        for (e, entry) in face.entries.iter().enumerate() {
+            let chosen = matches!(&view.chosen, Some((id, positions))
+                if *id == face.profile_id && positions.contains(&entry.position));
+            let is_under = under == Some((f, e));
+            let style = if is_under {
+                Style::new().fg(COLOR_SUCCESS).bold()
+            } else {
+                Style::new().fg(COLOR_TEXT_DEFAULT)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(if is_under { " ▸ " } else { "   " }, style),
+                Span::styled(if chosen { "☑ " } else { "☐ " }, style),
+                Span::styled(entry.claim_type.clone(), style),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+
+    if let Some((_, name)) = &view.deleting {
+        lines.push(
+            Line::from(format!(
+                " Delete \"{name}\"? It is taken off as it goes, so this community sees nothing \
+                 from it.   ⏎: confirm    Esc: cancel"
+            ))
+            .fg(COLOR_ORANGE),
+        );
+        lines.push(Line::from(""));
+    }
+    if let Some(e) = &view.error {
+        lines.push(Line::from(format!(" {e}")).fg(COLOR_ORANGE));
+        lines.push(Line::from(""));
+    }
+    if view.confirming {
+        lines.push(
+            Line::from(
+                " This cannot be undone. Once reusable, a value stays in your attributes; a \
+                 community that has seen it keeps what it saw. ⏎ again to make it reusable, Esc to \
+                 leave it as it is.",
+            )
+            .fg(COLOR_ORANGE),
+        );
+        lines.push(Line::from(""));
+    }
+    lines.push(
+        Line::from(if view.working {
+            " Making it reusable…"
+        } else {
+            " ↑/↓ value   space: choose   ⏎: make reusable   n: make a face here   w: wear it   \
+             d: delete   Esc: back"
+        })
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines
+}
+
+/// Making a face that lives inside one community.
+fn render_local_face_form(
+    view: &LocalFacesView,
+    form: &LocalFaceForm,
+    mut lines: Vec<Line<'static>>,
+) -> Vec<Line<'static>> {
+    lines.push(
+        Line::from(
+            " What you type here stays in this community. It cannot show anything from your \
+             attributes — that is what a face made here means, not a limitation of this form.",
+        )
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+    let style = |field: usize| {
+        if form.field == field {
+            Style::new().fg(COLOR_SUCCESS).bold()
+        } else {
+            Style::new().fg(COLOR_TEXT_DEFAULT)
+        }
+    };
+    let caret = |field: usize| if form.field == field { "▏" } else { "" };
+    lines.push(Line::from(vec![
+        Span::styled(" Your name for it   ", style(0)),
+        Span::styled(form.name.value().to_string(), style(0)),
+        Span::styled(caret(0), style(0)),
+    ]));
+    lines.push(Line::from("   Only you ever see it.").fg(COLOR_DARK_GRAY));
+    lines.push(Line::from(""));
+    for (i, row) in form.rows.iter().enumerate() {
+        let (t, v) = (1 + 2 * i, 2 + 2 * i);
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<18}", "What it is"), style(t)),
+            Span::styled(row.claim_type.value().to_string(), style(t)),
+            Span::styled(caret(t), style(t)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<18}", "Value"), style(v)),
+            Span::styled(row.value.value().to_string(), style(v)),
+            Span::styled(caret(v), style(v)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    if let Some(e) = &view.error {
+        lines.push(Line::from(format!(" {e}")).fg(COLOR_ORANGE));
+        lines.push(Line::from(""));
+    }
+    lines.push(
+        Line::from(if view.working {
+            " Making it…"
+        } else {
+            " ⇥/⇧⇥ field   ↓ on the last: add a value   ⏎: make it   Esc: cancel"
+        })
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines
+}
+
+/// What people in one community have told the holder about themselves.
+///
+/// One view with three faces: the list, a contact read in full, and the form
+/// for recording a new one. They are one mode because they are one question —
+/// "who here has told me something" — and splitting them would make Esc mean
+/// three different things.
+fn render_people(view: &PeopleView) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("")];
+    lines.push(
+        Line::from(format!(" People in {}", view.community))
+            .fg(COLOR_SUCCESS)
+            .bold(),
+    );
+    lines.push(Line::from(""));
+
+    if let Some(form) = &view.form {
+        return render_contact_form(view, form, lines);
+    }
+    if let Some(open) = &view.open {
+        return render_contact_detail(view, open, lines);
+    }
+
+    lines.push(
+        Line::from(
+            " What they told you, kept as they said it. A new card does not overwrite the old \
+             one: what they said in March survives them changing it in April.",
+        )
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+    match &view.contacts {
+        None => lines.push(Line::from(" Reading…").fg(COLOR_DARK_GRAY)),
+        Some(Err(e)) => {
+            lines.push(Line::from(format!(" Could not read them: {e}")).fg(COLOR_ORANGE))
+        }
+        Some(Ok(rows)) if rows.is_empty() => {
+            lines.push(Line::from(" Nobody here has told you anything yet.").fg(COLOR_DARK_GRAY));
+        }
+        Some(Ok(rows)) => {
+            for (i, c) in rows.iter().enumerate() {
+                let selected = i == view.selected;
+                let style = if selected {
+                    Style::new().fg(COLOR_SUCCESS).bold()
+                } else {
+                    Style::new().fg(COLOR_TEXT_DEFAULT)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(if selected { " ▸ " } else { "   " }, style),
+                    Span::styled(format!("{:<32}", truncate(&c.label(), 31)), style),
+                    Span::styled(
+                        format!(
+                            "{} fact{}   rev {}",
+                            c.claim_count,
+                            if c.claim_count == 1 { "" } else { "s" },
+                            c.rev
+                        ),
+                        Style::new().fg(COLOR_DARK_GRAY),
+                    ),
+                ]));
+                if c.unseen_change {
+                    lines.push(
+                        Line::from("      ⚠ they changed something you have not looked at")
+                            .fg(COLOR_ORANGE),
+                    );
+                }
+            }
+        }
+    }
+    lines.push(Line::from(""));
+    if let Some((_, label)) = &view.deleting {
+        lines.push(
+            Line::from(format!(
+                " Forget {label}, and every revision of what they told you?   ⏎: confirm    \
+                 Esc: cancel"
+            ))
+            .fg(COLOR_ORANGE),
+        );
+        lines.push(Line::from(""));
+    }
+    if let Some(e) = &view.error {
+        lines.push(Line::from(format!(" {e}")).fg(COLOR_ORANGE));
+        lines.push(Line::from(""));
+    }
+    lines.push(
+        Line::from(if view.working {
+            " Working…"
+        } else {
+            " ↑/↓ select   ⏎: what they said   n: record someone   d: forget   Esc: back"
+        })
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines
+}
+
+/// One contact, with what they said before.
+fn render_contact_detail(
+    view: &PeopleView,
+    open: &Result<openvtc_core::persona::contacts::ContactDetail, String>,
+    mut lines: Vec<Line<'static>>,
+) -> Vec<Line<'static>> {
+    match open {
+        Err(e) => lines.push(Line::from(format!(" Could not read them: {e}")).fg(COLOR_ORANGE)),
+        Ok(detail) => {
+            lines.push(
+                Line::from(format!(" {}", detail.summary.label()))
+                    .fg(COLOR_SOFT_PURPLE)
+                    .bold(),
+            );
+            lines.push(
+                Line::from(format!(
+                    "      {}   ·   revision {}   ·   {}",
+                    truncate(&detail.summary.subject_did, 44),
+                    detail.summary.rev,
+                    detail.summary.received_at
+                ))
+                .fg(COLOR_DARK_GRAY),
+            );
+            lines.push(Line::from(""));
+            for f in &detail.facts {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {:<22}", f.claim_type),
+                        Style::new().fg(COLOR_DARK_GRAY),
+                    ),
+                    Span::styled(f.value.clone(), Style::new().fg(COLOR_TEXT_DEFAULT)),
+                ]));
+            }
+            if let Some(notes) = &detail.notes {
+                lines.push(Line::from(""));
+                lines.push(Line::from(format!(" Your note: {notes}")).fg(COLOR_DARK_GRAY));
+            }
+            if !detail.earlier.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(
+                    Line::from(" What they said before")
+                        .fg(COLOR_SOFT_PURPLE)
+                        .bold(),
+                );
+                for rev in &detail.earlier {
+                    lines.push(
+                        Line::from(format!("   revision {} · {}", rev.rev, rev.received_at))
+                            .fg(COLOR_DARK_GRAY),
+                    );
+                    for f in &rev.facts {
+                        lines.push(
+                            Line::from(format!("      {:<22}{}", f.claim_type, f.value))
+                                .fg(COLOR_DARK_GRAY),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(if view.working {
+            " Reading…"
+        } else {
+            " ↑/↓ another   Esc: back"
+        })
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines
+}
+
+/// Recording what someone told the holder.
+fn render_contact_form(
+    view: &PeopleView,
+    form: &ContactForm,
+    mut lines: Vec<Line<'static>>,
+) -> Vec<Line<'static>> {
+    lines.push(
+        Line::from(
+            " What they told you, in their words. Nothing here is signed by them and your agent \
+             does not treat it as though it were — it is your note of what they said.",
+        )
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+    let style = |field: usize| {
+        if form.field == field {
+            Style::new().fg(COLOR_SUCCESS).bold()
+        } else {
+            Style::new().fg(COLOR_TEXT_DEFAULT)
+        }
+    };
+    let caret = |field: usize| if form.field == field { "▏" } else { "" };
+    lines.push(Line::from(vec![
+        Span::styled(" Their DID          ", style(0)),
+        Span::styled(form.subject_did.value().to_string(), style(0)),
+        Span::styled(caret(0), style(0)),
+    ]));
+    lines.push(Line::from(""));
+    for (i, row) in form.rows.iter().enumerate() {
+        let (t, v) = (1 + 2 * i, 2 + 2 * i);
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<18}", "What it is"), style(t)),
+            Span::styled(row.claim_type.value().to_string(), style(t)),
+            Span::styled(caret(t), style(t)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<18}", "What they said"), style(v)),
+            Span::styled(row.value.value().to_string(), style(v)),
+            Span::styled(caret(v), style(v)),
+        ]));
+    }
+    let n = form.notes_field();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" Your note          ", style(n)),
+        Span::styled(form.notes.value().to_string(), style(n)),
+        Span::styled(caret(n), style(n)),
+    ]));
+    lines.push(Line::from("   Never disclosed to anyone.").fg(COLOR_DARK_GRAY));
+    lines.push(Line::from(""));
+    if let Some(e) = &view.error {
+        lines.push(Line::from(format!(" {e}")).fg(COLOR_ORANGE));
+        lines.push(Line::from(""));
+    }
+    lines.push(
+        Line::from(if view.working {
+            " Recording…"
+        } else {
+            " ⇥/⇧⇥ field   ↓ on the last: add a fact   ⏎: record   Esc: cancel"
+        })
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines
+}
+
+/// The formats the agent can produce, and what each one discards.
+fn render_renderers(view: &RenderersView) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("")];
+    lines.push(Line::from(" Formats").fg(COLOR_SUCCESS).bold());
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(
+            " When you show something, your agent renders it into one of these. What a format \
+             cannot carry is simply left out — which is how \"my employer attested this\" \
+             becomes \"they said so\".",
+        )
+        .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from(""));
+    match &view.formats {
+        None => lines.push(Line::from(" Reading…").fg(COLOR_DARK_GRAY)),
+        Some(Err(e)) => {
+            lines.push(Line::from(format!(" Could not read them: {e}")).fg(COLOR_ORANGE))
+        }
+        Some(Ok(formats)) if formats.is_empty() => {
+            lines.push(Line::from(" This agent lists no formats.").fg(COLOR_DARK_GRAY));
+        }
+        Some(Ok(formats)) => {
+            for f in formats {
+                let mut marks = Vec::new();
+                if f.used_here {
+                    marks.push("used here");
+                }
+                if f.canonical {
+                    marks.push("your agent's own form");
+                }
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {:<12}", f.id),
+                        Style::new().fg(COLOR_SOFT_PURPLE).bold(),
+                    ),
+                    Span::styled(
+                        if marks.is_empty() {
+                            String::new()
+                        } else {
+                            format!("({})", marks.join(", "))
+                        },
+                        Style::new().fg(COLOR_SUCCESS),
+                    ),
+                ]));
+                if let Some(d) = &f.description {
+                    lines.push(Line::from(format!("      {d}")).fg(COLOR_TEXT_DEFAULT));
+                }
+                lines.push(
+                    Line::from(if f.drops.is_empty() {
+                        "      drops nothing".to_string()
+                    } else {
+                        format!("      drops: {}", f.drops.join(", "))
+                    })
+                    .fg(if f.drops.is_empty() {
+                        COLOR_DARK_GRAY
+                    } else {
+                        COLOR_ORANGE
+                    }),
+                );
+                if !f.carries_predicates {
+                    lines.push(
+                        Line::from(
+                            "      cannot carry a fact you PROVED rather than showed — \
+                             a disclosure that needs one fails here rather than quietly \
+                             handing over the value",
+                        )
+                        .fg(COLOR_DARK_GRAY),
+                    );
+                }
+                lines.push(Line::from(""));
+            }
+        }
+    }
+    lines.push(Line::from(" Esc: back").fg(COLOR_DARK_GRAY));
+    lines
+}
+
+/// Every persona of the holder's this community has a binding record for.
+fn render_known_here(view: &KnownHereView) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("")];
+    lines.push(
+        Line::from(format!(" Who {} knows you as", view.community))
+            .fg(COLOR_SUCCESS)
+            .bold(),
+    );
+    lines.push(Line::from(""));
+    match &view.personas {
+        None => lines.push(Line::from(" Reading…").fg(COLOR_DARK_GRAY)),
+        Some(Err(e)) => {
+            lines.push(Line::from(format!(" Could not read them: {e}")).fg(COLOR_ORANGE));
+        }
+        Some(Ok(rows)) if rows.is_empty() => {
+            lines.push(
+                Line::from(" This community holds no record of any persona of yours.")
+                    .fg(COLOR_DARK_GRAY),
+            );
+        }
+        Some(Ok(rows)) => {
+            for r in rows {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(
+                            " {:<44}",
+                            display_identifier(None, &r.persona_did, ID_WIDTH)
+                        ),
+                        Style::new().fg(COLOR_TEXT_DEFAULT),
+                    ),
+                    Span::styled(
+                        match (&r.label, r.bound) {
+                            (Some(l), true) => format!("wears \"{l}\""),
+                            (None, true) => "wears a face".to_string(),
+                            (_, false) => "shows nothing".to_string(),
+                        },
+                        Style::new().fg(COLOR_SOFT_PURPLE),
+                    ),
+                ]));
+                if r.bound {
+                    lines.push(
+                        Line::from(format!(
+                            "      {} value{}{}",
+                            r.claim_count,
+                            if r.claim_count == 1 { "" } else { "s" },
+                            if r.local { ", made here" } else { "" },
+                        ))
+                        .fg(COLOR_DARK_GRAY),
+                    );
+                }
+            }
+            lines.push(Line::from(""));
+            if rows.len() > 1 {
+                lines.push(
+                    Line::from(format!(
+                        " ⚠ This community has a record of {} of your personas. Anyone reading \
+                         both rows can see they are the same person.",
+                        rows.len()
+                    ))
+                    .fg(COLOR_ORANGE),
+                );
+                lines.push(Line::from(""));
+            }
+        }
+    }
+    lines.push(Line::from(" Esc: back").fg(COLOR_DARK_GRAY));
+    lines
+}
+
 fn render_facet_form(form: &FacetForm) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("")];
     lines.push(
@@ -2878,5 +3712,230 @@ mod tests {
             value: Some(serde_json::json!("4242424242424242")),
             ..PoolAttribute::default()
         }
+    }
+
+    /// The retired view lists what was retired and how to bring it back.
+    #[test]
+    fn the_retired_view_lists_kept_faces_and_how_to_reinstate() {
+        use openvtc_core::persona::profile::ProfileSummary;
+        let mut state = populated(PersonaTab::Profiles);
+        loaded(&mut state);
+        state.open_profile = None;
+        state.show_retired = true;
+        state.retired_faces = vec![ProfileSummary {
+            profile_id: "01R".into(),
+            name: "Old job".into(),
+            retired: true,
+            ..ProfileSummary::default()
+        }]
+        .into();
+        let shown = text(&render(&state));
+        assert!(shown.contains("1 retired face"), "{shown}");
+        assert!(shown.contains("Old job"), "{shown}");
+        assert!(shown.contains("x: reinstate"), "{shown}");
+    }
+
+    /// An opened face says where it may be worn, how far it has spoken, and —
+    /// asked — where it is worn and what it has done, with no value in it.
+    #[test]
+    fn an_opened_face_says_its_reach_its_reach_of_disclosure_and_its_history() {
+        use openvtc_core::persona::lifecycle::{FaceEvent, FaceHistory, FaceUsage};
+        let mut state = populated(PersonaTab::Profiles);
+        loaded(&mut state);
+        let detail = state
+            .open_profile
+            .as_mut()
+            .expect("the populated state opens a face");
+        detail.summary.reach_only = Some(vec!["ctx-nowhere".into()]);
+        detail.disclosed_to = Some((2, 1));
+        state.face_history = Some(Ok(FaceHistory {
+            usage: vec![FaceUsage {
+                context_id: "ctx-nowhere".into(),
+                persona_did: "did:key:zP".into(),
+                until: None,
+            }],
+            events: vec![FaceEvent {
+                at: "2026-09-07T10:00:00Z".into(),
+                kind: "disclosed".into(),
+                context_id: Some("ctx-nowhere".into()),
+                verifier_did: Some("did:web:v".into()),
+                claim_types: vec!["name.display".into()],
+                version: None,
+            }],
+        }));
+        let shown = text(&render(&state));
+        assert!(shown.contains("May be worn only in ctx-nowhere"), "{shown}");
+        assert!(shown.contains("disclosed to 2 parties"), "{shown}");
+        assert!(shown.contains("does not un-tell"), "{shown}");
+        assert!(shown.contains("told did:web:v name.display"), "{shown}");
+        assert!(shown.contains("never holds a value"), "{shown}");
+    }
+
+    /// The compose form says what stays where, and shows each row's choice.
+    #[test]
+    fn the_compose_form_says_what_stays_where() {
+        use crate::state_handler::main_page::content::{ComposeForm, ComposeRow};
+        let mut state = populated(PersonaTab::Communities);
+        state.mode = PersonaMode::Compose(ComposeForm {
+            community: "Co-op".into(),
+            name: tui_input::Input::new("Co-op".into()),
+            rows: vec![
+                ComposeRow {
+                    claim_type: tui_input::Input::new("name.display".into()),
+                    value: tui_input::Input::new("Ada".into()),
+                    share: false,
+                },
+                ComposeRow {
+                    claim_type: tui_input::Input::new("email.personal".into()),
+                    value: tui_input::Input::new("a@p.test".into()),
+                    share: true,
+                },
+            ],
+            ..ComposeForm::default()
+        });
+        let shown = text(&render(&state));
+        assert!(shown.contains("A face for Co-op"), "{shown}");
+        assert!(shown.contains("kept in this face alone"), "{shown}");
+        assert!(shown.contains("used in my other faces too"), "{shown}");
+    }
+    /// The faces made here list their values, mark the chosen ones, and put
+    /// the one-way warning before a promotion.
+    #[test]
+    fn faces_made_here_warn_before_a_value_is_made_reusable() {
+        use openvtc_core::persona::lifecycle::{LocalEntry, LocalFace};
+        let mut state = populated(PersonaTab::Communities);
+        let mut view = LocalFacesView {
+            community: "Co-op".into(),
+            faces: Some(Ok(vec![LocalFace {
+                profile_id: "p-a".into(),
+                name: "Market".into(),
+                version: 1,
+                entries: vec![LocalEntry {
+                    position: 0,
+                    claim_type: "email.personal".into(),
+                }],
+            }])),
+            chosen: Some(("p-a".into(), vec![0])),
+            ..LocalFacesView::default()
+        };
+        state.mode = PersonaMode::LocalFaces(view.clone());
+        let shown = text(&render(&state));
+        assert!(shown.contains("Faces made for Co-op"), "{shown}");
+        assert!(shown.contains("☑ email.personal"), "{shown}");
+        assert!(!shown.contains("cannot be undone"), "{shown}");
+        view.confirming = true;
+        state.mode = PersonaMode::LocalFaces(view);
+        let shown = text(&render(&state));
+        assert!(shown.contains("cannot be undone"), "{shown}");
+    }
+    /// A community that holds two of the holder's personas says so: the
+    /// linkage is the fact the screen exists for.
+    #[test]
+    fn a_community_holding_two_personas_says_they_are_the_same_person() {
+        use openvtc_core::persona::binding::KnownHere;
+        let mut state = populated(PersonaTab::Communities);
+        state.mode = PersonaMode::KnownHere(KnownHereView {
+            context_id: "ctx-coop".into(),
+            community: "Co-op".into(),
+            personas: Some(Ok(vec![
+                KnownHere {
+                    persona_did: "did:key:zOne".into(),
+                    label: Some("Market".into()),
+                    bound: true,
+                    local: true,
+                    claim_count: 2,
+                },
+                KnownHere {
+                    persona_did: "did:key:zTwo".into(),
+                    label: None,
+                    bound: false,
+                    local: false,
+                    claim_count: 0,
+                },
+            ])),
+        });
+        let shown = text(&render(&state));
+        assert!(shown.contains("Who Co-op knows you as"), "{shown}");
+        assert!(shown.contains("wears \"Market\""), "{shown}");
+        assert!(shown.contains("shows nothing"), "{shown}");
+        assert!(shown.contains("same person"), "{shown}");
+    }
+
+    /// A format names what it drops, and says when it cannot carry a fact
+    /// that was proved rather than shown.
+    #[test]
+    fn a_format_says_what_it_leaves_out() {
+        use openvtc_core::persona::disclosure::Renderer;
+        let mut state = populated(PersonaTab::Disclosures);
+        state.mode = PersonaMode::Renderers(RenderersView {
+            formats: Some(Ok(vec![Renderer {
+                id: "vcard".into(),
+                description: Some("A contact card".into()),
+                drops: vec!["provenance".into()],
+                carries_predicates: false,
+                canonical: false,
+                used_here: false,
+            }])),
+        });
+        let shown = text(&render(&state));
+        assert!(shown.contains("drops: provenance"), "{shown}");
+        assert!(shown.contains("PROVED"), "{shown}");
+    }
+
+    /// A contact who told the holder something reads as their card, with the
+    /// revisions behind it and the holder's own note.
+    #[test]
+    fn a_contact_shows_what_they_said_and_what_they_said_before() {
+        use openvtc_core::persona::contacts::{
+            ContactDetail, ContactFact, ContactRevision, ContactSummary,
+        };
+        let mut state = populated(PersonaTab::Communities);
+        let summary = ContactSummary {
+            contact_id: "01C".into(),
+            subject_did: "did:key:zPeer".into(),
+            known_by_persona: "did:key:zMe".into(),
+            display_name: Some("Ada".into()),
+            claim_count: 1,
+            rev: 2,
+            received_at: "2026-09-07T10:00:00Z".into(),
+            unseen_change: false,
+        };
+        state.mode = PersonaMode::People(PeopleView {
+            context_id: "ctx-coop".into(),
+            community: "Co-op".into(),
+            persona_did: "did:key:zMe".into(),
+            contacts: Some(Ok(vec![summary.clone()])),
+            open: Some(Ok(ContactDetail {
+                summary,
+                facts: vec![ContactFact {
+                    claim_type: "email.personal".into(),
+                    value: "ada@example.org".into(),
+                }],
+                notes: Some("met at the market".into()),
+                earlier: vec![ContactRevision {
+                    rev: 1,
+                    received_at: "2026-03-01T10:00:00Z".into(),
+                    facts: vec![ContactFact {
+                        claim_type: "email.personal".into(),
+                        value: "ada@old.example".into(),
+                    }],
+                }],
+            })),
+            ..PeopleView::default()
+        });
+        let shown = text(&render(&state));
+        assert!(shown.contains("ada@example.org"), "{shown}");
+        assert!(shown.contains("What they said before"), "{shown}");
+        assert!(shown.contains("ada@old.example"), "{shown}");
+        assert!(shown.contains("met at the market"), "{shown}");
+    }
+
+    /// The offer of worlds appears once there are several faces and nothing
+    /// arranging them — and not before, and not once there is one.
+    #[test]
+    fn worlds_are_offered_when_the_answer_is_worth_something() {
+        assert!(!super::suggests_worlds(3, 0), "too few faces to arrange");
+        assert!(super::suggests_worlds(4, 0), "several faces, no world");
+        assert!(!super::suggests_worlds(9, 1), "already arranged");
     }
 }

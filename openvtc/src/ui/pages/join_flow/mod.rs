@@ -31,6 +31,7 @@ use ratatui::Frame;
 use tokio::sync::mpsc::UnboundedSender;
 use tui_input::Input;
 
+pub mod answers;
 pub mod context_choice;
 pub mod identity_choice;
 pub mod invitation_choice;
@@ -200,6 +201,7 @@ impl Component for JoinFlow {
             JoinPage::ContextChoice => ContextChoice::handle_key_event(self, key),
             JoinPage::Progress => JoinProgress::handle_key_event(self, key),
             JoinPage::Vetting => VettingPage::handle_key_event(self, key),
+            JoinPage::Answers => answers::AnswersPage::handle_key_event(self, key),
         }
     }
 
@@ -228,7 +230,8 @@ impl Component for JoinFlow {
             JoinPage::IdentityChoice
             | JoinPage::ContextChoice
             | JoinPage::Progress
-            | JoinPage::Vetting => {}
+            | JoinPage::Vetting
+            | JoinPage::Answers => {}
         }
     }
 }
@@ -245,6 +248,7 @@ impl ComponentRender<()> for JoinFlow {
             JoinPage::ContextChoice => self.context_choice.render(&self.props.state, frame),
             JoinPage::Progress => self.join_progress.render(&self.props.state, frame),
             JoinPage::Vetting => self.vetting.render(&self.props.state, frame),
+            JoinPage::Answers => answers::AnswersPage.render(&self.props.state, frame),
         }
         if let Some(overlay) = self.props.create_persona.as_ref() {
             create_persona_overlay::render(frame, overlay);
