@@ -22,10 +22,10 @@
 //! verb. Not the payload and not the carriage — a document is addressed and
 //! dated here, and wrapped by whichever binding carries it.
 //!
-//! The *proof* is here too, as [`build_signed_value`], for the same reason the
+//! The *proof* is here too, as `build_signed_value`, for the same reason the
 //! envelope is: a verb that signs its own way is how one of them ends up
 //! subtly different. Signing stays a separate function rather than something
-//! [`build`] does, because a consumer of a document (a reply, an error) builds
+//! `build` does, because a consumer of a document (a reply, an error) builds
 //! one it does not sign.
 
 use affinidi_tdk::secrets_resolver::secrets::Secret;
