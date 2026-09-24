@@ -14,6 +14,49 @@ use chrono::{DateTime, TimeDelta, Utc};
 use openvtc_core::config::account::PersonaId;
 use openvtc_core::git_ns::{self, GitRight, Visibility, view};
 
+/// Longest name or DID kept for display.
+pub const MAX_NAME: usize = 256;
+
+/// How a status line reads: its colour comes from this, never from its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    /// Neutral information.
+    Info,
+    /// A request is on its way; cleared when its answer lands.
+    Progress,
+    /// A change the community confirmed.
+    Success,
+    /// Nothing was done, and why (a key that does not apply here).
+    Warning,
+    /// A refusal, a failed send, a timeout, a contract mismatch.
+    Error,
+}
+
+/// One status line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Status {
+    pub text: String,
+    pub severity: Severity,
+}
+
+impl Status {
+    #[must_use]
+    pub fn error(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            severity: Severity::Error,
+        }
+    }
+
+    #[must_use]
+    pub fn warning(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            severity: Severity::Warning,
+        }
+    }
+}
+
 /// Load phase of the view read.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReposPhase {
@@ -67,7 +110,7 @@ pub struct AddPersonForm {
     pub reason: String,
     /// Why the community refused the last attempt, shown in the form so the
     /// member can change what they asked for (a `policyDenied` especially).
-    pub error: Option<String>,
+    pub error: Option<Status>,
 }
 
 impl AddPersonForm {
@@ -105,7 +148,7 @@ pub struct NewRepoForm {
     pub name: String,
     pub visibility: Visibility,
     pub description: String,
-    pub error: Option<String>,
+    pub error: Option<Status>,
 }
 
 impl NewRepoForm {
@@ -213,12 +256,9 @@ pub struct LinkedAccount {
     pub id: String,
 }
 
-/// The did-git-sign commit-msg hook git would run, as did-git-sign's own
-/// `commit_msg_hook_status` finds it.
+/// What was found at one commit-msg hook location.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HookHealth {
-    /// Not checked yet.
-    Checking,
     /// This release's hook.
     Current { version: u32 },
     /// An older did-git-sign's hook; `did-git-sign init` replaces it.
@@ -226,30 +266,101 @@ pub enum HookHealth {
     /// A newer did-git-sign wrote it.
     Newer { installed: u32, current: u32 },
     /// A commit-msg hook did-git-sign did not write.
-    Foreign { path: String },
+    Foreign,
     /// No hook where git will look.
-    Missing { path: String },
-    /// Not in a repository and no global `core.hooksPath`: nowhere to look.
-    NoGlobalHooks,
+    Missing,
+    /// Nowhere to look: not in a repository and no global `core.hooksPath`,
+    /// or — for the global scope — no global `core.hooksPath`.
+    NowhereToLook,
     /// git could not be asked.
     Unknown(String),
 }
 
-/// Can this persona sign commits here: did-git-sign's install, and its hook.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SigningHealth {
-    /// The verification method did-git-sign signs with, when it is set up for
-    /// this persona.
-    pub key_id: Option<String>,
-    pub hook: HookHealth,
+impl HookHealth {
+    /// How bad it is, for choosing the headline: 0 fine, 1 unknown, 2 will
+    /// break commits.
+    #[must_use]
+    pub fn severity(&self) -> u8 {
+        match self {
+            HookHealth::Current { .. } | HookHealth::Newer { .. } => 0,
+            HookHealth::NowhereToLook | HookHealth::Unknown(_) => 1,
+            HookHealth::Outdated { .. } | HookHealth::Foreign | HookHealth::Missing => 2,
+        }
+    }
 }
 
-impl Default for SigningHealth {
-    fn default() -> Self {
-        Self {
-            key_id: None,
-            hook: HookHealth::Checking,
+/// Where a hook was looked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookScope {
+    /// Where openvtc was started: the hook git would run for a commit there.
+    Here,
+    /// The global `core.hooksPath`, which a `--global` install sets.
+    Global,
+    /// Both resolve to the same file.
+    HereAndGlobal,
+}
+
+impl HookScope {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            HookScope::Here => "here",
+            HookScope::Global => "global",
+            HookScope::HereAndGlobal => "here and global",
         }
+    }
+}
+
+/// One hook check: where, which file, and what was found.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HookCheck {
+    pub scope: HookScope,
+    /// The file looked at, when there was one to look at.
+    pub path: Option<String>,
+    pub health: HookHealth,
+}
+
+/// A did-git-sign signing config that was found.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InstallFound {
+    /// `global` or `repository`.
+    pub scope: &'static str,
+    pub path: String,
+    /// The verification method it signs with.
+    pub key_id: String,
+    /// Whether that key is this persona's.
+    pub this_persona: bool,
+}
+
+/// Can this persona sign commits here: did-git-sign's installs, and its hook
+/// at every scope that could apply.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SigningHealth {
+    /// `None` until checked.
+    pub checked: Option<SigningChecked>,
+}
+
+/// The result of a signing check.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SigningChecked {
+    /// Every signing config found, global and repository-local.
+    pub installs: Vec<InstallFound>,
+    /// Where a config was looked for when none was found.
+    pub looked: Vec<String>,
+    pub hooks: Vec<HookCheck>,
+}
+
+impl SigningChecked {
+    /// The worst hook check — the headline.
+    #[must_use]
+    pub fn headline(&self) -> Option<&HookCheck> {
+        self.hooks.iter().max_by_key(|h| h.health.severity())
+    }
+
+    /// Whether did-git-sign is set up for this persona anywhere.
+    #[must_use]
+    pub fn set_up(&self) -> bool {
+        self.installs.iter().any(|i| i.this_persona)
     }
 }
 
@@ -283,7 +394,8 @@ pub struct ReposView {
     pub link: Option<LinkFlow>,
     pub created: Option<CreatedRepo>,
     pub signing: SigningHealth,
-    pub status_message: Option<String>,
+    /// The last thing the panel has to say, with how it should read.
+    pub status: Option<Status>,
 }
 
 impl ReposView {
@@ -305,7 +417,7 @@ impl ReposView {
             link: None,
             created: None,
             signing: SigningHealth::default(),
-            status_message: None,
+            status: None,
         }
     }
 
@@ -361,15 +473,43 @@ impl ReposView {
     }
 
     /// A DID as the panel names it: "you", a verified name, or the DID.
+    ///
+    /// Always sanitised: every DID here came from the VTC, and a DID may carry
+    /// bidi overrides or zero-width characters (the schema only forbids
+    /// whitespace) that would make one person's name read as another's.
     #[must_use]
     pub fn name_of(&self, did: &str) -> String {
         if did == self.me {
             return "you".into();
         }
-        self.labels
-            .get(did)
-            .cloned()
-            .unwrap_or_else(|| did.to_string())
+        let raw = self.labels.get(did).map_or(did, String::as_str);
+        super::sanitize_display(raw, MAX_NAME)
+    }
+
+    /// Say something, with an explicit severity.
+    pub fn note(&mut self, severity: Severity, text: impl Into<String>) {
+        self.status = Some(Status {
+            text: text.into(),
+            severity,
+        });
+    }
+
+    /// Drop an "awaiting the reply" line once the reply is in.
+    pub fn clear_progress(&mut self) {
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|s| s.severity == Severity::Progress)
+        {
+            self.status = None;
+        }
+    }
+
+    /// The status text, for tests.
+    #[cfg(test)]
+    #[must_use]
+    pub fn status_text(&self) -> Option<&str> {
+        self.status.as_ref().map(|s| s.text.as_str())
     }
 
     /// The people the add-person picker offers for `query`: everyone the view

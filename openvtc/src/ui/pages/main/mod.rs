@@ -372,9 +372,11 @@ fn repos_key(
     };
     use openvtc_core::git_ns::GitRight;
 
+    // Only `y` confirms: Enter is what submitted the form that armed the
+    // change, and a key held a moment too long must not also confirm it.
     if view.confirm.is_some() {
         return Some(match key.code {
-            KeyCode::Char('y') | KeyCode::Enter => R::Confirm,
+            KeyCode::Char('y') => R::Confirm,
             _ => R::Cancel,
         });
     }
@@ -4337,6 +4339,11 @@ mod key_handler_tests {
         assert_eq!(
             repos_key(press(KeyCode::Char('y')), &armed),
             Some(R::Confirm)
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Enter), &armed),
+            Some(R::Cancel),
+            "Enter does not confirm"
         );
         assert_eq!(
             repos_key(press(KeyCode::Char('x')), &armed),

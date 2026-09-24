@@ -34,8 +34,10 @@ use crate::state_handler::actions::ReposAction as Act;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
 use crate::state_handler::main_page::repos::{
     AddPersonForm, ArmedChange, CreatedRepo, EXPIRY_CHOICES, LinkFlow, LinkPhase, LinkedAccount,
-    NewRepoForm, Pending, Purpose, ReposPhase, ReposScreen, ReposView, SigningHealth,
+    NewRepoForm, Pending, Purpose, ReposPhase, ReposScreen, ReposView, Severity, SigningHealth,
+    Status,
 };
+use crate::state_handler::main_page::sanitize_display;
 use crate::state_handler::runtime_actions::ActionCtx;
 use crate::state_handler::state::State;
 
@@ -43,6 +45,34 @@ const DOMAIN: DispatchDomain = DispatchDomain::GitNs;
 
 /// How long a request waits for the community's answer (R1.2).
 pub(crate) const REPLY_WINDOW: Duration = Duration::from_secs(30);
+
+/// How long `account/link` waits: the VTC itself waits up to 30 s for its
+/// bridge to begin the forge's flow, and the answer then has to travel back.
+pub(crate) const LINK_START_WINDOW: Duration = Duration::from_secs(60);
+
+/// The reply window for a request of this purpose.
+pub(crate) fn reply_window(purpose: &Purpose) -> Duration {
+    match purpose {
+        Purpose::LinkStart => LINK_START_WINDOW,
+        _ => REPLY_WINDOW,
+    }
+}
+
+/// A `git-ns` answer as it arrived: who sent it and who the document says
+/// issued it, besides the thread it answers.
+pub(crate) struct InboundReply {
+    /// The transport-authenticated sender.
+    pub(crate) from: String,
+    /// The document's `issuer`.
+    pub(crate) issuer: Option<String>,
+    pub(crate) thid: String,
+    pub(crate) reply: Reply,
+}
+
+/// The DID part of a DID or DID URL.
+fn did_part(did: &str) -> &str {
+    did.split('#').next().unwrap_or(did)
+}
 
 /// Longest text kept in a form field. Past every schema limit (a repository
 /// name is 100, a DID 2048, a reason 1024), so an over-long paste is refused
@@ -96,19 +126,19 @@ pub(crate) fn reduce(state: &mut State, action: &Act) -> bool {
                     resource: repo.resource.clone(),
                 };
                 view.selected = 0;
-                view.status_message = None;
+                view.status = None;
             }
         }
         Act::NewStart => {
             if view.creatable().is_empty() {
-                view.status_message = Some(
+                view.note(
+                    Severity::Warning,
                     "You hold no right to create repositories here. A namespace admin grants \
-                     `repo creator` on a namespace."
-                        .into(),
+                     `repo creator` on a namespace.",
                 );
             } else {
                 view.screen = ReposScreen::NewRepo(NewRepoForm::default());
-                view.status_message = None;
+                view.status = None;
             }
         }
         Act::NewField(f) => {
@@ -144,11 +174,11 @@ pub(crate) fn reduce(state: &mut State, action: &Act) -> bool {
             if let ReposScreen::Repo { resource } = &view.screen {
                 if view.governs(resource) {
                     view.add = Some(AddPersonForm::new(resource.clone()));
-                    view.status_message = None;
+                    view.status = None;
                 } else {
-                    view.status_message = Some(
-                        "Only an owner of this repository or a namespace admin can add people."
-                            .into(),
+                    view.note(
+                        Severity::Warning,
+                        "Only an owner of this repository or a namespace admin can add people.",
                     );
                 }
             }
@@ -249,22 +279,25 @@ fn arm_revoke(view: &mut ReposView) {
         return;
     };
     if person.namespace_wide {
-        view.status_message = Some(
-            "That right is held on the whole namespace; a namespace admin revokes it there.".into(),
+        view.note(
+            Severity::Warning,
+            "That right is held on the whole namespace; a namespace admin revokes it there.",
         );
         return;
     }
     if person.granted_by.is_none() {
-        view.status_message = Some(
+        view.note(
+            Severity::Warning,
             "You cannot see that owner's record, so only an owner of this repository or a \
-             namespace admin can revoke it."
-                .into(),
+             namespace admin can revoke it.",
         );
         return;
     }
     if person.did != view.me && !view.governs(&resource) {
-        view.status_message =
-            Some("Only an owner or a namespace admin can revoke someone else's right.".into());
+        view.note(
+            Severity::Warning,
+            "Only an owner or a namespace admin can revoke someone else's right.",
+        );
         return;
     }
     let request = Request::Revoke {
@@ -293,8 +326,10 @@ fn arm_transfer(view: &mut ReposView) {
         return;
     };
     if person.did == view.me {
-        view.status_message =
-            Some("Highlight the person to hand ownership to, then press t.".into());
+        view.note(
+            Severity::Warning,
+            "Highlight the person to hand ownership to, then press t.",
+        );
         return;
     }
     view.confirm = Some(ArmedChange {
@@ -315,8 +350,10 @@ fn arm_archive(view: &mut ReposView) {
         return;
     };
     if !view.governs(resource) {
-        view.status_message =
-            Some("Only an owner of this repository or a namespace admin can archive it.".into());
+        view.note(
+            Severity::Warning,
+            "Only an owner of this repository or a namespace admin can archive it.",
+        );
         return;
     }
     view.confirm = Some(ArmedChange {
@@ -458,7 +495,10 @@ impl ReposOutcome {
             }
             (Ok(thid), purpose) => {
                 if let Purpose::Change(what) = &purpose {
-                    view.status_message = Some(format!("{what}… awaiting the community's reply"));
+                    view.note(
+                        Severity::Progress,
+                        format!("{what}… awaiting the community's reply"),
+                    );
                 }
                 view.pending = Some(Pending {
                     thid,
@@ -472,11 +512,11 @@ impl ReposOutcome {
                         "could not send the query to the community: {e}"
                     ));
                 } else {
-                    view.status_message = Some(format!("couldn't refresh: {e}"));
+                    view.note(Severity::Error, format!("couldn't refresh: {e}"));
                 }
             }
             (Err(e), Purpose::Change(what)) => {
-                view.status_message = Some(format!("couldn't send ({what}): {e}"));
+                view.note(Severity::Error, format!("couldn't send ({what}): {e}"));
                 tracing::error!("git-ns change failed to send: {e}");
             }
             (Err(e), Purpose::LinkStart) => {
@@ -508,7 +548,15 @@ pub(crate) struct Loop<'a> {
 impl Loop<'_> {
     /// Send `request` for the open view. `quiet` suppresses the busy message,
     /// for sends nobody pressed a key for (polls, refresh after a change).
-    async fn send(&mut self, request: Request, purpose: Purpose, probe_signing: bool, quiet: bool) {
+    /// Returns whether the send was dispatched; every early return says why
+    /// in the view, unless `quiet`.
+    async fn send(
+        &mut self,
+        request: Request,
+        purpose: Purpose,
+        probe_signing: bool,
+        quiet: bool,
+    ) -> bool {
         let Some((vtc_did, persona, waiting)) = self
             .state
             .main_page
@@ -518,7 +566,7 @@ impl Loop<'_> {
             .as_ref()
             .map(|v| (v.vtc_did.clone(), v.persona, v.pending.clone()))
         else {
-            return;
+            return false;
         };
         // One request awaits its answer at a time. A second would take the
         // pending slot, and the first answer — a grant, say — would then match
@@ -527,14 +575,17 @@ impl Loop<'_> {
             && let Some(waiting) = waiting
         {
             if !quiet && let Some(view) = view_mut(self.state) {
-                view.status_message = Some(match waiting.purpose {
-                    Purpose::Change(what) => {
-                        format!("Still waiting for the community's answer ({what}).")
-                    }
-                    _ => "Still waiting for the community's answer.".into(),
-                });
+                view.note(
+                    Severity::Warning,
+                    match waiting.purpose {
+                        Purpose::Change(what) => {
+                            format!("Still waiting for the community's answer ({what}).")
+                        }
+                        _ => "Still waiting for the community's answer.".into(),
+                    },
+                );
             }
-            return;
+            return false;
         }
         let sender = match sender(self.config, self.tdk, persona).await {
             Ok(s) => s,
@@ -543,17 +594,17 @@ impl Loop<'_> {
                     if view.data.is_none() && purpose == Purpose::View {
                         view.phase = ReposPhase::Failed(e);
                     } else {
-                        view.status_message = Some(e);
+                        view.note(Severity::Error, e);
                     }
                 }
-                return;
+                return false;
             }
         };
         if !self.in_flight.try_begin(DOMAIN) {
             if !quiet && let Some(view) = view_mut(self.state) {
-                view.status_message = Some(InFlight::busy_message(DOMAIN));
+                view.note(Severity::Warning, InFlight::busy_message(DOMAIN));
             }
-            return;
+            return false;
         }
         let job = ReposJob {
             sender,
@@ -566,6 +617,7 @@ impl Loop<'_> {
         background_dispatch::spawn_dispatch(self.dispatch_tx.clone(), DOMAIN, async move {
             DispatchOutcome::Repos(job.run().await)
         });
+        true
     }
 
     /// Read the view again.
@@ -593,7 +645,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
                 if view.data.is_none() {
                     view.phase = ReposPhase::Loading;
                 }
-                view.status_message = None;
+                view.status = None;
             }
             lp.refresh(false).await;
         }
@@ -696,7 +748,7 @@ async fn submit_new(lp: &mut Loop<'_>) {
     // name, before anything is sent.
     if let Err(e) = request.payload() {
         if let ReposScreen::NewRepo(form) = &mut view.screen {
-            form.error = Some(e.to_string());
+            form.error = Some(Status::error(e.to_string()));
         }
         return;
     }
@@ -720,9 +772,9 @@ async fn submit_add(lp: &mut Loop<'_>) {
             None if form.query.trim().starts_with("did:") => form.query.trim().to_string(),
             None => {
                 if let Some(f) = view.add.as_mut() {
-                    f.error = Some(
-                        "Pick someone, or press Tab to paste a DID for someone not listed.".into(),
-                    );
+                    f.error = Some(Status::warning(
+                        "Pick someone, or press Ctrl+D to paste a DID for someone not listed.",
+                    ));
                 }
                 return;
             }
@@ -738,7 +790,7 @@ async fn submit_add(lp: &mut Loop<'_>) {
     };
     if let Err(e) = request.payload() {
         if let Some(f) = view.add.as_mut() {
-            f.error = Some(e.to_string());
+            f.error = Some(Status::error(e.to_string()));
         }
         return;
     }
@@ -777,15 +829,29 @@ async fn start_link(lp: &mut Loop<'_>) {
         .or_else(|| forges.first())
         .cloned()
     else {
-        view.status_message = Some(
-            "No bridge serves a forge for this community yet, so there is no account to link."
-                .into(),
+        view.note(
+            Severity::Warning,
+            "No bridge serves a forge for this community yet, so there is no account to link.",
         );
         return;
     };
-    view.link = Some(LinkFlow::starting(forge.clone()));
-    lp.send(Request::Link { forge }, Purpose::LinkStart, false, false)
-        .await;
+    // The attempt is shown only once its request is actually on its way: a
+    // send refused here (still waiting, busy, no signing key) says why and
+    // leaves no "starting…" line that nothing will ever answer.
+    if lp
+        .send(
+            Request::Link {
+                forge: forge.clone(),
+            },
+            Purpose::LinkStart,
+            false,
+            false,
+        )
+        .await
+        && let Some(view) = view_mut(lp.state)
+    {
+        view.link = Some(LinkFlow::starting(forge));
+    }
 }
 
 // ****************************************************************************
@@ -797,11 +863,36 @@ async fn start_link(lp: &mut Loop<'_>) {
 pub(crate) fn apply_replies(
     state: &mut State,
     config: &Config,
-    replies: Vec<(String, Reply)>,
+    replies: Vec<InboundReply>,
 ) -> bool {
     let mut refresh = false;
-    for (thid, reply) in replies {
-        refresh |= apply_reply(state, config, &thid, reply);
+    for inbound in replies {
+        // A thread id is a correlation key, not a credential: an answer is
+        // taken only from the community the view is asking — sent by it, and
+        // issued by it. Anyone who learned a thread id could otherwise answer
+        // for the community.
+        let Some(vtc) = state
+            .main_page
+            .content_panel
+            .repos
+            .view
+            .as_ref()
+            .map(|v| v.vtc_did.clone())
+        else {
+            continue;
+        };
+        let from_vtc = did_part(&inbound.from) == vtc;
+        let issued_by_vtc = inbound.issuer.as_deref().map(did_part) == Some(vtc.as_str());
+        if !(from_vtc && issued_by_vtc) {
+            tracing::warn!(
+                from = %inbound.from,
+                issuer = ?inbound.issuer,
+                thid = %inbound.thid,
+                "git-ns reply not from the community the Repos view is asking — dropped"
+            );
+            continue;
+        }
+        refresh |= apply_reply(state, config, &inbound.thid, inbound.reply);
     }
     refresh
 }
@@ -827,7 +918,7 @@ fn apply_reply(state: &mut State, config: &Config, thid: &str, reply: Reply) -> 
                         let (login, id) = r
                             .account
                             .as_ref()
-                            .map(|a| (a.login.to_string(), a.id.to_string()))
+                            .map(|a| (sanitize_display(&a.login, 100), sanitize_display(&a.id, 64)))
                             .unwrap_or_default();
                         linked = Some(LinkedAccount {
                             vtc_did: view.vtc_did.clone(),
@@ -888,96 +979,121 @@ fn apply_reply(state: &mut State, config: &Config, thid: &str, reply: Reply) -> 
                 ReposScreen::NewRepo(_) => 1,
             };
             view.selected = view.selected.min(count.saturating_sub(1));
-            if view
-                .status_message
-                .as_deref()
-                .is_some_and(|m| m.ends_with("awaiting the community's reply"))
-            {
-                view.status_message = None;
-            }
+            view.clear_progress();
             false
         }
         (Reply::Created(r), _) => {
             let resource = r.repo.resource.to_string();
-            let manual_steps: Vec<String> = r.manual_steps.iter().map(|s| s.to_string()).collect();
-            view.status_message = Some(if manual_steps.is_empty() {
-                format!(
-                    "Reserved {}. The community's bridge is creating it — the steps below fill \
+            let manual_steps: Vec<String> = r
+                .manual_steps
+                .iter()
+                .map(|s| sanitize_display(s, 1024))
+                .collect();
+            view.note(
+                Severity::Success,
+                if manual_steps.is_empty() {
+                    format!(
+                        "Reserved {}. The community's bridge is creating it — the steps below fill \
                      in as it goes (r to refresh).",
-                    git_ns::short_resource(&resource)
-                )
-            } else {
-                format!(
-                    "Reserved {}. No bot can create it here: follow the steps below, and it \
+                        git_ns::short_resource(&resource)
+                    )
+                } else {
+                    format!(
+                        "Reserved {}. No bot can create it here: follow the steps below, and it \
                      becomes active once it is adopted.",
-                    git_ns::short_resource(&resource)
-                )
-            });
+                        git_ns::short_resource(&resource)
+                    )
+                },
+            );
             view.created = Some(CreatedRepo {
                 resource: resource.clone(),
                 manual_steps,
             });
-            view.screen = ReposScreen::Repo { resource };
-            view.selected = 0;
+            // Go to the new repository only from the form that asked for it: a
+            // member who has since moved on is not pulled back.
+            if matches!(view.screen, ReposScreen::NewRepo(_)) {
+                view.screen = ReposScreen::Repo { resource };
+                view.selected = 0;
+            }
             true
         }
         (Reply::Granted(r), _) => {
             let rec = &r.right;
             view.add = None;
-            view.status_message = Some(format!(
-                "Granted {} {} on {}. It is published to the Trust Registry, where anyone can \
+            view.note(
+                Severity::Success,
+                format!(
+                    "Granted {} {} on {}. It is published to the Trust Registry, where anyone can \
                  read it.",
-                view.name_of(&rec.subject),
-                rec.right,
-                git_ns::short_resource(&rec.resource)
-            ));
+                    view.name_of(&rec.subject),
+                    rec.right,
+                    git_ns::short_resource(&rec.resource)
+                ),
+            );
             true
         }
         (Reply::Revoked(r), _) => {
             let rec = &r.revoked;
-            view.status_message = Some(format!(
-                "Revoked {}'s {} on {}.",
-                view.name_of(&rec.subject),
-                rec.right,
-                git_ns::short_resource(&rec.resource)
-            ));
+            view.note(
+                Severity::Success,
+                format!(
+                    "Revoked {}'s {} on {}.",
+                    view.name_of(&rec.subject),
+                    rec.right,
+                    git_ns::short_resource(&rec.resource)
+                ),
+            );
             true
         }
         (Reply::Transferred(r), _) => {
-            view.status_message = Some(format!(
-                "Handed over {}. Owners now: {}.",
-                git_ns::short_resource(&r.repo.resource),
-                r.repo
-                    .owners
-                    .iter()
-                    .map(|o| view.name_of(o))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            view.note(
+                Severity::Success,
+                format!(
+                    "Handed over {}. Owners now: {}.",
+                    git_ns::short_resource(&r.repo.resource),
+                    r.repo
+                        .owners
+                        .iter()
+                        .map(|o| view.name_of(o))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
             true
         }
         (Reply::Archived(r), _) => {
-            view.status_message = Some(format!(
-                "Archived {}; {} commit right(s) revoked.",
-                git_ns::short_resource(&r.repo.resource),
-                r.rights_revoked
-            ));
+            view.note(
+                Severity::Success,
+                format!(
+                    "Archived {}; {} commit right(s) revoked.",
+                    git_ns::short_resource(&r.repo.resource),
+                    r.rights_revoked
+                ),
+            );
             view.screen = ReposScreen::List;
             view.selected = 0;
             true
         }
         (Reply::LinkStarted(r), _) => {
             if let Some(link) = view.link.as_mut() {
-                link.phase = LinkPhase::Waiting;
-                link.link_id = Some(r.link_id.to_string());
-                link.url = Some(r.url.clone());
-                link.user_code = r.user_code.as_ref().map(|c| c.to_string());
-                link.expires_at = Some(r.expires_at);
+                if link_url_ok(&r.url, &link.forge) {
+                    link.phase = LinkPhase::Waiting;
+                    link.link_id = Some(r.link_id.to_string());
+                    link.url = Some(r.url.clone());
+                    link.user_code = r.user_code.as_ref().map(|c| sanitize_display(c, 64));
+                    link.expires_at = Some(r.expires_at);
+                } else {
+                    link.phase = LinkPhase::Failed(format!(
+                        "The community offered a link that is not an https address on {} — not \
+                         shown. Tell the community's operator.",
+                        link.forge
+                    ));
+                }
             }
             false
         }
         (Reply::Refused(r), Purpose::Change(_)) if r.is_already_gone() => {
-            view.status_message = Some("That right was already gone.".into());
+            view.note(Severity::Success, "That right was already gone.");
             true
         }
         (Reply::Refused(r), Purpose::View) => {
@@ -985,7 +1101,7 @@ fn apply_reply(state: &mut State, config: &Config, thid: &str, reply: Reply) -> 
             if view.data.is_none() {
                 view.phase = ReposPhase::Failed(text);
             } else {
-                view.status_message = Some(text);
+                view.note(Severity::Error, text);
             }
             false
         }
@@ -1001,23 +1117,32 @@ fn apply_reply(state: &mut State, config: &Config, thid: &str, reply: Reply) -> 
             // member can change it — a policy refusal of an outside signer
             // most of all.
             if let Some(form) = view.add.as_mut() {
-                form.error = Some(text);
+                form.error = Some(Status::error(text));
             } else if let ReposScreen::NewRepo(form) = &mut view.screen {
-                form.error = Some(text);
+                form.error = Some(Status::error(text));
             } else {
-                view.status_message = Some(text);
+                view.note(Severity::Error, text);
             }
-            view.status_message = view
-                .status_message
-                .take()
-                .filter(|m| !m.ends_with("awaiting the community's reply"));
+            view.clear_progress();
             false
         }
         (other, _) => {
-            view.status_message = Some(unexpected(&other));
+            view.note(Severity::Error, unexpected(&other));
             false
         }
     }
+}
+
+/// Whether a link URL may be shown and turned into a QR code: https, and on
+/// the forge the attempt is for. Anything else would send the member, or their
+/// phone, wherever the answer said.
+pub(crate) fn link_url_ok(url: &str, forge: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|u| {
+        u.scheme() == "https"
+            && u.host_str().is_some_and(|h| h.eq_ignore_ascii_case(forge))
+            && u.username().is_empty()
+            && u.password().is_none()
+    })
 }
 
 fn unexpected(reply: &Reply) -> String {
@@ -1041,10 +1166,10 @@ pub(crate) async fn tick(lp: &mut Loop<'_>) {
         if view
             .pending
             .as_ref()
-            .is_some_and(|p| now.duration_since(p.sent_at) > REPLY_WINDOW)
+            .is_some_and(|p| now.duration_since(p.sent_at) > reply_window(&p.purpose))
             && let Some(p) = view.pending.take()
         {
-            let secs = REPLY_WINDOW.as_secs();
+            let secs = reply_window(&p.purpose).as_secs();
             match p.purpose {
                 Purpose::View if view.data.is_none() => {
                     view.phase = ReposPhase::Failed(format!(
@@ -1053,13 +1178,25 @@ pub(crate) async fn tick(lp: &mut Loop<'_>) {
                     ));
                 }
                 Purpose::View => {
-                    view.status_message = Some(format!("no reply to the refresh within {secs}s"));
+                    view.note(
+                        Severity::Error,
+                        format!("no reply to the refresh within {secs}s"),
+                    );
                 }
                 Purpose::Change(what) => {
-                    view.status_message = Some(format!(
-                        "no reply ({what}) within {secs}s — refresh (r) to see whether it took \
-                         effect"
-                    ));
+                    let text = format!(
+                        "No reply ({what}) within {secs}s. It may have been applied — refresh (r) \
+                         to see before trying again."
+                    );
+                    // The form stays open with what was asked, marked, so a
+                    // second press does not blindly repeat a change that may
+                    // already have landed.
+                    if let Some(form) = view.add.as_mut() {
+                        form.error = Some(Status::warning(text.clone()));
+                    } else if let ReposScreen::NewRepo(form) = &mut view.screen {
+                        form.error = Some(Status::warning(text.clone()));
+                    }
+                    view.note(Severity::Error, text);
                 }
                 Purpose::LinkStart => {
                     if let Some(link) = view.link.as_mut() {
@@ -1113,6 +1250,15 @@ mod tests {
     const BOB: &str = "did:webvh:QmBobScid2:acme-vtc.example:bob";
     const ALICE: &str = "did:webvh:QmAliceScid1:acme-vtc.example:alice";
     const DAN: &str = "did:webvh:QmDanScid4:dan.example";
+
+    fn from_vtc(thid: &str, reply: Reply) -> InboundReply {
+        InboundReply {
+            from: VTC.into(),
+            issuer: Some(VTC.into()),
+            thid: thid.into(),
+            reply,
+        }
+    }
 
     fn persona() -> PersonaId {
         PersonaId(uuid::Uuid::nil())
@@ -1224,13 +1370,7 @@ mod tests {
         view_mut(&mut state).unwrap().me = DAN.into();
         reduce(&mut state, &Act::NewStart);
         assert_eq!(view(&state).screen, ReposScreen::List);
-        assert!(
-            view(&state)
-                .status_message
-                .as_deref()
-                .unwrap()
-                .contains("no right")
-        );
+        assert!(view(&state).status_text().unwrap().contains("no right"));
     }
 
     #[test]
@@ -1376,7 +1516,7 @@ mod tests {
         outcome(Ok("thid-1".into()), Purpose::Change("archiving x".into())).apply(&mut state);
         let v = view(&state);
         assert_eq!(v.pending.as_ref().unwrap().thid, "thid-1");
-        assert!(v.status_message.as_deref().unwrap().contains("awaiting"));
+        assert!(v.status_text().unwrap().contains("awaiting"));
     }
 
     #[test]
@@ -1410,7 +1550,7 @@ mod tests {
         let refresh = apply_replies(
             &mut state,
             &config(),
-            vec![("t".into(), Reply::View(Box::new(data())))],
+            vec![from_vtc("t", Reply::View(Box::new(data())))],
         );
         assert!(!refresh);
         let v = view(&state);
@@ -1426,7 +1566,7 @@ mod tests {
         apply_replies(
             &mut state,
             &config(),
-            vec![("someone-elses".into(), Reply::View(Box::new(data())))],
+            vec![from_vtc("someone-elses", Reply::View(Box::new(data())))],
         );
         assert!(view(&state).pending.is_some(), "still waiting for its own");
     }
@@ -1449,13 +1589,20 @@ mod tests {
         let refresh = apply_replies(
             &mut state,
             &config(),
-            vec![(
-                "t".into(),
+            vec![from_vtc(
+                "t",
                 refused("git-ns:policyDenied", Some("no external signers")),
             )],
         );
         assert!(!refresh);
-        let err = view(&state).add.as_ref().unwrap().error.clone().unwrap();
+        let err = view(&state)
+            .add
+            .as_ref()
+            .unwrap()
+            .error
+            .clone()
+            .unwrap()
+            .text;
         assert!(err.contains("no external signers"), "{err}");
         assert!(err.contains("policy"), "{err}");
     }
@@ -1473,14 +1620,13 @@ mod tests {
         let refresh = apply_replies(
             &mut state,
             &config(),
-            vec![("t".into(), Reply::Granted(Box::new(granted)))],
+            vec![from_vtc("t", Reply::Granted(Box::new(granted)))],
         );
         assert!(refresh);
         assert!(view(&state).add.is_none());
         assert!(
             view(&state)
-                .status_message
-                .as_deref()
+                .status_text()
                 .unwrap()
                 .contains("Trust Registry")
         );
@@ -1493,7 +1639,10 @@ mod tests {
         let refresh = apply_replies(
             &mut state,
             &config(),
-            vec![("t".into(), refused("git-ns/right/revoke:notGranted", None))],
+            vec![from_vtc(
+                "t",
+                refused("git-ns/right/revoke:notGranted", None),
+            )],
         );
         assert!(refresh);
     }
@@ -1514,7 +1663,7 @@ mod tests {
         let refresh = apply_replies(
             &mut state,
             &config(),
-            vec![("t".into(), Reply::Created(Box::new(created)))],
+            vec![from_vtc("t", Reply::Created(Box::new(created)))],
         );
         assert!(refresh);
         let v = view(&state);
@@ -1536,8 +1685,8 @@ mod tests {
         apply_replies(
             &mut state,
             &config(),
-            vec![(
-                "t".into(),
+            vec![from_vtc(
+                "t",
                 refused(
                     "permissionDenied",
                     Some(
@@ -1548,8 +1697,7 @@ mod tests {
         );
         assert!(
             view(&state)
-                .status_message
-                .as_deref()
+                .status_text()
                 .unwrap()
                 .contains("community administrator")
         );
@@ -1572,7 +1720,7 @@ mod tests {
         let mut state = open_state();
         view_mut(&mut state).unwrap().link = Some(LinkFlow::starting("github.com".into()));
         pend(&mut state, "t", Purpose::LinkStart);
-        apply_replies(&mut state, &config(), vec![("t".into(), link_reply())]);
+        apply_replies(&mut state, &config(), vec![from_vtc("t", link_reply())]);
         let link = view(&state).link.clone().unwrap();
         assert_eq!(link.phase, LinkPhase::Waiting);
         assert_eq!(link.user_code.as_deref(), Some("WDJB-MJHT"));
@@ -1613,7 +1761,7 @@ mod tests {
         apply_replies(
             &mut state,
             &config(),
-            vec![("poll-1".into(), Reply::LinkStatus(Box::new(status)))],
+            vec![from_vtc("poll-1", Reply::LinkStatus(Box::new(status)))],
         );
         assert!(matches!(
             &view(&state).link.as_ref().unwrap().phase,
@@ -1649,12 +1797,7 @@ mod tests {
         .await;
         let v = view(&state);
         assert_eq!(v.pending.as_ref().unwrap().thid, "grant-1");
-        assert!(
-            v.status_message
-                .as_deref()
-                .unwrap()
-                .contains("granting maintainer")
-        );
+        assert!(v.status_text().unwrap().contains("granting maintainer"));
         assert!(
             !in_flight.is_busy(DispatchDomain::GitNs),
             "nothing was sent"
@@ -1683,6 +1826,219 @@ mod tests {
         .await;
         let v = view(&state);
         assert!(v.pending.is_none());
-        assert!(v.status_message.as_deref().unwrap().contains("within 30s"));
+        assert!(v.status_text().unwrap().contains("within 30s"));
+    }
+
+    // --- review follow-ups -------------------------------------------------
+
+    async fn with_loop<F>(state: &mut State, f: F)
+    where
+        F: for<'a> FnOnce(
+            &'a mut Loop<'_>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>,
+    {
+        let config = config();
+        let tdk = crate::state_handler::dispatch_util::test_tdk().await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut in_flight = InFlight::default();
+        let mut lp = Loop {
+            state,
+            config: &config,
+            tdk: &tdk,
+            dispatch_tx: &tx,
+            in_flight: &mut in_flight,
+        };
+        f(&mut lp).await;
+    }
+
+    /// A reply correctly threaded but sent — or issued — by someone other than
+    /// the community is dropped: a thread id is not a credential.
+    #[test]
+    fn a_threaded_reply_from_another_did_is_dropped() {
+        let mut state = open_state();
+        view_mut(&mut state).unwrap().data = None;
+        pend(&mut state, "t", Purpose::View);
+        let mut forged = from_vtc("t", Reply::View(Box::new(data())));
+        forged.from = "did:webvh:QmMallory:evil.example".into();
+        apply_replies(&mut state, &config(), vec![forged]);
+        assert!(view(&state).data.is_none());
+        assert!(
+            view(&state).pending.is_some(),
+            "still waiting for the community"
+        );
+
+        let mut wrong_issuer = from_vtc("t", Reply::View(Box::new(data())));
+        wrong_issuer.issuer = Some("did:webvh:QmMallory:evil.example".into());
+        apply_replies(&mut state, &config(), vec![wrong_issuer]);
+        assert!(view(&state).data.is_none());
+
+        let mut no_issuer = from_vtc("t", Reply::View(Box::new(data())));
+        no_issuer.issuer = None;
+        apply_replies(&mut state, &config(), vec![no_issuer]);
+        assert!(view(&state).data.is_none());
+
+        // The community itself, from a key-qualified sender, is accepted.
+        let mut ok = from_vtc("t", Reply::View(Box::new(data())));
+        ok.from = format!("{VTC}#key-1");
+        apply_replies(&mut state, &config(), vec![ok]);
+        assert!(view(&state).data.is_some());
+    }
+
+    /// A link attempt is shown only once its request is on its way; a send
+    /// refused before it leaves leaves no "starting…" behind.
+    #[tokio::test]
+    async fn a_link_that_never_left_is_not_left_starting() {
+        // No messaging identity for the persona: the send is refused.
+        let mut state = open_state();
+        with_loop(&mut state, |lp| Box::pin(start_link(lp))).await;
+        let v = view(&state);
+        assert!(v.link.is_none(), "no attempt was started");
+        assert_eq!(v.status.as_ref().unwrap().severity, Severity::Error);
+
+        // Still waiting on another answer: likewise.
+        let mut state = open_state();
+        pend(&mut state, "grant-1", Purpose::Change("granting".into()));
+        with_loop(&mut state, |lp| Box::pin(start_link(lp))).await;
+        assert!(view(&state).link.is_none());
+        assert!(
+            view(&state)
+                .status_text()
+                .unwrap()
+                .contains("Still waiting")
+        );
+    }
+
+    /// `account/link` gets 60 s: the VTC waits up to 30 s on its bridge first.
+    #[tokio::test]
+    async fn a_link_start_waits_sixty_seconds() {
+        let mut state = open_state();
+        view_mut(&mut state).unwrap().link = Some(LinkFlow::starting("github.com".into()));
+        view_mut(&mut state).unwrap().pending = Some(Pending {
+            thid: "t".into(),
+            sent_at: Instant::now() - Duration::from_secs(45),
+            purpose: Purpose::LinkStart,
+        });
+        with_loop(&mut state, |lp| Box::pin(tick(lp))).await;
+        assert!(view(&state).pending.is_some(), "45 s is inside the window");
+
+        view_mut(&mut state)
+            .unwrap()
+            .pending
+            .as_mut()
+            .unwrap()
+            .sent_at = Instant::now() - LINK_START_WINDOW - Duration::from_secs(1);
+        with_loop(&mut state, |lp| Box::pin(tick(lp))).await;
+        assert!(matches!(
+            view(&state).link.as_ref().unwrap().phase,
+            LinkPhase::Failed(_)
+        ));
+        assert_eq!(reply_window(&Purpose::View), REPLY_WINDOW);
+    }
+
+    /// Only an https URL on the link's own forge is shown or made a QR code.
+    #[test]
+    fn a_link_url_off_the_forge_is_refused() {
+        assert!(link_url_ok("https://github.com/login/device", "github.com"));
+        assert!(!link_url_ok("http://github.com/login/device", "github.com"));
+        assert!(!link_url_ok(
+            "https://github.com.evil.example/x",
+            "github.com"
+        ));
+        assert!(!link_url_ok(
+            "https://evil.example/github.com",
+            "github.com"
+        ));
+        assert!(!link_url_ok("https://user@github.com/x", "github.com"));
+        assert!(!link_url_ok("javascript:alert(1)", "github.com"));
+
+        let mut state = open_state();
+        view_mut(&mut state).unwrap().link = Some(LinkFlow::starting("github.com".into()));
+        pend(&mut state, "t", Purpose::LinkStart);
+        let reply = Reply::LinkStarted(Box::new(
+            serde_json::from_value(json!({
+                "linkId": "lnk_1", "url": "https://evil.example/login/device",
+                "userCode": "WDJB-MJHT", "expiresAt": "2099-01-01T00:00:00Z"
+            }))
+            .unwrap(),
+        ));
+        apply_replies(&mut state, &config(), vec![from_vtc("t", reply)]);
+        let link = view(&state).link.clone().unwrap();
+        assert!(matches!(link.phase, LinkPhase::Failed(_)));
+        assert!(link.url.is_none(), "the address is not kept");
+    }
+
+    /// After a timeout the form stays, marked: the change may have landed.
+    #[tokio::test]
+    async fn a_timed_out_change_keeps_its_form_marked() {
+        let mut state = open_state();
+        on_gadgets(&mut state);
+        reduce(&mut state, &Act::AddStart);
+        view_mut(&mut state).unwrap().pending = Some(Pending {
+            thid: "t".into(),
+            sent_at: Instant::now() - REPLY_WINDOW - Duration::from_secs(1),
+            purpose: Purpose::Change("granting maintainer".into()),
+        });
+        with_loop(&mut state, |lp| Box::pin(tick(lp))).await;
+        let v = view(&state);
+        let err = v
+            .add
+            .as_ref()
+            .expect("the form stays")
+            .error
+            .clone()
+            .unwrap();
+        assert!(err.text.contains("may have been applied"), "{}", err.text);
+        assert_eq!(err.severity, Severity::Warning);
+        assert_eq!(v.status.as_ref().unwrap().severity, Severity::Error);
+    }
+
+    /// A create that lands after the member moved on does not pull them back.
+    #[test]
+    fn a_late_create_does_not_navigate() {
+        let mut state = open_state();
+        view_mut(&mut state).unwrap().screen = ReposScreen::List;
+        pend(&mut state, "t", Purpose::Change("creating".into()));
+        let created = serde_json::from_value(json!({
+            "repo": {"resource": "github.com/acme/gizmos", "visibility": "public",
+                     "state": "pendingCreate", "owners": [BOB],
+                     "bootstrap": {"workflow": false, "keyring": false, "variables": false, "requiredCheck": false},
+                     "sync": {"state": "pending", "drift": []}},
+            "manualSteps": ["Step \u{202E}one"]
+        }))
+        .unwrap();
+        apply_replies(
+            &mut state,
+            &config(),
+            vec![from_vtc("t", Reply::Created(Box::new(created)))],
+        );
+        let v = view(&state);
+        assert_eq!(v.screen, ReposScreen::List);
+        assert_eq!(v.status.as_ref().unwrap().severity, Severity::Success);
+        assert_eq!(v.created.as_ref().unwrap().manual_steps, ["Step one"]);
+    }
+
+    /// Names are cleaned of bidi overrides and zero-width characters.
+    #[test]
+    fn a_did_is_named_sanitised() {
+        let state = open_state();
+        let v = view(&state);
+        let name = v.name_of("did:webvh:Qm\u{202E}evil\u{200B}:x");
+        assert_eq!(name, "did:webvh:Qmevil:x");
+    }
+
+    /// Refusals read as errors, by severity rather than wording.
+    #[test]
+    fn a_refusal_is_an_error() {
+        let mut state = open_state();
+        pend(&mut state, "t", Purpose::Change("archiving".into()));
+        apply_replies(
+            &mut state,
+            &config(),
+            vec![from_vtc("t", refused("git-ns:repoNotActive", None))],
+        );
+        assert_eq!(
+            view(&state).status.as_ref().unwrap().severity,
+            Severity::Error
+        );
     }
 }

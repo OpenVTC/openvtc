@@ -63,6 +63,9 @@ pub const DEVICE_FLOW_FORGE: &str = "github.com";
 /// client **SHOULD** poll no faster than every five seconds.
 pub const LINK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Longest peer-supplied sentence kept for display.
+const MAX_PEER_TEXT: usize = 1024;
+
 fn conversion(what: &str, e: impl std::fmt::Display) -> OpenVTCError {
     OpenVTCError::Config(format!("{what}: {e}"))
 }
@@ -500,9 +503,10 @@ pub fn parse_reply(doc: &TrustTask<Value>) -> Option<(String, Reply)> {
     ) -> Reply {
         match serde_json::from_value::<T>(payload.clone()) {
             Ok(r) => wrap(Box::new(r)),
+            // serde echoes the offending value, which the peer chose.
             Err(e) => Reply::Unreadable {
                 task: task.to_string(),
-                detail: e.to_string(),
+                detail: crate::display::sanitize_display(&e.to_string(), MAX_PEER_TEXT),
             },
         }
     }
@@ -538,15 +542,17 @@ pub struct Refusal {
 impl Refusal {
     fn from_error_payload(payload: &Value) -> Self {
         Refusal {
-            code: payload
-                .get("code")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string(),
+            code: payload.get("code").and_then(Value::as_str).map_or_else(
+                || "unknown".to_string(),
+                |c| crate::display::sanitize_display(c, 128),
+            ),
+            // The VTC's own sentence is shown to the member, so it is cleaned
+            // of anything that could restyle or reorder the terminal (bidi
+            // overrides, zero-width characters, escapes) before it is kept.
             message: payload
                 .get("message")
                 .and_then(Value::as_str)
-                .map(|m| m.trim().to_string())
+                .map(|m| crate::display::sanitize_display(m.trim(), MAX_PEER_TEXT))
                 .filter(|m| !m.is_empty()),
         }
     }
@@ -884,7 +890,11 @@ pub fn my_repos(resp: &view::Response, me: &str) -> Vec<MyRepo> {
             })
         })
         .collect();
-    out.sort_by(|a, b| a.resource.cmp(&b.resource));
+    out.sort_by(|a, b| {
+        b.right
+            .cmp(&a.right)
+            .then_with(|| a.resource.cmp(&b.resource))
+    });
     out
 }
 
@@ -1210,17 +1220,24 @@ mod tests {
             expires_at: None,
             reason: None,
         };
-        assert!(
-            not_a_did
-                .payload()
-                .unwrap_err()
-                .to_string()
-                .contains("grant")
-        );
+        let err = not_a_did.payload().unwrap_err().to_string();
+        assert!(err.contains("subject"), "names the field: {err}");
         let unqualified = Request::Archive {
             resource: "acme/widgets".into(),
         };
-        assert!(unqualified.payload().is_err(), "the forge is never implied");
+        let err = unqualified.payload().unwrap_err().to_string();
+        assert!(
+            err.contains("resource"),
+            "the forge is never implied: {err}"
+        );
+        let bad_name = Request::Create {
+            namespace: "ns_1".into(),
+            name: "no spaces".into(),
+            visibility: Visibility::Public,
+            description: None,
+        };
+        let err = bad_name.payload().unwrap_err().to_string();
+        assert!(err.contains("name"), "names the field: {err}");
         let long_reason = Request::Revoke {
             subject: DAN.into(),
             right: GitRight::CommitSign,
@@ -1253,14 +1270,45 @@ mod tests {
             assert_eq!(doc.recipient.as_deref(), Some(VTC));
             assert!(doc.issued_at.is_some());
             assert!(doc.id.starts_with("urn:uuid:"));
-            let proof = serde_json::to_value(doc.proof.as_ref().unwrap()).unwrap();
+            let proof_value = serde_json::to_value(doc.proof.as_ref().unwrap()).unwrap();
             assert!(
-                proof["verificationMethod"]
+                proof_value["verificationMethod"]
                     .as_str()
                     .unwrap()
                     .starts_with(&me)
             );
+            assert_eq!(proof_value["proofPurpose"], "assertionMethod");
+            assert_eq!(proof_value["cryptosuite"], "eddsa-jcs-2022");
             assert_eq!(doc.type_uri.to_string(), req.type_uri());
+
+            // The proof verifies against the signer's key over the document
+            // without its proof, and stops verifying if the payload changes.
+            let proof: affinidi_data_integrity::DataIntegrityProof =
+                serde_json::from_value(proof_value).unwrap();
+            let mut unsigned = serde_json::to_value(&doc).unwrap();
+            unsigned.as_object_mut().unwrap().remove("proof");
+            let key = signer.get_public_bytes().to_vec();
+            assert!(
+                proof
+                    .verify_with_public_key(
+                        &unsigned,
+                        &key,
+                        affinidi_data_integrity::VerifyOptions::new()
+                    )
+                    .is_ok(),
+                "the proof verifies"
+            );
+            unsigned["payload"] = json!({"resource": "github.com/evil/x"});
+            assert!(
+                proof
+                    .verify_with_public_key(
+                        &unsigned,
+                        &key,
+                        affinidi_data_integrity::VerifyOptions::new()
+                    )
+                    .is_err(),
+                "a changed payload no longer verifies"
+            );
         }
     }
 
@@ -1403,6 +1451,24 @@ mod tests {
         assert!(text.contains("community administrator"), "{text}");
     }
 
+    /// A refusal's sentence is the peer's text: it is cleaned before it is
+    /// kept, so it cannot reorder or hide what the member reads.
+    #[test]
+    fn a_refusals_message_is_sanitised() {
+        let (_, reply) = parse_reply(&reply_doc(
+            "https://trusttasks.org/spec/trust-task-error/0.1",
+            json!({"code": "git-ns:policyDenied",
+                   "message": "ok\u{202E}lanretxe\u{200B} \u{1b}[31mred"}),
+        ))
+        .unwrap();
+        let Reply::Refused(r) = reply else {
+            panic!("expected a refusal");
+        };
+        let m = r.message.unwrap();
+        assert!(!m.contains('\u{202E}') && !m.contains('\u{200B}') && !m.contains('\u{1b}'));
+        assert!(m.contains("lanretxe"), "{m}");
+    }
+
     // --- error mapping -----------------------------------------------------
 
     fn refusal(code: &str, message: Option<&str>) -> Refusal {
@@ -1515,6 +1581,28 @@ mod tests {
         assert_eq!(mine[1].status, RepoStatus::Creating { done: 2, total: 6 });
 
         // Dan's namespace-less commit right shows as committer.
+        // Strongest right first, then by name.
+        let mut v = bob_view();
+        v.rights.push(
+            serde_json::from_value(json!({
+                "subject": BOB, "right": "git.commit.sign", "resource": "github.com/acme/widgets",
+                "grantedBy": ALICE, "grantedAt": "2026-09-23T09:00:00Z"
+            }))
+            .unwrap(),
+        );
+        let order: Vec<_> = my_repos(&v, BOB)
+            .into_iter()
+            .map(|r| (r.resource, r.right))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("github.com/acme/gadgets".to_string(), GitRight::RepoOwn),
+                ("github.com/acme/sprockets".to_string(), GitRight::RepoOwn),
+                ("github.com/acme/widgets".to_string(), GitRight::CommitSign),
+            ]
+        );
+
         let dans = my_repos(&bob_view(), DAN);
         assert_eq!(dans.len(), 1);
         assert_eq!(dans[0].right, GitRight::CommitSign);

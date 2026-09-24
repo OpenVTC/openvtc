@@ -328,8 +328,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 #
 # **0.22.3, with `git-ns`**, for the Repos panel: 0.22.3 is the release that
 # generates the `git-ns/*` wire types (`openvtc-core::git_ns`) from
-# `specs/git-ns/**`, and the feature is not default. A patch move on the line
-# `vta-sdk` 0.51 is already on, so nothing else follows it.
+# `specs/git-ns/**`. The feature is already in the crate's default
+# `all-specs`; it is named here so the dependency still carries it if this line
+# ever takes `default-features = false`. A patch move on the line `vta-sdk` 0.51
+# is already on, so nothing else follows it.
+#
+# 0.22.4 adds `git-ns/view` 0.2, which reports the caller's linked forge
+# accounts. Not taken yet: the VTC serves only view 0.1 until its follow-up to
+# VTI #1694, and the Repos panel asks for 0.1.
 trust-tasks-rs = { version = "0.22.3", features = ["git-ns"] }
 trust-tasks-capability-client = "0.22.3"
 tui-input = "0.15"

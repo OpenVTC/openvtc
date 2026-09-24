@@ -5,7 +5,7 @@
 //! account and commit-signing health beside it, one repository's people and
 //! rights (or its creation steps), and the new-repository form.
 
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::colors::{
@@ -14,10 +14,10 @@ use crate::colors::{
 };
 use crate::state_handler::main_page::content::ContentPanelState;
 use crate::state_handler::main_page::repos::{
-    AddPersonForm, EXPIRY_CHOICES, HookHealth, LinkPhase, LinkedAccount, NewRepoForm, ReposPhase,
-    ReposScreen, ReposView, expiry_label,
+    AddPersonForm, EXPIRY_CHOICES, HookCheck, HookHealth, HookScope, LinkPhase, LinkedAccount,
+    NewRepoForm, ReposPhase, ReposScreen, ReposView, Severity, Status, expiry_label,
 };
-use crate::state_handler::main_page::shorten_did;
+use crate::state_handler::main_page::{sanitize_display, shorten_did};
 use crate::state_handler::state::ConnectionState;
 use openvtc_core::git_ns::{self, GitRight, RepoStatus};
 
@@ -54,6 +54,33 @@ fn status_style(status: &RepoStatus) -> Style {
         RepoStatus::Detached => COLOR_WARNING_ACCESSIBLE_RED,
         RepoStatus::Archived | RepoStatus::Unmanaged => COLOR_DARK_GRAY,
     })
+}
+
+/// A status line in the colour its severity names — never guessed from its
+/// words.
+fn push_status(lines: &mut Vec<Line<'static>>, status: &Status) {
+    let style = match status.severity {
+        Severity::Info | Severity::Progress => Style::default().fg(COLOR_TEXT_DEFAULT),
+        Severity::Success => Style::default().fg(COLOR_SUCCESS),
+        Severity::Warning => Style::default().fg(COLOR_ORANGE),
+        Severity::Error => Style::default().fg(COLOR_WARNING_ACCESSIBLE_RED).bold(),
+    };
+    for part in super::status::wrap_text(
+        &status.text,
+        super::status::content_width().saturating_sub(6).max(20),
+    ) {
+        lines.push(Line::from(Span::styled(format!("    {part}"), style)));
+    }
+}
+
+fn error(lines: &mut Vec<Line<'static>>, text: &str) {
+    push_status(
+        lines,
+        &Status {
+            text: text.to_string(),
+            severity: Severity::Error,
+        },
+    );
 }
 
 fn date(at: &chrono::DateTime<chrono::Utc>) -> String {
@@ -94,7 +121,7 @@ impl Panel for ReposPanel {
             }
             ReposPhase::Failed(detail) => {
                 lines.push(Line::from(""));
-                super::status::push_status(&mut lines, detail, "    ");
+                error(&mut lines, detail);
                 hints(&mut lines, "r retry   Esc back");
                 return lines;
             }
@@ -115,14 +142,14 @@ impl Panel for ReposPanel {
             )));
             let class = armed.request.consent_class();
             lines.push(Line::from(dim(format!(
-                "    {} change · signed by this persona · y/⏎ confirm · any other key cancels",
+                "    {} change · signed by this persona · y confirm · any other key cancels",
                 class.label()
             ))));
         }
 
-        if let Some(status) = &view.status_message {
+        if let Some(status) = &view.status {
             lines.push(Line::from(""));
-            super::status::push_status(&mut lines, status, "    ");
+            push_status(&mut lines, status);
         }
         lines
     }
@@ -209,8 +236,8 @@ fn render_accounts(lines: &mut Vec<Line<'static>>, view: &ReposView, linked: &[L
         match view.linked_on(linked, forge) {
             Some(account) => lines.push(Line::from(vec![
                 Span::styled("    ● ", Style::default().fg(COLOR_SUCCESS)),
-                text(format!("{forge}  linked  @{}", account.login)),
-                dim(format!("  id {}", account.id)),
+                text(format!("{forge}  linked  @{}", sanitize_display(&account.login, 100))),
+                dim(format!("  id {}", sanitize_display(&account.id, 64))),
             ])),
             None => lines.push(Line::from(vec![
                 dim("    ○ "),
@@ -227,14 +254,19 @@ fn render_accounts(lines: &mut Vec<Line<'static>>, view: &ReposView, linked: &[L
                 link.forge
             )))),
             LinkPhase::Waiting => {
-                let url = link.url.clone().unwrap_or_default();
+                // Only an https URL on the link's own forge reaches here (the
+                // reply is checked when it lands); sanitised all the same.
+                let url = sanitize_display(link.url.as_deref().unwrap_or_default(), 2048);
                 match &link.user_code {
                     // Device flow: a code typed at a fixed URL.
                     Some(code) => {
                         lines.push(Line::from(vec![text("    Open  "), text(url)]));
                         lines.push(Line::from(vec![
                             text("    and enter  "),
-                            Span::styled(code.clone(), Style::default().fg(COLOR_SUCCESS).bold()),
+                            Span::styled(
+                                sanitize_display(code, 64),
+                                Style::default().fg(COLOR_SUCCESS).bold(),
+                            ),
                         ]));
                     }
                     // Authorisation code: a URL to open, and its QR for a phone.
@@ -267,7 +299,11 @@ fn render_accounts(lines: &mut Vec<Line<'static>>, view: &ReposView, linked: &[L
             }
             LinkPhase::Linked { login, .. } => lines.push(Line::from(vec![
                 Span::styled("    ✓ ", Style::default().fg(COLOR_SUCCESS)),
-                text(format!("Linked @{login} on {}.", link.forge)),
+                text(format!(
+                    "Linked @{} on {}.",
+                    sanitize_display(login, 100),
+                    link.forge
+                )),
                 dim("  d dismiss"),
             ])),
             LinkPhase::Expired => lines.push(Line::from(vec![
@@ -276,98 +312,91 @@ fn render_accounts(lines: &mut Vec<Line<'static>>, view: &ReposView, linked: &[L
                 dim("  l try again · d dismiss"),
             ])),
             LinkPhase::Failed(why) => {
-                super::status::push_status(lines, why, "    ");
+                error(lines, why);
                 lines.push(Line::from(dim("    l try again · d dismiss")));
             }
         }
     }
 }
 
-fn render_signing(lines: &mut Vec<Line<'static>>, view: &ReposView) {
-    heading(lines, "Commit signing");
-    let signing = &view.signing;
-    match &signing.key_id {
-        Some(key) => lines.push(Line::from(vec![
-            Span::styled("    ● ", Style::default().fg(COLOR_SUCCESS)),
-            text("did-git-sign set up for this persona"),
-            dim(format!("  key {}", shorten_did(key, 48))),
-        ])),
-        None => lines.push(Line::from(vec![
-            Span::styled("    ○ ", Style::default().fg(COLOR_ORANGE)),
-            text("did-git-sign is not set up for this persona."),
-            dim("  Run `did-git-sign init` with this persona's DID; commits you sign otherwise will not pass the check."),
-        ])),
-    }
-    // The fix, where there is one, goes on a line of its own: a command broken
-    // across a wrap can be neither read in one pass nor selected in one drag.
-    let rerun = Some("re-run `did-git-sign init`");
-    let (glyph, color, line, fix) = match &signing.hook {
-        HookHealth::Checking => (
-            "…",
-            COLOR_DARK_GRAY,
-            "checking the commit-msg hook".to_string(),
-            None,
-        ),
+fn hook_line(check: &HookCheck) -> (&'static str, Color, String, bool) {
+    let at = check
+        .path
+        .as_deref()
+        .map(|p| format!(" at {}", sanitize_display(p, 512)))
+        .unwrap_or_default();
+    let scope = check.scope.label();
+    match &check.health {
         HookHealth::Current { version } => (
             "●",
             COLOR_SUCCESS,
-            format!("commit-msg hook v{version} OK — writes the Signed-by-DID trailer"),
-            None,
+            format!("{scope}: commit-msg hook v{version} OK{at}"),
+            false,
         ),
         HookHealth::Outdated { installed, current } => (
             "▲",
-            COLOR_ORANGE,
+            COLOR_WARNING_ACCESSIBLE_RED,
             format!(
-                "commit-msg hook OUTDATED (v{installed}, current v{current}). Older hooks put \
-                 the Signed-by-DID trailer above any `---` line, where verify-trust does not \
-                 read it, and those commits fail."
+                "{scope}: commit-msg hook OUTDATED (v{installed}, current v{current}){at}. Older \
+                 hooks put the Signed-by-DID trailer above any `---` line, where verify-trust \
+                 does not read it, and those commits fail."
             ),
-            rerun,
+            true,
         ),
         HookHealth::Newer { installed, current } => (
             "●",
             COLOR_SOFT_PURPLE,
             format!(
-                "commit-msg hook v{installed} is newer than this openvtc knows (v{current}) — \
-                 fine if did-git-sign was upgraded"
+                "{scope}: commit-msg hook v{installed}{at} is newer than this openvtc knows \
+                 (v{current}) — fine if did-git-sign was upgraded"
             ),
-            None,
+            false,
         ),
-        HookHealth::Foreign { path } => (
+        HookHealth::Foreign => (
             "▲",
-            COLOR_ORANGE,
+            COLOR_WARNING_ACCESSIBLE_RED,
             format!(
-                "the commit-msg hook at {path} is not did-git-sign's, so nothing writes the \
+                "{scope}: the commit-msg hook{at} is not did-git-sign's, so nothing writes the \
                  Signed-by-DID trailer."
             ),
-            rerun,
+            true,
         ),
-        HookHealth::Missing { path } => (
+        HookHealth::Missing => (
             "▲",
-            COLOR_ORANGE,
-            format!("no commit-msg hook at {path}."),
-            rerun,
+            COLOR_WARNING_ACCESSIBLE_RED,
+            format!("{scope}: no commit-msg hook{at}."),
+            true,
         ),
-        HookHealth::NoGlobalHooks => (
+        HookHealth::NowhereToLook => (
             "○",
             COLOR_DARK_GRAY,
-            "openvtc is not running in a repository and there is no global core.hooksPath, \
-             so there is no hook to check (`did-git-sign health` in a repository checks it)"
-                .to_string(),
-            None,
+            match check.scope {
+                HookScope::Global => "global: no global core.hooksPath is set".to_string(),
+                _ => format!(
+                    "{scope}: openvtc was not started in a repository, so there is no \
+                     repository hook to check"
+                ),
+            },
+            false,
         ),
         HookHealth::Unknown(why) => (
             "○",
-            COLOR_DARK_GRAY,
-            format!("could not check the commit-msg hook: {why}"),
-            None,
+            COLOR_ORANGE,
+            format!(
+                "{scope}: could not check the commit-msg hook: {}",
+                sanitize_display(why, 256)
+            ),
+            false,
         ),
-    };
-    let wrapped = super::status::wrap_text(
-        &line,
+    }
+}
+
+fn wrapped(lines: &mut Vec<Line<'static>>, glyph: &str, color: Color, line: &str) {
+    let parts = super::status::wrap_text(
+        line,
         super::status::content_width().saturating_sub(8).max(20),
     );
-    for (i, part) in wrapped.into_iter().enumerate() {
+    for (i, part) in parts.into_iter().enumerate() {
         let lead = if i == 0 {
             format!("    {glyph} ")
         } else {
@@ -378,10 +407,80 @@ fn render_signing(lines: &mut Vec<Line<'static>>, view: &ReposView) {
             text(part),
         ]));
     }
-    if let Some(fix) = fix {
+}
+
+fn render_signing(lines: &mut Vec<Line<'static>>, view: &ReposView) {
+    heading(lines, "Commit signing");
+    let Some(checked) = &view.signing.checked else {
+        lines.push(Line::from(dim("    … checking did-git-sign")));
+        return;
+    };
+    // The install, wherever did-git-sign put it.
+    for i in &checked.installs {
+        let (glyph, color, what) = if i.this_persona {
+            ("●", COLOR_SUCCESS, "did-git-sign set up for this persona")
+        } else {
+            ("▲", COLOR_ORANGE, "did-git-sign set up for a different key")
+        };
+        wrapped(
+            lines,
+            glyph,
+            color,
+            &format!(
+                "{what} ({} config {}) — key {}",
+                i.scope,
+                sanitize_display(&i.path, 512),
+                shorten_did(&i.key_id, 48)
+            ),
+        );
+    }
+    if !checked.set_up() {
+        wrapped(
+            lines,
+            "○",
+            COLOR_ORANGE,
+            &format!(
+                "did-git-sign is not set up for this persona (looked in {}). Run `did-git-sign \
+                 init` with this persona's DID; commits signed otherwise will not pass the check.",
+                if checked.looked.is_empty() {
+                    "no config location".to_string()
+                } else {
+                    checked
+                        .looked
+                        .iter()
+                        .map(|p| sanitize_display(p, 512))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ),
+        );
+    }
+    // The hook at each scope, the worst first; the fix, where there is one,
+    // goes on a line of its own: a command broken across a wrap can be neither
+    // read in one pass nor selected in one drag.
+    let headline = checked.headline();
+    let hooks: Vec<&HookCheck> = headline
+        .into_iter()
+        .chain(
+            checked
+                .hooks
+                .iter()
+                .filter(|h| !headline.is_some_and(|top| std::ptr::eq(*h, top))),
+        )
+        .collect();
+    let mut needs_fix = false;
+    for check in hooks {
+        let (glyph, color, line, fix) = hook_line(check);
+        needs_fix |= fix;
+        wrapped(lines, glyph, color, &line);
+    }
+    if needs_fix {
         lines.push(Line::from(vec![
             dim("      fix: "),
-            Span::styled(fix, Style::default().fg(COLOR_ORANGE).bold()),
+            Span::styled(
+                "re-run `did-git-sign init`",
+                Style::default().fg(COLOR_ORANGE).bold(),
+            ),
         ]));
     }
 }
@@ -427,7 +526,13 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
         {
             heading(lines, "Steps to take by hand");
             for (i, step) in created.manual_steps.iter().enumerate() {
-                super::status::push_status(lines, &format!("{}. {step}", i + 1), "    ");
+                push_status(
+                    lines,
+                    &Status {
+                        text: format!("{}. {}", i + 1, sanitize_display(step, 1024)),
+                        severity: Severity::Info,
+                    },
+                );
             }
         } else {
             lines.push(Line::from(dim(
@@ -443,17 +548,17 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
             let who = d
                 .account
                 .as_ref()
-                .map(|a| format!(" @{}", *a.login))
+                .map(|a| format!(" @{}", sanitize_display(&a.login, 100)))
                 .unwrap_or_default();
             let observed = d
                 .observed
                 .as_ref()
-                .map(|o| format!(" observed {}", o.as_str()))
+                .map(|o| format!(" observed {}", sanitize_display(o, 256)))
                 .unwrap_or_default();
             let expected = d
                 .expected
                 .as_ref()
-                .map(|e| format!(" expected {}", e.as_str()))
+                .map(|e| format!(" expected {}", sanitize_display(e, 256)))
                 .unwrap_or_default();
             lines.push(Line::from(vec![
                 Span::styled("    ▲ ", Style::default().fg(COLOR_ORANGE)),
@@ -500,7 +605,10 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
             dim(granted),
         ]));
         if selected && let Some(reason) = &p.reason {
-            lines.push(Line::from(dim(format!("        reason: {reason}"))));
+            lines.push(Line::from(dim(format!(
+                "        reason: {}",
+                sanitize_display(reason, 1024)
+            ))));
         }
     }
 
@@ -653,15 +761,7 @@ fn render_add(lines: &mut Vec<Line<'static>>, view: &ReposView, form: &AddPerson
     ]));
     if let Some(err) = &form.error {
         lines.push(Line::from(""));
-        for part in super::status::wrap_text(
-            err,
-            super::status::content_width().saturating_sub(6).max(20),
-        ) {
-            lines.push(Line::from(Span::styled(
-                format!("    {part}"),
-                Style::default().fg(COLOR_ORANGE),
-            )));
-        }
+        push_status(lines, err);
     }
     hints(lines, "Tab next field   ↑/↓ choose   ⏎ grant   Esc cancel");
 }
@@ -746,15 +846,7 @@ fn render_new(lines: &mut Vec<Line<'static>>, view: &ReposView, form: &NewRepoFo
     )));
     if let Some(err) = &form.error {
         lines.push(Line::from(""));
-        for part in super::status::wrap_text(
-            err,
-            super::status::content_width().saturating_sub(6).max(20),
-        ) {
-            lines.push(Line::from(Span::styled(
-                format!("    {part}"),
-                Style::default().fg(COLOR_ORANGE),
-            )));
-        }
+        push_status(lines, err);
     }
     hints(lines, "Tab next field   ←/→ choose   ⏎ create   Esc cancel");
 }
@@ -764,7 +856,9 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use crate::state_handler::main_page::repos::{ReposState, SigningHealth};
+    use crate::state_handler::main_page::repos::{
+        InstallFound, ReposState, SigningChecked, SigningHealth,
+    };
     use openvtc_core::config::account::PersonaId;
     use serde_json::json;
     use std::sync::Arc;
@@ -833,15 +927,102 @@ mod tests {
     fn an_outdated_hook_says_to_rerun_init() {
         let mut v = loaded();
         v.signing = SigningHealth {
-            key_id: Some(format!("{BOB}#key-0")),
-            hook: HookHealth::Outdated {
-                installed: 1,
-                current: 2,
-            },
+            checked: Some(SigningChecked {
+                installs: vec![InstallFound {
+                    scope: "repository",
+                    path: "/repo/.did-git-sign.json".into(),
+                    key_id: format!("{BOB}#key-0"),
+                    this_persona: true,
+                }],
+                looked: Vec::new(),
+                hooks: vec![
+                    HookCheck {
+                        scope: HookScope::Here,
+                        path: Some("/repo/.git/did-git-sign-hooks/commit-msg".into()),
+                        health: HookHealth::Current { version: 2 },
+                    },
+                    HookCheck {
+                        scope: HookScope::Global,
+                        path: Some("/home/me/.config/did-git-sign/hooks/commit-msg".into()),
+                        health: HookHealth::Outdated {
+                            installed: 1,
+                            current: 2,
+                        },
+                    },
+                ],
+            }),
         };
         let out = rendered(v);
         assert!(out.contains("OUTDATED"), "{out}");
         assert!(out.contains("did-git-sign init"), "{out}");
+        // Both scopes, each with the file looked at; the worst first.
+        let global = out.find("global: commit-msg hook OUTDATED").unwrap();
+        let here = out.find("here: commit-msg hook v2 OK").unwrap();
+        assert!(global < here, "{out}");
+        assert!(
+            out.contains("/home/me/.config/did-git-sign/hooks/commit-msg"),
+            "{out}"
+        );
+        assert!(
+            out.contains("/repo/.git/did-git-sign-hooks/commit-msg"),
+            "{out}"
+        );
+        // A repository-only install is set up, not "not set up".
+        assert!(
+            out.contains("set up for this persona (repository config"),
+            "{out}"
+        );
+        assert!(!out.contains("not set up"), "{out}");
+    }
+
+    /// Everything the VTC supplies is cleaned before it is drawn: a DID or
+    /// a reason carrying a bidi override or a zero-width character cannot
+    /// reorder or hide what the member reads.
+    #[test]
+    fn peer_text_is_sanitised_before_it_is_drawn() {
+        let evil = "did:webvh:Qm\u{202E}evil\u{200B}:x.example";
+        let mut v = loaded();
+        let mut data = (**v.data.as_ref().unwrap()).clone();
+        data.rights.push(
+            serde_json::from_value(json!({
+                "subject": evil, "right": "git.commit.sign",
+                "resource": "github.com/acme/gadgets",
+                "grantedBy": BOB, "grantedAt": "2026-09-01T00:00:00Z",
+                "reason": "fine\u{202E}enif\u{200D} \u{1b}[31mred"
+            }))
+            .unwrap(),
+        );
+        v.data = Some(Arc::new(data));
+        v.screen = ReposScreen::Repo {
+            resource: "github.com/acme/gadgets".into(),
+        };
+        v.selected = 1;
+        let out = rendered(v);
+        for bad in ['\u{202E}', '\u{200B}', '\u{200D}', '\u{1b}'] {
+            assert!(!out.contains(bad), "{bad:?} reached the screen: {out}");
+        }
+        assert!(out.contains("reason: fineenif"), "{out}");
+    }
+
+    /// The colour of a status line comes from its severity.
+    #[test]
+    fn a_refusal_is_drawn_in_the_error_colour() {
+        let mut v = loaded();
+        v.note(Severity::Error, "The community refused.");
+        let state = ContentPanelState {
+            repos: ReposState {
+                view: Some(v),
+                linked: Vec::new(),
+            },
+            ..Default::default()
+        };
+        let lines = ReposPanel.render(&state, &ConnectionState::default());
+        let span = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains("The community refused."))
+            .unwrap();
+        assert_eq!(span.style.fg, Some(COLOR_WARNING_ACCESSIBLE_RED));
     }
 
     #[test]

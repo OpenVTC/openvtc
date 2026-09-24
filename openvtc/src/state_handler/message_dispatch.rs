@@ -131,7 +131,7 @@ pub struct InboundEffects {
     pub capability_replies: Vec<(String, openvtc_core::capabilities::CapabilityReply)>,
     /// `git-ns/*` replies for the Repos panel, keyed by the request id they
     /// thread on.
-    pub git_ns_replies: Vec<(String, openvtc_core::git_ns::Reply)>,
+    pub git_ns_replies: Vec<crate::state_handler::repos_actions::InboundReply>,
     /// Personhood challenges the community answered with. Display state with a
     /// ten-minute life — never persisted.
     pub personhood_challenges: Vec<openvtc_core::personhood::ChallengeReply>,
@@ -280,7 +280,14 @@ pub async fn process_inbound_message(
         && let Some((_, doc)) = openvtc_core::capabilities::parse_envelope_document(&message.body)
         && let Some((thid, reply)) = openvtc_core::git_ns::parse_reply(&doc)
     {
-        git_ns_replies.push((thid, reply));
+        // The sender and the document's issuer travel with the answer: the
+        // Repos view takes one only from the community it asked.
+        git_ns_replies.push(crate::state_handler::repos_actions::InboundReply {
+            from: from_did.to_string(),
+            issuer: doc.issuer.clone(),
+            thid,
+            reply,
+        });
         if !is_trust_task_error_type(&message.typ) {
             return Ok(false);
         }
