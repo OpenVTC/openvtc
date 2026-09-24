@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **A Repos panel for a community's git repositories.** `r` on an Active
+  community opens it. It speaks the `git-ns/*` Trust Task family (the member
+  side of VTC Git Namespaces; the VTC side is VTI #1694): *My repos* with your
+  strongest right on each and its status (`ok`, `drift`, `creating n/6`, …); a
+  new-repository form, offered only where you hold `repo.create`, that says when
+  the namespace is manual and shows the steps the community answers with; and a
+  repository view listing its people and rights, where `a` adds a person (from
+  the people you can see, or a pasted DID for an outside contributor if the
+  community's policy allows — a `policyDenied` is shown in the form), `x`
+  revokes, `t` transfers your ownership and `A` archives. Owner grants,
+  transfers, archives and every removal are armed and sent only on `y`. Every
+  document is signed by the persona. A forge-account row links a GitHub account
+  (device code and URL) or a Forgejo one (URL and QR), polling `link-status`
+  every five seconds, and a signing row shows whether did-git-sign is set up for
+  the persona and whether its commit-msg hook is current — an outdated hook says
+  to re-run `did-git-sign init`. Refusals name what to do about them.
+
 - **A vetting application can be abandoned.** `x` on the Applications tab arms a
   confirmation; `Enter` drops it. There was no way to remove one at all, and an
   application's persona is fixed for its whole life — so one started as the

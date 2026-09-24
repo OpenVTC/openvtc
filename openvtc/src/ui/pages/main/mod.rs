@@ -328,6 +328,12 @@ impl Component for MainPage {
             // A pasted did:key lands in the grant form's focused text field. The
             // deletion confirmation takes no paste: typing it is the point.
             MainMenu::Communities => {
+                if let Some(view) = self.props.main_page.content_panel.repos.view.as_ref() {
+                    if let Some(action) = repos_paste(view, trimmed) {
+                        let _ = self.action_tx.send(Action::Repos(action));
+                    }
+                    return;
+                }
                 if let Some(form) = self
                     .props
                     .main_page
@@ -350,6 +356,164 @@ impl Component for MainPage {
             _ => {}
         }
     }
+}
+
+/// The Repos view's key map. `None` when the key means nothing here.
+///
+/// Innermost first: an armed change takes only `y`/`⏎` (anything else
+/// disarms it), then an open form, then the screen.
+fn repos_key(
+    key: KeyEvent,
+    view: &crate::state_handler::main_page::repos::ReposView,
+) -> Option<crate::state_handler::actions::ReposAction> {
+    use crate::state_handler::actions::ReposAction as R;
+    use crate::state_handler::main_page::repos::{
+        AddPersonForm, EXPIRY_CHOICES, LinkPhase, NewRepoForm, ReposScreen,
+    };
+    use openvtc_core::git_ns::GitRight;
+
+    // Only `y` confirms: Enter is what submitted the form that armed the
+    // change, and a key held a moment too long must not also confirm it.
+    if view.confirm.is_some() {
+        return Some(match key.code {
+            KeyCode::Char('y') => R::Confirm,
+            _ => R::Cancel,
+        });
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if let Some(form) = &view.add {
+        let n = AddPersonForm::FIELDS;
+        return match (form.field, key.code) {
+            (_, KeyCode::Esc) => Some(R::Back),
+            (_, KeyCode::Enter) => Some(R::AddSubmit),
+            (_, KeyCode::Tab) => Some(R::AddField((form.field + 1) % n)),
+            (_, KeyCode::BackTab) => Some(R::AddField((form.field + n - 1) % n)),
+            (0, KeyCode::Char('d')) if ctrl => Some(R::AddToggleExternal),
+            (0, KeyCode::Up) if !form.external => Some(R::AddPick(form.pick.saturating_sub(1))),
+            (0, KeyCode::Down) if !form.external => Some(R::AddPick(form.pick + 1)),
+            (1, KeyCode::Up | KeyCode::Left) => Some(R::AddRight(form.right.saturating_sub(1))),
+            (1, KeyCode::Down | KeyCode::Right) => Some(R::AddRight(
+                (form.right + 1).min(GitRight::REPO_RIGHTS.len() - 1),
+            )),
+            (2, KeyCode::Left) => Some(R::AddExpiry(form.expiry.saturating_sub(1))),
+            (2, KeyCode::Right) => Some(R::AddExpiry(
+                (form.expiry + 1).min(EXPIRY_CHOICES.len() - 1),
+            )),
+            (f @ (0 | 3), KeyCode::Backspace) => {
+                let mut value = if f == 0 {
+                    form.query.clone()
+                } else {
+                    form.reason.clone()
+                };
+                value.pop();
+                Some(R::AddInput { field: f, value })
+            }
+            (f @ (0 | 3), KeyCode::Char(c)) if !ctrl => {
+                let current = if f == 0 { &form.query } else { &form.reason };
+                Some(R::AddInput {
+                    field: f,
+                    value: format!("{current}{c}"),
+                })
+            }
+            _ => None,
+        };
+    }
+    if let ReposScreen::NewRepo(form) = &view.screen {
+        let n = NewRepoForm::FIELDS;
+        return match (form.field, key.code) {
+            (_, KeyCode::Esc) => Some(R::Back),
+            (_, KeyCode::Enter) => Some(R::NewSubmit),
+            (_, KeyCode::Tab) => Some(R::NewField((form.field + 1) % n)),
+            (_, KeyCode::BackTab) => Some(R::NewField((form.field + n - 1) % n)),
+            (0, KeyCode::Left | KeyCode::Up) => {
+                Some(R::NewNamespace(form.namespace.saturating_sub(1)))
+            }
+            (0, KeyCode::Right | KeyCode::Down) => Some(R::NewNamespace(form.namespace + 1)),
+            (2, KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')) => Some(R::NewVisibility),
+            (f @ (1 | 3), KeyCode::Backspace) => {
+                let mut value = if f == 1 {
+                    form.name.clone()
+                } else {
+                    form.description.clone()
+                };
+                value.pop();
+                Some(R::NewInput { field: f, value })
+            }
+            (f @ (1 | 3), KeyCode::Char(c)) if !ctrl => {
+                let current = if f == 1 {
+                    &form.name
+                } else {
+                    &form.description
+                };
+                Some(R::NewInput {
+                    field: f,
+                    value: format!("{current}{c}"),
+                })
+            }
+            _ => None,
+        };
+    }
+    let link_settled = view.link.as_ref().is_some_and(|l| {
+        matches!(
+            l.phase,
+            LinkPhase::Linked { .. } | LinkPhase::Expired | LinkPhase::Failed(_)
+        )
+    });
+    let on_repo = matches!(view.screen, ReposScreen::Repo { .. });
+    match key.code {
+        KeyCode::Esc => Some(R::Back),
+        KeyCode::Up => Some(R::Select(view.selected.saturating_sub(1))),
+        KeyCode::Down => Some(R::Select(view.selected + 1)),
+        KeyCode::Char('r') => Some(R::Refresh),
+        KeyCode::Char('l') => Some(R::LinkStart),
+        KeyCode::Char('d') if link_settled => Some(R::LinkDismiss),
+        KeyCode::Enter if !on_repo => Some(R::OpenRepo),
+        KeyCode::Char('n') if !on_repo => Some(R::NewStart),
+        KeyCode::Char('a') if on_repo => Some(R::AddStart),
+        KeyCode::Char('x') | KeyCode::Delete if on_repo => Some(R::RevokeArm),
+        KeyCode::Char('t') if on_repo => Some(R::TransferArm),
+        KeyCode::Char('A') if on_repo => Some(R::ArchiveArm),
+        _ => None,
+    }
+}
+
+/// Paste into the Repos view's focused text field, if one is open.
+fn repos_paste(
+    view: &crate::state_handler::main_page::repos::ReposView,
+    text: &str,
+) -> Option<crate::state_handler::actions::ReposAction> {
+    use crate::state_handler::actions::ReposAction as R;
+    use crate::state_handler::main_page::repos::ReposScreen;
+    if view.confirm.is_some() {
+        return None;
+    }
+    if let Some(form) = &view.add {
+        return match form.field {
+            0 => Some(R::AddInput {
+                field: 0,
+                value: format!("{}{text}", form.query),
+            }),
+            3 => Some(R::AddInput {
+                field: 3,
+                value: format!("{}{text}", form.reason),
+            }),
+            _ => None,
+        };
+    }
+    if let ReposScreen::NewRepo(form) = &view.screen {
+        return match form.field {
+            1 => Some(R::NewInput {
+                field: 1,
+                value: format!("{}{text}", form.name),
+            }),
+            3 => Some(R::NewInput {
+                field: 3,
+                value: format!("{}{text}", form.description),
+            }),
+            _ => None,
+        };
+    }
+    None
 }
 
 /// The grant form's focused text field: the DID, or the device's name.
@@ -965,6 +1129,15 @@ impl MainPage {
         if let Some(view) = self.props.main_page.content_panel.capabilities.view.clone() {
             return self.handle_capabilities_key(key, &view);
         }
+        // Repos view open: the same.
+        if let Some(view) = self.props.main_page.content_panel.repos.view.clone() {
+            let action = repos_key(key, &view);
+            let handled = action.is_some();
+            if let Some(action) = action {
+                let _ = self.action_tx.send(Action::Repos(action));
+            }
+            return handled;
+        }
         // Deleting a context, or device access, owns the keys while open.
         if let Some(view) = self
             .props
@@ -1080,6 +1253,13 @@ impl MainPage {
             KeyCode::Char('c') if sel_active => {
                 // Open the community's capabilities view (governance/capability/*).
                 let _ = self.action_tx.send(Action::CapabilitiesOpen(selected));
+                true
+            }
+            KeyCode::Char('r') if sel_active => {
+                // Open the community's Repos view (git-ns/*).
+                let _ = self.action_tx.send(Action::Repos(
+                    crate::state_handler::actions::ReposAction::Open(selected),
+                ));
                 true
             }
             // Cancel is pending-only: a Pending join can be withdrawn (arming on
@@ -4071,6 +4251,144 @@ mod key_handler_tests {
             Ok(Action::AcknowledgeCommunity(1)) => {}
             _ => panic!("expected AcknowledgeCommunity(1)"),
         }
+    }
+
+    /// `r` on an Active community opens its Repos view; on a Pending one it
+    /// does nothing (there is no community to govern repositories yet).
+    #[test]
+    fn communities_r_opens_repos_for_active_rows_only() {
+        use crate::state_handler::actions::ReposAction as R;
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            s.main_page.content_panel.communities.items =
+                vec![community_summary_with("a", true, false, false)].into();
+        });
+        page.handle_key_event(press(KeyCode::Char('r')));
+        assert!(matches!(rx.try_recv(), Ok(Action::Repos(R::Open(0)))));
+
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            s.main_page.content_panel.communities.items =
+                vec![community_summary_with("a", false, false, true)].into();
+        });
+        page.handle_key_event(press(KeyCode::Char('r')));
+        assert!(rx.try_recv().is_err());
+    }
+
+    fn repos_view() -> crate::state_handler::main_page::repos::ReposView {
+        crate::state_handler::main_page::repos::ReposView::new(
+            "did:webvh:vtc".into(),
+            openvtc_core::config::account::PersonaId(uuid::Uuid::nil()),
+            "did:webvh:me".into(),
+            "Acme".into(),
+        )
+    }
+
+    /// The Repos view owns the keys while open: its screen keys, an armed
+    /// change's y/any, and the add form's fields.
+    #[test]
+    fn the_repos_view_maps_its_keys() {
+        use crate::state_handler::actions::ReposAction as R;
+        use crate::state_handler::main_page::repos::{AddPersonForm, ArmedChange, ReposScreen};
+
+        let list = repos_view();
+        assert_eq!(
+            repos_key(press(KeyCode::Char('n')), &list),
+            Some(R::NewStart)
+        );
+        assert_eq!(repos_key(press(KeyCode::Enter), &list), Some(R::OpenRepo));
+        assert_eq!(
+            repos_key(press(KeyCode::Char('l')), &list),
+            Some(R::LinkStart)
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Char('a')), &list),
+            None,
+            "add is per repo"
+        );
+
+        let mut repo = repos_view();
+        repo.screen = ReposScreen::Repo {
+            resource: "github.com/acme/widgets".into(),
+        };
+        assert_eq!(
+            repos_key(press(KeyCode::Char('a')), &repo),
+            Some(R::AddStart)
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Char('x')), &repo),
+            Some(R::RevokeArm)
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Char('t')), &repo),
+            Some(R::TransferArm)
+        );
+        assert_eq!(
+            repos_key(
+                KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+                &repo
+            ),
+            Some(R::ArchiveArm)
+        );
+
+        let mut armed = repo.clone();
+        armed.confirm = Some(ArmedChange {
+            request: openvtc_core::git_ns::Request::Archive {
+                resource: "github.com/acme/widgets".into(),
+            },
+            summary: String::new(),
+        });
+        assert_eq!(
+            repos_key(press(KeyCode::Char('y')), &armed),
+            Some(R::Confirm)
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Enter), &armed),
+            Some(R::Cancel),
+            "Enter does not confirm"
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Char('x')), &armed),
+            Some(R::Cancel)
+        );
+
+        let mut adding = repo;
+        adding.add = Some(AddPersonForm::new("github.com/acme/widgets".into()));
+        assert_eq!(
+            repos_key(press(KeyCode::Char('k')), &adding),
+            Some(R::AddInput {
+                field: 0,
+                value: "k".into()
+            })
+        );
+        assert_eq!(
+            repos_key(ctrl(KeyCode::Char('d')), &adding),
+            Some(R::AddToggleExternal)
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Tab), &adding),
+            Some(R::AddField(1))
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Enter), &adding),
+            Some(R::AddSubmit)
+        );
+    }
+
+    /// A pasted DID lands in the add form's person field.
+    #[test]
+    fn a_paste_fills_the_repos_form() {
+        use crate::state_handler::actions::ReposAction as R;
+        use crate::state_handler::main_page::repos::AddPersonForm;
+        let mut v = repos_view();
+        let mut form = AddPersonForm::new("github.com/acme/widgets".into());
+        form.external = true;
+        v.add = Some(form);
+        assert_eq!(
+            repos_paste(&v, "did:webvh:dan"),
+            Some(R::AddInput {
+                field: 0,
+                value: "did:webvh:dan".into()
+            })
+        );
     }
 
     #[test]

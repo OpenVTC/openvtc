@@ -241,6 +241,8 @@ mod create_persona;
 mod credential_actions;
 mod persona_actions;
 mod persona_binding_refresh;
+mod repos_actions;
+mod signing_health;
 /// The DIDComm transport module, which now lives in `openvtc-core`.
 ///
 /// Re-exported under its former path so every `didcomm::…` / `super::didcomm::…`
@@ -1280,6 +1282,7 @@ impl StateHandler {
                             let message_dispatch::InboundEffects {
                                 inactivated,
                                 capability_replies,
+                                git_ns_replies,
                                 personhood_challenges,
                                 vetting_answers,
                                 vetting_grant_checks,
@@ -1381,6 +1384,21 @@ impl StateHandler {
                                 }
                             }
                             apply_capability_replies(&mut state, capability_replies);
+                            // git-ns answers for the Repos panel; a change that
+                            // landed is followed by a fresh read of the view.
+                            if !git_ns_replies.is_empty()
+                                && repos_actions::apply_replies(&mut state, &config, git_ns_replies)
+                            {
+                                repos_actions::Loop {
+                                    state: &mut state,
+                                    config: &config,
+                                    tdk: &tdk,
+                                    dispatch_tx: &dispatch_tx,
+                                    in_flight: &mut in_flight,
+                                }
+                                .refresh(true)
+                                .await;
+                            }
                             // A vetter's grant is checked for revocation off the
                             // loop: the check fetches the community's status list.
                             for check in vetting_grant_checks {
@@ -1673,6 +1691,16 @@ impl StateHandler {
                 // that lands while a save runs is re-scheduled on completion.
                 // When nothing is scheduled the arm parks forever (no busy-wait).
                 _ = capabilities_sweep.tick() => {
+                    // The Repos panel: reply windows, and polling a forge-account
+                    // link no faster than the spec's five seconds.
+                    repos_actions::tick(&mut repos_actions::Loop {
+                        state: &mut state,
+                        config: &config,
+                        tdk: &tdk,
+                        dispatch_tx: &dispatch_tx,
+                        in_flight: &mut in_flight,
+                    })
+                    .await;
                     // Questions to communities have a reply window too (R1.2).
                     vetting_actions::expire_queries(&mut state, &mut config, chrono::Utc::now());
                     if awaiting_requirements
@@ -2692,7 +2720,7 @@ impl StateHandler {
                     // messaging runtime that comes with it. Inert, but not
                     // silent — a dead key is indistinguishable from a broken one.
                     Action::Inbox(..) | Action::Relationship(..) | Action::Credential(..) |
-                    Action::IssueMemberVmc(..) | Action::CapabilitiesOpen(..) |
+                    Action::IssueMemberVmc(..) | Action::CapabilitiesOpen(..) | Action::Repos(..) |
                     Action::RequestPersonhoodChallenge(..) | Action::AssertPersonhood |
                     Action::CapabilitiesRefresh | Action::CapabilitiesToggleCommit |
                     Action::SetActiveCommunity(..) | Action::ToggleFavourite(..) |
@@ -3892,6 +3920,9 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
         }
         Action::CommunityContext(action) => {
             return community_context_actions::reduce(state, action);
+        }
+        Action::Repos(action) => {
+            return repos_actions::reduce(state, action);
         }
         Action::AgentNameManagerInput(key) => {
             use tui_input::backend::crossterm::EventHandler;

@@ -31,6 +31,7 @@ pub mod diagnostics;
 pub mod didcomm;
 pub mod display;
 pub mod errors;
+pub mod git_ns;
 pub mod health;
 pub mod identity;
 pub mod join;

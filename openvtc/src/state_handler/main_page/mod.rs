@@ -32,6 +32,7 @@ use crate::state_handler::main_page::{
 
 pub mod content;
 pub mod menu;
+pub mod repos;
 
 /// Maximum number of activity log entries to keep in the UI.
 const MAX_ACTIVITY_LOG_ENTRIES: usize = 100;
@@ -1230,55 +1231,18 @@ fn format_validity_from_dates(
     )
 }
 
-/// Returns true for unicode codepoints that can spoof or mangle TUI
-/// display when rendered: bidirectional overrides, isolates, zero-width
-/// spaces/joiners, BOM. These are silently stripped by [`sanitize_display`].
-fn is_dangerous_format_char(c: char) -> bool {
-    matches!(
-        c as u32,
-        // Bidi marks, embeddings, overrides
-        0x200E | 0x200F |               // LRM, RLM
-        0x202A..=0x202E |               // LRE, RLE, PDF, LRO, RLO
-        0x2066..=0x2069 |               // LRI, RLI, FSI, PDI
-        // Zero-width space / joiner / non-joiner
-        0x200B..=0x200D |
-        0xFEFF                          // BOM / zero-width non-breaking space
-    )
-}
-
 /// Sanitize a string from an untrusted source for safe terminal display
 /// and persistence (e.g. contact aliases captured from inbound messages).
 ///
-/// Strips, in order:
-///   1. ANSI CSI escape sequences (ESC `[` … letter pattern)
-///   2. Other ASCII control characters, keeping space
-///   3. Bidi-override / zero-width / BOM characters that allow visual
-///      spoofing (e.g. RLO-flipping a contact alias to display text the
-///      operator didn't approve).
-///
-/// Truncates to `max_len` *characters* (not bytes).
+/// Strips ANSI escape sequences, other control characters (keeping space),
+/// and bidi-override / zero-width / BOM characters that allow visual
+/// spoofing, then truncates to `max_len` *characters*. The implementation
+/// is [`openvtc_core::display::sanitize_display`], shared with core so text
+/// core composes from a peer's words (a refusal's message) is cleaned the
+/// same way.
 #[must_use]
 pub fn sanitize_display(input: &str, max_len: usize) -> String {
-    let mut stripped = String::with_capacity(input.len());
-    let mut in_escape = false;
-    for c in input.chars() {
-        if c == '\x1b' {
-            in_escape = true;
-            continue;
-        }
-        if in_escape {
-            if c.is_ascii_alphabetic() {
-                in_escape = false;
-            }
-            continue;
-        }
-        stripped.push(c);
-    }
-    stripped
-        .chars()
-        .filter(|c| (!c.is_control() || *c == ' ') && !is_dangerous_format_char(*c))
-        .take(max_len)
-        .collect()
+    openvtc_core::display::sanitize_display(input, max_len)
 }
 
 /// Detect a did-git-sign install for the given persona DID by reading its
@@ -1291,7 +1255,7 @@ pub fn sanitize_display(input: &str, max_len: usize) -> String {
 /// the help screen reflects what `did-git-sign` itself would actually use
 /// — i.e. if the config was hand-edited, the help view stays consistent
 /// with the install.
-fn detect_did_git_sign_info(persona_did: &str) -> Option<DidGitSignInfo> {
+pub(crate) fn detect_did_git_sign_info(persona_did: &str) -> Option<DidGitSignInfo> {
     let config_path = did_git_sign::config::SigningConfig::default_global_path().ok()?;
     let cfg = did_git_sign::config::SigningConfig::load(&config_path).ok()?;
 
