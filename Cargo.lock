@@ -2805,9 +2805,9 @@ dependencies = [
 
 [[package]]
 name = "did-git-sign"
-version = "0.4.13"
+version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2aeb505530c4011d401f279ce514641ce675aab90d358648e87afe6b9dbb6971"
+checksum = "d7437bcafb66d32c3a64f9a08b71149027ebc21eac7cbc44606515fda8a4d34a"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -9677,9 +9677,9 @@ dependencies = [
 
 [[package]]
 name = "vgi-core"
-version = "0.4.13"
+version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4d740998635f9d763dc187d1aa30ce7bc2f081a49dff1716ffe7d5c9bc872e6"
+checksum = "e41ecb6d849718ca98262ba4a3b27ab6b13f5286240f6a945cf2c8002cd44bb3"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

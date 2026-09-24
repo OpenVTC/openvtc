@@ -325,7 +325,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # `persona/binding/set` with an optional `personaDid` — wearing a face in a
 # community as the persona already used there, without naming it (VTI #1654,
 # spec §9.7). A line below it has the field as required.
-trust-tasks-rs = "0.22.2"
+#
+# **0.22.3, with `git-ns`**, for the Repos panel: 0.22.3 is the release that
+# generates the `git-ns/*` wire types (`openvtc-core::git_ns`) from
+# `specs/git-ns/**`, and the feature is not default. A patch move on the line
+# `vta-sdk` 0.51 is already on, so nothing else follows it.
+trust-tasks-rs = { version = "0.22.3", features = ["git-ns"] }
 trust-tasks-capability-client = "0.22.3"
 tui-input = "0.15"
 url = "2.5"
