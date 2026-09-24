@@ -129,6 +129,9 @@ pub struct InboundEffects {
     pub inactivated: Vec<(VtcDid, openvtc_core::config::account::PersonaId)>,
     /// Capability replies, keyed by the request id they thread on.
     pub capability_replies: Vec<(String, openvtc_core::capabilities::CapabilityReply)>,
+    /// `git-ns/*` replies for the Repos panel, keyed by the request id they
+    /// thread on.
+    pub git_ns_replies: Vec<(String, openvtc_core::git_ns::Reply)>,
     /// Personhood challenges the community answered with. Display state with a
     /// ten-minute life — never persisted.
     pub personhood_challenges: Vec<openvtc_core::personhood::ChallengeReply>,
@@ -157,6 +160,7 @@ pub async fn process_inbound_message(
     let InboundEffects {
         inactivated,
         capability_replies,
+        git_ns_replies,
         personhood_challenges,
         vetting_answers,
         vetting_grant_checks,
@@ -262,6 +266,21 @@ pub async fn process_inbound_message(
         && let Some(reply) = openvtc_core::capabilities::parse_capability_reply(&doc, &thid)
     {
         capability_replies.push((thid, reply));
+        if !is_trust_task_error_type(&message.typ) {
+            return Ok(false);
+        }
+    }
+
+    // Git namespace replies (git-ns/*), in either carriage, for the Repos
+    // panel — keyed by the document's `threadId` and correlated there against
+    // the one request the panel has outstanding; anything else is dropped.
+    // A `trust-task-error` is offered here as well and falls through, for the
+    // same reason as above.
+    if openvtc_core::git_ns::is_reply_type(&message.typ)
+        && let Some((_, doc)) = openvtc_core::capabilities::parse_envelope_document(&message.body)
+        && let Some((thid, reply)) = openvtc_core::git_ns::parse_reply(&doc)
+    {
+        git_ns_replies.push((thid, reply));
         if !is_trust_task_error_type(&message.typ) {
             return Ok(false);
         }

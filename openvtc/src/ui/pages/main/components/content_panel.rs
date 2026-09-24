@@ -75,6 +75,8 @@ impl ContentPanelState {
             MainMenu::Communities => {
                 if self.capabilities.view.is_some() {
                     Some(Box::new(super::capabilities_panel::CapabilitiesPanel))
+                } else if self.repos.view.is_some() {
+                    Some(Box::new(super::repos_panel::ReposPanel))
                 } else {
                     Some(Box::new(CommunitiesPanel))
                 }

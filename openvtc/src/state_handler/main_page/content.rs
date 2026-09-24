@@ -76,6 +76,8 @@ pub struct ContentPanelState {
     pub communities: CommunitiesState,
     /// Per-community capabilities view (opened from Communities with `c`).
     pub capabilities: CapabilitiesState,
+    /// Per-community git repositories view (opened from Communities with `r`).
+    pub repos: super::repos::ReposState,
     /// The holder's own identity: personas, pool, profiles, and what each persona
     /// presents where.
     pub identity: IdentityState,

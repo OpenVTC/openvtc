@@ -32,6 +32,7 @@ use crate::state_handler::main_page::{
 
 pub mod content;
 pub mod menu;
+pub mod repos;
 
 /// Maximum number of activity log entries to keep in the UI.
 const MAX_ACTIVITY_LOG_ENTRIES: usize = 100;
@@ -1291,7 +1292,7 @@ pub fn sanitize_display(input: &str, max_len: usize) -> String {
 /// the help screen reflects what `did-git-sign` itself would actually use
 /// — i.e. if the config was hand-edited, the help view stays consistent
 /// with the install.
-fn detect_did_git_sign_info(persona_did: &str) -> Option<DidGitSignInfo> {
+pub(crate) fn detect_did_git_sign_info(persona_did: &str) -> Option<DidGitSignInfo> {
     let config_path = did_git_sign::config::SigningConfig::default_global_path().ok()?;
     let cfg = did_git_sign::config::SigningConfig::load(&config_path).ok()?;
 

@@ -433,6 +433,75 @@ pub enum CommunityContextAction {
     RevokeConfirm,
 }
 
+/// The per-community Repos panel (git namespaces), opened from Communities
+/// with `r`.
+///
+/// `Open`, `Refresh`, `Submit*`, `Confirm` and `Link*` read the config and
+/// send a `git-ns/*` task, so the runtime loop services them; the rest move the
+/// open view's state only and are handled by the shared nav reducer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReposAction {
+    /// Open the panel for the Active community at this display index and read
+    /// what it governs (`git-ns/view`).
+    Open(usize),
+    /// Read the view again.
+    Refresh,
+    /// Close the current screen: a form, a repository, then the panel.
+    Back,
+    /// Move the highlight (repositories on the list, people on a repository).
+    Select(usize),
+    /// Open the highlighted repository.
+    OpenRepo,
+    // ── New repository ───────────────────────────────────────────────────
+    /// Open the new-repository form.
+    NewStart,
+    /// Focus a form field (0 namespace, 1 name, 2 visibility, 3 description).
+    NewField(usize),
+    /// Replace a text field's value.
+    NewInput { field: usize, value: String },
+    /// Choose the namespace, by index into the ones the member may create in.
+    NewNamespace(usize),
+    /// Flip visibility.
+    NewVisibility,
+    /// Send `git-ns/repo/create`.
+    NewSubmit,
+    // ── Add a person ─────────────────────────────────────────────────────
+    /// Open the add-person form on the open repository.
+    AddStart,
+    /// Focus a form field (0 person, 1 right, 2 expiry, 3 reason).
+    AddField(usize),
+    /// Replace the person query / pasted DID, or the reason.
+    AddInput { field: usize, value: String },
+    /// Switch between picking a known person and pasting a DID.
+    AddToggleExternal,
+    /// Highlight a picker candidate.
+    AddPick(usize),
+    /// Choose the right, by index into the repository rights.
+    AddRight(usize),
+    /// Choose the expiry, by index into the offered expiries.
+    AddExpiry(usize),
+    /// Grant: sends at once for a `normal` right, arms the confirmation for an
+    /// elevated one.
+    AddSubmit,
+    // ── Revoke / transfer / archive ─────────────────────────────────────
+    /// Arm revocation of the highlighted person's right.
+    RevokeArm,
+    /// Arm transfer of the member's ownership to the highlighted person.
+    TransferArm,
+    /// Arm archiving the open repository.
+    ArchiveArm,
+    /// Send the armed change.
+    Confirm,
+    /// Disarm it.
+    Cancel,
+    // ── Forge account ────────────────────────────────────────────────────
+    /// Begin linking an account on the first forge a bridge serves
+    /// (`git-ns/account/link`).
+    LinkStart,
+    /// Stop showing the link attempt.
+    LinkDismiss,
+}
+
 // ============================================================================
 // Top-level Action enum
 // ============================================================================
@@ -467,6 +536,8 @@ pub enum Action {
     Vetting(VettingAction),
     /// Communities panel: a membership's VTA context (deletion, device access).
     CommunityContext(CommunityContextAction),
+    /// Communities panel: a community's git repositories (git namespaces).
+    Repos(ReposAction),
 
     /// Dismiss the startup loading screen (Enter, once loading has completed) and
     /// reveal the main page. Phase-2 connections are already running in the
