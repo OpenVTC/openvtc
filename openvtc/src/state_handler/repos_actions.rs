@@ -9,8 +9,8 @@
 //! is read again — the VTC is the record, so nothing is patched locally.
 //!
 //! Changes above the `normal` consent class (design §6: owner, transfer,
-//! archive) and every removal are armed first and sent only on `y`
-//! ([`ArmedChange`]). The VTC may still refuse an elevated change from a
+//! archive), every removal and every drift resolution are armed first and
+//! sent only on `y` ([`ArmedChange`]). The VTC may still refuse an elevated change from a
 //! member who is not a community administrator — it cannot yet ask a member
 //! to step up (VTI #1694, `[git_ns] elevated_requires_admin`) — and the
 //! refusal says so ([`openvtc_core::git_ns::Refusal::explain`]).
@@ -115,7 +115,7 @@ pub(crate) fn reduce(state: &mut State, action: &Act) -> bool {
         Act::Select(i) => {
             let count = match &view.screen {
                 ReposScreen::List => view.my_repos().len(),
-                ReposScreen::Repo { resource } => view.people(resource).len(),
+                ReposScreen::Repo { resource } => view.repo_rows(resource),
                 ReposScreen::NewRepo(_) => 0,
             };
             view.selected = (*i).min(count.saturating_sub(1));
@@ -233,6 +233,8 @@ pub(crate) fn reduce(state: &mut State, action: &Act) -> bool {
         Act::RevokeArm => arm_revoke(view),
         Act::TransferArm => arm_transfer(view),
         Act::ArchiveArm => arm_archive(view),
+        Act::DriftRevertArm => arm_drift(view, git_ns::DriftAction::Revert),
+        Act::DriftAdoptArm => arm_drift(view, git_ns::DriftAction::Adopt),
         Act::Cancel => view.confirm = None,
         Act::LinkDismiss => view.link = None,
         Act::Back
@@ -366,6 +368,113 @@ fn arm_archive(view: &mut ReposView) {
             resource: resource.clone(),
         },
     });
+}
+
+/// Arm resolving the highlighted drift item — `git-ns/drift/resolve`, which
+/// is an owner's decision: `git.repo.own` there, explicit or implied by
+/// namespace admin. Always armed: either way it changes the forge or the
+/// record, and the VTC gates it as the grant or revocation it amounts to.
+fn arm_drift(view: &mut ReposView, action: git_ns::DriftAction) {
+    let Some((resource, item)) = view.highlighted_drift() else {
+        view.note(
+            Severity::Warning,
+            "Highlight a drift item (↓ past the people), then press v to revert or o to adopt.",
+        );
+        return;
+    };
+    if !view.governs(&resource) {
+        view.note(
+            Severity::Warning,
+            "Resolving drift is an owner's decision: only an owner of this repository or a \
+             namespace admin can revert or adopt it.",
+        );
+        return;
+    }
+    let Some(ns) = view.namespace_of(&resource).cloned() else {
+        view.note(
+            Severity::Warning,
+            "The community's view names no namespace for this repository — r to refresh.",
+        );
+        return;
+    };
+    let short = git_ns::short_resource(&resource).to_string();
+    let (weighs_as, summary) = match action {
+        git_ns::DriftAction::Revert => {
+            if !git_ns::has_bridge(&ns) {
+                view.note(
+                    Severity::Warning,
+                    "This namespace is governed in manual mode: no bridge can undo a forge-side \
+                     change, so it is fixed on the forge by hand.",
+                );
+                return;
+            }
+            (
+                git_ns::revert_weighs_as(&ns, &item),
+                format!(
+                    "Revert {} on {short}? {} to match the community's rights; no right \
+                     changes.",
+                    item.describe(),
+                    capitalise(item.revert_effect())
+                ),
+            )
+        }
+        git_ns::DriftAction::Adopt => {
+            let Some(right) = git_ns::adoptable_right(&ns, &item) else {
+                view.note(
+                    Severity::Warning,
+                    if item.kind == "roleAdded" || item.kind == "roleChanged" {
+                        "No git right corresponds to that forge role, so there is nothing to \
+                         adopt. Revert it (v) instead."
+                    } else {
+                        "Only a role added or raised on the forge can be adopted. Revert this \
+                         one (v) instead."
+                    },
+                );
+                return;
+            };
+            (
+                right,
+                format!(
+                    "Adopt {} on {short}? The member who linked that account is granted {} \
+                     here, as a grant from you would be, and the forge keeps the role.",
+                    item.describe(),
+                    right.label(),
+                ),
+            )
+        }
+    };
+    let request = Request::DriftResolve {
+        resource,
+        action,
+        item,
+        reason: None,
+        weighs_as,
+    };
+    // Said in the confirmation, because the VTC may refuse an elevated change
+    // from a member who is not a community administrator.
+    let class = request.consent_class();
+    let summary = if class.needs_confirmation() {
+        format!(
+            "{summary} This is an {} change: it weighs as {} {}, which only a community \
+             administrator may do until the community can ask a member to step up.",
+            class.label(),
+            match action {
+                git_ns::DriftAction::Adopt => "granting",
+                git_ns::DriftAction::Revert => "revoking",
+            },
+            weighs_as.label()
+        )
+    } else {
+        summary
+    };
+    view.confirm = Some(ArmedChange { summary, request });
+}
+
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
 }
 
 // ****************************************************************************
@@ -721,6 +830,16 @@ fn describe(request: &Request) -> String {
         Request::Archive { resource } => {
             format!("archiving {}", git_ns::short_resource(resource))
         }
+        Request::DriftResolve {
+            resource, action, ..
+        } => format!(
+            "{} drift on {}",
+            match action {
+                git_ns::DriftAction::Adopt => "adopting",
+                git_ns::DriftAction::Revert => "reverting",
+            },
+            git_ns::short_resource(resource)
+        ),
         Request::View { .. } => "reading".into(),
         Request::Link { forge } => format!("linking {forge}"),
         Request::LinkStatus { .. } => "checking the link".into(),
@@ -975,7 +1094,7 @@ fn apply_reply(state: &mut State, config: &Config, thid: &str, reply: Reply) -> 
             view.phase = ReposPhase::Loaded;
             let count = match &view.screen {
                 ReposScreen::List => view.my_repos().len(),
-                ReposScreen::Repo { resource } => view.people(resource).len(),
+                ReposScreen::Repo { resource } => view.repo_rows(resource),
                 ReposScreen::NewRepo(_) => 1,
             };
             view.selected = view.selected.min(count.saturating_sub(1));
@@ -1072,6 +1191,25 @@ fn apply_reply(state: &mut State, config: &Config, thid: &str, reply: Reply) -> 
             );
             view.screen = ReposScreen::List;
             view.selected = 0;
+            true
+        }
+        (Reply::DriftResolved(r), _) => {
+            let left = r.sync.drift.len();
+            let then = if left == 0 {
+                "The bridge inspects the repository again to confirm it (r to refresh).".to_string()
+            } else {
+                format!("{left} drift item(s) still outstanding (r to refresh).")
+            };
+            let text = match &r.right {
+                Some(rec) => format!(
+                    "Adopted: {} now holds {} on {}, published to the Trust Registry. {then}",
+                    view.name_of(&rec.subject),
+                    rec.right,
+                    git_ns::short_resource(&rec.resource)
+                ),
+                None => format!("Reverted: the community's bridge is re-applying it. {then}"),
+            };
+            view.note(Severity::Success, text);
             true
         }
         (Reply::LinkStarted(r), _) => {
@@ -1506,6 +1644,185 @@ mod tests {
             git_ns::ConsentClass::Elevated
         );
         assert!(armed.summary.contains("no unarchive"));
+    }
+
+    // --- drift --------------------------------------------------------------
+
+    /// Bob owns `widgets`, which carries `drift`, in a namespace of `mode`.
+    fn drifted(drift: serde_json::Value, mode: &str) -> State {
+        let mut data = serde_json::to_value(data()).unwrap();
+        data["namespaces"][0]["mode"] = json!(mode);
+        data["repos"][1]["owners"] = json!([ALICE, BOB]);
+        data["repos"][1]["sync"]["drift"] = drift;
+        let mut state = open_state();
+        let v = view_mut(&mut state).unwrap();
+        v.data = Some(Arc::new(serde_json::from_value(data).unwrap()));
+        v.screen = ReposScreen::Repo {
+            resource: "github.com/acme/widgets".into(),
+        };
+        state
+    }
+
+    fn on_first_drift(state: &mut State) {
+        let people = view(state).people("github.com/acme/widgets").len();
+        reduce(state, &Act::Select(people));
+    }
+
+    fn role(observed: &str) -> serde_json::Value {
+        json!([{"type": "roleAdded", "resource": "github.com/acme/widgets",
+                "account": {"forge": "github.com", "id": "5550123", "login": "eve-dev"},
+                "observed": observed}])
+    }
+
+    #[test]
+    fn the_highlight_runs_on_from_the_people_into_the_drift() {
+        let mut state = drifted(role("maintain"), "bridge");
+        on_first_drift(&mut state);
+        let (_, item) = view(&state).highlighted_drift().unwrap();
+        assert_eq!(item.kind, "roleAdded");
+        // Nothing past the last item.
+        reduce(&mut state, &Act::Select(99));
+        assert!(view(&state).highlighted_drift().is_some());
+        // A person highlighted is not a drift item.
+        reduce(&mut state, &Act::Select(0));
+        assert!(view(&state).highlighted_drift().is_none());
+        reduce(&mut state, &Act::DriftRevertArm);
+        assert!(view(&state).confirm.is_none());
+        assert!(
+            view(&state)
+                .status_text()
+                .unwrap()
+                .contains("Highlight a drift item")
+        );
+    }
+
+    #[test]
+    fn only_an_owner_resolves_drift() {
+        // Bob only commits on widgets in the base data.
+        let mut state = open_state();
+        view_mut(&mut state).unwrap().screen = ReposScreen::Repo {
+            resource: "github.com/acme/widgets".into(),
+        };
+        on_first_drift(&mut state);
+        assert!(view(&state).highlighted_drift().is_some());
+        reduce(&mut state, &Act::DriftRevertArm);
+        assert!(view(&state).confirm.is_none());
+        assert!(
+            view(&state)
+                .status_text()
+                .unwrap()
+                .contains("owner's decision")
+        );
+    }
+
+    #[test]
+    fn an_owner_arms_a_revert_of_the_highlighted_drift() {
+        let mut state = drifted(
+            json!([{"type": "requiredCheckMissing", "resource": "github.com/acme/widgets"}]),
+            "bridge",
+        );
+        on_first_drift(&mut state);
+        reduce(&mut state, &Act::DriftRevertArm);
+        let armed = view(&state).confirm.clone().unwrap();
+        assert_eq!(
+            armed.request,
+            Request::DriftResolve {
+                resource: "github.com/acme/widgets".into(),
+                action: git_ns::DriftAction::Revert,
+                item: git_ns::DriftRef {
+                    kind: "requiredCheckMissing".into(),
+                    account: None,
+                    observed: None,
+                    expected: None,
+                },
+                reason: None,
+                weighs_as: GitRight::RepoMaintain,
+            }
+        );
+        assert_eq!(armed.request.consent_class(), git_ns::ConsentClass::Normal);
+        assert!(
+            armed.summary.contains("re-applies the ruleset"),
+            "{}",
+            armed.summary
+        );
+        // A ruleset item cannot be adopted.
+        reduce(&mut state, &Act::Cancel);
+        reduce(&mut state, &Act::DriftAdoptArm);
+        assert!(view(&state).confirm.is_none());
+        assert!(view(&state).status_text().unwrap().contains("Only a role"));
+    }
+
+    #[test]
+    fn taking_an_admin_role_off_is_armed_as_elevated() {
+        let mut state = drifted(role("admin"), "bridge");
+        on_first_drift(&mut state);
+        reduce(&mut state, &Act::DriftRevertArm);
+        let armed = view(&state).confirm.clone().unwrap();
+        assert_eq!(
+            armed.request.consent_class(),
+            git_ns::ConsentClass::Elevated
+        );
+        assert!(
+            armed.summary.contains("community administrator"),
+            "{}",
+            armed.summary
+        );
+        assert!(armed.summary.contains("@eve-dev"));
+    }
+
+    #[test]
+    fn a_forge_role_is_adopted_as_the_right_it_projects() {
+        let mut state = drifted(role("maintain"), "bridge");
+        on_first_drift(&mut state);
+        reduce(&mut state, &Act::DriftAdoptArm);
+        let armed = view(&state).confirm.clone().unwrap();
+        let Request::DriftResolve {
+            action,
+            weighs_as,
+            item,
+            ..
+        } = &armed.request
+        else {
+            panic!("expected a drift resolve, got {:?}", armed.request);
+        };
+        assert_eq!(*action, git_ns::DriftAction::Adopt);
+        assert_eq!(*weighs_as, GitRight::RepoMaintain);
+        assert_eq!(item.observed.as_deref(), Some("maintain"));
+        assert!(armed.summary.contains("maintainer"));
+
+        // `write` projects nothing on an organisation.
+        let mut state = drifted(role("write"), "bridge");
+        on_first_drift(&mut state);
+        reduce(&mut state, &Act::DriftAdoptArm);
+        assert!(view(&state).confirm.is_none());
+        assert!(view(&state).status_text().unwrap().contains("No git right"));
+    }
+
+    #[test]
+    fn a_manual_namespace_has_no_bridge_to_revert_with() {
+        let mut state = drifted(role("maintain"), "manual");
+        on_first_drift(&mut state);
+        reduce(&mut state, &Act::DriftRevertArm);
+        assert!(view(&state).confirm.is_none());
+        assert!(view(&state).status_text().unwrap().contains("manual mode"));
+    }
+
+    #[test]
+    fn a_resolved_drift_says_so_and_reads_again() {
+        let mut state = drifted(role("maintain"), "bridge");
+        pend(&mut state, "t", Purpose::Change("reverting drift".into()));
+        let resolved = serde_json::from_value(
+            json!({"action": "revert", "sync": {"state": "pending", "drift": []}}),
+        )
+        .unwrap();
+        let refresh = apply_replies(
+            &mut state,
+            &config(),
+            vec![from_vtc("t", Reply::DriftResolved(Box::new(resolved)))],
+        );
+        assert!(refresh);
+        let text = view(&state).status_text().unwrap();
+        assert!(text.starts_with("Reverted"), "{text}");
     }
 
     // --- sends --------------------------------------------------------------

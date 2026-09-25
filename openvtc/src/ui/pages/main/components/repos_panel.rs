@@ -542,34 +542,6 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
         }
     }
 
-    if !repo.sync.drift.is_empty() {
-        heading(lines, "Drift from the forge");
-        for d in &repo.sync.drift {
-            let who = d
-                .account
-                .as_ref()
-                .map(|a| format!(" @{}", sanitize_display(&a.login, 100)))
-                .unwrap_or_default();
-            let observed = d
-                .observed
-                .as_ref()
-                .map(|o| format!(" observed {}", sanitize_display(o, 256)))
-                .unwrap_or_default();
-            let expected = d
-                .expected
-                .as_ref()
-                .map(|e| format!(" expected {}", sanitize_display(e, 256)))
-                .unwrap_or_default();
-            lines.push(Line::from(vec![
-                Span::styled("    ▲ ", Style::default().fg(COLOR_ORANGE)),
-                text(format!("{}{who}{observed}{expected}", d.type_)),
-            ]));
-        }
-        lines.push(Line::from(dim(
-            "    A namespace admin adopts or reverts drift from the admin console.",
-        )));
-    }
-
     heading(lines, "People");
     let people = view.people(resource);
     lines.push(Line::from(dim(format!(
@@ -612,11 +584,51 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
         }
     }
 
+    // Drift after the people, so the highlight runs on from the last person
+    // into it (↓), in the order the view reported it.
+    let drift = view.drift(resource);
+    if !drift.is_empty() {
+        heading(lines, "Drift from the forge");
+        for (i, d) in drift.iter().enumerate() {
+            let selected = people.len() + i == view.selected && view.add.is_none();
+            let observed = d
+                .observed
+                .as_ref()
+                .map(|o| format!(" · forge shows {}", sanitize_display(o, 256)))
+                .unwrap_or_default();
+            let expected = d
+                .expected
+                .as_ref()
+                .map(|e| format!(" · rights call for {}", sanitize_display(e, 256)))
+                .unwrap_or_default();
+            lines.push(Line::from(vec![
+                Span::raw(if selected { "    ▸ " } else { "      " }),
+                Span::styled("▲ ", Style::default().fg(COLOR_ORANGE)),
+                Span::styled(
+                    format!("{}{observed}{expected}", d.describe()),
+                    if selected {
+                        Style::default().fg(COLOR_SUCCESS).bold()
+                    } else {
+                        Style::default().fg(COLOR_TEXT_DEFAULT)
+                    },
+                ),
+            ]));
+        }
+        lines.push(Line::from(dim(if view.governs(resource) {
+            "      v reverts the highlighted item (the bridge re-applies the community's rights); \
+             o adopts a forge role as a right."
+        } else {
+            "      An owner of this repository or a namespace admin reverts or adopts drift."
+        })));
+    }
+
     if let Some(form) = &view.add {
         render_add(lines, view, form);
         return;
     }
-    let keys = if view.governs(resource) {
+    let keys = if view.governs(resource) && !drift.is_empty() {
+        "↑/↓ navigate   a add   x revoke   t transfer   A archive   v revert drift   o adopt drift   l link account   r refresh   Esc back"
+    } else if view.governs(resource) {
         "↑/↓ navigate   a add   x revoke   t transfer   A archive   l link account   r refresh   Esc back"
     } else {
         "↑/↓ navigate   x resign your right   l link account   r refresh   Esc back"
@@ -1062,5 +1074,29 @@ mod tests {
         v.screen = ReposScreen::NewRepo(NewRepoForm::default());
         let out = rendered(v);
         assert!(out.contains("No bot can create repositories here"), "{out}");
+    }
+
+    #[test]
+    fn an_owner_sees_drift_as_rows_with_revert_and_adopt() {
+        let mut v = loaded();
+        let mut data = serde_json::to_value(&**v.data.as_ref().unwrap()).unwrap();
+        data["repos"][0]["state"] = json!("active");
+        data["repos"][0]["sync"] = json!({"state": "drift", "drift": [
+            {"type": "protectionWeakened", "resource": "github.com/acme/gadgets",
+             "observed": "force-push allowed"}
+        ]});
+        v.data = Some(Arc::new(serde_json::from_value(data).unwrap()));
+        v.screen = ReposScreen::Repo {
+            resource: "github.com/acme/gadgets".into(),
+        };
+        // Bob is the one person; the drift item is the next row.
+        v.selected = 1;
+        let out = rendered(v);
+        assert!(
+            out.contains("▸ ▲ protection weakened · forge shows force-push allowed"),
+            "{out}"
+        );
+        assert!(out.contains("v revert drift   o adopt drift"), "{out}");
+        assert!(!out.contains("admin console"), "{out}");
     }
 }

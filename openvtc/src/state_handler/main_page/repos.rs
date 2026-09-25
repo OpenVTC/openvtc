@@ -448,6 +448,41 @@ impl ReposView {
             .unwrap_or_default()
     }
 
+    /// The drift outstanding on a repository, as selectors, in the order
+    /// the view reported it.
+    #[must_use]
+    pub fn drift(&self, resource: &str) -> Vec<git_ns::DriftRef> {
+        self.repo(resource)
+            .map(|r| r.sync.drift.iter().map(git_ns::DriftRef::of).collect())
+            .unwrap_or_default()
+    }
+
+    /// The rows a repository screen highlights: its people, then its drift.
+    #[must_use]
+    pub fn repo_rows(&self, resource: &str) -> usize {
+        self.people(resource).len() + self.drift(resource).len()
+    }
+
+    /// The drift item highlighted on the open repository, if the highlight is
+    /// past the people.
+    #[must_use]
+    pub fn highlighted_drift(&self) -> Option<(String, git_ns::DriftRef)> {
+        let ReposScreen::Repo { resource } = &self.screen else {
+            return None;
+        };
+        let index = self.selected.checked_sub(self.people(resource).len())?;
+        let item = self.drift(resource).into_iter().nth(index)?;
+        Some((resource.clone(), item))
+    }
+
+    /// The namespace a repository lives in.
+    #[must_use]
+    pub fn namespace_of(&self, resource: &str) -> Option<&view::GitNamespace> {
+        self.data
+            .as_deref()
+            .and_then(|d| git_ns::namespace_of(d, resource))
+    }
+
     /// The repository record, if the view has it.
     #[must_use]
     pub fn repo(&self, resource: &str) -> Option<&view::RepoSummary> {

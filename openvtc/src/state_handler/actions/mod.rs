@@ -490,6 +490,13 @@ pub enum ReposAction {
     TransferArm,
     /// Arm archiving the open repository.
     ArchiveArm,
+    // ── Drift ────────────────────────────────────────────────────────────
+    /// Arm a revert of the highlighted drift item: the bridge makes the forge
+    /// match the community's rights again (`git-ns/drift/resolve`, revert).
+    DriftRevertArm,
+    /// Arm adopting the highlighted drift item: the forge-side role is
+    /// recorded as a right (`git-ns/drift/resolve`, adopt).
+    DriftAdoptArm,
     /// Send the armed change.
     Confirm,
     /// Disarm it.

@@ -473,6 +473,8 @@ fn repos_key(
         KeyCode::Char('x') | KeyCode::Delete if on_repo => Some(R::RevokeArm),
         KeyCode::Char('t') if on_repo => Some(R::TransferArm),
         KeyCode::Char('A') if on_repo => Some(R::ArchiveArm),
+        KeyCode::Char('v') if on_repo => Some(R::DriftRevertArm),
+        KeyCode::Char('o') if on_repo => Some(R::DriftAdoptArm),
         _ => None,
     }
 }
@@ -4327,6 +4329,19 @@ mod key_handler_tests {
                 &repo
             ),
             Some(R::ArchiveArm)
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Char('v')), &repo),
+            Some(R::DriftRevertArm)
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Char('o')), &repo),
+            Some(R::DriftAdoptArm)
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Char('v')), &list),
+            None,
+            "drift is per repo"
         );
 
         let mut armed = repo.clone();
