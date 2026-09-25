@@ -74,7 +74,7 @@ impl GrantCheck {
 }
 
 /// [`fetch_status_list`] over owned arguments, so its future borrows nothing.
-fn fetch_owned(
+pub(crate) fn fetch_owned(
     client: Client,
     url: String,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>> {

@@ -130,7 +130,9 @@ pub struct InboundEffects {
     /// their sessions (R-S-3).
     pub inactivated: Vec<(VtcDid, openvtc_core::config::account::PersonaId)>,
     /// Capability replies, keyed by the request id they thread on.
-    pub capability_replies: Vec<(String, openvtc_core::capabilities::CapabilityReply)>,
+    /// `(sender, thread id, reply)` — the view takes a reply only from the
+    /// community it asked.
+    pub capability_replies: Vec<(String, String, openvtc_core::capabilities::CapabilityReply)>,
     /// `git-ns/*` replies for the Repos panel, keyed by the request id they
     /// thread on.
     pub git_ns_replies: Vec<crate::state_handler::repos_actions::InboundReply>,
@@ -143,6 +145,44 @@ pub struct InboundEffects {
     /// Vetters' grants to check for revocation. The check fetches over HTTPS,
     /// so the loop runs it as a background job.
     pub vetting_grant_checks: Vec<openvtc_core::vetting::status::GrantCheck>,
+}
+
+/// Whether a community's reply to a question of ours (capability, git-ns) may
+/// be taken: a success reply must be the community's signed operational
+/// document — `authentication` key, addressed to the persona it arrived for,
+/// fresh, not seen before ([`openvtc_core::operational`]). A `trust-task-error`
+/// the community sends unsigned is let through here, to be taken only from the
+/// community the view asked (the view checks the sender) and only to display
+/// the refusal; one that does carry a proof must verify.
+async fn community_reply_proven(
+    config: &mut Config,
+    tdk: &TDK,
+    message: &Message,
+    from_did: &str,
+    recipient_did: &str,
+) -> bool {
+    if is_trust_task_error_type(&message.typ)
+        && !openvtc_core::proof_check::has_proof(&message.body)
+    {
+        return true;
+    }
+    match openvtc_core::operational::verify_operational(
+        &message.body,
+        from_did,
+        &[recipient_did],
+        openvtc_core::operational::OperationalKind::CommunityAnswer,
+        tdk.did_resolver(),
+        &mut config.private.seen_documents,
+        chrono::Utc::now(),
+    )
+    .await
+    {
+        Ok(_) => true,
+        Err(e) => {
+            warn!(typ = %message.typ, reason = %e, "community reply refused");
+            false
+        }
+    }
 }
 
 /// Process an inbound DIDComm message.
@@ -286,8 +326,9 @@ async fn process_inbound(
         && let Some((thid, doc)) =
             openvtc_core::capabilities::parse_envelope_document(&message.body)
         && let Some(reply) = openvtc_core::capabilities::parse_capability_reply(&doc, &thid)
+        && community_reply_proven(config, tdk, message, &from_did, &recipient_did).await
     {
-        capability_replies.push((thid, reply));
+        capability_replies.push((from_did.to_string(), thid, reply));
         if !is_trust_task_error_type(&message.typ) {
             return Ok(false);
         }
@@ -301,6 +342,7 @@ async fn process_inbound(
     if openvtc_core::git_ns::is_reply_type(&message.typ)
         && let Some((_, doc)) = openvtc_core::capabilities::parse_envelope_document(&message.body)
         && let Some((thid, reply)) = openvtc_core::git_ns::parse_reply(&doc)
+        && community_reply_proven(config, tdk, message, &from_did, &recipient_did).await
     {
         // The sender and the document's issuer travel with the answer: the
         // Repos view takes one only from the community it asked.
@@ -517,6 +559,12 @@ async fn process_inbound(
         // no join matched, and each report went into a `warn!` naming the
         // correlation miss rather than the failure.
         if let Some((code, comment)) = outcome.unclaimed {
+            // Only a community we belong to (or are joining) is heard: a
+            // report from anyone else records nothing, not even a log line.
+            if config.account.memberships_for(&from_did).is_empty() {
+                debug!("problem-report from a party we hold no membership with — ignored");
+                return Ok(false);
+            }
             warn!(
                 vtc = %from_did,
                 code = %code,

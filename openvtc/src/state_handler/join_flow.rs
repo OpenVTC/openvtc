@@ -855,7 +855,7 @@ impl StateHandler {
             JoinEntry::Resume { vtc_did, outcome } => {
                 // `reset` above cleared what the asking pass collected, and the
                 // routes cannot be drawn without it.
-                ensure_invitations(state, admin_vta, &vtc_did).await;
+                ensure_invitations(state, admin_vta, tdk.did_resolver(), &vtc_did).await;
                 match outcome {
                     RequirementsOutcome::Unanswered(reason) => {
                         // We got here by sending the question, so the DID
@@ -919,7 +919,7 @@ impl StateHandler {
                                 None
                             };
                             state.join.messages.clear();
-                            load_pasted_vic(state, &text, vtc.as_deref());
+                            load_pasted_vic(state, tdk.did_resolver(), &text, vtc.as_deref()).await;
                             state.join.invitation_foreign_subject = state
                                 .invitation_credential
                                 .as_ref()
@@ -1089,7 +1089,7 @@ impl StateHandler {
                                 state.join.messages.clear();
                                 match crate::clipboard::read_clipboard() {
                                     Ok(text) => {
-                                        load_pasted_vic(state, &text, Some(&vtc_did));
+                                        load_pasted_vic(state, tdk.did_resolver(), &text, Some(&vtc_did)).await;
                                     }
                                     Err(why) => {
                                         state.join.messages.push(MessageType::Error(format!(
@@ -1494,7 +1494,7 @@ impl StateHandler {
         // The invitations before the routes: whether presenting one is a way in
         // to this community is a fact about this account, and the vetting page
         // cannot say what the options are without it.
-        ensure_invitations(state, admin_vta, &vtc_did).await;
+        ensure_invitations(state, admin_vta, tdk.did_resolver(), &vtc_did).await;
         // Peer identity vetting: a community that vets says what it requires
         // before anything about the applicant is sent (vetting-process.md §6.1).
         // What the book already knows decides at once. Otherwise the community
@@ -1774,7 +1774,7 @@ impl StateHandler {
     ) -> Option<Interrupted> {
         match satisfied_application_persona(state) {
             Some(persona_id) => {
-                ensure_invitations(state, admin_vta, &vtc_did).await;
+                ensure_invitations(state, admin_vta, tdk.did_resolver(), &vtc_did).await;
                 open_invitation_choice(state, config, persona_id);
                 None
             }
@@ -1819,7 +1819,7 @@ impl StateHandler {
         // usable-invitation count, then let the operator pick the
         // identity to present (the invitation choice, if any,
         // follows for the chosen persona).
-        ensure_invitations(state, admin_vta, &vtc_did).await;
+        ensure_invitations(state, admin_vta, tdk.did_resolver(), &vtc_did).await;
         let options = build_persona_options(config, &state.join.available_vics);
         if options.is_empty() {
             // First join — nothing to reuse; mint a fresh identity. With no
@@ -2180,24 +2180,35 @@ fn build_persona_options(config: &Config, vics: &[AvailableVic]) -> Vec<PersonaO
 /// marker on the state, rather than the emptiness of the list, is what says it
 /// has been done: holding none is a legitimate answer, and re-asking on every
 /// screen would put a round trip behind a keypress.
-async fn ensure_invitations(state: &mut State, admin_vta: Option<&VtaClient>, vtc_did: &str) {
+async fn ensure_invitations(
+    state: &mut State,
+    admin_vta: Option<&VtaClient>,
+    resolver: &affinidi_tdk::did_resolver::DIDCacheClient,
+    vtc_did: &str,
+) {
     if state.join.invitations_for.as_deref() == Some(vtc_did) {
         return;
     }
-    state.join.available_vics = collect_available_vics(state, admin_vta, vtc_did).await;
+    state.join.available_vics = collect_available_vics(state, admin_vta, resolver, vtc_did).await;
     state.join.invitations_for = Some(vtc_did.to_string());
 }
 
 async fn collect_available_vics(
     state: &State,
     admin_vta: Option<&VtaClient>,
+    resolver: &affinidi_tdk::did_resolver::DIDCacheClient,
     vtc_did: &str,
 ) -> Vec<AvailableVic> {
     let now = Utc::now();
-    let usable = |vic: &serde_json::Value| {
+    // Usable = for this community, unexpired, complete, and genuinely signed by
+    // it (proof, window and revocation status verified). The vault's own
+    // `status` is not taken on trust.
+    let usable = async |vic: &serde_json::Value| {
         openvtc_core::join::invitation_matches_community(vic, vtc_did)
             && !openvtc_core::join::invitation_is_expired(vic, now)
-            && openvtc_core::join::validate_invitation_credential(vic).is_ok()
+            && openvtc_core::join::verify_invitation_credential(vic, resolver, now)
+                .await
+                .is_ok()
     };
     let mut out: Vec<AvailableVic> = Vec::new();
 
@@ -2218,7 +2229,7 @@ async fn collect_available_vics(
             }
             if let Ok(got) = vta.cred_vault_get(&summ.id).await
                 && let Some(body) = got.get("credential").cloned()
-                && usable(&body)
+                && usable(&body).await
                 && let Some(av) = to_available_vic(&body)
             {
                 out.push(av);
@@ -2229,7 +2240,7 @@ async fn collect_available_vics(
     // A loaded VIC (--invitation / paste) that matches this community, if not
     // already surfaced from the vault.
     if let Some(vic) = state.invitation_credential.as_ref()
-        && usable(vic)
+        && usable(vic).await
         && let Some(av) = to_available_vic(vic)
         && !out.iter().any(|o| o.id == av.id)
     {
@@ -2281,28 +2292,58 @@ pub(crate) enum JoinExit {
 /// pasted, and the operator then submits an open request believing they
 /// presented a credential — which is the same failure, in miniature, as skipping
 /// the step altogether.
-fn load_pasted_vic(state: &mut State, text: &str, vtc_did: Option<&str>) {
+async fn load_pasted_vic(
+    state: &mut State,
+    resolver: &affinidi_tdk::did_resolver::DIDCacheClient,
+    text: &str,
+    vtc_did: Option<&str>,
+) {
+    let Some(vic) = parse_pasted_vic(state, text) else {
+        return;
+    };
+    // Verified before anything is read out of it: the issuer it names is
+    // shown as the community and prefills the DID input, and anyone can write
+    // an invitation naming any community.
+    if let Err(why) =
+        openvtc_core::join::verify_invitation_credential(&vic, resolver, Utc::now()).await
+    {
+        state.join.messages.push(MessageType::Error(format!(
+            "Pasted invitation is not usable: {why}"
+        )));
+        return;
+    }
+    stash_verified_vic(state, vic, vtc_did);
+}
+
+/// The pasted text as a complete invitation, or `None` with the reason pushed.
+fn parse_pasted_vic(state: &mut State, text: &str) -> Option<serde_json::Value> {
     let vic = match serde_json::from_str::<serde_json::Value>(text.trim()) {
         Ok(v) => v,
         Err(e) => {
             state.join.messages.push(MessageType::Error(format!(
                 "Pasted text is not valid JSON: {e}"
             )));
-            return;
+            return None;
         }
     };
     if let Err(why) = openvtc_core::join::validate_invitation_credential(&vic) {
         state.join.messages.push(MessageType::Error(format!(
             "Pasted invitation is not usable: {why}"
         )));
-        return;
+        return None;
     }
+    Some(vic)
+}
+
+/// Keep an invitation whose proof has **already verified**
+/// ([`openvtc_core::join::verify_invitation_credential`]). Only
+/// [`load_pasted_vic`] calls this, after that check.
+fn stash_verified_vic(state: &mut State, vic: serde_json::Value, vtc_did: Option<&str>) {
     let Some(vtc_did) = vtc_did else {
         // Entry page: no community to match against yet. The VIC's issuer *is*
-        // the community, and `validate_invitation_credential` has already
-        // guaranteed one is extractable, so record it — the page shows it and
-        // prefills the DID input from it instead of asking for a DID the
-        // credential already carries.
+        // the community — its proof has just verified against that issuer's
+        // DID document — so record it: the page shows it and prefills the DID
+        // input from it instead of asking for a DID the credential carries.
         state.join.invitation_issuer =
             openvtc_core::join::invitation_issuer(&vic).map(str::to_string);
         state.invitation_credential = Some(vic);
@@ -2905,10 +2946,12 @@ async fn run_join_sequence(
     // the join to a moderator — so drop it here and fall to an open request with
     // a clear reason, rather than presenting junk.
     if let Some(vic) = &presentable
-        && let Err(why) = openvtc_core::join::validate_invitation_credential(vic)
+        && let Err(why) =
+            openvtc_core::join::verify_invitation_credential(vic, tdk.did_resolver(), Utc::now())
+                .await
     {
         state.join.info(format!(
-            "Resolved invitation is incomplete ({why}) — submitting as an open request instead."
+            "Resolved invitation is not usable ({why}) — submitting as an open request instead."
         ));
         presentable = None;
     }
@@ -3563,7 +3606,7 @@ mod tests {
     }
     use super::{
         build_pending_record, is_duplicate_membership, joined_session, load_pasted_vic,
-        start_persona_listener, validate_join_input,
+        parse_pasted_vic, start_persona_listener, stash_verified_vic, validate_join_input,
     };
     use crate::Interrupted;
     use crate::state_handler::dispatch_util::test_config;
@@ -3950,6 +3993,41 @@ mod tests {
         assert!(!super::mint_can_present(&config, &state, COMMUNITY));
     }
 
+    /// Paste as `load_pasted_vic` does once the proof has verified: parse,
+    /// shape-check, stash. The proof step itself needs the network (the
+    /// invitation's status list) and is covered in `openvtc-core::join` and by
+    /// [`an_unsigned_paste_is_refused_and_prefills_nothing`].
+    fn paste_verified(state: &mut State, text: &str, vtc_did: Option<&str>) {
+        if let Some(vic) = parse_pasted_vic(state, text) {
+            stash_verified_vic(state, vic, vtc_did);
+        }
+    }
+
+    /// A paste whose proof does not verify is refused, and leaves no issuer
+    /// behind to prefill the community DID from.
+    #[tokio::test]
+    async fn an_unsigned_paste_is_refused_and_prefills_nothing() {
+        let resolver = affinidi_tdk::did_resolver::DIDCacheClient::new(
+            affinidi_tdk::did_resolver::config::DIDCacheConfigBuilder::default().build(),
+        )
+        .await
+        .unwrap();
+        for vtc in [None, Some(COMMUNITY)] {
+            let mut state = State::default();
+            load_pasted_vic(
+                &mut state,
+                &resolver,
+                &pasteable_vic("urn:uuid:one").to_string(),
+                vtc,
+            )
+            .await;
+            assert!(first_error(&state).is_some_and(|e| e.contains("did not verify")));
+            assert!(state.join.invitation_issuer.is_none());
+            assert!(state.invitation_credential.is_none());
+            assert!(state.join.invitation_options.is_empty());
+        }
+    }
+
     fn first_error(state: &State) -> Option<&str> {
         state.join.messages.iter().find_map(|m| match m {
             MessageType::Error(e) => Some(e.as_str()),
@@ -3960,7 +4038,7 @@ mod tests {
     #[test]
     fn a_matching_paste_becomes_the_selected_invitation() {
         let mut state = State::default();
-        load_pasted_vic(
+        paste_verified(
             &mut state,
             &pasteable_vic("urn:uuid:one").to_string(),
             Some(COMMUNITY),
@@ -3977,8 +4055,8 @@ mod tests {
     fn re_pasting_the_same_invitation_reselects_rather_than_duplicates() {
         let mut state = State::default();
         let vic = pasteable_vic("urn:uuid:one").to_string();
-        load_pasted_vic(&mut state, &vic, Some(COMMUNITY));
-        load_pasted_vic(&mut state, &vic, Some(COMMUNITY));
+        paste_verified(&mut state, &vic, Some(COMMUNITY));
+        paste_verified(&mut state, &vic, Some(COMMUNITY));
         assert_eq!(state.join.invitation_options.len(), 1);
         assert_eq!(state.join.invitation_use_selected, 0);
     }
@@ -4005,7 +4083,7 @@ mod tests {
         ];
         for (name, text, expect) in cases {
             let mut state = State::default();
-            load_pasted_vic(&mut state, text, Some(COMMUNITY));
+            paste_verified(&mut state, text, Some(COMMUNITY));
             let err =
                 first_error(&state).unwrap_or_else(|| panic!("{name}: expected a reported reason"));
             assert!(
@@ -4026,7 +4104,7 @@ mod tests {
         let mut state = State::default();
         let mut elsewhere = pasteable_vic("urn:uuid:one");
         elsewhere["issuer"] = json!("did:webvh:example.com:elsewhere");
-        load_pasted_vic(&mut state, &elsewhere.to_string(), None);
+        paste_verified(&mut state, &elsewhere.to_string(), None);
         assert!(state.invitation_credential.is_some());
         assert!(state.join.has_invitation);
         assert!(!state.join.vic_cleared);
@@ -4042,7 +4120,7 @@ mod tests {
     #[test]
     fn an_entry_page_paste_records_the_issuing_community() {
         let mut state = State::default();
-        load_pasted_vic(&mut state, &pasteable_vic("urn:uuid:one").to_string(), None);
+        paste_verified(&mut state, &pasteable_vic("urn:uuid:one").to_string(), None);
         assert_eq!(state.join.invitation_issuer.as_deref(), Some(COMMUNITY));
     }
 
@@ -4053,7 +4131,7 @@ mod tests {
         let mut state = State::default();
         let mut vic = pasteable_vic("urn:uuid:one");
         vic["issuer"] = json!({ "id": COMMUNITY, "name": "Example Community" });
-        load_pasted_vic(&mut state, &vic.to_string(), None);
+        paste_verified(&mut state, &vic.to_string(), None);
         assert_eq!(state.join.invitation_issuer.as_deref(), Some(COMMUNITY));
     }
 
@@ -4065,7 +4143,7 @@ mod tests {
         let not_a_vic = json!({ "id": "urn:uuid:one", "type": ["VerifiableCredential"] });
         for text in ["}{ not json", &not_a_vic.to_string()] {
             let mut state = State::default();
-            load_pasted_vic(&mut state, text, None);
+            paste_verified(&mut state, text, None);
             assert_eq!(state.join.invitation_issuer, None, "for paste {text:?}");
             assert!(!state.join.has_invitation);
         }

@@ -2622,6 +2622,38 @@ mod tests {
         assert!(matches!(only(&acct, vtc).status, CommunityStatus::Rejected));
     }
 
+    /// A join failure is heard only from the community the join was sent to:
+    /// a problem-report or trust-task-error from anyone else, even threaded on
+    /// the real request id, changes nothing.
+    #[test]
+    fn join_failures_from_another_party_change_nothing() {
+        let vtc = "did:webvh:example:vtc";
+        let mallory = "did:webvh:example:mallory";
+        let rid = Uuid::new_v4();
+        let mut acct = pending_account(vtc, rid);
+
+        let out = handle_join_problem_report(
+            &mut acct,
+            &problem_report(&rid.to_string(), mallory, "e.p.msg.forbidden", "no"),
+            mallory,
+        );
+        assert!(!out.status.changed && out.status.inactivated.is_none());
+        let out = handle_join_trust_task_error(
+            &mut acct,
+            &trust_task_error(&rid.to_string(), mallory, "permissionDenied", "no"),
+            mallory,
+        );
+        assert!(!out.changed && out.inactivated.is_none());
+        assert!(!handle_join_submit_receipt(
+            &mut acct,
+            &receipt(&rid.to_string(), mallory, Uuid::new_v4(), "received"),
+            mallory,
+        ));
+        let rec = only(&acct, vtc);
+        assert!(matches!(rec.status, CommunityStatus::Pending { .. }));
+        assert!(rec.receipt_at.is_none(), "not even acknowledged");
+    }
+
     #[test]
     fn problem_report_bad_request_stays_pending() {
         let vtc = "did:webvh:example:vtc";

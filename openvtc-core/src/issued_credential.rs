@@ -136,7 +136,7 @@ async fn check_status(
     now: DateTime<Utc>,
 ) -> Result<(), IssuedCredentialError> {
     use crate::status_list::{StatusCheck, check_credential_status};
-    use crate::vetting::status::{STATUS_FETCH_TIMEOUT, fetch_status_list, status_client};
+    use crate::vetting::status::{STATUS_FETCH_TIMEOUT, fetch_owned, status_client};
 
     let client = status_client(true, STATUS_FETCH_TIMEOUT).map_err(|e| {
         debug!(reason = %e, "issued credential: no HTTP client for the status list");
@@ -145,7 +145,9 @@ async fn check_status(
     match check_credential_status(
         status,
         issuer,
-        async |url: &str| fetch_status_list(&client, url).await,
+        // Owned arguments, so the future is `Send` for every lifetime the
+        // fetch is called with (see `vetting::status::fetch_owned`).
+        async move |url: &str| fetch_owned(client.clone(), url.to_string()).await,
         resolver,
         now,
     )

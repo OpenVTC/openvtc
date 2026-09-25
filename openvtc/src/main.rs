@@ -524,7 +524,18 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("invitation file `{path}` is not valid JSON: {e}"))?;
             // Fail fast on a stripped/summary VIC rather than silently presenting
             // an unusable credential the VTC refers to a moderator.
-            openvtc_core::join::validate_invitation_credential(&vic)
+            // …and on one that is not genuinely the community's: its proof is
+            // checked against the issuer's DID document before anything —
+            // including the issuer it names — is used.
+            let resolver = affinidi_tdk::did_resolver::DIDCacheClient::new(
+                affinidi_tdk::did_resolver::config::DIDCacheConfigBuilder::default().build(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("could not start a DID resolver to check the invitation: {e}")
+            })?;
+            openvtc_core::join::verify_invitation_credential(&vic, &resolver, chrono::Utc::now())
+                .await
                 .map_err(|e| anyhow::anyhow!("invitation file `{path}`: {e}"))?;
             Some(vic)
         }
