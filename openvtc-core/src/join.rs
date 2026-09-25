@@ -226,17 +226,6 @@ pub async fn poll_join_status(
     Ok(())
 }
 
-/// Ask a community for its profile (`vtc/community/profile/show/0.1`) so we can
-/// read its declared `relationshipIdentifierDefault` (issue #241).
-///
-/// The request payload is empty — the community answers about itself, and the
-/// applicant is proven exactly as `poll_join_status` proves it (authcrypt sender
-/// over DIDComm, sender VID over TSP; no holder signature). The reply is a
-/// `#response` document threaded on this message, handled asynchronously by
-/// [`crate::messaging::handle_community_profile_show_response`]; nothing is
-/// awaited here. Background, best-effort — a send failure is the caller's to log,
-/// not surface (the value only seeds a form default, and its absence is a valid,
-/// pairwise-defaulting state).
 /// Profile questions we have outstanding: document id → (community, when).
 /// In memory: a question is this process's, and its answer after a restart is
 /// simply not taken (the next launch asks again).
@@ -277,6 +266,17 @@ pub fn take_profile_query(vtc_did: &str, thid: &str) -> bool {
     }
 }
 
+/// Ask a community for its profile (`vtc/community/profile/show/0.1`) so we can
+/// read its declared `relationshipIdentifierDefault` (issue #241).
+///
+/// The request payload is empty — the community answers about itself, and the
+/// applicant is proven exactly as `poll_join_status` proves it (authcrypt sender
+/// over DIDComm, sender VID over TSP; no holder signature). The reply is a
+/// `#response` document threaded on this message, handled asynchronously by
+/// [`crate::messaging::handle_community_profile_show_response`]; nothing is
+/// awaited here. Background, best-effort — a send failure is the caller's to log,
+/// not surface (the value only seeds a form default, and its absence is a valid,
+/// pairwise-defaulting state).
 pub async fn send_community_profile_show(
     atm: &ATM,
     profile: &Arc<ATMProfile>,
