@@ -140,7 +140,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rejects a join. A community-profile answer is taken only when signed and
   answering a profile question we asked, and a declared `attributed` default
   is never recorded over pairwise. A VRC rejection closes only our own VRC
-  request, to the party it was sent to.
+  request, to the party it was sent to. A reply from a party we hold no
+  membership with (Pending included) is refused before its proof is checked,
+  so it never costs a resolve, and each reply is taken only as its own signed
+  `type`.
   **Breaking (library):** `join::verify_invitation_credential` is the gate;
   `validate_invitation_credential` is shape-only.
 

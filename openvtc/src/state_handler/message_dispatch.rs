@@ -170,23 +170,25 @@ async fn community_reply_proven(
         return answer;
     }
     let refusal = is_trust_task_error_type(&message.typ);
+    // Capability and git-ns views exist only for communities we belong to, so
+    // a reply from anyone else has no standing: refused before its proof costs
+    // a resolve, and never recorded.
+    if config.account.memberships_for(from_did).is_empty() {
+        warn!(typ = %message.typ, "reply from a community we hold no membership with — ignored");
+        *cached = Some(false);
+        return false;
+    }
     let answer = match openvtc_core::operational::verify_operational(
         &message.body,
         from_did,
         &[recipient_did],
-        openvtc_core::operational::OperationalKind::CommunityAnswer,
+        &message.typ,
         tdk.did_resolver(),
         &config.private.seen_documents,
         chrono::Utc::now(),
     )
     .await
     {
-        // Capability and git-ns views exist only for communities we belong
-        // to, so a reply from anyone else has no standing, and is not recorded.
-        Ok(_) if config.account.memberships_for(from_did).is_empty() => {
-            warn!(typ = %message.typ, "reply from a community we hold no membership with — ignored");
-            false
-        }
         Ok(verified) => {
             match verified.commit(&mut config.private.seen_documents, chrono::Utc::now()) {
                 Ok(()) => true,
@@ -221,6 +223,11 @@ async fn community_document(
     openvtc_core::operational::VerifiedOperational,
     openvtc_core::operational::OperationalError,
 > {
+    // A community we hold no membership with (Pending included) has asked
+    // nothing of ours to answer: refused before its proof costs a resolve.
+    if config.account.memberships_for(from_did).is_empty() {
+        return Err(openvtc_core::operational::OperationalError::NoStanding);
+    }
     let ours: Vec<&str> = config
         .account
         .personas
@@ -231,7 +238,7 @@ async fn community_document(
         &message.body,
         from_did,
         &ours,
-        openvtc_core::operational::OperationalKind::CommunityAnswer,
+        &message.typ,
         tdk.did_resolver(),
         &config.private.seen_documents,
         chrono::Utc::now(),
@@ -1317,5 +1324,47 @@ async fn process_inbound(
             warn!(msg_type = %message.typ, "unhandled message type");
             Ok(false)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state_handler::dispatch_util::{test_config, test_tdk};
+
+    /// A community reply from a party we hold no membership with is refused
+    /// before its proof is checked — it never costs a resolve — and is not
+    /// recorded.
+    #[tokio::test]
+    async fn a_reply_from_a_non_member_is_refused_before_its_proof() {
+        let mut config = test_config();
+        let tdk = test_tdk().await;
+        let stranger = "did:webvh:QmS:stranger.example.com";
+        // Not even a document: were the proof checked first, this would be
+        // refused as malformed, not for standing.
+        let message = Message::build(
+            uuid::Uuid::new_v4().to_string(),
+            JOIN_REQUEST_STATUS_RESPONSE_TYPE.to_string(),
+            serde_json::json!({}),
+        )
+        .from(stranger.to_string())
+        .finalize();
+        assert_eq!(
+            community_document(&config, &tdk, &message, stranger).await,
+            Err(openvtc_core::operational::OperationalError::NoStanding)
+        );
+        let mut cached = None;
+        assert!(
+            !community_reply_proven(
+                &mut config,
+                &tdk,
+                &message,
+                stranger,
+                "did:webvh:QmP:example.com:alice",
+                &mut cached,
+            )
+            .await
+        );
+        assert!(config.private.seen_documents.is_empty());
     }
 }
