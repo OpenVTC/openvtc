@@ -148,25 +148,28 @@ pub struct InboundEffects {
 }
 
 /// Whether a community's reply to a question of ours (capability, git-ns) may
-/// be taken: a success reply must be the community's signed operational
-/// document — `authentication` key, addressed to the persona it arrived for,
-/// fresh, not seen before ([`openvtc_core::operational`]). A `trust-task-error`
-/// the community sends unsigned is let through here, to be taken only from the
-/// community the view asked (the view checks the sender) and only to display
-/// the refusal; one that does carry a proof must verify.
+/// be taken: it must be the community's signed operational document —
+/// `authentication` key, addressed to the persona it arrived for, fresh, not
+/// seen before ([`openvtc_core::operational`]). That holds for a refusal
+/// (`trust-task-error`) as much as for a success: an unsigned refusal is
+/// ignored, with a log line. The view then also checks the sender is the
+/// community it asked.
+///
+/// `cached` holds the answer for this message once computed: a refusal can be
+/// offered to both the capability and the git-ns view, and verifying it twice
+/// would read the second as a replay of the first.
 async fn community_reply_proven(
     config: &mut Config,
     tdk: &TDK,
     message: &Message,
     from_did: &str,
     recipient_did: &str,
+    cached: &mut Option<bool>,
 ) -> bool {
-    if is_trust_task_error_type(&message.typ)
-        && !openvtc_core::proof_check::has_proof(&message.body)
-    {
-        return true;
+    if let Some(answer) = *cached {
+        return answer;
     }
-    match openvtc_core::operational::verify_operational(
+    let answer = match openvtc_core::operational::verify_operational(
         &message.body,
         from_did,
         &[recipient_did],
@@ -179,10 +182,16 @@ async fn community_reply_proven(
     {
         Ok(_) => true,
         Err(e) => {
-            warn!(typ = %message.typ, reason = %e, "community reply refused");
+            if is_trust_task_error_type(&message.typ) {
+                warn!(typ = %message.typ, reason = %e, "unverified community refusal ignored");
+            } else {
+                warn!(typ = %message.typ, reason = %e, "community reply refused");
+            }
             false
         }
-    }
+    };
+    *cached = Some(answer);
+    answer
 }
 
 /// Process an inbound DIDComm message.
@@ -311,6 +320,9 @@ async fn process_inbound(
     }
     let message = opened.as_ref().unwrap_or(message);
 
+    // Computed at most once per message (see `community_reply_proven`).
+    let mut reply_proven: Option<bool> = None;
+
     // Capability replies (governance/capability/*), in either carriage: hand
     // them to the state loop keyed by the document's `threadId` (== our request
     // id). This is a fan-in point waiting on nothing in particular, so the
@@ -326,7 +338,15 @@ async fn process_inbound(
         && let Some((thid, doc)) =
             openvtc_core::capabilities::parse_envelope_document(&message.body)
         && let Some(reply) = openvtc_core::capabilities::parse_capability_reply(&doc, &thid)
-        && community_reply_proven(config, tdk, message, &from_did, &recipient_did).await
+        && community_reply_proven(
+            config,
+            tdk,
+            message,
+            &from_did,
+            &recipient_did,
+            &mut reply_proven,
+        )
+        .await
     {
         capability_replies.push((from_did.to_string(), thid, reply));
         if !is_trust_task_error_type(&message.typ) {
@@ -342,7 +362,15 @@ async fn process_inbound(
     if openvtc_core::git_ns::is_reply_type(&message.typ)
         && let Some((_, doc)) = openvtc_core::capabilities::parse_envelope_document(&message.body)
         && let Some((thid, reply)) = openvtc_core::git_ns::parse_reply(&doc)
-        && community_reply_proven(config, tdk, message, &from_did, &recipient_did).await
+        && community_reply_proven(
+            config,
+            tdk,
+            message,
+            &from_did,
+            &recipient_did,
+            &mut reply_proven,
+        )
+        .await
     {
         // The sender and the document's issuer travel with the answer: the
         // Repos view takes one only from the community it asked.

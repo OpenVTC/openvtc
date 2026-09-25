@@ -123,9 +123,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   acceptance) is removed.
 
 - **The last replies taken on the sender's word now need the right party, or a
-  proof.** A capability reply or git-ns reply that succeeds must be the
-  community's signed operational document (authentication key, addressed to our
-  persona, fresh, not replayed), and a capability reply is taken only from the
+  proof.** A capability or git-ns reply — a refusal (`trust-task-error`) as
+  much as a success — must be the community's signed operational document
+  (authentication key, addressed to our persona, fresh, not replayed); an
+  unsigned refusal is ignored with a log line, and a capability reply is taken only from the
   community the view asked — a thread id alone no longer answers for it. An
   invitation credential (from `--invitation`, a paste, the Add VIC panel, or the
   vault) is used only once its proof verifies against its issuer (and its
