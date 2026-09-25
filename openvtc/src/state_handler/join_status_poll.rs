@@ -177,7 +177,7 @@ pub(crate) async fn build(config: &Config, tdk: &TDK, due: Vec<PendingPoll>) -> 
             continue;
         };
         let signing_secret = match config.get_persona_keys_for(record.persona_ref, tdk).await {
-            Ok(keys) => keys.signing.secret.clone(),
+            Ok(keys) => keys.authentication.secret.clone(),
             Err(e) => {
                 debug!(
                     vtc = %record.vtc_did, error = %e,

@@ -357,7 +357,7 @@ pub async fn send_reply(
     if let Some(eligibility) = reply.eligibility {
         attach_eligibility(&mut document, &keys.authentication.secret, eligibility).await?;
     }
-    sign(&mut document, &keys.signing.secret).await?;
+    sign(&mut document, &keys.authentication.secret).await?;
     let message = to_message(&document)?;
     let (from, to) = (
         document.issuer.as_deref().unwrap_or_default(),

@@ -3148,8 +3148,9 @@ async fn run_join_sequence(
     // The submit is signed: `join-requests/submit/0.2` declares `proof`
     // REQUIRED, and a persona whose key cannot be read cannot apply — better
     // said here than as a refusal from the community.
+    // The persona's authentication key: it signs the request document.
     let signing_secret = match config.get_persona_keys_for(persona_id, tdk).await {
-        Ok(keys) => keys.signing.secret.clone(),
+        Ok(keys) => keys.authentication.secret.clone(),
         Err(e) => {
             state
                 .join

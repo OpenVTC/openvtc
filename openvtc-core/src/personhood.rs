@@ -156,20 +156,6 @@ pub fn match_code_from_reply(ext: &Value) -> Option<String> {
 
 // ─── Trust Task documents ────────────────────────────────────────────────
 
-/// Wrap a payload in the Trust Task document envelope the VTC's dispatcher
-/// reads. Mirrors [`crate::join`]'s builder — the VTC rejects a bare payload
-/// as `malformedRequest` ("missing field `id`"), so the shape is not
-/// optional for any verb.
-fn build_document<T: serde::Serialize>(
-    type_uri: &str,
-    issuer_did: &str,
-    recipient_did: &str,
-    document_id: &str,
-    payload: T,
-) -> Result<Value, OpenVTCError> {
-    crate::trust_task_doc::build_value(type_uri, issuer_did, recipient_did, document_id, payload)
-}
-
 /// Everything needed to get a document from this member to that community.
 ///
 /// Grouped rather than passed as loose arguments because both verbs need the
@@ -264,16 +250,22 @@ impl Route<'_> {
 /// person's own client answers it. Minting for someone else confers
 /// nothing: the nonce is bound to the subject, and only a presentation
 /// signed by the subject's key can spend it.
-pub async fn request_challenge(route: &Route<'_>, subject_did: &str) -> Result<Uuid, OpenVTCError> {
+pub async fn request_challenge(
+    route: &Route<'_>,
+    signer: &Secret,
+    subject_did: &str,
+) -> Result<Uuid, OpenVTCError> {
     let request_id = Uuid::new_v4();
     let document_id = format!("urn:uuid:{request_id}");
-    let body = build_document(
+    let body = crate::trust_task_doc::build_signed_value(
         PERSONHOOD_CHALLENGE_TYPE,
         route.member_did,
         route.vtc_did,
         &document_id,
         json!({ "did": subject_did }),
-    )?;
+        signer,
+    )
+    .await?;
 
     route.send(body, document_id).await?;
 

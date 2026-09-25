@@ -512,7 +512,7 @@ async fn sender(config: &Config, tdk: &TDK, persona: PersonaId) -> Result<Sender
         profile: id.profile().clone(),
         persona_did: id.persona_did().to_string(),
         mediator: id.mediator_did.clone().unwrap_or_default(),
-        signer: Box::new(keys.signing.secret.clone()),
+        signer: Box::new(keys.authentication.secret.clone()),
     })
 }
 

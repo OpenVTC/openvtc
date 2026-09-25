@@ -122,6 +122,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `relationships::create_send_message_accepted` (which sent an unproven
   acceptance) is removed.
 
+- **Every Trust Task request this client sends is signed as the persona.** A
+  community now requires a document proof bound to the sender on every request
+  it is sent, so each request carries an `authentication` proof by the
+  persona's authentication key (issuer = the persona, recipient = the
+  community, `issuedAt`, a fresh id). The requests that went unsigned — the
+  capability list, the community-profile question and the personhood challenge
+  — are now signed, and the ones already signed (join submit/status,
+  self-remove, member VMC, personhood assertion, capability toggles, git-ns,
+  vetting documents) now use the authentication key and purpose instead of
+  the assertion key. Credentials this client issues (the member VMC, vetting
+  cards and statements, VRCs) stay signed with the assertion key. The
+  anonymous HTTP manifest question sent before joining stays unsigned by
+  design. **Breaking (wire):** a community that checks a request proof's
+  purpose against `assertionMethod` refuses these; deploy with VTI #1739.
+
 - **The last replies taken on the sender's word now need the right party, or a
   proof.** A capability or git-ns reply — a refusal (`trust-task-error`) as
   much as a success — must be the community's signed operational document

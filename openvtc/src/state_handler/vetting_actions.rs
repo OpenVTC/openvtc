@@ -1105,7 +1105,7 @@ async fn sign_and_send(
         .get_persona_keys_for(persona, ctx.tdk)
         .await
         .map_err(|e| e.to_string())?;
-    wire::sign(&mut document, &keys.signing.secret)
+    wire::sign(&mut document, &keys.authentication.secret)
         .await
         .map_err(|e| e.to_string())?;
     let message = wire::to_message(&document).map_err(|e| e.to_string())?;
@@ -2199,18 +2199,22 @@ async fn send_card(
             // The card is signed here, as the persona DID, with the persona's
             // own assertionMethod key — the same path every other document
             // this client signs takes.
-            let signer = match ctx
+            let (signer, document_signer) = match ctx
                 .config
                 .get_persona_keys_for(application.persona, ctx.tdk)
                 .await
             {
-                Ok(keys) => keys.signing.secret.clone(),
+                Ok(keys) => (
+                    keys.signing.secret.clone(),
+                    keys.authentication.secret.clone(),
+                ),
                 Err(e) => return abandon(ctx, "Could not sign the card", e),
             };
             status(ctx, "Releasing and signing your card…");
             CardStep::Present(Box::new(Presenting {
                 preview_id: preview.preview_id,
                 signer,
+                document_signer,
                 resolver: resolver(ctx),
                 service: ctx.didcomm_service.clone(),
                 listener_id: openvtc_core::didcomm::listener_id_for_did(
@@ -2883,7 +2887,10 @@ pub(crate) enum CardStep {
 /// What releasing and sending a card needs.
 pub(crate) struct Presenting {
     preview_id: String,
+    /// assertionMethod key — signs the card (a credential).
     signer: Secret,
+    /// authentication key — signs the document that carries it.
+    document_signer: Secret,
     resolver: TrustTaskVmResolver,
     service: Messaging,
     listener_id: String,
@@ -2965,6 +2972,7 @@ impl CardJob {
                 let Presenting {
                     preview_id,
                     signer,
+                    document_signer,
                     resolver,
                     service,
                     listener_id,
@@ -3006,7 +3014,9 @@ impl CardJob {
                     )
                     .map_err(failed)?;
                     document.thread_id = Some(session_id.clone());
-                    wire::sign(&mut document, &signer).await.map_err(failed)?;
+                    wire::sign(&mut document, &document_signer)
+                        .await
+                        .map_err(failed)?;
                     let message = wire::to_message(&document).map_err(failed)?;
                     openvtc_core::didcomm::send_message_via(
                         &service,

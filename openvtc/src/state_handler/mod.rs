@@ -1880,7 +1880,14 @@ impl StateHandler {
                     // pacer marks each community asked before the send so a tick
                     // never re-asks one.
                     if let Some(atm) = tdk.atm.clone() {
-                        let asks = community_profile_pacer.due(&config);
+                        let mut asks = Vec::new();
+                        for ask in community_profile_pacer.due(&config) {
+                            // Local key lookup; an ask whose key cannot be
+                            // read is dropped rather than sent unsigned.
+                            if let Ok(keys) = config.get_persona_keys_for(ask.persona, &tdk).await {
+                                asks.push(ask.with_signer(keys.authentication.secret.clone()));
+                            }
+                        }
                         if !asks.is_empty() {
                             tokio::spawn(community_profile_poll::send_all(atm, asks));
                         }

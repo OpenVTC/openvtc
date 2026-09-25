@@ -104,6 +104,7 @@ pub(crate) async fn issue_member_vmc_for(
             mediator_did: &mediator,
         },
         &keys.signing.secret,
+        &keys.authentication.secret,
         &grant,
         closes_request,
     )
