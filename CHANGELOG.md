@@ -132,7 +132,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   vault) is used only once its proof verifies against its issuer (and its
   revocation status is established); until then its issuer is not shown as the
   community or used to prefill the DID. A problem-report from a party we hold no
-  membership with records nothing, not even an activity-log line.
+  membership with records nothing, not even an activity-log line. The join
+  path's replies — submit-receipt, verdict, status response, and a refusal
+  (`trust-task-error`) — are acted on only as the community's signed
+  operational document; a DIDComm problem-report, which cannot be signed, is
+  now only surfaced (from a community we hold a record with) and never
+  rejects a join. A community-profile answer is taken only when signed and
+  answering a profile question we asked, and a declared `attributed` default
+  is never recorded over pairwise. A VRC rejection closes only our own VRC
+  request, to the party it was sent to.
   **Breaking (library):** `join::verify_invitation_credential` is the gate;
   `validate_invitation_credential` is shape-only.
 

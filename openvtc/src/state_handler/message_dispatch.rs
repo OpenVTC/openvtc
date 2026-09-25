@@ -19,10 +19,10 @@ use openvtc_core::join::COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE;
 use openvtc_core::messaging::{
     SeenMessages, check_message_age, check_task_capacity, create_finalize_message,
     credential_in_issue, credential_issue_admissible, handle_community_profile_show_response,
-    handle_credential_issue, handle_join_problem_report, handle_join_status_response,
-    handle_join_submit_receipt, handle_join_trust_task_error, handle_join_verdict,
-    handle_member_removal_notice, is_trust_task_error_type, require_thid, validate_did,
-    verify_vrc_proof, vet_vrc_issued,
+    handle_credential_issue, handle_join_status_response, handle_join_submit_receipt,
+    handle_join_trust_task_error, handle_join_verdict, handle_member_removal_notice,
+    is_trust_task_error_type, read_problem_report, require_thid, validate_did, verify_vrc_proof,
+    vet_vrc_issued,
 };
 use openvtc_core::personhood::{
     PERSONHOOD_ASSERT_RESPONSE_TYPE, PERSONHOOD_CHALLENGE_RESPONSE_TYPE,
@@ -169,20 +169,35 @@ async fn community_reply_proven(
     if let Some(answer) = *cached {
         return answer;
     }
+    let refusal = is_trust_task_error_type(&message.typ);
     let answer = match openvtc_core::operational::verify_operational(
         &message.body,
         from_did,
         &[recipient_did],
         openvtc_core::operational::OperationalKind::CommunityAnswer,
         tdk.did_resolver(),
-        &mut config.private.seen_documents,
+        &config.private.seen_documents,
         chrono::Utc::now(),
     )
     .await
     {
-        Ok(_) => true,
+        // Capability and git-ns views exist only for communities we belong
+        // to, so a reply from anyone else has no standing, and is not recorded.
+        Ok(_) if config.account.memberships_for(from_did).is_empty() => {
+            warn!(typ = %message.typ, "reply from a community we hold no membership with — ignored");
+            false
+        }
+        Ok(verified) => {
+            match verified.commit(&mut config.private.seen_documents, chrono::Utc::now()) {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!(typ = %message.typ, reason = %e, "community reply refused");
+                    false
+                }
+            }
+        }
         Err(e) => {
-            if is_trust_task_error_type(&message.typ) {
+            if refusal {
                 warn!(typ = %message.typ, reason = %e, "unverified community refusal ignored");
             } else {
                 warn!(typ = %message.typ, reason = %e, "community reply refused");
@@ -192,6 +207,48 @@ async fn community_reply_proven(
     };
     *cached = Some(answer);
     answer
+}
+
+/// Verify a VTC's operational reply (a join receipt, verdict, status,
+/// refusal or profile) addressed to one of our personas. Records nothing:
+/// the caller commits it once the reply has matched something of ours.
+async fn community_document(
+    config: &Config,
+    tdk: &TDK,
+    message: &Message,
+    from_did: &str,
+) -> Result<
+    openvtc_core::operational::VerifiedOperational,
+    openvtc_core::operational::OperationalError,
+> {
+    let ours: Vec<&str> = config
+        .account
+        .personas
+        .values()
+        .map(|p| p.did.as_str())
+        .collect();
+    let verified = openvtc_core::operational::verify_operational(
+        &message.body,
+        from_did,
+        &ours,
+        openvtc_core::operational::OperationalKind::CommunityAnswer,
+        tdk.did_resolver(),
+        &config.private.seen_documents,
+        chrono::Utc::now(),
+    )
+    .await?;
+    verified.check(&config.private.seen_documents, chrono::Utc::now())?;
+    Ok(verified)
+}
+
+/// Commit a verified community reply that matched something of ours.
+fn commit_community_document(
+    config: &mut Config,
+    verified: openvtc_core::operational::VerifiedOperational,
+) {
+    if let Err(e) = verified.commit(&mut config.private.seen_documents, chrono::Utc::now()) {
+        warn!(reason = %e, "community reply acted on but not recorded");
+    }
 }
 
 /// Process an inbound DIDComm message.
@@ -445,11 +502,20 @@ async fn process_inbound(
     // It is a VTC Trust-Task type, not an openvtc relationship-protocol type,
     // so handle it before the `MessageType` conversion below (which rejects it).
     if message.typ == JOIN_REQUEST_SUBMIT_RECEIPT_TYPE {
-        return Ok(handle_join_submit_receipt(
-            &mut config.account,
-            message,
-            &from_did,
-        ));
+        // The request id it carries becomes the handle the join is asked about
+        // by, so it is taken only from the community's signed document.
+        let verified = match community_document(config, tdk, message, &from_did).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(reason = %e, "join submit-receipt refused");
+                return Ok(false);
+            }
+        };
+        let changed = handle_join_submit_receipt(&mut config.account, message, &from_did);
+        if changed {
+            commit_community_document(config, verified);
+        }
+        return Ok(changed);
     }
 
     // VTC credential delivery: on approve, the VTC pushes the issued VMC + role
@@ -560,57 +626,46 @@ async fn process_inbound(
     // (`thid`) on our submit message id. `allow` → Active, `deny` → Rejected; a
     // rejection inactivates the community so the loop deregisters the session.
     if message.typ == JOIN_REQUEST_SUBMIT_RESPONSE_TYPE {
+        let verified = match community_document(config, tdk, message, &from_did).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(reason = %e, "join verdict refused");
+                return Ok(false);
+            }
+        };
         let outcome = handle_join_verdict(&mut config.account, message, &from_did);
+        if outcome.changed {
+            commit_community_document(config, verified);
+        }
         if let Some(persona) = outcome.inactivated {
             inactivated.push((from_did.to_string(), persona));
         }
         return Ok(outcome.changed);
     }
 
-    // DIDComm problem-report: the framework-failure path of the trust-task join
-    // (invalid/expired/malformed VIC, bad signature), threaded on our submit id.
-    // `e.p.msg.forbidden` (the invitation was not accepted) → Rejected; other
-    // codes are surfaced but leave the join Pending. Routed here so a rejection
-    // is no longer silently dropped into a stuck `Pending`.
+    // DIDComm problem-report. It carries no proof, so it changes nothing — a
+    // join is rejected only by the community's signed `trust-task-error` or
+    // verdict. A report from a community we hold a record with is surfaced so a
+    // refusal is not invisible; one from anyone else is dropped without a trace.
     if message.typ == PROBLEM_REPORT_TYPE {
-        let outcome = handle_join_problem_report(&mut config.account, message, &from_did);
-
-        // A report the join handler cannot claim refused *something else* we
-        // sent. This client does not know what — it keeps no record of
-        // outstanding requests by thread id — but "we don't know which" is not
-        // a reason to say nothing. Every problem-report is a community telling
-        // us it refused us, and the one thing worse than an unattributed
-        // rejection is an invisible one.
-        //
-        // This is how the reciprocal-VMC exchange stayed broken for its whole
-        // life: the VTC rejected every delivery and said so here, on a thread
-        // no join matched, and each report went into a `warn!` naming the
-        // correlation miss rather than the failure.
-        if let Some((code, comment)) = outcome.unclaimed {
-            // Only a community we belong to (or are joining) is heard: a
-            // report from anyone else records nothing, not even a log line.
-            if config.account.memberships_for(&from_did).is_empty() {
-                debug!("problem-report from a party we hold no membership with — ignored");
-                return Ok(false);
-            }
-            warn!(
-                vtc = %from_did,
-                code = %code,
-                comment = %comment,
-                thid = message.thid.as_deref().unwrap_or("none"),
-                "community refused something we sent"
-            );
-            config.public.logs.insert(
-                LogFamily::Community,
-                format!("Community ({from_did}) refused something we sent [{code}]: {comment}"),
-            );
-            return Ok(true);
-        }
-
-        if let Some(persona) = outcome.status.inactivated {
-            inactivated.push((from_did.to_string(), persona));
-        }
-        return Ok(outcome.status.changed);
+        let Some(note) = read_problem_report(&config.account, message, &from_did) else {
+            debug!("problem-report from a party we hold no membership with — ignored");
+            return Ok(false);
+        };
+        warn!(
+            code = %note.code,
+            on_pending_join = note.on_pending_join,
+            "community reported a problem (unsigned — not acted on)"
+        );
+        config.public.logs.insert(
+            LogFamily::Community,
+            format!(
+                "Community ({from_did}) reported a problem [{}]: {} — unsigned, so nothing \
+                 was changed",
+                note.code, note.comment
+            ),
+        );
+        return Ok(true);
     }
 
     // VTC trust-task-error: the framework failure document for a Trust Task join
@@ -619,7 +674,19 @@ async fn process_inbound(
     // without this branch a failed ceremony was an unknown type, silently dropped
     // into a stuck `Pending`. Matched by type prefix (version-agnostic).
     if is_trust_task_error_type(&message.typ) {
+        // A refusal that rejects a join is taken only from the community's
+        // signed document; an unsigned one is ignored with a log line.
+        let verified = match community_document(config, tdk, message, &from_did).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(reason = %e, "unverified community refusal ignored");
+                return Ok(false);
+            }
+        };
         let outcome = handle_join_trust_task_error(&mut config.account, message, &from_did);
+        if outcome.changed {
+            commit_community_document(config, verified);
+        }
         if let Some(persona) = outcome.inactivated {
             inactivated.push((from_did.to_string(), persona));
         }
@@ -631,7 +698,17 @@ async fn process_inbound(
     // `requestId` (R-B-8). A rejection inactivates the community, so report its
     // VTC DID up so the loop deregisters the session (R-S-3).
     if message.typ == JOIN_REQUEST_STATUS_RESPONSE_TYPE {
+        let verified = match community_document(config, tdk, message, &from_did).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(reason = %e, "join status response refused");
+                return Ok(false);
+            }
+        };
         let outcome = handle_join_status_response(&mut config.account, message, &from_did);
+        if outcome.changed {
+            commit_community_document(config, verified);
+        }
         if let Some(persona) = outcome.inactivated {
             inactivated.push((from_did.to_string(), persona));
         }
@@ -643,6 +720,23 @@ async fn process_inbound(
     // default of the new-relationship form (issue #241). Informational — it
     // updates stored community metadata and never inactivates a session.
     if message.typ == COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE {
+        // Signed, and an answer to a profile question we asked this community.
+        let verified = match community_document(config, tdk, message, &from_did).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(reason = %e, "community profile response refused");
+                return Ok(false);
+            }
+        };
+        let asked = message
+            .thid
+            .as_deref()
+            .is_some_and(|thid| openvtc_core::join::take_profile_query(&from_did, thid));
+        if !asked {
+            warn!("community profile response we did not ask for — ignored");
+            return Ok(false);
+        }
+        commit_community_document(config, verified);
         let changed =
             handle_community_profile_show_response(&mut config.account, message, &from_did);
         return Ok(changed);
@@ -969,15 +1063,16 @@ async fn process_inbound(
             let task_id = require_thid(message)?;
             let body: VRCRequestReject = serde_json::from_value(message.body.clone())?;
 
-            // Verify sender has a relationship with us
-            if config.private.relationships.get(&from_did).is_none()
-                && config
-                    .private
-                    .relationships
-                    .find_by_remote_did(&from_did)
-                    .is_none()
-            {
-                warn!(from = %from_did, "VRC reject from unknown party — ignoring");
+            // A rejection closes only our own VRC request, on its thread, to the
+            // party it was sent to — the thread id alone names no counterparty,
+            // and anyone who learned it could otherwise delete the task.
+            if !openvtc_core::tasks::is_our_vrc_request_to(
+                &config.private.tasks,
+                &config.private.relationships,
+                &task_id,
+                &from_did,
+            ) {
+                warn!("VRC reject for no request of ours to this party — ignoring");
                 return Ok(false);
             }
 
