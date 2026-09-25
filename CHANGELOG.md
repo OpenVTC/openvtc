@@ -79,6 +79,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is checked by the same rules (purpose `assertionMethod`, listed by the
   issuer, a method the issuer controls).
 
+- **Decisions about who said something rest on a proof, not the sender.** The
+  sender a message arrives from is now treated as a routing hint only.
+  - *Relationship DIDs.* A relationship request and its acceptance carry proofs
+    (`didProof`, and `personaProof` when an R-DID is used) that bind the
+    relationship DID to that handshake — its thread id and both personas —
+    signed by an `authentication` key of the DID and of the persona naming it.
+    A request or acceptance without valid proofs is refused. An acceptance,
+    finalize or rejection is matched only by the thread id of a request of ours
+    in the right state and from the party it went to; the fallback that matched
+    by sender alone is gone, so a rejection can no longer end an established
+    relationship. **Breaking (wire):** both peers need this version; a request
+    in flight across the upgrade must be sent again.
+  - *Removal notices* are acted on only when they are the community's signed
+    Trust Task document (`assertionMethod`, or an `authentication` key); an
+    unsigned or bare notice is ignored, and the activity log says so.
+  - *A community's vetting answers* (manifest, vetter directory, profile,
+    resend, withdrawal record) are acted on only when the community signed
+    them, and a vetter role credential is kept only when its proof verifies.
+  **Breaking (library):** `handle_member_removal_notice` takes a
+  `VerifiedRemovalNotice`, `vetting::inbound::Context` has a `did_resolver`,
+  the relationship bodies gained proof fields, and the unused
+  `relationships::create_send_message_accepted` (which sent an unproven
+  acceptance) is removed.
+
 - **Vetting questions and personhood reach a community again.** A community
   (VTI #1687, Keyring VTI-42) now takes a Trust Task over DIDComm only inside
   the binding envelope (`https://trusttasks.org/binding/didcomm/0.1/envelope`),

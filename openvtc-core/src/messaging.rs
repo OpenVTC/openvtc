@@ -720,12 +720,88 @@ pub fn handle_join_trust_task_error(
     }
 }
 
-/// Handle a VTC → member **removal notice** (`vtc/members/removal-notice/0.1`):
-/// the community telling a member it removed them (issue #240). Unlike every
-/// join-decision path above it is *unsolicited* — not threaded on any request we
-/// sent — so it is correlated by its two named parties instead: the sender
-/// (`from_did`, the community's VTC) and the removed member's persona
-/// (`body.did`, which must be one of ours).
+/// Why a removal notice was not acted on. Names what failed, never the
+/// notice's contents or a DID.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RemovalNoticeError {
+    #[error("the notice is not a Trust Task document")]
+    NotADocument,
+    #[error("the notice is not issued by the community it came from")]
+    IssuerNotSender,
+    #[error("the notice is addressed to someone else")]
+    WrongRecipient,
+    #[error("the notice's proof: {0}")]
+    Proof(#[from] crate::proof_check::ProofError),
+    #[error("the notice's payload is malformed")]
+    Malformed,
+}
+
+/// A removal notice whose proof by the sending community verified
+/// ([`verify_removal_notice`]). The only way to obtain one outside tests.
+#[derive(Debug, Clone)]
+pub struct VerifiedRemovalNotice(RemovalNoticeBody);
+
+impl VerifiedRemovalNotice {
+    /// Wrap a payload without verifying it. Tests only: the transition logic
+    /// downstream of verification is tested separately from it.
+    #[cfg(test)]
+    pub(crate) fn assume_verified(body: RemovalNoticeBody) -> Self {
+        Self(body)
+    }
+}
+
+/// Verify a removal notice before anything acts on it.
+///
+/// Removal ends a membership, so it is taken only on the community's
+/// signature, never on who the transport says sent it: the notice must be the
+/// Trust Task document the VTC signs (`issuer` = `from_did`, `recipient` = the
+/// removed persona when named), with a proof by `from_did` under a key its DID
+/// document lists for the proof's purpose — `assertionMethod` today, or
+/// `authentication` (an operational key) — by the rules in
+/// [`crate::proof_check`]. A bare, unsigned payload is refused.
+///
+/// # Errors
+///
+/// [`RemovalNoticeError`] naming the check that failed.
+pub async fn verify_removal_notice(
+    message: &Message,
+    from_did: &str,
+    resolver: &affinidi_did_resolver_cache_sdk::DIDCacheClient,
+) -> Result<VerifiedRemovalNotice, RemovalNoticeError> {
+    let document = &message.body;
+    let payload = document
+        .get("payload")
+        .ok_or(RemovalNoticeError::NotADocument)?;
+    if document.get("issuer").and_then(Value::as_str) != Some(from_did) {
+        return Err(RemovalNoticeError::IssuerNotSender);
+    }
+    crate::proof_check::verify_signed(
+        document,
+        from_did,
+        resolver,
+        &[
+            crate::proof_check::Purpose::AssertionMethod,
+            crate::proof_check::Purpose::Authentication,
+        ],
+    )
+    .await?;
+    let body: RemovalNoticeBody =
+        serde_json::from_value(payload.clone()).map_err(|_| RemovalNoticeError::Malformed)?;
+    if let Some(recipient) = document.get("recipient").and_then(Value::as_str)
+        && recipient != body.did
+    {
+        return Err(RemovalNoticeError::WrongRecipient);
+    }
+    Ok(VerifiedRemovalNotice(body))
+}
+
+/// Handle a VTC → member **removal notice** (`vtc/members/removal-notice/0.1`)
+/// that [`verify_removal_notice`] accepted: the community telling a member it
+/// removed them (issue #240). Unlike every join-decision path above it is
+/// *unsolicited* — not threaded on any request we sent — so it is correlated
+/// by its two named parties instead: the community (`from_did`, whose proof
+/// verified) and the removed member's persona (`body.did`, which must be one of
+/// ours).
 ///
 /// Transitions the matching **Active** membership to `Removed`, persisting the
 /// notice's authority (`decided_by`), reason, decision time (`decided_at`) and
@@ -738,16 +814,10 @@ pub fn handle_join_trust_task_error(
 /// removed member can no longer authenticate to the community to be told twice.
 pub fn handle_member_removal_notice(
     account: &mut Account,
-    message: &Message,
+    notice: VerifiedRemovalNotice,
     from_did: &str,
 ) -> StatusOutcome {
-    let body: RemovalNoticeBody = match serde_json::from_value(message.body.clone()) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(error = %e, "malformed removal-notice body — ignoring");
-            return StatusOutcome::NONE;
-        }
-    };
+    let body = notice.0;
     let Some(persona) = account.persona_id_for_did(&body.did) else {
         warn!(
             vtc = %from_did,
@@ -1736,7 +1806,45 @@ mod tests {
 
     // ----- removal notice (issue #240) --------------------------------------
 
-    fn removal_notice(from: &str, body: serde_json::Value) -> Message {
+    /// A removal-notice payload, treated as verified — these tests cover the
+    /// transition after verification (see `verify_removal_notice` tests for
+    /// the proof).
+    fn removal_notice(_from: &str, body: serde_json::Value) -> VerifiedRemovalNotice {
+        VerifiedRemovalNotice::assume_verified(serde_json::from_value(body).expect("a payload"))
+    }
+
+    fn did_key_secret(seed: u8) -> affinidi_tdk::secrets_resolver::secrets::Secret {
+        let mut secret = affinidi_tdk::secrets_resolver::secrets::Secret::generate_ed25519(
+            None,
+            Some(&[seed; 32]),
+        );
+        let public = secret.get_public_keymultibase().unwrap();
+        secret.id = format!("did:key:{public}#{public}");
+        secret
+    }
+
+    fn did_of_secret(secret: &affinidi_tdk::secrets_resolver::secrets::Secret) -> String {
+        secret.id.split('#').next().unwrap().to_string()
+    }
+
+    /// The Trust Task document a VTC sends as a removal notice, unsigned.
+    fn notice_document(vtc: &str, persona: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("urn:uuid:{}", Uuid::new_v4()),
+            "type": vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE,
+            "issuer": vtc,
+            "recipient": persona,
+            "payload": {
+                "did": persona,
+                "code": "adminRemoved",
+                "disposition": "tombstone",
+                "decidedAt": "2026-08-23T09:14:02Z",
+                "decidedBy": "did:key:z6MkAdmin",
+            },
+        })
+    }
+
+    fn notice_message(from: &str, body: serde_json::Value) -> Message {
         Message::build(
             Uuid::new_v4().to_string(),
             vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE.to_string(),
@@ -1744,6 +1852,94 @@ mod tests {
         )
         .from(from.to_string())
         .finalize()
+    }
+
+    async fn test_resolver() -> affinidi_did_resolver_cache_sdk::DIDCacheClient {
+        affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
+            affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+        )
+        .await
+        .expect("resolver")
+    }
+
+    /// A removal ends a membership, so it is acted on only with the
+    /// community's signature — not on who the transport says sent it.
+    #[tokio::test]
+    async fn a_removal_notice_needs_the_communitys_proof() {
+        use crate::proof_check::{ProofError, test_support::sign};
+        let resolver = test_resolver().await;
+        let vtc_key = did_key_secret(0x51);
+        let vtc = did_of_secret(&vtc_key);
+        let persona = "did:webvh:example:persona";
+
+        // Signed by the community: accepted.
+        let signed = sign(notice_document(&vtc, persona), &[&vtc_key]).await;
+        assert!(
+            verify_removal_notice(&notice_message(&vtc, signed.clone()), &vtc, &resolver)
+                .await
+                .is_ok()
+        );
+
+        // Unsigned: refused.
+        assert_eq!(
+            verify_removal_notice(
+                &notice_message(&vtc, notice_document(&vtc, persona)),
+                &vtc,
+                &resolver
+            )
+            .await
+            .unwrap_err(),
+            RemovalNoticeError::Proof(ProofError::NoProof)
+        );
+
+        // A bare payload (no document): refused.
+        let bare = notice_document(&vtc, persona)["payload"].clone();
+        assert_eq!(
+            verify_removal_notice(&notice_message(&vtc, bare), &vtc, &resolver)
+                .await
+                .unwrap_err(),
+            RemovalNoticeError::NotADocument
+        );
+
+        // Changed after signing: refused.
+        let mut tampered = signed.clone();
+        tampered["payload"]["code"] = serde_json::json!("purged");
+        assert_eq!(
+            verify_removal_notice(&notice_message(&vtc, tampered), &vtc, &resolver)
+                .await
+                .unwrap_err(),
+            RemovalNoticeError::Proof(ProofError::Invalid(0))
+        );
+
+        // Claimed as the community's but signed by somebody else: refused.
+        let other = did_key_secret(0x52);
+        let forged = sign(notice_document(&vtc, persona), &[&other]).await;
+        assert_eq!(
+            verify_removal_notice(&notice_message(&vtc, forged), &vtc, &resolver)
+                .await
+                .unwrap_err(),
+            RemovalNoticeError::Proof(ProofError::ForeignVerificationMethod(0))
+        );
+
+        // A genuine notice arriving as another sender's: refused.
+        let elsewhere = did_of_secret(&other);
+        assert_eq!(
+            verify_removal_notice(&notice_message(&elsewhere, signed), &elsewhere, &resolver)
+                .await
+                .unwrap_err(),
+            RemovalNoticeError::IssuerNotSender
+        );
+
+        // Addressed to one persona but naming another: refused.
+        let mut misaddressed = notice_document(&vtc, persona);
+        misaddressed["recipient"] = serde_json::json!("did:webvh:example:someone-else");
+        let misaddressed = sign(misaddressed, &[&vtc_key]).await;
+        assert_eq!(
+            verify_removal_notice(&notice_message(&vtc, misaddressed), &vtc, &resolver)
+                .await
+                .unwrap_err(),
+            RemovalNoticeError::WrongRecipient
+        );
     }
 
     /// A removal notice for an active member transitions it to Removed, persists
@@ -1758,7 +1954,7 @@ mod tests {
 
         let out = handle_member_removal_notice(
             &mut acct,
-            &removal_notice(
+            removal_notice(
                 vtc,
                 serde_json::json!({
                     "did": persona,
@@ -1798,7 +1994,7 @@ mod tests {
 
         handle_member_removal_notice(
             &mut acct,
-            &removal_notice(
+            removal_notice(
                 vtc,
                 serde_json::json!({
                     "did": persona,
@@ -1824,7 +2020,7 @@ mod tests {
 
         let out = handle_member_removal_notice(
             &mut acct,
-            &removal_notice(
+            removal_notice(
                 vtc,
                 serde_json::json!({
                     "did": "did:webvh:example:someone-else",
@@ -1851,7 +2047,7 @@ mod tests {
 
         let out = handle_member_removal_notice(
             &mut acct,
-            &removal_notice(
+            removal_notice(
                 vtc,
                 serde_json::json!({
                     "did": persona,

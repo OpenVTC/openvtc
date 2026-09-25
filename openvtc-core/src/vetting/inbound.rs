@@ -62,6 +62,10 @@ pub struct Context<'a> {
     pub account: &'a Account,
     /// Resolves the DIDs whose proofs are checked.
     pub resolver: &'a TrustTaskVmResolver,
+    /// Resolves a community's DID document, for the proofs whose key must be
+    /// listed under a particular relationship (a community's replies and the
+    /// vetter role credential it issues).
+    pub did_resolver: &'a affinidi_did_resolver_cache_sdk::DIDCacheClient,
     /// Our persona the message was addressed to, and its DID.
     pub recipient: Option<(PersonaId, &'a str)>,
     /// The clock.
@@ -395,6 +399,14 @@ pub async fn handle(
     message: &Message,
     sender: &str,
 ) -> Option<Handled> {
+    // A community's answer is acted on only when the community signed it: the
+    // transport sender is a routing hint, not proof of who wrote the reply.
+    if is_community_answer_type(&message.typ)
+        && let Err(e) = community_signed(ctx, message, sender).await
+    {
+        warn!(typ = %message.typ, reason = %e, "community answer refused");
+        return Some(Handled::default());
+    }
     let handled = match message.typ.as_str() {
         VETTING_REQUEST_TYPE => take_request(book, ctx, message, sender).await,
         VETTING_REQUEST_RESPONSE_TYPE => accepted(book, ctx, message, sender).await,
@@ -428,6 +440,44 @@ async fn opened<P: DeserializeOwned>(
     }
 }
 
+/// The community answers — success responses the community signs — that are
+/// acted on only once their proof verifies ([`community_signed`]).
+fn is_community_answer_type(typ: &str) -> bool {
+    matches!(
+        typ,
+        VETTING_REVOKE_STATEMENT_RESPONSE_TYPE
+            | VETTING_VETTER_LIST_RESPONSE_TYPE
+            | VETTING_VETTER_PROFILE_RESPONSE_TYPE
+            | VETTING_VETTER_RESEND_RESPONSE_TYPE
+            | JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE
+    )
+}
+
+/// Check a community's answer is a document it issued and signed: `issuer` is
+/// the community it came from, and a proof by that DID verifies under a key its
+/// DID document lists for the proof's purpose.
+async fn community_signed(
+    ctx: &Context<'_>,
+    message: &Message,
+    sender: &str,
+) -> Result<(), String> {
+    let issuer = message.body.get("issuer").and_then(Value::as_str);
+    if issuer != Some(sender) {
+        return Err("the answer is not issued by the community it came from".to_string());
+    }
+    crate::proof_check::verify_signed(
+        &message.body,
+        sender,
+        ctx.did_resolver,
+        &[
+            crate::proof_check::Purpose::AssertionMethod,
+            crate::proof_check::Purpose::Authentication,
+        ],
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// The thread a community's reply names: the envelope's, or the document's.
 fn community_thread(message: &Message) -> Option<String> {
     message.thid.clone().or_else(|| {
@@ -439,15 +489,14 @@ fn community_thread(message: &Message) -> Option<String> {
     })
 }
 
-/// A community reply's payload. Replies are authenticated by transport and not
-/// always signed, so no proof is required.
+/// A community reply's payload. Read only after [`community_signed`] has
+/// checked the reply's proof (see [`handle`]).
 fn community_payload<P: DeserializeOwned>(message: &Message) -> Result<P, String> {
     let payload = message.body.get("payload").cloned().unwrap_or(Value::Null);
     serde_json::from_value(payload).map_err(|e| e.to_string())
 }
 
-/// A document from a community, whose replies are authenticated by transport
-/// and not always signed: read the payload without requiring a proof.
+/// A document from a community, whose proof [`handle`] has already checked.
 fn community_reply<P: DeserializeOwned>(message: &Message) -> Option<(Option<String>, P)> {
     match community_payload(message) {
         Ok(p) => Some((community_thread(message), p)),
@@ -792,7 +841,25 @@ async fn statement(
         && let Some((community, role)) = community_role(credential)
         && role_matches(&role, VETTER_ROLE)
     {
-        return Some(vetter_grant(book, ctx, credential, community, sender));
+        // Verified before anything else: a grant is what makes this persona a
+        // vetter, and the transport sender is not proof the community issued it.
+        return Some(
+            match crate::issued_credential::verify_issued_credential(
+                credential.clone(),
+                sender,
+                ctx.did_resolver,
+                ctx.now,
+                crate::issued_credential::StatusPolicy::Advisory,
+            )
+            .await
+            {
+                Ok(verified) => vetter_grant(book, ctx, verified.value(), community, sender),
+                Err(e) => {
+                    warn!(reason = %e, "vetter role credential refused");
+                    Handled::default()
+                }
+            },
+        );
     }
     let credential = wire::delivered_statement(&message.body)?;
     let Some((persona, _)) = ctx.recipient else {
@@ -826,11 +893,10 @@ async fn statement(
 
 /// A community's vetter role credential for one of our personas.
 ///
-/// Kept when the community that it names issued it, sent it (authcrypt
-/// authenticates the sender), and named the persona it was addressed to, which
-/// must hold a membership there. Its proof is not checked here: it proves
-/// nothing to us that the authenticated sender does not, and every applicant
-/// it is presented to verifies it.
+/// Kept when the community that it names issued and signed it (its proof is
+/// verified by the caller against the community's `assertionMethod` keys), and
+/// it names the persona it was addressed to, which must hold a membership
+/// there.
 fn vetter_grant(
     book: &mut VettingBook,
     ctx: &Context<'_>,

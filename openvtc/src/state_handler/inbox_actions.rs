@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use affinidi_tdk::TDK;
 use affinidi_tdk::didcomm::Message;
+use affinidi_tdk::secrets_resolver::secrets::Secret;
 use anyhow::Result;
 use chrono::Utc;
 use openvtc_core::didcomm::Messaging;
@@ -88,12 +89,31 @@ pub fn dismiss_task(config: &mut Config, task_id: &str) -> Result<()> {
 // builders can be packed by the DIDComm service later.
 // ------------------------------------------------------------------
 
-/// Build a DIDComm relationship-acceptance message.
-fn build_accept_message(from: &str, to: &str, r_did: &str, thid: &str) -> Result<Message> {
+/// Build a DIDComm relationship-acceptance message carrying the proofs that
+/// bind `r_did` to this handshake (`thid`, the request's id).
+async fn build_accept_message(
+    from: &str,
+    to: &str,
+    r_did: &str,
+    thid: &str,
+    did_signer: &Secret,
+    persona_signer: &Secret,
+) -> Result<Message> {
+    let (did_proof, persona_proof) = openvtc_core::relationships::did_binding_proofs(
+        r_did,
+        from,
+        to,
+        thid,
+        did_signer,
+        persona_signer,
+    )
+    .await?;
     super::didcomm::build_didcomm_message(
         openvtc_core::protocol_urls::RELATIONSHIP_REQUEST_ACCEPT,
         json!(RelationshipAcceptBody {
-            did: r_did.to_string()
+            did: r_did.to_string(),
+            did_proof: Some(did_proof),
+            persona_proof,
         }),
         from,
         to,
@@ -271,6 +291,8 @@ pub(crate) struct AcceptJob {
     /// `Some` ⇒ mint an R-DID first; `None` ⇒ use the persona DID directly.
     rdid_plan: Option<crate::state_handler::relationship_actions::RDidPlan>,
     persona_did: Arc<String>,
+    /// The persona's authentication key, which signs the DID binding.
+    persona_auth: Secret,
     persona_listener_id: String,
     task_id: Arc<String>,
     from_did: Arc<String>,
@@ -284,6 +306,7 @@ impl AcceptJob {
             service,
             rdid_plan,
             persona_did,
+            persona_auth,
             persona_listener_id,
             task_id,
             from_did,
@@ -312,7 +335,26 @@ impl AcceptJob {
 
         // 2. Build + send the acceptance via the persona listener (handshake uses
         //    persona DIDs for routing; the R-DID is carried in the body).
-        let result = match build_accept_message(&persona_did, &from_did, &our_did, &task_id) {
+        let built = async {
+            let did_signer = crate::state_handler::relationship_actions::relationship_did_signer(
+                &tdk,
+                &our_did,
+                &persona_did,
+                &persona_auth,
+            )
+            .await?;
+            build_accept_message(
+                &persona_did,
+                &from_did,
+                &our_did,
+                &task_id,
+                &did_signer,
+                &persona_auth,
+            )
+            .await
+        }
+        .await;
+        let result = match built {
             Ok(msg) => {
                 super::didcomm::send_message_via(&service, &msg, &persona_listener_id, &from_did)
                     .await
@@ -625,6 +667,13 @@ async fn prepare_accept_relationship(
 
     let persona_did = config.persona_did_arc();
     let persona_listener_id = super::didcomm::listener_id_for_did(&persona_did, config);
+    // Signs the binding of our relationship DID to this accept.
+    let persona_auth = config
+        .get_persona_keys(tdk)
+        .await
+        .map_err(|e| anyhow::anyhow!("could not load the persona's authentication key: {e}"))?
+        .authentication
+        .secret;
 
     if generate_r_did {
         state.main_page.content_panel.inbox.status_message =
@@ -643,6 +692,7 @@ async fn prepare_accept_relationship(
         service: service.clone(),
         rdid_plan,
         persona_did,
+        persona_auth,
         persona_listener_id,
         task_id,
         from_did,
