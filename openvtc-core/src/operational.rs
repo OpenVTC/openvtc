@@ -128,6 +128,8 @@ pub enum OperationalError {
     NoStanding,
     #[error("its proof: {0}")]
     Proof(#[from] ProofError),
+    #[error("it was not checked")]
+    NotChecked,
 }
 
 /// Document ids already acted on, per issuer, each kept until its window has

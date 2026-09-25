@@ -223,6 +223,10 @@ pub struct CommunitiesState {
     /// Whether archived communities are included in the list (R-C-8). Off by
     /// default; toggled so archived records stay discoverable.
     pub show_archived: bool,
+    /// Communities (VTC DIDs) whose delivered credential is being verified
+    /// off the loop. Display state only: the membership stays Pending until the
+    /// check finishes, and its row says "verifying…" meanwhile.
+    pub verifying: std::collections::HashSet<String>,
     /// The personhood challenge this member is part-way through answering, if
     /// any. `Some` between the community's challenge reply arriving and the
     /// assertion being sent or the challenge lapsing.

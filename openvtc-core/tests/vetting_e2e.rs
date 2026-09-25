@@ -160,10 +160,27 @@ impl Party {
         )
         .await
         .expect("a DID resolver");
+        let issued = if message.typ == vta_sdk::protocols::credential_exchange::ISSUE {
+            match openvtc_core::messaging::credential_in_issue(message) {
+                Some(c) => Some(
+                    openvtc_core::issued_credential::verify_issued_credential(
+                        c,
+                        sender,
+                        &did_resolver,
+                        Utc::now(),
+                    )
+                    .await,
+                ),
+                None => None,
+            }
+        } else {
+            None
+        };
         let ctx = Context {
             account: &self.account,
             resolver: &resolver,
             did_resolver: &did_resolver,
+            issued_credential: issued.as_ref(),
             recipient: Some((self.persona, &self.did)),
             now: Utc::now(),
         };

@@ -66,6 +66,16 @@ pub struct Context<'a> {
     /// listed under a particular relationship (a community's replies and the
     /// vetter role credential it issues).
     pub did_resolver: &'a affinidi_did_resolver_cache_sdk::DIDCacheClient,
+    /// A credential-issue's credential, already verified off the dispatch loop
+    /// ([`crate::issued_credential::verify_issued_credential`]) — the vetter
+    /// grant is taken from this rather than verified again inline. `None`
+    /// means it was not checked, and a grant is then refused.
+    pub issued_credential: Option<
+        &'a Result<
+            crate::issued_credential::VerifiedIssuedCredential,
+            crate::issued_credential::IssuedCredentialError,
+        >,
+    >,
     /// Our persona the message was addressed to, and its DID.
     pub recipient: Option<(PersonaId, &'a str)>,
     /// The clock.
@@ -865,22 +875,19 @@ async fn statement(
     {
         // Verified before anything else: a grant is what makes this persona a
         // vetter, and the transport sender is not proof the community issued it.
-        return Some(
-            match crate::issued_credential::verify_issued_credential(
-                credential.clone(),
-                sender,
-                ctx.did_resolver,
-                ctx.now,
-            )
-            .await
-            {
-                Ok(verified) => vetter_grant(book, ctx, verified.value(), community, sender),
-                Err(e) => {
-                    warn!(reason = %e, "vetter role credential refused");
-                    Handled::default()
-                }
-            },
-        );
+        return Some(match ctx.issued_credential {
+            Some(Ok(verified)) if verified.value() == credential => {
+                vetter_grant(book, ctx, verified.value(), community, sender)
+            }
+            Some(Err(e)) => {
+                warn!(reason = %e, "vetter role credential refused");
+                Handled::default()
+            }
+            _ => {
+                warn!("vetter role credential not checked — refused");
+                Handled::default()
+            }
+        });
     }
     let credential = wire::delivered_statement(&message.body)?;
     let Some((persona, _)) = ctx.recipient else {

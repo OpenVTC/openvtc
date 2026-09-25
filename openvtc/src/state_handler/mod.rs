@@ -1179,6 +1179,34 @@ impl StateHandler {
         let mut community_profile_tick = tokio::time::interval(std::time::Duration::from_secs(60));
         let mut community_profile_pacer = community_profile_poll::ProfilePacer::default();
 
+        // Network-bound checks on inbound messages (a DID resolve, a status
+        // list fetch) run off this loop, one at a time in arrival order, so a
+        // slow community never freezes the UI. A message waiting on its check
+        // is not applied at all; it comes back on `verified_rx` with the result
+        // and is dispatched from the top.
+        let (verify_tx, mut verify_rx) =
+            mpsc::unbounded_channel::<(message_dispatch::Deferred, didcomm::MessagingTransport)>();
+        let (verified_tx, mut verified_rx) = mpsc::unbounded_channel::<(
+            Box<affinidi_tdk::didcomm::Message>,
+            didcomm::MessagingTransport,
+            message_dispatch::PreVerified,
+        )>();
+        {
+            let tdk = tdk.clone();
+            tokio::spawn(async move {
+                while let Some((deferred, transport)) = verify_rx.recv().await {
+                    let message_dispatch::Deferred { message, job } = deferred;
+                    let pre = job.run(tdk.clone()).await;
+                    if verified_tx
+                        .send((Box::new(message), transport, pre))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        }
+
         // The join flow to enter at the end of this iteration, and a join
         // waiting on a community's requirements (see `join_flow::AwaitingRequirements`).
         let mut join_entry: Option<join_flow::JoinEntry> = None;
@@ -1273,8 +1301,9 @@ impl StateHandler {
                         }
                     },
                 },
-                // DIDComm inbound message events
-                Some(event) = didcomm_event_rx.recv() => {
+                // DIDComm inbound message events — as they arrive, or handed
+                // back with the result of their off-loop check.
+                Some((event, pre)) = next_inbound(&mut didcomm_event_rx, &mut verified_rx) => {
                     match event {
                         didcomm::DIDCommEvent::InboundMessage { message, transport, .. } => {
                             // Capture message info before processing for detailed logging
@@ -1283,6 +1312,12 @@ impl StateHandler {
                             let msg_to = message.to.as_ref().and_then(|v| v.first()).cloned().unwrap_or_default();
                             let msg_thid = message.thid.clone().unwrap_or_else(|| "none".into());
 
+                            // A credential that has been checked no longer
+                            // shows its membership as verifying.
+                            let returning_credential = matches!(
+                                pre,
+                                Some(message_dispatch::PreVerified::Credential(_))
+                            );
                             let mut effects = message_dispatch::InboundEffects::default();
                             let dispatched = message_dispatch::process_inbound_message(
                                 &mut config,
@@ -1291,6 +1326,7 @@ impl StateHandler {
                                 &mut seen_messages,
                                 &message,
                                 &mut effects,
+                                pre,
                             )
                             .await;
                             let message_dispatch::InboundEffects {
@@ -1300,7 +1336,33 @@ impl StateHandler {
                                 personhood_challenges,
                                 vetting_answers,
                                 vetting_grant_checks,
+                                deferred,
                             } = effects;
+                            if returning_credential {
+                                state
+                                    .main_page
+                                    .content_panel
+                                    .communities
+                                    .verifying
+                                    .remove(&msg_from);
+                                state.main_page.sync_from_config(&config);
+                            }
+                            // Set aside for its check: the membership shows
+                            // "verifying…" until the result comes back.
+                            if let Some(deferred) = deferred {
+                                if let Some(vtc) = deferred.job.verifying_community() {
+                                    state
+                                        .main_page
+                                        .content_panel
+                                        .communities
+                                        .verifying
+                                        .insert(vtc.to_string());
+                                    state.main_page.sync_from_config(&config);
+                                }
+                                if verify_tx.send((deferred, transport)).is_err() {
+                                    warn!("inbound verification worker has stopped — message dropped");
+                                }
+                            }
 
                             // A live challenge is display state, not account
                             // state: single-use, ten-minute life, and worthless
@@ -4255,6 +4317,31 @@ fn build_trust_pong(
     .finalize();
 
     Ok(message)
+}
+
+/// The next inbound event: one handed back from its off-loop check first (it
+/// arrived earlier), else the next to arrive. `None` when both are closed.
+async fn next_inbound(
+    arriving: &mut mpsc::UnboundedReceiver<didcomm::DIDCommEvent>,
+    verified: &mut mpsc::UnboundedReceiver<(
+        Box<affinidi_tdk::didcomm::Message>,
+        didcomm::MessagingTransport,
+        message_dispatch::PreVerified,
+    )>,
+) -> Option<(didcomm::DIDCommEvent, Option<message_dispatch::PreVerified>)> {
+    tokio::select! {
+        biased;
+        Some((message, transport, pre)) = verified.recv() => Some((
+            didcomm::DIDCommEvent::InboundMessage {
+                from: message.from.clone(),
+                message,
+                transport,
+            },
+            Some(pre),
+        )),
+        Some(event) = arriving.recv() => Some((event, None)),
+        else => None,
+    }
 }
 
 #[cfg(test)]

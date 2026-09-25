@@ -67,6 +67,33 @@ fn code_ticket(code: &str) -> request::v0_1::Ticket {
     )
 }
 
+/// A credential-issue's credential, verified as the dispatcher's off-loop job
+/// verifies it; `None` for any other message.
+async fn verified_delivery(
+    message: &Message,
+    sender: &str,
+    resolver: &affinidi_did_resolver_cache_sdk::DIDCacheClient,
+) -> Option<
+    Result<
+        crate::issued_credential::VerifiedIssuedCredential,
+        crate::issued_credential::IssuedCredentialError,
+    >,
+> {
+    if message.typ != vta_sdk::protocols::credential_exchange::ISSUE {
+        return None;
+    }
+    let credential = crate::messaging::credential_in_issue(message)?;
+    Some(
+        crate::issued_credential::verify_issued_credential(
+            credential,
+            sender,
+            resolver,
+            Utc::now(),
+        )
+        .await,
+    )
+}
+
 /// A DID resolver. Every DID here is a `did:key`, which resolves locally.
 async fn did_resolver() -> affinidi_did_resolver_cache_sdk::DIDCacheClient {
     affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
@@ -176,10 +203,14 @@ impl Party {
     async fn receive(&mut self, message: &Message, sender: &str) -> Handled {
         let resolver = TrustTaskVmResolver::did_key_only();
         let did_resolver = did_resolver().await;
+        // As the dispatcher does off the loop: a delivered credential is
+        // verified before the handler sees it.
+        let issued = verified_delivery(message, sender, &did_resolver).await;
         let ctx = Context {
             account: &self.account,
             resolver: &resolver,
             did_resolver: &did_resolver,
+            issued_credential: issued.as_ref(),
             recipient: Some((self.persona, &self.did)),
             now: Utc::now(),
         };
@@ -695,10 +726,17 @@ async fn a_vetter_grant_is_kept_only_from_its_community() {
     .await;
     let resolver = TrustTaskVmResolver::did_key_only();
     let did_resolver = did_resolver().await;
+    let issued: Option<
+        Result<
+            crate::issued_credential::VerifiedIssuedCredential,
+            crate::issued_credential::IssuedCredentialError,
+        >,
+    > = None;
     let ctx = Context {
         account: &member.account,
         resolver: &resolver,
         did_resolver: &did_resolver,
+        issued_credential: issued.as_ref(),
         recipient: Some((member.persona, &member.did)),
         now: Utc::now(),
     };
@@ -791,10 +829,17 @@ async fn a_membership_credential_is_left_for_the_join_handler() {
     .finalize();
     let resolver = TrustTaskVmResolver::did_key_only();
     let did_resolver = did_resolver().await;
+    let issued: Option<
+        Result<
+            crate::issued_credential::VerifiedIssuedCredential,
+            crate::issued_credential::IssuedCredentialError,
+        >,
+    > = None;
     let ctx = Context {
         account: &applicant.account,
         resolver: &resolver,
         did_resolver: &did_resolver,
+        issued_credential: issued.as_ref(),
         recipient: Some((applicant.persona, &applicant.did)),
         now: Utc::now(),
     };
@@ -1074,10 +1119,17 @@ async fn the_directory_answers_only_what_was_asked() {
     let stray = wire::vetter_list_request(&applicant.did, COMMUNITY, &unfiltered_list()).unwrap();
     let resolver = TrustTaskVmResolver::did_key_only();
     let did_resolver = did_resolver().await;
+    let issued: Option<
+        Result<
+            crate::issued_credential::VerifiedIssuedCredential,
+            crate::issued_credential::IssuedCredentialError,
+        >,
+    > = None;
     let ctx = Context {
         account: &applicant.account,
         resolver: &resolver,
         did_resolver: &did_resolver,
+        issued_credential: issued.as_ref(),
         recipient: Some((applicant.persona, &applicant.did)),
         now: Utc::now(),
     };
@@ -1221,10 +1273,17 @@ async fn a_problem_report_refuses_the_question_it_threads_on() {
     // One threading on nothing of vetting's is left for the join handler.
     let resolver = TrustTaskVmResolver::did_key_only();
     let did_resolver = did_resolver().await;
+    let issued: Option<
+        Result<
+            crate::issued_credential::VerifiedIssuedCredential,
+            crate::issued_credential::IssuedCredentialError,
+        >,
+    > = None;
     let ctx = Context {
         account: &applicant.account,
         resolver: &resolver,
         did_resolver: &did_resolver,
+        issued_credential: issued.as_ref(),
         recipient: Some((applicant.persona, &applicant.did)),
         now: Utc::now(),
     };

@@ -197,6 +197,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Checks that go to the network no longer freeze the screen.** Verifying a
+  delivered credential (the issuer's DID document, its revocation status list),
+  a community's signed reply or removal notice, a relationship DID's binding
+  proofs and a VRC's proof each resolve a DID or fetch over HTTPS. They now run
+  off the screen's loop, one at a time in arrival order, so a slow community no
+  longer stalls the UI. A message waiting on its check is not acted on at all;
+  when the check finishes it is handled with the result, under the same rules
+  as before (a check that did not run, or ran for another credential, refuses).
+  A join whose credential is being checked shows *Pending — verifying
+  credential…* until it activates or is refused. **Breaking (library):**
+  `vetting::inbound::Context` takes the credential-issue's already-verified
+  credential (`issued_credential`), and `messaging::bind_removal_notice` is the
+  local half of `verify_removal_notice`.
+
 - **The join page for a community that vets is one list of choices.** It had
   grown a row of keys along the foot that was a second, shorter, differently
   worded menu of the same things: `j` was *Send an open request*, `n` was the
