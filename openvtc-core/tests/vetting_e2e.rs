@@ -123,6 +123,7 @@ struct Party {
     persona: PersonaId,
     book: VettingBook,
     account: Account,
+    seen: openvtc_core::operational::SeenDocuments,
 }
 
 impl Party {
@@ -133,6 +134,7 @@ impl Party {
             persona: PersonaId::new(),
             book: VettingBook::default(),
             account: Account::default(),
+            seen: Default::default(),
         }
     }
 
@@ -165,7 +167,7 @@ impl Party {
             recipient: Some((self.persona, &self.did)),
             now: Utc::now(),
         };
-        handle(&mut self.book, &ctx, message, sender)
+        handle(&mut self.book, &ctx, &mut self.seen, message, sender)
             .await
             .expect("a vetting message is claimed")
     }
@@ -194,7 +196,7 @@ fn requirements() -> VettingRequirements {
 
 /// The community's manifest answer, signed as a VTC signs its success
 /// responses — an unsigned one is not acted on.
-async fn manifest_reply(community: &str, signer: &Secret) -> Message {
+async fn manifest_reply(community: &str, to: &str, signer: &Secret) -> Message {
     let criterion = manifest::v0_2::Criterion::try_from(
         manifest::v0_2::Criterion::builder()
             .id("vetted")
@@ -212,15 +214,20 @@ async fn manifest_reply(community: &str, signer: &Secret) -> Message {
             .branding(None),
     )
     .expect("manifest");
+    // An operational document: addressed, dated, and signed with the
+    // community's authentication key.
     let mut document = json!({
+        "id": wire::new_id(),
         "type": JOIN_REQUEST_MANIFEST_0_2_TYPE,
         "issuer": community,
+        "recipient": to,
+        "issuedAt": Utc::now().to_rfc3339(),
         "payload": body,
     });
     let proof = affinidi_data_integrity::DataIntegrityProof::sign(
         &document,
         signer,
-        affinidi_data_integrity::SignOptions::new(),
+        affinidi_data_integrity::SignOptions::new().with_proof_purpose("authentication"),
     )
     .await
     .expect("sign the manifest");
@@ -326,7 +333,7 @@ async fn the_vetting_ceremony_completes_over_the_wire() {
         .expect("application starts");
     let handled = alice
         .receive(
-            &manifest_reply(&community, &community_secret).await,
+            &manifest_reply(&community, &alice_did, &community_secret).await,
             &community,
         )
         .await;
@@ -582,7 +589,7 @@ async fn a_request_without_a_ticket_is_refused_at_the_desk() {
         .expect("application starts");
     alice
         .receive(
-            &manifest_reply(&community, &community_secret).await,
+            &manifest_reply(&community, &alice_did, &community_secret).await,
             &community,
         )
         .await;

@@ -317,6 +317,7 @@ pub async fn process_inbound_message(
         if let Some(handled) = openvtc_core::vetting::inbound::handle(
             &mut config.private.vetting,
             &ctx,
+            &mut config.private.seen_documents,
             message,
             &from_did,
         )
@@ -654,10 +655,15 @@ pub async fn process_inbound_message(
     // its VTC DID up for the loop to deregister the session (R-S-3).
     if message.typ == MEMBER_REMOVAL_NOTICE_TYPE {
         // Only the community's signature ends a membership.
+        let ours = config.persona_dids();
+        let ours: Vec<&str> = ours.iter().map(String::as_str).collect();
         let notice = match openvtc_core::messaging::verify_removal_notice(
             message,
             &from_did,
+            &ours,
             tdk.did_resolver(),
+            &mut config.private.seen_documents,
+            chrono::Utc::now(),
         )
         .await
         {

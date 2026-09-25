@@ -393,16 +393,20 @@ pub fn may_claim(typ: &str) -> bool {
 }
 
 /// Handle `message` from the authenticated `sender` if it is vetting's.
+///
+/// `seen` holds the ids of operational documents already acted on: a
+/// community's answer is taken once ([`crate::operational`]).
 pub async fn handle(
     book: &mut VettingBook,
     ctx: &Context<'_>,
+    seen: &mut crate::operational::SeenDocuments,
     message: &Message,
     sender: &str,
 ) -> Option<Handled> {
     // A community's answer is acted on only when the community signed it: the
     // transport sender is a routing hint, not proof of who wrote the reply.
     if is_community_answer_type(&message.typ)
-        && let Err(e) = community_signed(ctx, message, sender).await
+        && let Err(e) = community_signed(ctx, seen, message, sender).await
     {
         warn!(typ = %message.typ, reason = %e, "community answer refused");
         return Some(Handled::default());
@@ -453,28 +457,30 @@ fn is_community_answer_type(typ: &str) -> bool {
     )
 }
 
-/// Check a community's answer is a document it issued and signed: `issuer` is
-/// the community it came from, and a proof by that DID verifies under a key its
-/// DID document lists for the proof's purpose.
+/// Check a community's answer is its signed operational document: issued by
+/// the community it came from, signed with its `authentication` key
+/// (VTI-KEY-106), addressed to the persona it arrived for, fresh, and not seen
+/// before (VTI-KEY-107).
 async fn community_signed(
     ctx: &Context<'_>,
+    seen: &mut crate::operational::SeenDocuments,
     message: &Message,
     sender: &str,
 ) -> Result<(), String> {
-    let issuer = message.body.get("issuer").and_then(Value::as_str);
-    if issuer != Some(sender) {
-        return Err("the answer is not issued by the community it came from".to_string());
-    }
-    crate::proof_check::verify_signed(
+    let Some((_, our_did)) = ctx.recipient else {
+        return Err("it arrived for no persona of ours".to_string());
+    };
+    crate::operational::verify_operational(
         &message.body,
         sender,
+        &[our_did],
+        crate::operational::OperationalKind::CommunityAnswer,
         ctx.did_resolver,
-        &[
-            crate::proof_check::Purpose::AssertionMethod,
-            crate::proof_check::Purpose::Authentication,
-        ],
+        seen,
+        ctx.now,
     )
     .await
+    .map(|_| ())
     .map_err(|e| e.to_string())
 }
 
@@ -849,7 +855,6 @@ async fn statement(
                 sender,
                 ctx.did_resolver,
                 ctx.now,
-                crate::issued_credential::StatusPolicy::Advisory,
             )
             .await
             {

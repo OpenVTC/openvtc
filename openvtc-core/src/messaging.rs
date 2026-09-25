@@ -724,16 +724,12 @@ pub fn handle_join_trust_task_error(
 /// notice's contents or a DID.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RemovalNoticeError {
-    #[error("the notice is not a Trust Task document")]
-    NotADocument,
-    #[error("the notice is not issued by the community it came from")]
-    IssuerNotSender,
-    #[error("the notice is addressed to someone else")]
-    WrongRecipient,
-    #[error("the notice's proof: {0}")]
-    Proof(#[from] crate::proof_check::ProofError),
+    #[error("the notice {0}")]
+    Document(#[from] crate::operational::OperationalError),
     #[error("the notice's payload is malformed")]
     Malformed,
+    #[error("the notice is addressed to one persona but names another")]
+    WrongRecipient,
 }
 
 /// A removal notice whose proof by the sending community verified
@@ -752,13 +748,13 @@ impl VerifiedRemovalNotice {
 
 /// Verify a removal notice before anything acts on it.
 ///
-/// Removal ends a membership, so it is taken only on the community's
-/// signature, never on who the transport says sent it: the notice must be the
-/// Trust Task document the VTC signs (`issuer` = `from_did`, `recipient` = the
-/// removed persona when named), with a proof by `from_did` under a key its DID
-/// document lists for the proof's purpose — `assertionMethod` today, or
-/// `authentication` (an operational key) — by the rules in
-/// [`crate::proof_check`]. A bare, unsigned payload is refused.
+/// Removal ends a membership, so it is taken only as the community's signed
+/// operational document ([`crate::operational`]): `issuer` is `from_did`, the
+/// proof is by the community's `authentication` key (VTI-KEY-106), it names a
+/// `recipient` that is one of `our_dids` and is the persona the payload
+/// removes, its `issuedAt` is inside the notice's delivery window, and its id
+/// has not been acted on before (VTI-KEY-107). A bare or unsigned notice is
+/// refused.
 ///
 /// # Errors
 ///
@@ -766,32 +762,37 @@ impl VerifiedRemovalNotice {
 pub async fn verify_removal_notice(
     message: &Message,
     from_did: &str,
+    our_dids: &[&str],
     resolver: &affinidi_did_resolver_cache_sdk::DIDCacheClient,
+    seen: &mut crate::operational::SeenDocuments,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<VerifiedRemovalNotice, RemovalNoticeError> {
     let document = &message.body;
-    let payload = document
+    // Parse and bind before the proof check records the id: a well-signed
+    // notice whose payload contradicts its recipient must not be recorded as
+    // acted on.
+    let body: RemovalNoticeBody = document
         .get("payload")
-        .ok_or(RemovalNoticeError::NotADocument)?;
-    if document.get("issuer").and_then(Value::as_str) != Some(from_did) {
-        return Err(RemovalNoticeError::IssuerNotSender);
-    }
-    crate::proof_check::verify_signed(
-        document,
-        from_did,
-        resolver,
-        &[
-            crate::proof_check::Purpose::AssertionMethod,
-            crate::proof_check::Purpose::Authentication,
-        ],
-    )
-    .await?;
-    let body: RemovalNoticeBody =
-        serde_json::from_value(payload.clone()).map_err(|_| RemovalNoticeError::Malformed)?;
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| RemovalNoticeError::Malformed)?
+        .ok_or(crate::operational::OperationalError::NotADocument)?;
     if let Some(recipient) = document.get("recipient").and_then(Value::as_str)
         && recipient != body.did
     {
         return Err(RemovalNoticeError::WrongRecipient);
     }
+    crate::operational::verify_operational(
+        document,
+        from_did,
+        our_dids,
+        crate::operational::OperationalKind::RemovalNotice,
+        resolver,
+        seen,
+        now,
+    )
+    .await?;
     Ok(VerifiedRemovalNotice(body))
 }
 
@@ -1834,6 +1835,7 @@ mod tests {
             "type": vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE,
             "issuer": vtc,
             "recipient": persona,
+            "issuedAt": Utc::now().to_rfc3339(),
             "payload": {
                 "did": persona,
                 "code": "adminRemoved",
@@ -1862,83 +1864,112 @@ mod tests {
         .expect("resolver")
     }
 
-    /// A removal ends a membership, so it is acted on only with the
-    /// community's signature — not on who the transport says sent it.
+    /// A removal ends a membership, so it is acted on only as the community's
+    /// signed operational document — authentication key, addressed, fresh,
+    /// once — not on who the transport says sent it.
     #[tokio::test]
-    async fn a_removal_notice_needs_the_communitys_proof() {
-        use crate::proof_check::{ProofError, test_support::sign};
+    async fn a_removal_notice_needs_the_communitys_operational_proof() {
+        use crate::operational::{OperationalError, SeenDocuments};
+        use crate::proof_check::{ProofError, Purpose, test_support::sign_for};
         let resolver = test_resolver().await;
         let vtc_key = did_key_secret(0x51);
         let vtc = did_of_secret(&vtc_key);
         let persona = "did:webvh:example:persona";
+        let ours = [persona];
+        let mut seen = SeenDocuments::default();
+        let signers = [&vtc_key];
+        let auth = |doc| sign_for(doc, &signers, Purpose::Authentication);
+        macro_rules! run {
+            ($m:expr, $from:expr) => {
+                verify_removal_notice(&$m, &$from, &ours, &resolver, &mut seen, Utc::now()).await
+            };
+        }
 
-        // Signed by the community: accepted.
-        let signed = sign(notice_document(&vtc, persona), &[&vtc_key]).await;
-        assert!(
-            verify_removal_notice(&notice_message(&vtc, signed.clone()), &vtc, &resolver)
-                .await
-                .is_ok()
+        // Signed with the community's authentication key: accepted, once.
+        let signed = auth(notice_document(&vtc, persona)).await;
+        assert!(run!(notice_message(&vtc, signed.clone()), vtc).is_ok());
+        assert_eq!(
+            run!(notice_message(&vtc, signed.clone()), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Replayed)
+        );
+
+        // Signed under assertionMethod (VTI-KEY-106): refused.
+        let asserted = sign_for(
+            notice_document(&vtc, persona),
+            &[&vtc_key],
+            Purpose::AssertionMethod,
+        )
+        .await;
+        assert_eq!(
+            run!(notice_message(&vtc, asserted), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Proof(ProofError::WrongPurpose(0)))
         );
 
         // Unsigned: refused.
         assert_eq!(
-            verify_removal_notice(
-                &notice_message(&vtc, notice_document(&vtc, persona)),
-                &vtc,
-                &resolver
-            )
-            .await
-            .unwrap_err(),
-            RemovalNoticeError::Proof(ProofError::NoProof)
+            run!(notice_message(&vtc, notice_document(&vtc, persona)), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Proof(ProofError::NoProof))
         );
 
         // A bare payload (no document): refused.
         let bare = notice_document(&vtc, persona)["payload"].clone();
-        assert_eq!(
-            verify_removal_notice(&notice_message(&vtc, bare), &vtc, &resolver)
-                .await
-                .unwrap_err(),
-            RemovalNoticeError::NotADocument
-        );
+        assert!(run!(notice_message(&vtc, bare), vtc).is_err());
 
         // Changed after signing: refused.
-        let mut tampered = signed.clone();
+        let mut tampered = auth(notice_document(&vtc, persona)).await;
         tampered["payload"]["code"] = serde_json::json!("purged");
         assert_eq!(
-            verify_removal_notice(&notice_message(&vtc, tampered), &vtc, &resolver)
-                .await
-                .unwrap_err(),
-            RemovalNoticeError::Proof(ProofError::Invalid(0))
+            run!(notice_message(&vtc, tampered), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Proof(ProofError::Invalid(0)))
         );
 
         // Claimed as the community's but signed by somebody else: refused.
         let other = did_key_secret(0x52);
-        let forged = sign(notice_document(&vtc, persona), &[&other]).await;
+        let forged = sign_for(
+            notice_document(&vtc, persona),
+            &[&other],
+            Purpose::Authentication,
+        )
+        .await;
         assert_eq!(
-            verify_removal_notice(&notice_message(&vtc, forged), &vtc, &resolver)
-                .await
-                .unwrap_err(),
-            RemovalNoticeError::Proof(ProofError::ForeignVerificationMethod(0))
+            run!(notice_message(&vtc, forged), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Proof(
+                ProofError::ForeignVerificationMethod(0)
+            ))
         );
 
         // A genuine notice arriving as another sender's: refused.
         let elsewhere = did_of_secret(&other);
+        let fresh = auth(notice_document(&vtc, persona)).await;
         assert_eq!(
-            verify_removal_notice(&notice_message(&elsewhere, signed), &elsewhere, &resolver)
-                .await
-                .unwrap_err(),
-            RemovalNoticeError::IssuerNotSender
+            run!(notice_message(&elsewhere, fresh), elsewhere).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::IssuerNotSender)
         );
 
-        // Addressed to one persona but naming another: refused.
+        // No recipient, or one naming another persona than the payload: refused.
+        let mut unaddressed = notice_document(&vtc, persona);
+        unaddressed.as_object_mut().unwrap().remove("recipient");
+        let unaddressed = auth(unaddressed).await;
+        assert_eq!(
+            run!(notice_message(&vtc, unaddressed), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::NoRecipient)
+        );
         let mut misaddressed = notice_document(&vtc, persona);
         misaddressed["recipient"] = serde_json::json!("did:webvh:example:someone-else");
-        let misaddressed = sign(misaddressed, &[&vtc_key]).await;
+        let misaddressed = auth(misaddressed).await;
         assert_eq!(
-            verify_removal_notice(&notice_message(&vtc, misaddressed), &vtc, &resolver)
-                .await
-                .unwrap_err(),
+            run!(notice_message(&vtc, misaddressed), vtc).unwrap_err(),
             RemovalNoticeError::WrongRecipient
+        );
+
+        // Too old for the delivery window: refused.
+        let mut stale = notice_document(&vtc, persona);
+        stale["issuedAt"] =
+            serde_json::json!((Utc::now() - chrono::TimeDelta::days(40)).to_rfc3339());
+        let stale = auth(stale).await;
+        assert_eq!(
+            run!(notice_message(&vtc, stale), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::TooOld)
         );
     }
 

@@ -91,14 +91,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     by sender alone is gone, so a rejection can no longer end an established
     relationship. **Breaking (wire):** both peers need this version; a request
     in flight across the upgrade must be sent again.
-  - *Removal notices* are acted on only when they are the community's signed
-    Trust Task document (`assertionMethod`, or an `authentication` key); an
-    unsigned or bare notice is ignored, and the activity log says so.
-  - *A community's vetting answers* (manifest, vetter directory, profile,
-    resend, withdrawal record) are acted on only when the community signed
-    them, and a vetter role credential is kept only when its proof verifies.
+  - *Operational documents from a community* — removal notices and its
+    vetting answers (manifest, vetter directory, profile, resend, withdrawal
+    record) — are acted on only when signed with the community's
+    `authentication` key (an `assertionMethod` proof is refused: VTI-KEY-106),
+    addressed to one of our personas (`recipient` required), dated inside the
+    kind's window (`issuedAt` required; 30 days for a removal notice, a day for
+    an answer; `expiresAt` honoured), and never seen before — document ids are
+    remembered, persisted, until their window passes (VTI-KEY-107). A refused
+    removal notice is noted in the activity log.
+  - *Vetter role credentials* are kept only when their proof verifies
+    (`assertionMethod`, like every credential).
+  **Breaking (wire):** a community must sign operational documents with an
+  `authentication` key and include `recipient` and `issuedAt`.
   **Breaking (library):** `handle_member_removal_notice` takes a
-  `VerifiedRemovalNotice`, `vetting::inbound::Context` has a `did_resolver`,
+  `VerifiedRemovalNotice` (from `verify_removal_notice`, which now takes our
+  persona DIDs and the seen-document store), `vetting::inbound::handle` takes
+  the seen-document store, `vetting::inbound::Context` has a `did_resolver`,
   the relationship bodies gained proof fields, and the unused
   `relationships::create_send_message_accepted` (which sent an unproven
   acceptance) is removed.
