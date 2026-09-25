@@ -1632,3 +1632,18 @@ async fn a_community_answer_is_taken_once_and_only_from_the_operational_key() {
     let handled = applicant.receive(&other, COMMUNITY).await;
     assert!(!handled.changed && handled.notice.is_none());
 }
+
+/// A signed manifest nobody asked for — no query, no application, no
+/// membership — is not learned, and nothing is written to the replay set.
+#[tokio::test]
+async fn an_unsolicited_manifest_writes_nothing() {
+    let mut stranger = Party::new(7);
+    let reply = manifest_reply(&stranger.did.clone()).await;
+    let handled = stranger.receive(&reply, COMMUNITY).await;
+    assert!(!handled.changed && handled.notice.is_none() && handled.answer.is_none());
+    assert!(stranger.seen.is_empty(), "the replay set is untouched");
+    assert!(matches!(
+        stranger.book.knowledge(COMMUNITY),
+        Knowledge::Unknown
+    ));
+}

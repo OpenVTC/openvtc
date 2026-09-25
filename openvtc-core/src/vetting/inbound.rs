@@ -405,12 +405,20 @@ pub async fn handle(
 ) -> Option<Handled> {
     // A community's answer is acted on only when the community signed it: the
     // transport sender is a routing hint, not proof of who wrote the reply.
-    if is_community_answer_type(&message.typ)
-        && let Err(e) = community_signed(ctx, seen, message, sender).await
-    {
-        warn!(typ = %message.typ, reason = %e, "community answer refused");
-        return Some(Handled::default());
-    }
+    // Its id is checked against the replay set before acting, and recorded
+    // only after — and only if the answer matched something of ours, so an
+    // answer nobody asked for writes nothing.
+    let pending = if is_community_answer_type(&message.typ) {
+        match community_signed(ctx, seen, message, sender).await {
+            Ok(verified) => Some(verified),
+            Err(e) => {
+                warn!(typ = %message.typ, reason = %e, "community answer refused");
+                return Some(Handled::default());
+            }
+        }
+    } else {
+        None
+    };
     let handled = match message.typ.as_str() {
         VETTING_REQUEST_TYPE => take_request(book, ctx, message, sender).await,
         VETTING_REQUEST_RESPONSE_TYPE => accepted(book, ctx, message, sender).await,
@@ -427,6 +435,12 @@ pub async fn handle(
         PROBLEM_REPORT_TYPE => return problem_reported(book, ctx, message, sender),
         _ => return None,
     };
+    if let Some(verified) = pending
+        && (handled.changed || handled.answer.is_some() || handled.notice.is_some())
+        && let Err(e) = verified.commit(seen, ctx.now)
+    {
+        warn!(reason = %e, "community answer acted on but not recorded");
+    }
     Some(handled)
 }
 
@@ -463,14 +477,14 @@ fn is_community_answer_type(typ: &str) -> bool {
 /// before (VTI-KEY-107).
 async fn community_signed(
     ctx: &Context<'_>,
-    seen: &mut crate::operational::SeenDocuments,
+    seen: &crate::operational::SeenDocuments,
     message: &Message,
     sender: &str,
-) -> Result<(), String> {
+) -> Result<crate::operational::VerifiedOperational, String> {
     let Some((_, our_did)) = ctx.recipient else {
         return Err("it arrived for no persona of ours".to_string());
     };
-    crate::operational::verify_operational(
+    let verified = crate::operational::verify_operational(
         &message.body,
         sender,
         &[our_did],
@@ -480,8 +494,10 @@ async fn community_signed(
         ctx.now,
     )
     .await
-    .map(|_| ())
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // Refuse a replay, or a community over its quota, before acting.
+    verified.check(seen, ctx.now).map_err(|e| e.to_string())?;
+    Ok(verified)
 }
 
 /// The thread a community's reply names: the envelope's, or the document's.
@@ -1098,6 +1114,19 @@ fn withdrawal_recorded(book: &mut VettingBook, message: &Message, sender: &str) 
 
 fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender: &str) -> Handled {
     let thread = community_thread(message);
+    // Taken only from a community we have reason to hear from: one we asked,
+    // one we are applying to, or one we belong to. Anyone else's manifest,
+    // signed or not, is not ours to learn.
+    let solicited = book
+        .queries
+        .iter()
+        .any(|q| q.community == sender && q.kind == super::queries::QueryKind::Manifest)
+        || book.applications.iter().any(|a| a.community == sender)
+        || !ctx.account.memberships_for(sender).is_empty();
+    if !solicited {
+        debug!(typ = %message.typ, "manifest from a community we have no business with — ignored");
+        return Handled::default();
+    }
     let body = match community_payload::<join_manifest::v0_2::Response>(message) {
         Ok(body) => body,
         Err(detail) => {

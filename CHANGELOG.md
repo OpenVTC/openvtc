@@ -98,7 +98,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     addressed to one of our personas (`recipient` required), dated inside the
     kind's window (`issuedAt` required; 30 days for a removal notice, a day for
     an answer; `expiresAt` honoured), and never seen before — document ids are
-    remembered, persisted, until their window passes (VTI-KEY-107). A refused
+    remembered, persisted, until their window passes (VTI-KEY-107). An id is
+    recorded only once the document is bound — from a community we belong to
+    with a payload naming what it should, or answering a request of ours — so
+    a party with no standing cannot write to the set; the set is keyed by
+    issuer, ids are capped at 256 characters, and each issuer's quota refuses
+    new documents rather than evicting a live entry. A refused
     removal notice is noted in the activity log.
   - *Vetter role credentials* are kept only when their proof verifies
     (`assertionMethod`, like every credential).

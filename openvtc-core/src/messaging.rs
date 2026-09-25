@@ -730,6 +730,8 @@ pub enum RemovalNoticeError {
     Malformed,
     #[error("the notice is addressed to one persona but names another")]
     WrongRecipient,
+    #[error("the notice is for a membership we do not hold with that community")]
+    NoMembership,
 }
 
 /// A removal notice whose proof by the sending community verified
@@ -762,15 +764,12 @@ impl VerifiedRemovalNotice {
 pub async fn verify_removal_notice(
     message: &Message,
     from_did: &str,
-    our_dids: &[&str],
+    account: &Account,
     resolver: &affinidi_did_resolver_cache_sdk::DIDCacheClient,
     seen: &mut crate::operational::SeenDocuments,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<VerifiedRemovalNotice, RemovalNoticeError> {
     let document = &message.body;
-    // Parse and bind before the proof check records the id: a well-signed
-    // notice whose payload contradicts its recipient must not be recorded as
-    // acted on.
     let body: RemovalNoticeBody = document
         .get("payload")
         .cloned()
@@ -783,16 +782,27 @@ pub async fn verify_removal_notice(
     {
         return Err(RemovalNoticeError::WrongRecipient);
     }
-    crate::operational::verify_operational(
+    let ours: Vec<&str> = account.personas.values().map(|p| p.did.as_str()).collect();
+    let verified = crate::operational::verify_operational(
         document,
         from_did,
-        our_dids,
+        &ours,
         crate::operational::OperationalKind::RemovalNotice,
         resolver,
         seen,
         now,
     )
     .await?;
+    // Bound before it is recorded: the sender is a community the named
+    // persona holds a membership with. A party with no standing — however
+    // well it signs with its own key — never reaches the replay set.
+    let bound = account
+        .persona_id_for_did(&body.did)
+        .is_some_and(|persona| account.membership(from_did, persona).is_some());
+    if !bound {
+        return Err(RemovalNoticeError::NoMembership);
+    }
+    verified.commit(seen, now)?;
     Ok(VerifiedRemovalNotice(body))
 }
 
@@ -1875,13 +1885,13 @@ mod tests {
         let vtc_key = did_key_secret(0x51);
         let vtc = did_of_secret(&vtc_key);
         let persona = "did:webvh:example:persona";
-        let ours = [persona];
+        let acct = account_with_persona(&vtc, persona);
         let mut seen = SeenDocuments::default();
         let signers = [&vtc_key];
         let auth = |doc| sign_for(doc, &signers, Purpose::Authentication);
         macro_rules! run {
             ($m:expr, $from:expr) => {
-                verify_removal_notice(&$m, &$from, &ours, &resolver, &mut seen, Utc::now()).await
+                verify_removal_notice(&$m, &$from, &acct, &resolver, &mut seen, Utc::now()).await
             };
         }
 
@@ -1892,6 +1902,23 @@ mod tests {
             run!(notice_message(&vtc, signed.clone()), vtc).unwrap_err(),
             RemovalNoticeError::Document(OperationalError::Replayed)
         );
+
+        // A stranger signing its own notice with its own key: it has no
+        // membership, so it is refused and records nothing.
+        let stranger_key = did_key_secret(0x5a);
+        let stranger = did_of_secret(&stranger_key);
+        let theirs = sign_for(
+            notice_document(&stranger, persona),
+            &[&stranger_key],
+            Purpose::Authentication,
+        )
+        .await;
+        let rev = seen.revision();
+        assert_eq!(
+            run!(notice_message(&stranger, theirs), stranger).unwrap_err(),
+            RemovalNoticeError::NoMembership
+        );
+        assert_eq!(seen.revision(), rev, "nothing recorded for a stranger");
 
         // Signed under assertionMethod (VTI-KEY-106): refused.
         let asserted = sign_for(

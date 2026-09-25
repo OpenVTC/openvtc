@@ -159,6 +159,22 @@ pub async fn process_inbound_message(
     message: &Message,
     effects: &mut InboundEffects,
 ) -> Result<bool, anyhow::Error> {
+    // A document recorded as acted on must be saved even when the handler
+    // reports no other change — otherwise a restart forgets it and the
+    // document can be replayed.
+    let seen_before = config.private.seen_documents.revision();
+    let changed = process_inbound(config, tdk, service, seen, message, effects).await?;
+    Ok(changed || config.private.seen_documents.revision() != seen_before)
+}
+
+async fn process_inbound(
+    config: &mut Config,
+    tdk: &TDK,
+    service: &Messaging,
+    seen: &mut SeenMessages,
+    message: &Message,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
     let InboundEffects {
         inactivated,
         capability_replies,
@@ -655,12 +671,10 @@ pub async fn process_inbound_message(
     // its VTC DID up for the loop to deregister the session (R-S-3).
     if message.typ == MEMBER_REMOVAL_NOTICE_TYPE {
         // Only the community's signature ends a membership.
-        let ours = config.persona_dids();
-        let ours: Vec<&str> = ours.iter().map(String::as_str).collect();
         let notice = match openvtc_core::messaging::verify_removal_notice(
             message,
             &from_did,
-            &ours,
+            &config.account,
             tdk.did_resolver(),
             &mut config.private.seen_documents,
             chrono::Utc::now(),
