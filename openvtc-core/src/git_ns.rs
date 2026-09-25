@@ -46,7 +46,7 @@ use trust_tasks_rs::specs::git_ns::drift::resolve::v0_1 as resolve;
 use trust_tasks_rs::specs::git_ns::repo::{
     archive::v0_1 as archive, create::v0_1 as create, transfer::v0_1 as transfer,
 };
-use trust_tasks_rs::specs::git_ns::right::{grant::v0_1 as grant, revoke::v0_1 as revoke};
+use trust_tasks_rs::specs::git_ns::right::{grant::v0_3 as grant, revoke::v0_3 as revoke};
 use uuid::Uuid;
 
 use crate::errors::OpenVTCError;
@@ -230,7 +230,7 @@ pub enum Request {
         visibility: Visibility,
         description: Option<String>,
     },
-    /// `git-ns/right/grant/0.1`.
+    /// `git-ns/right/grant/0.3` — the only version the VTC serves.
     Grant {
         subject: String,
         right: GitRight,
@@ -238,7 +238,7 @@ pub enum Request {
         expires_at: Option<DateTime<Utc>>,
         reason: Option<String>,
     },
-    /// `git-ns/right/revoke/0.1`.
+    /// `git-ns/right/revoke/0.3` — the only version the VTC serves.
     Revoke {
         subject: String,
         right: GitRight,
@@ -700,6 +700,14 @@ impl Refusal {
                  decision (git_ns.rego) — for example whether outside contributors may sign \
                  commits, or which visibilities are allowed. Ask a community administrator."
             ),
+            c if c == grant::error_codes::SELF_GRANT_NOT_ALLOWED.code => {
+                "Separation of duties: nobody grants themselves namespace admin, repo creator \
+                 or owner. Ask another administrator to grant it. If nobody else can, break \
+                 the glass from the admin console or with cnm git break-glass: it is \
+                 announced to every administrator and flagged until another one ratifies or \
+                 revokes it."
+                    .to_string()
+            }
             c if c == grant::error_codes::EXPIRY_IN_PAST.code => {
                 "The expiry is not in the future. Choose a later one, or none.".to_string()
             }
@@ -1563,7 +1571,7 @@ mod tests {
         );
         assert_eq!(
             req.type_uri(),
-            "https://trusttasks.org/spec/git-ns/right/grant/0.1"
+            "https://trusttasks.org/spec/git-ns/right/grant/0.3"
         );
         assert!(req.proof_required());
     }
@@ -2016,7 +2024,7 @@ mod tests {
     #[test]
     fn a_response_off_contract_is_unreadable_not_dropped() {
         let (_, reply) = parse_reply(&reply_doc(
-            "https://trusttasks.org/spec/git-ns/right/grant/0.1#response",
+            "https://trusttasks.org/spec/git-ns/right/grant/0.3#response",
             json!({"right": {"subject": "nobody"}}),
         ))
         .unwrap();
