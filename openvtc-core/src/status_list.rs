@@ -79,7 +79,16 @@ pub async fn check_credential_status(
     let mut first_unknown = None;
     for entry in &parsed {
         if !lists.iter().any(|(url, _)| *url == entry.url) {
-            let body = fetch(&entry.url).await;
+            let body = match cache::get(&entry.url, now) {
+                Some(list) => Ok(list),
+                None => {
+                    let body = fetch(&entry.url).await;
+                    if let Ok(list) = &body {
+                        cache::put(&entry.url, list, now);
+                    }
+                    body
+                }
+            };
             lists.push((entry.url.clone(), body));
         }
         let outcome = match lists.iter().find(|(url, _)| *url == entry.url) {
@@ -109,6 +118,99 @@ pub async fn check_credential_status(
     match first_unknown {
         Some(reason) => StatusCheck::Unknown(reason),
         None => StatusCheck::Active,
+    }
+}
+
+/// Fetched status lists, kept briefly so a burst of checks against one list
+/// costs one fetch.
+///
+/// Only the fetched body is cached — it is verified afresh on every use, so a
+/// cached list is trusted no more than a fetched one. An entry lives until the
+/// earliest of the list's `validUntil`, its `ttl` (milliseconds, Bitstring
+/// Status List v1.0 §2.2), and [`cache::MAX_AGE`]: a revocation is seen within
+/// that bound. The cache holds at most [`cache::MAX_ENTRIES`] lists.
+pub mod cache {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    use chrono::{DateTime, TimeDelta, Utc};
+    use serde_json::Value;
+
+    /// The longest a fetched list is reused, whatever it declares.
+    pub const MAX_AGE: TimeDelta = TimeDelta::minutes(5);
+    /// Most lists held.
+    pub const MAX_ENTRIES: usize = 64;
+
+    struct Entry {
+        list: Value,
+        until: DateTime<Utc>,
+    }
+
+    static CACHE: LazyLock<Mutex<HashMap<String, Entry>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// The cached list at `url`, if still fresh.
+    pub fn get(url: &str, now: DateTime<Utc>) -> Option<Value> {
+        let cache = CACHE.lock().ok()?;
+        cache
+            .get(url)
+            .filter(|e| e.until > now)
+            .map(|e| e.list.clone())
+    }
+
+    /// Keep `list` fetched from `url` at `now`.
+    pub fn put(url: &str, list: &Value, now: DateTime<Utc>) {
+        let until = expiry(list, now);
+        if until <= now {
+            return;
+        }
+        let Ok(mut cache) = CACHE.lock() else {
+            return;
+        };
+        cache.retain(|_, e| e.until > now);
+        if cache.len() >= MAX_ENTRIES
+            && !cache.contains_key(url)
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, e)| e.until)
+                .map(|(k, _)| k.clone())
+        {
+            cache.remove(&oldest);
+        }
+        cache.insert(
+            url.to_string(),
+            Entry {
+                list: list.clone(),
+                until,
+            },
+        );
+    }
+
+    /// When a list fetched at `now` stops being reusable.
+    pub fn expiry(list: &Value, now: DateTime<Utc>) -> DateTime<Utc> {
+        let mut until = now + MAX_AGE;
+        if let Some(valid_until) = list
+            .get("validUntil")
+            .and_then(Value::as_str)
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        {
+            until = until.min(valid_until.with_timezone(&Utc));
+        }
+        let ttl = list
+            .pointer("/credentialSubject/ttl")
+            .or_else(|| list.get("ttl"))
+            .and_then(Value::as_u64);
+        if let Some(ms) = ttl.and_then(|ms| i64::try_from(ms).ok()) {
+            until = until.min(now + TimeDelta::milliseconds(ms));
+        }
+        until
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear() {
+        if let Ok(mut c) = CACHE.lock() {
+            c.clear();
+        }
     }
 }
 
@@ -338,6 +440,25 @@ mod tests {
         elsewhere["id"] = json!("https://vtc.example.com/other");
         let elsewhere = sign(elsewhere, &[&key]).await;
         assert!(check(&elsewhere, &entry("7"), &doc).is_err());
+    }
+
+    #[test]
+    fn a_cached_list_lives_no_longer_than_it_says_or_the_bound() {
+        let now = Utc::now();
+        let mut l = list(&[]);
+        assert_eq!(cache::expiry(&l, now), now + cache::MAX_AGE);
+        l["credentialSubject"]["ttl"] = json!(1000);
+        assert_eq!(cache::expiry(&l, now), now + chrono::TimeDelta::seconds(1));
+        l["validUntil"] = json!((now - chrono::TimeDelta::seconds(1)).to_rfc3339());
+        assert!(cache::expiry(&l, now) < now);
+        // An expired list is not cached at all.
+        cache::put("https://expired.example/list", &l, now);
+        assert!(cache::get("https://expired.example/list", now).is_none());
+        let fresh = list(&[]);
+        cache::put("https://fresh.example/list", &fresh, now);
+        assert!(cache::get("https://fresh.example/list", now).is_some());
+        assert!(cache::get("https://fresh.example/list", now + cache::MAX_AGE).is_none());
+        cache::clear();
     }
 
     #[tokio::test]

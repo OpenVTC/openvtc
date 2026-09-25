@@ -53,7 +53,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   established: a revoked credential is refused, and so is one whose status list
   cannot be reached or does not verify (fail closed; the message says to retry).
   The status list is read by openvtc itself, so a list signed with a proof set
-  (Ed25519 + ML-DSA-44) verifies — the vetter grant check uses the same reader. A credential
+  (Ed25519 + ML-DSA-44) verifies — the vetter grant check uses the same reader.
+  A fetched list is reused for at most five minutes (sooner if its `validUntil`
+  or `ttl` says so) and re-verified on every use. A credential lands only on a
+  Pending or Active membership, and only a Pending join is activated — a
+  membership that ended is not revived by a credential arriving. A proof's
+  verification method must be controlled by the signer, and a proof `created`
+  up to five minutes in the future is accepted. A credential
   that fails is not stored and the activity log says what failed. Account
   recovery applies the same check to every membership it would restore, and the
   vault sync no longer pushes a locally held credential that does not verify

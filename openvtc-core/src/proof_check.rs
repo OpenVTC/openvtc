@@ -43,6 +43,11 @@ use affinidi_tdk::secrets_resolver::secrets::KeyType;
 use serde_json::Value;
 use tracing::debug;
 
+/// How far in the future a proof's `created` may be — the same allowance
+/// operational documents get on `issuedAt`, so a slightly fast clock at the
+/// signer is not a refusal.
+pub const CREATED_SKEW: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
+
 /// Bound on resolving a signer's DID document (R1.2).
 pub const SIGNER_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -96,6 +101,8 @@ pub enum ProofError {
     NotInRelationship(usize),
     #[error("proof {0} names a key the signer's DID document does not publish")]
     KeyNotPublished(usize),
+    #[error("proof {0} names a key controlled by someone other than the signer")]
+    ForeignController(usize),
     #[error("proof {0} names a key the signer has revoked")]
     KeyRevoked(usize),
     #[error("proof {0} names a key of a type that does not match its cryptosuite")]
@@ -246,6 +253,12 @@ fn verify_one(
             .find(|m| m.id.as_str() == vm || m.id.as_str() == relative)
             .ok_or(ProofError::KeyNotPublished(i))?,
     };
+    // The method's controller is the signer: a document may embed or
+    // reference a method some other DID controls, and that method does not
+    // speak for the signer.
+    if method.controller.as_str() != signer {
+        return Err(ProofError::ForeignController(i));
+    }
     if method.revoked.is_some() {
         return Err(ProofError::KeyRevoked(i));
     }
@@ -266,7 +279,9 @@ fn verify_one(
         .verify_with_public_key(
             unsigned,
             &key,
-            VerifyOptions::new().with_allowed_suites(accepted_suites()),
+            VerifyOptions::new()
+                .with_allowed_suites(accepted_suites())
+                .with_clock_skew(CREATED_SKEW),
         )
         .map_err(|e| {
             debug!(proof = i, error = %e, "proof did not verify");
@@ -519,6 +534,56 @@ mod tests {
             verify_proofs(&signed, SIGNER, &doc, ASSERT),
             Err(ProofError::DocumentMismatch)
         );
+    }
+
+    /// A method the signer's document embeds but someone else controls does
+    /// not speak for the signer.
+    #[tokio::test]
+    async fn a_method_controlled_by_another_did_is_refused() {
+        let key = ed_key(SIGNER, "key-0", 1);
+        let doc: Document = serde_json::from_value(json!({
+            "id": SIGNER,
+            "assertionMethod": [{
+                "id": format!("{SIGNER}#key-0"),
+                "type": "Multikey",
+                "controller": OTHER,
+                "publicKeyMultibase": key.get_public_keymultibase().unwrap(),
+            }],
+        }))
+        .unwrap();
+        let signed = sign(statement(), &[&key]).await;
+        assert_eq!(
+            verify_proofs(&signed, SIGNER, &doc, ASSERT),
+            Err(ProofError::ForeignController(0))
+        );
+    }
+
+    /// A proof `created` a little in the signer's future (its clock runs fast)
+    /// still verifies; one far in the future does not.
+    #[tokio::test]
+    async fn a_slightly_fast_signer_clock_is_tolerated() {
+        use affinidi_data_integrity::SignOptions;
+        let key = ed_key(SIGNER, "key-0", 1);
+        let doc = document(SIGNER, &[("key-0", &key)], &[]);
+        for (ahead, ok) in [
+            (chrono::TimeDelta::minutes(3), true),
+            (chrono::TimeDelta::hours(1), false),
+        ] {
+            let mut st = statement();
+            let p = DataIntegrityProof::sign(
+                &st,
+                &key,
+                SignOptions::new().with_created(chrono::Utc::now() + ahead),
+            )
+            .await
+            .unwrap();
+            st["proof"] = serde_json::to_value(p).unwrap();
+            assert_eq!(
+                verify_proofs(&st, SIGNER, &doc, ASSERT).is_ok(),
+                ok,
+                "{ahead}"
+            );
+        }
     }
 
     /// The refusal text is safe to show: it names no DID and quotes no claim.

@@ -940,6 +940,21 @@ pub fn handle_credential_issue(
         warn!(vtc = %from_did, "credential-issue for a community we don't hold a matching membership with — ignoring");
         return CredentialIssueOutcome::NONE;
     };
+    // A credential lands only on a live membership: one waiting on our join
+    // (Pending) or already Active. A membership that ended — Left, Withdrawn,
+    // Rejected, Removed, Expired — is not revived by a credential arriving,
+    // however well signed: re-joining is a new join the member starts.
+    let pending = matches!(
+        record.status,
+        crate::config::account::CommunityStatus::Pending { .. }
+    );
+    if !pending && !record.status.is_active() {
+        warn!(
+            status = ?record.status,
+            "issued credential for a membership that has ended — ignoring"
+        );
+        return CredentialIssueOutcome::NONE;
+    }
     record.credentials.insert(kind, credential);
 
     // Capture the join request id *before* activating. `activate` replaces
@@ -947,15 +962,15 @@ pub fn handle_credential_issue(
     // id exists — which is why a caller could not simply read it back
     // afterwards and why the reciprocal VMC has always gone out with
     // `requestId: None`.
-    let closed_join = if kind.activates_membership() && !record.status.is_active() {
-        let request_id = match record.status {
-            crate::config::account::CommunityStatus::Pending { request_id } => Some(request_id),
-            _ => None,
-        };
-        record.activate(chrono::Utc::now());
-        request_id.map(|id| (persona_id, id))
-    } else {
-        None
+    // Only a Pending membership — our outstanding join — is activated.
+    let closed_join = match record.status {
+        crate::config::account::CommunityStatus::Pending { request_id }
+            if kind.activates_membership() =>
+        {
+            record.activate(chrono::Utc::now());
+            Some((persona_id, request_id))
+        }
+        _ => None,
     };
     info!(
         vtc = %from_did,
@@ -2601,6 +2616,48 @@ mod tests {
                 kind.activates_membership(),
                 "activation for {kind:?} must match the registry",
             );
+        }
+    }
+
+    /// A membership that ended is not revived by a credential arriving: only a
+    /// Pending join is activated.
+    #[test]
+    fn a_credential_does_not_revive_an_ended_membership() {
+        let vtc = "did:webvh:example:vtc";
+        let persona = "did:webvh:example:persona";
+        for end in ["left", "removed", "rejected", "withdrawn"] {
+            let mut acct = account_with_persona(vtc, persona);
+            {
+                let rec = acct.memberships_mut().next().unwrap();
+                match end {
+                    "left" => {
+                        rec.activate(Utc::now());
+                        rec.leave();
+                    }
+                    "removed" => {
+                        rec.activate(Utc::now());
+                        rec.remove(DecisionEvidence::default());
+                    }
+                    "rejected" => rec.reject(DecisionEvidence::default()),
+                    _ => {
+                        rec.withdraw();
+                    }
+                }
+            }
+            let before = only(&acct, vtc).status.clone();
+            let m = issue(
+                vtc,
+                vc(
+                    &["VerifiableCredential", "MembershipCredential"],
+                    vtc,
+                    persona,
+                ),
+            );
+            let out = handle_credential_issue(&mut acct, verified(&m), vtc);
+            assert!(!out.changed && out.closed_join.is_none(), "{end}");
+            let rec = only(&acct, vtc);
+            assert_eq!(rec.status, before, "{end}: status unchanged");
+            assert!(rec.credentials.is_empty(), "{end}: nothing stored");
         }
     }
 
