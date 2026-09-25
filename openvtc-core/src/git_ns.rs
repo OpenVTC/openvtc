@@ -8,12 +8,12 @@
 //!
 //! - [`Request`]: one variant per task a member sends — `view`,
 //!   `repo/create`, `right/grant`, `right/revoke`, `repo/transfer`,
-//!   `repo/archive`, `account/link`, `account/link-status`. Every payload is
+//!   `repo/archive`, `drift/resolve`, `account/link`, `account/link-status`. Every payload is
 //!   built through the generated `trust_tasks_rs::specs::git_ns` types, so a
 //!   value the schema refuses (a DID without a method, an uppercase resource,
 //!   a reason over 1024 characters) fails here, before anything is sent.
-//! - [`build_signed`]: the addressed, dated, **signed** document. Six of the
-//!   eight tasks declare the proof REQUIRED; `view` and `account/link-status`
+//! - [`build_signed`]: the addressed, dated, **signed** document. Seven of the
+//!   nine tasks declare the proof REQUIRED; `view` and `account/link-status`
 //!   declare it RECOMMENDED. The VTC reads the actor from the verified
 //!   signer, never from the payload, so every document is signed — for the
 //!   two reads that is what the specification recommends, and it keeps the
@@ -21,7 +21,8 @@
 //! - [`parse_reply`] and [`Reply`]: the VTC's answer, typed, or a
 //!   [`Refusal`] whose [`Refusal::explain`] says what to do about it.
 //! - Pure readings of a `git-ns/view` answer the panel renders from:
-//!   [`my_repos`], [`creatable_namespaces`], [`people_on`], [`RepoStatus`].
+//!   [`my_repos`], [`creatable_namespaces`], [`people_on`], [`RepoStatus`],
+//!   and for drift [`DriftRef`], [`adoptable_right`], [`revert_weighs_as`].
 //!
 //! # Carriage
 //!
@@ -38,6 +39,7 @@ use trust_tasks_rs::TrustTask;
 use trust_tasks_rs::specs::git_ns::account::{
     link::v0_1 as link, link_status::v0_1 as link_status,
 };
+use trust_tasks_rs::specs::git_ns::drift::resolve::v0_1 as resolve;
 use trust_tasks_rs::specs::git_ns::repo::{
     archive::v0_1 as archive, create::v0_1 as create, transfer::v0_1 as transfer,
 };
@@ -242,6 +244,19 @@ pub enum Request {
     Transfer { resource: String, to: String },
     /// `git-ns/repo/archive/0.1`.
     Archive { resource: String },
+    /// `git-ns/drift/resolve/0.1` — answer one drift item the bridge
+    /// reported on a repository: adopt the forge-side role as a right, or
+    /// have the bridge revert the forge to the VTC's projection.
+    DriftResolve {
+        resource: String,
+        action: DriftAction,
+        item: DriftRef,
+        reason: Option<String>,
+        /// The right whose grant (adopt) or revocation (revert) the VTC gates
+        /// this as, which is what its consent class follows — from
+        /// [`adoptable_right`] or [`revert_weighs_as`].
+        weighs_as: GitRight,
+    },
     /// `git-ns/account/link/0.1` — begin linking a forge account.
     Link { forge: String },
     /// `git-ns/account/link-status/0.1`.
@@ -264,6 +279,7 @@ impl Request {
             Request::Revoke { .. } => revoke::Payload::TYPE_URI,
             Request::Transfer { .. } => transfer::Payload::TYPE_URI,
             Request::Archive { .. } => archive::Payload::TYPE_URI,
+            Request::DriftResolve { .. } => resolve::Payload::TYPE_URI,
             Request::Link { .. } => link::Payload::TYPE_URI,
             Request::LinkStatus { .. } => link_status::Payload::TYPE_URI,
         }
@@ -282,16 +298,22 @@ impl Request {
             Request::Revoke { .. } => revoke::Payload::IS_PROOF_REQUIRED,
             Request::Transfer { .. } => transfer::Payload::IS_PROOF_REQUIRED,
             Request::Archive { .. } => archive::Payload::IS_PROOF_REQUIRED,
+            Request::DriftResolve { .. } => resolve::Payload::IS_PROOF_REQUIRED,
             Request::Link { .. } => link::Payload::IS_PROOF_REQUIRED,
             Request::LinkStatus { .. } => link_status::Payload::IS_PROOF_REQUIRED,
         }
     }
 
-    /// The consent class of this change.
+    /// The consent class of this change. Resolving drift is classed as the
+    /// grant (adopt) or revocation (revert) the VTC gates it as.
     #[must_use]
     pub fn consent_class(&self) -> ConsentClass {
         match self {
-            Request::Grant { right, .. } | Request::Revoke { right, .. } => match right {
+            Request::Grant { right, .. }
+            | Request::Revoke { right, .. }
+            | Request::DriftResolve {
+                weighs_as: right, ..
+            } => match right {
                 GitRight::NsAdmin => ConsentClass::Destructive,
                 GitRight::RepoOwn | GitRight::RepoCreate => ConsentClass::Elevated,
                 GitRight::RepoMaintain | GitRight::CommitSign => ConsentClass::Normal,
@@ -399,6 +421,44 @@ impl Request {
                     .map_err(|e| conversion("archive", e))?;
                 serde_json::to_value(p)
             }
+            Request::DriftResolve {
+                resource,
+                action,
+                item,
+                reason,
+                ..
+            } => {
+                // Through the generated type, so the selector's rules the
+                // schema states (an account only on a role item, `observed`
+                // at most 256 characters, a reason at most 1024) are checked
+                // here, before anything is sent.
+                let mut drift = serde_json::json!({ "type": item.kind });
+                if let Some(a) = &item.account {
+                    drift["account"] =
+                        serde_json::json!({ "forge": a.forge, "id": a.id, "login": a.login });
+                }
+                if let Some(o) = &item.observed {
+                    drift["observed"] = Value::String(o.clone());
+                }
+                let mut v = serde_json::json!({
+                    "resource": resource,
+                    "action": action.as_str(),
+                    "drift": drift,
+                });
+                if let Some(r) = opt_text(reason.as_ref()) {
+                    v["reason"] = Value::String(r.to_string());
+                }
+                let p: resolve::Payload =
+                    serde_json::from_value(v).map_err(|e| conversion("drift/resolve", e))?;
+                if action == &DriftAction::Adopt && p.drift.observed.is_none() {
+                    return Err(conversion(
+                        "drift/resolve",
+                        "adopting records a right derived from the observed role, so the item's \
+                         observed value is required",
+                    ));
+                }
+                serde_json::to_value(p)
+            }
             Request::Link { forge } => {
                 let p: link::Payload = link::Payload::builder()
                     .forge(forge.as_str())
@@ -457,6 +517,7 @@ pub enum Reply {
     Revoked(Box<revoke::Response>),
     Transferred(Box<transfer::Response>),
     Archived(Box<archive::Response>),
+    DriftResolved(Box<resolve::Response>),
     LinkStarted(Box<link::Response>),
     LinkStatus(Box<link_status::Response>),
     /// A `trust-task-error`.
@@ -520,6 +581,9 @@ pub fn parse_reply(doc: &TrustTask<Value>) -> Option<(String, Reply)> {
             read(p, Reply::Transferred, "git-ns/repo/transfer")
         }
         u if u == archive::Response::TYPE_URI => read(p, Reply::Archived, "git-ns/repo/archive"),
+        u if u == resolve::Response::TYPE_URI => {
+            read(p, Reply::DriftResolved, "git-ns/drift/resolve")
+        }
         u if u == link::Response::TYPE_URI => read(p, Reply::LinkStarted, "git-ns/account/link"),
         u if u == link_status::Response::TYPE_URI => {
             read(p, Reply::LinkStatus, "git-ns/account/link-status")
@@ -661,6 +725,28 @@ impl Refusal {
             c if c == transfer::error_codes::SELF_TRANSFER.code => {
                 "You already own it. Choose someone else to hand it to.".to_string()
             }
+            c if c == resolve::error_codes::DRIFT_NOT_FOUND.code => {
+                "That drift is no longer outstanding as you read it: resolved already, or the \
+                 forge has changed since. Refresh (r) and look again."
+                    .to_string()
+            }
+            c if c == resolve::error_codes::NOT_ADOPTABLE.code => format!(
+                "That drift cannot be adopted{detail}. Revert it (v) instead, or — to accept a \
+                 lowered role — revoke the right (x)."
+            ),
+            c if c == resolve::error_codes::ACCOUNT_NOT_LINKED.code => {
+                "That forge account is not linked to a current member, so there is nobody to \
+                 grant the role to. Revert it (v), or have the person link their account first."
+                    .to_string()
+            }
+            c if c == resolve::error_codes::NO_MATCHING_RIGHT.code => format!(
+                "No git right corresponds to that forge role{detail}. Revert it (v), or grant a \
+                 right (a) and then revert the role."
+            ),
+            c if c == resolve::error_codes::NOT_REVERTIBLE.code => format!(
+                "The community cannot revert that on the forge{detail}. Fix it on the forge by \
+                 hand, or ask a namespace admin."
+            ),
             c if c == link::error_codes::UNSUPPORTED_FORGE.code => {
                 "No bridge serves that forge for this community, so there is nothing to link \
                  an account to. An administrator binds a namespace with the community's app \
@@ -747,6 +833,173 @@ pub fn is_manual(ns: &view::GitNamespace) -> bool {
 #[must_use]
 pub fn short_resource(resource: &str) -> &str {
     resource.split_once('/').map_or(resource, |(_, rest)| rest)
+}
+
+// ****************************************************************************
+// Drift
+// ****************************************************************************
+
+/// How a drift item is resolved (`git-ns/drift/resolve`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriftAction {
+    /// Record the forge-side role as a VTC right, so the projection comes to
+    /// match the forge.
+    Adopt,
+    /// Have the bridge make the forge match the projection again. No right
+    /// changes.
+    Revert,
+}
+
+impl DriftAction {
+    /// The wire string.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DriftAction::Adopt => "adopt",
+            DriftAction::Revert => "revert",
+        }
+    }
+}
+
+/// A forge account as a drift item names it: `id` is authoritative, `login`
+/// display only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DriftAccount {
+    pub forge: String,
+    pub id: String,
+    pub login: String,
+}
+
+/// One drift item as the view reported it, kept as the selector that picks
+/// it out again: its type, its account for the role types, and the observed
+/// value the member read — so a decision made about one forge state is
+/// refused (`driftNotFound`) rather than applied to another.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DriftRef {
+    /// `roleAdded`, `roleRemoved`, `roleChanged`, `requiredCheckMissing`,
+    /// `protectionWeakened` or `bootstrapMissing`.
+    pub kind: String,
+    pub account: Option<DriftAccount>,
+    pub observed: Option<String>,
+    pub expected: Option<String>,
+}
+
+impl DriftRef {
+    /// The selector for a reported item.
+    #[must_use]
+    pub fn of(item: &view::DriftItem) -> Self {
+        DriftRef {
+            kind: serde_json::to_value(item.type_)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            account: item.account.as_ref().map(|a| DriftAccount {
+                forge: a.forge.to_string(),
+                id: a.id.to_string(),
+                login: a.login.to_string(),
+            }),
+            observed: item.observed.as_ref().map(|o| o.to_string()),
+            expected: item.expected.as_ref().map(|e| e.to_string()),
+        }
+    }
+
+    /// Whether it is about one account's role.
+    #[must_use]
+    pub fn is_role(&self) -> bool {
+        matches!(
+            self.kind.as_str(),
+            "roleAdded" | "roleRemoved" | "roleChanged"
+        )
+    }
+
+    /// The item in words, for a confirmation or a status line.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let what = match self.kind.as_str() {
+            "roleAdded" => "role added on the forge",
+            "roleRemoved" => "projected role missing",
+            "roleChanged" => "role changed on the forge",
+            "requiredCheckMissing" => "required check no longer required",
+            "protectionWeakened" => "protection weakened",
+            "bootstrapMissing" => "bootstrap file or variable gone",
+            other => other,
+        };
+        let who = self
+            .account
+            .as_ref()
+            .map(|a| format!(" for @{}", crate::display::sanitize_display(&a.login, 100)))
+            .unwrap_or_default();
+        format!("{what}{who}")
+    }
+
+    /// What reverting it has the bridge do.
+    #[must_use]
+    pub fn revert_effect(&self) -> &'static str {
+        match self.kind.as_str() {
+            "roleAdded" => "the bridge takes the forge role off the account",
+            "roleRemoved" | "roleChanged" => {
+                "the bridge re-applies the roles the community's rights call for"
+            }
+            "requiredCheckMissing" | "protectionWeakened" => {
+                "the bridge re-applies the ruleset, so the commit-trust check is required again"
+            }
+            _ => "the bridge re-runs the bootstrap plan, restoring only what is missing",
+        }
+    }
+}
+
+/// The right the namespace's forge adapter projects to `role` — the VTC's
+/// `git_ns::drift::projected_right`. On an organisation `admin` projects
+/// owner and `maintain` maintainer; on a personal account collaborator
+/// `write` is the one level, and projects maintainer. Nothing else projects
+/// a right.
+#[must_use]
+pub fn projected_right(kind: Option<view::GitNamespaceKind>, role: &str) -> Option<GitRight> {
+    match (kind, role) {
+        (Some(view::GitNamespaceKind::User), "write") => Some(GitRight::RepoMaintain),
+        (Some(view::GitNamespaceKind::User), _) => None,
+        (_, "admin") => Some(GitRight::RepoOwn),
+        (_, "maintain") => Some(GitRight::RepoMaintain),
+        _ => None,
+    }
+}
+
+/// The right adopting `item` would record, if it can be adopted at all: only
+/// a role added or raised on the forge, to a level a right projects to.
+/// Whether the account is linked to a member the VTC decides.
+#[must_use]
+pub fn adoptable_right(ns: &view::GitNamespace, item: &DriftRef) -> Option<GitRight> {
+    if item.kind != "roleAdded" && item.kind != "roleChanged" {
+        return None;
+    }
+    projected_right(ns.kind, item.observed.as_deref()?)
+}
+
+/// The revocation reverting `item` weighs as, which the VTC gates it as
+/// (`git_ns::drift::revert`): taking off or lowering a forge role that
+/// projects owner weighs as revoking owner; any other revert at most as
+/// revoking maintainer.
+#[must_use]
+pub fn revert_weighs_as(ns: &view::GitNamespace, item: &DriftRef) -> GitRight {
+    if item.is_role()
+        && item.kind != "roleRemoved"
+        && item
+            .observed
+            .as_deref()
+            .and_then(|o| projected_right(ns.kind, o))
+            == Some(GitRight::RepoOwn)
+    {
+        GitRight::RepoOwn
+    } else {
+        GitRight::RepoMaintain
+    }
+}
+
+/// Whether a bridge acts on the forge for this namespace — without one
+/// nothing can revert a forge-side change (`notRevertible`).
+#[must_use]
+pub fn has_bridge(ns: &view::GitNamespace) -> bool {
+    matches!(ns.mode, view::GitNamespaceMode::Bridge)
 }
 
 /// Where a repository is, for its row.
@@ -1352,6 +1605,180 @@ mod tests {
         assert!(ConsentClass::Elevated.needs_confirmation());
     }
 
+    // --- drift -------------------------------------------------------------
+
+    fn eve_role() -> DriftRef {
+        DriftRef::of(&bob_view().repos[0].sync.drift[0])
+    }
+
+    /// The selector is the item as read: type, account, observed.
+    #[test]
+    fn a_drift_item_reads_as_its_selector() {
+        let item = eve_role();
+        assert_eq!(item.kind, "roleAdded");
+        assert!(item.is_role());
+        assert_eq!(
+            item.account,
+            Some(DriftAccount {
+                forge: "github.com".into(),
+                id: "5550123".into(),
+                login: "eve-dev".into(),
+            })
+        );
+        assert_eq!(item.observed.as_deref(), Some("write"));
+        assert_eq!(item.describe(), "role added on the forge for @eve-dev");
+    }
+
+    /// A revert and an adopt are built through the generated type, selecting
+    /// the item exactly as the specification does.
+    #[test]
+    fn a_drift_resolve_payload_matches_the_specification() {
+        let revert = Request::DriftResolve {
+            resource: "github.com/acme/widgets".into(),
+            action: DriftAction::Revert,
+            item: eve_role(),
+            reason: Some("  not granted in the VTC ".into()),
+            weighs_as: GitRight::RepoMaintain,
+        };
+        assert_eq!(
+            revert.payload().unwrap(),
+            json!({
+                "resource": "github.com/acme/widgets",
+                "action": "revert",
+                "drift": {
+                    "type": "roleAdded",
+                    "account": {"forge": "github.com", "id": "5550123", "login": "eve-dev"},
+                    "observed": "write"
+                },
+                "reason": "not granted in the VTC"
+            })
+        );
+        assert_eq!(
+            revert.type_uri(),
+            "https://trusttasks.org/spec/git-ns/drift/resolve/0.1"
+        );
+        assert!(revert.proof_required());
+
+        // A ruleset item has no account, and a blank reason is left out.
+        let check = Request::DriftResolve {
+            resource: "github.com/acme/widgets".into(),
+            action: DriftAction::Revert,
+            item: DriftRef {
+                kind: "requiredCheckMissing".into(),
+                account: None,
+                observed: None,
+                expected: None,
+            },
+            reason: Some(" ".into()),
+            weighs_as: GitRight::RepoMaintain,
+        };
+        assert_eq!(
+            check.payload().unwrap(),
+            json!({
+                "resource": "github.com/acme/widgets",
+                "action": "revert",
+                "drift": {"type": "requiredCheckMissing"}
+            })
+        );
+
+        // Adopting needs the observed value it derives the right from.
+        let mut blind = eve_role();
+        blind.observed = None;
+        let adopt = Request::DriftResolve {
+            resource: "github.com/acme/widgets".into(),
+            action: DriftAction::Adopt,
+            item: blind,
+            reason: None,
+            weighs_as: GitRight::RepoMaintain,
+        };
+        assert!(
+            adopt
+                .payload()
+                .unwrap_err()
+                .to_string()
+                .contains("observed")
+        );
+    }
+
+    /// What adopting records and what a revert weighs as, as the VTC's own
+    /// `projected_right` has them.
+    #[test]
+    fn drift_is_weighed_as_the_right_it_projects() {
+        let view = bob_view();
+        let org = &view.namespaces[0];
+        let mut personal = org.clone();
+        personal.kind = Some(view::GitNamespaceKind::User);
+        let role = |kind: &str, observed: &str| DriftRef {
+            kind: kind.into(),
+            account: eve_role().account,
+            observed: Some(observed.into()),
+            expected: None,
+        };
+
+        assert_eq!(
+            adoptable_right(org, &role("roleAdded", "admin")),
+            Some(GitRight::RepoOwn)
+        );
+        assert_eq!(
+            adoptable_right(org, &role("roleChanged", "maintain")),
+            Some(GitRight::RepoMaintain)
+        );
+        // Collaborator `write` projects nothing on an organisation, and
+        // maintainer on a personal account.
+        assert_eq!(adoptable_right(org, &role("roleAdded", "write")), None);
+        assert_eq!(
+            adoptable_right(&personal, &role("roleAdded", "write")),
+            Some(GitRight::RepoMaintain)
+        );
+        // A missing projected role has nothing to adopt.
+        assert_eq!(adoptable_right(org, &role("roleRemoved", "admin")), None);
+
+        assert_eq!(
+            revert_weighs_as(org, &role("roleAdded", "admin")),
+            GitRight::RepoOwn
+        );
+        assert_eq!(
+            revert_weighs_as(org, &role("roleRemoved", "admin")),
+            GitRight::RepoMaintain
+        );
+        assert_eq!(
+            revert_weighs_as(&personal, &role("roleAdded", "admin")),
+            GitRight::RepoMaintain
+        );
+
+        let weighed = |weighs_as| Request::DriftResolve {
+            resource: "github.com/acme/widgets".into(),
+            action: DriftAction::Revert,
+            item: eve_role(),
+            reason: None,
+            weighs_as,
+        };
+        assert_eq!(
+            weighed(GitRight::RepoOwn).consent_class(),
+            ConsentClass::Elevated
+        );
+        assert_eq!(
+            weighed(GitRight::RepoMaintain).consent_class(),
+            ConsentClass::Normal
+        );
+        assert!(has_bridge(org));
+    }
+
+    #[test]
+    fn a_drift_resolve_response_is_read_typed() {
+        let doc = reply_doc(
+            "https://trusttasks.org/spec/git-ns/drift/resolve/0.1#response",
+            json!({"action": "revert", "sync": {"state": "pending", "drift": []}}),
+        );
+        let (thid, reply) = parse_reply(&doc).unwrap();
+        assert_eq!(thid, "urn:uuid:req-1");
+        let Reply::DriftResolved(r) = reply else {
+            panic!("expected DriftResolved, got {reply:?}");
+        };
+        assert!(r.right.is_none());
+        assert!(r.sync.drift.is_empty());
+    }
+
     // --- replies -----------------------------------------------------------
 
     fn reply_doc(type_uri: &str, payload: Value) -> TrustTask<Value> {
@@ -1489,7 +1916,8 @@ mod tests {
             .chain(transfer::ERROR_CODES)
             .chain(archive::ERROR_CODES)
             .chain(link::ERROR_CODES)
-            .chain(link_status::ERROR_CODES);
+            .chain(link_status::ERROR_CODES)
+            .chain(resolve::ERROR_CODES);
         for code in declared {
             let text = refusal(code.code, None).explain();
             assert!(

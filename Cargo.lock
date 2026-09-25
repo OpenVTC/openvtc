@@ -9221,9 +9221,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-capability-client"
-version = "0.22.3"
+version = "0.22.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b2f616d3def6497e758bbe99c914215ea4db074efa477ff9b741988bf2a67d1"
+checksum = "5de21bcfc22be8f15ed452779c26a31fc07cc8f1e81eed0d3c5f499e66928eb6"
 dependencies = [
  "chrono",
  "serde",
@@ -9235,9 +9235,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-didcomm"
-version = "0.22.3"
+version = "0.22.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3d714f0198dfa2c0bc36dfbc4e71e0f3bba6f0e085953126b565382c388e3a2"
+checksum = "b2bd4347666ffa40bce57c5dbcfe9266bad7803bbd42a4977230da2212b3d136"
 dependencies = [
  "affinidi-messaging-didcomm",
  "base64 0.22.1",
@@ -9251,9 +9251,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-https"
-version = "0.22.3"
+version = "0.22.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8251be388fa9011616e8aa1ac20d7db336e134ba82edf19e36326f6b6708ca10"
+checksum = "1c707f24bb86122f3f1269324deb1160d9e544797ec61216e7f05f6b9fd6ab50"
 dependencies = [
  "axum",
  "chrono",
@@ -9270,9 +9270,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-proof"
-version = "0.22.3"
+version = "0.22.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dec4559096cbaffc3f04dd074751d479e015fa1c0a6781636eb8bc6a11360908"
+checksum = "aac140286713c51b460ba3c9f24b3cb4a82c6caa893ee86eb72b947324b4ce33"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -9288,9 +9288,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-rs"
-version = "0.22.3"
+version = "0.22.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26f9f1dd77f52419569cd3051e5ac1268b7304aec5063dd99b4d5feebc7decfa"
+checksum = "1d7ba07576152893f350eec73a5421c2b89a3248536e78eae8987bb1070e1921"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9304,9 +9304,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-tsp"
-version = "0.22.3"
+version = "0.22.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e8773fb732bdf9d17bba36dce41a44cef0fd186c6a5aa9878e73aed97326957"
+checksum = "e7cd70d8be320c5766473f1a6926ed76452e0167e8b6a7f98b8d80b7c02230a7"
 dependencies = [
  "affinidi-tsp",
  "chrono",
