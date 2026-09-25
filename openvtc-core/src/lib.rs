@@ -48,6 +48,7 @@ pub mod persona;
 pub mod personhood;
 pub mod presentation;
 pub mod process_lock;
+pub mod proof_check;
 pub mod rebuild;
 pub mod rebuild_apply;
 pub mod relationships;

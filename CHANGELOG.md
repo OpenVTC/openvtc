@@ -53,7 +53,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that fails is not stored and the activity log says what failed. Account
   recovery applies the same check to every membership it would restore, and the
   vault sync no longer pushes a locally held credential that does not verify
-  (the activity log counts them). **Breaking (library):**
+  (the activity log counts them). **Behaviour change:** a join is admitted
+  only by the verified membership credential — an `approved` status or an
+  `allow` verdict (both unsigned) now acknowledges the join and leaves it
+  Pending until the credential arrives, and the reciprocal membership credential
+  goes out only then. **Breaking (library):**
   `messaging::handle_credential_issue` now takes a
   `issued_credential::VerifiedIssuedCredential` instead of the message, and
   `credential_sync::sync_membership_credentials` takes a DID resolver.
