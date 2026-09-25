@@ -15,6 +15,13 @@
 //!   lane never delays a community's removal notice.
 //! - **Caps.** Each lane has a length cap and each sender a cap across both;
 //!   a message over either is refused, not queued, and the caller says so.
+//! - **Keyed on the authenticated sender.** The caller keys each message on
+//!   the sender the transport bound to it, never the plaintext `from`: a
+//!   forger claiming a community's DID spends its own share, not the
+//!   community's, and rotating the claimed `from` gains nothing.
+//! - **A rate on relationship requests.** Checking one resolves DIDs the
+//!   requester chose, so at most [`MAX_REQUEST_CHECKS_PER_MINUTE`] are queued
+//!   a minute, from everyone together.
 //! - **Order per sender.** A sender's messages keep the lane their first
 //!   queued one took, so they come back in the order they arrived.
 //! - **A timeout per check** ([`JOB_TIMEOUT`]), and a check that panics or
@@ -46,6 +53,9 @@ pub const MAX_OTHER_QUEUED: usize = 64;
 /// lanes.
 pub const MAX_PER_SENDER: usize = 32;
 
+/// Most relationship-request checks queued in a minute, across all senders.
+pub const MAX_REQUEST_CHECKS_PER_MINUTE: usize = 20;
+
 /// Which lane a message waits in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
@@ -62,10 +72,16 @@ pub enum Refused {
     LaneFull,
     #[error("this sender has too many messages waiting on verification")]
     SenderFull,
+    #[error("too many relationship requests to check right now")]
+    RateLimited,
+    #[error("it has no authenticated sender")]
+    Unauthenticated,
 }
 
 /// A message back from its check, to be dispatched from the top.
 pub struct Finished {
+    /// The key it was queued under (the authenticated sender).
+    pub sender: String,
     pub message: Box<Message>,
     pub transport: MessagingTransport,
     pub pre: PreVerified,
@@ -95,6 +111,8 @@ pub struct Verifier {
     /// Per sender: messages queued or running, and the lane they use.
     senders: HashMap<String, (usize, Lane)>,
     running: Option<Running>,
+    /// When recent relationship-request checks were queued.
+    request_checks: VecDeque<std::time::Instant>,
 }
 
 impl Verifier {
@@ -112,7 +130,20 @@ impl Verifier {
             other: VecDeque::new(),
             senders: HashMap::new(),
             running: None,
+            request_checks: VecDeque::new(),
         }
+    }
+
+    /// Whether the lane or `sender` is at its cap, so an `enqueue` would be
+    /// refused for want of room (not for rate).
+    #[must_use]
+    pub fn is_full_for(&self, sender: &str, lane: Lane) -> bool {
+        let (count, lane) = self.senders.get(sender).copied().unwrap_or((0, lane));
+        count >= MAX_PER_SENDER
+            || match lane {
+                Lane::Priority => self.priority.len() >= MAX_PRIORITY_QUEUED,
+                Lane::Other => self.other.len() >= MAX_OTHER_QUEUED,
+            }
     }
 
     /// Whether `sender` has anything queued or being checked. A message from
@@ -146,6 +177,20 @@ impl Verifier {
         };
         if queue.len() >= cap {
             return Err(Refused::LaneFull);
+        }
+        if deferred.job.is_relationship_request() {
+            let now = std::time::Instant::now();
+            while self
+                .request_checks
+                .front()
+                .is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60))
+            {
+                self.request_checks.pop_front();
+            }
+            if self.request_checks.len() >= MAX_REQUEST_CHECKS_PER_MINUTE {
+                return Err(Refused::RateLimited);
+            }
+            self.request_checks.push_back(now);
         }
         queue.push_back(Queued {
             deferred,
@@ -223,6 +268,7 @@ impl Verifier {
         }
         self.start_next();
         Finished {
+            sender: running.sender,
             message: running.message,
             transport: running.transport,
             pre,
@@ -329,6 +375,52 @@ mod tests {
                 MessagingTransport::DidComm,
                 "vtc",
                 Lane::Priority
+            )
+            .is_ok()
+        );
+    }
+
+    /// Relationship-request checks (which resolve DIDs the requester chose)
+    /// are rate-limited across all senders; other checks are not.
+    #[tokio::test]
+    async fn relationship_request_checks_are_rate_limited() {
+        let mut v = Verifier::new(test_tdk().await);
+        let request = |i: usize| Deferred {
+            message: Message::build(format!("r{i}"), "t", serde_json::json!({})).finalize(),
+            job: VerifyJob::DidBinding {
+                did: format!("did:key:z{i}"),
+                did_proof: None,
+                persona: format!("did:key:z{i}"),
+                persona_proof: None,
+                peer: "did:key:zMe".into(),
+                thid: format!("r{i}"),
+                role: openvtc_core::relationships::BindingRole::Request,
+            },
+        };
+        for i in 0..MAX_REQUEST_CHECKS_PER_MINUTE {
+            v.enqueue(
+                request(i),
+                MessagingTransport::DidComm,
+                &format!("s{i}"),
+                Lane::Other,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            v.enqueue(
+                request(99),
+                MessagingTransport::DidComm,
+                "fresh",
+                Lane::Other
+            ),
+            Err(Refused::RateLimited)
+        );
+        assert!(
+            v.enqueue(
+                barrier("b"),
+                MessagingTransport::DidComm,
+                "fresh",
+                Lane::Other
             )
             .is_ok()
         );

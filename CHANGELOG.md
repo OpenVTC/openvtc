@@ -216,16 +216,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - *A bounded queue.* Communities we belong to have their own lane, taken
     first, so a flood from anyone else cannot delay a removal notice; each lane
     and each sender is capped (a message over a cap is dropped, and for a
-    community's the activity log says so). Each check has a 30-second limit, and
-    one that times out or fails is a refusal; one failing never stops the
-    queue.
+    community's the activity log says so). Lanes and caps are keyed on the
+    sender the transport authenticated, never the claimed `from`: a message
+    claiming a community's DID from anyone else waits in the other lane under
+    its real sender's cap, and rotating the claimed `from` gains nothing. A
+    message with no authenticated sender is not queued. Relationship-request
+    checks, which resolve DIDs the requester chose, are limited to 20 a
+    minute. Each check has a 30-second limit, and one that times out or fails
+    is a refusal; one failing never stops the queue.
   - *Nothing lost on exit.* The mediator deletes a message once delivered, so a
-    community's message still waiting on its check is kept (encrypted, with the
-    protected config) and queued again on the next start.
+    community's message still waiting on its check (or its turn) is kept
+    (encrypted, with the protected config; at most 128, 32 KiB each) and queued
+    again on the next start, as the queue has room — none is dropped for want
+    of it. It is checked as of the restart, so after a long downtime one past
+    its freshness or validity window is refused, as if it had arrived late.
   - *Order per sender.* A message whose sender has messages waiting on a check
     waits behind them — a `members/request-vmc` arriving while the credential
     that activates the membership is still being verified is answered once it
-    is Active, rather than dropped.
+    is Active, rather than dropped. On its turn it is triaged again, and set
+    aside for a check if it now needs one.
   **Breaking (library):** `vetting::inbound::Context` takes the
   credential-issue's already-verified credential (`issued_credential`) and the
   community answer's check (`community_answer`), `messaging::bind_removal_notice`

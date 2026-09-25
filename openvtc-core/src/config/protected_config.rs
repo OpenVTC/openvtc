@@ -52,6 +52,9 @@ fn default_protected_schema_version() -> u32 {
 /// ([`ProtectedConfig::deferred_inbound`]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DeferredInbound {
+    /// The sender the transport authenticated, which equalled the message's
+    /// `from` (only such a message is kept). With the message id, the key.
+    pub sender: String,
     /// The message as it arrived.
     pub message: affinidi_tdk::didcomm::Message,
     /// The transport it arrived on.
@@ -286,7 +289,14 @@ pub struct ProtectedConfig {
     /// an off-loop check and not yet applied. The mediator deleted them on
     /// delivery, so without this a removal notice or credential still queued
     /// at exit would be lost; they are queued again on the next start, and
-    /// removed once applied. Bounded by the queue that fills it.
+    /// removed once applied. Only a message whose transport-authenticated
+    /// sender is a community we belong to is kept, at most
+    /// `MAX_KEPT_DEFERRED` of them.
+    ///
+    /// After a long downtime a kept message is still checked as of the
+    /// restart: an operational document past its freshness window (a day for
+    /// an answer, thirty-one for a removal notice) or a credential past its
+    /// validity is refused then, exactly as if it had just arrived that late.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_inbound: Vec<DeferredInbound>,
 

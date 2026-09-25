@@ -112,6 +112,7 @@ async fn an_openvtc_message_routes_through_the_production_transport() {
             message,
             from,
             transport,
+            ..
         } => {
             assert_eq!(
                 message.typ, OPENVTC_TYPE,
@@ -257,6 +258,7 @@ async fn a_message_stored_before_the_listener_existed_is_collected_on_connect() 
             message,
             from,
             transport,
+            ..
         } => {
             assert_eq!(message.typ, OPENVTC_TYPE);
             assert_eq!(

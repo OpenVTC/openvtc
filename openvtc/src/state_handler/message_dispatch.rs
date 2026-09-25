@@ -226,9 +226,10 @@ pub enum Arrival<'a> {
     New { waiting: &'a dyn Fn(&str) -> bool },
     /// Queued for its check before a restart
     /// ([`openvtc_core::config::protected_config::ProtectedConfig::deferred_inbound`]).
-    /// It passed the age and replay gates when it arrived; it is set aside for
-    /// its check again if it still passes the local checks, and dropped if
-    /// not. It is never handled directly.
+    /// It passed the age and replay gates when it arrived; it is set aside
+    /// again — for its check if it still passes the local checks, else to wait
+    /// its turn and be refused by its handler then. It is never handled
+    /// directly.
     Restored,
     /// Back from its check, with the result.
     Returning(PreVerified),
@@ -340,7 +341,21 @@ impl VerifyJob {
         }
     }
 
+    /// Whether this checks a relationship request's binding (DIDs the
+    /// requester chose).
+    #[must_use]
+    pub fn is_relationship_request(&self) -> bool {
+        matches!(
+            self,
+            VerifyJob::DidBinding {
+                role: openvtc_core::relationships::BindingRole::Request,
+                ..
+            }
+        )
+    }
+
     /// Whether this is a [`VerifyJob::Barrier`] (nothing to check).
+    #[cfg(test)]
     #[must_use]
     pub fn is_barrier(&self) -> bool {
         matches!(self, VerifyJob::Barrier)
@@ -791,16 +806,19 @@ async fn process_inbound(
 
     // A network-bound check runs off the loop. Set the message aside — nothing
     // about it is applied — and let the loop hand it back with the result.
-    if !returning {
+    // A message back from waiting its turn behind its sender's checks was
+    // triaged against state those checks have since changed: triage it again,
+    // and set it aside for a check if it now needs one.
+    let recheck = matches!(arrival, Arrival::Returning(PreVerified::Barrier));
+    if !returning || recheck {
         let job = match (
             verification_job(config, message, &from_did, &recipient_did),
             &arrival,
         ) {
             (Some(job), _) => Some(job),
-            (None, Arrival::Restored) => {
-                warn!(id = %message.id, typ = %message.typ, "a message queued before the restart no longer passes its checks — dropped");
-                return Ok(false);
-            }
+            // Kept across the restart because it had to wait its turn: it
+            // waits again, and is handled — or refused — then.
+            (None, Arrival::Restored) => Some(VerifyJob::Barrier),
             // Its sender has messages queued ahead of it (a credential being
             // checked, say): it waits its turn rather than being handled
             // against state those will change — a request that depends on a
@@ -2129,10 +2147,11 @@ mod tests {
     }
 
     /// A message kept across a restart is queued for its check again — past
-    /// the age gate it already passed — and dropped if it no longer passes the
-    /// local checks.
+    /// the age gate it already passed. One that no longer passes the local
+    /// checks is not dropped on restore: it waits its turn, and its handler
+    /// refuses it then.
     #[tokio::test]
-    async fn a_restored_message_is_queued_again_or_dropped() {
+    async fn a_restored_message_is_queued_again() {
         let (vtc, key) = community_key();
         let tdk = test_tdk().await;
         let mut config = pending_config(&vtc);
@@ -2152,10 +2171,60 @@ mod tests {
             Some(VerifyJob::Credential { .. })
         ));
 
-        // The membership went meanwhile: dropped, and nothing is applied.
+        // The membership went meanwhile: it waits as a barrier, and on its
+        // turn it is refused — nothing is applied.
         config.account = Default::default();
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::Restored).await;
+        let deferred = dispatch(&mut config, &tdk, &m, Arrival::Restored)
+            .await
+            .deferred
+            .expect("set aside to wait its turn");
+        assert!(deferred.job.is_barrier());
+        let effects = dispatch(
+            &mut config,
+            &tdk,
+            &deferred.message,
+            Arrival::Returning(PreVerified::Barrier),
+        )
+        .await;
         assert!(effects.deferred.is_none());
+        assert!(config.account.memberships_for(&vtc).is_empty());
+    }
+
+    /// A message that waited as a barrier is triaged again on its turn: if it
+    /// now needs a check (its sender became a community we hold a record
+    /// with meanwhile), it is set aside for that check rather than refused as
+    /// unchecked.
+    #[tokio::test]
+    async fn a_barrier_is_triaged_again_on_its_turn() {
+        let (vtc, key) = community_key();
+        let tdk = test_tdk().await;
+        let m = issue(&vtc, membership_vmc(&vtc, &key).await);
+        // No record with the community yet: no check, and it waits behind
+        // its sender's queued work.
+        let mut config = pending_config(&vtc);
+        let persona_only = {
+            let mut c = pending_config(&vtc);
+            c.account.communities.clear();
+            c
+        };
+        let mut early = persona_only;
+        let busy = |sender: &str| sender == vtc;
+        let deferred = dispatch(&mut early, &tdk, &m, Arrival::New { waiting: &busy })
+            .await
+            .deferred
+            .expect("waits its turn");
+        assert!(deferred.job.is_barrier());
+        // By its turn the join is Pending: it now needs its check.
+        let again = dispatch(
+            &mut config,
+            &tdk,
+            &deferred.message,
+            Arrival::Returning(PreVerified::Barrier),
+        )
+        .await
+        .deferred
+        .expect("set aside for the check it now needs");
+        assert!(matches!(again.job, VerifyJob::Credential { .. }));
     }
 
     /// A check that did not finish is a refusal: the credential is not stored.
