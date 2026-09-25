@@ -356,14 +356,6 @@ pub async fn plan(
                     &m.vtc_did,
                     resolver,
                     now,
-                    // A revoked credential is refused. An unreadable status
-                    // list is not, yet: `vta_sdk`'s status check reads a single
-                    // proof object, so a VTC that signs its list with a proof
-                    // set (Ed25519 + ML-DSA-44) always reads as "unknown", and
-                    // requiring it would reject every membership such a
-                    // community issued. Move to `Required` once the SDK reads
-                    // proof sets.
-                    crate::issued_credential::StatusPolicy::Advisory,
                 )
                 .await
                 .map(|_| m)

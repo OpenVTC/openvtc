@@ -39,7 +39,7 @@ use serde_json::Value;
 use tracing::{debug, warn};
 use vta_sdk::client::VtaClient;
 
-use crate::issued_credential::{StatusPolicy, verify_issued_credential};
+use crate::issued_credential::verify_issued_credential;
 use crate::{CredentialKind, config::Config};
 
 /// What a sync pass did.
@@ -128,10 +128,6 @@ pub async fn sync_membership_credentials(
             &vtc_did,
             resolver,
             chrono::Utc::now(),
-            // Pushing is not the trust decision — a rebuild re-verifies before
-            // restoring. Refusing here because a status host is briefly down
-            // would only cost recoverability.
-            StatusPolicy::Advisory,
         )
         .await
         {

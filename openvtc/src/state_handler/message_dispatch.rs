@@ -14,7 +14,7 @@ use std::sync::Arc;
 use affinidi_tdk::{TDK, didcomm::Message};
 use dtg_credentials::DTGCredential;
 use openvtc_core::didcomm::Messaging;
-use openvtc_core::issued_credential::{StatusPolicy, verify_issued_credential};
+use openvtc_core::issued_credential::verify_issued_credential;
 use openvtc_core::join::COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE;
 use openvtc_core::messaging::{
     SeenMessages, check_message_age, check_task_capacity, create_finalize_message,
@@ -384,7 +384,6 @@ pub async fn process_inbound_message(
             &from_did,
             tdk.did_resolver(),
             chrono::Utc::now(),
-            StatusPolicy::Advisory,
         )
         .await
         {

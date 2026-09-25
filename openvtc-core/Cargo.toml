@@ -31,6 +31,7 @@ arbitrary = { workspace = true, optional = true }
 argon2.workspace = true
 affinidi-tdk.workspace = true
 affinidi-data-integrity.workspace = true
+affinidi-status-list.workspace = true
 affinidi-did-resolver-cache-sdk.workspace = true
 # `health` probes mediator transport URLs over HTTP: resolving a DID proves the
 # document is fetchable, not that the transport host behind it answers, and the

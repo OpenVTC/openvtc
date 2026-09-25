@@ -16,11 +16,10 @@
 //!   proof, none failing, each by a key of the issuer's own DID listed under
 //!   `assertionMethod`.
 //! - The credential is inside its validity window.
-//! - If it names a `credentialStatus`, the issuer's status list is read through
-//!   the SDK's existing check. A revoked or suspended credential is refused. A
-//!   list that cannot be read is refused under [`StatusPolicy::Required`] and
-//!   logged under [`StatusPolicy::Advisory`], which every caller uses today
-//!   (see the variants for why).
+//! - If it names a `credentialStatus`, the issuer's status list is fetched and
+//!   verified ([`crate::status_list`], which reads proof sets). A revoked or
+//!   suspended credential is refused, and so is one whose status cannot be
+//!   established — an unreachable or unverifiable list fails closed.
 //!
 //! Error text names what failed, never the credential or any DID: it reaches
 //! the log and the user's activity feed.
@@ -28,7 +27,7 @@
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::proof_check::{self, ProofError, Purpose};
 
@@ -54,7 +53,11 @@ pub enum IssuedCredentialError {
     Expired,
     #[error("the community has revoked or suspended the credential")]
     Revoked,
-    #[error("the credential's revocation status could not be checked")]
+    #[error(
+        "the credential's revocation status could not be checked (the community's status \
+         list was unreachable or did not verify); try again once the community is \
+         reachable, or ask it to re-issue the credential"
+    )]
     StatusUnknown,
 }
 
@@ -108,7 +111,6 @@ pub async fn verify_issued_credential(
     sender: &str,
     resolver: &DIDCacheClient,
     now: DateTime<Utc>,
-    status_policy: StatusPolicy,
 ) -> Result<VerifiedIssuedCredential, IssuedCredentialError> {
     let issuer = issuer_of(&credential).ok_or(IssuedCredentialError::NoIssuer)?;
     if issuer != sender {
@@ -120,68 +122,41 @@ pub async fn verify_issued_credential(
     proof_check::verify_signed(&credential, issuer, resolver, &[Purpose::AssertionMethod]).await?;
 
     if let Some(status) = credential.get("credentialStatus") {
-        check_status(status, issuer, resolver, status_policy).await?;
+        check_status(status, issuer, resolver, now).await?;
     }
     Ok(VerifiedIssuedCredential(credential))
 }
 
-/// What to do when a credential names a status list that cannot be read.
-///
-/// A revoked or suspended credential is refused under either policy; the
-/// policies differ only when revocation cannot be established.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatusPolicy {
-    /// Accept, logging that status is unknown. For a credential the community
-    /// has just delivered: it cannot have been revoked before it was issued,
-    /// and refusing would lose the delivery (it is not re-sent) because the
-    /// community's status host was briefly unreachable. Also, for now, for the
-    /// vault sync and recovery (see [`StatusPolicy::Required`]).
-    Advisory,
-    /// Refuse. The right policy for a credential read back from storage
-    /// (recovery), where it may be old and revocation is the question that
-    /// matters. Not used there yet: `vta_sdk`'s status check cannot read a
-    /// status list signed with a proof set, which a post-quantum VTC emits, so
-    /// requiring it would refuse every such community's credentials.
-    Required,
-}
-
-/// Read the status list through the SDK's check. A definite revocation always
-/// refuses; an unreadable list refuses only under [`StatusPolicy::Required`].
+/// Read the credential's status list. Only an established "not revoked"
+/// passes: revoked, suspended, and "could not be established" all refuse.
 async fn check_status(
     status: &Value,
     issuer: &str,
     resolver: &DIDCacheClient,
-    policy: StatusPolicy,
+    now: DateTime<Utc>,
 ) -> Result<(), IssuedCredentialError> {
+    use crate::status_list::{StatusCheck, check_credential_status};
     use crate::vetting::status::{STATUS_FETCH_TIMEOUT, fetch_status_list, status_client};
-    use vta_sdk::vetting::status::{StatusCheck, check_credential_status};
 
-    let unknown = |reason: &str| {
-        debug!(%reason, "issued credential: status could not be established");
-        match policy {
-            StatusPolicy::Advisory => {
-                warn!("issued credential: revocation status unknown — accepting the delivery");
-                Ok(())
-            }
-            StatusPolicy::Required => Err(IssuedCredentialError::StatusUnknown),
-        }
-    };
-    let client = match status_client(true, STATUS_FETCH_TIMEOUT) {
-        Ok(c) => c,
-        Err(e) => return unknown(&e),
-    };
-    let vm_resolver = vta_sdk::trust_task_proof::TrustTaskVmResolver::new(resolver.clone());
+    let client = status_client(true, STATUS_FETCH_TIMEOUT).map_err(|e| {
+        debug!(reason = %e, "issued credential: no HTTP client for the status list");
+        IssuedCredentialError::StatusUnknown
+    })?;
     match check_credential_status(
         status,
         issuer,
         async |url: &str| fetch_status_list(&client, url).await,
-        &vm_resolver,
+        resolver,
+        now,
     )
     .await
     {
         StatusCheck::Active => Ok(()),
         StatusCheck::Revoked => Err(IssuedCredentialError::Revoked),
-        StatusCheck::Unknown(reason) => unknown(&reason),
+        StatusCheck::Unknown(reason) => {
+            debug!(%reason, "issued credential: status could not be established");
+            Err(IssuedCredentialError::StatusUnknown)
+        }
     }
 }
 
@@ -275,18 +250,47 @@ mod tests {
                 credential(),
                 "did:webvh:QmOther:evil.example.com",
                 &resolver,
-                now,
-                StatusPolicy::Advisory
+                now
             )
             .await
             .unwrap_err(),
             IssuedCredentialError::IssuerNotSender
         );
         assert_eq!(
-            verify_issued_credential(credential(), VTC, &resolver, now, StatusPolicy::Advisory)
+            verify_issued_credential(credential(), VTC, &resolver, now)
                 .await
                 .unwrap_err(),
             IssuedCredentialError::Proof(ProofError::NoProof)
         );
+    }
+
+    /// Revocation fails closed: a validly signed credential whose status list
+    /// cannot be reached is refused, with a message that says to retry.
+    #[tokio::test]
+    async fn an_unreachable_status_list_refuses_the_credential() {
+        let resolver = DIDCacheClient::new(
+            affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+        )
+        .await
+        .expect("resolver");
+        let mut key =
+            affinidi_tdk::secrets_resolver::secrets::Secret::generate_ed25519(None, Some(&[4; 32]));
+        let mb = key.get_public_keymultibase().unwrap();
+        let issuer = format!("did:key:{mb}");
+        key.id = format!("{issuer}#{mb}");
+        let mut vc = credential();
+        vc["issuer"] = json!(issuer);
+        vc["credentialStatus"] = json!({
+            "type": "BitstringStatusListEntry",
+            "statusPurpose": "revocation",
+            "statusListIndex": "7",
+            "statusListCredential": "https://127.0.0.1:1/status/revocation",
+        });
+        let vc = crate::proof_check::test_support::sign(vc, &[&key]).await;
+        let err = verify_issued_credential(vc, &issuer, &resolver, Utc::now())
+            .await
+            .unwrap_err();
+        assert_eq!(err, IssuedCredentialError::StatusUnknown);
+        assert!(err.to_string().contains("try again"), "{err}");
     }
 }

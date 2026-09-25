@@ -7,9 +7,9 @@
 //! over HTTPS (design §7.1). This is that step, run as a background job after
 //! the acceptance is recorded.
 //!
-//! The SDK's `check_credential_status` does the reading: it verifies the list's
-//! proof and issuer, decodes the bitstring and reads the bit. This module
-//! supplies the one thing the SDK leaves to its caller, the fetch. The fetch
+//! [`crate::status_list::check_credential_status`] does the reading: it
+//! verifies the list's proof (proof sets included) and issuer, decodes the
+//! bitstring and reads the bit. This module supplies the fetch. The fetch
 //! has finite timeouts (R1.2), accepts only `https`, and bounds what it reads.
 //! Its error text says whether the host was unreachable, answered with an
 //! error, or sent something that is not a status list (R6.4), because "the
@@ -21,10 +21,11 @@
 
 use std::time::Duration;
 
+use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use reqwest::{Client, Url, header::ACCEPT};
 use serde_json::Value;
-use vta_sdk::trust_task_proof::TrustTaskVmResolver;
-use vta_sdk::vetting::status::{StatusCheck, check_credential_status};
+
+use crate::status_list::{StatusCheck, check_credential_status};
 
 /// How long to wait for a status list host to accept the connection.
 pub const STATUS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,7 +57,7 @@ impl GrantCheck {
     /// hands `fetch_owned` a cloned client and an owned URL: a future that
     /// kept the borrowed `&str` across its `.await` is not provably `Send` for
     /// every lifetime the SDK's `AsyncFn(&str)` may be called with.
-    pub async fn run(&self, resolver: &TrustTaskVmResolver) -> StatusCheck {
+    pub async fn run(&self, resolver: &DIDCacheClient) -> StatusCheck {
         let client = match status_client(true, STATUS_FETCH_TIMEOUT) {
             Ok(client) => client,
             Err(e) => return StatusCheck::Unknown(e),
@@ -66,6 +67,7 @@ impl GrantCheck {
             &self.issuer,
             async move |url: &str| fetch_owned(client.clone(), url.to_string()).await,
             resolver,
+            chrono::Utc::now(),
         )
         .await
     }
@@ -188,9 +190,17 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    async fn test_resolver() -> DIDCacheClient {
+        DIDCacheClient::new(
+            affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+        )
+        .await
+        .expect("resolver")
+    }
+
     /// The check is spawned by the TUI, so its future must be `Send`.
-    #[test]
-    fn the_check_can_be_spawned() {
+    #[tokio::test]
+    async fn the_check_can_be_spawned() {
         fn assert_send<F: std::future::Future + Send>(_: F) {}
         let check = GrantCheck {
             application_id: String::new(),
@@ -199,7 +209,7 @@ mod tests {
             issuer: String::new(),
             credential_status: Value::Null,
         };
-        let resolver = TrustTaskVmResolver::did_key_only();
+        let resolver = test_resolver().await;
         assert_send(check.run(&resolver));
     }
 
@@ -305,7 +315,7 @@ mod tests {
                 "statusListCredential": "http://vtc.example.com/list"
             }),
         };
-        let result = check.run(&TrustTaskVmResolver::did_key_only()).await;
+        let result = check.run(&test_resolver().await).await;
         assert!(
             matches!(&result, StatusCheck::Unknown(reason) if reason.contains("https")),
             "{result:?}"
