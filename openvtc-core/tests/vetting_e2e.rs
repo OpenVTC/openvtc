@@ -181,6 +181,7 @@ impl Party {
             resolver: &resolver,
             did_resolver: &did_resolver,
             issued_credential: issued.as_ref(),
+            community_answer: None,
             recipient: Some((self.persona, &self.did)),
             now: Utc::now(),
         };

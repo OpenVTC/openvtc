@@ -200,16 +200,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Checks that go to the network no longer freeze the screen.** Verifying a
   delivered credential (the issuer's DID document, its revocation status list),
   a community's signed reply or removal notice, a relationship DID's binding
-  proofs and a VRC's proof each resolve a DID or fetch over HTTPS. They now run
-  off the screen's loop, one at a time in arrival order, so a slow community no
-  longer stalls the UI. A message waiting on its check is not acted on at all;
-  when the check finishes it is handled with the result, under the same rules
-  as before (a check that did not run, or ran for another credential, refuses).
-  A join whose credential is being checked shows *Pending — verifying
-  credential…* until it activates or is refused. **Breaking (library):**
-  `vetting::inbound::Context` takes the credential-issue's already-verified
-  credential (`issued_credential`), and `messaging::bind_removal_notice` is the
-  local half of `verify_removal_notice`.
+  proofs, a VRC's proof and a community's answer to a vetting question each
+  resolve a DID or fetch over HTTPS. They now run off the screen's loop, one at
+  a time, so a slow community no longer stalls the UI. A message waiting on its
+  check is not acted on at all; when the check finishes it is handled with the
+  result, under the same rules as before (a check that did not run, did not
+  finish, or ran for another credential, refuses). A join whose credential is
+  being checked shows *Pending — verifying credential…* until it activates or
+  is refused.
+  - *Local checks first.* Only a message that passes the cheap local checks is
+    queued for a check: a credential or operational document from a party we
+    hold no membership with, an accept that answers no request of ours, a VRC
+    outside an established relationship or a relationship request we would
+    refuse anyway is refused at once, without a resolve or a fetch.
+  - *A bounded queue.* Communities we belong to have their own lane, taken
+    first, so a flood from anyone else cannot delay a removal notice; each lane
+    and each sender is capped (a message over a cap is dropped, and for a
+    community's the activity log says so). Each check has a 30-second limit, and
+    one that times out or fails is a refusal; one failing never stops the
+    queue.
+  - *Nothing lost on exit.* The mediator deletes a message once delivered, so a
+    community's message still waiting on its check is kept (encrypted, with the
+    protected config) and queued again on the next start.
+  - *Order per sender.* A message whose sender has messages waiting on a check
+    waits behind them — a `members/request-vmc` arriving while the credential
+    that activates the membership is still being verified is answered once it
+    is Active, rather than dropped.
+  **Breaking (library):** `vetting::inbound::Context` takes the
+  credential-issue's already-verified credential (`issued_credential`) and the
+  community answer's check (`community_answer`), `messaging::bind_removal_notice`
+  is the local half of `verify_removal_notice`, and the protected config gains
+  `deferred_inbound`.
 
 - **The join page for a community that vets is one list of choices.** It had
   grown a row of keys along the foot that was a second, shorter, differently

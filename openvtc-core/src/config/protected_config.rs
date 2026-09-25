@@ -48,6 +48,16 @@ fn default_protected_schema_version() -> u32 {
     1
 }
 
+/// An inbound message awaiting its off-loop check, kept across a restart
+/// ([`ProtectedConfig::deferred_inbound`]).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DeferredInbound {
+    /// The message as it arrived.
+    pub message: affinidi_tdk::didcomm::Message,
+    /// The transport it arrived on.
+    pub transport: crate::didcomm::MessagingTransport,
+}
+
 /// A record for a single known Contact
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Contact {
@@ -272,6 +282,14 @@ pub struct ProtectedConfig {
     #[serde(default, skip_serializing_if = "SeenDocuments::is_empty")]
     pub seen_documents: SeenDocuments,
 
+    /// Inbound messages from communities we belong to that were set aside for
+    /// an off-loop check and not yet applied. The mediator deleted them on
+    /// delivery, so without this a removal notice or credential still queued
+    /// at exit would be lost; they are queued again on the next start, and
+    /// removed once applied. Bounded by the queue that fills it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_inbound: Vec<DeferredInbound>,
+
     /// Fields written by a newer build, preserved verbatim (D19).
     ///
     /// The protected tier is where the account lives, so an older build
@@ -333,6 +351,7 @@ impl Default for ProtectedConfig {
             agent_names: HashMap::default(),
             vetting: VettingBook::default(),
             seen_documents: SeenDocuments::default(),
+            deferred_inbound: Vec::new(),
         }
     }
 }

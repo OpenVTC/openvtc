@@ -211,6 +211,34 @@ impl Party {
             resolver: &resolver,
             did_resolver: &did_resolver,
             issued_credential: issued.as_ref(),
+            community_answer: None,
+            recipient: Some((self.persona, &self.did)),
+            now: Utc::now(),
+        };
+        handle(&mut self.book, &ctx, &mut self.seen, message, sender)
+            .await
+            .expect("a vetting message is claimed")
+    }
+
+    /// [`Self::receive`], with the community answer already checked off the
+    /// loop, as the dispatcher passes it.
+    async fn receive_checked(
+        &mut self,
+        message: &Message,
+        sender: &str,
+        answer: &Result<
+            crate::operational::VerifiedOperational,
+            crate::operational::OperationalError,
+        >,
+    ) -> Handled {
+        let resolver = TrustTaskVmResolver::did_key_only();
+        let did_resolver = did_resolver().await;
+        let ctx = Context {
+            account: &self.account,
+            resolver: &resolver,
+            did_resolver: &did_resolver,
+            issued_credential: None,
+            community_answer: Some(answer),
             recipient: Some((self.persona, &self.did)),
             now: Utc::now(),
         };
@@ -737,6 +765,7 @@ async fn a_vetter_grant_is_kept_only_from_its_community() {
         resolver: &resolver,
         did_resolver: &did_resolver,
         issued_credential: issued.as_ref(),
+        community_answer: None,
         recipient: Some((member.persona, &member.did)),
         now: Utc::now(),
     };
@@ -840,6 +869,7 @@ async fn a_membership_credential_is_left_for_the_join_handler() {
         resolver: &resolver,
         did_resolver: &did_resolver,
         issued_credential: issued.as_ref(),
+        community_answer: None,
         recipient: Some((applicant.persona, &applicant.did)),
         now: Utc::now(),
     };
@@ -1130,6 +1160,7 @@ async fn the_directory_answers_only_what_was_asked() {
         resolver: &resolver,
         did_resolver: &did_resolver,
         issued_credential: issued.as_ref(),
+        community_answer: None,
         recipient: Some((applicant.persona, &applicant.did)),
         now: Utc::now(),
     };
@@ -1284,6 +1315,7 @@ async fn a_problem_report_refuses_the_question_it_threads_on() {
         resolver: &resolver,
         did_resolver: &did_resolver,
         issued_credential: issued.as_ref(),
+        community_answer: None,
         recipient: Some((applicant.persona, &applicant.did)),
         now: Utc::now(),
     };
@@ -1601,6 +1633,38 @@ async fn an_unsigned_or_altered_community_answer_is_not_acted_on() {
     let handled = applicant
         .receive(&manifest_reply(&applicant.did.clone()).await, COMMUNITY)
         .await;
+    assert!(matches!(
+        handled.notice,
+        Some(Notice::RequirementsUpdated { .. })
+    ));
+}
+
+/// A community answer checked off the loop is taken from that check — not
+/// resolved again — and one whose check failed or never ran is refused.
+#[tokio::test]
+async fn a_community_answer_is_taken_from_its_off_loop_check() {
+    let mut applicant = Party::new(1);
+    applicant
+        .book
+        .start_application(COMMUNITY, applicant.persona, &applicant.did, Utc::now())
+        .unwrap();
+    let reply = manifest_reply(&applicant.did.clone()).await;
+
+    let refused = Err(crate::operational::OperationalError::NotChecked);
+    let handled = applicant.receive_checked(&reply, COMMUNITY, &refused).await;
+    assert!(!handled.changed && handled.notice.is_none());
+
+    let checked = crate::operational::verify_operational(
+        &reply.body,
+        COMMUNITY,
+        &[applicant.did.as_str()],
+        &reply.typ,
+        &did_resolver().await,
+        &applicant.seen,
+        Utc::now(),
+    )
+    .await;
+    let handled = applicant.receive_checked(&reply, COMMUNITY, &checked).await;
     assert!(matches!(
         handled.notice,
         Some(Notice::RequirementsUpdated { .. })

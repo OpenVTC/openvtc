@@ -185,6 +185,17 @@ pub enum VerifyJob {
     },
     /// A VRC's proof against its issuer's key.
     Vrc(Box<DTGCredential>),
+    /// No check: the message needs none, but its sender has messages queued
+    /// ahead of it, and it waits its turn behind them rather than overtaking
+    /// them — a `members/request-vmc` behind the credential that makes the
+    /// membership it asks about Active, say.
+    Barrier,
+    /// A check that never finishes (tests of the queue's timeout).
+    #[cfg(test)]
+    Hang,
+    /// A check that panics (tests of the queue's supervision).
+    #[cfg(test)]
+    Panic,
 }
 
 /// The result of a [`VerifyJob`]. Recording (replay sets) and every state
@@ -204,6 +215,36 @@ pub enum PreVerified {
     ),
     DidBinding(Result<(), openvtc_core::relationships::DidBindingError>),
     Vrc(Result<(), String>),
+    /// Nothing was checked ([`VerifyJob::Barrier`]).
+    Barrier,
+}
+
+/// Where a message is in its handling.
+pub enum Arrival<'a> {
+    /// Just arrived. `waiting(sender)` says whether that sender has messages
+    /// queued for a check ahead of this one, which it must not overtake.
+    New { waiting: &'a dyn Fn(&str) -> bool },
+    /// Queued for its check before a restart
+    /// ([`openvtc_core::config::protected_config::ProtectedConfig::deferred_inbound`]).
+    /// It passed the age and replay gates when it arrived; it is set aside for
+    /// its check again if it still passes the local checks, and dropped if
+    /// not. It is never handled directly.
+    Restored,
+    /// Back from its check, with the result.
+    Returning(PreVerified),
+}
+
+#[cfg(test)]
+fn nobody_waiting(_: &str) -> bool {
+    false
+}
+
+#[cfg(test)]
+impl Arrival<'static> {
+    /// Just arrived, with nothing queued ahead of it.
+    pub const FRESH: Arrival<'static> = Arrival::New {
+        waiting: &nobody_waiting,
+    };
 }
 
 /// A message set aside until its check has run.
@@ -266,7 +307,43 @@ impl VerifyJob {
                 .await,
             ),
             VerifyJob::Vrc(vrc) => PreVerified::Vrc(verify_vrc_proof(&tdk, &vrc).await),
+            VerifyJob::Barrier => PreVerified::Barrier,
+            #[cfg(test)]
+            VerifyJob::Hang => std::future::pending().await,
+            #[cfg(test)]
+            VerifyJob::Panic => panic!("a check that panics"),
         }
+    }
+
+    /// The result for a check that did not finish — it timed out, or its task
+    /// failed. Always a refusal (fail closed) of the job's own kind.
+    #[must_use]
+    pub fn unfinished(&self) -> PreVerified {
+        match self {
+            VerifyJob::Credential { .. } => PreVerified::Credential(Err(
+                openvtc_core::issued_credential::IssuedCredentialError::CheckUnfinished,
+            )),
+            VerifyJob::DidBinding { .. } => PreVerified::DidBinding(Err(
+                openvtc_core::relationships::DidBindingError::CheckUnfinished,
+            )),
+            VerifyJob::Vrc(_) => PreVerified::Vrc(Err(
+                "its proof's check did not finish (timed out or failed)".to_string(),
+            )),
+            VerifyJob::Barrier => PreVerified::Barrier,
+            #[cfg(test)]
+            VerifyJob::Hang | VerifyJob::Panic => PreVerified::Operational(Err(
+                openvtc_core::operational::OperationalError::CheckUnfinished,
+            )),
+            VerifyJob::Operational { .. } => PreVerified::Operational(Err(
+                openvtc_core::operational::OperationalError::CheckUnfinished,
+            )),
+        }
+    }
+
+    /// Whether this is a [`VerifyJob::Barrier`] (nothing to check).
+    #[must_use]
+    pub fn is_barrier(&self) -> bool {
+        matches!(self, VerifyJob::Barrier)
     }
 
     /// The community a credential check is for — the one whose membership
@@ -281,6 +358,15 @@ impl VerifyJob {
 }
 
 /// The check `message` (opened) needs before it can be acted on, if any.
+///
+/// The cheap local checks come first, and only a message that passes them is
+/// set aside for its network-bound check: one this client would refuse anyway
+/// — a credential or operational document from a party we hold no membership
+/// with, an accept answering nothing of ours, a VRC outside an established
+/// relationship — never costs a resolve or a fetch, nor a place in the queue.
+/// A message that fails them is not deferred: it goes straight to its handler,
+/// which runs the same checks, says why, and refuses it (every handler fails
+/// closed without a check result).
 fn verification_job(
     config: &Config,
     message: &Message,
@@ -288,24 +374,50 @@ fn verification_job(
     recipient_did: &str,
 ) -> Option<VerifyJob> {
     let typ = message.typ.as_str();
-    let operational = || {
-        Some(VerifyJob::Operational {
-            document: message.body.clone(),
-            sender: from_did.to_string(),
-            our_dids: config
-                .account
-                .personas
-                .values()
-                .map(|p| p.did.clone())
-                .collect(),
-            typ: typ.to_string(),
-        })
+    // A community we hold a record with (Pending included): the only party
+    // whose credentials and operational documents this client acts on.
+    let member = !config.account.memberships_for(from_did).is_empty();
+    let operational = || VerifyJob::Operational {
+        document: message.body.clone(),
+        sender: from_did.to_string(),
+        our_dids: config
+            .account
+            .personas
+            .values()
+            .map(|p| p.did.clone())
+            .collect(),
+        typ: typ.to_string(),
     };
     if typ == CREDENTIAL_ISSUE_TYPE {
-        return credential_in_issue(message).map(|credential| VerifyJob::Credential {
+        let credential = credential_in_issue(message)?;
+        // Issued by the community that sent it, to one of our personas, and
+        // that community is one we hold a record with. (Which membership,
+        // and whether it is live, the handler checks again once verified; a
+        // vetter's grant passes here too.) A vetter's statement is vetting's,
+        // checked by vetting.
+        let to_us = credential
+            .pointer("/credentialSubject/id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|subject| config.account.persona_id_for_did(subject).is_some());
+        let from_issuer = openvtc_core::issued_credential::issuer_of(&credential) == Some(from_did);
+        return (member && to_us && from_issuer).then(|| VerifyJob::Credential {
             credential,
             sender: from_did.to_string(),
         });
+    }
+    // A community's answer to a vetting question: only from a community we
+    // have business with — a question outstanding, an application, or a
+    // membership (the same test vetting applies before taking one).
+    if openvtc_core::vetting::inbound::is_community_answer_type(typ) {
+        let business = config.private.vetting.asked(from_did)
+            || config
+                .private
+                .vetting
+                .applications
+                .iter()
+                .any(|a| a.community == from_did)
+            || member;
+        return business.then(operational);
     }
     if is_capability_reply_type(typ)
         || openvtc_core::git_ns::is_reply_type(typ)
@@ -318,12 +430,19 @@ fn verification_job(
         ]
         .contains(&typ)
     {
-        return operational();
+        return member.then(operational);
     }
     match MessageType::try_from(message).ok()? {
         MessageType::RelationshipRequest => {
             let body: openvtc_core::relationships::RelationshipRequestBody =
                 serde_json::from_value(message.body.clone()).ok()?;
+            validate_did(&body.did).ok()?;
+            relationship_request_admissible(
+                config,
+                &Arc::new(message.id.clone()),
+                &Arc::new(from_did.to_string()),
+            )
+            .ok()?;
             Some(VerifyJob::DidBinding {
                 did: body.did,
                 did_proof: body.did_proof,
@@ -336,23 +455,86 @@ fn verification_job(
         }
         MessageType::RelationshipRequestAccepted => {
             let body: RelationshipAcceptBody = serde_json::from_value(message.body.clone()).ok()?;
+            validate_did(&body.did).ok()?;
+            let thid = message.thid.clone()?;
+            // It answers a request of ours still waiting, from the party it
+            // went to.
+            config
+                .private
+                .relationships
+                .awaiting(
+                    &Arc::new(thid.clone()),
+                    RelationshipState::RequestSent,
+                    from_did,
+                )
+                .is_some()
+                .then_some(())?;
             Some(VerifyJob::DidBinding {
                 did: body.did,
                 did_proof: body.did_proof,
                 persona: from_did.to_string(),
                 persona_proof: body.persona_proof,
                 peer: recipient_did.to_string(),
-                thid: message.thid.clone()?,
+                thid,
                 role: openvtc_core::relationships::BindingRole::Accept,
             })
         }
         MessageType::VRCIssued => {
             let vrc: DTGCredential = serde_json::from_value(message.body.clone()).ok()?;
+            // An established relationship, and the issuer pinned to it.
+            vet_vrc_issued(
+                &config.private.relationships,
+                &config.private.tasks,
+                &vrc,
+                &Arc::new(from_did.to_string()),
+                message.thid.as_deref(),
+            )
+            .ok()?;
             Some(VerifyJob::Vrc(Box::new(vrc)))
         }
         _ => None,
     }
 }
+
+/// Whether an inbound relationship request from `from_did` (task id
+/// `task_id`) could be queued at all: room for the task, under the
+/// relationship limit, no relationship with the sender already, and no
+/// request from it already waiting. Local and cheap; run before the request's
+/// proofs are checked, and again when it is handled.
+fn relationship_request_admissible(
+    config: &Config,
+    task_id: &Arc<String>,
+    from_did: &Arc<String>,
+) -> Result<(), &'static str> {
+    if check_task_capacity(config, task_id, from_did).is_err() {
+        return Err("no room for another task");
+    }
+    if config.private.relationships.relationships.len() >= MAX_RELATIONSHIPS {
+        return Err("relationship limit reached");
+    }
+    if config.private.relationships.get(from_did).is_some()
+        || config
+            .private
+            .relationships
+            .find_by_remote_did(from_did)
+            .is_some()
+    {
+        return Err("a relationship with this party already exists");
+    }
+    let has_pending = config.private.tasks.tasks.values().any(|task| {
+        matches!(&task.type_, TaskType::RelationshipRequestInbound { from, .. } if from == from_did)
+    });
+    if has_pending {
+        return Err("a request from this party is already waiting");
+    }
+    Ok(())
+}
+
+/// An operational document that was not checked.
+static NOT_CHECKED: Result<
+    openvtc_core::operational::VerifiedOperational,
+    openvtc_core::operational::OperationalError,
+> = Err(openvtc_core::operational::OperationalError::NotChecked);
 
 /// The operational result the off-loop check produced, or "not checked".
 fn pre_operational(
@@ -476,13 +658,13 @@ pub async fn process_inbound_message(
     seen: &mut SeenMessages,
     message: &Message,
     effects: &mut InboundEffects,
-    pre: Option<PreVerified>,
+    arrival: Arrival<'_>,
 ) -> Result<bool, anyhow::Error> {
     // A document recorded as acted on must be saved even when the handler
     // reports no other change — otherwise a restart forgets it and the
     // document can be replayed.
     let seen_before = config.private.seen_documents.revision();
-    let changed = process_inbound(config, tdk, service, seen, message, effects, pre).await?;
+    let changed = process_inbound(config, tdk, service, seen, message, effects, arrival).await?;
     Ok(changed || config.private.seen_documents.revision() != seen_before)
 }
 
@@ -493,7 +675,7 @@ async fn process_inbound(
     seen: &mut SeenMessages,
     message: &Message,
     effects: &mut InboundEffects,
-    pre: Option<PreVerified>,
+    arrival: Arrival<'_>,
 ) -> Result<bool, anyhow::Error> {
     let InboundEffects {
         inactivated,
@@ -504,14 +686,19 @@ async fn process_inbound(
         vetting_grant_checks,
         deferred,
     } = effects;
-    // A message handed back with its check's result already passed the age
-    // and replay gates on arrival; running them again would drop it as a
-    // replay of itself.
-    let returning = pre.is_some();
+    // A message handed back with its check's result (or restored from before
+    // a restart) already passed the age and replay gates on arrival; running
+    // them again would drop it as a replay of itself.
+    let (fresh, restored) = match &arrival {
+        Arrival::New { .. } => (true, false),
+        Arrival::Restored => (false, true),
+        Arrival::Returning(_) => (false, false),
+    };
+    let returning = !fresh && !restored;
     // Drop messages outside the replay / freshness window before doing
     // any state-mutating work. Saves us from acting on stale captures
     // and from clock-skew–induced retries.
-    if !returning && let Err(reason) = check_message_age(message) {
+    if fresh && let Err(reason) = check_message_age(message) {
         warn!(
             id = %message.id,
             typ = %message.typ,
@@ -525,9 +712,14 @@ async fn process_inbound(
     // already guards against unpack-level duplicates, but the LRU is a
     // belt-and-braces defense for mediator pickup retries and replay
     // attempts.
-    if !returning && seen.observe(&message.id) {
+    if fresh && seen.observe(&message.id) {
         debug!(id = %message.id, typ = %message.typ, "dropping replayed message ID");
         return Ok(false);
+    }
+    // A restored message is remembered too, so the mediator redelivering it
+    // is dropped as a replay.
+    if restored {
+        seen.observe(&message.id);
     }
 
     // The sender — a routing hint, not an identity. It selects the record a
@@ -599,13 +791,35 @@ async fn process_inbound(
 
     // A network-bound check runs off the loop. Set the message aside — nothing
     // about it is applied — and let the loop hand it back with the result.
-    if !returning && let Some(job) = verification_job(config, message, &from_did, &recipient_did) {
-        *deferred = Some(Deferred {
-            message: arrived.clone(),
-            job,
-        });
-        return Ok(false);
+    if !returning {
+        let job = match (
+            verification_job(config, message, &from_did, &recipient_did),
+            &arrival,
+        ) {
+            (Some(job), _) => Some(job),
+            (None, Arrival::Restored) => {
+                warn!(id = %message.id, typ = %message.typ, "a message queued before the restart no longer passes its checks — dropped");
+                return Ok(false);
+            }
+            // Its sender has messages queued ahead of it (a credential being
+            // checked, say): it waits its turn rather than being handled
+            // against state those will change — a request that depends on a
+            // membership still being verified would otherwise be dropped.
+            (None, Arrival::New { waiting }) if waiting(&from_did) => Some(VerifyJob::Barrier),
+            (None, _) => None,
+        };
+        if let Some(job) = job {
+            *deferred = Some(Deferred {
+                message: arrived.clone(),
+                job,
+            });
+            return Ok(false);
+        }
     }
+    let pre = match arrival {
+        Arrival::Returning(pre) => Some(pre),
+        Arrival::New { .. } | Arrival::Restored => None,
+    };
 
     // Computed at most once per message (see `community_reply_proven`).
     let mut reply_proven: Option<bool> = None;
@@ -686,6 +900,12 @@ async fn process_inbound(
                 Some(PreVerified::Credential(r)) => Some(r),
                 _ => None,
             },
+            // Always `Some`: an answer is taken only as checked off the loop,
+            // never resolved here.
+            community_answer: Some(match &pre {
+                Some(PreVerified::Operational(r)) => r,
+                _ => &NOT_CHECKED,
+            }),
             recipient: recipient_persona.map(|p| (p, recipient_did.as_str())),
             now: chrono::Utc::now(),
         };
@@ -1323,6 +1543,10 @@ async fn process_inbound(
                 warn!(from = %from_did, error = %e, "rejecting request with invalid DID in body");
                 return Ok(false);
             }
+            if let Err(reason) = relationship_request_admissible(config, &task_id, &from_did) {
+                warn!(from = %from_did, "relationship request ignored: {reason}");
+                return Ok(false);
+            }
 
             // The DID the requester will use must be proven — by that DID, and
             // by the requesting persona when it is an R-DID — for exactly this
@@ -1345,36 +1569,6 @@ async fn process_inbound(
                     .cloned()
                     .unwrap_or_default(),
             );
-
-            if check_task_capacity(config, &task_id, &from_did).is_err() {
-                return Ok(false);
-            }
-
-            if config.private.relationships.relationships.len() >= MAX_RELATIONSHIPS {
-                warn!("relationship limit reached — rejecting request");
-                return Ok(false);
-            }
-
-            // Reject if we already have a relationship with this sender
-            if config.private.relationships.get(&from_did).is_some()
-                || config
-                    .private
-                    .relationships
-                    .find_by_remote_did(&from_did)
-                    .is_some()
-            {
-                warn!(from = %from_did, "relationship request from existing relationship — ignoring");
-                return Ok(false);
-            }
-
-            // Reject if a pending inbound request from this sender already exists
-            let has_pending = config.private.tasks.tasks.values().any(|task| {
-                matches!(&task.type_, TaskType::RelationshipRequestInbound { from, .. } if *from == from_did)
-            });
-            if has_pending {
-                warn!(from = %from_did, "duplicate pending relationship request — ignoring");
-                return Ok(false);
-            }
 
             config.private.tasks.new_task_for(
                 &task_id,
@@ -1651,7 +1845,7 @@ mod tests {
             &mut seen,
             &m,
             &mut effects,
-            None,
+            Arrival::FRESH,
         )
         .await
         .unwrap();
@@ -1671,7 +1865,7 @@ mod tests {
             &mut seen,
             &deferred.message,
             &mut effects,
-            Some(pre),
+            Arrival::Returning(pre),
         )
         .await
         .unwrap();
@@ -1701,7 +1895,7 @@ mod tests {
             &mut seen,
             &m,
             &mut effects,
-            None,
+            Arrival::FRESH,
         )
         .await
         .unwrap();
@@ -1720,7 +1914,7 @@ mod tests {
             &mut seen,
             &deferred.message,
             &mut effects,
-            Some(pre),
+            Arrival::Returning(pre),
         )
         .await
         .unwrap();
@@ -1749,7 +1943,7 @@ mod tests {
             &mut seen,
             &other,
             &mut effects,
-            None,
+            Arrival::FRESH,
         )
         .await
         .unwrap();
@@ -1767,7 +1961,7 @@ mod tests {
             &mut seen,
             &m,
             &mut effects,
-            Some(pre),
+            Arrival::Returning(pre),
         )
         .await
         .unwrap();
@@ -1806,12 +2000,186 @@ mod tests {
             &mut seen,
             &m,
             &mut effects,
-            None,
+            Arrival::FRESH,
         )
         .await
         .unwrap();
         let deferred = effects.deferred.expect("set aside for its check");
         assert!(matches!(deferred.job, VerifyJob::Operational { .. }));
         assert_eq!(deferred.job.verifying_community(), None);
+    }
+
+    /// Dispatch `m` as `arrival`, returning the effects.
+    async fn dispatch(
+        config: &mut Config,
+        tdk: &TDK,
+        m: &Message,
+        arrival: Arrival<'_>,
+    ) -> InboundEffects {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service = openvtc_core::didcomm::start_empty_service(
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let mut seen = SeenMessages::new();
+        let mut effects = InboundEffects::default();
+        process_inbound_message(config, tdk, &service, &mut seen, m, &mut effects, arrival)
+            .await
+            .unwrap();
+        effects
+    }
+
+    /// The local checks run before anything is queued for a network-bound
+    /// check: a credential or operational document from a party we hold no
+    /// membership with, an accept that answers nothing of ours, or a
+    /// community answer to no question of ours is never set aside (so never
+    /// resolved or fetched for) — it is handled at once, and refused.
+    #[tokio::test]
+    async fn only_what_passes_the_local_checks_is_queued_for_a_check() {
+        let (vtc, key) = community_key();
+        let tdk = test_tdk().await;
+        let mut config = pending_config(&vtc);
+        let stranger = "did:key:z6MkStranger";
+
+        // A credential "issued" by a stranger, about itself.
+        let mut vc = membership_vmc(&vtc, &key).await;
+        vc["issuer"] = serde_json::json!(stranger);
+        let effects = dispatch(&mut config, &tdk, &issue(stranger, vc), Arrival::FRESH).await;
+        assert!(effects.deferred.is_none());
+        // A credential for someone else, from the community.
+        let mut vc = membership_vmc(&vtc, &key).await;
+        vc["credentialSubject"]["id"] = serde_json::json!("did:key:z6MkSomeoneElse");
+        let effects = dispatch(&mut config, &tdk, &issue(&vtc, vc), Arrival::FRESH).await;
+        assert!(effects.deferred.is_none());
+        assert!(matches!(
+            status(&config, &vtc),
+            CommunityStatus::Pending { .. }
+        ));
+
+        // Operational documents from a stranger.
+        for typ in [
+            MEMBER_REMOVAL_NOTICE_TYPE,
+            JOIN_REQUEST_STATUS_RESPONSE_TYPE,
+            vta_sdk::protocols::vetting::VETTING_VETTER_LIST_RESPONSE_TYPE,
+        ] {
+            let m = Message::build(
+                uuid::Uuid::new_v4().to_string(),
+                typ.to_string(),
+                serde_json::json!({ "payload": { "did": PERSONA } }),
+            )
+            .from(stranger.to_string())
+            .created_time(chrono::Utc::now().timestamp() as u64)
+            .finalize();
+            let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+            assert!(effects.deferred.is_none(), "{typ}");
+        }
+
+        // A relationship accept answering no request of ours.
+        let m = Message::build(
+            uuid::Uuid::new_v4().to_string(),
+            openvtc_core::protocol_urls::RELATIONSHIP_REQUEST_ACCEPT.to_string(),
+            serde_json::json!({ "did": stranger }),
+        )
+        .from(stranger.to_string())
+        .thid(uuid::Uuid::new_v4().to_string())
+        .created_time(chrono::Utc::now().timestamp() as u64)
+        .finalize();
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+        assert!(effects.deferred.is_none());
+    }
+
+    /// A message whose sender has messages queued for a check waits behind
+    /// them rather than overtaking them, and is handled when its turn comes:
+    /// a `members/request-vmc` arriving while the credential that activates
+    /// the membership is still being verified is not dropped for want of an
+    /// Active membership.
+    #[tokio::test]
+    async fn a_message_behind_a_check_from_its_sender_waits_its_turn() {
+        let (vtc, _) = community_key();
+        let tdk = test_tdk().await;
+        let mut config = pending_config(&vtc);
+        let m = Message::build(
+            uuid::Uuid::new_v4().to_string(),
+            MEMBER_REQUEST_VMC_TYPE.to_string(),
+            serde_json::json!({}),
+        )
+        .from(vtc.clone())
+        .to(PERSONA.to_string())
+        .created_time(chrono::Utc::now().timestamp() as u64)
+        .finalize();
+
+        let busy = |sender: &str| sender == vtc;
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::New { waiting: &busy }).await;
+        let deferred = effects.deferred.expect("waits behind its sender's check");
+        assert!(deferred.job.is_barrier());
+
+        // Nobody else is held up.
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+        assert!(effects.deferred.is_none());
+
+        // Back in its turn, it is handled, not set aside again.
+        let effects = dispatch(
+            &mut config,
+            &tdk,
+            &deferred.message,
+            Arrival::Returning(PreVerified::Barrier),
+        )
+        .await;
+        assert!(effects.deferred.is_none());
+    }
+
+    /// A message kept across a restart is queued for its check again — past
+    /// the age gate it already passed — and dropped if it no longer passes the
+    /// local checks.
+    #[tokio::test]
+    async fn a_restored_message_is_queued_again_or_dropped() {
+        let (vtc, key) = community_key();
+        let tdk = test_tdk().await;
+        let mut config = pending_config(&vtc);
+        let mut m = issue(&vtc, membership_vmc(&vtc, &key).await);
+        // Older than the replay window allows a fresh message.
+        m.created_time = Some(1);
+        assert!(
+            dispatch(&mut config, &tdk, &m, Arrival::FRESH)
+                .await
+                .deferred
+                .is_none(),
+            "a fresh arrival that old is dropped"
+        );
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::Restored).await;
+        assert!(matches!(
+            effects.deferred.map(|d| d.job),
+            Some(VerifyJob::Credential { .. })
+        ));
+
+        // The membership went meanwhile: dropped, and nothing is applied.
+        config.account = Default::default();
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::Restored).await;
+        assert!(effects.deferred.is_none());
+    }
+
+    /// A check that did not finish is a refusal: the credential is not stored.
+    #[tokio::test]
+    async fn an_unfinished_check_refuses() {
+        let (vtc, key) = community_key();
+        let tdk = test_tdk().await;
+        let mut config = pending_config(&vtc);
+        let m = issue(&vtc, membership_vmc(&vtc, &key).await);
+        let deferred = dispatch(&mut config, &tdk, &m, Arrival::FRESH)
+            .await
+            .deferred
+            .unwrap();
+        let pre = deferred.job.unfinished();
+        dispatch(
+            &mut config,
+            &tdk,
+            &deferred.message,
+            Arrival::Returning(pre),
+        )
+        .await;
+        assert!(matches!(
+            status(&config, &vtc),
+            CommunityStatus::Pending { .. }
+        ));
     }
 }

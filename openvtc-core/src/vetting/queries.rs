@@ -220,6 +220,12 @@ impl VettingBook {
         self.queries.push(query);
     }
 
+    /// Whether any question to `community` is unanswered.
+    #[must_use]
+    pub fn asked(&self, community: &str) -> bool {
+        self.queries.iter().any(|q| q.community == community)
+    }
+
     /// The unanswered question of `kind` to `community`, if there is one.
     #[must_use]
     pub fn waiting_on(&self, community: &str, kind: QueryKind) -> Option<&CommunityQuery> {

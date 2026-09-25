@@ -130,6 +130,8 @@ pub enum OperationalError {
     Proof(#[from] ProofError),
     #[error("it was not checked")]
     NotChecked,
+    #[error("its check did not finish (timed out or failed)")]
+    CheckUnfinished,
 }
 
 /// Document ids already acted on, per issuer, each kept until its window has

@@ -271,6 +271,7 @@ mod setup_token_actions;
 mod setup_vta_actions;
 mod setup_wizard;
 pub mod state;
+mod verify_queue;
 mod vetting_actions;
 mod vic;
 mod vta_transports;
@@ -1180,31 +1181,36 @@ impl StateHandler {
         let mut community_profile_pacer = community_profile_poll::ProfilePacer::default();
 
         // Network-bound checks on inbound messages (a DID resolve, a status
-        // list fetch) run off this loop, one at a time in arrival order, so a
-        // slow community never freezes the UI. A message waiting on its check
-        // is not applied at all; it comes back on `verified_rx` with the result
-        // and is dispatched from the top.
-        let (verify_tx, mut verify_rx) =
-            mpsc::unbounded_channel::<(message_dispatch::Deferred, didcomm::MessagingTransport)>();
-        let (verified_tx, mut verified_rx) = mpsc::unbounded_channel::<(
-            Box<affinidi_tdk::didcomm::Message>,
-            didcomm::MessagingTransport,
-            message_dispatch::PreVerified,
-        )>();
-        {
-            let tdk = tdk.clone();
-            tokio::spawn(async move {
-                while let Some((deferred, transport)) = verify_rx.recv().await {
-                    let message_dispatch::Deferred { message, job } = deferred;
-                    let pre = job.run(tdk.clone()).await;
-                    if verified_tx
-                        .send((Box::new(message), transport, pre))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            });
+        // list fetch) run off this loop, one at a time, so a slow community
+        // never freezes the UI. A message waiting on its check is not applied
+        // at all; it comes back from `verifier` with the result and is
+        // dispatched from the top. The queue is bounded, with a lane for the
+        // communities we belong to and a cap per sender (`verify_queue`).
+        let mut verifier = verify_queue::Verifier::new(tdk.clone());
+        // Messages from communities that were still queued at the last exit.
+        // The mediator deleted them on delivery, so this is their only copy.
+        for restored in std::mem::take(&mut config.private.deferred_inbound) {
+            let mut effects = message_dispatch::InboundEffects::default();
+            let _ = message_dispatch::process_inbound_message(
+                &mut config,
+                &tdk,
+                &didcomm_service,
+                &mut seen_messages,
+                &restored.message,
+                &mut effects,
+                message_dispatch::Arrival::Restored,
+            )
+            .await;
+            if let Some(deferred) = effects.deferred {
+                queue_for_check(
+                    &mut verifier,
+                    &mut config,
+                    &mut state,
+                    deferred,
+                    restored.transport,
+                );
+            }
+            save.mark_dirty();
         }
 
         // The join flow to enter at the end of this iteration, and a join
@@ -1303,7 +1309,7 @@ impl StateHandler {
                 },
                 // DIDComm inbound message events — as they arrive, or handed
                 // back with the result of their off-loop check.
-                Some((event, pre)) = next_inbound(&mut didcomm_event_rx, &mut verified_rx) => {
+                Some((event, pre)) = next_inbound(&mut didcomm_event_rx, &mut verifier) => {
                     match event {
                         didcomm::DIDCommEvent::InboundMessage { message, transport, .. } => {
                             // Capture message info before processing for detailed logging
@@ -1318,7 +1324,13 @@ impl StateHandler {
                                 pre,
                                 Some(message_dispatch::PreVerified::Credential(_))
                             );
+                            let returning = pre.is_some();
                             let mut effects = message_dispatch::InboundEffects::default();
+                            let waiting = |sender: &str| verifier.is_waiting_on(sender);
+                            let arrival = match pre {
+                                Some(pre) => message_dispatch::Arrival::Returning(pre),
+                                None => message_dispatch::Arrival::New { waiting: &waiting },
+                            };
                             let dispatched = message_dispatch::process_inbound_message(
                                 &mut config,
                                 &tdk,
@@ -1326,9 +1338,20 @@ impl StateHandler {
                                 &mut seen_messages,
                                 &message,
                                 &mut effects,
-                                pre,
+                                arrival,
                             )
                             .await;
+                            // Applied (or refused): its kept copy goes.
+                            if returning {
+                                let before = config.private.deferred_inbound.len();
+                                config
+                                    .private
+                                    .deferred_inbound
+                                    .retain(|kept| kept.message.id != message.id);
+                                if config.private.deferred_inbound.len() != before {
+                                    save.mark_dirty();
+                                }
+                            }
                             let message_dispatch::InboundEffects {
                                 inactivated,
                                 capability_replies,
@@ -1350,18 +1373,14 @@ impl StateHandler {
                             // Set aside for its check: the membership shows
                             // "verifying…" until the result comes back.
                             if let Some(deferred) = deferred {
-                                if let Some(vtc) = deferred.job.verifying_community() {
-                                    state
-                                        .main_page
-                                        .content_panel
-                                        .communities
-                                        .verifying
-                                        .insert(vtc.to_string());
-                                    state.main_page.sync_from_config(&config);
-                                }
-                                if verify_tx.send((deferred, transport)).is_err() {
-                                    warn!("inbound verification worker has stopped — message dropped");
-                                }
+                                queue_for_check(
+                                    &mut verifier,
+                                    &mut config,
+                                    &mut state,
+                                    deferred,
+                                    transport,
+                                );
+                                save.mark_dirty();
                             }
 
                             // A live challenge is display state, not account
@@ -4320,27 +4339,94 @@ fn build_trust_pong(
 }
 
 /// The next inbound event: one handed back from its off-loop check first (it
-/// arrived earlier), else the next to arrive. `None` when both are closed.
+/// arrived earlier), else the next to arrive. `None` when the arriving
+/// channel is closed and nothing is being checked.
 async fn next_inbound(
     arriving: &mut mpsc::UnboundedReceiver<didcomm::DIDCommEvent>,
-    verified: &mut mpsc::UnboundedReceiver<(
-        Box<affinidi_tdk::didcomm::Message>,
-        didcomm::MessagingTransport,
-        message_dispatch::PreVerified,
-    )>,
+    verifier: &mut verify_queue::Verifier,
 ) -> Option<(didcomm::DIDCommEvent, Option<message_dispatch::PreVerified>)> {
     tokio::select! {
         biased;
-        Some((message, transport, pre)) = verified.recv() => Some((
+        finished = verifier.finished() => Some((
             didcomm::DIDCommEvent::InboundMessage {
-                from: message.from.clone(),
-                message,
-                transport,
+                from: finished.message.from.clone(),
+                message: finished.message,
+                transport: finished.transport,
             },
-            Some(pre),
+            Some(finished.pre),
         )),
         Some(event) = arriving.recv() => Some((event, None)),
         else => None,
+    }
+}
+
+/// The largest message kept across a restart while it waits on its check.
+/// Credentials and removal notices are a few KiB; anything bigger is queued
+/// but not kept.
+const MAX_KEPT_DEFERRED_BYTES: usize = 64 * 1024;
+
+/// Queue a message set aside by dispatch for its off-loop check.
+///
+/// A community we hold a membership with gets the priority lane, and its
+/// message (a credential, a removal notice, a join answer) is also kept in the
+/// protected config until it is applied, because the mediator has already
+/// deleted it: an exit before its check finishes must not lose it. A message
+/// the queue refuses (its lane or its sender at the cap) is dropped, and for a
+/// community's the activity log says so.
+fn queue_for_check(
+    verifier: &mut verify_queue::Verifier,
+    config: &mut openvtc_core::config::Config,
+    state: &mut State,
+    deferred: message_dispatch::Deferred,
+    transport: didcomm::MessagingTransport,
+) {
+    let sender = deferred.message.from.clone().unwrap_or_default();
+    let lane = if config.account.memberships_for(&sender).is_empty() {
+        verify_queue::Lane::Other
+    } else {
+        verify_queue::Lane::Priority
+    };
+    let verifying = deferred.job.verifying_community().map(str::to_string);
+    let keep = (lane == verify_queue::Lane::Priority && !deferred.job.is_barrier())
+        .then(|| openvtc_core::config::protected_config::DeferredInbound {
+            message: deferred.message.clone(),
+            transport,
+        })
+        .filter(|kept| {
+            serde_json::to_vec(&kept.message).is_ok_and(|b| b.len() <= MAX_KEPT_DEFERRED_BYTES)
+        });
+    let typ = deferred.message.typ.clone();
+    match verifier.enqueue(deferred, transport, &sender, lane) {
+        Ok(_) => {
+            if let Some(kept) = keep
+                && !config
+                    .private
+                    .deferred_inbound
+                    .iter()
+                    .any(|k| k.message.id == kept.message.id)
+            {
+                config.private.deferred_inbound.push(kept);
+            }
+            // Its membership shows "verifying…" until the result comes back.
+            if let Some(vtc) = verifying {
+                state
+                    .main_page
+                    .content_panel
+                    .communities
+                    .verifying
+                    .insert(vtc);
+                state.main_page.sync_from_config(config);
+            }
+        }
+        Err(refused) => {
+            warn!(%typ, reason = %refused, "inbound message not queued for verification — dropped");
+            if lane == verify_queue::Lane::Priority {
+                config.public.logs.insert(
+                    openvtc_core::logs::LogFamily::Community,
+                    format!("Dropped a message from community ({sender}): {refused}."),
+                );
+            }
+        }
     }
 }
 

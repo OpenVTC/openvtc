@@ -41,6 +41,8 @@ pub const VALID_FROM_SKEW: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 pub enum IssuedCredentialError {
     #[error("the credential was not checked")]
     NotChecked,
+    #[error("its check did not finish (timed out or failed) — ask the community to send it again")]
+    CheckUnfinished,
     #[error("the credential names no issuer")]
     NoIssuer,
     #[error("the credential's issuer is not the community that sent it")]
