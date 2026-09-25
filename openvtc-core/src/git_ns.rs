@@ -23,6 +23,9 @@
 //! - Pure readings of a `git-ns/view` answer the panel renders from:
 //!   [`my_repos`], [`creatable_namespaces`], [`people_on`], [`RepoStatus`],
 //!   and for drift [`DriftRef`], [`adoptable_right`], [`revert_weighs_as`].
+//!   Break-glass records (`git-ns/right/break-glass`) read as
+//!   [`unratified_break_glass`] for the panel's banner and as each
+//!   [`Person`]'s [`BreakGlassState`] flag.
 //!
 //! # Carriage
 //!
@@ -50,8 +53,10 @@ use crate::errors::OpenVTCError;
 
 /// The generated `git-ns/account/link-status/0.1` types.
 pub use link_status::ResponseState as LinkState;
-/// The generated `git-ns/view/0.1` types, which the panel renders from.
-pub use trust_tasks_rs::specs::git_ns::view::v0_1 as view;
+/// The generated `git-ns/view/0.4` types, which the panel renders from. 0.4
+/// carries each right record's `breakGlass` flag, and shows every unratified
+/// break-glass record to the administrators it concerns.
+pub use trust_tasks_rs::specs::git_ns::view::v0_4 as view;
 
 /// Every `git-ns` task URI starts with this.
 pub const TYPE_PREFIX: &str = "https://trusttasks.org/spec/git-ns/";
@@ -216,7 +221,7 @@ impl Visibility {
 /// One `git-ns/*` task a member sends to their community.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
-    /// `git-ns/view/0.1` — what the caller may see, optionally narrowed.
+    /// `git-ns/view/0.4` — what the caller may see, optionally narrowed.
     View { resource: Option<String> },
     /// `git-ns/repo/create/0.1`.
     Create {
@@ -1210,6 +1215,10 @@ pub struct Person {
     /// Whether the record is on the namespace rather than the repository —
     /// a namespace-wide committer, shown but not revocable from here.
     pub namespace_wide: bool,
+    /// Where the subject gave themselves this right with
+    /// `git-ns/right/break-glass`: whether another administrator has ratified
+    /// it yet. `None` for an ordinary grant.
+    pub break_glass: Option<BreakGlassState>,
 }
 
 /// Everyone the caller may see holding a right on `resource`: its owners, and
@@ -1233,6 +1242,7 @@ pub fn people_on(resp: &view::Response, resource: &str) -> Vec<Person> {
                 expires_at: r.expires_at,
                 reason: r.reason.as_ref().map(|s| s.to_string()),
                 namespace_wide: *r.resource != *resource,
+                break_glass: r.break_glass.as_ref().map(BreakGlassState::of),
             })
         })
         .collect();
@@ -1250,6 +1260,7 @@ pub fn people_on(resp: &view::Response, resource: &str) -> Vec<Person> {
                     expires_at: None,
                     reason: None,
                     namespace_wide: false,
+                    break_glass: None,
                 });
             }
         }
@@ -1293,6 +1304,182 @@ pub fn known_dids(resp: &view::Response) -> Vec<String> {
     dids
 }
 
+// ****************************************************************************
+// Break-glass
+// ****************************************************************************
+
+/// Where a break-glass record stands (`git-ns/right/break-glass`,
+/// `git-ns/right/ratify`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BreakGlassState {
+    /// Recorded by its subject for themselves, and not yet ratified by anyone
+    /// else. Live, published, and revocable by any other administrator.
+    Unratified,
+    /// Ratified by another administrator: an ordinary grant now, flagged only
+    /// as its history.
+    Ratified,
+}
+
+impl BreakGlassState {
+    #[must_use]
+    pub fn of(bg: &view::BreakGlass) -> Self {
+        if bg.ratified_by.is_some() {
+            BreakGlassState::Ratified
+        } else {
+            BreakGlassState::Unratified
+        }
+    }
+
+    /// The flag drawn beside the right.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            BreakGlassState::Unratified => "BREAK-GLASS",
+            BreakGlassState::Ratified => "break-glass, ratified",
+        }
+    }
+}
+
+/// One unratified break-glass record, as the banner shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BreakGlassAlert {
+    pub subject: String,
+    /// The right's wire string, as recorded.
+    pub right: String,
+    pub resource: String,
+    /// `breakGlass.at` — what a ratification names (`breakGlassAt`).
+    pub at: DateTime<Utc>,
+    pub justification: String,
+    /// When a policy delay lets it take effect, if that is still ahead.
+    pub pending_until: Option<DateTime<Utc>>,
+    /// The viewer broke this glass themselves: they cannot ratify it, only
+    /// wait for someone else to, or resign it.
+    pub mine: bool,
+}
+
+impl BreakGlassAlert {
+    /// The `cnm` command that ratifies it, every value quoted for sh, bash,
+    /// zsh and fish alike.
+    #[must_use]
+    pub fn ratify_command(&self) -> String {
+        format!(
+            "cnm git ratify --subject={} --right={} --resource={} --break-glass-at={}",
+            shell_word(&self.subject),
+            shell_word(&self.right),
+            shell_word(&self.resource),
+            shell_word(&self.at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        )
+    }
+
+    /// The `cnm` command that revokes it.
+    #[must_use]
+    pub fn revoke_command(&self) -> String {
+        format!(
+            "cnm git revoke --subject={} --right={} --resource={}",
+            shell_word(&self.subject),
+            shell_word(&self.right),
+            shell_word(&self.resource),
+        )
+    }
+}
+
+/// Every unratified break-glass record in the view, oldest first.
+///
+/// The VTC decides who receives these: `git-ns/view` 0.4 returns every
+/// unratified break-glass record to every community administrator and every
+/// namespace admin of its namespace — whether or not they could otherwise see
+/// rights there — and to the resource's owners and the subject. So the panel
+/// shows every one it is given: anyone holding such a record in their answer
+/// is someone the record concerns, and a community administrator with no git
+/// right of their own is identifiable to the VTC, not to this client.
+#[must_use]
+pub fn unratified_break_glass(
+    resp: &view::Response,
+    me: &str,
+    now: DateTime<Utc>,
+) -> Vec<BreakGlassAlert> {
+    let mut out: Vec<BreakGlassAlert> = resp
+        .rights
+        .iter()
+        .filter_map(|r| {
+            let bg = r.break_glass.as_ref()?;
+            if BreakGlassState::of(bg) != BreakGlassState::Unratified {
+                return None;
+            }
+            Some(BreakGlassAlert {
+                subject: r.subject.to_string(),
+                right: to_wire_string(&r.right),
+                resource: r.resource.to_string(),
+                at: bg.at,
+                justification: bg.justification.to_string(),
+                pending_until: bg.effective_at.filter(|e| *e > now),
+                mine: *r.subject == *me,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.resource.cmp(&b.resource)));
+    out
+}
+
+fn to_wire_string<T: serde::Serialize>(v: &T) -> String {
+    serde_json::to_value(v)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// `s` as one shell word that sh, bash, zsh and fish all read back as `s`.
+///
+/// The same rule as `cnm`'s own `shell_word` (verifiable-trust-infrastructure
+/// `cnm-cli/src/git.rs`), because the commands printed here are `cnm`
+/// commands: unchanged when it holds nothing a shell interprets and does not
+/// start with `-`, `=` or `%`; otherwise single-quoted, with each `'` written
+/// `"'"` and each `\` `"\\"`. POSIX's `'\''` is not enough — fish reads `\'`
+/// and `\\` as escapes even inside single quotes.
+#[must_use]
+pub fn shell_word(s: &str) -> String {
+    let plain = !s.is_empty()
+        && !s.starts_with(['-', '=', '%'])
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'.' | b'_' | b'-' | b'/' | b':' | b'@' | b'%' | b'+' | b'=' | b','
+                )
+        });
+    if plain {
+        return s.to_string();
+    }
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if !run.is_empty() {
+            out.push('\'');
+            out.push_str(run);
+            out.push('\'');
+            run.clear();
+        }
+    };
+    for c in s.chars() {
+        match c {
+            '\'' => {
+                flush(&mut run, &mut out);
+                out.push_str("\"'\"");
+            }
+            '\\' => {
+                flush(&mut run, &mut out);
+                out.push_str("\"\\\\\"");
+            }
+            c => run.push(c),
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1308,6 +1495,7 @@ mod tests {
     /// The specification's own "What Bob sees" answer.
     fn bob_view() -> view::Response {
         serde_json::from_value(json!({
+            "accounts": [],
             "namespaces": [{
                 "id": "ns_01J8Z6Q4M2", "forge": "github.com", "owner": "acme",
                 "kind": "organization", "mode": "bridge", "state": "bound"
@@ -1798,7 +1986,7 @@ mod tests {
     fn a_view_response_is_read_typed() {
         let payload = serde_json::to_value(bob_view()).unwrap();
         let (thid, reply) = parse_reply(&reply_doc(
-            "https://trusttasks.org/spec/git-ns/view/0.1#response",
+            "https://trusttasks.org/spec/git-ns/view/0.4#response",
             payload,
         ))
         .unwrap();
@@ -1839,7 +2027,7 @@ mod tests {
     fn a_request_or_a_foreign_family_is_not_a_reply() {
         assert!(
             parse_reply(&reply_doc(
-                "https://trusttasks.org/spec/git-ns/view/0.1",
+                "https://trusttasks.org/spec/git-ns/view/0.4",
                 json!({})
             ))
             .is_none()
@@ -1852,7 +2040,7 @@ mod tests {
             .is_none()
         );
         assert!(is_reply_type(
-            "https://trusttasks.org/spec/git-ns/view/0.1#response"
+            "https://trusttasks.org/spec/git-ns/view/0.4#response"
         ));
         assert!(!is_reply_type(
             "https://trusttasks.org/spec/governance/capability/list/0.1"
@@ -2095,5 +2283,156 @@ mod tests {
         assert!(known.contains(&DAN.to_string()));
         assert!(known.contains(&ALICE.to_string()));
         assert_eq!(short_resource("github.com/acme/widgets"), "acme/widgets");
+    }
+
+    const CAROL: &str = "did:webvh:QmCarolScid3:acme-vtc.example:carol";
+
+    /// Bob's view, plus Carol's break-glass ownership of `widgets` (the
+    /// break-glass specification's own example) and an older one of Dan's,
+    /// since ratified.
+    fn view_with_break_glass() -> view::Response {
+        let mut v = serde_json::to_value(bob_view()).unwrap();
+        let rights = v["rights"].as_array_mut().unwrap();
+        rights.push(json!({
+            "subject": CAROL, "right": "git.repo.own", "resource": "github.com/acme/widgets",
+            "grantedBy": CAROL, "grantedAt": "2026-09-25T02:10:31Z",
+            "breakGlass": {
+                "by": CAROL, "at": "2026-09-25T02:10:31Z",
+                "justification": "CVE-2026-4411 fix must ship tonight; both owners unreachable."
+            }
+        }));
+        rights.push(json!({
+            "subject": BOB, "right": "git.ns.admin", "resource": "github.com/acme",
+            "grantedBy": BOB, "grantedAt": "2026-09-20T08:00:00Z",
+            "breakGlass": {
+                "by": BOB, "at": "2026-09-20T08:00:00Z", "justification": "Namespace was headless",
+                "ratifiedBy": ALICE, "ratifiedAt": "2026-09-21T09:00:00Z"
+            }
+        }));
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn only_unratified_break_glass_records_raise_the_banner() {
+        let now: DateTime<Utc> = "2026-09-25T03:00:00Z".parse().unwrap();
+        assert!(unratified_break_glass(&bob_view(), BOB, now).is_empty());
+
+        let alerts = unratified_break_glass(&view_with_break_glass(), BOB, now);
+        assert_eq!(alerts.len(), 1, "the ratified one is history, not an alert");
+        let a = &alerts[0];
+        assert_eq!(a.subject, CAROL);
+        assert_eq!(a.right, "git.repo.own");
+        assert_eq!(a.resource, "github.com/acme/widgets");
+        assert!(!a.mine);
+        assert!(a.pending_until.is_none());
+
+        // Carol sees her own, marked as hers: she cannot ratify it.
+        assert!(unratified_break_glass(&view_with_break_glass(), CAROL, now)[0].mine);
+    }
+
+    #[test]
+    fn a_delayed_break_glass_says_when_it_takes_effect() {
+        let mut v = serde_json::to_value(view_with_break_glass()).unwrap();
+        v["rights"][3]["breakGlass"]["effectiveAt"] = json!("2026-09-25T04:10:31Z");
+        let v: view::Response = serde_json::from_value(v).unwrap();
+        let before: DateTime<Utc> = "2026-09-25T03:00:00Z".parse().unwrap();
+        let after: DateTime<Utc> = "2026-09-25T05:00:00Z".parse().unwrap();
+        assert_eq!(
+            unratified_break_glass(&v, BOB, before)[0].pending_until,
+            Some("2026-09-25T04:10:31Z".parse().unwrap())
+        );
+        assert!(
+            unratified_break_glass(&v, BOB, after)[0]
+                .pending_until
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn people_carry_the_break_glass_flag() {
+        let v = view_with_break_glass();
+        let widgets = people_on(&v, "github.com/acme/widgets");
+        let carol = widgets.iter().find(|p| p.did == CAROL).unwrap();
+        assert_eq!(carol.break_glass, Some(BreakGlassState::Unratified));
+        assert_eq!(carol.break_glass.unwrap().label(), "BREAK-GLASS");
+        let gadgets = people_on(&v, "github.com/acme/gadgets");
+        let bob_admin = gadgets
+            .iter()
+            .find(|p| p.did == BOB && p.right == GitRight::NsAdmin)
+            .unwrap();
+        assert_eq!(bob_admin.break_glass, Some(BreakGlassState::Ratified));
+        assert!(
+            gadgets
+                .iter()
+                .any(|p| p.did == DAN && p.break_glass.is_none())
+        );
+    }
+
+    #[test]
+    fn printed_commands_name_the_record_and_are_quoted() {
+        let now: DateTime<Utc> = "2026-09-25T03:00:00Z".parse().unwrap();
+        let a = &unratified_break_glass(&view_with_break_glass(), BOB, now)[0];
+        assert_eq!(
+            a.ratify_command(),
+            format!(
+                "cnm git ratify --subject={CAROL} --right=git.repo.own \
+                 --resource=github.com/acme/widgets --break-glass-at=2026-09-25T02:10:31Z"
+            )
+        );
+        assert_eq!(
+            a.revoke_command(),
+            format!(
+                "cnm git revoke --subject={CAROL} --right=git.repo.own \
+                 --resource=github.com/acme/widgets"
+            )
+        );
+    }
+
+    #[test]
+    fn shell_words_survive_sh_bash_zsh_and_fish() {
+        assert_eq!(
+            shell_word("did:webvh:QmScid:acme.example"),
+            "did:webvh:QmScid:acme.example"
+        );
+        assert_eq!(shell_word("a b"), "'a b'");
+        assert_eq!(shell_word("it's"), r#"'it'"'"'s'"#);
+        assert_eq!(shell_word("\\"), r#""\\""#);
+        assert_eq!(shell_word(""), "''");
+        assert_eq!(shell_word("-x"), "'-x'");
+        assert_eq!(shell_word("%self"), "'%self'");
+        let hostile = [
+            r"x\' ; echo INJECTED ; echo \",
+            "it's",
+            "$(id)",
+            "$fish_pid",
+            "",
+            "-rf",
+        ];
+        let words = hostile
+            .iter()
+            .map(|v| shell_word(v))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut ran = 0;
+        for shell in ["sh", "bash", "zsh", "fish"] {
+            let Ok(out) = std::process::Command::new(shell)
+                .arg("-c")
+                .arg(format!(r"env printf '%s\0' {words}"))
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("HOME", std::env::temp_dir())
+                .stderr(std::process::Stdio::null())
+                .output()
+            else {
+                assert_ne!(shell, "sh", "sh must be runnable");
+                continue;
+            };
+            let text = String::from_utf8(out.stdout).unwrap();
+            let mut argv: Vec<&str> = text.split('\0').collect();
+            argv.pop();
+            assert_eq!(argv, hostile, "{shell}");
+            ran += 1;
+        }
+        assert!(ran >= 1);
     }
 }

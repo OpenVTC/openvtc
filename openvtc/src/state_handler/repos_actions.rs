@@ -1404,6 +1404,7 @@ mod tests {
 
     fn data() -> view::Response {
         serde_json::from_value(json!({
+            "accounts": [],
             "namespaces": [{"id": "ns_1", "forge": "github.com", "owner": "acme",
                             "kind": "organization", "mode": "bridge", "state": "bound"}],
             "repos": [
