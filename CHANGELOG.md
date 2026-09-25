@@ -71,6 +71,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `messaging::handle_credential_issue` now takes a
   `issued_credential::VerifiedIssuedCredential` instead of the message, and
   `credential_sync::sync_membership_credentials` takes a DID resolver.
+  The cheap local checks run first: a credential from a party we hold no
+  membership with, for someone else, of an unknown kind, or for a membership
+  that ended is refused before anything is resolved or fetched. A status list
+  on a loopback, private, link-local or otherwise non-public host — as written,
+  or as its name resolves, redirects included — is not fetched. A VRC's proof
+  is checked by the same rules (purpose `assertionMethod`, listed by the
+  issuer, a method the issuer controls).
 
 - **Vetting questions and personhood reach a community again.** A community
   (VTI #1687, Keyring VTI-42) now takes a Trust Task over DIDComm only inside

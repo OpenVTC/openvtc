@@ -886,6 +886,59 @@ pub fn credential_in_issue(message: &Message) -> Option<Value> {
         .cloned()
 }
 
+/// Whether a `credential-exchange/issue` from `from_did` carrying
+/// `credential` (unverified) could be stored at all: issued by the sender, to
+/// one of our personas, of a known kind, for a membership that persona holds
+/// with the sender and that is still live (Pending or Active).
+///
+/// Local and cheap — no resolve, no fetch. It runs **before** the credential
+/// is verified, so a party we hold no membership with cannot make this client
+/// resolve DIDs or fetch status lists on its behalf, and again when the
+/// verified credential is stored ([`handle_credential_issue`]).
+///
+/// # Errors
+///
+/// Why it could not be stored; the text names no DID.
+pub fn credential_issue_admissible(
+    account: &Account,
+    credential: &Value,
+    from_did: &str,
+) -> Result<(crate::config::account::PersonaId, crate::CredentialKind), &'static str> {
+    // Anti-misdelivery: issuer must be this community's VTC. The credential's
+    // subject (a persona DID) also selects WHICH membership it is for — a
+    // community may hold several, one per persona.
+    if crate::issued_credential::issuer_of(credential) != Some(from_did) {
+        return Err("its issuer is not the community that sent it");
+    }
+    let subject = credential
+        .get("credentialSubject")
+        .and_then(|s| s.get("id"))
+        .and_then(Value::as_str)
+        .ok_or("it has no subject")?;
+    let persona_id = account
+        .persona_id_for_did(subject)
+        .ok_or("its subject is not one of our personas")?;
+    // Classified against the typed registry — the one place that knows
+    // credential kinds, so a new kind is handled here without edits.
+    let kind =
+        crate::CredentialKind::from_credential(credential).ok_or("it is of no known kind")?;
+    let record = account
+        .membership(from_did, persona_id)
+        .ok_or("we hold no membership with that community for its subject")?;
+    // A credential lands only on a live membership: one waiting on our join
+    // (Pending) or already Active. A membership that ended — Left, Withdrawn,
+    // Rejected, Removed, Expired — is not revived by a credential arriving,
+    // however well signed: re-joining is a new join the member starts.
+    let pending = matches!(
+        record.status,
+        crate::config::account::CommunityStatus::Pending { .. }
+    );
+    if !pending && !record.status.is_active() {
+        return Err("it is for a membership that has ended");
+    }
+    Ok((persona_id, kind))
+}
+
 /// Handle a VTC `credential-exchange/issue` whose credential has been verified
 /// ([`crate::issued_credential::verify_issued_credential`]): store it on the
 /// matching community and, for the membership credential (VMC), flip the
@@ -906,55 +959,18 @@ pub fn handle_credential_issue(
 ) -> CredentialIssueOutcome {
     let credential = credential.into_value();
 
-    // Anti-misdelivery: issuer must be this community's VTC (verification
-    // already bound it to the sender; checked again so this function stands on
-    // its own). The credential's subject (a persona DID) also selects WHICH
-    // membership it is for — a community may now hold several, one per persona.
-    if crate::issued_credential::issuer_of(&credential) != Some(from_did) {
-        warn!(vtc = %from_did, "issued credential's issuer is not the community VTC — ignoring");
-        return CredentialIssueOutcome::NONE;
-    }
-    let Some(subject) = credential
-        .get("credentialSubject")
-        .and_then(|s| s.get("id"))
-        .and_then(Value::as_str)
-    else {
-        warn!(vtc = %from_did, "issued credential has no subject — ignoring");
-        return CredentialIssueOutcome::NONE;
+    // Checked again, although the caller ran the same checks before verifying,
+    // so this function stands on its own.
+    let (persona_id, kind) = match credential_issue_admissible(account, &credential, from_did) {
+        Ok(target) => target,
+        Err(reason) => {
+            warn!(vtc = %from_did, "issued credential ignored: {reason}");
+            return CredentialIssueOutcome::NONE;
+        }
     };
-    // The subject must be one of our personas, and that persona must hold a
-    // membership with this community.
-    let Some(persona_id) = account.persona_id_for_did(subject) else {
-        warn!(vtc = %from_did, "issued credential subject is not our persona — ignoring");
-        return CredentialIssueOutcome::NONE;
-    };
-
-    // Classify the credential against the typed registry — the one place that
-    // knows credential kinds, so a new kind is handled here without edits.
-    let Some(kind) = crate::CredentialKind::from_credential(&credential) else {
-        warn!(vtc = %from_did, "issued credential is of no known kind — ignoring");
-        return CredentialIssueOutcome::NONE;
-    };
-
     let Some(record) = account.membership_mut(from_did, persona_id) else {
-        warn!(vtc = %from_did, "credential-issue for a community we don't hold a matching membership with — ignoring");
         return CredentialIssueOutcome::NONE;
     };
-    // A credential lands only on a live membership: one waiting on our join
-    // (Pending) or already Active. A membership that ended — Left, Withdrawn,
-    // Rejected, Removed, Expired — is not revived by a credential arriving,
-    // however well signed: re-joining is a new join the member starts.
-    let pending = matches!(
-        record.status,
-        crate::config::account::CommunityStatus::Pending { .. }
-    );
-    if !pending && !record.status.is_active() {
-        warn!(
-            status = ?record.status,
-            "issued credential for a membership that has ended — ignoring"
-        );
-        return CredentialIssueOutcome::NONE;
-    }
     record.credentials.insert(kind, credential);
 
     // Capture the join request id *before* activating. `activate` replaces
@@ -1061,22 +1077,28 @@ pub fn vet_vrc_issued(
 
 /// Cryptographically verify an inbound VRC's data-integrity proof (task R2).
 ///
-/// The proof's `verificationMethod` must belong to the credential's issuer
-/// DID — without that binding an attacker could present a proof made with
-/// *their own* key over a credential naming someone else as issuer. The
-/// public key is then resolved from the issuer's DID Document via the TDK
-/// resolver and the proof verified over the proof-stripped credential.
+/// Checked by the same rules as every other signed document this client acts
+/// on ([`crate::proof_check`]): every proof verifies, by a method whose DID is
+/// exactly the credential's issuer, that the issuer's DID document lists under
+/// `assertionMethod` and whose controller is the issuer — without which an
+/// attacker could present a proof made with *their own* key over a credential
+/// naming someone else as issuer, or with a key the issuer publishes for
+/// another purpose.
+///
+/// # Errors
+///
+/// What failed, naming no DID.
 pub async fn verify_vrc_proof(tdk: &TDK, vrc: &DTGCredential) -> Result<(), String> {
-    let proof = check_vrc_issuer_binding(vrc)?;
-
-    // `verify_data` expects the signed document with the proof stripped.
-    let mut unsigned = vrc.clone();
-    unsigned.credential_mut().proof = None;
-
-    tdk.verify_data(&unsigned, None, &proof)
-        .await
-        .map_err(|e| format!("proof verification failed: {e}"))?;
-    Ok(())
+    let document = serde_json::to_value(vrc)
+        .map_err(|e| format!("the credential could not be read for verification: {e}"))?;
+    crate::proof_check::verify_signed(
+        &document,
+        vrc.issuer(),
+        tdk.did_resolver(),
+        &[crate::proof_check::Purpose::AssertionMethod],
+    )
+    .await
+    .map_err(|e| format!("proof verification failed: {e}"))
 }
 
 /// Verify a VRC's data-integrity proof against an **explicitly supplied** issuer
@@ -1094,7 +1116,7 @@ pub fn verify_vrc_proof_with_key(
         .map_err(|e| format!("proof verification failed: {e}"))
 }
 
-/// Shared guard for the VRC proof verifiers: the credential must carry a
+/// Guard for the key-injected VRC verifier: the credential must carry a
 /// data-integrity proof and its `verification_method` must belong to the named
 /// issuer (no "issuer signs with their own key over a credential naming someone
 /// else"). Returns the proof on success.
@@ -2699,6 +2721,41 @@ mod tests {
         assert!(!only(&acct, vtc).status.is_active());
     }
 
+    /// The cheap local checks run before any proof or status work: a
+    /// credential from a party we hold no membership with (or otherwise not
+    /// storable) is refused without resolving or fetching anything.
+    #[test]
+    fn a_credential_is_admissible_only_for_a_live_membership_with_its_sender() {
+        let vtc = "did:webvh:example:vtc";
+        let persona = "did:webvh:example:persona";
+        let acct = account_with_persona(vtc, persona);
+        let vmc = |issuer: &str, subject: &str| {
+            vc(
+                &["VerifiableCredential", "MembershipCredential"],
+                issuer,
+                subject,
+            )
+        };
+
+        assert!(credential_issue_admissible(&acct, &vmc(vtc, persona), vtc).is_ok());
+        // A stranger issuing about itself: no membership with it.
+        let stranger = "did:webvh:example:stranger";
+        assert!(
+            credential_issue_admissible(&acct, &vmc(stranger, persona), stranger)
+                .unwrap_err()
+                .contains("no membership")
+        );
+        // Issued by someone other than the sender.
+        assert!(credential_issue_admissible(&acct, &vmc(stranger, persona), vtc).is_err());
+        // For someone else.
+        assert!(credential_issue_admissible(&acct, &vmc(vtc, "did:webvh:other"), vtc).is_err());
+        // Of no known kind.
+        assert!(
+            credential_issue_admissible(&acct, &vc(&["VerifiableCredential"], vtc, persona), vtc)
+                .is_err()
+        );
+    }
+
     #[test]
     fn validate_did_accepts_well_formed_dids() {
         assert!(validate_did("did:web:example.com").is_ok());
@@ -2999,6 +3056,22 @@ mod tests {
         vrc.sign(&attacker_secret, None).await.expect("signs");
 
         assert!(verify_vrc_proof(&tdk, &vrc).await.is_err());
+    }
+
+    /// A VRC is an assertion: a proof made for another purpose (here
+    /// `authentication`) does not stand for it, whoever made it.
+    #[tokio::test]
+    async fn vrc_proof_for_another_purpose_is_rejected() {
+        let tdk = test_tdk().await;
+        let (issuer_did, issuer_secret) =
+            DID::generate_did_key(KeyType::Ed25519).expect("did:key generates");
+        let mut vrc = unsigned_vrc(&issuer_did);
+        vrc.sign(&issuer_secret, None).await.expect("signs");
+        if let Some(proof) = vrc.credential_mut().proof.as_mut() {
+            proof.proof_purpose = "authentication".to_string();
+        }
+        let error = verify_vrc_proof(&tdk, &vrc).await.unwrap_err();
+        assert!(error.contains("purpose"), "{error}");
     }
 
     #[tokio::test]

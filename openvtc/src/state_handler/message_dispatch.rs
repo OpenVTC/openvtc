@@ -18,10 +18,11 @@ use openvtc_core::issued_credential::verify_issued_credential;
 use openvtc_core::join::COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE;
 use openvtc_core::messaging::{
     SeenMessages, check_message_age, check_task_capacity, create_finalize_message,
-    credential_in_issue, handle_community_profile_show_response, handle_credential_issue,
-    handle_join_problem_report, handle_join_status_response, handle_join_submit_receipt,
-    handle_join_trust_task_error, handle_join_verdict, handle_member_removal_notice,
-    is_trust_task_error_type, require_thid, validate_did, verify_vrc_proof, vet_vrc_issued,
+    credential_in_issue, credential_issue_admissible, handle_community_profile_show_response,
+    handle_credential_issue, handle_join_problem_report, handle_join_status_response,
+    handle_join_submit_receipt, handle_join_trust_task_error, handle_join_verdict,
+    handle_member_removal_notice, is_trust_task_error_type, require_thid, validate_did,
+    verify_vrc_proof, vet_vrc_issued,
 };
 use openvtc_core::personhood::{
     PERSONHOOD_ASSERT_RESPONSE_TYPE, PERSONHOOD_CHALLENGE_RESPONSE_TYPE,
@@ -379,6 +380,13 @@ pub async fn process_inbound_message(
             warn!("credential-issue without credential_response.credential — ignoring");
             return Ok(false);
         };
+        // The local checks come first: a credential this client could not
+        // store anyway — from a party we hold no membership with, for someone
+        // else, of an unknown kind — never costs a resolve or a status fetch.
+        if let Err(reason) = credential_issue_admissible(&config.account, &credential, &from_did) {
+            warn!("credential-issue ignored before verification: {reason}");
+            return Ok(false);
+        }
         let verified = match verify_issued_credential(
             credential,
             &from_did,
