@@ -373,8 +373,16 @@ async fn create_request_message(
     did_signer: &Secret,
     persona_signer: &Secret,
 ) -> Result<Message> {
-    let (did_proof, persona_proof) =
-        did_binding_proofs(our_did, from, to, msg_id, did_signer, persona_signer).await?;
+    let (did_proof, persona_proof) = did_binding_proofs(
+        our_did,
+        from,
+        to,
+        msg_id,
+        openvtc_core::relationships::BindingRole::Request,
+        did_signer,
+        persona_signer,
+    )
+    .await?;
     let mut msg = super::didcomm::build_didcomm_message(
         openvtc_core::protocol_urls::RELATIONSHIP_REQUEST,
         json!(RelationshipRequestBody {

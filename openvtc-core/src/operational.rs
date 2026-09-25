@@ -9,6 +9,10 @@
 //!   lists under `authentication` (the community's operational key). A proof
 //!   under `assertionMethod` is refused here: that key issues credentials, and
 //!   credentials are a different thing from acting;
+//! - its signed `type` is the one the handler acting on it handles — a
+//!   community's signed answer to one question cannot be replayed as a
+//!   removal notice, or as its answer to another — and the freshness window
+//!   comes from that type ([`OperationalKind::of`]);
 //! - it names a `recipient`, which is the persona it is for;
 //! - it carries an `issuedAt` inside the window its kind allows (not in the
 //!   future beyond clock skew, not older than [`OperationalKind::max_age`]),
@@ -69,6 +73,17 @@ pub enum OperationalKind {
 }
 
 impl OperationalKind {
+    /// The kind a document of type `typ` is. Taken from the type the handler
+    /// handles, which the document's own signed `type` must equal.
+    #[must_use]
+    pub fn of(typ: &str) -> Self {
+        if typ == vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE {
+            OperationalKind::RemovalNotice
+        } else {
+            OperationalKind::CommunityAnswer
+        }
+    }
+
     /// The oldest an `issuedAt` may be.
     #[must_use]
     pub fn max_age(self) -> TimeDelta {
@@ -87,6 +102,8 @@ pub enum OperationalError {
     NotADocument,
     #[error("it has no id")]
     NoId,
+    #[error("its signed type is not the one this message was handled as")]
+    WrongType,
     #[error("its id is too long")]
     IdTooLong,
     #[error("too many recent documents from this community to take another yet")]
@@ -254,7 +271,7 @@ impl VerifiedOperational {
 }
 
 /// Verify an operational `document` from `sender` addressed to one of
-/// `our_dids`. Records nothing: the caller binds the result and then
+/// `our_dids`, handled as type `typ` (which its signed `type` must be). Records nothing: the caller binds the result and then
 /// [commits](VerifiedOperational::commit) it.
 ///
 /// # Errors
@@ -265,12 +282,12 @@ pub async fn verify_operational(
     document: &Value,
     sender: &str,
     our_dids: &[&str],
-    kind: OperationalKind,
+    typ: &str,
     resolver: &DIDCacheClient,
     seen: &SeenDocuments,
     now: DateTime<Utc>,
 ) -> Result<VerifiedOperational, OperationalError> {
-    let verified = check_envelope(document, sender, our_dids, kind, seen, now)?;
+    let verified = check_envelope(document, sender, our_dids, typ, seen, now)?;
     proof_check::verify_signed(document, sender, resolver, &[Purpose::Authentication]).await?;
     Ok(verified)
 }
@@ -285,11 +302,11 @@ pub fn verify_operational_with(
     sender: &str,
     sender_doc: &affinidi_tdk::did_common::Document,
     our_dids: &[&str],
-    kind: OperationalKind,
+    typ: &str,
     seen: &SeenDocuments,
     now: DateTime<Utc>,
 ) -> Result<VerifiedOperational, OperationalError> {
-    let verified = check_envelope(document, sender, our_dids, kind, seen, now)?;
+    let verified = check_envelope(document, sender, our_dids, typ, seen, now)?;
     proof_check::verify_proofs(document, sender, sender_doc, &[Purpose::Authentication])?;
     Ok(verified)
 }
@@ -299,7 +316,7 @@ fn check_envelope(
     document: &Value,
     sender: &str,
     our_dids: &[&str],
-    kind: OperationalKind,
+    typ: &str,
     seen: &SeenDocuments,
     now: DateTime<Utc>,
 ) -> Result<VerifiedOperational, OperationalError> {
@@ -307,6 +324,13 @@ fn check_envelope(
     if !obj.contains_key("payload") {
         return Err(OperationalError::NotADocument);
     }
+    // The handler is chosen by the message's type, which is not signed; the
+    // document's is. They must agree, or a signed document of one kind could
+    // be acted on as another.
+    if obj.get("type").and_then(Value::as_str) != Some(typ) {
+        return Err(OperationalError::WrongType);
+    }
+    let kind = OperationalKind::of(typ);
     let id = obj
         .get("id")
         .and_then(Value::as_str)
@@ -368,11 +392,14 @@ pub(crate) mod test_support {
     use affinidi_tdk::secrets_resolver::secrets::Secret;
     use serde_json::json;
 
+    /// The type [`document`] gives its documents.
+    pub(crate) const TEST_TYPE: &str = "https://trusttasks.org/spec/vtc/test/0.1";
+
     /// A fresh operational document from `issuer` to `recipient`.
     pub(crate) fn document(issuer: &str, recipient: &str, payload: Value) -> Value {
         json!({
             "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-            "type": "https://trusttasks.org/spec/vtc/test/0.1",
+            "type": TEST_TYPE,
             "issuer": issuer,
             "recipient": recipient,
             "issuedAt": Utc::now().to_rfc3339(),
@@ -388,7 +415,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{document, sign};
+    use super::test_support::{TEST_TYPE, document, sign};
     use super::*;
     use crate::proof_check::test_support::{document as did_document, ed_key};
     use serde_json::json;
@@ -414,15 +441,7 @@ mod tests {
         doc: &affinidi_tdk::did_common::Document,
         seen: &SeenDocuments,
     ) -> Result<VerifiedOperational, OperationalError> {
-        verify_operational_with(
-            d,
-            VTC,
-            doc,
-            &[ME],
-            OperationalKind::CommunityAnswer,
-            seen,
-            Utc::now(),
-        )
+        verify_operational_with(d, VTC, doc, &[ME], TEST_TYPE, seen, Utc::now())
     }
 
     #[tokio::test]
@@ -443,6 +462,45 @@ mod tests {
 
     /// VTI-KEY-106: acting is the operational key's job, not the credential
     /// key's — even a valid assertionMethod proof is refused here.
+    /// The document's signed `type` binds it to the handler: a community's
+    /// signed answer cannot be acted on as a removal notice (or any other
+    /// type), and the window is the handled type's.
+    #[tokio::test]
+    async fn a_document_is_taken_only_as_its_signed_type() {
+        let (_, op, doc) = vtc();
+        let seen = SeenDocuments::default();
+        let d = sign(document(VTC, ME, json!({})), &op).await;
+        assert!(verify(&d, &doc, &seen).is_ok());
+        let as_notice = verify_operational_with(
+            &d,
+            VTC,
+            &doc,
+            &[ME],
+            vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE,
+            &seen,
+            Utc::now(),
+        );
+        assert_eq!(as_notice, Err(OperationalError::WrongType));
+
+        // No signed type at all.
+        let mut untyped = document(VTC, ME, json!({}));
+        untyped.as_object_mut().unwrap().remove("type");
+        let untyped = sign(untyped, &op).await;
+        assert_eq!(
+            verify(&untyped, &doc, &seen),
+            Err(OperationalError::WrongType)
+        );
+
+        assert_eq!(
+            OperationalKind::of(vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE),
+            OperationalKind::RemovalNotice
+        );
+        assert_eq!(
+            OperationalKind::of(TEST_TYPE),
+            OperationalKind::CommunityAnswer
+        );
+    }
+
     #[tokio::test]
     async fn an_assertion_method_proof_is_not_operational() {
         let (assertion, _, doc) = vtc();

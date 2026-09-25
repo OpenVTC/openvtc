@@ -807,6 +807,7 @@ async fn process_inbound(
                 body.persona_proof.as_ref(),
                 &recipient_did,
                 &task_id,
+                openvtc_core::relationships::BindingRole::Accept,
                 tdk.did_resolver(),
             )
             .await
@@ -941,6 +942,7 @@ async fn process_inbound(
                 body.persona_proof.as_ref(),
                 &recipient_did,
                 &message.id,
+                openvtc_core::relationships::BindingRole::Request,
                 tdk.did_resolver(),
             )
             .await

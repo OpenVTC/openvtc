@@ -83,8 +83,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sender a message arrives from is now treated as a routing hint only.
   - *Relationship DIDs.* A relationship request and its acceptance carry proofs
     (`didProof`, and `personaProof` when an R-DID is used) that bind the
-    relationship DID to that handshake — its thread id and both personas —
-    signed by an `authentication` key of the DID and of the persona naming it.
+    relationship DID to that handshake — its thread id, both personas and the
+    side it is made for (`role`: request or accept, so one side's proof cannot
+    stand as the other's) — signed by an `authentication` key of the DID and of
+    the persona naming it.
     A request or acceptance without valid proofs is refused. An acceptance,
     finalize or rejection is matched only by the thread id of a request of ours
     in the right state and from the party it went to; the fallback that matched
@@ -95,7 +97,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     vetting answers (manifest, vetter directory, profile, resend, withdrawal
     record) — are acted on only when signed with the community's
     `authentication` key (an `assertionMethod` proof is refused: VTI-KEY-106),
-    addressed to one of our personas (`recipient` required), dated inside the
+    of the type it is handled as (its signed `type` must equal the handler's,
+    so a signed answer cannot be acted on as a removal notice or another
+    answer; the window follows that type), addressed to one of our personas
+    (`recipient` required), dated inside the
     kind's window (`issuedAt` required; 30 days for a removal notice, a day for
     an answer; `expiresAt` honoured), and never seen before — document ids are
     remembered, persisted, until their window passes (VTI-KEY-107). An id is

@@ -834,13 +834,41 @@ pub struct RelationshipAcceptBody {
 pub const RELATIONSHIP_DID_BINDING_TYPE: &str =
     "https://linuxfoundation.org/openvtc/1.0/relationship-did-binding";
 
+/// Which side of a handshake a binding proof is made for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingRole {
+    /// The requester's binding, carried on the relationship request.
+    Request,
+    /// The respondent's binding, carried on the accept.
+    Accept,
+}
+
+impl BindingRole {
+    /// The statement's `role` value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BindingRole::Request => "request",
+            BindingRole::Accept => "accept",
+        }
+    }
+}
+
 /// The statement a relationship request or accept proves: "`did` is the DID
-/// `persona` uses with `peer` in the handshake `thid`". Every member is taken
-/// from the handshake, not from the sender, so a proof made for one handshake
-/// does not verify in another.
-fn did_binding(did: &str, persona: &str, peer: &str, thid: &str) -> serde_json::Value {
+/// `persona` uses with `peer` in the handshake `thid`, as its `role`". Every
+/// member is taken from the handshake, not from the sender, so a proof made for
+/// one handshake does not verify in another — and the role keeps a request's
+/// proof from standing as an accept's (or the reverse) in the same handshake.
+fn did_binding(
+    did: &str,
+    persona: &str,
+    peer: &str,
+    thid: &str,
+    role: BindingRole,
+) -> serde_json::Value {
     json!({
         "type": RELATIONSHIP_DID_BINDING_TYPE,
+        "role": role.as_str(),
         "did": did,
         "persona": persona,
         "peer": peer,
@@ -860,10 +888,11 @@ pub async fn sign_did_binding(
     persona: &str,
     peer: &str,
     thid: &str,
+    role: BindingRole,
     signer: &Secret,
 ) -> Result<serde_json::Value, OpenVTCError> {
     use affinidi_data_integrity::{DataIntegrityProof, SignOptions};
-    let statement = did_binding(did, persona, peer, thid);
+    let statement = did_binding(did, persona, peer, thid, role);
     let proof = DataIntegrityProof::sign(
         &statement,
         signer,
@@ -886,14 +915,15 @@ pub async fn did_binding_proofs(
     persona: &str,
     peer: &str,
     thid: &str,
+    role: BindingRole,
     did_signer: &Secret,
     persona_signer: &Secret,
 ) -> Result<(serde_json::Value, Option<serde_json::Value>), OpenVTCError> {
-    let did_proof = sign_did_binding(did, persona, peer, thid, did_signer).await?;
+    let did_proof = sign_did_binding(did, persona, peer, thid, role, did_signer).await?;
     let persona_proof = if did == persona {
         None
     } else {
-        Some(sign_did_binding(did, persona, peer, thid, persona_signer).await?)
+        Some(sign_did_binding(did, persona, peer, thid, role, persona_signer).await?)
     };
     Ok((did_proof, persona_proof))
 }
@@ -913,12 +943,13 @@ pub enum DidBindingError {
 
 /// Verify that the holder of `did` controls it and — when it is not `persona`
 /// itself — that `persona` names it, both for exactly this handshake (`peer`,
-/// `thid`). Each proof must be by a key its DID document lists under
+/// `thid`) and side of it (`role`). Each proof must be by a key its DID document lists under
 /// `authentication` ([`crate::proof_check`]).
 ///
 /// # Errors
 ///
 /// [`DidBindingError`] naming the proof that is missing or failed.
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_did_binding(
     did: &str,
     did_proof: Option<&serde_json::Value>,
@@ -926,10 +957,11 @@ pub async fn verify_did_binding(
     persona_proof: Option<&serde_json::Value>,
     peer: &str,
     thid: &str,
+    role: BindingRole,
     resolver: &affinidi_did_resolver_cache_sdk::DIDCacheClient,
 ) -> Result<(), DidBindingError> {
     use crate::proof_check::{Purpose, verify_signed};
-    let statement = did_binding(did, persona, peer, thid);
+    let statement = did_binding(did, persona, peer, thid, role);
     let with = |proof: &serde_json::Value| {
         let mut signed = statement.clone();
         signed["proof"] = proof.clone();
@@ -1154,15 +1186,23 @@ mod tests {
         let (persona, persona_key) = did_key_signer(0x21);
         let (rdid, rdid_key) = rdid_signer();
 
-        let (did_proof, persona_proof) =
-            did_binding_proofs(&rdid, &persona, PEER, THID, &rdid_key, &persona_key)
-                .await
-                .unwrap();
+        let (did_proof, persona_proof) = did_binding_proofs(
+            &rdid,
+            &persona,
+            PEER,
+            THID,
+            BindingRole::Request,
+            &rdid_key,
+            &persona_key,
+        )
+        .await
+        .unwrap();
         assert!(persona_proof.is_some(), "an R-DID is named by its persona");
-        let verify = |did: &str,
-                      did_proof: Option<serde_json::Value>,
-                      persona_proof: Option<serde_json::Value>,
-                      thid: &str| {
+        let verify_as = |did: &str,
+                         did_proof: Option<serde_json::Value>,
+                         persona_proof: Option<serde_json::Value>,
+                         thid: &str,
+                         role: BindingRole| {
             let (did, thid, persona, resolver) = (
                 did.to_string(),
                 thid.to_string(),
@@ -1177,10 +1217,17 @@ mod tests {
                     persona_proof.as_ref(),
                     PEER,
                     &thid,
+                    role,
                     &resolver,
                 )
                 .await
             }
+        };
+        let verify = |did: &str,
+                      did_proof: Option<serde_json::Value>,
+                      persona_proof: Option<serde_json::Value>,
+                      thid: &str| {
+            verify_as(did, did_proof, persona_proof, thid, BindingRole::Request)
         };
 
         // Proven: accepted.
@@ -1215,13 +1262,36 @@ mod tests {
             ))
         ));
 
+        // A request's proof does not stand as an accept's in the same
+        // handshake: the statement names its side.
+        assert!(matches!(
+            verify_as(
+                &rdid,
+                Some(did_proof.clone()),
+                persona_proof.clone(),
+                THID,
+                BindingRole::Accept
+            )
+            .await,
+            Err(DidBindingError::DidProof(
+                crate::proof_check::ProofError::Invalid(0)
+            ))
+        ));
+
         // Switching to a DID the sender does not control: the proof is by the
         // sender's own key, not the claimed DID's.
         let (victim, _) = did_key_signer(0x33);
-        let (forged, _) =
-            did_binding_proofs(&victim, &persona, PEER, THID, &rdid_key, &persona_key)
-                .await
-                .unwrap();
+        let (forged, _) = did_binding_proofs(
+            &victim,
+            &persona,
+            PEER,
+            THID,
+            BindingRole::Request,
+            &rdid_key,
+            &persona_key,
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             verify(&victim, Some(forged), None, THID).await,
             Err(DidBindingError::DidProof(
@@ -1230,10 +1300,17 @@ mod tests {
         ));
 
         // The persona's own DID needs only its own proof.
-        let (own, none) =
-            did_binding_proofs(&persona, &persona, PEER, THID, &persona_key, &persona_key)
-                .await
-                .unwrap();
+        let (own, none) = did_binding_proofs(
+            &persona,
+            &persona,
+            PEER,
+            THID,
+            BindingRole::Request,
+            &persona_key,
+            &persona_key,
+        )
+        .await
+        .unwrap();
         assert!(none.is_none());
         assert_eq!(verify(&persona, Some(own), None, THID).await, Ok(()));
     }

@@ -787,7 +787,7 @@ pub async fn verify_removal_notice(
         document,
         from_did,
         &ours,
-        crate::operational::OperationalKind::RemovalNotice,
+        vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE,
         resolver,
         seen,
         now,

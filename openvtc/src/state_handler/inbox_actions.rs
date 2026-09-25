@@ -104,6 +104,7 @@ async fn build_accept_message(
         from,
         to,
         thid,
+        openvtc_core::relationships::BindingRole::Accept,
         did_signer,
         persona_signer,
     )

@@ -488,7 +488,7 @@ async fn community_signed(
         &message.body,
         sender,
         &[our_did],
-        crate::operational::OperationalKind::CommunityAnswer,
+        &message.typ,
         ctx.did_resolver,
         seen,
         ctx.now,
