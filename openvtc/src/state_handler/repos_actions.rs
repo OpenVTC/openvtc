@@ -378,7 +378,7 @@ fn arm_drift(view: &mut ReposView, action: git_ns::DriftAction) {
     let Some((resource, item)) = view.highlighted_drift() else {
         view.note(
             Severity::Warning,
-            "Highlight a drift item (↓ past the people), then press v to revert or o to adopt.",
+            "Highlight a drift item (↓ past the people), then press v to revert it.",
         );
         return;
     };
@@ -432,15 +432,26 @@ fn arm_drift(view: &mut ReposView, action: git_ns::DriftAction) {
                 );
                 return;
             };
-            (
-                right,
+            // An adoption must name the member who receives the right
+            // (git-ns/drift/resolve 0.3, `subject`), and git-ns/view tells a
+            // member only their own account links — so this panel cannot
+            // show, or name, who that is. Nothing is sent: a 0.1 adopt, which
+            // names nobody, would grant to whoever holds the link when it
+            // runs, and the community refuses it.
+            view.note(
+                Severity::Warning,
                 format!(
-                    "Adopt {} on {short}? The member who linked that account is granted {} \
-                     here, as a grant from you would be, and the forge keeps the role.",
+                    "Adopting {} would grant {} to the member who linked that forge account, and \
+                     the community shows you only your own links — so this panel cannot tell you \
+                     who that is. Adopt it from the admin console, or with `cnm git drift \
+                     resolve … adopt --subject <their DID>`, where the member is shown and named. \
+                     Revert (v) works here.",
                     item.describe(),
-                    right.label(),
+                    right.label()
                 ),
-            )
+            );
+            let _ = short;
+            return;
         }
     };
     let request = Request::DriftResolve {
@@ -1771,26 +1782,17 @@ mod tests {
     }
 
     #[test]
-    fn a_forge_role_is_adopted_as_the_right_it_projects() {
+    fn adopting_is_not_offered_here_and_says_where_it_is() {
+        // An adoptable role: nothing is armed, and the note says why and where.
         let mut state = drifted(role("maintain"), "bridge");
         on_first_drift(&mut state);
         reduce(&mut state, &Act::DriftAdoptArm);
-        let armed = view(&state).confirm.clone().unwrap();
-        let Request::DriftResolve {
-            action,
-            weighs_as,
-            item,
-            ..
-        } = &armed.request
-        else {
-            panic!("expected a drift resolve, got {:?}", armed.request);
-        };
-        assert_eq!(*action, git_ns::DriftAction::Adopt);
-        assert_eq!(*weighs_as, GitRight::RepoMaintain);
-        assert_eq!(item.observed.as_deref(), Some("maintain"));
-        assert!(armed.summary.contains("maintainer"));
-
-        // `write` projects nothing on an organisation.
+        assert!(view(&state).confirm.is_none());
+        let text = view(&state).status_text().unwrap();
+        assert!(text.contains("maintainer"), "{text}");
+        assert!(text.contains("only your own links"), "{text}");
+        assert!(text.contains("--subject"), "{text}");
+        // `write` projects nothing on an organisation: that reason first.
         let mut state = drifted(role("write"), "bridge");
         on_first_drift(&mut state);
         reduce(&mut state, &Act::DriftAdoptArm);
