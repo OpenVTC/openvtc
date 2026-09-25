@@ -34,6 +34,7 @@ pub mod errors;
 pub mod git_ns;
 pub mod health;
 pub mod identity;
+pub mod issued_credential;
 pub mod join;
 pub mod logs;
 pub mod members;

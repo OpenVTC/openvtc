@@ -14,13 +14,14 @@ use std::sync::Arc;
 use affinidi_tdk::{TDK, didcomm::Message};
 use dtg_credentials::DTGCredential;
 use openvtc_core::didcomm::Messaging;
+use openvtc_core::issued_credential::{StatusPolicy, verify_issued_credential};
 use openvtc_core::join::COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE;
 use openvtc_core::messaging::{
     SeenMessages, check_message_age, check_task_capacity, create_finalize_message,
-    handle_community_profile_show_response, handle_credential_issue, handle_join_problem_report,
-    handle_join_status_response, handle_join_submit_receipt, handle_join_trust_task_error,
-    handle_join_verdict, handle_member_removal_notice, is_trust_task_error_type, require_thid,
-    validate_did, verify_vrc_proof, vet_vrc_issued,
+    credential_in_issue, handle_community_profile_show_response, handle_credential_issue,
+    handle_join_problem_report, handle_join_status_response, handle_join_submit_receipt,
+    handle_join_trust_task_error, handle_join_verdict, handle_member_removal_notice,
+    is_trust_task_error_type, require_thid, validate_did, verify_vrc_proof, vet_vrc_issued,
 };
 use openvtc_core::personhood::{
     PERSONHOOD_ASSERT_RESPONSE_TYPE, PERSONHOOD_CHALLENGE_RESPONSE_TYPE,
@@ -371,7 +372,35 @@ pub async fn process_inbound_message(
             .memberships_for(&from_did)
             .iter()
             .any(|m| m.status.is_active());
-        let outcome = handle_credential_issue(&mut config.account, message, &from_did);
+        // Nothing is stored until its proof verifies against the community's
+        // DID document: the envelope proves who sent the message, not who
+        // signed the credential inside it.
+        let Some(credential) = credential_in_issue(message) else {
+            warn!("credential-issue without credential_response.credential — ignoring");
+            return Ok(false);
+        };
+        let verified = match verify_issued_credential(
+            credential,
+            &from_did,
+            tdk.did_resolver(),
+            chrono::Utc::now(),
+            StatusPolicy::Advisory,
+        )
+        .await
+        {
+            Ok(verified) => verified,
+            Err(e) => {
+                // The reason only: never the credential, and the DID stays out
+                // of the log line (the activity feed names the community).
+                warn!(reason = %e, "refused an issued credential");
+                config.public.logs.insert(
+                    LogFamily::Community,
+                    format!("Refused a credential from community ({from_did}): {e}."),
+                );
+                return Ok(true);
+            }
+        };
+        let outcome = handle_credential_issue(&mut config.account, verified, &from_did);
         // Admission is the moment the member owes the community its half of
         // the membership pair. Sending it here — naming the join request it
         // closes — is what `vtc/members/vmc/0.1`'s `requestId` is for; without

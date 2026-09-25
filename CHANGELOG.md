@@ -43,6 +43,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Issued credentials are verified before they are stored.** A membership or
+  role credential a community delivers (`credential-exchange/issue`) is now
+  checked against the community's DID document before it is kept: every Data
+  Integrity proof must verify (Ed25519 `eddsa-jcs-2022`, and ML-DSA-44
+  `mldsa44-jcs-2024` where the community signs with both), each must be made by
+  a key of the issuer's own DID listed under `assertionMethod`, the credential
+  must be inside its validity window, and a revoked one is refused. A credential
+  that fails is not stored and the activity log says what failed. Account
+  recovery applies the same check to every membership it would restore, and the
+  vault sync no longer pushes a locally held credential that does not verify
+  (the activity log counts them). **Breaking (library):**
+  `messaging::handle_credential_issue` now takes a
+  `issued_credential::VerifiedIssuedCredential` instead of the message, and
+  `credential_sync::sync_membership_credentials` takes a DID resolver.
+
 - **Vetting questions and personhood reach a community again.** A community
   (VTI #1687, Keyring VTI-42) now takes a Trust Task over DIDComm only inside
   the binding envelope (`https://trusttasks.org/binding/didcomm/0.1/envelope`),

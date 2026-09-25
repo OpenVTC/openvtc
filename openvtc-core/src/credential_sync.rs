@@ -34,10 +34,12 @@
 //!
 //! Both are dispatched Trust Tasks; neither is a bespoke route.
 
+use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use serde_json::Value;
 use tracing::{debug, warn};
 use vta_sdk::client::VtaClient;
 
+use crate::issued_credential::{StatusPolicy, verify_issued_credential};
 use crate::{CredentialKind, config::Config};
 
 /// What a sync pass did.
@@ -51,6 +53,10 @@ pub struct SyncReport {
     /// still authoritative today, so a failure costs recoverability, not the
     /// membership itself.
     pub failed: usize,
+    /// Credentials held locally whose proof did not verify against the issuing
+    /// community's DID document, and so were not pushed. A credential stored
+    /// before issued credentials were verified on receipt can land here.
+    pub unverified: usize,
 }
 
 impl SyncReport {
@@ -58,7 +64,7 @@ impl SyncReport {
     /// has been synced.
     #[must_use]
     pub fn is_noop(&self) -> bool {
-        self.stored == 0 && self.failed == 0
+        self.stored == 0 && self.failed == 0 && self.unverified == 0
     }
 }
 
@@ -71,8 +77,16 @@ impl SyncReport {
 /// Best-effort throughout. The local copy remains the source of truth today, so
 /// a vault that will not answer costs future recoverability rather than
 /// anything working now.
-pub async fn sync_membership_credentials(config: &Config, client: &VtaClient) -> SyncReport {
-    let held: Vec<(String, Value)> = config
+///
+/// Each credential's proof is verified before it is pushed, so the vault only
+/// ever receives what the community actually signed — a recovery restores from
+/// the vault, and must not inherit a credential this client never checked.
+pub async fn sync_membership_credentials(
+    config: &Config,
+    client: &VtaClient,
+    resolver: &DIDCacheClient,
+) -> SyncReport {
+    let held: Vec<(String, String, Value)> = config
         .account
         .memberships()
         .filter_map(|c| {
@@ -81,7 +95,7 @@ pub async fn sync_membership_credentials(config: &Config, client: &VtaClient) ->
             // would mint a fresh one on every pass — storing a duplicate each
             // launch. Skip rather than churn.
             let id = vc.get("id").and_then(Value::as_str)?;
-            Some((id.to_string(), vc.clone()))
+            Some((id.to_string(), c.vtc_did.clone(), vc.clone()))
         })
         .collect();
 
@@ -104,11 +118,30 @@ pub async fn sync_membership_credentials(config: &Config, client: &VtaClient) ->
     };
 
     let mut report = SyncReport::default();
-    for (id, credential) in held {
+    for (id, vtc_did, credential) in held {
         if in_vault.iter().any(|held| held == &id) {
             report.already_held += 1;
             continue;
         }
+        let credential = match verify_issued_credential(
+            credential,
+            &vtc_did,
+            resolver,
+            chrono::Utc::now(),
+            // Pushing is not the trust decision — a rebuild re-verifies before
+            // restoring. Refusing here because a status host is briefly down
+            // would only cost recoverability.
+            StatusPolicy::Advisory,
+        )
+        .await
+        {
+            Ok(verified) => verified.into_value(),
+            Err(e) => {
+                warn!(reason = %e, "a held membership credential did not verify; not storing it");
+                report.unverified += 1;
+                continue;
+            }
+        };
         match client.cred_vault_receive(credential, None).await {
             Ok(_) => {
                 debug!(id = %id, "stored a membership credential in the vault");
@@ -169,10 +202,19 @@ mod tests {
             SyncReport {
                 stored: 0,
                 already_held: 4,
-                failed: 0
+                failed: 0,
+                unverified: 0,
             }
             .is_noop(),
             "an already-synced account must not report activity every launch"
+        );
+        assert!(
+            !SyncReport {
+                unverified: 1,
+                ..SyncReport::default()
+            }
+            .is_noop(),
+            "a credential that did not verify is worth reporting"
         );
     }
 
@@ -182,7 +224,8 @@ mod tests {
             !SyncReport {
                 stored: 1,
                 already_held: 0,
-                failed: 0
+                failed: 0,
+                unverified: 0,
             }
             .is_noop()
         );
@@ -190,7 +233,8 @@ mod tests {
             !SyncReport {
                 stored: 0,
                 already_held: 0,
-                failed: 1
+                failed: 1,
+                unverified: 0,
             }
             .is_noop(),
             "a failure costs future recoverability and must be visible"

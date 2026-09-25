@@ -22,6 +22,7 @@ use vta_sdk::protocols::members::{RemovalCode, RemovalNoticeBody};
 
 use crate::config::Config;
 use crate::config::account::{Account, DecisionEvidence, PersonaId, RelationshipIdentifierDefault};
+use crate::issued_credential::VerifiedIssuedCredential;
 use crate::relationships::{RelationshipState, Relationships};
 use crate::tasks::{TaskType, Tasks};
 
@@ -861,41 +862,47 @@ pub fn handle_community_profile_show_response(
     changed
 }
 
-/// Handle a VTC `credential-exchange/issue`: store the issued credential on the
+/// The credential a VTC `credential-exchange/issue` carries, unverified.
+///
+/// The known-holder delivery carries the VC at `credential_response.credential`.
+/// `sealed` issues (invite / air-gap) are not handled here. Pass the result to
+/// [`crate::issued_credential::verify_issued_credential`]; only what that
+/// returns can be stored.
+#[must_use]
+pub fn credential_in_issue(message: &Message) -> Option<Value> {
+    message
+        .body
+        .get("credential_response")
+        .and_then(|cr| cr.get("credential"))
+        .cloned()
+}
+
+/// Handle a VTC `credential-exchange/issue` whose credential has been verified
+/// ([`crate::issued_credential::verify_issued_credential`]): store it on the
 /// matching community and, for the membership credential (VMC), flip the
 /// membership to `Active`. The issuing VTC is the authcrypt sender; the
 /// credential must be issued by that VTC and to the community's own persona
 /// (anti-misdelivery).
 ///
+/// Taking a [`VerifiedIssuedCredential`] rather than the message is the point:
+/// the proof check cannot be skipped by a caller, because nothing else
+/// produces one.
+///
 /// See [`CredentialIssueOutcome`] for why this reports the join request it
 /// closed rather than just whether anything changed.
 pub fn handle_credential_issue(
     account: &mut Account,
-    message: &Message,
+    credential: VerifiedIssuedCredential,
     from_did: &str,
 ) -> CredentialIssueOutcome {
-    // The known-holder delivery carries the VC at `credential_response.credential`.
-    // `sealed` issues (invite / air-gap) are not handled here.
-    let Some(credential) = message
-        .body
-        .get("credential_response")
-        .and_then(|cr| cr.get("credential"))
-        .cloned()
-    else {
-        warn!(vtc = %from_did, "credential-issue without credential_response.credential — ignoring");
-        return CredentialIssueOutcome::NONE;
-    };
+    let credential = credential.into_value();
 
-    // Anti-misdelivery: issuer must be this community's VTC. The credential's
-    // subject (a persona DID) also selects WHICH membership it is for — a
-    // community may now hold several, one per persona.
-    let issuer = credential.get("issuer").and_then(|i| match i {
-        Value::String(s) => Some(s.as_str()),
-        Value::Object(o) => o.get("id").and_then(Value::as_str),
-        _ => None,
-    });
-    if issuer != Some(from_did) {
-        warn!(vtc = %from_did, ?issuer, "issued credential's issuer is not the community VTC — ignoring");
+    // Anti-misdelivery: issuer must be this community's VTC (verification
+    // already bound it to the sender; checked again so this function stands on
+    // its own). The credential's subject (a persona DID) also selects WHICH
+    // membership it is for — a community may now hold several, one per persona.
+    if crate::issued_credential::issuer_of(&credential) != Some(from_did) {
+        warn!(vtc = %from_did, "issued credential's issuer is not the community VTC — ignoring");
         return CredentialIssueOutcome::NONE;
     }
     let Some(subject) = credential
@@ -2399,6 +2406,13 @@ mod tests {
         .finalize()
     }
 
+    /// The message's credential, treated as verified — these tests cover what
+    /// happens after verification (see `issued_credential` for the proof
+    /// checks themselves).
+    fn verified(m: &Message) -> VerifiedIssuedCredential {
+        VerifiedIssuedCredential::assume_verified(credential_in_issue(m).expect("a credential"))
+    }
+
     fn vc(types: &[&str], issuer: &str, subject: &str) -> serde_json::Value {
         serde_json::json!({
             "type": types,
@@ -2436,7 +2450,7 @@ mod tests {
                 persona,
             ),
         );
-        let outcome = handle_credential_issue(&mut acct, &m, vtc);
+        let outcome = handle_credential_issue(&mut acct, verified(&m), vtc);
 
         assert_eq!(
             outcome.closed_join,
@@ -2467,7 +2481,7 @@ mod tests {
             ),
         );
         assert!(
-            handle_credential_issue(&mut acct, &vmc, vtc)
+            handle_credential_issue(&mut acct, verified(&vmc), vtc)
                 .closed_join
                 .is_some()
         );
@@ -2482,7 +2496,7 @@ mod tests {
                 persona,
             ),
         );
-        let outcome = handle_credential_issue(&mut acct, &again, vtc);
+        let outcome = handle_credential_issue(&mut acct, verified(&again), vtc);
         assert!(outcome.changed, "the credential is still stored");
         assert_eq!(
             outcome.closed_join, None,
@@ -2504,7 +2518,7 @@ mod tests {
                 persona,
             ),
         );
-        assert!(handle_credential_issue(&mut acct, &m, vtc).changed);
+        assert!(handle_credential_issue(&mut acct, verified(&m), vtc).changed);
 
         let rec = only(&acct, vtc);
         assert!(rec.status.is_active());
@@ -2528,7 +2542,7 @@ mod tests {
                 persona,
             ),
         );
-        assert!(handle_credential_issue(&mut acct, &m, vtc).changed);
+        assert!(handle_credential_issue(&mut acct, verified(&m), vtc).changed);
 
         let rec = only(&acct, vtc);
         assert!(
@@ -2554,7 +2568,7 @@ mod tests {
                 vc(&["VerifiableCredential", kind.vc_type()], vtc, persona),
             );
             assert!(
-                handle_credential_issue(&mut acct, &m, vtc).changed,
+                handle_credential_issue(&mut acct, verified(&m), vtc).changed,
                 "kind {kind:?} should be accepted",
             );
             let rec = only(&acct, vtc);
@@ -2585,7 +2599,7 @@ mod tests {
                 persona,
             ),
         );
-        assert!(!handle_credential_issue(&mut acct, &m, vtc).changed);
+        assert!(!handle_credential_issue(&mut acct, verified(&m), vtc).changed);
         assert!(!only(&acct, vtc).status.is_active());
     }
 
@@ -2604,7 +2618,7 @@ mod tests {
                 "did:webvh:someone-else",
             ),
         );
-        assert!(!handle_credential_issue(&mut acct, &m, vtc).changed);
+        assert!(!handle_credential_issue(&mut acct, verified(&m), vtc).changed);
         assert!(!only(&acct, vtc).status.is_active());
     }
 

@@ -840,8 +840,12 @@ impl StateHandler {
         // credential has to be somewhere other than the config file a rebuild
         // exists because you no longer have.
         if let Some(client) = admin_vta.as_ref() {
-            let report =
-                openvtc_core::credential_sync::sync_membership_credentials(&config, client).await;
+            let report = openvtc_core::credential_sync::sync_membership_credentials(
+                &config,
+                client,
+                tdk.did_resolver(),
+            )
+            .await;
             if report.stored > 0 {
                 // Worth an activity-log line rather than only a debug one:
                 // this is the moment the account becomes recoverable, and a
@@ -851,6 +855,16 @@ impl StateHandler {
                     "Stored {} membership credential(s) at the VTA — this account can now \
                      be recovered from its Trust Context",
                     report.stored
+                ));
+            }
+            if report.unverified > 0 {
+                // A credential held locally that its community did not sign (or
+                // whose signature no longer checks out). Not pushed, and the
+                // user should know their stored standing is not backed by it.
+                state.main_page.log(format!(
+                    "{} stored membership credential(s) did not verify against the \
+                     community's DID document and were not stored at the VTA",
+                    report.unverified
                 ));
             }
             if report.failed > 0 {
