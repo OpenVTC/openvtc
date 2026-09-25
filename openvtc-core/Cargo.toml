@@ -111,7 +111,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # 0.7 is the line built on messaging-sdk 0.24 / TDK 0.14 / trust-tasks 0.20.
 # Leaving it behind puts a second copy of each in the **dev** graph — including
 # `trust-tasks-rs`, whose types the messaging sdk carries in its own API.
-affinidi-messaging-test-mediator = "0.10"
+affinidi-messaging-test-mediator = "0.10.2"
 # In-process MockVta for the bootstrap e2e (VTI#406/#427 test-support seams).
 # `vta-service` is the VTA server crate; it carries the credential-vault
 # lifecycle tasks (receive/query/archive/delete/restore/purge) + the

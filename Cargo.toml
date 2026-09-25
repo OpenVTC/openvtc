@@ -105,7 +105,7 @@ affinidi-messaging-core = "0.1.8"
 # geometric reconnect cascade behind `#231`–`#234`; and 0.19.4 (#694) was the
 # `live_stream_next*` read guard that blocked `stop_websocket` for the remainder
 # of a 10s poll window.
-affinidi-messaging-sdk = "0.27.1"
+affinidi-messaging-sdk = "0.27.2"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
