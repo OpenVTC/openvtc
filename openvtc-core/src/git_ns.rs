@@ -734,12 +734,16 @@ impl Refusal {
                  decision (git_ns.rego) — for example whether outside contributors may sign \
                  commits, or which visibilities are allowed. Ask a community administrator."
             ),
-            c if c == grant::error_codes::SELF_GRANT_NOT_ALLOWED.code => {
-                "Separation of duties: nobody grants themselves namespace admin, repo creator \
-                 or owner. Ask another administrator to grant it. If nobody else can, break \
-                 the glass from the admin console or with cnm git break-glass: it is \
-                 announced to every administrator and flagged until another one ratifies or \
-                 revokes it."
+            // A grant and a repo/create refuse a self-grant with the same
+            // code, so one text serves both.
+            c if c == grant::error_codes::SELF_GRANT_NOT_ALLOWED.code
+                || c == create::error_codes::SELF_GRANT_NOT_ALLOWED.code =>
+            {
+                "Separation of duties: nobody gives themselves an elevated right (own, \
+                 repo.create or ns.admin) on their own authority. Ask another community \
+                 administrator to do it. If nobody else can, break the glass (`cnm git \
+                 break-glass`, or from the admin console): it is announced to every \
+                 administrator and flagged until another one ratifies or revokes it."
                     .to_string()
             }
             c if c == grant::error_codes::EXPIRY_IN_PAST.code => {
@@ -762,12 +766,6 @@ impl Refusal {
             }
             c if c == create::error_codes::NAME_TAKEN.code => {
                 "The community already records a repository with that name. Choose another."
-                    .to_string()
-            }
-            c if c == create::error_codes::SELF_GRANT_NOT_ALLOWED.code => {
-                "This would give you an elevated right (own, repo.create or ns.admin) on your \
-                 own authority. Ask another community administrator to do it, or use \
-                 break-glass (`cnm git break-glass`), which is audited and must be ratified."
                     .to_string()
             }
             c if c == transfer::error_codes::NOT_OWNER.code => {
@@ -2239,9 +2237,11 @@ mod tests {
     fn self_grant_not_allowed_names_break_glass() {
         assert_eq!(
             refusal("git-ns:selfGrantNotAllowed", None).explain(),
-            "This would give you an elevated right (own, repo.create or ns.admin) on your own \
-             authority. Ask another community administrator to do it, or use break-glass \
-             (`cnm git break-glass`), which is audited and must be ratified."
+            "Separation of duties: nobody gives themselves an elevated right (own, repo.create \
+             or ns.admin) on their own authority. Ask another community administrator to do \
+             it. If nobody else can, break the glass (`cnm git break-glass`, or from the admin \
+             console): it is announced to every administrator and flagged until another one \
+             ratifies or revokes it."
         );
     }
 

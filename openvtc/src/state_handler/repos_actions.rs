@@ -1697,9 +1697,11 @@ mod tests {
         let text = form.error.as_ref().unwrap().text.clone();
         assert_eq!(
             text,
-            "This would give you an elevated right (own, repo.create or ns.admin) on your own \
-             authority. Ask another community administrator to do it, or use break-glass \
-             (`cnm git break-glass`), which is audited and must be ratified."
+            "Separation of duties: nobody gives themselves an elevated right (own, repo.create \
+             or ns.admin) on their own authority. Ask another community administrator to do \
+             it. If nobody else can, break the glass (`cnm git break-glass`, or from the admin \
+             console): it is announced to every administrator and flagged until another one \
+             ratifies or revokes it."
         );
     }
 
