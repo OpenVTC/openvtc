@@ -887,7 +887,12 @@ async fn statement(
     message: &Message,
     sender: &str,
 ) -> Option<Handled> {
-    if let Some(credential) = message.body.pointer("/credential_response/credential")
+    // Read where the dispatcher read it for the proof check: a community pushes
+    // `issue` as a signed document with the credential under `payload`, and an
+    // older one sent it as the bare body. Reading the body root alone missed
+    // every signed grant.
+    let issued = crate::messaging::credential_in_issue(message);
+    if let Some(credential) = issued.as_ref()
         && let Some((community, role)) = community_role(credential)
         && role_matches(&role, VETTER_ROLE)
     {

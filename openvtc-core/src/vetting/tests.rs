@@ -702,6 +702,47 @@ async fn someone_who_is_not_a_member_cannot_vet() {
     );
 }
 
+/// A community pushes `issue` as a signed Trust Task document, with the grant
+/// under `payload`. It is kept exactly as the bare delivery is: vetting reads
+/// the credential where the dispatcher read it for its proof check. Reading the
+/// body root alone would miss every grant a current VTC sends.
+#[tokio::test]
+async fn a_vetter_grant_pushed_as_a_signed_document_is_kept() {
+    let mut member = Party::new(6).member_of(COMMUNITY);
+    let credential = role_credential(
+        &secret(COMMUNITY_SEED),
+        COMMUNITY,
+        &member.did.clone(),
+        VETTER_ROLE,
+    )
+    .await;
+    let issue = vta_sdk::protocols::credential_exchange::ISSUE;
+    let message = Message::build(
+        wire::new_id(),
+        issue.to_string(),
+        json!({
+            "id": format!("urn:uuid:{}", wire::new_id()),
+            "type": issue,
+            "issuer": COMMUNITY,
+            "recipient": member.did.clone(),
+            "payload": { "credential_response": { "credential": credential } },
+        }),
+    )
+    .from(COMMUNITY.to_string())
+    .finalize();
+    let handled = member.receive(&message, COMMUNITY).await;
+    assert!(
+        matches!(handled.notice, Some(Notice::VetterGranted { .. })),
+        "a signed grant is kept"
+    );
+    assert!(
+        member
+            .book
+            .vetter_grant(COMMUNITY, member.persona, Utc::now())
+            .is_some()
+    );
+}
+
 /// Membership is not enough: the community has to have named the member a
 /// vetter, or requests are refused before anything is recorded.
 #[tokio::test]
