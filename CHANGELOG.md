@@ -58,6 +58,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A community's credential deliveries and VMC requests are taken only as its
+  signed documents.** A VTC now pushes every credential-exchange step, and
+  `vtc/members/request-vmc`, as a signed Trust Task document over TSP or
+  DIDComm (in the binding envelope) — VTI "credential exchange onto the Trust
+  Task spine". A delivered credential (`credential-exchange/issue`) is read
+  from the document's `payload`, and kept only when the document is signed by
+  the community that sent it, under `authentication`, and the credential
+  inside verifies on its own proof — `issued_credential::verify_issued_delivery`
+  checks both, in that order. A vetter grant additionally opens with
+  `wire::open`. A `request-vmc` is answered only once it passes the
+  operational-document check (signed, addressed to the persona, fresh, not seen
+  before), since answering it signs and sends this member's credential. Before,
+  the credential was read from the bare message body, so a pushed document's
+  credential was never found — an admission would never complete — and a
+  `request-vmc` was answered on the transport sender alone.
+  **Breaking (wire):** a community must sign `issue` and `request-vmc` as
+  Trust Task documents; a bare delivery is refused and logged. **Breaking
+  (library):** `VerifyJob::Credential` carries the delivery `document`, not the
+  credential; `IssuedCredentialError` gains `DeliveryIssuerNotSender`,
+  `DeliveryProof` and `NoCredential`; `messaging::credential_in_issue` reads
+  only a document whose `issuer` is the sender.
+
 - **Issued credentials are verified before they are stored.** A membership or
   role credential a community delivers (`credential-exchange/issue`) is now
   checked against the community's DID document before it is kept: every Data

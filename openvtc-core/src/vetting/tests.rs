@@ -82,10 +82,10 @@ async fn verified_delivery(
     if message.typ != vta_sdk::protocols::credential_exchange::ISSUE {
         return None;
     }
-    let credential = crate::messaging::credential_in_issue(message)?;
+    crate::messaging::credential_in_issue(message)?;
     Some(
-        crate::issued_credential::verify_issued_credential(
-            credential,
+        crate::issued_credential::verify_issued_delivery(
+            &message.body,
             sender,
             resolver,
             Utc::now(),
@@ -128,14 +128,19 @@ async fn role_credential(issuer: &Secret, community: &str, subject: &str, role: 
 }
 
 /// `credential-exchange/issue` from `from`, as a community delivers.
-fn delivery(credential: &Value, from: &str) -> Message {
-    Message::build(
-        wire::new_id(),
-        vta_sdk::protocols::credential_exchange::ISSUE.to_string(),
-        json!({ "credential_response": { "credential": credential } }),
-    )
-    .from(from.to_string())
-    .finalize()
+/// `credential-exchange/issue` as a community pushes it: a Trust Task document
+/// signed by `issuer` under `authentication`.
+async fn delivery(credential: &Value, issuer: &Secret) -> Message {
+    let document: TrustTask<Value> = serde_json::from_value(json!({
+        "id": format!("urn:uuid:{}", wire::new_id()),
+        "type": vta_sdk::protocols::credential_exchange::ISSUE,
+        "issuer": did(issuer),
+        "recipient": "did:key:zTheMember",
+        "issuedAt": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "payload": { "credential_response": { "credential": credential } },
+    }))
+    .expect("an issue document");
+    signed(document, issuer).await
 }
 
 /// Sign a reply the way `wire::send_reply` does: presentation first.
@@ -195,7 +200,10 @@ impl Party {
         )
         .await;
         let handled = self
-            .receive(&delivery(&credential, COMMUNITY), COMMUNITY)
+            .receive(
+                &delivery(&credential, &secret(COMMUNITY_SEED)).await,
+                COMMUNITY,
+            )
             .await;
         assert!(matches!(handled.notice, Some(Notice::VetterGranted { .. })));
     }
@@ -702,6 +710,72 @@ async fn someone_who_is_not_a_member_cannot_vet() {
     );
 }
 
+/// A vetter grant is taken only from the community's signed delivery. The
+/// same grant, correctly signed by the community, in a bare `issue` body —
+/// the shape a VTC sent before every `issue` was a document — makes nobody a
+/// vetter.
+#[tokio::test]
+async fn a_bare_vetter_grant_delivery_is_refused() {
+    let mut member = Party::new(6).member_of(COMMUNITY);
+    let credential = role_credential(
+        &secret(COMMUNITY_SEED),
+        COMMUNITY,
+        &member.did.clone(),
+        VETTER_ROLE,
+    )
+    .await;
+    let bare = Message::build(
+        wire::new_id(),
+        vta_sdk::protocols::credential_exchange::ISSUE.to_string(),
+        json!({ "credential_response": { "credential": credential } }),
+    )
+    .from(COMMUNITY.to_string())
+    .finalize();
+    let resolver = TrustTaskVmResolver::did_key_only();
+    let did_resolver = did_resolver().await;
+    let ctx = Context {
+        account: &member.account,
+        resolver: &resolver,
+        did_resolver: &did_resolver,
+        issued_credential: None,
+        community_answer: None,
+        recipient: Some((member.persona, &member.did)),
+        now: Utc::now(),
+    };
+    let handled = handle(
+        &mut member.book,
+        &ctx,
+        &mut crate::operational::SeenDocuments::default(),
+        &bare,
+        COMMUNITY,
+    )
+    .await;
+    assert!(
+        handled.is_none_or(|h| h.notice.is_none()),
+        "a bare delivery grants nothing"
+    );
+    assert!(member.book.vetter_grants.is_empty());
+}
+
+/// And a signed delivery by anyone but the community is refused before the
+/// grant inside is looked at, even when the grant itself is the community's.
+#[tokio::test]
+async fn a_vetter_grant_relayed_by_another_party_is_refused() {
+    let mut member = Party::new(7).member_of(COMMUNITY);
+    let credential = role_credential(
+        &secret(COMMUNITY_SEED),
+        COMMUNITY,
+        &member.did.clone(),
+        VETTER_ROLE,
+    )
+    .await;
+    let relay = secret(0xD7);
+    let handled = member
+        .receive(&delivery(&credential, &relay).await, &did(&relay))
+        .await;
+    assert!(handled.notice.is_none() && member.book.vetter_grants.is_empty());
+}
+
 /// Membership is not enough: the community has to have named the member a
 /// vetter, or requests are refused before anything is recorded.
 #[tokio::test]
@@ -736,7 +810,7 @@ async fn a_vetter_grant_is_kept_only_from_its_community() {
     let impostor = secret(0xC1);
     let forged = role_credential(&impostor, COMMUNITY, &member.did.clone(), VETTER_ROLE).await;
     let handled = member
-        .receive(&delivery(&forged, &did(&impostor)), &did(&impostor))
+        .receive(&delivery(&forged, &impostor).await, &did(&impostor))
         .await;
     assert!(handled.notice.is_none() && member.book.vetter_grants.is_empty());
 
@@ -748,7 +822,10 @@ async fn a_vetter_grant_is_kept_only_from_its_community() {
     )
     .await;
     let handled = member
-        .receive(&delivery(&for_someone_else, COMMUNITY), COMMUNITY)
+        .receive(
+            &delivery(&for_someone_else, &secret(COMMUNITY_SEED)).await,
+            COMMUNITY,
+        )
         .await;
     assert!(handled.notice.is_none() && member.book.vetter_grants.is_empty());
 
@@ -781,7 +858,7 @@ async fn a_vetter_grant_is_kept_only_from_its_community() {
             &mut member.book,
             &ctx,
             &mut crate::operational::SeenDocuments::default(),
-            &delivery(&ordinary, COMMUNITY),
+            &delivery(&ordinary, &secret(COMMUNITY_SEED)).await,
             COMMUNITY
         )
         .await
@@ -1700,7 +1777,10 @@ async fn a_tampered_vetter_grant_is_not_kept() {
     .await;
     credential["validUntil"] = json!("2999-01-01T00:00:00Z");
     let handled = member
-        .receive(&delivery(&credential, COMMUNITY), COMMUNITY)
+        .receive(
+            &delivery(&credential, &secret(COMMUNITY_SEED)).await,
+            COMMUNITY,
+        )
         .await;
     assert!(handled.notice.is_none() && member.book.vetter_grants.is_empty());
 }
@@ -1713,7 +1793,10 @@ async fn a_grant_whose_status_cannot_be_read_is_not_kept() {
     let credential =
         role_credential_with_status(&secret(COMMUNITY_SEED), &vetter.did.clone()).await;
     let handled = vetter
-        .receive(&delivery(&credential, COMMUNITY), COMMUNITY)
+        .receive(
+            &delivery(&credential, &secret(COMMUNITY_SEED)).await,
+            COMMUNITY,
+        )
         .await;
     assert!(handled.notice.is_none() && vetter.book.vetter_grants.is_empty());
 }

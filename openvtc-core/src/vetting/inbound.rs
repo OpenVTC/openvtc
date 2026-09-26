@@ -887,12 +887,22 @@ async fn statement(
     message: &Message,
     sender: &str,
 ) -> Option<Handled> {
-    if let Some(credential) = message.body.pointer("/credential_response/credential")
+    // Read where the dispatcher read it for the proof check: a community pushes
+    // every `issue` as a signed document, the credential under `payload`.
+    let issued = crate::messaging::credential_in_issue(message);
+    if let Some(credential) = issued.as_ref()
         && let Some((community, role)) = community_role(credential)
         && role_matches(&role, VETTER_ROLE)
     {
-        // Verified before anything else: a grant is what makes this persona a
-        // vetter, and the transport sender is not proof the community issued it.
+        // The delivery first: signed by the community that sent it, under
+        // `authentication`. A grant that arrives any other way is not the
+        // community's hand-off, however well the credential inside is signed.
+        if let Err(e) = wire::open::<Value>(message, sender, ctx.resolver).await {
+            warn!(%sender, reason = %e, "vetter grant delivery refused");
+            return Some(Handled::default());
+        }
+        // Then the grant itself: it is what makes this persona a vetter, and
+        // the transport sender is not proof the community issued it.
         return Some(match ctx.issued_credential {
             Some(Ok(verified)) if verified.value() == credential => {
                 vetter_grant(book, ctx, verified.value(), community, sender)

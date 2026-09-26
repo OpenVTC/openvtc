@@ -160,9 +160,9 @@ impl Party {
         .expect("a DID resolver");
         let issued = if message.typ == vta_sdk::protocols::credential_exchange::ISSUE {
             match openvtc_core::messaging::credential_in_issue(message) {
-                Some(c) => Some(
-                    openvtc_core::issued_credential::verify_issued_credential(
-                        c,
+                Some(_) => Some(
+                    openvtc_core::issued_credential::verify_issued_delivery(
+                        &message.body,
                         sender,
                         &did_resolver,
                         Utc::now(),
@@ -279,15 +279,22 @@ async fn role_credential(issuer: &Secret, community: &str, subject: &str) -> Val
     serde_json::to_value(&credential).expect("credential json")
 }
 
-/// `credential-exchange/issue`, as a community's dispatcher delivers one.
-fn delivery(credential: &Value, from: &str) -> Message {
-    Message::build(
-        wire::new_id(),
-        vta_sdk::protocols::credential_exchange::ISSUE.to_string(),
-        json!({ "credential_response": { "credential": credential } }),
-    )
-    .from(from.to_string())
-    .finalize()
+/// `credential-exchange/issue`, as a community pushes one: a Trust Task
+/// document signed by the community under `authentication`.
+async fn delivery(credential: &Value, community: &Secret) -> Message {
+    let mut document = serde_json::from_value(json!({
+        "id": format!("urn:uuid:{}", wire::new_id()),
+        "type": vta_sdk::protocols::credential_exchange::ISSUE,
+        "issuer": did_of(community),
+        "recipient": "did:key:zTheMember",
+        "issuedAt": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "payload": { "credential_response": { "credential": credential } },
+    }))
+    .expect("an issue document");
+    wire::sign(&mut document, community)
+        .await
+        .expect("sign the delivery");
+    wire::to_message(&document).expect("delivery message")
 }
 
 // ── the wire ────────────────────────────────────────────────────────────
@@ -339,7 +346,9 @@ async fn the_vetting_ceremony_completes_over_the_wire() {
 
     // ── setup: what the community told each of them ────────────────────
     let grant = role_credential(&community_secret, &community, &bob_did).await;
-    let handled = bob.receive(&delivery(&grant, &community), &community).await;
+    let handled = bob
+        .receive(&delivery(&grant, &community_secret).await, &community)
+        .await;
     assert!(
         matches!(handled.notice, Some(Notice::VetterGranted { .. })),
         "bob holds the community's vetter grant"
