@@ -83,7 +83,17 @@ impl CapabilityJob {
                         version,
                         *enable,
                     );
-                    openvtc_core::capabilities::sign_document(&mut doc, signing_secret).await?;
+                    // Signed with the authentication key (#key-2), not the
+                    // assertionMethod signing key: enabling or disabling a
+                    // capability is acting on the community, not making a
+                    // claim to be held to later, and #key-2 is listed only
+                    // under `authentication` in the DID document.
+                    openvtc_core::capabilities::sign_document_as(
+                        &mut doc,
+                        signing_secret,
+                        "authentication",
+                    )
+                    .await?;
                     doc
                 }
             };

@@ -31,10 +31,15 @@ pub use trust_tasks_capability_client::{
 };
 
 /// Attach an `eddsa-jcs-2022` Data-Integrity proof over `doc` (minus the
-/// `proof` member) signed with the persona's signing key, bound to the
-/// document `issuer`. Signing is kept local rather than in the shared crate:
-/// each consumer signs with its own signer and its own error type, so the
-/// wire crate stays crypto-free.
+/// `proof` member) signed with the persona's signing (assertionMethod) key,
+/// bound to the document `issuer`. Signing is kept local rather than in the
+/// shared crate: each consumer signs with its own signer and its own error
+/// type, so the wire crate stays crypto-free.
+///
+/// This is the `assertionMethod` default — the right choice for a document
+/// that stands as a claim the issuer is willing to be held to later. A
+/// document that merely *acts* under a proof-purpose the strict rule checks
+/// (e.g. `authentication`) should call [`sign_document_as`] instead.
 ///
 /// NOTE: v1 signs directly in the client; routing the approval through the
 /// delegated-execution consent flow is the planned upgrade
@@ -43,14 +48,33 @@ pub async fn sign_document(
     doc: &mut TrustTask<Value>,
     signing_secret: &Secret,
 ) -> Result<(), OpenVTCError> {
+    sign_document_as(doc, signing_secret, "assertionMethod").await
+}
+
+/// Like [`sign_document`], but with an explicit `proofPurpose` rather than
+/// the `assertionMethod` default.
+///
+/// Used where the signing key is not listed under `assertionMethod` in the
+/// DID document at all — e.g. an operational document acted on with the
+/// authentication key, which the strict proof-purpose rule refuses unless
+/// `proofPurpose` names the relationship the key is actually listed under.
+pub async fn sign_document_as(
+    doc: &mut TrustTask<Value>,
+    signing_secret: &Secret,
+    proof_purpose: &str,
+) -> Result<(), OpenVTCError> {
     let mut doc_value = serde_json::to_value(&*doc)
         .map_err(|e| OpenVTCError::Config(format!("serialise capability document: {e}")))?;
     if let Some(obj) = doc_value.as_object_mut() {
         obj.remove("proof");
     }
-    let proof = DataIntegrityProof::sign(&doc_value, signing_secret, SignOptions::default())
-        .await
-        .map_err(|e| OpenVTCError::Config(format!("sign capability document: {e}")))?;
+    let proof = DataIntegrityProof::sign(
+        &doc_value,
+        signing_secret,
+        SignOptions::default().with_proof_purpose(proof_purpose),
+    )
+    .await
+    .map_err(|e| OpenVTCError::Config(format!("sign capability document: {e}")))?;
     let proof_value = serde_json::to_value(&proof)
         .map_err(|e| OpenVTCError::Config(format!("serialise proof: {e}")))?;
     doc.proof = Some(
@@ -107,5 +131,26 @@ mod tests {
             true,
         );
         assert_eq!(enable.payload["config"]["authority"], "did:example:vtc");
+    }
+
+    /// `sign_document` defaults to `assertionMethod`; `sign_document_as`
+    /// carries whatever purpose the caller names — used for a capability
+    /// toggle, which acts on the community rather than making a claim, and
+    /// is signed with the authentication key (VTI-KEY-022).
+    #[tokio::test]
+    async fn sign_document_as_carries_the_named_proof_purpose() {
+        use affinidi_tdk::dids::{DID, KeyType};
+
+        let (issuer_did, signer) =
+            DID::generate_did_key(KeyType::Ed25519).expect("did:key generates");
+        let mut doc =
+            build_toggle_document(&issuer_did, "did:example:vtc", "git-trust", "0.1", true);
+
+        sign_document_as(&mut doc, &signer, "authentication")
+            .await
+            .expect("signs");
+
+        let proof = doc.proof.as_ref().expect("a proof is attached");
+        assert_eq!(proof.proof_purpose, "authentication");
     }
 }

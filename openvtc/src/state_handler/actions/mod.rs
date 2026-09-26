@@ -455,7 +455,8 @@ pub enum ReposAction {
     // ── New repository ───────────────────────────────────────────────────
     /// Open the new-repository form.
     NewStart,
-    /// Focus a form field (0 namespace, 1 name, 2 visibility, 3 description).
+    /// Focus a form field (0 namespace, 1 name, 2 visibility, 3 description,
+    /// 4 owners).
     NewField(usize),
     /// Replace a text field's value.
     NewInput { field: usize, value: String },
@@ -463,7 +464,19 @@ pub enum ReposAction {
     NewNamespace(usize),
     /// Flip visibility.
     NewVisibility,
-    /// Send `git-ns/repo/create`.
+    /// Replace the owner query / pasted DID on the owner picker.
+    NewOwnerQuery(String),
+    /// Switch the owner picker between picking a known person and pasting a
+    /// DID.
+    NewOwnerToggleExternal,
+    /// Highlight an owner-picker candidate.
+    NewOwnerPick(usize),
+    /// Add the highlighted candidate, or the pasted DID, to `owners`.
+    NewOwnerAdd,
+    /// Drop the last-added owner (backspace on an empty query).
+    NewOwnerRemoveLast,
+    /// Send `git-ns/repo/create`: sends at once for the requester alone,
+    /// arms the confirmation once `owners` names anyone.
     NewSubmit,
     // ── Add a person ─────────────────────────────────────────────────────
     /// Open the add-person form on the open repository.
