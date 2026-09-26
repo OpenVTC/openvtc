@@ -391,7 +391,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                                 slug,
                                 version,
                                 enable,
-                                signing_secret: Box::new(keys.signing.secret.clone()),
+                                signing_secret: Box::new(keys.authentication.secret.clone()),
                             },
                         },
                     );
@@ -473,8 +473,9 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
             }
         }
         Action::RequestPersonhoodChallenge(i) => {
-            // Ask the community for the nonce an assertion must carry. No key
-            // is needed yet — nothing is signed until the challenge comes back.
+            // `vtc/members/personhood/challenge/0.1` declares `proof`
+            // REQUIRED (trust-tasks 0.23): signed with the authentication
+            // key, the same way the assertion that follows it is.
             let target = ctx
                 .config
                 .account
@@ -485,8 +486,26 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 .filter(|c| c.status.is_active())
                 .map(|c| (c.vtc_did.clone(), c.persona_ref));
             if let Some((vtc, persona_id)) = target {
-                match capability_sender(ctx.config, ctx.tdk, persona_id) {
-                    Some((atm, profile, member_did, mediator)) => spawn_community_job(
+                let ready = match (
+                    capability_sender(ctx.config, ctx.tdk, persona_id),
+                    ctx.config.get_persona_keys_for(persona_id, ctx.tdk).await,
+                ) {
+                    (Some(sender), Ok(keys)) => Some((sender, keys)),
+                    (_, Err(e)) => {
+                        ctx.state.main_page.content_panel.communities.status_message =
+                            Some(format!("Couldn't sign the challenge request: {e}"));
+                        None
+                    }
+                    (None, _) => {
+                        ctx.state.main_page.content_panel.communities.status_message = Some(
+                            "Messaging unavailable — cannot ask for a challenge right now."
+                                .to_string(),
+                        );
+                        None
+                    }
+                };
+                if let Some(((atm, profile, member_did, mediator), keys)) = ready {
+                    spawn_community_job(
                         ctx.dispatch_tx,
                         ctx.in_flight,
                         ctx.state,
@@ -497,15 +516,11 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                             mediator,
                             vtc_did: vtc,
                             persona: persona_id,
-                            verb: community_actions::Verb::RequestPersonhoodChallenge,
+                            verb: community_actions::Verb::RequestPersonhoodChallenge {
+                                signing_secret: Box::new(keys.authentication.secret.clone()),
+                            },
                         },
-                    ),
-                    None => {
-                        ctx.state.main_page.content_panel.communities.status_message = Some(
-                            "Messaging unavailable — cannot ask for a challenge right now."
-                                .to_string(),
-                        );
-                    }
+                    );
                 }
             }
         }
@@ -573,7 +588,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         vtc_did: challenge.vtc_did.clone(),
                         persona: challenge.persona,
                         verb: community_actions::Verb::AssertPersonhood {
-                            signing_secret: Box::new(keys.signing.secret.clone()),
+                            signing_secret: Box::new(keys.authentication.secret.clone()),
                             challenge_id: challenge.challenge_id,
                             credentials,
                         },

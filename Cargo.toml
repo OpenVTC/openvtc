@@ -66,6 +66,10 @@ argon2 = "0.6"
 # 0.9 does too. This line only records it.
 affinidi-tdk = "0.17"
 affinidi-data-integrity = "0.7"
+# Decodes a community's Bitstring Status List. Already in the graph through
+# `vta-sdk`, whose status reader cannot verify a list signed with a proof set;
+# openvtc reads the list itself (`openvtc-core::status_list`).
+affinidi-status-list = "0.1"
 # The delivery layer (D1). Replaced `affinidi-messaging-didcomm-service`, the
 # type-routed framework both VTI services had already cut over from (#189).
 # `-delivery` is the durable outbox + `MessagingService`; `-core` is the
@@ -173,7 +177,7 @@ async-trait = "0.1"
 arbitrary = { version = "1", features = ["derive"] }
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 base64 = "0.23"
-bip39 = "2.2"
+bip39 = "3.0"
 byteorder = "1.5"
 chrono = "0.4"
 clap = { version = "4.6", features = ["derive"] }

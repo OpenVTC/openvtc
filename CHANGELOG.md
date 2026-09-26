@@ -58,6 +58,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Issued credentials are verified before they are stored.** A membership or
+  role credential a community delivers (`credential-exchange/issue`) is now
+  checked against the community's DID document before it is kept: every Data
+  Integrity proof must verify (Ed25519 `eddsa-jcs-2022`, and ML-DSA-44
+  `mldsa44-jcs-2024` where the community signs with both), each must be made by
+  a key of the issuer's own DID listed under `assertionMethod`, the credential
+  must be inside its validity window, and its revocation status must be
+  established: a revoked credential is refused, and so is one whose status list
+  cannot be reached or does not verify (fail closed; the message says to retry).
+  The status list is read by openvtc itself, so a list signed with a proof set
+  (Ed25519 + ML-DSA-44) verifies — the vetter grant check uses the same reader.
+  A fetched list is reused for at most five minutes (sooner if its `validUntil`
+  or `ttl` says so) and re-verified on every use. A credential lands only on a
+  Pending or Active membership, and only a Pending join is activated — a
+  membership that ended is not revived by a credential arriving. A proof's
+  verification method must be controlled by the signer, and a proof `created`
+  up to five minutes in the future is accepted. A credential
+  that fails is not stored and the activity log says what failed. Account
+  recovery applies the same check to every membership it would restore, and the
+  vault sync no longer pushes a locally held credential that does not verify
+  (the activity log counts them). **Behaviour change:** a join is admitted
+  only by the verified membership credential — an `approved` status or an
+  `allow` verdict (both unsigned) now acknowledges the join and leaves it
+  Pending until the credential arrives, and the reciprocal membership credential
+  goes out only then. **Breaking (library):**
+  `messaging::handle_credential_issue` now takes a
+  `issued_credential::VerifiedIssuedCredential` instead of the message, and
+  `credential_sync::sync_membership_credentials` takes a DID resolver.
+  The cheap local checks run first: a credential from a party we hold no
+  membership with, for someone else, of an unknown kind, or for a membership
+  that ended is refused before anything is resolved or fetched. A status list
+  on a loopback, private, link-local or otherwise non-public host — as written,
+  or as its name resolves, redirects included — is not fetched. A VRC's proof
+  is checked by the same rules (purpose `assertionMethod`, listed by the
+  issuer, a method the issuer controls).
+
 - **Vetting questions and personhood reach a community again.** A community
   (VTI #1687, Keyring VTI-42) now takes a Trust Task over DIDComm only inside
   the binding envelope (`https://trusttasks.org/binding/didcomm/0.1/envelope`),
