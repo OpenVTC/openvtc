@@ -561,3 +561,10 @@ strip = "symbols"
 # places, and writing down here what has to happen for it to leave again — the
 # entries removed each carried that note, and it is the only reason this unwind
 # and the one before it were tractable.
+
+# TEMPORARY, draft only: git-ns/repo/create 0.3 (trustoverip/dtgwg-trust-tasks-tf#641)
+# is not released yet — it pairs with OpenVTC/verifiable-trust-infrastructure#1745.
+# Replace with the trust-tasks-rs release that carries it, and delete this
+# section (and the matching `deny.toml` entry), before this PR leaves draft.
+[patch.crates-io]
+trust-tasks-rs = { git = "https://github.com/trustoverip/dtgwg-trust-tasks-tf", branch = "feat/git-ns-break-glass" }

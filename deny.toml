@@ -125,4 +125,8 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # VGI published `did-git-sign` 0.4.9. The patch block at the foot of the root
 # `Cargo.toml` went with them, so nothing resolves from a git source and there is
 # nothing left to allow.
-allow-git = []
+#
+# TEMPORARY, draft only: the `[patch.crates-io]` entry in the root `Cargo.toml`
+# for `trust-tasks-rs` (git-ns/repo/create 0.3, trustoverip/dtgwg-trust-tasks-tf#641).
+# Remove this entry when that patch is dropped.
+allow-git = ["https://github.com/trustoverip/dtgwg-trust-tasks-tf"]
