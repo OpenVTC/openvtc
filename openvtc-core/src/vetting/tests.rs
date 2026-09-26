@@ -448,8 +448,15 @@ async fn an_applicant_is_vetted_end_to_end() {
     ));
 
     // The statement reaches the applicant, who now meets the requirements.
-    let message =
-        wire::credential_delivery(&vetter.did, &applicant.did, &statement, &session_id).unwrap();
+    let message = wire::credential_delivery(
+        &vetter.did,
+        &applicant.did,
+        &statement,
+        &session_id,
+        &vetter.secret,
+    )
+    .await
+    .unwrap();
     let handled = applicant.receive(&message, &vetter.did).await;
     assert!(matches!(
         handled.notice,
@@ -931,9 +938,7 @@ async fn a_vetter_publishes_a_profile_and_hears_the_communitys_answer() {
     // claim to be held to later — the same purpose a personhood challenge or
     // assertion is signed with), and opens as a profile.
     let mut request = wire::vetter_profile_request(&vetter.did, COMMUNITY, &body).unwrap();
-    wire::sign_as(&mut request, &vetter.secret, "authentication")
-        .await
-        .unwrap();
+    wire::sign(&mut request, &vetter.secret).await.unwrap();
     assert_eq!(
         request.proof.as_ref().unwrap().proof_purpose,
         "authentication"

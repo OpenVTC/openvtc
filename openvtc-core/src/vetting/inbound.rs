@@ -882,8 +882,22 @@ async fn statement(
             },
         );
     }
-    let credential = wire::delivered_statement(&message.body)?;
+    // Claimed on sight, taken only once the delivery opens: signed by the
+    // vetter who sent it, for `authentication`. The statement inside is then
+    // checked on its own proof by `on_statement`.
+    wire::delivered_statement(&message.body)?;
     let Some((persona, _)) = ctx.recipient else {
+        return Some(Handled::default());
+    };
+    let opened = match wire::open::<Value>(message, sender, ctx.resolver).await {
+        Ok(opened) => opened,
+        Err(e) => {
+            warn!(%sender, reason = %e, "vetting statement delivery refused");
+            return Some(Handled::default());
+        }
+    };
+    let Some(credential) = wire::statement_in(&opened.payload) else {
+        warn!(%sender, "signed issue carries no vetting statement — ignored");
         return Some(Handled::default());
     };
     for application in book

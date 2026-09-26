@@ -1092,8 +1092,10 @@ fn resolver(ctx: &ActionCtx<'_>) -> TrustTaskVmResolver {
     TrustTaskVmResolver::new(ctx.tdk.did_resolver().clone())
 }
 
-/// Sign `document` as `persona`, then hand the send to a background job. The
-/// caller has claimed the domain; on error it is still claimed.
+/// Sign `document` as `persona` — with its authentication key, under
+/// `proofPurpose: authentication`, like every request — then hand the send
+/// to a background job. The caller has claimed the domain; on error it is
+/// still claimed.
 async fn sign_and_send(
     ctx: &mut ActionCtx<'_>,
     persona: PersonaId,
@@ -1105,36 +1107,7 @@ async fn sign_and_send(
         .get_persona_keys_for(persona, ctx.tdk)
         .await
         .map_err(|e| e.to_string())?;
-    wire::sign(&mut document, &keys.signing.secret)
-        .await
-        .map_err(|e| e.to_string())?;
-    let message = wire::to_message(&document).map_err(|e| e.to_string())?;
-    let from = document.issuer.clone().unwrap_or_default();
-    let to = document.recipient.clone().unwrap_or_default();
-    spawn_send(ctx, message, &from, &to, sent);
-    Ok(())
-}
-
-/// Like [`sign_and_send`], but signs with the persona's authentication key
-/// under `proofPurpose: authentication` rather than the `assertionMethod`
-/// default.
-///
-/// For `vtc/vetting/vetters/profile/0.1` and `vtc/vetting/vetters/resend/0.1`
-/// (`proof` REQUIRED as of trust-tasks 0.23): both are the vetter acting on
-/// their own standing with the community, not a claim to be held to later,
-/// so they are signed the same way a personhood challenge or assertion is.
-async fn sign_and_send_operational(
-    ctx: &mut ActionCtx<'_>,
-    persona: PersonaId,
-    mut document: Document,
-    sent: Sent,
-) -> Result<(), String> {
-    let keys = ctx
-        .config
-        .get_persona_keys_for(persona, ctx.tdk)
-        .await
-        .map_err(|e| e.to_string())?;
-    wire::sign_as(&mut document, &keys.authentication.secret, "authentication")
+    wire::sign(&mut document, &keys.authentication.secret)
         .await
         .map_err(|e| e.to_string())?;
     let message = wire::to_message(&document).map_err(|e| e.to_string())?;
@@ -1786,7 +1759,7 @@ async fn publish_profile(ctx: &mut ActionCtx<'_>, form: &VetterProfileForm) {
         persona: membership.persona,
         previous: previous.clone().map(Box::new),
     };
-    if let Err(e) = sign_and_send_operational(ctx, membership.persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, membership.persona, document, sent).await {
         let book = &mut ctx.config.private.vetting;
         book.restore_profile(&membership.community, membership.persona, previous);
         book.forget_query(&document_id);
@@ -1832,7 +1805,7 @@ async fn ask_resend(ctx: &mut ActionCtx<'_>, index: usize) {
         community: target.community.clone(),
         kind: QueryKind::VetterResend,
     };
-    if let Err(e) = sign_and_send_operational(ctx, target.persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, target.persona, document, sent).await {
         ctx.config.private.vetting.forget_query(&document_id);
         abandon(ctx, "Could not ask for your vetter credential", e);
     }
@@ -2228,18 +2201,22 @@ async fn send_card(
             // The card is signed here, as the persona DID, with the persona's
             // own assertionMethod key — the same path every other document
             // this client signs takes.
-            let signer = match ctx
+            let (signer, document_signer) = match ctx
                 .config
                 .get_persona_keys_for(application.persona, ctx.tdk)
                 .await
             {
-                Ok(keys) => keys.signing.secret.clone(),
+                Ok(keys) => (
+                    keys.signing.secret.clone(),
+                    keys.authentication.secret.clone(),
+                ),
                 Err(e) => return abandon(ctx, "Could not sign the card", e),
             };
             status(ctx, "Releasing and signing your card…");
             CardStep::Present(Box::new(Presenting {
                 preview_id: preview.preview_id,
                 signer,
+                document_signer,
                 resolver: resolver(ctx),
                 service: ctx.didcomm_service.clone(),
                 listener_id: openvtc_core::didcomm::listener_id_for_did(
@@ -2472,21 +2449,31 @@ async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
         Ok(issued) => issued,
         Err(e) => return abandon(ctx, "The statement did not verify", e),
     };
-    let message =
-        match wire::credential_delivery(&vetter_did, &entry.applicant, &statement, &session.id) {
-            Ok(message) => message,
-            Err(e) => {
-                ctx.config
-                    .private
-                    .vetting
-                    .issued
-                    .retain(|s| s.id != issued.id);
-                if let Some(e2) = ctx.config.private.vetting.desk_entry_mut(request_id) {
-                    e2.state = entry.state.clone();
-                }
-                return abandon(ctx, "Could not send the statement", e);
+    // The statement is signed with the assertionMethod key (a credential); the
+    // delivery document carrying it with the authentication key, like every
+    // other document this persona sends.
+    let message = match wire::credential_delivery(
+        &vetter_did,
+        &entry.applicant,
+        &statement,
+        &session.id,
+        &keys.authentication.secret,
+    )
+    .await
+    {
+        Ok(message) => message,
+        Err(e) => {
+            ctx.config
+                .private
+                .vetting
+                .issued
+                .retain(|s| s.id != issued.id);
+            if let Some(e2) = ctx.config.private.vetting.desk_entry_mut(request_id) {
+                e2.state = entry.state.clone();
             }
-        };
+            return abandon(ctx, "Could not send the statement", e);
+        }
+    };
     page(ctx).mode = VettingMode::List;
     persist(ctx, "Sending your statement…");
     let sent = Sent::Statement {
@@ -2912,7 +2899,10 @@ pub(crate) enum CardStep {
 /// What releasing and sending a card needs.
 pub(crate) struct Presenting {
     preview_id: String,
+    /// assertionMethod key — signs the card (a credential).
     signer: Secret,
+    /// authentication key — signs the document that carries it.
+    document_signer: Secret,
     resolver: TrustTaskVmResolver,
     service: Messaging,
     listener_id: String,
@@ -2994,6 +2984,7 @@ impl CardJob {
                 let Presenting {
                     preview_id,
                     signer,
+                    document_signer,
                     resolver,
                     service,
                     listener_id,
@@ -3035,7 +3026,9 @@ impl CardJob {
                     )
                     .map_err(failed)?;
                     document.thread_id = Some(session_id.clone());
-                    wire::sign(&mut document, &signer).await.map_err(failed)?;
+                    wire::sign(&mut document, &document_signer)
+                        .await
+                        .map_err(failed)?;
                     let message = wire::to_message(&document).map_err(failed)?;
                     openvtc_core::didcomm::send_message_via(
                         &service,

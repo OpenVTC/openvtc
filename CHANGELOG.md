@@ -137,6 +137,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `relationships::create_send_message_accepted` (which sent an unproven
   acceptance) is removed.
 
+- **Every Trust Task request this client sends is signed as the persona.** A
+  community now requires a document proof bound to the sender on every request
+  it is sent, so each request carries an `authentication` proof by the
+  persona's authentication key (issuer = the persona, recipient = the
+  community, `issuedAt`, a fresh id). The requests that went unsigned — the
+  capability list, the community-profile question and the personhood challenge
+  — are now signed, and the ones already signed (join submit/status,
+  self-remove, member VMC, personhood assertion, capability toggles, git-ns,
+  vetting documents) now use the authentication key and purpose instead of
+  the assertion key. Credentials this client issues (the member VMC, vetting
+  cards and statements, VRCs) stay signed with the assertion key. The
+  anonymous HTTP manifest question sent before joining stays unsigned by
+  design. **Breaking (wire):** a community that checks a request proof's
+  purpose against `assertionMethod` refuses these; deploy with VTI #1739.
+  There is one signing path for a request, and it has no purpose to choose:
+  `capabilities::sign_document`, `trust_task_doc::build_signed_value` and
+  `vetting::wire::sign` always sign for `authentication`, and the
+  purpose-taking variants added alongside them (`sign_document_as`,
+  `build_signed_value_as`, `wire::sign_as`) are removed. A vetter's
+  statement now reaches the applicant in a signed
+  `credential-exchange/issue` document too (issuer = the vetter persona,
+  recipient = the applicant, `authentication` proof), with the statement as
+  its payload keeping its own `assertionMethod` proof; the applicant opens it
+  like any other vetting document and refuses the bare, unsigned delivery.
+  `wire::credential_delivery` and `wire::send_statement` take the signer.
+  **Breaking (wire):** a vetter on an older release sends the bare delivery,
+  which is refused.
+
 - **The last replies taken on the sender's word now need the right party, or a
   proof.** A capability or git-ns reply — a refusal (`trust-task-error`) as
   much as a success — must be the community's signed operational document

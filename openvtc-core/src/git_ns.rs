@@ -1823,7 +1823,7 @@ mod tests {
                     .unwrap()
                     .starts_with(&me)
             );
-            assert_eq!(proof_value["proofPurpose"], "assertionMethod");
+            assert_eq!(proof_value["proofPurpose"], "authentication");
             assert_eq!(proof_value["cryptosuite"], "eddsa-jcs-2022");
             assert_eq!(doc.type_uri.to_string(), req.type_uri());
 

@@ -238,7 +238,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                                 vtc_did: vtc,
                                 persona: persona_id,
                                 verb: community_actions::Verb::Leave {
-                                    signing_secret: Box::new(keys.signing.secret.clone()),
+                                    signing_secret: Box::new(keys.authentication.secret.clone()),
                                 },
                             },
                         );
@@ -272,8 +272,11 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 });
             if let Some((vtc, persona_id, name)) = target {
                 capability_actions::open_view(ctx.state, vtc.clone(), persona_id, name);
-                match capability_sender(ctx.config, ctx.tdk, persona_id) {
-                    Some((atm, profile, persona_did, mediator)) => {
+                match (
+                    capability_sender(ctx.config, ctx.tdk, persona_id),
+                    ctx.config.get_persona_keys_for(persona_id, ctx.tdk).await,
+                ) {
+                    (Some((atm, profile, persona_did, mediator)), Ok(keys)) => {
                         spawn_capability_job(
                             ctx.dispatch_tx,
                             ctx.in_flight,
@@ -285,11 +288,13 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                                 mediator,
                                 vtc_did: vtc,
                                 persona: persona_id,
-                                verb: capability_actions::Verb::List,
+                                verb: capability_actions::Verb::List {
+                                    signing_secret: Box::new(keys.authentication.secret.clone()),
+                                },
                             },
                         );
                     }
-                    None => capability_actions::send_unavailable(ctx.state),
+                    _ => capability_actions::send_unavailable(ctx.state),
                 }
             }
         }
@@ -308,8 +313,11 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         crate::state_handler::main_page::content::CapabilitiesPhase::Loading;
                     view.status_message = None;
                 }
-                match capability_sender(ctx.config, ctx.tdk, persona_id) {
-                    Some((atm, profile, persona_did, mediator)) => {
+                match (
+                    capability_sender(ctx.config, ctx.tdk, persona_id),
+                    ctx.config.get_persona_keys_for(persona_id, ctx.tdk).await,
+                ) {
+                    (Some((atm, profile, persona_did, mediator)), Ok(keys)) => {
                         spawn_capability_job(
                             ctx.dispatch_tx,
                             ctx.in_flight,
@@ -321,11 +329,13 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                                 mediator,
                                 vtc_did: vtc,
                                 persona: persona_id,
-                                verb: capability_actions::Verb::List,
+                                verb: capability_actions::Verb::List {
+                                    signing_secret: Box::new(keys.authentication.secret.clone()),
+                                },
                             },
                         );
                     }
-                    None => capability_actions::send_unavailable(ctx.state),
+                    _ => capability_actions::send_unavailable(ctx.state),
                 }
             }
         }
@@ -465,6 +475,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                             persona: persona_id,
                             verb: community_actions::Verb::IssueVmc {
                                 signing_secret: Box::new(keys.signing.secret.clone()),
+                                document_signer: Box::new(keys.authentication.secret.clone()),
                                 grant: Box::new(grant),
                             },
                         },
@@ -486,26 +497,11 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 .filter(|c| c.status.is_active())
                 .map(|c| (c.vtc_did.clone(), c.persona_ref));
             if let Some((vtc, persona_id)) = target {
-                let ready = match (
-                    capability_sender(ctx.config, ctx.tdk, persona_id),
-                    ctx.config.get_persona_keys_for(persona_id, ctx.tdk).await,
-                ) {
-                    (Some(sender), Ok(keys)) => Some((sender, keys)),
-                    (_, Err(e)) => {
-                        ctx.state.main_page.content_panel.communities.status_message =
-                            Some(format!("Couldn't sign the challenge request: {e}"));
-                        None
-                    }
-                    (None, _) => {
-                        ctx.state.main_page.content_panel.communities.status_message = Some(
-                            "Messaging unavailable — cannot ask for a challenge right now."
-                                .to_string(),
-                        );
-                        None
-                    }
-                };
-                if let Some(((atm, profile, member_did, mediator), keys)) = ready {
-                    spawn_community_job(
+                // The request is signed, so the persona's authentication key
+                // comes along; one that cannot be read cannot ask.
+                let keys = ctx.config.get_persona_keys_for(persona_id, ctx.tdk).await;
+                match (capability_sender(ctx.config, ctx.tdk, persona_id), keys) {
+                    (Some((atm, profile, member_did, mediator)), Ok(keys)) => spawn_community_job(
                         ctx.dispatch_tx,
                         ctx.in_flight,
                         ctx.state,
@@ -517,10 +513,21 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                             vtc_did: vtc,
                             persona: persona_id,
                             verb: community_actions::Verb::RequestPersonhoodChallenge {
-                                signing_secret: Box::new(keys.authentication.secret.clone()),
+                                document_signer: Box::new(keys.authentication.secret.clone()),
                             },
                         },
-                    );
+                    ),
+                    (_, Err(e)) => {
+                        ctx.state.main_page.content_panel.communities.status_message = Some(
+                            format!("Could not load the persona's key to sign the request: {e}"),
+                        );
+                    }
+                    (None, _) => {
+                        ctx.state.main_page.content_panel.communities.status_message = Some(
+                            "Messaging unavailable — cannot ask for a challenge right now."
+                                .to_string(),
+                        );
+                    }
                 }
             }
         }

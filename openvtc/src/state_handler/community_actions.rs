@@ -33,6 +33,8 @@ pub(crate) enum Verb {
     /// Carries the persona's signing key because the task declares `proof`
     /// REQUIRED: leaving is a document the community keeps, and the authcrypt
     /// sender attributes the carriage rather than the document.
+    /// `signing_secret` is the persona's **authentication** key: it signs the
+    /// request document.
     Leave { signing_secret: Box<Secret> },
     /// `members/vmc` — issue the reciprocal membership credential, signed by the
     /// member, acknowledging `grant`.
@@ -43,17 +45,16 @@ pub(crate) enum Verb {
     /// recompute it over — so the wire form travels here rather than being
     /// re-derived from a parse.
     IssueVmc {
+        /// assertionMethod key — signs the credential.
         signing_secret: Box<Secret>,
+        /// authentication key — signs the request document.
+        document_signer: Box<Secret>,
         grant: Box<serde_json::Value>,
     },
     /// `members/personhood/challenge` — ask for the nonce an assertion must
     /// carry. The reply arrives asynchronously and lands via
     /// [`crate::state_handler::message_dispatch`]; nothing here waits for it.
-    ///
-    /// Carries the persona's authentication key because the task declares
-    /// `proof` REQUIRED (trust-tasks 0.23): the request is an operational
-    /// one, signed the same way the assertion that follows it is.
-    RequestPersonhoodChallenge { signing_secret: Box<Secret> },
+    RequestPersonhoodChallenge { document_signer: Box<Secret> },
     /// `members/personhood/assert` — present the evidence over that nonce.
     ///
     /// `credentials` are presented whole: `eddsa-jcs-2022` credentials cannot
@@ -128,6 +129,7 @@ impl CommunityJob {
             .map(|_| ()),
             Verb::IssueVmc {
                 signing_secret,
+                document_signer,
                 grant,
             } => openvtc_core::members::issue_and_send_member_vmc(
                 &openvtc_core::members::Delivery {
@@ -138,20 +140,21 @@ impl CommunityJob {
                     mediator_did: &self.mediator,
                 },
                 signing_secret,
+                document_signer,
                 grant,
                 // Unprompted re-issue: there is no open join to close.
                 None,
             )
             .await
             .map(|(_, vmc)| issued = Some(vmc)),
-            Verb::RequestPersonhoodChallenge { signing_secret } => {
+            Verb::RequestPersonhoodChallenge { document_signer } => {
                 // The member asks for their own. An administrator minting one
                 // for somebody else is a community-side action, not something
                 // this client offers.
                 openvtc_core::personhood::request_challenge(
                     &route,
+                    document_signer,
                     &self.member_did,
-                    signing_secret,
                 )
                 .await
                 .map(|_| ())

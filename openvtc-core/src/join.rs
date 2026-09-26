@@ -281,6 +281,7 @@ pub async fn send_community_profile_show(
     atm: &ATM,
     profile: &Arc<ATMProfile>,
     persona_did: &str,
+    signer: &Secret,
     vtc_did: &str,
     mediator_did: &str,
     tsp_mediator_did: Option<&str>,
@@ -291,13 +292,17 @@ pub async fn send_community_profile_show(
     // The show payload carries only an optional extension bag; an empty object is
     // the request. The VTC reads the body as a Trust Task document, so it must be
     // wrapped (a bare payload is rejected `malformedRequest`).
-    let body = build_trust_task_document(
+    // Signed like every request: a community requires a proof bound to the
+    // sender on every Trust Task it is sent.
+    let body = crate::trust_task_doc::build_signed_value(
         COMMUNITY_PROFILE_SHOW_TYPE,
         persona_did,
         vtc_did,
         &document_id,
         serde_json::json!({}),
-    )?;
+        signer,
+    )
+    .await?;
 
     match tsp_mediator_did {
         Some(tsp_mediator) => {
@@ -314,24 +319,6 @@ pub async fn send_community_profile_show(
         }
     }
     Ok(())
-}
-
-/// Wrap `payload` in the Trust Task *document* every VTC verb is dispatched
-/// from: the required `id` + `type`, plus the audience-binding `issuer` (us) and
-/// `recipient` (the community).
-///
-/// Generalised out of [`build_join_submit_document`], which had these five lines
-/// inline. The VTC rejects a bare payload as `malformedRequest` ("missing field
-/// `id`"), so this shape is not optional for any verb — a second verb writing
-/// its own copy is how one of them ends up subtly different.
-fn build_trust_task_document<T: serde::Serialize>(
-    type_uri: &str,
-    issuer_did: &str,
-    recipient_did: &str,
-    document_id: &str,
-    payload: T,
-) -> Result<Value, OpenVTCError> {
-    crate::trust_task_doc::build_value(type_uri, issuer_did, recipient_did, document_id, payload)
 }
 
 /// Build the DIDComm body for a join-request submit: a Trust Task *document*
@@ -812,7 +799,7 @@ mod tests {
     #[test]
     fn a_status_poll_is_a_well_formed_trust_task_document() {
         let request_id = Uuid::new_v4();
-        let doc = build_trust_task_document(
+        let doc = crate::trust_task_doc::build_value(
             JOIN_REQUEST_STATUS_TYPE,
             "did:webvh:example.com:alice",
             "did:webvh:example.com:community",

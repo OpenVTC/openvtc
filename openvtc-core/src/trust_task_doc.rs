@@ -94,28 +94,6 @@ pub async fn build_signed_value<P: Serialize>(
         .map_err(|e| OpenVTCError::Config(format!("trust task document serialize: {e}")))
 }
 
-/// Like [`build_signed_value`], but with an explicit `proofPurpose`.
-///
-/// For a document acted on with a key that is not listed under
-/// `assertionMethod` — e.g. one signed with the same authentication key as
-/// the presentation it carries — `proofPurpose` must name the relationship
-/// that key is actually listed under, or a peer enforcing the strict
-/// proof-purpose rule refuses it.
-pub async fn build_signed_value_as<P: Serialize>(
-    type_uri: &str,
-    issuer_did: &str,
-    recipient_did: &str,
-    document_id: impl Into<String>,
-    payload: P,
-    signer: &Secret,
-    proof_purpose: &str,
-) -> Result<Value, OpenVTCError> {
-    let mut doc = build(type_uri, issuer_did, recipient_did, document_id, payload)?;
-    crate::capabilities::sign_document_as(&mut doc, signer, proof_purpose).await?;
-    serde_json::to_value(&doc)
-        .map_err(|e| OpenVTCError::Config(format!("trust task document serialize: {e}")))
-}
-
 /// [`build`], serialised — for the callers that hand a `Value` straight to a
 /// DIDComm message body.
 pub fn build_value<P: Serialize>(
@@ -189,6 +167,55 @@ mod tests {
         assert!(doc.get("issuedAt").is_some());
     }
 
+    /// Every request is signed for `authentication` by a key the issuer's DID
+    /// document lists under `authentication`, and verifies as a document proof
+    /// bound to the sender — which is what a community checks on every Trust
+    /// Task it is sent. Two documents never share an id.
+    #[tokio::test]
+    async fn a_request_verifies_as_the_senders_authentication_proof() {
+        use crate::proof_check::{Purpose, verify_proofs};
+        use affinidi_tdk::dids::{DID, KeyType};
+
+        let (issuer_did, signer) =
+            DID::generate_did_key(KeyType::Ed25519).expect("did:key generates");
+        let resolver = affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
+            affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+        )
+        .await
+        .unwrap();
+        let issuer_doc = resolver.resolve(&issuer_did).await.unwrap().doc;
+
+        let a = build_signed_value(
+            TYPE_URI,
+            &issuer_did,
+            "did:webvh:community",
+            "urn:uuid:a",
+            json!({}),
+            &signer,
+        )
+        .await
+        .unwrap();
+        assert_eq!(a["proof"]["proofPurpose"], json!("authentication"));
+        assert_eq!(
+            verify_proofs(&a, &issuer_did, &issuer_doc, &[Purpose::Authentication]),
+            Ok(())
+        );
+        // Not acceptable as an assertion: it is the sender acting.
+        assert!(verify_proofs(&a, &issuer_did, &issuer_doc, &[Purpose::AssertionMethod]).is_err());
+        // Changing the addressing breaks the proof.
+        let mut readdressed = a.clone();
+        readdressed["recipient"] = json!("did:webvh:elsewhere");
+        assert!(
+            verify_proofs(
+                &readdressed,
+                &issuer_did,
+                &issuer_doc,
+                &[Purpose::Authentication]
+            )
+            .is_err()
+        );
+    }
+
     /// Every field a peer's framework checks is present.
     ///
     /// Written as one assertion per field rather than a shape comparison,
@@ -222,50 +249,6 @@ mod tests {
         assert!(
             doc.issued_at.is_some(),
             "without `issuedAt` the document is refused under §7.3 item 17"
-        );
-    }
-
-    /// `build_signed_value` defaults to `assertionMethod` — the right
-    /// purpose for a document that stands as a claim to be held to later —
-    /// while `build_signed_value_as` carries whatever purpose the caller
-    /// names, for a document acted on with a key that is not listed under
-    /// `assertionMethod` at all (VTI-KEY-022).
-    #[tokio::test]
-    async fn build_signed_value_as_carries_the_named_proof_purpose() {
-        use affinidi_tdk::dids::{DID, KeyType};
-
-        let (issuer_did, signer) =
-            DID::generate_did_key(KeyType::Ed25519).expect("did:key generates");
-
-        let default_doc = build_signed_value(
-            TYPE_URI,
-            &issuer_did,
-            "did:webvh:community",
-            "urn:uuid:1",
-            json!({}),
-            &signer,
-        )
-        .await
-        .expect("builds and signs");
-        assert_eq!(
-            default_doc["proof"]["proofPurpose"].as_str(),
-            Some("assertionMethod")
-        );
-
-        let auth_doc = build_signed_value_as(
-            TYPE_URI,
-            &issuer_did,
-            "did:webvh:community",
-            "urn:uuid:2",
-            json!({}),
-            &signer,
-            "authentication",
-        )
-        .await
-        .expect("builds and signs");
-        assert_eq!(
-            auth_doc["proof"]["proofPurpose"].as_str(),
-            Some("authentication")
         );
     }
 

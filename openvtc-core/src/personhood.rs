@@ -251,15 +251,14 @@ impl Route<'_> {
 /// nothing: the nonce is bound to the subject, and only a presentation
 /// signed by the subject's key can spend it.
 ///
-/// Signed with `signing_secret` under `proofPurpose: authentication` —
-/// `vtc/members/personhood/challenge/0.1` declares `proof` REQUIRED
-/// (trust-tasks 0.23) — the same key and purpose [`assert_personhood`]
-/// signs the presentation with, since both are the member acting rather
-/// than making a claim to be held to later.
+/// Signed with `signer`, the persona's authentication key, under
+/// `proofPurpose: authentication` — `vtc/members/personhood/challenge/0.1`
+/// declares `proof` REQUIRED — the same key and purpose
+/// [`assert_personhood`] signs the presentation with.
 pub async fn request_challenge(
     route: &Route<'_>,
+    signer: &Secret,
     subject_did: &str,
-    signing_secret: &Secret,
 ) -> Result<Uuid, OpenVTCError> {
     let request_id = Uuid::new_v4();
     let document_id = format!("urn:uuid:{request_id}");
@@ -268,7 +267,7 @@ pub async fn request_challenge(
         route.vtc_did,
         &document_id,
         subject_did,
-        signing_secret,
+        signer,
     )
     .await?;
 
@@ -287,14 +286,13 @@ async fn build_challenge_request(
     subject_did: &str,
     signing_secret: &Secret,
 ) -> Result<Value, OpenVTCError> {
-    crate::trust_task_doc::build_signed_value_as(
+    crate::trust_task_doc::build_signed_value(
         PERSONHOOD_CHALLENGE_TYPE,
         member_did,
         vtc_did,
         document_id,
         json!({ "did": subject_did }),
         signing_secret,
-        "authentication",
     )
     .await
 }
@@ -382,14 +380,13 @@ pub async fn assert_personhood(
     // declares `proof` REQUIRED, and `signing_secret` is the persona's
     // authentication key (#key-2), which is listed only under
     // `authentication` in the DID document, not `assertionMethod`.
-    let body = crate::trust_task_doc::build_signed_value_as(
+    let body = crate::trust_task_doc::build_signed_value(
         PERSONHOOD_ASSERT_TYPE,
         route.member_did,
         route.vtc_did,
         &document_id,
         json!({ "did": route.member_did, "presentation": presentation }),
         signing_secret,
-        "authentication",
     )
     .await?;
 

@@ -29,10 +29,11 @@ use openvtc_core::config::account::PersonaId;
 
 /// Which document a job sends.
 pub(crate) enum Verb {
-    /// `governance/capability/list` — ask what the community offers.
-    List,
-    /// `governance/capability/enable|disable` — ask it to change one. Signed,
-    /// because it is a write.
+    /// `governance/capability/list` — ask what the community offers. Signed
+    /// like every request, with the persona's authentication key.
+    List { signing_secret: Box<Secret> },
+    /// `governance/capability/enable|disable` — ask it to change one. Signed
+    /// with the persona's authentication key.
     Toggle {
         slug: String,
         version: String,
@@ -56,20 +57,24 @@ impl CapabilityJob {
     /// Build, sign where required, and send. I/O only.
     pub(crate) async fn run(self) -> CapabilityOutcome {
         let enable = match &self.verb {
-            Verb::List => None,
+            Verb::List { .. } => None,
             Verb::Toggle { enable, .. } => Some(*enable),
         };
         let slug = match &self.verb {
-            Verb::List => None,
+            Verb::List { .. } => None,
             Verb::Toggle { slug, .. } => Some(slug.clone()),
         };
 
         let result = async {
             let doc = match &self.verb {
-                Verb::List => openvtc_core::capabilities::build_list_document(
-                    &self.persona_did,
-                    &self.vtc_did,
-                ),
+                Verb::List { signing_secret } => {
+                    let mut doc = openvtc_core::capabilities::build_list_document(
+                        &self.persona_did,
+                        &self.vtc_did,
+                    );
+                    openvtc_core::capabilities::sign_document(&mut doc, signing_secret).await?;
+                    doc
+                }
                 Verb::Toggle {
                     slug,
                     version,
@@ -83,17 +88,7 @@ impl CapabilityJob {
                         version,
                         *enable,
                     );
-                    // Signed with the authentication key (#key-2), not the
-                    // assertionMethod signing key: enabling or disabling a
-                    // capability is acting on the community, not making a
-                    // claim to be held to later, and #key-2 is listed only
-                    // under `authentication` in the DID document.
-                    openvtc_core::capabilities::sign_document_as(
-                        &mut doc,
-                        signing_secret,
-                        "authentication",
-                    )
-                    .await?;
+                    openvtc_core::capabilities::sign_document(&mut doc, signing_secret).await?;
                     doc
                 }
             };

@@ -57,6 +57,22 @@ pub(crate) struct Ask {
     /// The community was joined over TSP, so the ask must go over TSP too — a
     /// community reachable only over TSP would never see a DIDComm ask.
     over_tsp: bool,
+    /// The persona asking, whose authentication key signs the request.
+    pub(crate) persona: PersonaId,
+    /// That key, filled by [`Ask::with_signer`] before the send — the request
+    /// is signed like every other.
+    signer: Option<affinidi_tdk::secrets_resolver::secrets::Secret>,
+}
+
+impl Ask {
+    /// Attach the persona's authentication key.
+    pub(crate) fn with_signer(
+        mut self,
+        signer: affinidi_tdk::secrets_resolver::secrets::Secret,
+    ) -> Self {
+        self.signer = Some(signer);
+        self
+    }
 }
 
 impl ProfilePacer {
@@ -108,6 +124,8 @@ impl ProfilePacer {
                 mediator_did: identity.mediator_did.clone().unwrap_or_default(),
                 vtc_did: record.vtc_did.clone(),
                 over_tsp: record.submit_transport == Some(MessagingTransport::Tsp),
+                persona: record.persona_ref,
+                signer: None,
             });
         }
         asks
@@ -134,6 +152,11 @@ impl ProfilePacer {
 /// form default whose absence is harmless.
 pub(crate) async fn send_all(atm: ATM, asks: Vec<Ask>) {
     for ask in asks {
+        // Never sent unsigned: an ask with no key is dropped.
+        let Some(signer) = ask.signer.as_ref() else {
+            debug!(vtc = %ask.vtc_did, "no key to sign the profile ask; skipped");
+            continue;
+        };
         let tsp_mediator = if ask.over_tsp {
             openvtc_core::config::peer_tsp_mediator(&ask.vtc_did).await
         } else {
@@ -143,6 +166,7 @@ pub(crate) async fn send_all(atm: ATM, asks: Vec<Ask>) {
             &atm,
             &ask.profile,
             &ask.persona_did,
+            signer,
             &ask.vtc_did,
             &ask.mediator_did,
             tsp_mediator.as_deref(),
