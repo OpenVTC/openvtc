@@ -2449,21 +2449,31 @@ async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
         Ok(issued) => issued,
         Err(e) => return abandon(ctx, "The statement did not verify", e),
     };
-    let message =
-        match wire::credential_delivery(&vetter_did, &entry.applicant, &statement, &session.id) {
-            Ok(message) => message,
-            Err(e) => {
-                ctx.config
-                    .private
-                    .vetting
-                    .issued
-                    .retain(|s| s.id != issued.id);
-                if let Some(e2) = ctx.config.private.vetting.desk_entry_mut(request_id) {
-                    e2.state = entry.state.clone();
-                }
-                return abandon(ctx, "Could not send the statement", e);
+    // The statement is signed with the assertionMethod key (a credential); the
+    // delivery document carrying it with the authentication key, like every
+    // other document this persona sends.
+    let message = match wire::credential_delivery(
+        &vetter_did,
+        &entry.applicant,
+        &statement,
+        &session.id,
+        &keys.authentication.secret,
+    )
+    .await
+    {
+        Ok(message) => message,
+        Err(e) => {
+            ctx.config
+                .private
+                .vetting
+                .issued
+                .retain(|s| s.id != issued.id);
+            if let Some(e2) = ctx.config.private.vetting.desk_entry_mut(request_id) {
+                e2.state = entry.state.clone();
             }
-        };
+            return abandon(ctx, "Could not send the statement", e);
+        }
+    };
     page(ctx).mode = VettingMode::List;
     persist(ctx, "Sending your statement…");
     let sent = Sent::Statement {

@@ -507,8 +507,15 @@ async fn an_applicant_is_vetted_end_to_end() {
     ));
 
     // The statement reaches the applicant, who now meets the requirements.
-    let message =
-        wire::credential_delivery(&vetter.did, &applicant.did, &statement, &session_id).unwrap();
+    let message = wire::credential_delivery(
+        &vetter.did,
+        &applicant.did,
+        &statement,
+        &session_id,
+        &vetter.secret,
+    )
+    .await
+    .unwrap();
     let handled = applicant.receive(&message, &vetter.did).await;
     assert!(matches!(
         handled.notice,

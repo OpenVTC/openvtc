@@ -155,7 +155,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `capabilities::sign_document`, `trust_task_doc::build_signed_value` and
   `vetting::wire::sign` always sign for `authentication`, and the
   purpose-taking variants added alongside them (`sign_document_as`,
-  `build_signed_value_as`, `wire::sign_as`) are removed.
+  `build_signed_value_as`, `wire::sign_as`) are removed. A vetter's
+  statement now reaches the applicant in a signed
+  `credential-exchange/issue` document too (issuer = the vetter persona,
+  recipient = the applicant, `authentication` proof), with the statement as
+  its payload keeping its own `assertionMethod` proof; the applicant opens it
+  like any other vetting document and refuses the bare, unsigned delivery.
+  `wire::credential_delivery` and `wire::send_statement` take the signer.
+  **Breaking (wire):** a vetter on an older release sends the bare delivery,
+  which is refused.
 
 - **The last replies taken on the sender's word now need the right party, or a
   proof.** A capability or git-ns reply — a refusal (`trust-task-error`) as

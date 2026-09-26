@@ -8,8 +8,11 @@
 //! checks both, and that they name the same party.
 //!
 //! The Vetting Statement itself travels as `credential-exchange/issue/0.1`,
-//! the same message a community uses to deliver a membership credential
-//! ([`credential_delivery`]).
+//! the same task a community uses to deliver a membership credential
+//! ([`credential_delivery`]). Between peers it is a signed Trust Task document
+//! like every other vetting leg: the vetter persona signs it for
+//! `authentication`, and the statement inside keeps its own `assertionMethod`
+//! proof. [`open`] checks it on arrival.
 
 use std::str::FromStr;
 
@@ -23,7 +26,7 @@ use vta_sdk::protocols::credential_exchange::ISSUE as CREDENTIAL_ISSUE_TYPE;
 use vta_sdk::trust_task_proof::{TrustTaskVmResolver, verify_trust_task_proof_with};
 
 use crate::errors::OpenVTCError;
-use crate::messaging::{MESSAGE_EXPIRY_SECS, build_didcomm_message, unix_now};
+use crate::messaging::{MESSAGE_EXPIRY_SECS, unix_now};
 
 /// Why an inbound vetting document was not accepted.
 #[derive(Debug, thiserror::Error)]
@@ -175,20 +178,30 @@ pub fn to_message(doc: &TrustTask<Value>) -> Result<Message, OpenVTCError> {
 
 /// The DIDComm message delivering a signed Vetting Statement to the applicant,
 /// threaded on the session it came out of.
-pub fn credential_delivery(
+///
+/// The delivery is a `credential-exchange/issue/0.1` Trust Task document from
+/// the vetter persona to the applicant — fresh `id`, `issuedAt` — signed by
+/// `signer`, the vetter persona's authentication key, through the same path as
+/// every other document this client sends ([`sign`]). The statement is its
+/// payload's `credential_response.credential`, carrying its own
+/// `assertionMethod` proof.
+pub async fn credential_delivery(
     vetter_did: &str,
     applicant_did: &str,
     statement: &Value,
     session_id: &str,
+    signer: &Secret,
 ) -> Result<Message, OpenVTCError> {
-    build_didcomm_message(
+    let mut doc = document(
         CREDENTIAL_ISSUE_TYPE,
-        json!({ "credential_response": { "credential": statement } }),
         vetter_did,
         applicant_did,
-        Some(session_id),
-    )
-    .map_err(|e| config_error("statement delivery", e))
+        new_id(),
+        &json!({ "credential_response": { "credential": statement } }),
+    )?;
+    doc.thread_id = Some(session_id.to_string());
+    sign(&mut doc, signer).await?;
+    to_message(&doc)
 }
 
 /// A verified inbound document.
@@ -370,7 +383,8 @@ pub async fn send_reply(
     Ok(document.id)
 }
 
-/// Deliver a signed statement to the applicant.
+/// Deliver a signed statement to the applicant, in a delivery document signed
+/// by `signer`, the vetter persona's authentication key.
 pub async fn send_statement(
     config: &crate::config::Config,
     service: &crate::didcomm::Messaging,
@@ -378,8 +392,10 @@ pub async fn send_statement(
     applicant_did: &str,
     statement: &Value,
     session_id: &str,
+    signer: &Secret,
 ) -> Result<(), OpenVTCError> {
-    let message = credential_delivery(vetter_did, applicant_did, statement, session_id)?;
+    let message =
+        credential_delivery(vetter_did, applicant_did, statement, session_id, signer).await?;
     crate::didcomm::send_message(service, config, &message, vetter_did, applicant_did)
         .await
         .map_err(|e| config_error("send vetting statement", e))
@@ -387,9 +403,24 @@ pub async fn send_statement(
 
 /// The statement a `credential-exchange/issue` message carries, if it is an
 /// identity-vetting statement rather than a community-issued credential.
+///
+/// This decides whether vetting claims the message, not whether it is taken:
+/// it looks in the signed delivery's `payload` ([`credential_delivery`]) and
+/// also at the top of the body, so a bare, unsigned statement is claimed — and
+/// then refused by [`open`] — rather than handed on to the join handler. Read
+/// the statement to act on from the opened document ([`statement_in`]).
 #[must_use]
 pub fn delivered_statement(body: &Value) -> Option<&Value> {
-    let credential = body.pointer("/credential_response/credential")?;
+    body.get("payload")
+        .and_then(statement_in)
+        .or_else(|| statement_in(body))
+}
+
+/// The identity-vetting statement at `credential_response.credential` in an
+/// issue payload, if that is what it holds.
+#[must_use]
+pub fn statement_in(payload: &Value) -> Option<&Value> {
+    let credential = payload.pointer("/credential_response/credential")?;
     (credential
         .pointer("/credentialSubject/endorsement/type")
         .and_then(Value::as_str)
@@ -627,15 +658,83 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn only_identity_vetting_statements_are_picked_out_of_an_issue() {
-        let statement = json!({
+    fn a_statement() -> Value {
+        json!({
             "credentialSubject": { "endorsement": {
                 "type": vta_sdk::protocols::vetting::IDENTITY_VETTING_ENDORSEMENT_TYPE
             } }
-        });
+        })
+    }
+
+    /// The statement's delivery is a Trust Task document signed by the vetter
+    /// persona for `authentication`, addressed to the applicant and threaded on
+    /// the session, and it opens for the vetter only. An unsigned one — the
+    /// bare body this used to send — is still claimed, and refused.
+    #[tokio::test]
+    async fn a_statement_delivery_is_signed_for_authentication_and_refused_unsigned() {
+        let (vetter, applicant, other) = (secret(1), secret(2), secret(3));
+        let statement = a_statement();
+        let message = credential_delivery(
+            &did(&vetter),
+            &did(&applicant),
+            &statement,
+            "urn:uuid:session",
+            &vetter,
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.typ, CREDENTIAL_ISSUE_TYPE);
+        assert_eq!(message.thid.as_deref(), Some("urn:uuid:session"));
+        let body = &message.body;
+        assert_eq!(body["type"], CREDENTIAL_ISSUE_TYPE);
+        assert_eq!(body["issuer"], did(&vetter));
+        assert_eq!(body["recipient"], did(&applicant));
+        assert!(body["id"].as_str().unwrap().starts_with("urn:uuid:"));
+        assert!(body.get("issuedAt").is_some());
+        assert_eq!(
+            body.pointer("/proof/proofPurpose"),
+            Some(&json!("authentication"))
+        );
+        assert_eq!(delivered_statement(body), Some(&statement));
+
+        let resolver = TrustTaskVmResolver::did_key_only();
+        let opened: Opened<Value> = open(&message, &did(&vetter), &resolver).await.unwrap();
+        assert_eq!(statement_in(&opened.payload), Some(&statement));
+        assert!(matches!(
+            open::<Value>(&message, &did(&other), &resolver).await,
+            Err(WireError::IssuerNotSender)
+        ));
+
+        // The same document, unsigned.
+        let mut unsigned = message.clone();
+        unsigned.body.as_object_mut().unwrap().remove("proof");
+        assert!(matches!(
+            open::<Value>(&unsigned, &did(&vetter), &resolver).await,
+            Err(WireError::Proof(_))
+        ));
+        // The bare body: claimed, then refused.
+        let bare = crate::messaging::build_didcomm_message(
+            CREDENTIAL_ISSUE_TYPE,
+            json!({ "credential_response": { "credential": statement } }),
+            &did(&vetter),
+            &did(&applicant),
+            Some("urn:uuid:session"),
+        )
+        .unwrap();
+        assert!(delivered_statement(&bare.body).is_some());
+        assert!(
+            open::<Value>(&bare, &did(&vetter), &resolver)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn only_identity_vetting_statements_are_picked_out_of_an_issue() {
+        let statement = a_statement();
         let body = json!({ "credential_response": { "credential": statement } });
         assert!(delivered_statement(&body).is_some());
+        assert!(delivered_statement(&json!({ "payload": body })).is_some());
         let vmc = json!({ "credential_response": { "credential": {
             "type": ["VerifiableCredential", "MembershipCredential"]
         } } });

@@ -548,8 +548,10 @@ async fn the_vetting_ceremony_completes_over_the_wire() {
         .record_statement(&request_id, &statement, &resolver, Utc::now())
         .await
         .expect("record the statement");
-    let statement_msg = wire::credential_delivery(&bob_did, &alice_did, &statement, &opened)
-        .expect("credential delivery");
+    let statement_msg =
+        wire::credential_delivery(&bob_did, &alice_did, &statement, &opened, &bob.secret)
+            .await
+            .expect("credential delivery");
 
     let arrived = hop(&bob_msg, &alice_did, &mut alice_inbox, &statement_msg).await;
     let handled = alice.receive(&arrived, &bob_did).await;
