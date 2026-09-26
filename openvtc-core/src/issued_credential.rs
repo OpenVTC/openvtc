@@ -41,6 +41,12 @@ pub const VALID_FROM_SKEW: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 pub enum IssuedCredentialError {
     #[error("the credential was not checked")]
     NotChecked,
+    #[error("the delivery is not a Trust Task document naming the community that sent it")]
+    DeliveryIssuerNotSender,
+    #[error("the delivery's proof: {0}")]
+    DeliveryProof(ProofError),
+    #[error("the delivery carries no credential")]
+    NoCredential,
     #[error("its check did not finish (timed out or failed) — ask the community to send it again")]
     CheckUnfinished,
     #[error("the credential names no issuer")]
@@ -110,6 +116,38 @@ pub fn issuer_of(credential: &Value) -> Option<&str> {
 /// # Errors
 ///
 /// The first check that failed, as an [`IssuedCredentialError`].
+/// Verify a pushed `credential-exchange/issue` document and the credential it
+/// delivers.
+///
+/// Two proofs, two questions. The **document** proof — by `sender`, the
+/// community, under `authentication` — attributes the delivery: the community
+/// handed this over, not whoever relayed it. The **credential** proof, checked
+/// by [`verify_issued_credential`], is what the credential is trusted by. A VTC
+/// signs every `issue` it pushes, so an unsigned one, or one signed by anyone
+/// else, is refused before the credential is looked at.
+///
+/// # Errors
+///
+/// The first check that failed.
+pub async fn verify_issued_delivery(
+    document: &Value,
+    sender: &str,
+    resolver: &DIDCacheClient,
+    now: DateTime<Utc>,
+) -> Result<VerifiedIssuedCredential, IssuedCredentialError> {
+    if document.get("issuer").and_then(Value::as_str) != Some(sender) {
+        return Err(IssuedCredentialError::DeliveryIssuerNotSender);
+    }
+    proof_check::verify_signed(document, sender, resolver, &[Purpose::Authentication])
+        .await
+        .map_err(IssuedCredentialError::DeliveryProof)?;
+    let credential = document
+        .pointer("/payload/credential_response/credential")
+        .cloned()
+        .ok_or(IssuedCredentialError::NoCredential)?;
+    verify_issued_credential(credential, sender, resolver, now).await
+}
+
 pub async fn verify_issued_credential(
     credential: Value,
     sender: &str,

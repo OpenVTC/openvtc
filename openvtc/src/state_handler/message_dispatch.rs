@@ -14,7 +14,6 @@ use std::sync::Arc;
 use affinidi_tdk::{TDK, didcomm::Message};
 use dtg_credentials::DTGCredential;
 use openvtc_core::didcomm::Messaging;
-use openvtc_core::issued_credential::verify_issued_credential;
 use openvtc_core::join::COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE;
 use openvtc_core::messaging::{
     SeenMessages, check_message_age, check_task_capacity, create_finalize_message,
@@ -160,7 +159,8 @@ pub enum VerifyJob {
     /// An issued credential: proof against the issuer's document, validity,
     /// revocation (fails closed).
     Credential {
-        credential: serde_json::Value,
+        /// The whole delivery: its own proof is checked before the credential's.
+        document: serde_json::Value,
         sender: String,
     },
     /// A community's operational document (removal notice, join replies,
@@ -261,8 +261,14 @@ impl VerifyJob {
     pub async fn run(self, tdk: TDK) -> PreVerified {
         let now = chrono::Utc::now();
         match self {
-            VerifyJob::Credential { credential, sender } => PreVerified::Credential(
-                verify_issued_credential(credential, &sender, tdk.did_resolver(), now).await,
+            VerifyJob::Credential { document, sender } => PreVerified::Credential(
+                openvtc_core::issued_credential::verify_issued_delivery(
+                    &document,
+                    &sender,
+                    tdk.did_resolver(),
+                    now,
+                )
+                .await,
             ),
             VerifyJob::Operational {
                 document,
@@ -416,7 +422,7 @@ fn verification_job(
             .is_some_and(|subject| config.account.persona_id_for_did(subject).is_some());
         let from_issuer = openvtc_core::issued_credential::issuer_of(&credential) == Some(from_did);
         return (member && to_us && from_issuer).then(|| VerifyJob::Credential {
-            credential,
+            document: message.body.clone(),
             sender: from_did.to_string(),
         });
     }
@@ -1821,11 +1827,25 @@ mod tests {
         config
     }
 
-    fn issue(vtc: &str, credential: serde_json::Value) -> Message {
+    /// An `issue` as a VTC pushes it: a Trust Task document signed by the
+    /// community's key, opened out of the binding envelope.
+    async fn issue(vtc: &str, key: &Secret, credential: serde_json::Value) -> Message {
+        let mut document = serde_json::from_value(serde_json::json!({
+            "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+            "type": CREDENTIAL_ISSUE_TYPE,
+            "issuer": vtc,
+            "recipient": PERSONA,
+            "issuedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "payload": { "credential_response": { "credential": credential } },
+        }))
+        .expect("an issue document");
+        openvtc_core::capabilities::sign_document(&mut document, key)
+            .await
+            .expect("sign the delivery");
         Message::build(
             uuid::Uuid::new_v4().to_string(),
             CREDENTIAL_ISSUE_TYPE.to_string(),
-            serde_json::json!({ "credential_response": { "credential": credential } }),
+            serde_json::to_value(&document).expect("document json"),
         )
         .from(vtc.to_string())
         .to(PERSONA.to_string())
@@ -1877,7 +1897,7 @@ mod tests {
         let mut config = pending_config(&vtc);
         let mut forged = membership_vmc(&vtc, &key).await;
         forged.as_object_mut().unwrap().remove("proof");
-        let m = issue(&vtc, forged);
+        let m = issue(&vtc, &key, forged).await;
         let mut effects = InboundEffects::default();
         let changed = process_inbound_message(
             &mut config,
@@ -1927,7 +1947,7 @@ mod tests {
         // A genuine credential: deferred, then it activates.
         let mut config = pending_config(&vtc);
         let genuine = membership_vmc(&vtc, &key).await;
-        let m = issue(&vtc, genuine);
+        let m = issue(&vtc, &key, genuine).await;
         let mut effects = InboundEffects::default();
         process_inbound_message(
             &mut config,
@@ -1975,7 +1995,7 @@ mod tests {
         let mut seen = SeenMessages::new();
         let mut config = pending_config(&vtc);
 
-        let other = issue(&vtc, membership_vmc(&vtc, &key).await);
+        let other = issue(&vtc, &key, membership_vmc(&vtc, &key).await).await;
         let mut effects = InboundEffects::default();
         process_inbound_message(
             &mut config,
@@ -1993,7 +2013,7 @@ mod tests {
         // A different credential, handed back with the first one's result.
         let mut different = membership_vmc(&vtc, &key).await;
         different["id"] = serde_json::json!("urn:uuid:different");
-        let m = issue(&vtc, different);
+        let m = issue(&vtc, &key, different).await;
         let mut effects = InboundEffects::default();
         process_inbound_message(
             &mut config,
@@ -2085,12 +2105,24 @@ mod tests {
         // A credential "issued" by a stranger, about itself.
         let mut vc = membership_vmc(&vtc, &key).await;
         vc["issuer"] = serde_json::json!(stranger);
-        let effects = dispatch(&mut config, &tdk, &issue(stranger, vc), Arrival::FRESH).await;
+        let effects = dispatch(
+            &mut config,
+            &tdk,
+            &issue(stranger, &key, vc).await,
+            Arrival::FRESH,
+        )
+        .await;
         assert!(effects.deferred.is_none());
         // A credential for someone else, from the community.
         let mut vc = membership_vmc(&vtc, &key).await;
         vc["credentialSubject"]["id"] = serde_json::json!("did:key:z6MkSomeoneElse");
-        let effects = dispatch(&mut config, &tdk, &issue(&vtc, vc), Arrival::FRESH).await;
+        let effects = dispatch(
+            &mut config,
+            &tdk,
+            &issue(&vtc, &key, vc).await,
+            Arrival::FRESH,
+        )
+        .await;
         assert!(effects.deferred.is_none());
         assert!(matches!(
             status(&config, &vtc),
@@ -2227,7 +2259,7 @@ mod tests {
         let (vtc, key) = community_key();
         let tdk = test_tdk().await;
         let mut config = pending_config(&vtc);
-        let mut m = issue(&vtc, membership_vmc(&vtc, &key).await);
+        let mut m = issue(&vtc, &key, membership_vmc(&vtc, &key).await).await;
         // Older than the replay window allows a fresh message.
         m.created_time = Some(1);
         assert!(
@@ -2270,7 +2302,7 @@ mod tests {
     async fn a_barrier_is_triaged_again_on_its_turn() {
         let (vtc, key) = community_key();
         let tdk = test_tdk().await;
-        let m = issue(&vtc, membership_vmc(&vtc, &key).await);
+        let m = issue(&vtc, &key, membership_vmc(&vtc, &key).await).await;
         // No record with the community yet: no check, and it waits behind
         // its sender's queued work.
         let mut config = pending_config(&vtc);
@@ -2305,7 +2337,7 @@ mod tests {
         let (vtc, key) = community_key();
         let tdk = test_tdk().await;
         let mut config = pending_config(&vtc);
-        let m = issue(&vtc, membership_vmc(&vtc, &key).await);
+        let m = issue(&vtc, &key, membership_vmc(&vtc, &key).await).await;
         let deferred = dispatch(&mut config, &tdk, &m, Arrival::FRESH)
             .await
             .deferred

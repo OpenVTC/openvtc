@@ -947,32 +947,23 @@ pub fn handle_community_profile_show_response(
 /// The credential a VTC `credential-exchange/issue` carries, unverified.
 ///
 /// The known-holder delivery carries the VC at `credential_response.credential`
-/// of the task's payload. A VTC pushes the `issue` as a signed Trust Task
-/// document (VTI #credential-exchange onto the spine), so the payload sits
-/// under `payload` and the document's `issuer` must be the community that sent
-/// it; a document naming anyone else is refused here, before anything is
-/// verified. An older VTC sent the payload as the bare message body, which is
-/// still read — the credential's own proof, not the delivery, is what
-/// [`crate::issued_credential::verify_issued_credential`] checks before
-/// anything is stored.
+/// of the task's payload. A VTC pushes every `issue` as a signed Trust Task
+/// document, so this reads only a document whose `issuer` is the party that
+/// delivered it; a bare body, or a document naming anyone else, carries
+/// nothing this client will act on. Reading here is not verifying: pass the
+/// document to [`crate::issued_credential::verify_issued_delivery`], and only
+/// what that returns can be stored.
 ///
-/// `sealed` issues (invite / air-gap) are not handled here. Only what
-/// `verify_issued_credential` returns can be stored.
+/// `sealed` issues (invite / air-gap) are not handled here.
 #[must_use]
 pub fn credential_in_issue(message: &Message) -> Option<Value> {
-    let payload = match message.body.get("payload") {
-        Some(payload) => {
-            let issuer = message.body.get("issuer").and_then(Value::as_str);
-            if issuer.is_none() || issuer != message.from.as_deref() {
-                return None;
-            }
-            payload
-        }
-        None => &message.body,
-    };
-    payload
-        .get("credential_response")
-        .and_then(|cr| cr.get("credential"))
+    let issuer = message.body.get("issuer").and_then(Value::as_str)?;
+    if Some(issuer) != message.from.as_deref() {
+        return None;
+    }
+    message
+        .body
+        .pointer("/payload/credential_response/credential")
         .cloned()
 }
 
@@ -2636,14 +2627,10 @@ mod tests {
         acct
     }
 
+    /// An `issue` as a VTC pushes it: a Trust Task document from `from`. Not
+    /// signed — these tests start after verification.
     fn issue(from: &str, credential: serde_json::Value) -> Message {
-        Message::build(
-            Uuid::new_v4().to_string(),
-            CREDENTIAL_ISSUE_TYPE.to_string(),
-            serde_json::json!({ "credential_response": { "credential": credential } }),
-        )
-        .from(from.to_string())
-        .finalize()
+        enveloped_issue_message(from, from, &credential)
     }
 
     /// A VTC pushes `issue` as a signed Trust Task document in the binding
@@ -2695,17 +2682,23 @@ mod tests {
         assert_eq!(credential_in_issue(&m), None);
     }
 
-    /// A VTC from before the change sent the payload as the bare body; it is
-    /// still read, and the credential's own proof decides what is stored.
+    /// A bare body — the shape a VTC sent before every `issue` was a signed
+    /// document — carries nothing this client acts on.
     #[test]
-    fn the_credential_is_still_read_from_a_bare_issue_body() {
+    fn a_bare_issue_body_is_not_read() {
         let credential = vc(
             &["VerifiableCredential"],
             "did:example:vtc",
             "did:example:p",
         );
-        let m = issue("did:example:vtc", credential.clone());
-        assert_eq!(credential_in_issue(&m), Some(credential));
+        let m = Message::build(
+            Uuid::new_v4().to_string(),
+            CREDENTIAL_ISSUE_TYPE.to_string(),
+            serde_json::json!({ "credential_response": { "credential": credential } }),
+        )
+        .from("did:example:vtc".to_string())
+        .finalize();
+        assert_eq!(credential_in_issue(&m), None);
     }
 
     /// The message's credential, treated as verified — these tests cover what
