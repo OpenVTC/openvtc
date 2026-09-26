@@ -92,7 +92,7 @@ anyhow.workspace = true
 # `COMMIT_MSG_HOOK_VERSION` (verifiable-git-infrastructure #72), which the Repos
 # panel's signing-health row reads rather than re-implementing the hook's
 # version marker. Same `vta-sdk` 0.51 line as 0.4.13.
-did-git-sign = "0.4.14"
+did-git-sign = "0.5"
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true

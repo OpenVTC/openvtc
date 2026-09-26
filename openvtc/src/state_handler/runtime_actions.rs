@@ -484,8 +484,9 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
             }
         }
         Action::RequestPersonhoodChallenge(i) => {
-            // Ask the community for the nonce an assertion must carry. No key
-            // is needed yet — nothing is signed until the challenge comes back.
+            // `vtc/members/personhood/challenge/0.1` declares `proof`
+            // REQUIRED (trust-tasks 0.23): signed with the authentication
+            // key, the same way the assertion that follows it is.
             let target = ctx
                 .config
                 .account

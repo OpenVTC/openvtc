@@ -925,9 +925,17 @@ async fn a_vetter_publishes_a_profile_and_hears_the_communitys_answer() {
     draft.languages = "en, cs".into();
     let body = draft.to_body().unwrap();
 
-    // What the community receives is signed by the vetter and opens as a profile.
+    // What the community receives is signed by the vetter, with the
+    // authentication key and proofPurpose (trust-tasks 0.23: `proof`
+    // REQUIRED, and this is the vetter acting on their own standing, not a
+    // claim to be held to later — the same purpose a personhood challenge or
+    // assertion is signed with), and opens as a profile.
     let mut request = wire::vetter_profile_request(&vetter.did, COMMUNITY, &body).unwrap();
     wire::sign(&mut request, &vetter.secret).await.unwrap();
+    assert_eq!(
+        request.proof.as_ref().unwrap().proof_purpose,
+        "authentication"
+    );
     // It travels in the binding envelope; the community takes that off first.
     let sent = wire::to_message(&request).unwrap();
     assert_eq!(sent.typ, crate::capabilities::TRUST_TASK_ENVELOPE_TYPE);

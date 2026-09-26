@@ -36,9 +36,11 @@ pub use trust_tasks_capability_client::{
 /// party making the request. Every Trust Task request this client sends is
 /// signed this way (a community requires a document proof bound to the sender
 /// on every request); `signing_secret` must therefore be a key the issuer's DID
-/// document lists under `authentication`. Signing is kept local rather than in the shared crate:
-/// each consumer signs with its own signer and its own error type, so the
-/// wire crate stays crypto-free.
+/// document lists under `authentication`. This is the one signing path for a
+/// request: there is no purpose to choose, so a request cannot go out under
+/// `assertionMethod` by mistake. Signing is kept local rather than in the
+/// shared crate: each consumer signs with its own signer and its own error
+/// type, so the wire crate stays crypto-free.
 ///
 /// NOTE: v1 signs directly in the client; routing the approval through the
 /// delegated-execution consent flow is the planned upgrade
@@ -133,5 +135,23 @@ mod tests {
         assert_eq!(v["recipient"], "did:example:vtc");
         assert!(v.get("issuedAt").is_some(), "{v}");
         assert_eq!(v["proof"]["proofPurpose"], "authentication");
+    }
+
+    /// A capability toggle acts on the community rather than making a claim,
+    /// so it is signed with the authentication key under `authentication`
+    /// (VTI-KEY-022), like every other request.
+    #[tokio::test]
+    async fn a_toggle_request_is_signed_for_authentication() {
+        use affinidi_tdk::dids::{DID, KeyType};
+
+        let (issuer_did, signer) =
+            DID::generate_did_key(KeyType::Ed25519).expect("did:key generates");
+        let mut doc =
+            build_toggle_document(&issuer_did, "did:example:vtc", "git-trust", "0.1", true);
+
+        sign_document(&mut doc, &signer).await.expect("signs");
+
+        let proof = doc.proof.as_ref().expect("a proof is attached");
+        assert_eq!(proof.proof_purpose, "authentication");
     }
 }

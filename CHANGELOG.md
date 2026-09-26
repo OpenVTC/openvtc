@@ -41,6 +41,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a session they open afterwards finds nothing to answer. The message says to
   tell them.
 
+### Changed
+
+- **`git-ns/repo/create` moves to `0.3`, and the new-repository form can name
+  owners.** A namespace admin's `repo.create` is implied by `ns.admin`, and in
+  `0.2` that let them make themselves owner — and so forge admin — of any
+  repository they created, alone. `0.3` closes that: the requester becomes
+  owner only when their `repo.create` is an explicit grant; an admin whose
+  `repo.create` is only implied must name someone else in the form's new
+  Owners field (Ctrl+D pastes a DID for someone not in the picker, Ctrl+A adds
+  it), or the community refuses with `git-ns:selfGrantNotAllowed` — shown with
+  what to do about it: ask another administrator, or break the glass (`cnm git
+  break-glass`). Naming an owner is itself a grant of `repo.own`, so it needs
+  the authority to grant it (`git-ns:escalation` otherwise) and arms the
+  confirmation like any other elevated change.
+
 ### Fixed
 
 - **Issued credentials are verified before they are stored.** A membership or
@@ -136,6 +151,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   anonymous HTTP manifest question sent before joining stays unsigned by
   design. **Breaking (wire):** a community that checks a request proof's
   purpose against `assertionMethod` refuses these; deploy with VTI #1739.
+  There is one signing path for a request, and it has no purpose to choose:
+  `capabilities::sign_document`, `trust_task_doc::build_signed_value` and
+  `vetting::wire::sign` always sign for `authentication`, and the
+  purpose-taking variants added alongside them (`sign_document_as`,
+  `build_signed_value_as`, `wire::sign_as`) are removed.
 
 - **The last replies taken on the sender's word now need the right party, or a
   proof.** A capability or git-ns reply — a refusal (`trust-task-error`) as

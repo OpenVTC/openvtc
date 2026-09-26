@@ -96,7 +96,8 @@ pub fn refusal(
         .map_err(|e| config_error("error document", e))
 }
 
-/// Sign `doc` as its issuer.
+/// Sign `doc` as its issuer, with its authentication key under
+/// `proofPurpose: authentication` (see [`crate::capabilities::sign_document`]).
 pub async fn sign(doc: &mut TrustTask<Value>, signer: &Secret) -> Result<(), OpenVTCError> {
     crate::capabilities::sign_document(doc, signer).await
 }
@@ -527,6 +528,22 @@ pub(crate) mod tests {
             .await,
             Err(WireError::Proof(_))
         ));
+    }
+
+    /// `vtc/vetting/vetters/resend/0.1` declares `proof` REQUIRED
+    /// (trust-tasks 0.23), and is signed the same way as a personhood
+    /// challenge or assertion: with the authentication key, under
+    /// `proofPurpose: authentication` — both are the persona acting on their
+    /// own standing rather than making a claim to be held to later.
+    #[tokio::test]
+    async fn a_resend_request_is_signed_under_authentication_proof_purpose() {
+        let vetter = secret(3);
+        let mut request = vetter_resend_request(&did(&vetter), "did:key:zVtc").unwrap();
+        sign(&mut request, &vetter).await.unwrap();
+        assert_eq!(
+            request.proof.as_ref().unwrap().proof_purpose,
+            "authentication"
+        );
     }
 
     /// Toward a community the DIDComm `type` is the binding envelope, which a
