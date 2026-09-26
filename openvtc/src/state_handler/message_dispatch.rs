@@ -438,6 +438,7 @@ fn verification_job(
         || openvtc_core::git_ns::is_reply_type(typ)
         || [
             MEMBER_REMOVAL_NOTICE_TYPE,
+            MEMBER_REQUEST_VMC_TYPE,
             JOIN_REQUEST_SUBMIT_RECEIPT_TYPE,
             JOIN_REQUEST_SUBMIT_RESPONSE_TYPE,
             JOIN_REQUEST_STATUS_RESPONSE_TYPE,
@@ -1265,12 +1266,34 @@ async fn process_inbound(
         return Ok(true);
     }
 
-    // VTC → member: "please issue + send your VMC" (`members/request-vmc/1.0`).
+    // VTC → member: "please issue + send your VMC" (`members/request-vmc/0.1`).
     // Auto-answer: the sender is the community VTC and the recipient is one of our
     // personas; if we hold an Active membership there, issue + send our reciprocal
     // VMC straight back. Best-effort — a failure is logged, not surfaced as a stuck
     // state (the admin can re-request, or the member can issue manually with `m`).
+    //
+    // Only on the community's signed request: the VTC pushes it as an
+    // operational document, checked before dispatch like the removal notice —
+    // its `authentication` key, addressed to the persona, fresh, not seen
+    // before. The transport sender alone would let anyone who can reach us
+    // make this client sign and send a credential.
     if message.typ == MEMBER_REQUEST_VMC_TYPE {
+        let verified = match pre_operational(&pre) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(vtc = %from_did, error = %e, "members/request-vmc is not the community's signed request — ignoring");
+                return Ok(false);
+            }
+        };
+        let now = chrono::Utc::now();
+        if let Err(e) = verified.check(&config.private.seen_documents, now) {
+            warn!(vtc = %from_did, error = %e, "members/request-vmc already acted on — ignoring");
+            return Ok(false);
+        }
+        if let Err(e) = verified.commit(&mut config.private.seen_documents, now) {
+            warn!(vtc = %from_did, error = %e, "members/request-vmc could not be recorded — ignoring");
+            return Ok(false);
+        }
         match recipient_persona {
             Some(persona_id)
                 if config
@@ -2107,10 +2130,13 @@ mod tests {
     }
 
     /// A message whose sender has messages queued for a check waits behind
-    /// them rather than overtaking them, and is handled when its turn comes:
-    /// a `members/request-vmc` arriving while the credential that activates
-    /// the membership is still being verified is not dropped for want of an
-    /// Active membership.
+    /// them rather than overtaking them, and is handled when its turn comes.
+    ///
+    /// The message here has no check of its own, which is what makes it wait
+    /// as a barrier. (This used `members/request-vmc`, until that became the
+    /// community's signed document with a check of its own; its ordering is
+    /// the same, and `a_request_for_our_vmc_waits_for_the_communitys_signature`
+    /// covers it.)
     #[tokio::test]
     async fn a_message_behind_a_check_from_its_sender_waits_its_turn() {
         let (vtc, _) = community_key();
@@ -2118,8 +2144,8 @@ mod tests {
         let mut config = pending_config(&vtc);
         let m = Message::build(
             uuid::Uuid::new_v4().to_string(),
-            MEMBER_REQUEST_VMC_TYPE.to_string(),
-            serde_json::json!({}),
+            "https://didcomm.org/trust-ping/2.0/ping".to_string(),
+            serde_json::json!({ "response_requested": false }),
         )
         .from(vtc.clone())
         .to(PERSONA.to_string())
@@ -2144,6 +2170,52 @@ mod tests {
         )
         .await;
         assert!(effects.deferred.is_none());
+    }
+
+    /// `members/request-vmc` makes this client sign and send a credential, so
+    /// it is the community's signed operational document or nothing: it is set
+    /// aside for that check, never acted on for the transport sender alone, and
+    /// a check that did not pass issues no VMC.
+    #[tokio::test]
+    async fn a_request_for_our_vmc_waits_for_the_communitys_signature() {
+        let (vtc, _) = community_key();
+        let tdk = test_tdk().await;
+        let mut config = pending_config(&vtc);
+        let m = Message::build(
+            uuid::Uuid::new_v4().to_string(),
+            MEMBER_REQUEST_VMC_TYPE.to_string(),
+            serde_json::json!({}),
+        )
+        .from(vtc.clone())
+        .to(PERSONA.to_string())
+        .created_time(chrono::Utc::now().timestamp() as u64)
+        .finalize();
+
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+        let deferred = effects
+            .deferred
+            .expect("a request for our VMC is checked before it is answered");
+        assert!(
+            matches!(deferred.job, VerifyJob::Operational { .. }),
+            "checked as the community's operational document"
+        );
+
+        let effects = dispatch(
+            &mut config,
+            &tdk,
+            &deferred.message,
+            Arrival::Returning(deferred.job.unfinished()),
+        )
+        .await;
+        assert!(effects.deferred.is_none());
+        assert!(
+            config
+                .account
+                .memberships_for(&vtc)
+                .iter()
+                .all(|m| m.member_vmc.is_none()),
+            "an unverified request issues nothing"
+        );
     }
 
     /// A message kept across a restart is queued for its check again — past

@@ -946,14 +946,31 @@ pub fn handle_community_profile_show_response(
 
 /// The credential a VTC `credential-exchange/issue` carries, unverified.
 ///
-/// The known-holder delivery carries the VC at `credential_response.credential`.
-/// `sealed` issues (invite / air-gap) are not handled here. Pass the result to
-/// [`crate::issued_credential::verify_issued_credential`]; only what that
-/// returns can be stored.
+/// The known-holder delivery carries the VC at `credential_response.credential`
+/// of the task's payload. A VTC pushes the `issue` as a signed Trust Task
+/// document (VTI #credential-exchange onto the spine), so the payload sits
+/// under `payload` and the document's `issuer` must be the community that sent
+/// it; a document naming anyone else is refused here, before anything is
+/// verified. An older VTC sent the payload as the bare message body, which is
+/// still read — the credential's own proof, not the delivery, is what
+/// [`crate::issued_credential::verify_issued_credential`] checks before
+/// anything is stored.
+///
+/// `sealed` issues (invite / air-gap) are not handled here. Only what
+/// `verify_issued_credential` returns can be stored.
 #[must_use]
 pub fn credential_in_issue(message: &Message) -> Option<Value> {
-    message
-        .body
+    let payload = match message.body.get("payload") {
+        Some(payload) => {
+            let issuer = message.body.get("issuer").and_then(Value::as_str);
+            if issuer.is_none() || issuer != message.from.as_deref() {
+                return None;
+            }
+            payload
+        }
+        None => &message.body,
+    };
+    payload
         .get("credential_response")
         .and_then(|cr| cr.get("credential"))
         .cloned()
@@ -2627,6 +2644,68 @@ mod tests {
         )
         .from(from.to_string())
         .finalize()
+    }
+
+    /// A VTC pushes `issue` as a signed Trust Task document in the binding
+    /// envelope; opened, the message body is the document and the credential
+    /// sits under its `payload`.
+    fn enveloped_issue_message(
+        from: &str,
+        issuer: &str,
+        credential: &serde_json::Value,
+    ) -> Message {
+        Message::build(
+            Uuid::new_v4().to_string(),
+            CREDENTIAL_ISSUE_TYPE.to_string(),
+            serde_json::json!({
+                "id": format!("urn:uuid:{}", Uuid::new_v4()),
+                "type": CREDENTIAL_ISSUE_TYPE,
+                "issuer": issuer,
+                "recipient": "did:example:persona",
+                "payload": { "credential_response": { "credential": credential } },
+                "proof": { "type": "DataIntegrityProof" },
+            }),
+        )
+        .from(from.to_string())
+        .finalize()
+    }
+
+    #[test]
+    fn the_credential_is_read_from_a_pushed_issue_document() {
+        let credential = vc(
+            &["VerifiableCredential"],
+            "did:example:vtc",
+            "did:example:p",
+        );
+        let m = enveloped_issue_message("did:example:vtc", "did:example:vtc", &credential);
+        assert_eq!(credential_in_issue(&m), Some(credential));
+    }
+
+    /// A document delivered by one party naming another as its issuer is not
+    /// read at all: nothing downstream is asked to verify a credential whose
+    /// delivery already contradicts itself.
+    #[test]
+    fn an_issue_document_from_someone_other_than_its_issuer_is_not_read() {
+        let credential = vc(
+            &["VerifiableCredential"],
+            "did:example:vtc",
+            "did:example:p",
+        );
+        let m = enveloped_issue_message("did:example:relay", "did:example:vtc", &credential);
+        assert_eq!(credential_in_issue(&m), None);
+    }
+
+    /// A VTC from before the change sent the payload as the bare body; it is
+    /// still read, and the credential's own proof decides what is stored.
+    #[test]
+    fn the_credential_is_still_read_from_a_bare_issue_body() {
+        let credential = vc(
+            &["VerifiableCredential"],
+            "did:example:vtc",
+            "did:example:p",
+        );
+        let m = issue("did:example:vtc", credential.clone());
+        assert_eq!(credential_in_issue(&m), Some(credential));
     }
 
     /// The message's credential, treated as verified — these tests cover what
