@@ -1618,14 +1618,16 @@ mod tests {
     /// generated round trip is the proof — and names the right task.
     #[test]
     fn every_request_builds_a_payload_its_task_accepts() {
+        // `git-ns/view/0.4` does not declare `proof` REQUIRED (0.1–0.3 did);
+        // the view is signed all the same, like every request (`build_signed`).
         let cases = [
-            (Request::View { resource: None }, "git-ns/view", true),
+            (Request::View { resource: None }, "git-ns/view", false),
             (
                 Request::View {
                     resource: Some("github.com/acme".into()),
                 },
                 "git-ns/view",
-                true,
+                false,
             ),
             (
                 Request::Create {
