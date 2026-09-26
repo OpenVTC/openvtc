@@ -450,6 +450,26 @@ fn repos_key(
                     value: format!("{current}{c}"),
                 })
             }
+            (4, KeyCode::Char('d')) if ctrl => Some(R::NewOwnerToggleExternal),
+            (4, KeyCode::Char('a')) if ctrl => Some(R::NewOwnerAdd),
+            (4, KeyCode::Up) if !form.owner_external => {
+                Some(R::NewOwnerPick(form.owner_pick.saturating_sub(1)))
+            }
+            (4, KeyCode::Down) if !form.owner_external => {
+                Some(R::NewOwnerPick(form.owner_pick + 1))
+            }
+            (4, KeyCode::Backspace) => {
+                if form.owner_query.is_empty() {
+                    Some(R::NewOwnerRemoveLast)
+                } else {
+                    let mut value = form.owner_query.clone();
+                    value.pop();
+                    Some(R::NewOwnerQuery(value))
+                }
+            }
+            (4, KeyCode::Char(c)) if !ctrl => {
+                Some(R::NewOwnerQuery(format!("{}{c}", form.owner_query)))
+            }
             _ => None,
         };
     }
@@ -512,6 +532,7 @@ fn repos_paste(
                 field: 3,
                 value: format!("{}{text}", form.description),
             }),
+            4 => Some(R::NewOwnerQuery(format!("{}{text}", form.owner_query))),
             _ => None,
         };
     }
@@ -4385,6 +4406,54 @@ mod key_handler_tests {
         assert_eq!(
             repos_key(press(KeyCode::Enter), &adding),
             Some(R::AddSubmit)
+        );
+    }
+
+    /// The new-repository form's owner picker (field 4): typing filters,
+    /// Ctrl+D pastes a DID, Ctrl+A adds it, and Enter still submits the
+    /// whole form rather than the owner field.
+    #[test]
+    fn the_new_repo_owner_field_maps_its_keys() {
+        use crate::state_handler::actions::ReposAction as R;
+        use crate::state_handler::main_page::repos::{NewRepoForm, ReposScreen};
+
+        let mut naming = repos_view();
+        let mut form = NewRepoForm {
+            field: 4,
+            ..NewRepoForm::default()
+        };
+        form.owner_query = "da".into();
+        naming.screen = ReposScreen::NewRepo(form);
+        assert_eq!(
+            repos_key(press(KeyCode::Char('n')), &naming),
+            Some(R::NewOwnerQuery("dan".into()))
+        );
+        assert_eq!(
+            repos_key(ctrl(KeyCode::Char('a')), &naming),
+            Some(R::NewOwnerAdd)
+        );
+        assert_eq!(
+            repos_key(ctrl(KeyCode::Char('d')), &naming),
+            Some(R::NewOwnerToggleExternal)
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Enter), &naming),
+            Some(R::NewSubmit),
+            "Enter submits the form, not the owner field"
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Backspace), &naming),
+            Some(R::NewOwnerQuery("d".into()))
+        );
+
+        let mut empty_query = naming.clone();
+        if let ReposScreen::NewRepo(form) = &mut empty_query.screen {
+            form.owner_query.clear();
+        }
+        assert_eq!(
+            repos_key(press(KeyCode::Backspace), &empty_query),
+            Some(R::NewOwnerRemoveLast),
+            "backspace on an empty query drops the last owner, chip-input style"
         );
     }
 

@@ -41,6 +41,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a session they open afterwards finds nothing to answer. The message says to
   tell them.
 
+### Changed
+
+- **`git-ns/repo/create` moves to `0.3`, and the new-repository form can name
+  owners.** A namespace admin's `repo.create` is implied by `ns.admin`, and in
+  `0.2` that let them make themselves owner — and so forge admin — of any
+  repository they created, alone. `0.3` closes that: the requester becomes
+  owner only when their `repo.create` is an explicit grant; an admin whose
+  `repo.create` is only implied must name someone else in the form's new
+  Owners field (Ctrl+D pastes a DID for someone not in the picker, Ctrl+A adds
+  it), or the community refuses with `git-ns:selfGrantNotAllowed` — shown with
+  what to do about it: ask another administrator, or break the glass (`cnm git
+  break-glass`). Naming an owner is itself a grant of `repo.own`, so it needs
+  the authority to grant it (`git-ns:escalation` otherwise) and arms the
+  confirmation like any other elevated change.
+
 ### Fixed
 
 - **Vetting questions and personhood reach a community again.** A community
