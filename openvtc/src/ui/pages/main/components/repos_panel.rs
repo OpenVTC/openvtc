@@ -19,7 +19,7 @@ use crate::state_handler::main_page::repos::{
 };
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
 use crate::state_handler::state::ConnectionState;
-use openvtc_core::git_ns::{self, GitRight, RepoStatus};
+use openvtc_core::git_ns::{self, BreakGlassState, GitRight, RepoStatus};
 
 use super::panel::Panel;
 
@@ -128,6 +128,8 @@ impl Panel for ReposPanel {
             ReposPhase::Loaded => {}
         }
 
+        render_break_glass(&mut lines, view, chrono::Utc::now());
+
         match &view.screen {
             ReposScreen::List => render_list(&mut lines, view, &state.repos.linked),
             ReposScreen::Repo { resource } => render_repo(&mut lines, view, resource),
@@ -152,6 +154,93 @@ impl Panel for ReposPanel {
             push_status(&mut lines, status);
         }
         lines
+    }
+}
+
+// ****************************************************************************
+// Break-glass banner
+// ****************************************************************************
+
+/// How many records the banner lists by name before it summarises the rest.
+const BREAK_GLASS_LISTED: usize = 5;
+
+/// The banner every screen of the panel opens with while any break-glass
+/// record awaits ratification (`git-ns/right/break-glass`): someone gave
+/// themselves an elevated right nobody else granted, and until another
+/// administrator ratifies or revokes it, it stays in front of them.
+///
+/// The VTC chooses who receives these records (`git-ns/view` 0.4 returns them
+/// to every administrator of the namespace, the resource's owners and the
+/// subject), so the banner shows every one the view holds.
+fn render_break_glass(
+    lines: &mut Vec<Line<'static>>,
+    view: &ReposView,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let alerts = view.break_glass(now);
+    if alerts.is_empty() {
+        return;
+    }
+    let alarm = Style::default().fg(COLOR_WARNING_ACCESSIBLE_RED).bold();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  ⚠ BREAK-GLASS — {} self-granted right{} awaiting ratification",
+            alerts.len(),
+            if alerts.len() == 1 { "" } else { "s" }
+        ),
+        alarm,
+    )));
+    for a in alerts.iter().take(BREAK_GLASS_LISTED) {
+        let who = if a.mine {
+            "You".to_string()
+        } else {
+            shorten_did(&view.name_of(&a.subject), 32)
+        };
+        let pending = a
+            .pending_until
+            .map(|e| format!(" · takes effect {}", e.format("%Y-%m-%d %H:%M UTC")))
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::styled("    ● ", alarm),
+            text(format!(
+                "{who} gave {} {} on {} · {}{pending}",
+                if a.mine { "yourself" } else { "themselves" },
+                a.right,
+                a.resource,
+                a.at.format("%Y-%m-%d %H:%M UTC"),
+            )),
+        ]));
+        lines.push(Line::from(dim(format!(
+            "      why: {}",
+            sanitize_display(&a.justification, 2048)
+        ))));
+    }
+    if alerts.len() > BREAK_GLASS_LISTED {
+        lines.push(Line::from(dim(format!(
+            "    … and {} more",
+            alerts.len() - BREAK_GLASS_LISTED
+        ))));
+    }
+    match alerts.iter().find(|a| !a.mine) {
+        Some(first) => {
+            lines.push(Line::from(dim(
+                "    Another administrator ratifies or revokes each one — in the admin console \
+                 (Repos → Break-glass grants), or with cnm:",
+            )));
+            lines.push(Line::from(text(format!(
+                "      {}",
+                first.ratify_command()
+            ))));
+            lines.push(Line::from(text(format!(
+                "      {}",
+                first.revoke_command()
+            ))));
+        }
+        None => lines.push(Line::from(dim(
+            "    Another community administrator or namespace admin must ratify or revoke it; \
+             it stays flagged, and in front of every administrator, until one does.",
+        ))),
     }
 }
 
@@ -567,7 +656,7 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
         if p.namespace_wide {
             granted.push_str(" · namespace-wide");
         }
-        lines.push(Line::from(vec![
+        let mut row = vec![
             Span::raw(if selected { "    ▸ " } else { "      " }),
             Span::styled(
                 format!("{:<34}", shorten_did(&view.name_of(&p.did), 32)),
@@ -575,7 +664,19 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
             ),
             text(format!("{:<14}", p.right.label())),
             dim(granted),
-        ]));
+        ];
+        if let Some(bg) = p.break_glass {
+            row.push(Span::styled(
+                format!(" · {}", bg.label()),
+                match bg {
+                    BreakGlassState::Unratified => {
+                        Style::default().fg(COLOR_WARNING_ACCESSIBLE_RED).bold()
+                    }
+                    BreakGlassState::Ratified => Style::default().fg(COLOR_DARK_GRAY),
+                },
+            ));
+        }
+        lines.push(Line::from(row));
         if selected && let Some(reason) = &p.reason {
             lines.push(Line::from(dim(format!(
                 "        reason: {}",
@@ -975,6 +1076,7 @@ mod tests {
         );
         v.data = Some(Arc::new(
             serde_json::from_value(json!({
+                "accounts": [],
                 "namespaces": [{"id": "ns_1", "forge": "github.com", "owner": "acme",
                                 "kind": "organization", "mode": "bridge", "state": "bound"}],
                 "repos": [{"resource": "github.com/acme/gadgets", "visibility": "public",
@@ -1055,12 +1157,21 @@ mod tests {
         assert!(!out.contains("not set up"), "{out}");
     }
 
-    /// Everything the VTC supplies is cleaned before it is drawn: a DID or
-    /// a reason carrying a bidi override or a zero-width character cannot
-    /// reorder or hide what the member reads.
+    /// Everything the VTC supplies is cleaned before it is drawn: a reason
+    /// carrying a bidi override or a zero-width character cannot reorder or
+    /// hide what the member reads. A DID carrying one no longer gets this far:
+    /// `git-ns/view` 0.4 pins `_shared/0.4`, whose DID-core pattern refuses it
+    /// when the answer is parsed (below).
     #[test]
     fn peer_text_is_sanitised_before_it_is_drawn() {
         let evil = "did:webvh:Qm\u{202E}evil\u{200B}:x.example";
+        let refused: Result<git_ns::view::RightRecord, _> = serde_json::from_value(json!({
+            "subject": evil, "right": "git.commit.sign",
+            "resource": "github.com/acme/gadgets",
+            "grantedBy": BOB, "grantedAt": "2026-09-01T00:00:00Z"
+        }));
+        assert!(refused.is_err(), "a DID with a bidi override is not a DID");
+        let evil = "did:webvh:QmEvilScid9:x.example";
         let mut v = loaded();
         let mut data = (**v.data.as_ref().unwrap()).clone();
         data.rights.push(
@@ -1188,5 +1299,79 @@ mod tests {
         assert!(out.contains("v revert drift   l link account"), "{out}");
         assert!(!out.contains("o adopt"), "{out}");
         assert!(out.contains("do it from the admin console or cnm"), "{out}");
+    }
+
+    const CAROL: &str = "did:webvh:QmCarolScid3:acme-vtc.example:carol";
+
+    /// `loaded()`, plus Carol's unratified break-glass ownership of
+    /// `gadgets`, as `git-ns/view` 0.4 returns it to an administrator.
+    fn with_break_glass(me: &str, justification: &str) -> ReposView {
+        let mut v = loaded();
+        v.me = me.into();
+        let mut data = serde_json::to_value(v.data.as_deref().unwrap()).unwrap();
+        data["rights"].as_array_mut().unwrap().push(json!({
+            "subject": CAROL, "right": "git.repo.own", "resource": "github.com/acme/gadgets",
+            "grantedBy": CAROL, "grantedAt": "2026-09-25T02:10:31Z",
+            "breakGlass": {"by": CAROL, "at": "2026-09-25T02:10:31Z", "justification": justification}
+        }));
+        v.data = Some(Arc::new(serde_json::from_value(data).unwrap()));
+        v
+    }
+
+    #[test]
+    fn no_banner_without_a_break_glass() {
+        let out = rendered(loaded());
+        assert!(!out.contains("BREAK-GLASS"), "{out}");
+    }
+
+    #[test]
+    fn an_administrator_sees_the_banner_with_the_commands() {
+        let out = rendered(with_break_glass(BOB, "CVE fix; owners unreachable"));
+        assert!(
+            out.contains("BREAK-GLASS — 1 self-granted right awaiting ratification"),
+            "{out}"
+        );
+        assert!(
+            out.contains("gave themselves git.repo.own on github.com/acme/gadgets"),
+            "{out}"
+        );
+        assert!(out.contains("why: CVE fix; owners unreachable"), "{out}");
+        assert!(out.contains("admin console"), "{out}");
+        assert!(
+            out.contains(&format!(
+                "cnm git ratify --subject={CAROL} --right=git.repo.own \
+                 --resource=github.com/acme/gadgets --break-glass-at=2026-09-25T02:10:31Z"
+            )),
+            "{out}"
+        );
+        assert!(out.contains("cnm git revoke --subject="), "{out}");
+    }
+
+    #[test]
+    fn the_subject_is_told_someone_else_must_ratify() {
+        let out = rendered(with_break_glass(CAROL, "CVE fix"));
+        assert!(out.contains("You gave yourself git.repo.own"), "{out}");
+        assert!(!out.contains("cnm git ratify"), "{out}");
+        assert!(out.contains("must ratify or revoke it"), "{out}");
+    }
+
+    #[test]
+    fn the_justification_is_sanitised_before_it_is_drawn() {
+        let out = rendered(with_break_glass(BOB, "evil\u{1b}[2Jtext"));
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+    }
+
+    #[test]
+    fn a_repo_view_flags_the_break_glass_right() {
+        let mut v = with_break_glass(BOB, "CVE fix");
+        v.screen = ReposScreen::Repo {
+            resource: "github.com/acme/gadgets".into(),
+        };
+        let out = rendered(v);
+        let row = out
+            .lines()
+            .find(|l| l.contains("carol") && l.contains(" owner "))
+            .unwrap_or_default();
+        assert!(row.contains("BREAK-GLASS"), "{out}");
     }
 }
