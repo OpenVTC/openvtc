@@ -173,7 +173,7 @@ async-trait = "0.1"
 arbitrary = { version = "1", features = ["derive"] }
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 base64 = "0.23"
-bip39 = "2.2"
+bip39 = "3.0"
 byteorder = "1.5"
 chrono = "0.4"
 clap = { version = "4.6", features = ["derive"] }
