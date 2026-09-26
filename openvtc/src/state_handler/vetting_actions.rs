@@ -3710,7 +3710,7 @@ pub(crate) fn spawn_grant_check(
     tdk: &affinidi_tdk::TDK,
     check: GrantCheck,
 ) {
-    let resolver = TrustTaskVmResolver::new(tdk.did_resolver().clone());
+    let resolver = tdk.did_resolver().clone();
     background_dispatch::spawn_dispatch(
         dispatch_tx.clone(),
         DispatchDomain::VettingStatus,

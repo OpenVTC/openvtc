@@ -6234,6 +6234,7 @@ dependencies = [
  "affinidi-messaging-sdk",
  "affinidi-messaging-test-mediator",
  "affinidi-net-guard",
+ "affinidi-status-list",
  "affinidi-tdk",
  "agent-names",
  "anyhow",

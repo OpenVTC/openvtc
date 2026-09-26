@@ -18,8 +18,9 @@
 //!     `JoinRequestSubmitBody` to bob; bob deserialises it, then replies
 //!     with an `approved` `JoinRequestStatusResponseBody`. Feeding the
 //!     wire-delivered response into the production
-//!     [`handle_join_status_response`] reducer flips the persisted
-//!     community `Pending → Active` and stamps `member_since` (R-B-8).
+//!     [`handle_join_status_response`] reducer acknowledges the join and
+//!     leaves it `Pending` — only the verified membership credential
+//!     activates it.
 //!   * `join_submit_and_rejection_inactivates` — same first leg, but a
 //!     `rejected` response drives `Pending → Rejected`, marks the
 //!     session for deregistration, and raises the actions-required badge
@@ -232,18 +233,20 @@ async fn join_submit_and_approval_activates() {
     .await;
 
     let outcome = handle_join_status_response(&mut account, &delivered, &vtc_did);
-    assert!(outcome.changed, "approval transitions the record");
+    assert!(outcome.changed, "approval is acknowledged");
     assert!(
         outcome.inactivated.is_none(),
         "approval keeps the live session"
     );
 
+    // An approval is not an admission: the membership turns Active only when
+    // the community's membership credential arrives and verifies.
     let record = account.memberships().next().expect("community");
-    assert!(record.status.is_active(), "Pending -> Active on approval");
     assert!(
-        record.member_since.is_some(),
-        "member_since stamped on activation"
+        !record.status.is_active(),
+        "still Pending until the credential"
     );
+    assert!(record.member_since.is_none());
 
     let _ = (persona_service, vtc_service);
     drop(mediator);
