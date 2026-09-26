@@ -713,6 +713,12 @@ impl Refusal {
                  the repository or a namespace admin."
                     .to_string()
             }
+            c if c == resolve::error_codes::ROLE_MAP_UNKNOWN.code => {
+                "The community doesn't yet know how this namespace's rights map to forge \
+                 roles: its bridge hasn't reported its role map. Try again once the bridge has \
+                 connected, or ask a community administrator to check it."
+                    .to_string()
+            }
             c if c == grant::error_codes::MEMBERS_ONLY.code => {
                 "Namespace admin and repo creator go only to current members, and that DID is \
                  not one. Repository rights for outside contributors are the community's policy."
@@ -1419,13 +1425,13 @@ mod tests {
     #[test]
     fn every_request_builds_a_payload_its_task_accepts() {
         let cases = [
-            (Request::View { resource: None }, "git-ns/view", false),
+            (Request::View { resource: None }, "git-ns/view", true),
             (
                 Request::View {
                     resource: Some("github.com/acme".into()),
                 },
                 "git-ns/view",
-                false,
+                true,
             ),
             (
                 Request::Create {
@@ -1475,7 +1481,7 @@ mod tests {
                     link_id: "lnk_4Tq9Xw2P".into(),
                 },
                 "git-ns/account/link-status",
-                false,
+                true,
             ),
         ];
         for (req, slug, proof) in cases {
