@@ -44,6 +44,7 @@ pub mod messaging;
 mod net_guard;
 #[cfg(feature = "openpgp-card")]
 pub mod openpgp_card;
+pub mod operational;
 pub mod persona;
 pub mod personhood;
 pub mod presentation;

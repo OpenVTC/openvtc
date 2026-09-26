@@ -483,11 +483,16 @@ impl Request {
                 }
                 let p: resolve::Payload =
                     serde_json::from_value(v).map_err(|e| conversion("drift/resolve", e))?;
-                if action == &DriftAction::Adopt && p.drift.observed.is_none() {
+                // This client speaks drift/resolve 0.1, whose adopt names no
+                // recipient: the VTC would grant to whoever holds the
+                // account's link when it runs. It is never built here (and a
+                // VTC serving 0.3 refuses one); adopt names its member in 0.3.
+                if action == &DriftAction::Adopt {
                     return Err(conversion(
                         "drift/resolve",
-                        "adopting records a right derived from the observed role, so the item's \
-                         observed value is required",
+                        "an adoption must name the member who receives the right \
+                         (git-ns/drift/resolve 0.3), which this client cannot see; adopt from \
+                         the admin console or cnm",
                     ));
                 }
                 serde_json::to_value(p)
@@ -821,6 +826,10 @@ impl Refusal {
             "proofRequired" | "proofInvalid" | "identityMismatch" => format!(
                 "The community could not verify this persona's signature{detail}. Check the \
                  persona's signing key under My Identity, then try again."
+            ),
+            "unsupportedVersion" if detail.contains("drift/resolve 0.3") => format!(
+                "The community no longer accepts an adoption that does not name who receives the \
+                 right{detail}. Adopt from the admin console or cnm; revert (v) works here."
             ),
             "unsupportedType" | "unsupportedVersion" => format!(
                 "This community does not serve git namespaces (git-ns 0.1){detail}. Its VTC \
@@ -1965,23 +1974,17 @@ mod tests {
             })
         );
 
-        // Adopting needs the observed value it derives the right from.
-        let mut blind = eve_role();
-        blind.observed = None;
+        // An adoption over 0.1 names no recipient, so it is never built:
+        // even with everything the 0.1 schema asks for.
         let adopt = Request::DriftResolve {
             resource: "github.com/acme/widgets".into(),
             action: DriftAction::Adopt,
-            item: blind,
+            item: eve_role(),
             reason: None,
             weighs_as: GitRight::RepoMaintain,
         };
-        assert!(
-            adopt
-                .payload()
-                .unwrap_err()
-                .to_string()
-                .contains("observed")
-        );
+        let err = adopt.payload().unwrap_err().to_string();
+        assert!(err.contains("must name the member"), "{err}");
     }
 
     /// What adopting records and what a revert weighs as, as the VTC's own
@@ -2210,6 +2213,22 @@ mod tests {
                 code.code
             );
         }
+    }
+
+    #[test]
+    fn a_recipientless_adopt_refusal_says_where_to_adopt() {
+        let text = refusal(
+            "unsupportedVersion",
+            Some("an adoption over git-ns/drift/resolve 0.1 names no recipient … Adopt with git-ns/drift/resolve 0.3"),
+        )
+        .explain();
+        assert!(text.contains("admin console or cnm"), "{text}");
+        // Other version refusals still read as before.
+        assert!(
+            refusal("unsupportedVersion", None)
+                .explain()
+                .contains("does not serve git namespaces")
+        );
     }
 
     #[test]

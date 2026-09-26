@@ -716,8 +716,9 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
             ]));
         }
         lines.push(Line::from(dim(if view.governs(resource) {
-            "      v reverts the highlighted item (the bridge re-applies the community's rights); \
-             o adopts a forge role as a right."
+            "      v reverts the highlighted item (the bridge re-applies the community's rights). \
+             Adopting a forge role as a right names the member who linked the account, which \
+             this panel cannot see: do it from the admin console or cnm."
         } else {
             "      An owner of this repository or a namespace admin reverts or adopts drift."
         })));
@@ -728,7 +729,7 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
         return;
     }
     let keys = if view.governs(resource) && !drift.is_empty() {
-        "↑/↓ navigate   a add   x revoke   t transfer   A archive   v revert drift   o adopt drift   l link account   r refresh   Esc back"
+        "↑/↓ navigate   a add   x revoke   t transfer   A archive   v revert drift   l link account   r refresh   Esc back"
     } else if view.governs(resource) {
         "↑/↓ navigate   a add   x revoke   t transfer   A archive   l link account   r refresh   Esc back"
     } else {
@@ -1276,7 +1277,7 @@ mod tests {
     }
 
     #[test]
-    fn an_owner_sees_drift_as_rows_with_revert_and_adopt() {
+    fn an_owner_sees_drift_as_rows_to_revert_and_where_to_adopt() {
         let mut v = loaded();
         let mut data = serde_json::to_value(&**v.data.as_ref().unwrap()).unwrap();
         data["repos"][0]["state"] = json!("active");
@@ -1295,8 +1296,9 @@ mod tests {
             out.contains("▸ ▲ protection weakened · forge shows force-push allowed"),
             "{out}"
         );
-        assert!(out.contains("v revert drift   o adopt drift"), "{out}");
-        assert!(!out.contains("admin console"), "{out}");
+        assert!(out.contains("v revert drift   l link account"), "{out}");
+        assert!(!out.contains("o adopt"), "{out}");
+        assert!(out.contains("do it from the admin console or cnm"), "{out}");
     }
 
     const CAROL: &str = "did:webvh:QmCarolScid3:acme-vtc.example:carol";

@@ -140,6 +140,10 @@ async fn relationship_request_round_trip() {
         reason: Some("integration test".to_string()),
         did: alice_did.clone(),
         name: Some("Alice".to_string()),
+        // The transport round trip is what this covers; the binding proofs
+        // have their own tests in `relationships`.
+        did_proof: None,
+        persona_proof: None,
     };
     let msg = Message::build(
         uuid::Uuid::new_v4().to_string(),

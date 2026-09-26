@@ -1089,8 +1089,14 @@ async fn dispatch_inbound(
                 continue;
             }
         };
-        // The transport authenticated the sender; the plaintext `from` header is
-        // sender-controlled. Prefer the cryptographically-bound one.
+        // The transport's sender is preferred over the plaintext `from` header,
+        // which the sender controls outright. But neither is an identity: the
+        // result is a **routing hint** — which conversation, which community
+        // record, whom to reply to. Anything that turns on *who said it* (a
+        // credential stored, a membership ended, a relationship bound to a DID,
+        // a community's answer acted on) must check a proof by that party
+        // (`crate::proof_check`), because the transport's sender binding is not
+        // something this client can rely on.
         let from = item.message.sender.clone().or_else(|| message.from.clone());
 
         for event in classify_inbound(message, transport, from, item.message.recipient.clone()) {
@@ -1220,6 +1226,12 @@ async fn frame_to_message(
 ///
 /// Belongs upstream on `InboundFrame` rather than here — see the note in
 /// [`Messaging::pickup_stored`].
+///
+/// **A routing hint, never an identity.** Even when this returns `Some`, the DID
+/// only says where a message claims to come from. Handlers use it to find the
+/// conversation it belongs to; a decision about who said something rests on a
+/// proof by that party, checked with [`crate::proof_check`] (issued credentials,
+/// removal notices, relationship DIDs, a community's answers).
 fn authenticated_sender(
     message: &Message,
     meta: &affinidi_messaging_sdk::messages::compat::UnpackMetadata,

@@ -226,6 +226,46 @@ pub async fn poll_join_status(
     Ok(())
 }
 
+/// Profile questions we have outstanding: document id → (community, when).
+/// In memory: a question is this process's, and its answer after a restart is
+/// simply not taken (the next launch asks again).
+static PROFILE_QUERIES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// How long a profile question waits for its answer.
+const PROFILE_QUERY_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+/// Most profile questions outstanding at once.
+const MAX_PROFILE_QUERIES: usize = 256;
+
+fn remember_profile_query(document_id: &str, vtc_did: &str) {
+    if let Ok(mut q) = PROFILE_QUERIES.lock() {
+        q.retain(|_, (_, at)| at.elapsed() < PROFILE_QUERY_TTL);
+        if q.len() < MAX_PROFILE_QUERIES {
+            q.insert(
+                document_id.to_string(),
+                (vtc_did.to_string(), std::time::Instant::now()),
+            );
+        }
+    }
+}
+
+/// Whether `thid` answers a profile question we put to `vtc_did` (and is not
+/// yet answered). Consumes it: a question is answered once.
+#[must_use]
+pub fn take_profile_query(vtc_did: &str, thid: &str) -> bool {
+    let Ok(mut q) = PROFILE_QUERIES.lock() else {
+        return false;
+    };
+    match q.get(thid) {
+        Some((vtc, at)) if vtc == vtc_did && at.elapsed() < PROFILE_QUERY_TTL => {
+            q.remove(thid);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Ask a community for its profile (`vtc/community/profile/show/0.1`) so we can
 /// read its declared `relationshipIdentifierDefault` (issue #241).
 ///
@@ -246,6 +286,8 @@ pub async fn send_community_profile_show(
     tsp_mediator_did: Option<&str>,
 ) -> Result<(), OpenVTCError> {
     let document_id = format!("urn:uuid:{}", Uuid::new_v4());
+    // Remembered before the send, so an answer racing it is still recognised.
+    remember_profile_query(&document_id, vtc_did);
     // The show payload carries only an optional extension bag; an empty object is
     // the request. The VTC reads the body as a Trust Task document, so it must be
     // wrapped (a bare payload is rejected `malformedRequest`).
@@ -620,9 +662,10 @@ pub fn is_invitation_credential(value: &Value) -> bool {
 ///   does not), `validUntil` (the invite's expiry), and `credentialStatus`
 ///   (issuance burns a revocation slot, so a VIC always carries one).
 ///
-/// `proof` / `credentialStatus` are not *re-verified* here (that is the VTC's
-/// job at submit) — their mere presence is what distinguishes a real signed VIC
-/// from a stripped copy.
+/// This is a **shape** check only: `proof` / `credentialStatus` are required
+/// to be present, not verified. Anything that uses an invitation — stores it,
+/// shows it as usable, reads its issuer — calls
+/// [`verify_invitation_credential`], which does verify them.
 pub fn validate_invitation_credential(vic: &Value) -> Result<(), String> {
     let mut missing: Vec<&str> = Vec::new();
 
@@ -686,6 +729,34 @@ pub fn validate_invitation_credential(vic: &Value) -> Result<(), String> {
             missing.join("; ")
         ))
     }
+}
+
+/// Check an invitation credential is complete **and** genuinely the
+/// community's: [`validate_invitation_credential`], then its proof verified
+/// against its issuer's DID document (`assertionMethod`, every proof in a set),
+/// its validity window, and its revocation status, which must be established
+/// ([`crate::issued_credential`]).
+///
+/// Until this passes, nothing read from the invitation — above all its issuer —
+/// may be shown as the community or used to prefill one: anyone can write an
+/// invitation naming any community.
+///
+/// # Errors
+///
+/// A sentence for the user saying what failed.
+pub async fn verify_invitation_credential(
+    vic: &Value,
+    resolver: &affinidi_did_resolver_cache_sdk::DIDCacheClient,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    validate_invitation_credential(vic)?;
+    let issuer = invitation_issuer(vic)
+        .ok_or_else(|| "the invitation names no issuer".to_string())?
+        .to_string();
+    crate::issued_credential::verify_issued_credential(vic.clone(), &issuer, resolver, now)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("the invitation did not verify: {e}"))
 }
 
 #[cfg(test)]
@@ -942,6 +1013,69 @@ mod tests {
             "credentialStatus": { "type": "BitstringStatusListEntry" },
             "proof": { "type": "DataIntegrityProof" }
         })
+    }
+
+    /// An invitation is used only once its proof verifies against the issuer
+    /// it names: an unsigned one, one signed by somebody else, and a signed one
+    /// whose revocation status cannot be established are all refused.
+    #[tokio::test]
+    async fn an_invitation_must_verify_against_its_issuer() {
+        let resolver = affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
+            affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+        )
+        .await
+        .unwrap();
+        let key = |seed: u8| {
+            let mut s = affinidi_tdk::secrets_resolver::secrets::Secret::generate_ed25519(
+                None,
+                Some(&[seed; 32]),
+            );
+            let mb = s.get_public_keymultibase().unwrap();
+            let did = format!("did:key:{mb}");
+            s.id = format!("{did}#{mb}");
+            (did, s)
+        };
+        let (community, community_key) = key(0x61);
+        let (_, other_key) = key(0x62);
+        let mut vic = complete_vic();
+        vic["issuer"] = json!(community);
+        vic["credentialStatus"] = json!({
+            "type": "BitstringStatusListEntry",
+            "statusPurpose": "revocation",
+            "statusListIndex": "3",
+            "statusListCredential": "https://127.0.0.1:1/status",
+        });
+        let now = chrono::Utc::now();
+
+        // The fixture's placeholder proof is not a proof.
+        let err = verify_invitation_credential(&vic, &resolver, now)
+            .await
+            .unwrap_err();
+        assert!(err.contains("did not verify"), "{err}");
+
+        let forged = crate::proof_check::test_support::sign(vic.clone(), &[&other_key]).await;
+        let err = verify_invitation_credential(&forged, &resolver, now)
+            .await
+            .unwrap_err();
+        assert!(err.contains("does not belong to the signer"), "{err}");
+
+        let genuine = crate::proof_check::test_support::sign(vic.clone(), &[&community_key]).await;
+        let err = verify_invitation_credential(&genuine, &resolver, now)
+            .await
+            .unwrap_err();
+        assert!(err.contains("revocation status"), "{err}");
+    }
+
+    #[test]
+    fn a_profile_answer_is_taken_once_and_only_from_the_community_asked() {
+        remember_profile_query("urn:uuid:q1", "did:webvh:vtc");
+        assert!(!take_profile_query("did:webvh:mallory", "urn:uuid:q1"));
+        assert!(!take_profile_query("did:webvh:vtc", "urn:uuid:other"));
+        assert!(take_profile_query("did:webvh:vtc", "urn:uuid:q1"));
+        assert!(
+            !take_profile_query("did:webvh:vtc", "urn:uuid:q1"),
+            "answered once"
+        );
     }
 
     #[test]

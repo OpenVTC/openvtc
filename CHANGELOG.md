@@ -94,6 +94,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is checked by the same rules (purpose `assertionMethod`, listed by the
   issuer, a method the issuer controls).
 
+- **Decisions about who said something rest on a proof, not the sender.** The
+  sender a message arrives from is now treated as a routing hint only.
+  - *Relationship DIDs.* A relationship request and its acceptance carry proofs
+    (`didProof`, and `personaProof` when an R-DID is used) that bind the
+    relationship DID to that handshake — its thread id, both personas and the
+    side it is made for (`role`: request or accept, so one side's proof cannot
+    stand as the other's) — signed by an `authentication` key of the DID and of
+    the persona naming it.
+    A request or acceptance without valid proofs is refused. An acceptance,
+    finalize or rejection is matched only by the thread id of a request of ours
+    in the right state and from the party it went to; the fallback that matched
+    by sender alone is gone, so a rejection can no longer end an established
+    relationship. **Breaking (wire):** both peers need this version; a request
+    in flight across the upgrade must be sent again.
+  - *Operational documents from a community* — removal notices and its
+    vetting answers (manifest, vetter directory, profile, resend, withdrawal
+    record) — are acted on only when signed with the community's
+    `authentication` key (an `assertionMethod` proof is refused: VTI-KEY-106),
+    of the type it is handled as (its signed `type` must equal the handler's,
+    so a signed answer cannot be acted on as a removal notice or another
+    answer; the window follows that type), addressed to one of our personas
+    (`recipient` required), dated inside the
+    kind's window (`issuedAt` required; 30 days for a removal notice, a day for
+    an answer; `expiresAt` honoured), and never seen before — document ids are
+    remembered, persisted, until their window passes (VTI-KEY-107). An id is
+    recorded only once the document is bound — from a community we belong to
+    with a payload naming what it should, or answering a request of ours — so
+    a party with no standing cannot write to the set; the set is keyed by
+    issuer, ids are capped at 256 characters, and each issuer's quota refuses
+    new documents rather than evicting a live entry. A refused
+    removal notice is noted in the activity log.
+  - *Vetter role credentials* are kept only when their proof verifies
+    (`assertionMethod`, like every credential).
+  **Breaking (wire):** a community must sign operational documents with an
+  `authentication` key and include `recipient` and `issuedAt`.
+  **Breaking (library):** `handle_member_removal_notice` takes a
+  `VerifiedRemovalNotice` (from `verify_removal_notice`, which now takes our
+  persona DIDs and the seen-document store), `vetting::inbound::handle` takes
+  the seen-document store, `vetting::inbound::Context` has a `did_resolver`,
+  the relationship bodies gained proof fields, and the unused
+  `relationships::create_send_message_accepted` (which sent an unproven
+  acceptance) is removed.
+
+- **The last replies taken on the sender's word now need the right party, or a
+  proof.** A capability or git-ns reply — a refusal (`trust-task-error`) as
+  much as a success — must be the community's signed operational document
+  (authentication key, addressed to our persona, fresh, not replayed); an
+  unsigned refusal is ignored with a log line, and a capability reply is taken only from the
+  community the view asked — a thread id alone no longer answers for it. An
+  invitation credential (from `--invitation`, a paste, the Add VIC panel, or the
+  vault) is used only once its proof verifies against its issuer (and its
+  revocation status is established); until then its issuer is not shown as the
+  community or used to prefill the DID. A problem-report from a party we hold no
+  membership with records nothing, not even an activity-log line. The join
+  path's replies — submit-receipt, verdict, status response, and a refusal
+  (`trust-task-error`) — are acted on only as the community's signed
+  operational document; a DIDComm problem-report, which cannot be signed, is
+  now only surfaced (from a community we hold a record with) and never
+  rejects a join. A community-profile answer is taken only when signed and
+  answering a profile question we asked, and a declared `attributed` default
+  is never recorded over pairwise. A VRC rejection closes only our own VRC
+  request, to the party it was sent to. A reply from a party we hold no
+  membership with (Pending included) is refused before its proof is checked,
+  so it never costs a resolve, and each reply is taken only as its own signed
+  `type`.
+  **Breaking (library):** `join::verify_invitation_credential` is the gate;
+  `validate_invitation_credential` is shape-only.
+
 - **Vetting questions and personhood reach a community again.** A community
   (VTI #1687, Keyring VTI-42) now takes a Trust Task over DIDComm only inside
   the binding envelope (`https://trusttasks.org/binding/didcomm/0.1/envelope`),

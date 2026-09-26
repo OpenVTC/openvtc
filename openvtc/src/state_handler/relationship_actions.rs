@@ -22,7 +22,7 @@ use openvtc_core::{
         secured_config::{KeyInfoConfig, KeySourceMaterial},
     },
     logs::LogFamily,
-    relationships::{RelationshipRequestBody, RelationshipState},
+    relationships::{RelationshipRequestBody, RelationshipState, did_binding_proofs},
     tasks::TaskType,
 };
 use serde_json::json;
@@ -358,25 +358,63 @@ fn insert_contact(config: &mut Config, did: &Arc<String>, alias: Option<String>)
     );
 }
 
-/// Build a DIDComm relationship request message.
-fn create_request_message(
+/// Build a DIDComm relationship request message, id `msg_id`, carrying the
+/// proofs that bind `our_did` to this request ([`did_binding_proofs`]). The
+/// id is fixed up front because the proofs sign it: the respondent's accept
+/// threads on it, and it is the only thing the accept is correlated by.
+#[allow(clippy::too_many_arguments)]
+async fn create_request_message(
+    msg_id: &str,
     from: &str,
     to: &str,
     reason: Option<&str>,
     our_did: &str,
     friendly_name: Option<&str>,
+    did_signer: &Secret,
+    persona_signer: &Secret,
 ) -> Result<Message> {
-    super::didcomm::build_didcomm_message(
+    let (did_proof, persona_proof) = did_binding_proofs(
+        our_did,
+        from,
+        to,
+        msg_id,
+        openvtc_core::relationships::BindingRole::Request,
+        did_signer,
+        persona_signer,
+    )
+    .await?;
+    let mut msg = super::didcomm::build_didcomm_message(
         openvtc_core::protocol_urls::RELATIONSHIP_REQUEST,
         json!(RelationshipRequestBody {
             reason: reason.map(|r| r.to_string()),
             did: our_did.to_string(),
             name: friendly_name.map(|n| n.to_string()),
+            did_proof: Some(did_proof),
+            persona_proof,
         }),
         from,
         to,
         None,
-    )
+    )?;
+    msg.id = msg_id.to_string();
+    Ok(msg)
+}
+
+/// The key that proves control of `our_did` for a handshake: the persona's own
+/// authentication key when `our_did` is the persona, else the R-DID's signing
+/// key from the TDK's resolver.
+pub(crate) async fn relationship_did_signer(
+    tdk: &TDK,
+    our_did: &str,
+    persona_did: &str,
+    persona_auth: &Secret,
+) -> Result<Secret> {
+    if our_did == persona_did {
+        return Ok(persona_auth.clone());
+    }
+    openvtc_core::relationships::relationship_signing_secret(tdk, our_did)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("the relationship DID's signing key is not loaded"))
 }
 
 // ============================================================
@@ -444,6 +482,11 @@ pub(crate) struct CreateJob {
     rdid_plan: Option<RDidPlan>,
     /// Our persona DID (message `from`, and the listener the request is sent via).
     persona_did: Arc<String>,
+    /// The persona's authentication key, which signs the DID binding.
+    persona_auth: Secret,
+    /// The request's message id, chosen on the loop thread so the provisional
+    /// record carries it before any accept can arrive.
+    msg_id: Arc<String>,
     persona_listener_id: String,
     respondent_did: Arc<String>,
     reason: Option<String>,
@@ -463,6 +506,8 @@ impl CreateJob {
             service,
             rdid_plan,
             persona_did,
+            persona_auth,
+            msg_id,
             persona_listener_id,
             respondent_did,
             reason,
@@ -483,7 +528,7 @@ impl CreateJob {
                     effect: RelationshipEffect::Create {
                         respondent_did,
                         our_did: persona_did,
-                        msg_id: Arc::new(String::new()),
+                        msg_id: Arc::clone(&msg_id),
                         used_r_did: rdid_plan.is_some(),
                         key_info: Vec::new(),
                         contact_to_add: None,
@@ -506,7 +551,7 @@ impl CreateJob {
                         effect: RelationshipEffect::Create {
                             respondent_did,
                             our_did: persona_did,
-                            msg_id: Arc::new(String::new()),
+                            msg_id: Arc::clone(&msg_id),
                             used_r_did: true,
                             key_info: Vec::new(),
                             contact_to_add,
@@ -520,20 +565,30 @@ impl CreateJob {
 
         // 2. Build + send the request via the persona listener (handshake uses
         //    persona DIDs for routing; the R-DID is carried in the body).
-        let msg = match create_request_message(
-            &persona_did,
-            &respondent_did,
-            reason.as_deref(),
-            &our_did,
-            friendly_name.as_deref(),
-        ) {
+        let msg = match async {
+            let did_signer =
+                relationship_did_signer(&tdk, &our_did, &persona_did, &persona_auth).await?;
+            create_request_message(
+                &msg_id,
+                &persona_did,
+                &respondent_did,
+                reason.as_deref(),
+                &our_did,
+                friendly_name.as_deref(),
+                &did_signer,
+                &persona_auth,
+            )
+            .await
+        }
+        .await
+        {
             Ok(m) => m,
             Err(e) => {
                 return RelationshipOutcome {
                     effect: RelationshipEffect::Create {
                         respondent_did,
                         our_did,
-                        msg_id: Arc::new(String::new()),
+                        msg_id: Arc::clone(&msg_id),
                         used_r_did,
                         key_info,
                         contact_to_add,
@@ -542,7 +597,6 @@ impl CreateJob {
                 };
             }
         };
-        let msg_id = Arc::new(msg.id.clone());
         let result =
             super::didcomm::send_message_via(&service, &msg, &persona_listener_id, &respondent_did)
                 .await
@@ -1205,6 +1259,18 @@ async fn prepare_submit(
     };
     let persona_did = config.persona_did_arc();
     let persona_listener_id = super::didcomm::listener_id_for_did(&persona_did, config);
+    // The persona's authentication key signs the binding of the relationship
+    // DID to this request; without it the request cannot be proven, so it is
+    // not sent.
+    let persona_auth = config
+        .get_persona_keys(tdk)
+        .await
+        .map_err(|e| anyhow::anyhow!("could not load the persona's authentication key: {e}"))?
+        .authentication
+        .secret;
+    // The request's id, fixed now so the provisional record below carries it:
+    // the accept is correlated by this thread id and nothing else.
+    let msg_id = Arc::new(Uuid::new_v4().to_string());
 
     // Insert a *provisional* `RequestSent` record keyed by the respondent's
     // persona DID, BEFORE the send is even spawned. This closes a lost-update
@@ -1218,11 +1284,14 @@ async fn prepare_submit(
     // back to `get(from_did)`), and `our_did`/`remote_did`/`remote_p_did` are the
     // respondent DID. The accept's `from_did` equals this respondent DID, so the
     // `get(from_did)` fallback finds it and the `remote_p_did == from_did` check
-    // passes. The Create outcome later fills in the real `task_id`/`our_did`.
+    // passes. The Create outcome later fills in the real `our_did`.
+    //
+    // The accept is now correlated by `task_id` alone (no sender fallback), so
+    // the provisional record carries the request's real id from the start.
     config.private.relationships.relationships.insert(
         Arc::clone(&respondent_arc),
         RelRecord {
-            task_id: Arc::new(String::new()),
+            task_id: Arc::clone(&msg_id),
             our_did: Arc::clone(&persona_did),
             remote_p_did: Arc::clone(&respondent_arc),
             remote_did: Arc::clone(&respondent_arc),
@@ -1252,6 +1321,8 @@ async fn prepare_submit(
         service: service.clone(),
         rdid_plan,
         persona_did,
+        persona_auth,
+        msg_id,
         persona_listener_id,
         respondent_did: respondent_arc,
         reason: reason.map(|s| s.to_string()),
