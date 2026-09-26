@@ -7,9 +7,9 @@
 //! over HTTPS (design §7.1). This is that step, run as a background job after
 //! the acceptance is recorded.
 //!
-//! The SDK's `check_credential_status` does the reading: it verifies the list's
-//! proof and issuer, decodes the bitstring and reads the bit. This module
-//! supplies the one thing the SDK leaves to its caller, the fetch. The fetch
+//! [`crate::status_list::check_credential_status`] does the reading: it
+//! verifies the list's proof (proof sets included) and issuer, decodes the
+//! bitstring and reads the bit. This module supplies the fetch. The fetch
 //! has finite timeouts (R1.2), accepts only `https`, and bounds what it reads.
 //! Its error text says whether the host was unreachable, answered with an
 //! error, or sent something that is not a status list (R6.4), because "the
@@ -21,10 +21,11 @@
 
 use std::time::Duration;
 
+use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use reqwest::{Client, Url, header::ACCEPT};
 use serde_json::Value;
-use vta_sdk::trust_task_proof::TrustTaskVmResolver;
-use vta_sdk::vetting::status::{StatusCheck, check_credential_status};
+
+use crate::status_list::{StatusCheck, check_credential_status};
 
 /// How long to wait for a status list host to accept the connection.
 pub const STATUS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,7 +57,7 @@ impl GrantCheck {
     /// hands `fetch_owned` a cloned client and an owned URL: a future that
     /// kept the borrowed `&str` across its `.await` is not provably `Send` for
     /// every lifetime the SDK's `AsyncFn(&str)` may be called with.
-    pub async fn run(&self, resolver: &TrustTaskVmResolver) -> StatusCheck {
+    pub async fn run(&self, resolver: &DIDCacheClient) -> StatusCheck {
         let client = match status_client(true, STATUS_FETCH_TIMEOUT) {
             Ok(client) => client,
             Err(e) => return StatusCheck::Unknown(e),
@@ -66,6 +67,7 @@ impl GrantCheck {
             &self.issuer,
             async move |url: &str| fetch_owned(client.clone(), url.to_string()).await,
             resolver,
+            chrono::Utc::now(),
         )
         .await
     }
@@ -79,24 +81,51 @@ fn fetch_owned(
     Box::pin(async move { fetch_status_list(&client, &url).await })
 }
 
-/// The HTTP client a status fetch uses: finite connect and total timeouts, at
-/// most three redirects, and — outside tests — `https` only, redirects
-/// included.
+/// Most redirects a status fetch follows.
+const MAX_REDIRECTS: u8 = 3;
+
+/// The HTTP client a status fetch uses: finite connect and total timeouts and
+/// at most three redirects. Outside tests (`https_only`) it is also guarded
+/// against SSRF: `https` only, every redirect hop re-vetted, no proxy, and a
+/// DNS resolver that refuses a name resolving to a loopback, private,
+/// link-local or otherwise non-public address (`affinidi-net-guard`'s
+/// `public_internet` policy). The URL half of that guard — IP literals and
+/// special-use names, which never reach a resolver — is
+/// [`status_list_url`]'s.
+///
+/// A status list URL comes out of a credential someone else wrote, so without
+/// this a credential could aim the fetch at this machine or its network.
 ///
 /// # Errors
 ///
 /// Only if the TLS backend cannot start.
 pub fn status_client(https_only: bool, timeout: Duration) -> Result<Client, String> {
-    Client::builder()
+    let mut builder = Client::builder()
         .connect_timeout(STATUS_CONNECT_TIMEOUT.min(timeout))
         .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .https_only(https_only)
+        .https_only(https_only);
+    builder = if https_only {
+        let policy = affinidi_net_guard::EgressPolicy::public_internet();
+        builder
+            .no_proxy()
+            .dns_resolver(affinidi_net_guard::guarded_dns_resolver(policy.clone()))
+            .redirect(affinidi_net_guard::redirect_policy(
+                policy,
+                affinidi_net_guard::RedirectMode::ReVet { max: MAX_REDIRECTS },
+            ))
+    } else {
+        builder.redirect(reqwest::redirect::Policy::limited(usize::from(
+            MAX_REDIRECTS,
+        )))
+    };
+    builder
         .build()
         .map_err(|e| format!("could not start an HTTP client to check the grant: {e}"))
 }
 
-/// A status list URL this client will fetch: `https`, with a host.
+/// A status list URL this client will fetch: `https`, with a host that is not
+/// an IP literal or name for a loopback, private, link-local or otherwise
+/// non-public address.
 ///
 /// # Errors
 ///
@@ -112,6 +141,12 @@ pub fn status_list_url(url: &str) -> Result<Url, String> {
     }
     if parsed.host_str().is_none_or(str::is_empty) {
         return Err("the grant's status list URL names no host".to_string());
+    }
+    // A name is re-checked on what it resolves to, by the client's resolver.
+    if let Err(e) = affinidi_net_guard::EgressPolicy::public_internet().vet_url(&parsed) {
+        return Err(format!(
+            "the grant's status list is not on a public host, so it is not fetched ({e})"
+        ));
     }
     Ok(parsed)
 }
@@ -188,9 +223,17 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    async fn test_resolver() -> DIDCacheClient {
+        DIDCacheClient::new(
+            affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+        )
+        .await
+        .expect("resolver")
+    }
+
     /// The check is spawned by the TUI, so its future must be `Send`.
-    #[test]
-    fn the_check_can_be_spawned() {
+    #[tokio::test]
+    async fn the_check_can_be_spawned() {
         fn assert_send<F: std::future::Future + Send>(_: F) {}
         let check = GrantCheck {
             application_id: String::new(),
@@ -199,7 +242,7 @@ mod tests {
             issuer: String::new(),
             credential_status: Value::Null,
         };
-        let resolver = TrustTaskVmResolver::did_key_only();
+        let resolver = test_resolver().await;
         assert_send(check.run(&resolver));
     }
 
@@ -213,6 +256,42 @@ mod tests {
         );
         assert!(status_list_url("file:///etc/passwd").is_err());
         assert!(status_list_url("not a url").is_err());
+    }
+
+    /// A status list URL comes out of someone else's credential: it may not
+    /// aim the fetch at this machine, its network, or a metadata service.
+    #[test]
+    fn a_status_list_on_a_non_public_host_is_not_fetched() {
+        for url in [
+            "https://127.0.0.1/list",
+            "https://localhost/list",
+            "https://10.0.0.5/list",
+            "https://192.168.1.1/list",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[::1]/list",
+            "https://[fc00::1]/list",
+            "https://printer.local/list",
+        ] {
+            let error = status_list_url(url).unwrap_err();
+            assert!(error.contains("not on a public host"), "{url}: {error}");
+        }
+    }
+
+    /// The URL half is not the only guard: the production client's resolver
+    /// refuses a name that resolves to a non-public address, before any
+    /// connection.
+    #[tokio::test]
+    async fn the_production_client_refuses_a_name_that_resolves_to_loopback() {
+        let client = status_client(true, Duration::from_secs(2)).unwrap();
+        let error = client
+            .get("https://localhost:9/list")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            affinidi_net_guard::blocked_in_chain(&error).is_some(),
+            "{error:?}"
+        );
     }
 
     async fn serve(response: ResponseTemplate) -> (MockServer, Url) {
@@ -305,7 +384,7 @@ mod tests {
                 "statusListCredential": "http://vtc.example.com/list"
             }),
         };
-        let result = check.run(&TrustTaskVmResolver::did_key_only()).await;
+        let result = check.run(&test_resolver().await).await;
         assert!(
             matches!(&result, StatusCheck::Unknown(reason) if reason.contains("https")),
             "{result:?}"

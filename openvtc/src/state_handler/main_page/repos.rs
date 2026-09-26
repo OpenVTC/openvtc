@@ -143,16 +143,27 @@ impl AddPersonForm {
 pub struct NewRepoForm {
     /// Index into the namespaces the member may create in.
     pub namespace: usize,
-    /// 0 namespace, 1 name, 2 visibility, 3 description.
+    /// 0 namespace, 1 name, 2 visibility, 3 description, 4 owners.
     pub field: usize,
     pub name: String,
     pub visibility: Visibility,
     pub description: String,
+    /// Owners named so far, besides the requester. Sent as `owners` only
+    /// when non-empty; absent, the VTC makes the requester the sole owner
+    /// (accepted only when their `git.repo.create` is an explicit record).
+    pub owners: Vec<String>,
+    /// Typed filter over known people, or — in `owner_external` mode — the
+    /// DID being pasted, for the owner picker on field 4.
+    pub owner_query: String,
+    /// Paste a DID for someone not in the picker.
+    pub owner_external: bool,
+    /// Highlighted owner-picker candidate.
+    pub owner_pick: usize,
     pub error: Option<Status>,
 }
 
 impl NewRepoForm {
-    pub const FIELDS: usize = 4;
+    pub const FIELDS: usize = 5;
 }
 
 /// A change armed and waiting for `y` — the consent surface for anything

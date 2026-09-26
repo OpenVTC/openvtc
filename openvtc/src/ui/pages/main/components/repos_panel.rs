@@ -952,16 +952,83 @@ fn render_new(lines: &mut Vec<Line<'static>>, view: &ReposView, form: &NewRepoFo
         form.field == 3,
     );
     input(lines, &form.description, form.field == 3, "optional");
+    field_label(lines, "Owners (besides you)", form.field == 4);
+    if form.owners.is_empty() {
+        lines.push(Line::from(dim(
+            "        none — you alone become owner (only if you already hold repo creator by \
+             grant, not only by namespace admin)",
+        )));
+    } else {
+        let named = form
+            .owners
+            .iter()
+            .map(|d| view.name_of(d))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(Line::from(vec![Span::raw("        "), text(named)]));
+    }
+    if form.field == 4 {
+        if form.owner_external {
+            input(
+                lines,
+                &form.owner_query,
+                true,
+                "did:… — Ctrl+A add, Ctrl+D pick from people",
+            );
+        } else {
+            input(lines, &form.owner_query, true, "type to filter, Ctrl+A add");
+            let candidates = view.candidates(&form.owner_query);
+            if candidates.is_empty() {
+                lines.push(Line::from(dim(
+                    "        nobody you can see matches — Ctrl+D to paste a DID",
+                )));
+            }
+            for (i, did) in candidates.iter().enumerate().take(6) {
+                let picked = i == form.owner_pick;
+                let name = view.name_of(did);
+                let label = if name == *did {
+                    shorten_did(did, 56)
+                } else {
+                    format!("{name}  {}", shorten_did(did, 40))
+                };
+                lines.push(Line::from(vec![
+                    Span::raw(if picked { "      ▸ " } else { "        " }),
+                    Span::styled(
+                        label,
+                        if picked {
+                            Style::default().fg(COLOR_SUCCESS)
+                        } else {
+                            Style::default().fg(COLOR_TEXT_DEFAULT)
+                        },
+                    ),
+                ]));
+            }
+        }
+    }
     lines.push(Line::from(""));
-    lines.push(Line::from(dim(
+    lines.push(Line::from(dim(if form.owners.is_empty() {
         "    You become owner. Commit trust is on from the first push: the check runs on every \
-         pull request, with no bypass.",
-    )));
+         pull request, with no bypass."
+            .to_string()
+    } else {
+        format!(
+            "    {} become owner — not you, unless you add yourself above too. Commit trust is \
+             on from the first push: the check runs on every pull request, with no bypass.",
+            form.owners
+                .iter()
+                .map(|d| view.name_of(d))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })));
     if let Some(err) = &form.error {
         lines.push(Line::from(""));
         push_status(lines, err);
     }
-    hints(lines, "Tab next field   ←/→ choose   ⏎ create   Esc cancel");
+    hints(
+        lines,
+        "Tab next field   ←/→ choose   Ctrl+A add owner   ⏎ create   Esc cancel",
+    );
 }
 
 #[cfg(test)]
@@ -1185,6 +1252,27 @@ mod tests {
         v.screen = ReposScreen::NewRepo(NewRepoForm::default());
         let out = rendered(v);
         assert!(out.contains("No bot can create repositories here"), "{out}");
+    }
+
+    /// With no owners named, the form says the requester alone becomes
+    /// owner. Naming one shows them instead — never the requester, who is
+    /// not automatically included.
+    #[test]
+    fn the_new_repo_form_shows_named_owners() {
+        const DAN: &str = "did:webvh:QmDanScid4:dan.example";
+        let mut v = loaded();
+        v.screen = ReposScreen::NewRepo(NewRepoForm::default());
+        let out = rendered(v.clone());
+        assert!(out.contains("you alone become owner"), "{out}");
+
+        v.screen = ReposScreen::NewRepo(NewRepoForm {
+            owners: vec![DAN.into()],
+            ..NewRepoForm::default()
+        });
+        let out = rendered(v);
+        assert!(out.contains(DAN), "{out}");
+        assert!(out.contains("become owner"), "{out}");
+        assert!(!out.contains("you alone become owner"), "{out}");
     }
 
     #[test]
