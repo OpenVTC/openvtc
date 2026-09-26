@@ -450,6 +450,15 @@ impl ReposView {
             .unwrap_or_default()
     }
 
+    /// Every unratified break-glass record the view returned — the banner.
+    #[must_use]
+    pub fn break_glass(&self, now: DateTime<Utc>) -> Vec<git_ns::BreakGlassAlert> {
+        self.data
+            .as_deref()
+            .map(|d| git_ns::unratified_break_glass(d, &self.me, now))
+            .unwrap_or_default()
+    }
+
     /// The people on a repository.
     #[must_use]
     pub fn people(&self, resource: &str) -> Vec<git_ns::Person> {
