@@ -620,7 +620,19 @@ impl MainPageState {
                     })
                     .unwrap_or_else(|| shorten_did(&c.vtc_did, 40)),
                 accent: branding.and_then(|b| b.accent_rgb()),
-                status_label: community_status_label(&c.status),
+                status_label: if matches!(
+                    c.status,
+                    openvtc_core::config::account::CommunityStatus::Pending { .. }
+                ) && self
+                    .content_panel
+                    .communities
+                    .verifying
+                    .contains(&c.vtc_did)
+                {
+                    "Pending — verifying credential…".to_string()
+                } else {
+                    community_status_label(&c.status)
+                },
                 persona_label,
                 member_since: c
                     .member_since

@@ -66,6 +66,24 @@ pub struct Context<'a> {
     /// listed under a particular relationship (a community's replies and the
     /// vetter role credential it issues).
     pub did_resolver: &'a affinidi_did_resolver_cache_sdk::DIDCacheClient,
+    /// A credential-issue's credential, already verified off the dispatch loop
+    /// ([`crate::issued_credential::verify_issued_credential`]) — the vetter
+    /// grant is taken from this rather than verified again inline. `None`
+    /// means it was not checked, and a grant is then refused.
+    pub issued_credential: Option<
+        &'a Result<
+            crate::issued_credential::VerifiedIssuedCredential,
+            crate::issued_credential::IssuedCredentialError,
+        >,
+    >,
+    /// A community answer's check ([`crate::operational::verify_operational`]),
+    /// already run off the dispatch loop. `Some` is taken as the answer's
+    /// verification (a failed or missing check refuses it); `None` means the
+    /// caller did not run one, and it is verified here, inline. The TUI's
+    /// dispatch always passes `Some`, so no resolve happens on its loop.
+    pub community_answer: Option<
+        &'a Result<crate::operational::VerifiedOperational, crate::operational::OperationalError>,
+    >,
     /// Our persona the message was addressed to, and its DID.
     pub recipient: Option<(PersonaId, &'a str)>,
     /// The clock.
@@ -459,8 +477,9 @@ async fn opened<P: DeserializeOwned>(
 }
 
 /// The community answers — success responses the community signs — that are
-/// acted on only once their proof verifies ([`community_signed`]).
-fn is_community_answer_type(typ: &str) -> bool {
+/// acted on only once their proof verifies, as the community's operational
+/// document ([`crate::operational`]).
+pub fn is_community_answer_type(typ: &str) -> bool {
     matches!(
         typ,
         VETTING_REVOKE_STATEMENT_RESPONSE_TYPE
@@ -484,6 +503,15 @@ async fn community_signed(
     let Some((_, our_did)) = ctx.recipient else {
         return Err("it arrived for no persona of ours".to_string());
     };
+    if let Some(checked) = ctx.community_answer {
+        let verified = checked.clone().map_err(|e| e.to_string())?;
+        // Checked against every persona of ours; it must be for this one.
+        if verified.recipient() != our_did {
+            return Err("it is addressed to another persona".to_string());
+        }
+        verified.check(seen, ctx.now).map_err(|e| e.to_string())?;
+        return Ok(verified);
+    }
     let verified = crate::operational::verify_operational(
         &message.body,
         sender,
@@ -865,22 +893,19 @@ async fn statement(
     {
         // Verified before anything else: a grant is what makes this persona a
         // vetter, and the transport sender is not proof the community issued it.
-        return Some(
-            match crate::issued_credential::verify_issued_credential(
-                credential.clone(),
-                sender,
-                ctx.did_resolver,
-                ctx.now,
-            )
-            .await
-            {
-                Ok(verified) => vetter_grant(book, ctx, verified.value(), community, sender),
-                Err(e) => {
-                    warn!(reason = %e, "vetter role credential refused");
-                    Handled::default()
-                }
-            },
-        );
+        return Some(match ctx.issued_credential {
+            Some(Ok(verified)) if verified.value() == credential => {
+                vetter_grant(book, ctx, verified.value(), community, sender)
+            }
+            Some(Err(e)) => {
+                warn!(reason = %e, "vetter role credential refused");
+                Handled::default()
+            }
+            _ => {
+                warn!("vetter role credential not checked — refused");
+                Handled::default()
+            }
+        });
     }
     // Claimed on sight, taken only once the delivery opens: signed by the
     // vetter who sent it, for `authentication`. The statement inside is then

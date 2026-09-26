@@ -723,6 +723,36 @@ pub async fn verify_removal_notice(
     seen: &mut crate::operational::SeenDocuments,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<VerifiedRemovalNotice, RemovalNoticeError> {
+    let ours: Vec<&str> = account.personas.values().map(|p| p.did.as_str()).collect();
+    let verified = crate::operational::verify_operational(
+        &message.body,
+        from_did,
+        &ours,
+        vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE,
+        resolver,
+        seen,
+        now,
+    )
+    .await;
+    bind_removal_notice(message, from_did, account, seen, verified, now)
+}
+
+/// The local half of [`verify_removal_notice`]: given the result of
+/// verifying the document (which may have run elsewhere — the network-bound
+/// half runs off the dispatch loop), bind it to a membership we hold and
+/// record it. Nothing is recorded unless every check passes.
+///
+/// # Errors
+///
+/// As [`verify_removal_notice`].
+pub fn bind_removal_notice(
+    message: &Message,
+    from_did: &str,
+    account: &Account,
+    seen: &mut crate::operational::SeenDocuments,
+    verified: Result<crate::operational::VerifiedOperational, crate::operational::OperationalError>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<VerifiedRemovalNotice, RemovalNoticeError> {
     let document = &message.body;
     let body: RemovalNoticeBody = document
         .get("payload")
@@ -736,17 +766,7 @@ pub async fn verify_removal_notice(
     {
         return Err(RemovalNoticeError::WrongRecipient);
     }
-    let ours: Vec<&str> = account.personas.values().map(|p| p.did.as_str()).collect();
-    let verified = crate::operational::verify_operational(
-        document,
-        from_did,
-        &ours,
-        vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE,
-        resolver,
-        seen,
-        now,
-    )
-    .await?;
+    let verified = verified?;
     // Bound before it is recorded: the sender is a community the named
     // persona holds a membership with. A party with no standing — however
     // well it signs with its own key — never reaches the replay set.
@@ -756,6 +776,7 @@ pub async fn verify_removal_notice(
     if !bound {
         return Err(RemovalNoticeError::NoMembership);
     }
+    verified.check(seen, now)?;
     verified.commit(seen, now)?;
     Ok(VerifiedRemovalNotice(body))
 }

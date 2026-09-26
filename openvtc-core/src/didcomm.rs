@@ -625,7 +625,13 @@ impl Messaging {
                 else {
                     continue;
                 };
-                let events = classify_inbound(message, transport, from, listener_id.to_string());
+                let events = classify_inbound(
+                    message,
+                    transport,
+                    from.clone(),
+                    from,
+                    listener_id.to_string(),
+                );
                 // An unroutable type is *handled* — the live path drops it too —
                 // so ack it rather than leaving it to be re-fetched forever.
                 if events.is_empty() {
@@ -797,6 +803,15 @@ pub enum DIDCommEvent {
         message: Box<Message>,
         #[allow(dead_code)]
         from: Option<String>,
+        /// The sender the transport itself bound to the frame (the authcrypt
+        /// or TSP sender, and on pickup only when it matches the key that
+        /// sealed it), or `None` when it bound none. Unlike `from` it never
+        /// falls back to the plaintext header, which the sender writes
+        /// outright. Still not an identity for any decision about who said
+        /// something (that is a proof, [`crate::proof_check`]); it keys
+        /// resource accounting — the verification queue's lanes and caps —
+        /// so a claimed `from` alone cannot spend another party's share.
+        authenticated: Option<String>,
         /// Which transport actually carried this frame.
         ///
         /// The pump knows — it matches on `Protocol` to decode the payload —
@@ -1097,9 +1112,16 @@ async fn dispatch_inbound(
         // a community's answer acted on) must check a proof by that party
         // (`crate::proof_check`), because the transport's sender binding is not
         // something this client can rely on.
-        let from = item.message.sender.clone().or_else(|| message.from.clone());
+        let authenticated = item.message.sender.clone();
+        let from = authenticated.clone().or_else(|| message.from.clone());
 
-        for event in classify_inbound(message, transport, from, item.message.recipient.clone()) {
+        for event in classify_inbound(
+            message,
+            transport,
+            from,
+            authenticated,
+            item.message.recipient.clone(),
+        ) {
             // Unbounded: `send` fails only when the receiver is gone, which means
             // the state handler has shut down and there is nothing left to
             // deliver to. It can no longer fail because the channel is full —
@@ -1273,6 +1295,7 @@ fn classify_inbound(
     message: Message,
     transport: MessagingTransport,
     from: Option<String>,
+    authenticated: Option<String>,
     listener_id: String,
 ) -> Vec<DIDCommEvent> {
     if message.typ == TRUST_PING_TYPE {
@@ -1291,6 +1314,7 @@ fn classify_inbound(
             DIDCommEvent::TrustPongReceived { from: from.clone() },
             DIDCommEvent::InboundMessage {
                 from,
+                authenticated,
                 message: Box::new(message),
                 transport,
             },
@@ -1306,6 +1330,7 @@ fn classify_inbound(
         );
         return vec![DIDCommEvent::InboundMessage {
             from,
+            authenticated,
             message: Box::new(message),
             transport,
         }];

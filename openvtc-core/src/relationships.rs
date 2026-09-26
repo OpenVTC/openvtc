@@ -931,6 +931,10 @@ pub async fn did_binding_proofs(
 /// Why a relationship DID was not accepted. Names what failed, never a DID.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DidBindingError {
+    #[error("its proofs were not checked")]
+    NotChecked,
+    #[error("its proofs' check did not finish (timed out or failed)")]
+    CheckUnfinished,
     #[error("it carries no proof of control of the relationship DID")]
     MissingDidProof,
     #[error("it carries no proof from the persona naming the relationship DID")]
