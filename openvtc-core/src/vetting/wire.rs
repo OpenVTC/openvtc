@@ -101,6 +101,20 @@ pub async fn sign(doc: &mut TrustTask<Value>, signer: &Secret) -> Result<(), Ope
     crate::capabilities::sign_document(doc, signer).await
 }
 
+/// Like [`sign`], but with an explicit `proofPurpose` rather than the
+/// `assertionMethod` default.
+///
+/// Used for a document acted on with a key that is not listed under
+/// `assertionMethod` in the DID document at all — e.g. an operational
+/// request signed with the persona's authentication key.
+pub async fn sign_as(
+    doc: &mut TrustTask<Value>,
+    signer: &Secret,
+    proof_purpose: &str,
+) -> Result<(), OpenVTCError> {
+    crate::capabilities::sign_document_as(doc, signer, proof_purpose).await
+}
+
 /// Whether a document of `type_uri` is addressed to a **community** (a VTC)
 /// rather than to another member.
 ///
@@ -527,6 +541,24 @@ pub(crate) mod tests {
             .await,
             Err(WireError::Proof(_))
         ));
+    }
+
+    /// `vtc/vetting/vetters/resend/0.1` declares `proof` REQUIRED
+    /// (trust-tasks 0.23), and is signed the same way as a personhood
+    /// challenge or assertion: with the authentication key, under
+    /// `proofPurpose: authentication` — both are the persona acting on their
+    /// own standing rather than making a claim to be held to later.
+    #[tokio::test]
+    async fn a_resend_request_is_signed_under_authentication_proof_purpose() {
+        let vetter = secret(3);
+        let mut request = vetter_resend_request(&did(&vetter), "did:key:zVtc").unwrap();
+        sign_as(&mut request, &vetter, "authentication")
+            .await
+            .unwrap();
+        assert_eq!(
+            request.proof.as_ref().unwrap().proof_purpose,
+            "authentication"
+        );
     }
 
     /// Toward a community the DIDComm `type` is the binding envelope, which a
