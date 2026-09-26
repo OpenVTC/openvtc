@@ -41,7 +41,7 @@ use trust_tasks_rs::specs::git_ns::account::{
 };
 use trust_tasks_rs::specs::git_ns::drift::resolve::v0_1 as resolve;
 use trust_tasks_rs::specs::git_ns::repo::{
-    archive::v0_1 as archive, create::v0_1 as create, transfer::v0_1 as transfer,
+    archive::v0_1 as archive, create::v0_3 as create, transfer::v0_1 as transfer,
 };
 use trust_tasks_rs::specs::git_ns::right::{grant::v0_1 as grant, revoke::v0_1 as revoke};
 use uuid::Uuid;
@@ -218,12 +218,20 @@ impl Visibility {
 pub enum Request {
     /// `git-ns/view/0.1` — what the caller may see, optionally narrowed.
     View { resource: Option<String> },
-    /// `git-ns/repo/create/0.1`.
+    /// `git-ns/repo/create/0.3`.
     Create {
         namespace: String,
         name: String,
         visibility: Visibility,
         description: Option<String>,
+        /// Who owns the new repository: other members' DIDs. Absent, the
+        /// requester alone — which the VTC accepts only when the requester
+        /// holds `git.repo.create` by explicit record; a namespace admin
+        /// whose `git.repo.create` is only implied is refused
+        /// `git-ns:selfGrantNotAllowed` and must name someone else here.
+        /// Naming anyone is a grant of `git.repo.own`, and needs the
+        /// authority to grant it (`git-ns:escalation` otherwise).
+        owners: Option<Vec<String>>,
     },
     /// `git-ns/right/grant/0.1`.
     Grant {
@@ -319,10 +327,19 @@ impl Request {
                 GitRight::RepoMaintain | GitRight::CommitSign => ConsentClass::Normal,
             },
             Request::Transfer { .. } | Request::Archive { .. } => ConsentClass::Elevated,
-            Request::View { .. }
-            | Request::Create { .. }
-            | Request::Link { .. }
-            | Request::LinkStatus { .. } => ConsentClass::Normal,
+            // Naming owners is a grant of `git.repo.own` (0.3): elevated,
+            // like any other `own` grant. Absent (or empty) `owners` is the
+            // ordinary, unelevated path — the requester alone, as before.
+            Request::Create { owners, .. } => {
+                if owners.as_ref().is_some_and(|o| !o.is_empty()) {
+                    ConsentClass::Elevated
+                } else {
+                    ConsentClass::Normal
+                }
+            }
+            Request::View { .. } | Request::Link { .. } | Request::LinkStatus { .. } => {
+                ConsentClass::Normal
+            }
         }
     }
 
@@ -350,6 +367,7 @@ impl Request {
                 name,
                 visibility,
                 description,
+                owners,
             } => {
                 let visibility = create::RepoVisibility::try_from(visibility.as_str())
                     .map_err(|e| conversion("visibility", e))?;
@@ -357,11 +375,21 @@ impl Request {
                     .map(create::PayloadDescription::try_from)
                     .transpose()
                     .map_err(|e| conversion("description", e))?;
+                let owners = owners
+                    .as_ref()
+                    .map(|dids| {
+                        dids.iter()
+                            .map(|d| create::Did::try_from(d.trim()))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .transpose()
+                    .map_err(|e| conversion("owners", e))?;
                 let p: create::Payload = create::Payload::builder()
                     .namespace(namespace.as_str())
                     .name(name.trim().to_lowercase())
                     .visibility(visibility)
                     .description(description)
+                    .owners(owners)
                     .try_into()
                     .map_err(|e| conversion("repository", e))?;
                 serde_json::to_value(p)
@@ -685,6 +713,12 @@ impl Refusal {
                  the repository or a namespace admin."
                     .to_string()
             }
+            c if c == resolve::error_codes::ROLE_MAP_UNKNOWN.code => {
+                "The community doesn't yet know how this namespace's rights map to forge \
+                 roles: its bridge hasn't reported its role map. Try again once the bridge has \
+                 connected, or ask a community administrator to check it."
+                    .to_string()
+            }
             c if c == grant::error_codes::MEMBERS_ONLY.code => {
                 "Namespace admin and repo creator go only to current members, and that DID is \
                  not one. Repository rights for outside contributors are the community's policy."
@@ -715,6 +749,12 @@ impl Refusal {
             }
             c if c == create::error_codes::NAME_TAKEN.code => {
                 "The community already records a repository with that name. Choose another."
+                    .to_string()
+            }
+            c if c == create::error_codes::SELF_GRANT_NOT_ALLOWED.code => {
+                "This would give you an elevated right (own, repo.create or ns.admin) on your \
+                 own authority. Ask another community administrator to do it, or use \
+                 break-glass (`cnm git break-glass`), which is audited and must be ratified."
                     .to_string()
             }
             c if c == transfer::error_codes::NOT_OWNER.code => {
@@ -1385,13 +1425,13 @@ mod tests {
     #[test]
     fn every_request_builds_a_payload_its_task_accepts() {
         let cases = [
-            (Request::View { resource: None }, "git-ns/view", false),
+            (Request::View { resource: None }, "git-ns/view", true),
             (
                 Request::View {
                     resource: Some("github.com/acme".into()),
                 },
                 "git-ns/view",
-                false,
+                true,
             ),
             (
                 Request::Create {
@@ -1399,6 +1439,7 @@ mod tests {
                     name: "Gadgets".into(),
                     visibility: Visibility::Public,
                     description: Some("  ".into()),
+                    owners: None,
                 },
                 "git-ns/repo/create",
                 true,
@@ -1440,7 +1481,7 @@ mod tests {
                     link_id: "lnk_4Tq9Xw2P".into(),
                 },
                 "git-ns/account/link-status",
-                false,
+                true,
             ),
         ];
         for (req, slug, proof) in cases {
@@ -1455,11 +1496,47 @@ mod tests {
             name: "Gadgets".into(),
             visibility: Visibility::Private,
             description: Some("  ".into()),
+            owners: None,
         };
         assert_eq!(
             create.payload().unwrap(),
             json!({"namespace": "ns_1", "name": "gadgets", "visibility": "private"})
         );
+    }
+
+    /// Naming owners sends them, each trimmed and unchanged — the VTC (not
+    /// this client) decides who may hold `git.repo.own` there.
+    #[test]
+    fn create_sends_the_named_owners() {
+        let create = Request::Create {
+            namespace: "ns_1".into(),
+            name: "sprockets".into(),
+            visibility: Visibility::Public,
+            description: None,
+            owners: Some(vec![BOB.into()]),
+        };
+        assert_eq!(
+            create.payload().unwrap(),
+            json!({
+                "namespace": "ns_1",
+                "name": "sprockets",
+                "visibility": "public",
+                "owners": [BOB]
+            })
+        );
+        assert_eq!(
+            create.consent_class(),
+            ConsentClass::Elevated,
+            "naming owners grants git.repo.own"
+        );
+        let for_myself_only = Request::Create {
+            namespace: "ns_1".into(),
+            name: "sprockets".into(),
+            visibility: Visibility::Public,
+            description: None,
+            owners: None,
+        };
+        assert_eq!(for_myself_only.consent_class(), ConsentClass::Normal);
     }
 
     /// What the schema refuses fails here, naming the field, before anything
@@ -1488,9 +1565,20 @@ mod tests {
             name: "no spaces".into(),
             visibility: Visibility::Public,
             description: None,
+            owners: None,
         };
         let err = bad_name.payload().unwrap_err().to_string();
         assert!(err.contains("name"), "names the field: {err}");
+        // An owner is a bare DID, never a DID URL such as a verification-method id.
+        let bad_owner = Request::Create {
+            namespace: "ns_1".into(),
+            name: "gadgets".into(),
+            visibility: Visibility::Public,
+            description: None,
+            owners: Some(vec![format!("{BOB}#key-1")]),
+        };
+        let err = bad_owner.payload().unwrap_err().to_string();
+        assert!(err.contains("owners"), "names the field: {err}");
         let long_reason = Request::Revoke {
             subject: DAN.into(),
             right: GitRight::CommitSign,
@@ -1946,6 +2034,19 @@ mod tests {
                 .contains("again")
         );
         assert!(refusal("git-ns/right/revoke:notGranted", None).is_already_gone());
+    }
+
+    /// A namespace admin whose `git.repo.create` is only implied sees this
+    /// text exactly — it names break-glass, the way out that does not need
+    /// another administrator.
+    #[test]
+    fn self_grant_not_allowed_names_break_glass() {
+        assert_eq!(
+            refusal("git-ns:selfGrantNotAllowed", None).explain(),
+            "This would give you an elevated right (own, repo.create or ns.admin) on your own \
+             authority. Ask another community administrator to do it, or use break-glass \
+             (`cnm git break-glass`), which is audited and must be ratified."
+        );
     }
 
     /// R6.4: an authorisation refusal, a proof problem, a contract mismatch

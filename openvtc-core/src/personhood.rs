@@ -250,6 +250,11 @@ impl Route<'_> {
 /// person's own client answers it. Minting for someone else confers
 /// nothing: the nonce is bound to the subject, and only a presentation
 /// signed by the subject's key can spend it.
+///
+/// Signed with `signer`, the persona's authentication key, under
+/// `proofPurpose: authentication` — `vtc/members/personhood/challenge/0.1`
+/// declares `proof` REQUIRED — the same key and purpose
+/// [`assert_personhood`] signs the presentation with.
 pub async fn request_challenge(
     route: &Route<'_>,
     signer: &Secret,
@@ -257,12 +262,11 @@ pub async fn request_challenge(
 ) -> Result<Uuid, OpenVTCError> {
     let request_id = Uuid::new_v4();
     let document_id = format!("urn:uuid:{request_id}");
-    let body = crate::trust_task_doc::build_signed_value(
-        PERSONHOOD_CHALLENGE_TYPE,
+    let body = build_challenge_request(
         route.member_did,
         route.vtc_did,
         &document_id,
-        json!({ "did": subject_did }),
+        subject_did,
         signer,
     )
     .await?;
@@ -270,6 +274,27 @@ pub async fn request_challenge(
     route.send(body, document_id).await?;
 
     Ok(request_id)
+}
+
+/// Build the signed `vtc/members/personhood/challenge/0.1` document —
+/// split out from [`request_challenge`] so the signing can be tested
+/// without a live [`Route`].
+async fn build_challenge_request(
+    member_did: &str,
+    vtc_did: &str,
+    document_id: &str,
+    subject_did: &str,
+    signing_secret: &Secret,
+) -> Result<Value, OpenVTCError> {
+    crate::trust_task_doc::build_signed_value(
+        PERSONHOOD_CHALLENGE_TYPE,
+        member_did,
+        vtc_did,
+        document_id,
+        json!({ "did": subject_did }),
+        signing_secret,
+    )
+    .await
 }
 
 /// Build and sign the presentation the assert verb carries.
@@ -350,8 +375,11 @@ pub async fn assert_personhood(
 
     let request_id = Uuid::new_v4();
     let document_id = format!("urn:uuid:{request_id}");
-    // Signed with the same key that signed the presentation inside it:
-    // `vtc/members/personhood/assert/0.1` declares `proof` REQUIRED.
+    // Signed with the same key — and the same proof purpose — that signed
+    // the presentation inside it: `vtc/members/personhood/assert/0.1`
+    // declares `proof` REQUIRED, and `signing_secret` is the persona's
+    // authentication key (#key-2), which is listed only under
+    // `authentication` in the DID document, not `assertionMethod`.
     let body = crate::trust_task_doc::build_signed_value(
         PERSONHOOD_ASSERT_TYPE,
         route.member_did,
@@ -581,6 +609,37 @@ mod tests {
             "the copy the published task names is missing"
         );
         assert_eq!(vp["holder"].as_str(), Some(MEMBER));
+    }
+
+    /// The presentation is signed under `proofPurpose: authentication`, not
+    /// the Data-Integrity default of `assertionMethod` — VTI-KEY-022. The
+    /// signing key this ceremony uses (`keys.authentication`, #key-2) is
+    /// listed only under `authentication` in the DID document, so a peer
+    /// enforcing the strict proof-purpose rule refuses a proof that claims
+    /// any other purpose for it.
+    #[tokio::test]
+    async fn presentation_is_signed_under_authentication_proof_purpose() {
+        let vp = build_presentation(&secret(), MEMBER, &Uuid::new_v4(), vec![])
+            .await
+            .expect("build presentation");
+
+        assert_eq!(vp["proof"]["proofPurpose"].as_str(), Some("authentication"));
+    }
+
+    /// `vtc/members/personhood/challenge/0.1` also declares `proof` REQUIRED
+    /// as of trust-tasks 0.23, and is signed the same way the assertion it
+    /// pairs with is: with the authentication key, under `proofPurpose:
+    /// authentication`.
+    #[tokio::test]
+    async fn challenge_request_is_signed_under_authentication_proof_purpose() {
+        let doc = build_challenge_request(MEMBER, "did:key:zVtc", "urn:uuid:1", MEMBER, &secret())
+            .await
+            .expect("build challenge request");
+
+        assert_eq!(
+            doc["proof"]["proofPurpose"].as_str(),
+            Some("authentication")
+        );
     }
 
     const CHALLENGE: &str = "6f1c4f9e-7c2a-4f4b-9a3e-2b1d0c5e8a77";

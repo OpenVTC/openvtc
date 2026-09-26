@@ -1092,8 +1092,10 @@ fn resolver(ctx: &ActionCtx<'_>) -> TrustTaskVmResolver {
     TrustTaskVmResolver::new(ctx.tdk.did_resolver().clone())
 }
 
-/// Sign `document` as `persona`, then hand the send to a background job. The
-/// caller has claimed the domain; on error it is still claimed.
+/// Sign `document` as `persona` — with its authentication key, under
+/// `proofPurpose: authentication`, like every request — then hand the send
+/// to a background job. The caller has claimed the domain; on error it is
+/// still claimed.
 async fn sign_and_send(
     ctx: &mut ActionCtx<'_>,
     persona: PersonaId,
