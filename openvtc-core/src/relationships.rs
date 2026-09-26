@@ -718,6 +718,30 @@ impl Relationships {
             .map(|(k, _)| k.clone())
     }
 
+    /// The map key of the relationship a handshake message answers: the one
+    /// whose `task_id` is the message's thread id, that is in `state`, and
+    /// whose remote persona is `from`.
+    ///
+    /// The thread id is the correlation — never the sender alone. A reply that
+    /// threads on nothing of ours, on a handshake in another state (above all an
+    /// established relationship), or on a request sent to someone else answers
+    /// nothing. An empty thread id never matches.
+    pub fn awaiting(
+        &self,
+        thid: &Arc<String>,
+        state: RelationshipState,
+        from: &str,
+    ) -> Option<Arc<String>> {
+        if thid.is_empty() {
+            return None;
+        }
+        self.relationships
+            .iter()
+            .find(|(_, r)| &r.task_id == thid)
+            .filter(|(_, r)| r.state == state && r.remote_p_did.as_str() == from)
+            .map(|(k, _)| k.clone())
+    }
+
     /// Finds a relationship by its remote DID (either P-DID or R-DID).
     pub fn find_by_remote_did(&self, did: &Arc<String>) -> Option<&Relationship> {
         self.relationships
@@ -760,6 +784,20 @@ pub struct RelationshipRequestBody {
     /// without needing to resolve the DID first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Proof by `did` that its holder controls it and binds it to this request
+    /// ([`sign_did_binding`]). Optional in the type only so a task persisted
+    /// before proofs existed still loads; [`verify_did_binding`] refuses a
+    /// request without one.
+    #[serde(default, rename = "didProof", skip_serializing_if = "Option::is_none")]
+    pub did_proof: Option<serde_json::Value>,
+    /// Proof by the requesting persona that it names `did` for this
+    /// relationship. Present when `did` is not the persona's own.
+    #[serde(
+        default,
+        rename = "personaProof",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub persona_proof: Option<serde_json::Value>,
 }
 
 /// DIDComm message body sent to the initiator when a relationship request is rejected.
@@ -774,6 +812,177 @@ pub struct RelationshipRejectBody {
 pub struct RelationshipAcceptBody {
     /// The DID the acceptor will use for this relationship.
     pub did: String,
+    /// Proof by `did` that its holder controls it and binds it to this accept
+    /// ([`sign_did_binding`]). Required by [`verify_did_binding`].
+    #[serde(default, rename = "didProof", skip_serializing_if = "Option::is_none")]
+    pub did_proof: Option<serde_json::Value>,
+    /// Proof by the accepting persona that it names `did` for this
+    /// relationship. Present when `did` is not the persona's own.
+    #[serde(
+        default,
+        rename = "personaProof",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub persona_proof: Option<serde_json::Value>,
+}
+
+// ****************************************************************************
+// Relationship DID binding
+// ****************************************************************************
+
+/// `type` of the statement a relationship DID proof signs.
+pub const RELATIONSHIP_DID_BINDING_TYPE: &str =
+    "https://linuxfoundation.org/openvtc/1.0/relationship-did-binding";
+
+/// Which side of a handshake a binding proof is made for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingRole {
+    /// The requester's binding, carried on the relationship request.
+    Request,
+    /// The respondent's binding, carried on the accept.
+    Accept,
+}
+
+impl BindingRole {
+    /// The statement's `role` value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BindingRole::Request => "request",
+            BindingRole::Accept => "accept",
+        }
+    }
+}
+
+/// The statement a relationship request or accept proves: "`did` is the DID
+/// `persona` uses with `peer` in the handshake `thid`, as its `role`". Every
+/// member is taken from the handshake, not from the sender, so a proof made for
+/// one handshake does not verify in another — and the role keeps a request's
+/// proof from standing as an accept's (or the reverse) in the same handshake.
+fn did_binding(
+    did: &str,
+    persona: &str,
+    peer: &str,
+    thid: &str,
+    role: BindingRole,
+) -> serde_json::Value {
+    json!({
+        "type": RELATIONSHIP_DID_BINDING_TYPE,
+        "role": role.as_str(),
+        "did": did,
+        "persona": persona,
+        "peer": peer,
+        "thid": thid,
+    })
+}
+
+/// Sign the binding of `did` to this handshake with `signer`, an
+/// `authentication` key of the DID being proven (the secret's id is the
+/// verification method). Returns the proof object.
+///
+/// # Errors
+///
+/// Signing failed.
+pub async fn sign_did_binding(
+    did: &str,
+    persona: &str,
+    peer: &str,
+    thid: &str,
+    role: BindingRole,
+    signer: &Secret,
+) -> Result<serde_json::Value, OpenVTCError> {
+    use affinidi_data_integrity::{DataIntegrityProof, SignOptions};
+    let statement = did_binding(did, persona, peer, thid, role);
+    let proof = DataIntegrityProof::sign(
+        &statement,
+        signer,
+        SignOptions::new().with_proof_purpose(crate::proof_check::Purpose::Authentication.as_str()),
+    )
+    .await
+    .map_err(|e| OpenVTCError::Config(format!("could not sign the relationship DID proof: {e}")))?;
+    serde_json::to_value(proof)
+        .map_err(|e| OpenVTCError::Config(format!("relationship DID proof: {e}")))
+}
+
+/// The proofs a request or accept carries for `did`: one by `did`, and — when
+/// `did` is not the persona's own — one by the persona naming it.
+///
+/// # Errors
+///
+/// Signing failed.
+pub async fn did_binding_proofs(
+    did: &str,
+    persona: &str,
+    peer: &str,
+    thid: &str,
+    role: BindingRole,
+    did_signer: &Secret,
+    persona_signer: &Secret,
+) -> Result<(serde_json::Value, Option<serde_json::Value>), OpenVTCError> {
+    let did_proof = sign_did_binding(did, persona, peer, thid, role, did_signer).await?;
+    let persona_proof = if did == persona {
+        None
+    } else {
+        Some(sign_did_binding(did, persona, peer, thid, role, persona_signer).await?)
+    };
+    Ok((did_proof, persona_proof))
+}
+
+/// Why a relationship DID was not accepted. Names what failed, never a DID.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DidBindingError {
+    #[error("it carries no proof of control of the relationship DID")]
+    MissingDidProof,
+    #[error("it carries no proof from the persona naming the relationship DID")]
+    MissingPersonaProof,
+    #[error("the relationship DID's proof: {0}")]
+    DidProof(crate::proof_check::ProofError),
+    #[error("the persona's proof: {0}")]
+    PersonaProof(crate::proof_check::ProofError),
+}
+
+/// Verify that the holder of `did` controls it and — when it is not `persona`
+/// itself — that `persona` names it, both for exactly this handshake (`peer`,
+/// `thid`) and side of it (`role`). Each proof must be by a key its DID document lists under
+/// `authentication` ([`crate::proof_check`]).
+///
+/// # Errors
+///
+/// [`DidBindingError`] naming the proof that is missing or failed.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_did_binding(
+    did: &str,
+    did_proof: Option<&serde_json::Value>,
+    persona: &str,
+    persona_proof: Option<&serde_json::Value>,
+    peer: &str,
+    thid: &str,
+    role: BindingRole,
+    resolver: &affinidi_did_resolver_cache_sdk::DIDCacheClient,
+) -> Result<(), DidBindingError> {
+    use crate::proof_check::{Purpose, verify_signed};
+    let statement = did_binding(did, persona, peer, thid, role);
+    let with = |proof: &serde_json::Value| {
+        let mut signed = statement.clone();
+        signed["proof"] = proof.clone();
+        signed
+    };
+    let did_proof = did_proof.ok_or(DidBindingError::MissingDidProof)?;
+    verify_signed(&with(did_proof), did, resolver, &[Purpose::Authentication])
+        .await
+        .map_err(DidBindingError::DidProof)?;
+    if did != persona {
+        let persona_proof = persona_proof.ok_or(DidBindingError::MissingPersonaProof)?;
+        verify_signed(
+            &with(persona_proof),
+            persona,
+            resolver,
+            &[Purpose::Authentication],
+        )
+        .await
+        .map_err(DidBindingError::PersonaProof)?;
+    }
+    Ok(())
 }
 
 // ****************************************************************************
@@ -833,59 +1042,6 @@ pub async fn create_send_message_rejected(
     Ok(())
 }
 
-/// Creates and sends a relationship acceptance message to the remote party via DIDComm.
-///
-/// - `atm`: The Affinidi Trusted Messaging service instance.
-/// - `from_profile`: ATM profile of the responder (our identity).
-/// - `to`: DID of the remote party who initiated the request.
-/// - `mediator_did`: DID of the mediator used for message forwarding.
-/// - `r_did`: The relationship DID to use (may be the persona DID or a dedicated R-DID).
-/// - `thid`: Thread ID linking this acceptance to the original request.
-///
-/// # Errors
-///
-/// Returns an error if the system clock is unavailable, message encryption fails,
-/// or message delivery fails.
-pub async fn create_send_message_accepted(
-    atm: &ATM,
-    from_profile: &Arc<ATMProfile>,
-    to: &str,
-    mediator_did: &str,
-    r_did: &str,
-    thid: &str,
-) -> Result<(), OpenVTCError> {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|e| OpenVTCError::Config(format!("System clock error: {e}")))?
-        .as_secs();
-
-    let msg = Message::build(
-        Uuid::new_v4().to_string(),
-        "https://linuxfoundation.org/openvtc/1.0/relationship-request-accept".to_string(),
-        json!(RelationshipAcceptBody {
-            did: r_did.to_string()
-        }),
-    )
-    .from(from_profile.inner.did.to_string())
-    .to(to.to_string())
-    .thid(thid.to_string())
-    .created_time(now)
-    .expires_time(now + 60 * 60 * 48) // 48 hours
-    .finalize();
-
-    crate::pack_and_send(
-        atm,
-        from_profile,
-        &msg,
-        &from_profile.inner.did,
-        to,
-        mediator_did,
-    )
-    .await?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,6 +1065,254 @@ mod tests {
             our_persona: None,
             needs_reestablishment: false,
         }
+    }
+
+    /// A handshake reply answers only the request it threads on, in the state
+    /// that request is waiting in, from the party it was sent to.
+    #[test]
+    fn a_reply_answers_only_the_request_it_threads_on() {
+        let mut rels = Relationships::default();
+        rels.relationships.insert(
+            Arc::new("did:peer:bob".into()),
+            make_relationship(
+                "req-1",
+                "did:peer:me",
+                "did:peer:bob",
+                "did:peer:bob",
+                RelationshipState::RequestSent,
+            ),
+        );
+        rels.relationships.insert(
+            Arc::new("did:peer:carol".into()),
+            make_relationship(
+                "req-2",
+                "did:peer:me",
+                "did:peer:carol-r",
+                "did:peer:carol",
+                RelationshipState::Established,
+            ),
+        );
+        let t = |s: &str| Arc::new(s.to_string());
+
+        assert_eq!(
+            rels.awaiting(&t("req-1"), RelationshipState::RequestSent, "did:peer:bob"),
+            Some(t("did:peer:bob"))
+        );
+        // Someone else threading on bob's request.
+        assert_eq!(
+            rels.awaiting(
+                &t("req-1"),
+                RelationshipState::RequestSent,
+                "did:peer:mallory"
+            ),
+            None
+        );
+        // No thread id, or one naming nothing of ours: no fallback to the sender.
+        assert_eq!(
+            rels.awaiting(&t(""), RelationshipState::RequestSent, "did:peer:bob"),
+            None
+        );
+        assert_eq!(
+            rels.awaiting(
+                &t("unknown"),
+                RelationshipState::RequestSent,
+                "did:peer:bob"
+            ),
+            None
+        );
+        // An established relationship is not a request waiting for an answer.
+        assert_eq!(
+            rels.awaiting(
+                &t("req-2"),
+                RelationshipState::RequestSent,
+                "did:peer:carol"
+            ),
+            None
+        );
+        assert_eq!(
+            rels.awaiting(
+                &t("req-1"),
+                RelationshipState::RequestAccepted,
+                "did:peer:bob"
+            ),
+            None
+        );
+    }
+
+    // --- relationship DID binding -----------------------------------------
+
+    fn did_key_signer(seed: u8) -> (String, Secret) {
+        let mut secret = Secret::generate_ed25519(None, Some(&[seed; 32]));
+        let public = secret.get_public_keymultibase().unwrap();
+        let did = format!("did:key:{public}");
+        secret.id = format!("{did}#{public}");
+        (did, secret)
+    }
+
+    fn rdid_signer() -> (String, Secret) {
+        use affinidi_tdk::dids::{DID, KeyType, PeerKeyRole};
+        let (did, secrets) = DID::generate_did_peer(
+            vec![
+                (PeerKeyRole::Verification, KeyType::Ed25519),
+                (PeerKeyRole::Encryption, KeyType::X25519),
+            ],
+            None,
+        )
+        .expect("mint a did:peer");
+        let signer = secrets
+            .into_iter()
+            .find(|s| s.id == relationship_signing_vm_id(&did))
+            .expect("the verification key");
+        (did, signer)
+    }
+
+    async fn resolver() -> affinidi_did_resolver_cache_sdk::DIDCacheClient {
+        affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
+            affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+        )
+        .await
+        .expect("resolver")
+    }
+
+    const PEER: &str = "did:key:z6MkPeer";
+    const THID: &str = "5f1c2a4e-0000-4000-8000-000000000001";
+
+    /// The relationship DID a request or accept names is taken only with a
+    /// proof by that DID (and, for an R-DID, by the persona naming it), both
+    /// bound to this handshake.
+    #[tokio::test]
+    async fn a_relationship_did_must_be_proven_for_this_handshake() {
+        let resolver = resolver().await;
+        let (persona, persona_key) = did_key_signer(0x21);
+        let (rdid, rdid_key) = rdid_signer();
+
+        let (did_proof, persona_proof) = did_binding_proofs(
+            &rdid,
+            &persona,
+            PEER,
+            THID,
+            BindingRole::Request,
+            &rdid_key,
+            &persona_key,
+        )
+        .await
+        .unwrap();
+        assert!(persona_proof.is_some(), "an R-DID is named by its persona");
+        let verify_as = |did: &str,
+                         did_proof: Option<serde_json::Value>,
+                         persona_proof: Option<serde_json::Value>,
+                         thid: &str,
+                         role: BindingRole| {
+            let (did, thid, persona, resolver) = (
+                did.to_string(),
+                thid.to_string(),
+                persona.clone(),
+                resolver.clone(),
+            );
+            async move {
+                verify_did_binding(
+                    &did,
+                    did_proof.as_ref(),
+                    &persona,
+                    persona_proof.as_ref(),
+                    PEER,
+                    &thid,
+                    role,
+                    &resolver,
+                )
+                .await
+            }
+        };
+        let verify = |did: &str,
+                      did_proof: Option<serde_json::Value>,
+                      persona_proof: Option<serde_json::Value>,
+                      thid: &str| {
+            verify_as(did, did_proof, persona_proof, thid, BindingRole::Request)
+        };
+
+        // Proven: accepted.
+        assert_eq!(
+            verify(&rdid, Some(did_proof.clone()), persona_proof.clone(), THID).await,
+            Ok(())
+        );
+
+        // No proof of the DID: refused.
+        assert_eq!(
+            verify(&rdid, None, persona_proof.clone(), THID).await,
+            Err(DidBindingError::MissingDidProof)
+        );
+
+        // An R-DID the persona did not name: refused.
+        assert_eq!(
+            verify(&rdid, Some(did_proof.clone()), None, THID).await,
+            Err(DidBindingError::MissingPersonaProof)
+        );
+
+        // A proof made for another handshake does not carry over.
+        assert!(matches!(
+            verify(
+                &rdid,
+                Some(did_proof.clone()),
+                persona_proof.clone(),
+                "another-thread"
+            )
+            .await,
+            Err(DidBindingError::DidProof(
+                crate::proof_check::ProofError::Invalid(0)
+            ))
+        ));
+
+        // A request's proof does not stand as an accept's in the same
+        // handshake: the statement names its side.
+        assert!(matches!(
+            verify_as(
+                &rdid,
+                Some(did_proof.clone()),
+                persona_proof.clone(),
+                THID,
+                BindingRole::Accept
+            )
+            .await,
+            Err(DidBindingError::DidProof(
+                crate::proof_check::ProofError::Invalid(0)
+            ))
+        ));
+
+        // Switching to a DID the sender does not control: the proof is by the
+        // sender's own key, not the claimed DID's.
+        let (victim, _) = did_key_signer(0x33);
+        let (forged, _) = did_binding_proofs(
+            &victim,
+            &persona,
+            PEER,
+            THID,
+            BindingRole::Request,
+            &rdid_key,
+            &persona_key,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            verify(&victim, Some(forged), None, THID).await,
+            Err(DidBindingError::DidProof(
+                crate::proof_check::ProofError::ForeignVerificationMethod(0)
+            ))
+        ));
+
+        // The persona's own DID needs only its own proof.
+        let (own, none) = did_binding_proofs(
+            &persona,
+            &persona,
+            PEER,
+            THID,
+            BindingRole::Request,
+            &persona_key,
+            &persona_key,
+        )
+        .await
+        .unwrap();
+        assert!(none.is_none());
+        assert_eq!(verify(&persona, Some(own), None, THID).await, Ok(()));
     }
 
     // --- R-DID key_info repair (migration) -------------------------------

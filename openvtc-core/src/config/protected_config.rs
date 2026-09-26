@@ -2,6 +2,7 @@
 *   but is not as critical as private key information which is stored in the OS Secure Store
 */
 
+use crate::operational::SeenDocuments;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
@@ -264,6 +265,13 @@ pub struct ProtectedConfig {
     #[serde(default, skip_serializing_if = "VettingBook::is_empty")]
     pub vetting: VettingBook,
 
+    /// Ids of operational documents already acted on (removal notices,
+    /// community answers), each kept until its freshness window has passed, so
+    /// a replayed document is refused across restarts too
+    /// ([`crate::operational`]).
+    #[serde(default, skip_serializing_if = "SeenDocuments::is_empty")]
+    pub seen_documents: SeenDocuments,
+
     /// Fields written by a newer build, preserved verbatim (D19).
     ///
     /// The protected tier is where the account lives, so an older build
@@ -324,6 +332,7 @@ impl Default for ProtectedConfig {
             vrcs_received: Vrcs::default(),
             agent_names: HashMap::default(),
             vetting: VettingBook::default(),
+            seen_documents: SeenDocuments::default(),
         }
     }
 }

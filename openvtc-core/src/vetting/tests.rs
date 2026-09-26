@@ -67,6 +67,15 @@ fn code_ticket(code: &str) -> request::v0_1::Ticket {
     )
 }
 
+/// A DID resolver. Every DID here is a `did:key`, which resolves locally.
+async fn did_resolver() -> affinidi_did_resolver_cache_sdk::DIDCacheClient {
+    affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
+        affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+    )
+    .await
+    .expect("a DID resolver")
+}
+
 #[test]
 fn the_community_is_its_key() {
     assert_eq!(did(&secret(COMMUNITY_SEED)), COMMUNITY);
@@ -119,6 +128,7 @@ struct Party {
     persona: PersonaId,
     book: VettingBook,
     account: Account,
+    seen: crate::operational::SeenDocuments,
 }
 
 impl Party {
@@ -130,6 +140,7 @@ impl Party {
             persona: PersonaId::new(),
             book: VettingBook::default(),
             account: Account::default(),
+            seen: crate::operational::SeenDocuments::default(),
         }
     }
 
@@ -164,13 +175,15 @@ impl Party {
 
     async fn receive(&mut self, message: &Message, sender: &str) -> Handled {
         let resolver = TrustTaskVmResolver::did_key_only();
+        let did_resolver = did_resolver().await;
         let ctx = Context {
             account: &self.account,
             resolver: &resolver,
+            did_resolver: &did_resolver,
             recipient: Some((self.persona, &self.did)),
             now: Utc::now(),
         };
-        handle(&mut self.book, &ctx, message, sender)
+        handle(&mut self.book, &ctx, &mut self.seen, message, sender)
             .await
             .expect("a vetting message is claimed")
     }
@@ -229,13 +242,30 @@ fn manifest_with(
     .unwrap()
 }
 
-/// The community's manifest 0.2 reply, as its dispatcher sends it.
-fn manifest_reply() -> Message {
-    let body = manifest_body();
+/// The community's manifest answer to `to`, as a VTC sends an operational
+/// document: signed with its authentication key, addressed, dated.
+async fn manifest_reply(to: &str) -> Message {
+    signed_manifest(to, manifest_body()).await
+}
+
+/// `body` as the community's signed manifest answer to `to`.
+async fn signed_manifest(to: &str, body: impl serde::Serialize) -> Message {
+    let document = crate::operational::test_support::sign(
+        json!({
+            "id": wire::new_id(),
+            "type": JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE,
+            "issuer": COMMUNITY,
+            "recipient": to,
+            "issuedAt": Utc::now().to_rfc3339(),
+            "payload": body,
+        }),
+        &secret(COMMUNITY_SEED),
+    )
+    .await;
     Message::build(
         wire::new_id(),
         JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE.to_string(),
-        json!({ "type": JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, "payload": body }),
+        document,
     )
     .from(COMMUNITY.to_string())
     .thid(wire::new_id())
@@ -252,7 +282,9 @@ async fn ready() -> (Party, Party, request::v0_1::Ticket) {
         .book
         .start_application(COMMUNITY, applicant.persona, &applicant.did, now)
         .unwrap();
-    let handled = applicant.receive(&manifest_reply(), COMMUNITY).await;
+    let handled = applicant
+        .receive(&manifest_reply(&applicant.did.clone()).await, COMMUNITY)
+        .await;
     assert!(matches!(
         handled.notice,
         Some(Notice::RequirementsUpdated { .. })
@@ -662,9 +694,11 @@ async fn a_vetter_grant_is_kept_only_from_its_community() {
     )
     .await;
     let resolver = TrustTaskVmResolver::did_key_only();
+    let did_resolver = did_resolver().await;
     let ctx = Context {
         account: &member.account,
         resolver: &resolver,
+        did_resolver: &did_resolver,
         recipient: Some((member.persona, &member.did)),
         now: Utc::now(),
     };
@@ -672,6 +706,7 @@ async fn a_vetter_grant_is_kept_only_from_its_community() {
         handle(
             &mut member.book,
             &ctx,
+            &mut crate::operational::SeenDocuments::default(),
             &delivery(&ordinary, COMMUNITY),
             COMMUNITY
         )
@@ -755,16 +790,24 @@ async fn a_membership_credential_is_left_for_the_join_handler() {
     .from(COMMUNITY.to_string())
     .finalize();
     let resolver = TrustTaskVmResolver::did_key_only();
+    let did_resolver = did_resolver().await;
     let ctx = Context {
         account: &applicant.account,
         resolver: &resolver,
+        did_resolver: &did_resolver,
         recipient: Some((applicant.persona, &applicant.did)),
         now: Utc::now(),
     };
     assert!(
-        handle(&mut applicant.book, &ctx, &message, COMMUNITY)
-            .await
-            .is_none()
+        handle(
+            &mut applicant.book,
+            &ctx,
+            &mut crate::operational::SeenDocuments::default(),
+            &message,
+            COMMUNITY
+        )
+        .await
+        .is_none()
     );
 }
 
@@ -776,7 +819,9 @@ async fn a_vetter_asks_for_the_claims_the_community_requires() {
         (vec!["name.legal".to_string()], false),
         "without the manifest, the fallback — and it says so"
     );
-    let handled = vetter.receive(&manifest_reply(), COMMUNITY).await;
+    let handled = vetter
+        .receive(&manifest_reply(&vetter.did.clone()).await, COMMUNITY)
+        .await;
     assert!(handled.changed, "the criteria are remembered");
     let (claims, known) = vetter.book.required_claims_for(COMMUNITY, Some(DIGEST));
     assert!(known);
@@ -790,7 +835,10 @@ async fn a_vetter_asks_for_the_claims_the_community_requires() {
             .collect::<Vec<_>>()
     );
     assert!(
-        !vetter.receive(&manifest_reply(), COMMUNITY).await.changed,
+        !vetter
+            .receive(&manifest_reply(&vetter.did.clone()).await, COMMUNITY)
+            .await
+            .changed,
         "the same manifest again changes nothing"
     );
 }
@@ -809,13 +857,7 @@ async fn the_communitys_decision_sla_is_known_once_its_manifest_is() {
     let mut requirements = requirements();
     requirements.decision_sla = Some("P21D".try_into().unwrap());
     let body = manifest_with(Some(requirements), None);
-    let reply = Message::build(
-        wire::new_id(),
-        JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE.to_string(),
-        json!({ "type": JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, "payload": body }),
-    )
-    .from(COMMUNITY.to_string())
-    .finalize();
+    let reply = signed_manifest(&with_sla.did.clone(), body).await;
     with_sla.receive(&reply, COMMUNITY).await;
     assert_eq!(
         with_sla.book.decision_sla(COMMUNITY, with_sla.persona),
@@ -829,8 +871,17 @@ async fn the_communitys_decision_sla_is_known_once_its_manifest_is() {
 
 /// The community's answer to `request`, as its dispatcher sends it: unsigned
 /// (transport authenticates it) and threaded on the request.
-fn community_answer<P: serde::Serialize>(request: &TrustTask<Value>, payload: &P) -> Message {
-    wire::to_message(&wire::response(request, payload).unwrap()).unwrap()
+/// The community answering `request`, signed as a VTC signs its success
+/// responses.
+async fn community_answer<P: serde::Serialize>(request: &TrustTask<Value>, payload: &P) -> Message {
+    let document = wire::response(request, payload).unwrap();
+    let mut message = wire::to_message(&document).unwrap();
+    message.body = crate::operational::test_support::sign(
+        serde_json::to_value(&document).unwrap(),
+        &secret(COMMUNITY_SEED),
+    )
+    .await;
+    message
 }
 
 /// The community refusing `request` with `code`.
@@ -917,7 +968,7 @@ async fn a_vetter_publishes_a_profile_and_hears_the_communitys_answer() {
     )
     .unwrap();
     let handled = vetter
-        .receive(&community_answer(&request, &stored), COMMUNITY)
+        .receive(&community_answer(&request, &stored).await, COMMUNITY)
         .await;
     assert!(handled.changed, "the stored state is kept");
     assert!(matches!(
@@ -983,7 +1034,7 @@ async fn the_directory_answers_only_what_was_asked() {
 
     // Nobody asked: the page answers nothing.
     let handled = applicant
-        .receive(&community_answer(&request, &page), COMMUNITY)
+        .receive(&community_answer(&request, &page).await, COMMUNITY)
         .await;
     assert!(handled.answer.is_none());
 
@@ -992,12 +1043,15 @@ async fn the_directory_answers_only_what_was_asked() {
         .ask(asked(&request, applicant.persona, QueryKind::VetterList));
     // Another community cannot answer our question.
     let handled = applicant
-        .receive(&community_answer(&request, &page), "did:key:zElsewhere")
+        .receive(
+            &community_answer(&request, &page).await,
+            "did:key:zElsewhere",
+        )
         .await;
     assert!(handled.answer.is_none());
 
     let handled = applicant
-        .receive(&community_answer(&request, &page), COMMUNITY)
+        .receive(&community_answer(&request, &page).await, COMMUNITY)
         .await;
     let Some(CommunityAnswer::Vetters {
         query, page: got, ..
@@ -1029,9 +1083,11 @@ async fn the_directory_answers_only_what_was_asked() {
     // An error that answers nothing we asked is left for the join handler.
     let stray = wire::vetter_list_request(&applicant.did, COMMUNITY, &unfiltered_list()).unwrap();
     let resolver = TrustTaskVmResolver::did_key_only();
+    let did_resolver = did_resolver().await;
     let ctx = Context {
         account: &applicant.account,
         resolver: &resolver,
+        did_resolver: &did_resolver,
         recipient: Some((applicant.persona, &applicant.did)),
         now: Utc::now(),
     };
@@ -1039,6 +1095,7 @@ async fn the_directory_answers_only_what_was_asked() {
         handle(
             &mut applicant.book,
             &ctx,
+            &mut crate::operational::SeenDocuments::default(),
             &community_refusal(&stray, "permissionDenied"),
             COMMUNITY
         )
@@ -1053,7 +1110,7 @@ async fn the_directory_answers_only_what_was_asked() {
         .ask(asked(&request, applicant.persona, QueryKind::VetterList));
     let handled = applicant
         .receive(
-            &community_answer(&request, &json!({ "vetters": "not a list" })),
+            &community_answer(&request, &json!({ "vetters": "not a list" })).await,
             COMMUNITY,
         )
         .await;
@@ -1091,7 +1148,7 @@ async fn a_community_answer_is_read_in_either_carriage() {
         applicant
             .book
             .ask(asked(&request, applicant.persona, QueryKind::VetterList));
-        let reply = community_answer(&request, &page);
+        let reply = community_answer(&request, &page).await;
         let reply = if in_envelope {
             crate::didcomm::open_didcomm_envelope(&enveloped(&reply))
                 .expect("an enveloped document opens")
@@ -1173,9 +1230,11 @@ async fn a_problem_report_refuses_the_question_it_threads_on() {
 
     // One threading on nothing of vetting's is left for the join handler.
     let resolver = TrustTaskVmResolver::did_key_only();
+    let did_resolver = did_resolver().await;
     let ctx = Context {
         account: &applicant.account,
         resolver: &resolver,
+        did_resolver: &did_resolver,
         recipient: Some((applicant.persona, &applicant.did)),
         now: Utc::now(),
     };
@@ -1183,6 +1242,7 @@ async fn a_problem_report_refuses_the_question_it_threads_on() {
         handle(
             &mut applicant.book,
             &ctx,
+            &mut crate::operational::SeenDocuments::default(),
             &report("urn:uuid:not-ours"),
             COMMUNITY
         )
@@ -1205,7 +1265,7 @@ async fn a_resend_is_answered_or_refused_in_plain_words() {
     )
     .unwrap();
     let handled = member
-        .receive(&community_answer(&request, &resent), COMMUNITY)
+        .receive(&community_answer(&request, &resent).await, COMMUNITY)
         .await;
     assert!(matches!(
         handled.answer,
@@ -1254,7 +1314,7 @@ async fn a_manifest_answers_whoever_asked_and_brings_the_communitys_branding() {
     .unwrap();
     let body = manifest_with(Some(requirements()), Some(branding));
     let handled = applicant
-        .receive(&community_answer(&request, &body), COMMUNITY)
+        .receive(&community_answer(&request, &body).await, COMMUNITY)
         .await;
     assert!(matches!(
         handled.answer,
@@ -1312,10 +1372,20 @@ async fn a_verified_grant_is_handed_on_for_a_revocation_check() {
     let (mut applicant, mut vetter, ticket) = ready().await;
     let credential =
         role_credential_with_status(&secret(COMMUNITY_SEED), &vetter.did.clone()).await;
-    let handled = vetter
-        .receive(&delivery(&credential, COMMUNITY), COMMUNITY)
-        .await;
-    assert!(matches!(handled.notice, Some(Notice::VetterGranted { .. })));
+    // Receiving this grant would read its status list, which fails closed
+    // with no list to fetch (see `a_grant_whose_status_cannot_be_read_is_not_kept`);
+    // this test is about the applicant's side, so the vetter is handed the grant.
+    vetter.book.keep_vetter_grant(super::book::VetterGrant {
+        community: COMMUNITY.to_string(),
+        persona: vetter.persona,
+        credential_id: credential["id"].as_str().map(str::to_string),
+        valid_until: credential["validUntil"]
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&Utc)),
+        received_at: Utc::now(),
+        credential: credential.clone(),
+    });
 
     let message = request(&mut applicant, &vetter, ticket).await;
     let reply = vetter
@@ -1437,4 +1507,153 @@ async fn the_next_step_follows_the_application() {
             session_id: session_doc.id.clone()
         }
     );
+}
+
+/// A community's answer is acted on only when the community signed it: an
+/// unsigned manifest, or one whose content was changed after signing, is not
+/// adopted — whoever the transport says sent it.
+#[tokio::test]
+async fn an_unsigned_or_altered_community_answer_is_not_acted_on() {
+    let mut applicant = Party::new(1);
+    applicant
+        .book
+        .start_application(COMMUNITY, applicant.persona, &applicant.did, Utc::now())
+        .unwrap();
+
+    let unsigned = Message::build(
+        wire::new_id(),
+        JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE.to_string(),
+        json!({
+            "type": JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE,
+            "issuer": COMMUNITY,
+            "payload": manifest_body(),
+        }),
+    )
+    .from(COMMUNITY.to_string())
+    .finalize();
+    let handled = applicant.receive(&unsigned, COMMUNITY).await;
+    assert!(!handled.changed && handled.notice.is_none());
+
+    let mut altered = manifest_reply(&applicant.did.clone()).await;
+    altered.body["payload"]["tampered"] = json!(true);
+    let handled = applicant.receive(&altered, COMMUNITY).await;
+    assert!(!handled.changed && handled.notice.is_none());
+
+    // Signed by the community, but arriving as another sender's answer.
+    let handled = applicant
+        .receive(
+            &manifest_reply(&applicant.did.clone()).await,
+            "did:key:zElsewhere",
+        )
+        .await;
+    assert!(!handled.changed && handled.notice.is_none());
+
+    // The genuine answer is adopted.
+    let handled = applicant
+        .receive(&manifest_reply(&applicant.did.clone()).await, COMMUNITY)
+        .await;
+    assert!(matches!(
+        handled.notice,
+        Some(Notice::RequirementsUpdated { .. })
+    ));
+}
+
+/// A vetter role credential whose proof does not verify is not kept — here, a
+/// genuine grant with its role claim changed after the community signed it.
+#[tokio::test]
+async fn a_tampered_vetter_grant_is_not_kept() {
+    let mut member = Party::new(2).member_of(COMMUNITY);
+    let mut credential = role_credential(
+        &secret(COMMUNITY_SEED),
+        COMMUNITY,
+        &member.did.clone(),
+        VETTER_ROLE,
+    )
+    .await;
+    credential["validUntil"] = json!("2999-01-01T00:00:00Z");
+    let handled = member
+        .receive(&delivery(&credential, COMMUNITY), COMMUNITY)
+        .await;
+    assert!(handled.notice.is_none() && member.book.vetter_grants.is_empty());
+}
+
+/// A vetter grant naming a status list that cannot be read is not kept:
+/// revocation fails closed.
+#[tokio::test]
+async fn a_grant_whose_status_cannot_be_read_is_not_kept() {
+    let mut vetter = Party::new(2).member_of(COMMUNITY);
+    let credential =
+        role_credential_with_status(&secret(COMMUNITY_SEED), &vetter.did.clone()).await;
+    let handled = vetter
+        .receive(&delivery(&credential, COMMUNITY), COMMUNITY)
+        .await;
+    assert!(handled.notice.is_none() && vetter.book.vetter_grants.is_empty());
+}
+
+/// A community answer is operational: signed with the community's
+/// authentication key, not its credential key, and taken once.
+#[tokio::test]
+async fn a_community_answer_is_taken_once_and_only_from_the_operational_key() {
+    let mut applicant = Party::new(1);
+    applicant
+        .book
+        .start_application(COMMUNITY, applicant.persona, &applicant.did, Utc::now())
+        .unwrap();
+    // `did:key` lists its one key under both relationships, so an
+    // assertionMethod proof is refused for its purpose.
+    let asserted = crate::proof_check::test_support::sign(
+        json!({
+            "id": wire::new_id(),
+            "type": JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE,
+            "issuer": COMMUNITY,
+            "recipient": applicant.did,
+            "issuedAt": Utc::now().to_rfc3339(),
+            "payload": manifest_body(),
+        }),
+        &[&secret(COMMUNITY_SEED)],
+    )
+    .await;
+    let message = Message::build(
+        wire::new_id(),
+        JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE.to_string(),
+        asserted,
+    )
+    .from(COMMUNITY.to_string())
+    .finalize();
+    let handled = applicant.receive(&message, COMMUNITY).await;
+    assert!(handled.notice.is_none());
+
+    let reply = manifest_reply(&applicant.did.clone()).await;
+    let handled = applicant.receive(&reply, COMMUNITY).await;
+    assert!(matches!(
+        handled.notice,
+        Some(Notice::RequirementsUpdated { .. })
+    ));
+    let mut again = reply.clone();
+    again.id = wire::new_id();
+    let handled = applicant.receive(&again, COMMUNITY).await;
+    assert!(
+        !handled.changed && handled.notice.is_none(),
+        "a replayed answer is refused"
+    );
+
+    // Addressed to somebody else.
+    let other = manifest_reply("did:key:zSomeoneElse").await;
+    let handled = applicant.receive(&other, COMMUNITY).await;
+    assert!(!handled.changed && handled.notice.is_none());
+}
+
+/// A signed manifest nobody asked for — no query, no application, no
+/// membership — is not learned, and nothing is written to the replay set.
+#[tokio::test]
+async fn an_unsolicited_manifest_writes_nothing() {
+    let mut stranger = Party::new(7);
+    let reply = manifest_reply(&stranger.did.clone()).await;
+    let handled = stranger.receive(&reply, COMMUNITY).await;
+    assert!(!handled.changed && handled.notice.is_none() && handled.answer.is_none());
+    assert!(stranger.seen.is_empty(), "the replay set is untouched");
+    assert!(matches!(
+        stranger.book.knowledge(COMMUNITY),
+        Knowledge::Unknown
+    ));
 }
