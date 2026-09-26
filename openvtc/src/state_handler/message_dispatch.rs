@@ -159,6 +159,22 @@ pub async fn process_inbound_message(
     message: &Message,
     effects: &mut InboundEffects,
 ) -> Result<bool, anyhow::Error> {
+    // A document recorded as acted on must be saved even when the handler
+    // reports no other change — otherwise a restart forgets it and the
+    // document can be replayed.
+    let seen_before = config.private.seen_documents.revision();
+    let changed = process_inbound(config, tdk, service, seen, message, effects).await?;
+    Ok(changed || config.private.seen_documents.revision() != seen_before)
+}
+
+async fn process_inbound(
+    config: &mut Config,
+    tdk: &TDK,
+    service: &Messaging,
+    seen: &mut SeenMessages,
+    message: &Message,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
     let InboundEffects {
         inactivated,
         capability_replies,
@@ -189,8 +205,12 @@ pub async fn process_inbound_message(
         return Ok(false);
     }
 
-    // Validate sender — trust-pong messages may omit `from` (the thid
-    // linkage to our outbound ping is sufficient for task cleanup).
+    // The sender — a routing hint, not an identity. It selects the record a
+    // message is about; every decision that turns on who said something is
+    // gated on a proof by that party (`openvtc_core::proof_check`), not on this.
+    //
+    // Trust-pong messages may omit `from` (the thid linkage to our outbound
+    // ping is sufficient for task cleanup).
     let from_did = match &message.from {
         Some(did) => Arc::new(did.to_string()),
         None => {
@@ -306,12 +326,14 @@ pub async fn process_inbound_message(
         let ctx = openvtc_core::vetting::inbound::Context {
             account: &config.account,
             resolver: &resolver,
+            did_resolver: tdk.did_resolver(),
             recipient: recipient_persona.map(|p| (p, recipient_did.as_str())),
             now: chrono::Utc::now(),
         };
         if let Some(handled) = openvtc_core::vetting::inbound::handle(
             &mut config.private.vetting,
             &ctx,
+            &mut config.private.seen_documents,
             message,
             &from_did,
         )
@@ -648,7 +670,28 @@ pub async fn process_inbound_message(
     // membership into `Removed`. A removal inactivates the community, so report
     // its VTC DID up for the loop to deregister the session (R-S-3).
     if message.typ == MEMBER_REMOVAL_NOTICE_TYPE {
-        let outcome = handle_member_removal_notice(&mut config.account, message, &from_did);
+        // Only the community's signature ends a membership.
+        let notice = match openvtc_core::messaging::verify_removal_notice(
+            message,
+            &from_did,
+            &config.account,
+            tdk.did_resolver(),
+            &mut config.private.seen_documents,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            Ok(notice) => notice,
+            Err(e) => {
+                warn!(reason = %e, "refused a removal notice");
+                config.public.logs.insert(
+                    LogFamily::Community,
+                    format!("Ignored a removal notice from community ({from_did}): {e}."),
+                );
+                return Ok(true);
+            }
+        };
+        let outcome = handle_member_removal_notice(&mut config.account, notice, &from_did);
         if let Some(persona) = outcome.inactivated {
             inactivated.push((from_did.to_string(), persona));
         }
@@ -680,15 +723,17 @@ pub async fn process_inbound_message(
             let task_id = require_thid(message)?;
             let body: RelationshipRejectBody = serde_json::from_value(message.body.clone())?;
 
-            // Verify sender has a relationship with us
-            if config.private.relationships.get(&from_did).is_none()
-                && config
-                    .private
-                    .relationships
-                    .find_by_remote_did(&from_did)
-                    .is_none()
-            {
-                warn!(from = %from_did, "reject from unknown party — ignoring");
+            // A rejection answers exactly one request of ours that is still
+            // waiting, and comes from the party it was sent to. Anything else —
+            // above all a thread id naming an established relationship — must
+            // not tear a relationship down.
+            let waiting = config
+                .private
+                .relationships
+                .awaiting(&task_id, RelationshipState::RequestSent, &from_did)
+                .is_some();
+            if !waiting {
+                warn!("reject for no waiting request of ours from this party — ignoring");
                 return Ok(false);
             }
 
@@ -735,48 +780,54 @@ pub async fn process_inbound_message(
                 return Ok(false);
             }
 
-            // All handshake messages use persona DIDs for from/to, so from_did
-            // is the remote party's persona DID. Look up by task_id first, then
-            // by persona DID. Validate sender matches the expected remote party.
+            // An accept answers exactly one request of ours: it is correlated
+            // by its thread id (the request's id) and nothing else — never by
+            // who the transport says sent it — and only while that request is
+            // still waiting (`RequestSent`), from the party it was sent to.
             //
-            // R20: with plain values we cannot hold a `&mut` across the finalize
-            // `.await` below, so resolve the map key, mutate via `get_mut` (the
-            // borrow ends immediately), then await. The mutation happens before
-            // the await — no re-look-up is needed.
-            let key = config
-                .private
-                .relationships
-                .find_key_by_task_id(&task_id)
-                .or_else(|| {
-                    config
-                        .private
-                        .relationships
-                        .get(&from_did)
-                        .map(|_| Arc::clone(&from_did))
-                });
+            // R20: with plain values we cannot hold a `&mut` across an `.await`,
+            // so resolve and check with shared borrows, verify, then mutate.
+            let Some(key) = config.private.relationships.awaiting(
+                &task_id,
+                RelationshipState::RequestSent,
+                &from_did,
+            ) else {
+                warn!("accept answers no waiting request of ours from this party — ignoring");
+                return Ok(false);
+            };
 
-            if let Some(key) = key {
+            // The DID the respondent switches to must be proven for this
+            // handshake, by that DID (and by the respondent's persona when it
+            // is an R-DID). Without this the accept could point the
+            // relationship at a DID the sender does not control.
+            if let Err(e) = openvtc_core::relationships::verify_did_binding(
+                &body.did,
+                body.did_proof.as_ref(),
+                &from_did,
+                body.persona_proof.as_ref(),
+                &recipient_did,
+                &task_id,
+                openvtc_core::relationships::BindingRole::Accept,
+                tdk.did_resolver(),
+            )
+            .await
+            {
+                warn!(reason = %e, "relationship accept refused");
+                config.public.logs.insert(
+                    LogFamily::Relationship,
+                    format!("Refused a relationship acceptance from ({from_did}): {e}."),
+                );
+                return Ok(true);
+            }
+
+            {
                 let rel = config
                     .private
                     .relationships
                     .get_mut(&key)
                     .expect("key just resolved");
-
-                // Verify sender is the party we sent the request to
-                if *rel.remote_p_did != *from_did {
-                    warn!(
-                        from = %from_did,
-                        expected = %rel.remote_p_did,
-                        "accept from unexpected party"
-                    );
-                    return Ok(false);
-                }
-
                 rel.state = RelationshipState::Established;
                 rel.remote_did = Arc::new(body.did.clone());
-            } else {
-                warn!(from = %from_did, task_id = %task_id, "no relationship found for accept message");
-                return Ok(false);
             }
 
             // Send finalize using persona DIDs (same as request and accept).
@@ -807,41 +858,18 @@ pub async fn process_inbound_message(
         MessageType::RelationshipRequestFinalize => {
             let task_id = require_thid(message)?;
 
-            // All handshake messages use persona DIDs, so from_did is the
-            // remote persona DID which is the relationship HashMap key.
-            let key = config
-                .private
-                .relationships
-                .find_key_by_task_id(&task_id)
-                .or_else(|| {
-                    config
-                        .private
-                        .relationships
-                        .get(&from_did)
-                        .map(|_| Arc::clone(&from_did))
-                });
-
-            if let Some(key) = key {
-                let rel = config
-                    .private
-                    .relationships
-                    .get_mut(&key)
-                    .expect("key just resolved");
-
-                // Verify sender matches expected remote party
-                if *rel.remote_p_did != *from_did {
-                    warn!(
-                        from = %from_did,
-                        expected = %rel.remote_p_did,
-                        "finalize from unexpected party"
-                    );
-                    return Ok(false);
-                }
-
-                rel.state = RelationshipState::Established;
-            } else {
-                warn!(from = %from_did, task_id = %task_id, "no relationship found for finalize message");
+            // A finalize closes exactly the handshake we accepted: correlated
+            // by its thread id only, and only while our accept is waiting on it.
+            let Some(key) = config.private.relationships.awaiting(
+                &task_id,
+                RelationshipState::RequestAccepted,
+                &from_did,
+            ) else {
+                warn!("finalize closes no handshake of ours from this party — ignoring");
                 return Ok(false);
+            };
+            if let Some(rel) = config.private.relationships.get_mut(&key) {
+                rel.state = RelationshipState::Established;
             }
 
             config.private.tasks.remove(&task_id);
@@ -900,6 +928,26 @@ pub async fn process_inbound_message(
 
             if let Err(e) = validate_did(&body.did) {
                 warn!(from = %from_did, error = %e, "rejecting request with invalid DID in body");
+                return Ok(false);
+            }
+
+            // The DID the requester will use must be proven — by that DID, and
+            // by the requesting persona when it is an R-DID — for exactly this
+            // request (its id, its two parties). The transport sender alone is
+            // a routing hint, not proof of who is asking or which DID they hold.
+            if let Err(e) = openvtc_core::relationships::verify_did_binding(
+                &body.did,
+                body.did_proof.as_ref(),
+                &from_did,
+                body.persona_proof.as_ref(),
+                &recipient_did,
+                &message.id,
+                openvtc_core::relationships::BindingRole::Request,
+                tdk.did_resolver(),
+            )
+            .await
+            {
+                warn!(reason = %e, "relationship request refused");
                 return Ok(false);
             }
 

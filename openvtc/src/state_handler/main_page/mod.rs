@@ -1993,6 +1993,8 @@ mod tests {
                     reason: None,
                     did: BOB_DID.to_string(),
                     name: Some("Totally Not Bob".to_string()),
+                    did_proof: None,
+                    persona_proof: None,
                 },
             },
         );

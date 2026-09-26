@@ -50,9 +50,7 @@ use openvtc_core::vetting::wire;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use vta_sdk::protocols::join_requests::{
-    JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, JOIN_REQUEST_MANIFEST_0_2_TYPE, manifest,
-};
+use vta_sdk::protocols::join_requests::{JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, manifest};
 use vta_sdk::protocols::vetting::{
     COMMUNITY_ROLE_ENDORSEMENT_TYPE, IDENTITY_VETTING_ENDORSEMENT_TYPE, VETTER_ROLE,
     VETTING_REQUEST_RESPONSE_TYPE, VETTING_REQUEST_TYPE, VETTING_SESSION_RESPONSE_TYPE,
@@ -123,6 +121,7 @@ struct Party {
     persona: PersonaId,
     book: VettingBook,
     account: Account,
+    seen: openvtc_core::operational::SeenDocuments,
 }
 
 impl Party {
@@ -133,6 +132,7 @@ impl Party {
             persona: PersonaId::new(),
             book: VettingBook::default(),
             account: Account::default(),
+            seen: Default::default(),
         }
     }
 
@@ -153,13 +153,19 @@ impl Party {
     /// Feed a message to the production handler as this party.
     async fn receive(&mut self, message: &Message, sender: &str) -> Handled {
         let resolver = TrustTaskVmResolver::did_key_only();
+        let did_resolver = affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
+            affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+        )
+        .await
+        .expect("a DID resolver");
         let ctx = Context {
             account: &self.account,
             resolver: &resolver,
+            did_resolver: &did_resolver,
             recipient: Some((self.persona, &self.did)),
             now: Utc::now(),
         };
-        handle(&mut self.book, &ctx, message, sender)
+        handle(&mut self.book, &ctx, &mut self.seen, message, sender)
             .await
             .expect("a vetting message is claimed")
     }
@@ -186,7 +192,9 @@ fn requirements() -> VettingRequirements {
     .expect("requirements")
 }
 
-fn manifest_reply(community: &str) -> Message {
+/// The community's manifest answer, signed as a VTC signs its success
+/// responses — an unsigned one is not acted on.
+async fn manifest_reply(community: &str, to: &str, signer: &Secret) -> Message {
     let criterion = manifest::v0_2::Criterion::try_from(
         manifest::v0_2::Criterion::builder()
             .id("vetted")
@@ -204,10 +212,30 @@ fn manifest_reply(community: &str) -> Message {
             .branding(None),
     )
     .expect("manifest");
+    // An operational document: addressed, dated, and signed with the
+    // community's authentication key. Its signed type is the response's, the
+    // same as the message's — a VTC signs what it sends, and a document signed
+    // as one kind is not acted on as another.
+    let mut document = json!({
+        "id": wire::new_id(),
+        "type": JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE,
+        "issuer": community,
+        "recipient": to,
+        "issuedAt": Utc::now().to_rfc3339(),
+        "payload": body,
+    });
+    let proof = affinidi_data_integrity::DataIntegrityProof::sign(
+        &document,
+        signer,
+        affinidi_data_integrity::SignOptions::new().with_proof_purpose("authentication"),
+    )
+    .await
+    .expect("sign the manifest");
+    document["proof"] = serde_json::to_value(proof).expect("proof json");
     Message::build(
         wire::new_id(),
         JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE.to_string(),
-        json!({ "type": JOIN_REQUEST_MANIFEST_0_2_TYPE, "payload": body }),
+        document,
     )
     .from(community.to_string())
     .thid(wire::new_id())
@@ -303,7 +331,12 @@ async fn the_vetting_ceremony_completes_over_the_wire() {
         .book
         .start_application(&community, alice.persona, &alice_did, Utc::now())
         .expect("application starts");
-    let handled = alice.receive(&manifest_reply(&community), &community).await;
+    let handled = alice
+        .receive(
+            &manifest_reply(&community, &alice_did, &community_secret).await,
+            &community,
+        )
+        .await;
     assert!(matches!(
         handled.notice,
         Some(Notice::RequirementsUpdated { .. })
@@ -526,7 +559,8 @@ async fn the_vetting_ceremony_completes_over_the_wire() {
 async fn a_request_without_a_ticket_is_refused_at_the_desk() {
     init_test_tracing();
     let mediator = MockMediator::start().await.expect("mediator");
-    let community = did_of(&key_secret(9));
+    let community_secret = key_secret(9);
+    let community = did_of(&community_secret);
 
     let alice_profile = mediator.profile("alice").expect("alice");
     let bob_profile = mediator.profile("bob").expect("bob");
@@ -553,7 +587,12 @@ async fn a_request_without_a_ticket_is_refused_at_the_desk() {
         .book
         .start_application(&community, alice.persona, &alice_did, Utc::now())
         .expect("application starts");
-    alice.receive(&manifest_reply(&community), &community).await;
+    alice
+        .receive(
+            &manifest_reply(&community, &alice_did, &community_secret).await,
+            &community,
+        )
+        .await;
 
     // A ticket bob never issued: the code is well-formed and worthless.
     let stranger = Ticket::issue(

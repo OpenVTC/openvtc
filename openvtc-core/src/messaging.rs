@@ -720,12 +720,99 @@ pub fn handle_join_trust_task_error(
     }
 }
 
-/// Handle a VTC → member **removal notice** (`vtc/members/removal-notice/0.1`):
-/// the community telling a member it removed them (issue #240). Unlike every
-/// join-decision path above it is *unsolicited* — not threaded on any request we
-/// sent — so it is correlated by its two named parties instead: the sender
-/// (`from_did`, the community's VTC) and the removed member's persona
-/// (`body.did`, which must be one of ours).
+/// Why a removal notice was not acted on. Names what failed, never the
+/// notice's contents or a DID.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RemovalNoticeError {
+    #[error("the notice {0}")]
+    Document(#[from] crate::operational::OperationalError),
+    #[error("the notice's payload is malformed")]
+    Malformed,
+    #[error("the notice is addressed to one persona but names another")]
+    WrongRecipient,
+    #[error("the notice is for a membership we do not hold with that community")]
+    NoMembership,
+}
+
+/// A removal notice whose proof by the sending community verified
+/// ([`verify_removal_notice`]). The only way to obtain one outside tests.
+#[derive(Debug, Clone)]
+pub struct VerifiedRemovalNotice(RemovalNoticeBody);
+
+impl VerifiedRemovalNotice {
+    /// Wrap a payload without verifying it. Tests only: the transition logic
+    /// downstream of verification is tested separately from it.
+    #[cfg(test)]
+    pub(crate) fn assume_verified(body: RemovalNoticeBody) -> Self {
+        Self(body)
+    }
+}
+
+/// Verify a removal notice before anything acts on it.
+///
+/// Removal ends a membership, so it is taken only as the community's signed
+/// operational document ([`crate::operational`]): `issuer` is `from_did`, the
+/// proof is by the community's `authentication` key (VTI-KEY-106), it names a
+/// `recipient` that is one of `our_dids` and is the persona the payload
+/// removes, its `issuedAt` is inside the notice's delivery window, and its id
+/// has not been acted on before (VTI-KEY-107). A bare or unsigned notice is
+/// refused.
+///
+/// # Errors
+///
+/// [`RemovalNoticeError`] naming the check that failed.
+pub async fn verify_removal_notice(
+    message: &Message,
+    from_did: &str,
+    account: &Account,
+    resolver: &affinidi_did_resolver_cache_sdk::DIDCacheClient,
+    seen: &mut crate::operational::SeenDocuments,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<VerifiedRemovalNotice, RemovalNoticeError> {
+    let document = &message.body;
+    let body: RemovalNoticeBody = document
+        .get("payload")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| RemovalNoticeError::Malformed)?
+        .ok_or(crate::operational::OperationalError::NotADocument)?;
+    if let Some(recipient) = document.get("recipient").and_then(Value::as_str)
+        && recipient != body.did
+    {
+        return Err(RemovalNoticeError::WrongRecipient);
+    }
+    let ours: Vec<&str> = account.personas.values().map(|p| p.did.as_str()).collect();
+    let verified = crate::operational::verify_operational(
+        document,
+        from_did,
+        &ours,
+        vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE,
+        resolver,
+        seen,
+        now,
+    )
+    .await?;
+    // Bound before it is recorded: the sender is a community the named
+    // persona holds a membership with. A party with no standing — however
+    // well it signs with its own key — never reaches the replay set.
+    let bound = account
+        .persona_id_for_did(&body.did)
+        .is_some_and(|persona| account.membership(from_did, persona).is_some());
+    if !bound {
+        return Err(RemovalNoticeError::NoMembership);
+    }
+    verified.commit(seen, now)?;
+    Ok(VerifiedRemovalNotice(body))
+}
+
+/// Handle a VTC → member **removal notice** (`vtc/members/removal-notice/0.1`)
+/// that [`verify_removal_notice`] accepted: the community telling a member it
+/// removed them (issue #240). Unlike every join-decision path above it is
+/// *unsolicited* — not threaded on any request we sent — so it is correlated
+/// by its two named parties instead: the community (`from_did`, whose proof
+/// verified) and the removed member's persona (`body.did`, which must be one of
+/// ours).
 ///
 /// Transitions the matching **Active** membership to `Removed`, persisting the
 /// notice's authority (`decided_by`), reason, decision time (`decided_at`) and
@@ -738,16 +825,10 @@ pub fn handle_join_trust_task_error(
 /// removed member can no longer authenticate to the community to be told twice.
 pub fn handle_member_removal_notice(
     account: &mut Account,
-    message: &Message,
+    notice: VerifiedRemovalNotice,
     from_did: &str,
 ) -> StatusOutcome {
-    let body: RemovalNoticeBody = match serde_json::from_value(message.body.clone()) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(error = %e, "malformed removal-notice body — ignoring");
-            return StatusOutcome::NONE;
-        }
-    };
+    let body = notice.0;
     let Some(persona) = account.persona_id_for_did(&body.did) else {
         warn!(
             vtc = %from_did,
@@ -1736,7 +1817,46 @@ mod tests {
 
     // ----- removal notice (issue #240) --------------------------------------
 
-    fn removal_notice(from: &str, body: serde_json::Value) -> Message {
+    /// A removal-notice payload, treated as verified — these tests cover the
+    /// transition after verification (see `verify_removal_notice` tests for
+    /// the proof).
+    fn removal_notice(_from: &str, body: serde_json::Value) -> VerifiedRemovalNotice {
+        VerifiedRemovalNotice::assume_verified(serde_json::from_value(body).expect("a payload"))
+    }
+
+    fn did_key_secret(seed: u8) -> affinidi_tdk::secrets_resolver::secrets::Secret {
+        let mut secret = affinidi_tdk::secrets_resolver::secrets::Secret::generate_ed25519(
+            None,
+            Some(&[seed; 32]),
+        );
+        let public = secret.get_public_keymultibase().unwrap();
+        secret.id = format!("did:key:{public}#{public}");
+        secret
+    }
+
+    fn did_of_secret(secret: &affinidi_tdk::secrets_resolver::secrets::Secret) -> String {
+        secret.id.split('#').next().unwrap().to_string()
+    }
+
+    /// The Trust Task document a VTC sends as a removal notice, unsigned.
+    fn notice_document(vtc: &str, persona: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("urn:uuid:{}", Uuid::new_v4()),
+            "type": vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE,
+            "issuer": vtc,
+            "recipient": persona,
+            "issuedAt": Utc::now().to_rfc3339(),
+            "payload": {
+                "did": persona,
+                "code": "adminRemoved",
+                "disposition": "tombstone",
+                "decidedAt": "2026-08-23T09:14:02Z",
+                "decidedBy": "did:key:z6MkAdmin",
+            },
+        })
+    }
+
+    fn notice_message(from: &str, body: serde_json::Value) -> Message {
         Message::build(
             Uuid::new_v4().to_string(),
             vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE.to_string(),
@@ -1744,6 +1864,140 @@ mod tests {
         )
         .from(from.to_string())
         .finalize()
+    }
+
+    async fn test_resolver() -> affinidi_did_resolver_cache_sdk::DIDCacheClient {
+        affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
+            affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+        )
+        .await
+        .expect("resolver")
+    }
+
+    /// A removal ends a membership, so it is acted on only as the community's
+    /// signed operational document — authentication key, addressed, fresh,
+    /// once — not on who the transport says sent it.
+    #[tokio::test]
+    async fn a_removal_notice_needs_the_communitys_operational_proof() {
+        use crate::operational::{OperationalError, SeenDocuments};
+        use crate::proof_check::{ProofError, Purpose, test_support::sign_for};
+        let resolver = test_resolver().await;
+        let vtc_key = did_key_secret(0x51);
+        let vtc = did_of_secret(&vtc_key);
+        let persona = "did:webvh:example:persona";
+        let acct = account_with_persona(&vtc, persona);
+        let mut seen = SeenDocuments::default();
+        let signers = [&vtc_key];
+        let auth = |doc| sign_for(doc, &signers, Purpose::Authentication);
+        macro_rules! run {
+            ($m:expr, $from:expr) => {
+                verify_removal_notice(&$m, &$from, &acct, &resolver, &mut seen, Utc::now()).await
+            };
+        }
+
+        // Signed with the community's authentication key: accepted, once.
+        let signed = auth(notice_document(&vtc, persona)).await;
+        assert!(run!(notice_message(&vtc, signed.clone()), vtc).is_ok());
+        assert_eq!(
+            run!(notice_message(&vtc, signed.clone()), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Replayed)
+        );
+
+        // A stranger signing its own notice with its own key: it has no
+        // membership, so it is refused and records nothing.
+        let stranger_key = did_key_secret(0x5a);
+        let stranger = did_of_secret(&stranger_key);
+        let theirs = sign_for(
+            notice_document(&stranger, persona),
+            &[&stranger_key],
+            Purpose::Authentication,
+        )
+        .await;
+        let rev = seen.revision();
+        assert_eq!(
+            run!(notice_message(&stranger, theirs), stranger).unwrap_err(),
+            RemovalNoticeError::NoMembership
+        );
+        assert_eq!(seen.revision(), rev, "nothing recorded for a stranger");
+
+        // Signed under assertionMethod (VTI-KEY-106): refused.
+        let asserted = sign_for(
+            notice_document(&vtc, persona),
+            &[&vtc_key],
+            Purpose::AssertionMethod,
+        )
+        .await;
+        assert_eq!(
+            run!(notice_message(&vtc, asserted), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Proof(ProofError::WrongPurpose(0)))
+        );
+
+        // Unsigned: refused.
+        assert_eq!(
+            run!(notice_message(&vtc, notice_document(&vtc, persona)), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Proof(ProofError::NoProof))
+        );
+
+        // A bare payload (no document): refused.
+        let bare = notice_document(&vtc, persona)["payload"].clone();
+        assert!(run!(notice_message(&vtc, bare), vtc).is_err());
+
+        // Changed after signing: refused.
+        let mut tampered = auth(notice_document(&vtc, persona)).await;
+        tampered["payload"]["code"] = serde_json::json!("purged");
+        assert_eq!(
+            run!(notice_message(&vtc, tampered), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Proof(ProofError::Invalid(0)))
+        );
+
+        // Claimed as the community's but signed by somebody else: refused.
+        let other = did_key_secret(0x52);
+        let forged = sign_for(
+            notice_document(&vtc, persona),
+            &[&other],
+            Purpose::Authentication,
+        )
+        .await;
+        assert_eq!(
+            run!(notice_message(&vtc, forged), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Proof(
+                ProofError::ForeignVerificationMethod(0)
+            ))
+        );
+
+        // A genuine notice arriving as another sender's: refused.
+        let elsewhere = did_of_secret(&other);
+        let fresh = auth(notice_document(&vtc, persona)).await;
+        assert_eq!(
+            run!(notice_message(&elsewhere, fresh), elsewhere).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::IssuerNotSender)
+        );
+
+        // No recipient, or one naming another persona than the payload: refused.
+        let mut unaddressed = notice_document(&vtc, persona);
+        unaddressed.as_object_mut().unwrap().remove("recipient");
+        let unaddressed = auth(unaddressed).await;
+        assert_eq!(
+            run!(notice_message(&vtc, unaddressed), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::NoRecipient)
+        );
+        let mut misaddressed = notice_document(&vtc, persona);
+        misaddressed["recipient"] = serde_json::json!("did:webvh:example:someone-else");
+        let misaddressed = auth(misaddressed).await;
+        assert_eq!(
+            run!(notice_message(&vtc, misaddressed), vtc).unwrap_err(),
+            RemovalNoticeError::WrongRecipient
+        );
+
+        // Too old for the delivery window: refused.
+        let mut stale = notice_document(&vtc, persona);
+        stale["issuedAt"] =
+            serde_json::json!((Utc::now() - chrono::TimeDelta::days(40)).to_rfc3339());
+        let stale = auth(stale).await;
+        assert_eq!(
+            run!(notice_message(&vtc, stale), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::TooOld)
+        );
     }
 
     /// A removal notice for an active member transitions it to Removed, persists
@@ -1758,7 +2012,7 @@ mod tests {
 
         let out = handle_member_removal_notice(
             &mut acct,
-            &removal_notice(
+            removal_notice(
                 vtc,
                 serde_json::json!({
                     "did": persona,
@@ -1798,7 +2052,7 @@ mod tests {
 
         handle_member_removal_notice(
             &mut acct,
-            &removal_notice(
+            removal_notice(
                 vtc,
                 serde_json::json!({
                     "did": persona,
@@ -1824,7 +2078,7 @@ mod tests {
 
         let out = handle_member_removal_notice(
             &mut acct,
-            &removal_notice(
+            removal_notice(
                 vtc,
                 serde_json::json!({
                     "did": "did:webvh:example:someone-else",
@@ -1851,7 +2105,7 @@ mod tests {
 
         let out = handle_member_removal_notice(
             &mut acct,
-            &removal_notice(
+            removal_notice(
                 vtc,
                 serde_json::json!({
                     "did": persona,
