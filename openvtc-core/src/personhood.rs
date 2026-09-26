@@ -358,15 +358,19 @@ pub async fn assert_personhood(
 
     let request_id = Uuid::new_v4();
     let document_id = format!("urn:uuid:{request_id}");
-    // Signed with the same key that signed the presentation inside it:
-    // `vtc/members/personhood/assert/0.1` declares `proof` REQUIRED.
-    let body = crate::trust_task_doc::build_signed_value(
+    // Signed with the same key — and the same proof purpose — that signed
+    // the presentation inside it: `vtc/members/personhood/assert/0.1`
+    // declares `proof` REQUIRED, and `signing_secret` is the persona's
+    // authentication key (#key-2), which is listed only under
+    // `authentication` in the DID document, not `assertionMethod`.
+    let body = crate::trust_task_doc::build_signed_value_as(
         PERSONHOOD_ASSERT_TYPE,
         route.member_did,
         route.vtc_did,
         &document_id,
         json!({ "did": route.member_did, "presentation": presentation }),
         signing_secret,
+        "authentication",
     )
     .await?;
 
@@ -589,6 +593,21 @@ mod tests {
             "the copy the published task names is missing"
         );
         assert_eq!(vp["holder"].as_str(), Some(MEMBER));
+    }
+
+    /// The presentation is signed under `proofPurpose: authentication`, not
+    /// the Data-Integrity default of `assertionMethod` — VTI-KEY-022. The
+    /// signing key this ceremony uses (`keys.authentication`, #key-2) is
+    /// listed only under `authentication` in the DID document, so a peer
+    /// enforcing the strict proof-purpose rule refuses a proof that claims
+    /// any other purpose for it.
+    #[tokio::test]
+    async fn presentation_is_signed_under_authentication_proof_purpose() {
+        let vp = build_presentation(&secret(), MEMBER, &Uuid::new_v4(), vec![])
+            .await
+            .expect("build presentation");
+
+        assert_eq!(vp["proof"]["proofPurpose"].as_str(), Some("authentication"));
     }
 
     const CHALLENGE: &str = "6f1c4f9e-7c2a-4f4b-9a3e-2b1d0c5e8a77";

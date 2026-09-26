@@ -391,7 +391,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                                 slug,
                                 version,
                                 enable,
-                                signing_secret: Box::new(keys.signing.secret.clone()),
+                                signing_secret: Box::new(keys.authentication.secret.clone()),
                             },
                         },
                     );
@@ -573,7 +573,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         vtc_did: challenge.vtc_did.clone(),
                         persona: challenge.persona,
                         verb: community_actions::Verb::AssertPersonhood {
-                            signing_secret: Box::new(keys.signing.secret.clone()),
+                            signing_secret: Box::new(keys.authentication.secret.clone()),
                             challenge_id: challenge.challenge_id,
                             credentials,
                         },
