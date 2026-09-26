@@ -49,7 +49,11 @@ pub(crate) enum Verb {
     /// `members/personhood/challenge` — ask for the nonce an assertion must
     /// carry. The reply arrives asynchronously and lands via
     /// [`crate::state_handler::message_dispatch`]; nothing here waits for it.
-    RequestPersonhoodChallenge,
+    ///
+    /// Carries the persona's authentication key because the task declares
+    /// `proof` REQUIRED (trust-tasks 0.23): the request is an operational
+    /// one, signed the same way the assertion that follows it is.
+    RequestPersonhoodChallenge { signing_secret: Box<Secret> },
     /// `members/personhood/assert` — present the evidence over that nonce.
     ///
     /// `credentials` are presented whole: `eddsa-jcs-2022` credentials cannot
@@ -91,7 +95,7 @@ impl CommunityJob {
         let performed = match &self.verb {
             Verb::Leave { .. } => Performed::Leave,
             Verb::IssueVmc { .. } => Performed::IssueVmc,
-            Verb::RequestPersonhoodChallenge => Performed::RequestPersonhoodChallenge,
+            Verb::RequestPersonhoodChallenge { .. } => Performed::RequestPersonhoodChallenge,
             Verb::AssertPersonhood { .. } => Performed::AssertPersonhood,
         };
         // The personhood verbs share one route; building it once keeps the
@@ -140,13 +144,17 @@ impl CommunityJob {
             )
             .await
             .map(|(_, vmc)| issued = Some(vmc)),
-            Verb::RequestPersonhoodChallenge => {
+            Verb::RequestPersonhoodChallenge { signing_secret } => {
                 // The member asks for their own. An administrator minting one
                 // for somebody else is a community-side action, not something
                 // this client offers.
-                openvtc_core::personhood::request_challenge(&route, &self.member_did)
-                    .await
-                    .map(|_| ())
+                openvtc_core::personhood::request_challenge(
+                    &route,
+                    &self.member_did,
+                    signing_secret,
+                )
+                .await
+                .map(|_| ())
             }
             Verb::AssertPersonhood {
                 signing_secret,
