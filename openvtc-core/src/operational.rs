@@ -124,6 +124,8 @@ pub enum OperationalError {
     Expired,
     #[error("it was already acted on (replay)")]
     Replayed,
+    #[error("it is from a community we hold no membership with")]
+    NoStanding,
     #[error("its proof: {0}")]
     Proof(#[from] ProofError),
 }

@@ -2899,7 +2899,7 @@ enum DegradedOutcome {
 /// older query) are dropped — the reply is stale by definition.
 fn apply_capability_replies(
     state: &mut State,
-    replies: Vec<(String, openvtc_core::capabilities::CapabilityReply)>,
+    replies: Vec<(String, String, openvtc_core::capabilities::CapabilityReply)>,
 ) {
     use crate::state_handler::main_page::content::CapabilitiesPhase;
     use openvtc_core::capabilities::CapabilityReply;
@@ -2909,8 +2909,14 @@ fn apply_capability_replies(
     let Some(view) = state.main_page.content_panel.capabilities.view.as_mut() else {
         return;
     };
-    for (thid, reply) in replies {
+    for (from, thid, reply) in replies {
         if view.pending_thid.as_deref() != Some(thid.as_str()) {
+            continue;
+        }
+        // A thread id is a correlation key, not a credential: the answer is
+        // taken only from the community the view asked.
+        if from != view.vtc_did {
+            tracing::warn!("capability reply not from the community the view is asking — dropped");
             continue;
         }
         view.pending_thid = None;
@@ -4248,6 +4254,62 @@ fn build_trust_pong(
 mod tests {
     use super::*;
     use crate::state_handler::main_page::menu::MainMenu;
+
+    /// A capability reply is taken only from the community the view asked,
+    /// on the thread it is waiting on — a thread id alone is not enough.
+    #[test]
+    fn a_capability_reply_is_taken_only_from_the_community_asked() {
+        use crate::state_handler::main_page::content::{CapabilitiesPhase, CapabilitiesView};
+        use openvtc_core::capabilities::CapabilityReply;
+        let mut state = State::default();
+        let mut view = CapabilitiesView::new(
+            "did:webvh:vtc".into(),
+            openvtc_core::config::account::PersonaId::new(),
+            "Community".into(),
+        );
+        view.pending_thid = Some("thread-1".into());
+        state.main_page.content_panel.capabilities.view = Some(view);
+
+        apply_capability_replies(
+            &mut state,
+            vec![(
+                "did:webvh:mallory".into(),
+                "thread-1".into(),
+                CapabilityReply::Listing(Vec::new()),
+            )],
+        );
+        let view = state
+            .main_page
+            .content_panel
+            .capabilities
+            .view
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            view.pending_thid.as_deref(),
+            Some("thread-1"),
+            "still waiting"
+        );
+        assert!(matches!(view.phase, CapabilitiesPhase::Loading));
+
+        apply_capability_replies(
+            &mut state,
+            vec![(
+                "did:webvh:vtc".into(),
+                "thread-1".into(),
+                CapabilityReply::Listing(Vec::new()),
+            )],
+        );
+        let view = state
+            .main_page
+            .content_panel
+            .capabilities
+            .view
+            .as_ref()
+            .unwrap();
+        assert!(view.pending_thid.is_none());
+        assert!(matches!(view.phase, CapabilitiesPhase::Loaded));
+    }
 
     /// The regression this function exists for.
     ///

@@ -185,13 +185,14 @@ pub fn handle_join_submit_receipt(
             return false;
         }
     };
-    let body: JoinRequestSubmitReceiptBody = match serde_json::from_value(message.body.clone()) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(error = %e, "malformed join submit-receipt body — ignoring");
-            return false;
-        }
-    };
+    let body: JoinRequestSubmitReceiptBody =
+        match serde_json::from_value(trust_task_reply_payload(&message.body)) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(error = %e, "malformed join submit-receipt body — ignoring");
+                return false;
+            }
+        };
 
     // Correlate to the specific pending membership (a community may now hold
     // several, one per persona) by the placeholder = our submit id.
@@ -249,40 +250,21 @@ impl CredentialIssueOutcome {
     };
 }
 
-/// What an inbound DIDComm problem-report meant to the join handler.
+/// What an inbound DIDComm problem-report says, read — never acted on.
 ///
-/// A problem-report says "I refused the thing you sent me". This handler can
-/// only interpret one kind: a refusal threaded on a *pending join request*. It
-/// used to return an empty [`StatusOutcome`] for everything else and log a warn
-/// naming the correlation miss — so a community refusing anything else at all
-/// produced, on this client, nothing a user could see.
-///
-/// That is how the broken reciprocal-VMC exchange stayed invisible for its
-/// entire life: the VTC rejected every delivery, said so in a problem-report
-/// threaded on the delivery, and this client discarded each one as "not a join
-/// I know about" while the UI reported the send as a success.
-///
-/// So the miss is now reportable rather than swallowed. This handler still
-/// declines to *interpret* a report it cannot correlate — it genuinely does not
-/// know what failed — but it hands the code and comment back so the caller can
-/// put them where somebody will read them.
-pub struct ProblemReportOutcome {
-    /// The record change, if this report was a join refusal.
-    pub status: StatusOutcome,
-    /// `Some((code, comment))` when the report could not be matched to a
-    /// pending join — i.e. it refused something else this client sent, and
-    /// nothing here knows what. Surface it; do not drop it.
-    pub unclaimed: Option<(String, String)>,
-}
-
-impl ProblemReportOutcome {
-    /// A report this handler recognised and acted on.
-    fn claimed(status: StatusOutcome) -> Self {
-        Self {
-            status,
-            unclaimed: None,
-        }
-    }
+/// A problem-report is a DIDComm message with no Data Integrity proof, so it
+/// cannot show that the community wrote it. It therefore changes nothing: a
+/// join is rejected only by the community's signed `trust-task-error` or
+/// verdict. A report from a community we hold a record with is surfaced (so a
+/// refusal is not invisible); from anyone else it is dropped without a trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemReportNote {
+    /// The report's `code`.
+    pub code: String,
+    /// Its free-text `comment` (possibly empty).
+    pub comment: String,
+    /// Whether it threads on a join of ours that is still pending.
+    pub on_pending_join: bool,
 }
 
 /// Outcome of applying a VTC `join-requests/status-response` to a community.
@@ -551,62 +533,34 @@ pub fn handle_join_verdict(
     }
 }
 
-/// Handle a DIDComm problem-report threaded to our join submit — the framework
-/// failure path of the trust-task join (invalid/expired/malformed VIC, bad
-/// signature). Correlate by `thid`, then branch on the `e.p.msg.*` code:
-/// `forbidden` (the invitation was not accepted) → Rejected, surfacing the
-/// `comment`; any other code (bad-request / internal) is logged but leaves the
-/// record Pending (it's a transient/client problem, not a policy rejection).
-pub fn handle_join_problem_report(
-    account: &mut Account,
+/// Read a DIDComm problem-report from `from_did`. `None` when the sender is
+/// not a community we hold any record with. See [`ProblemReportNote`] for why
+/// this never changes a record.
+#[must_use]
+pub fn read_problem_report(
+    account: &Account,
     message: &Message,
     from_did: &str,
-) -> ProblemReportOutcome {
-    use vta_sdk::protocols::problem_report_codes as codes;
-
-    let (code, comment) = vta_sdk::protocols::extract_problem_report(&message.body);
-    let unclaimed = || ProblemReportOutcome {
-        status: StatusOutcome::NONE,
-        unclaimed: Some((code.clone(), comment.clone())),
-    };
-
-    let Some(thid) = message.thid.as_deref() else {
-        return unclaimed();
-    };
-    let Ok(placeholder) = Uuid::parse_str(thid) else {
-        return unclaimed();
-    };
-    let Some(record) = account.membership_by_pending_request(from_did, placeholder) else {
-        return unclaimed();
-    };
-    let persona = record.persona_ref;
-
-    if code == codes::FORBIDDEN {
-        // The problem-report's `comment` is free text; keep it verbatim as the
-        // reason, and the report `code` as the code (issue #240). An empty
-        // comment is "no reason given", not an empty reason.
-        record.reject(DecisionEvidence {
-            code: Some(code.clone()),
-            reason: (!comment.is_empty()).then(|| comment.clone()),
-            decided_by: None,
-            decided_at: None,
-            disposition: None,
-        });
-        info!(
-            vtc = %from_did,
-            comment = %comment,
-            "join rejected by VTC — invitation not accepted (now Rejected)"
-        );
-        ProblemReportOutcome::claimed(StatusOutcome {
-            changed: true,
-            inactivated: Some(persona),
-        })
-    } else {
-        // bad-request / internal / other: the submit didn't admit, but it's not a
-        // policy rejection — surface the detail and leave the record Pending.
-        warn!(vtc = %from_did, code = %code, comment = %comment, "join submit failed — left Pending");
-        ProblemReportOutcome::claimed(StatusOutcome::NONE)
+) -> Option<ProblemReportNote> {
+    if account.memberships_for(from_did).is_empty() {
+        return None;
     }
+    let (code, comment) = vta_sdk::protocols::extract_problem_report(&message.body);
+    let on_pending_join = message
+        .thid
+        .as_deref()
+        .and_then(|t| Uuid::parse_str(t).ok())
+        .is_some_and(|id| {
+            account
+                .memberships_for(from_did)
+                .iter()
+                .any(|m| matches!(m.status, crate::config::account::CommunityStatus::Pending { request_id } if request_id == id))
+        });
+    Some(ProblemReportNote {
+        code,
+        comment,
+        on_pending_join,
+    })
 }
 
 /// Type-URI prefix of a framework `trust-task-error` document, version-agnostic
@@ -641,7 +595,7 @@ fn is_join_denial_code(code: &str) -> bool {
 /// - A definitive authorization denial (`permissionDenied` / `forbidden` /
 ///   `identityMismatch`) → `Rejected` (terminal; inactivates the session so the
 ///   loop deregisters it). Mirrors the `forbidden` branch of
-///   [`handle_join_problem_report`].
+///   [`read_problem_report`], which never acts on it.
 /// - Any other code (malformed / unsupported / internal / unavailable / …) is a
 ///   client or transient failure, not a policy decision: surface the detail and
 ///   leave the record `Pending` so a corrected retry can still succeed.
@@ -894,8 +848,10 @@ pub fn handle_member_removal_notice(
 /// does not need, so a strict parse would drop a valid response over a field it
 /// never reads.
 ///
-/// **Anti-spoof:** only a community we actually hold a membership with may set
-/// this — a response from a DID we know nothing about is ignored. An absent or
+/// **Anti-spoof:** the caller passes only the community's signed answer to a
+/// profile question we asked it; and only a community we actually hold a
+/// membership with may set this. A declared `attributed` is never recorded —
+/// it would weaken the pairwise default, which is the member's choice. An absent or
 /// unrecognised value stores `None`, which reads as "default to pairwise" (the
 /// field is a declaration, not an enforcement); it does not fail the message.
 ///
@@ -939,6 +895,21 @@ pub fn handle_community_profile_show_response(
     }
     let mut changed = false;
     for record in records {
+        // Never weaken pairwise to attributed on the community's say-so: an
+        // attributed edge links the member's persona DID into a legible graph,
+        // which is the member's choice to make. The declaration is logged; the
+        // form's toggle is where the member makes it. A move towards pairwise
+        // (or back to undeclared) is taken.
+        if declared == Some(RelationshipIdentifierDefault::Attributed)
+            && record.relationship_identifier_default
+                != Some(RelationshipIdentifierDefault::Attributed)
+        {
+            info!(
+                "community declares attributed relationship identifiers — kept pairwise; \
+                 choose attributed per relationship if you want it"
+            );
+            continue;
+        }
         if record.relationship_identifier_default != declared {
             record.relationship_identifier_default = declared;
             changed = true;
@@ -1524,20 +1495,19 @@ mod tests {
         .finalize()
     }
 
+    /// Pairwise is recorded; attributed is not — the community declaring it
+    /// never weakens the member's pairwise default without their say.
     #[test]
-    fn profile_response_records_attributed_and_pairwise() {
+    fn profile_response_records_pairwise_but_never_weakens_to_attributed() {
         let vtc = "did:webvh:example:vtc";
 
         let mut acct = pending_account(vtc, Uuid::new_v4());
-        assert!(handle_community_profile_show_response(
+        assert!(!handle_community_profile_show_response(
             &mut acct,
             &profile_response(vtc, Some("attributed")),
             vtc,
         ));
-        assert_eq!(
-            only(&acct, vtc).relationship_identifier_default,
-            Some(RelationshipIdentifierDefault::Attributed)
-        );
+        assert_eq!(only(&acct, vtc).relationship_identifier_default, None);
 
         let mut acct = pending_account(vtc, Uuid::new_v4());
         assert!(handle_community_profile_show_response(
@@ -1749,49 +1719,6 @@ mod tests {
         let d = rec.decision.clone().expect("deny records evidence");
         assert_eq!(d.code.as_deref(), Some("policy.denied"));
         assert_eq!(d.reason.as_deref(), Some("membership full"));
-    }
-
-    /// A FORBIDDEN problem-report persists its code and the free-text comment.
-    #[test]
-    fn problem_report_forbidden_persists_code_and_comment() {
-        let vtc = "did:webvh:example:vtc";
-        let rid = Uuid::new_v4();
-        let mut acct = pending_account(vtc, rid);
-
-        let out = handle_join_problem_report(
-            &mut acct,
-            &problem_report(
-                &rid.to_string(),
-                vtc,
-                "e.p.msg.forbidden",
-                "invitation rejected",
-            ),
-            vtc,
-        );
-        assert!(out.status.changed);
-        let d = only(&acct, vtc)
-            .decision
-            .clone()
-            .expect("forbidden records evidence");
-        assert_eq!(d.code.as_deref(), Some("e.p.msg.forbidden"));
-        assert_eq!(d.reason.as_deref(), Some("invitation rejected"));
-    }
-
-    /// An empty problem-report comment is "no reason given", not an empty reason.
-    #[test]
-    fn problem_report_forbidden_empty_comment_gives_no_reason() {
-        let vtc = "did:webvh:example:vtc";
-        let rid = Uuid::new_v4();
-        let mut acct = pending_account(vtc, rid);
-
-        handle_join_problem_report(
-            &mut acct,
-            &problem_report(&rid.to_string(), vtc, "e.p.msg.forbidden", ""),
-            vtc,
-        );
-        let d = only(&acct, vtc).decision.clone().expect("records evidence");
-        assert!(d.reason.is_none(), "an empty comment is an absent reason");
-        assert_eq!(d.code.as_deref(), Some("e.p.msg.forbidden"));
     }
 
     /// A denial trust-task-error persists its code and human `message`.
@@ -2540,75 +2467,16 @@ mod tests {
         .finalize()
     }
 
-    /// A problem-report on a thread no pending join matches must be reported,
-    /// not swallowed.
-    ///
-    /// This is the exact shape that hid the broken reciprocal-VMC exchange: the
-    /// community refused every delivery and said so in a report threaded on the
-    /// delivery, which correlates to no join, so the handler returned "nothing
-    /// happened" and the only trace was a warn naming the correlation miss
-    /// rather than the failure.
+    /// A problem-report carries no proof, so it never changes a record — even a
+    /// `forbidden` threaded on our pending join. It is read, so the refusal is
+    /// visible, with the community's own words.
     #[test]
-    fn a_report_matching_no_pending_join_is_handed_back_not_dropped() {
+    fn a_problem_report_is_read_but_never_acted_on() {
         let vtc = "did:webvh:example:vtc";
         let rid = Uuid::new_v4();
-        let mut acct = pending_account(vtc, rid);
-
-        // Threaded on something else entirely — a members/vmc delivery, say.
-        let unrelated = Uuid::new_v4();
-        let out = handle_join_problem_report(
-            &mut acct,
-            &problem_report(
-                &unrelated.to_string(),
-                vtc,
-                "e.p.msg.bad-request",
-                "member vmc has no top-level `id`",
-            ),
-            vtc,
-        );
-
-        let (code, comment) = out
-            .unclaimed
-            .expect("an uncorrelated report must be reported");
-        assert_eq!(code, "e.p.msg.bad-request");
-        assert!(
-            comment.contains("member vmc"),
-            "the community's own words must survive: {comment}"
-        );
-        assert!(
-            !out.status.changed,
-            "it still must not touch the pending join it does not belong to"
-        );
-        assert!(matches!(
-            only(&acct, vtc).status,
-            CommunityStatus::Pending { .. }
-        ));
-    }
-
-    /// A report with no thread id at all cannot be correlated either, and is
-    /// equally not a reason to stay quiet.
-    #[test]
-    fn a_report_with_no_thread_id_is_still_reported() {
-        let vtc = "did:webvh:example:vtc";
-        let mut acct = pending_account(vtc, Uuid::new_v4());
-        let mut msg = problem_report("ignored", vtc, "e.p.msg.internal", "boom");
-        msg.thid = None;
-
-        let out = handle_join_problem_report(&mut acct, &msg, vtc);
-        assert!(
-            out.unclaimed.is_some(),
-            "no thid is not a reason to drop it"
-        );
-    }
-
-    #[test]
-    fn problem_report_forbidden_rejects() {
-        let vtc = "did:webvh:example:vtc";
-        let rid = Uuid::new_v4();
-        let mut acct = pending_account(vtc, rid);
-
-        let out = handle_join_problem_report(
-            &mut acct,
+        let acct = pending_account(vtc, rid);
+        let note = read_problem_report(
+            &acct,
             &problem_report(
                 &rid.to_string(),
                 vtc,
@@ -2616,35 +2484,58 @@ mod tests {
                 "invitation rejected",
             ),
             vtc,
-        );
-        assert!(out.status.changed);
-        assert!(out.status.inactivated.is_some());
-        assert!(matches!(only(&acct, vtc).status, CommunityStatus::Rejected));
-    }
-
-    #[test]
-    fn problem_report_bad_request_stays_pending() {
-        let vtc = "did:webvh:example:vtc";
-        let rid = Uuid::new_v4();
-        let mut acct = pending_account(vtc, rid);
-
-        let out = handle_join_problem_report(
-            &mut acct,
-            &problem_report(&rid.to_string(), vtc, "e.p.msg.bad-request", "malformed"),
-            vtc,
-        );
-        assert!(
-            !out.status.changed,
-            "a client/transient error must not mark Rejected"
-        );
-        assert!(
-            out.unclaimed.is_none(),
-            "a report threaded on a known pending join is this handler's to interpret"
-        );
+        )
+        .expect("our community's report is read");
+        assert_eq!(note.code, "e.p.msg.forbidden");
+        assert_eq!(note.comment, "invitation rejected");
+        assert!(note.on_pending_join);
         assert!(matches!(
             only(&acct, vtc).status,
             CommunityStatus::Pending { .. }
         ));
+
+        let unrelated = read_problem_report(
+            &acct,
+            &problem_report(&Uuid::new_v4().to_string(), vtc, "e.p.msg.bad-request", "x"),
+            vtc,
+        )
+        .unwrap();
+        assert!(!unrelated.on_pending_join);
+    }
+
+    /// A join failure is heard only from the community the join was sent to:
+    /// a problem-report or trust-task-error from anyone else, even threaded on
+    /// the real request id, changes nothing.
+    #[test]
+    fn join_failures_from_another_party_change_nothing() {
+        let vtc = "did:webvh:example:vtc";
+        let mallory = "did:webvh:example:mallory";
+        let rid = Uuid::new_v4();
+        let mut acct = pending_account(vtc, rid);
+
+        assert!(
+            read_problem_report(
+                &acct,
+                &problem_report(&rid.to_string(), mallory, "e.p.msg.forbidden", "no"),
+                mallory,
+            )
+            .is_none(),
+            "a stranger's report is not even read"
+        );
+        let out = handle_join_trust_task_error(
+            &mut acct,
+            &trust_task_error(&rid.to_string(), mallory, "permissionDenied", "no"),
+            mallory,
+        );
+        assert!(!out.changed && out.inactivated.is_none());
+        assert!(!handle_join_submit_receipt(
+            &mut acct,
+            &receipt(&rid.to_string(), mallory, Uuid::new_v4(), "received"),
+            mallory,
+        ));
+        let rec = only(&acct, vtc);
+        assert!(matches!(rec.status, CommunityStatus::Pending { .. }));
+        assert!(rec.receipt_at.is_none(), "not even acknowledged");
     }
 
     #[test]

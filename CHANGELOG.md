@@ -137,6 +137,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `relationships::create_send_message_accepted` (which sent an unproven
   acceptance) is removed.
 
+- **The last replies taken on the sender's word now need the right party, or a
+  proof.** A capability or git-ns reply — a refusal (`trust-task-error`) as
+  much as a success — must be the community's signed operational document
+  (authentication key, addressed to our persona, fresh, not replayed); an
+  unsigned refusal is ignored with a log line, and a capability reply is taken only from the
+  community the view asked — a thread id alone no longer answers for it. An
+  invitation credential (from `--invitation`, a paste, the Add VIC panel, or the
+  vault) is used only once its proof verifies against its issuer (and its
+  revocation status is established); until then its issuer is not shown as the
+  community or used to prefill the DID. A problem-report from a party we hold no
+  membership with records nothing, not even an activity-log line. The join
+  path's replies — submit-receipt, verdict, status response, and a refusal
+  (`trust-task-error`) — are acted on only as the community's signed
+  operational document; a DIDComm problem-report, which cannot be signed, is
+  now only surfaced (from a community we hold a record with) and never
+  rejects a join. A community-profile answer is taken only when signed and
+  answering a profile question we asked, and a declared `attributed` default
+  is never recorded over pairwise. A VRC rejection closes only our own VRC
+  request, to the party it was sent to. A reply from a party we hold no
+  membership with (Pending included) is refused before its proof is checked,
+  so it never costs a resolve, and each reply is taken only as its own signed
+  `type`.
+  **Breaking (library):** `join::verify_invitation_credential` is the gate;
+  `validate_invitation_credential` is shape-only.
+
 - **Vetting questions and personhood reach a community again.** A community
   (VTI #1687, Keyring VTI-42) now takes a Trust Task over DIDComm only inside
   the binding envelope (`https://trusttasks.org/binding/didcomm/0.1/envelope`),
