@@ -1115,6 +1115,35 @@ async fn sign_and_send(
     Ok(())
 }
 
+/// Like [`sign_and_send`], but signs with the persona's authentication key
+/// under `proofPurpose: authentication` rather than the `assertionMethod`
+/// default.
+///
+/// For `vtc/vetting/vetters/profile/0.1` and `vtc/vetting/vetters/resend/0.1`
+/// (`proof` REQUIRED as of trust-tasks 0.23): both are the vetter acting on
+/// their own standing with the community, not a claim to be held to later,
+/// so they are signed the same way a personhood challenge or assertion is.
+async fn sign_and_send_operational(
+    ctx: &mut ActionCtx<'_>,
+    persona: PersonaId,
+    mut document: Document,
+    sent: Sent,
+) -> Result<(), String> {
+    let keys = ctx
+        .config
+        .get_persona_keys_for(persona, ctx.tdk)
+        .await
+        .map_err(|e| e.to_string())?;
+    wire::sign_as(&mut document, &keys.authentication.secret, "authentication")
+        .await
+        .map_err(|e| e.to_string())?;
+    let message = wire::to_message(&document).map_err(|e| e.to_string())?;
+    let from = document.issuer.clone().unwrap_or_default();
+    let to = document.recipient.clone().unwrap_or_default();
+    spawn_send(ctx, message, &from, &to, sent);
+    Ok(())
+}
+
 fn spawn_send(ctx: &mut ActionCtx<'_>, message: Message, from: &str, to: &str, sent: Sent) {
     let job = SendJob {
         service: ctx.didcomm_service.clone(),
@@ -1757,7 +1786,7 @@ async fn publish_profile(ctx: &mut ActionCtx<'_>, form: &VetterProfileForm) {
         persona: membership.persona,
         previous: previous.clone().map(Box::new),
     };
-    if let Err(e) = sign_and_send(ctx, membership.persona, document, sent).await {
+    if let Err(e) = sign_and_send_operational(ctx, membership.persona, document, sent).await {
         let book = &mut ctx.config.private.vetting;
         book.restore_profile(&membership.community, membership.persona, previous);
         book.forget_query(&document_id);
@@ -1803,7 +1832,7 @@ async fn ask_resend(ctx: &mut ActionCtx<'_>, index: usize) {
         community: target.community.clone(),
         kind: QueryKind::VetterResend,
     };
-    if let Err(e) = sign_and_send(ctx, target.persona, document, sent).await {
+    if let Err(e) = sign_and_send_operational(ctx, target.persona, document, sent).await {
         ctx.config.private.vetting.forget_query(&document_id);
         abandon(ctx, "Could not ask for your vetter credential", e);
     }
