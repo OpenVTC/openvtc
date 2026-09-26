@@ -23,7 +23,8 @@
 //! Today the local config is the source of truth, so a hostile VTA cannot
 //! invent a membership. Rebuilding from the VTA removes that property unless
 //! every reconstructed membership is checked against its own credential — so
-//! every one is. A credential that fails is neither silently dropped nor
+//! every one is: its shape here, and its proof against the issuing community's
+//! DID document in [`plan`] (via [`crate::issued_credential`]). A credential that fails is neither silently dropped nor
 //! silently accepted: it lands in [`RebuildPlan::rejected`] with a reason, and
 //! the user decides, exactly as [`crate::config::integrity`] does for a
 //! degraded load.
@@ -90,6 +91,12 @@ pub enum RejectionReason {
         /// The unparseable value, verbatim.
         valid_until: String,
     },
+    /// The credential's proof did not verify against the issuing community's
+    /// DID document, or could not be checked.
+    Unverified {
+        /// What failed (never the credential's contents).
+        reason: String,
+    },
 }
 
 impl RejectionReason {
@@ -105,6 +112,9 @@ impl RejectionReason {
             RejectionReason::Expired { valid_until } => format!("it expired on {valid_until}"),
             RejectionReason::MalformedValidity { valid_until } => {
                 format!("its validity window is unreadable ({valid_until})")
+            }
+            RejectionReason::Unverified { reason } => {
+                format!("its signature could not be verified: {reason}")
             }
         }
     }
@@ -219,6 +229,10 @@ fn validity(credential: &Value, now: chrono::DateTime<chrono::Utc>) -> Result<()
 /// a fabricated credential. `known_personas` is the set the VTA holds for this
 /// context: a credential issued to something else is not ours to restore.
 ///
+/// This checks shape only. The proof is checked by [`plan`], which resolves the
+/// issuer; a caller using this directly must verify the proof itself
+/// ([`crate::issued_credential::verify_issued_credential`]).
+///
 /// # Errors
 ///
 /// A [`RejectionReason`] describing which check failed.
@@ -308,6 +322,22 @@ pub async fn plan(
     // status — and a membership is defined by its *subject*, which only the
     // body carries. So each descriptor is fetched with `get/0.1` before it can
     // be verified.
+    // Every membership's proof is checked against its issuer's DID document.
+    // No resolver means nothing can be checked, so every membership is
+    // rejected (with the reason) rather than trusted.
+    let resolver = if descriptors.is_empty() {
+        Err("no DID resolver was needed".to_string())
+    } else {
+        affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
+            affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+        )
+        .await
+        .map_err(|e| {
+            warn!("could not start a DID resolver for rebuild: {e}");
+            "no DID resolver was available to check it".to_string()
+        })
+    };
+
     for id in descriptors {
         let credential = match client.cred_vault_get(&id).await {
             Ok(v) => v.get("credential").cloned().unwrap_or(v),
@@ -316,7 +346,29 @@ pub async fn plan(
                 continue;
             }
         };
-        match membership_from_credential(&credential, &known, now) {
+        let checked = match membership_from_credential(&credential, &known, now) {
+            // The shape says whose membership this would be; the proof says the
+            // community actually issued it. Without the second, anyone able to
+            // write to the vault could restore a membership nobody granted.
+            Ok(m) => match &resolver {
+                Ok(resolver) => crate::issued_credential::verify_issued_credential(
+                    credential.clone(),
+                    &m.vtc_did,
+                    resolver,
+                    now,
+                )
+                .await
+                .map(|_| m)
+                .map_err(|e| RejectionReason::Unverified {
+                    reason: e.to_string(),
+                }),
+                Err(reason) => Err(RejectionReason::Unverified {
+                    reason: reason.clone(),
+                }),
+            },
+            Err(reason) => Err(reason),
+        };
+        match checked {
             Ok(m) => memberships.push(m),
             Err(reason) => {
                 warn!(

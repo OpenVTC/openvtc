@@ -170,6 +170,41 @@ pub(crate) fn reduce(state: &mut State, action: &Act) -> bool {
                 };
             }
         }
+        Act::NewOwnerQuery(value) => {
+            if let ReposScreen::NewRepo(form) = &mut view.screen {
+                form.owner_query = clip(value);
+                form.owner_pick = 0;
+                form.error = None;
+            }
+        }
+        Act::NewOwnerToggleExternal => {
+            if let ReposScreen::NewRepo(form) = &mut view.screen {
+                form.owner_external = !form.owner_external;
+                form.owner_query.clear();
+                form.owner_pick = 0;
+                form.error = None;
+            }
+        }
+        Act::NewOwnerPick(i) => {
+            let query = if let ReposScreen::NewRepo(form) = &view.screen {
+                form.owner_query.clone()
+            } else {
+                String::new()
+            };
+            let count = view.candidates(&query).len();
+            if let ReposScreen::NewRepo(form) = &mut view.screen {
+                form.owner_pick = (*i).min(count.saturating_sub(1));
+            }
+        }
+        Act::NewOwnerAdd => new_owner_add(view),
+        // Sent only when the owner query is already empty (repos_key
+        // decides): a chip-input backspace, dropping the last owner added.
+        Act::NewOwnerRemoveLast => {
+            if let ReposScreen::NewRepo(form) = &mut view.screen {
+                form.owners.pop();
+                form.error = None;
+            }
+        }
         Act::AddStart => {
             if let ReposScreen::Repo { resource } = &view.screen {
                 if view.governs(resource) {
@@ -868,11 +903,17 @@ async fn submit_new(lp: &mut Loop<'_>) {
     let Some(ns) = creatable.get(form.namespace) else {
         return;
     };
+    let owners = if form.owners.is_empty() {
+        None
+    } else {
+        Some(form.owners.clone())
+    };
     let request = Request::Create {
         namespace: ns.namespace.id.to_string(),
         name: form.name.clone(),
         visibility: form.visibility,
         description: Some(form.description.clone()),
+        owners: owners.clone(),
     };
     // The schema is checked here, so a bad name is refused in the form, by
     // name, before anything is sent.
@@ -882,8 +923,59 @@ async fn submit_new(lp: &mut Loop<'_>) {
         }
         return;
     }
+    let class = request.consent_class();
+    if class.needs_confirmation() {
+        let owner_names = owners
+            .unwrap_or_default()
+            .iter()
+            .map(|d| view.name_of(d))
+            .collect::<Vec<_>>()
+            .join(", ");
+        view.confirm = Some(ArmedChange {
+            summary: format!(
+                "Create {} owned by {owner_names}? This is an {} change: it grants git.repo.own.",
+                form.name,
+                class.label()
+            ),
+            request,
+        });
+        return;
+    }
     let what = describe(&request);
     lp.send(request, Purpose::Change(what), false, false).await;
+}
+
+/// Add the owner picker's highlighted candidate, or its pasted DID, to the
+/// new-repository form's `owners`.
+fn new_owner_add(view: &mut ReposView) {
+    let ReposScreen::NewRepo(form) = &view.screen else {
+        return;
+    };
+    let did = if form.owner_external {
+        let d = form.owner_query.trim().to_string();
+        if d.is_empty() {
+            return;
+        }
+        d
+    } else {
+        let Some(d) = view
+            .candidates(&form.owner_query)
+            .get(form.owner_pick)
+            .cloned()
+        else {
+            return;
+        };
+        d
+    };
+    let ReposScreen::NewRepo(form) = &mut view.screen else {
+        return;
+    };
+    if !form.owners.contains(&did) {
+        form.owners.push(did);
+    }
+    form.owner_query.clear();
+    form.owner_pick = 0;
+    form.error = None;
 }
 
 async fn submit_add(lp: &mut Loop<'_>) {
@@ -1539,6 +1631,86 @@ mod tests {
         };
         assert_eq!(form.name, "gizmos");
         assert_eq!(form.visibility, git_ns::Visibility::Private);
+    }
+
+    #[test]
+    fn the_owner_picker_adds_and_drops_owners() {
+        let mut state = open_state();
+        reduce(&mut state, &Act::NewStart);
+        reduce(&mut state, &Act::NewOwnerQuery("dan.example".into()));
+        reduce(&mut state, &Act::NewOwnerPick(0));
+        reduce(&mut state, &Act::NewOwnerAdd);
+        let ReposScreen::NewRepo(form) = &view(&state).screen else {
+            panic!("form open");
+        };
+        assert_eq!(form.owners, [DAN.to_string()]);
+        assert!(form.owner_query.is_empty(), "the query clears after adding");
+
+        // Pasting a DID for someone not in the picker.
+        reduce(&mut state, &Act::NewOwnerToggleExternal);
+        reduce(
+            &mut state,
+            &Act::NewOwnerQuery("did:webvh:QmEveScid9:acme-vtc.example:eve".into()),
+        );
+        reduce(&mut state, &Act::NewOwnerAdd);
+        let ReposScreen::NewRepo(form) = &view(&state).screen else {
+            panic!("form open");
+        };
+        assert_eq!(form.owners.len(), 2);
+        assert_eq!(form.owners[1], "did:webvh:QmEveScid9:acme-vtc.example:eve");
+
+        // A chip-input backspace on an empty query drops the last one added.
+        reduce(&mut state, &Act::NewOwnerRemoveLast);
+        let ReposScreen::NewRepo(form) = &view(&state).screen else {
+            panic!("form open");
+        };
+        assert_eq!(form.owners, [DAN.to_string()]);
+    }
+
+    #[test]
+    fn naming_an_owner_arms_the_confirmation() {
+        let mut state = open_state();
+        reduce(&mut state, &Act::NewStart);
+        reduce(&mut state, &Act::NewOwnerQuery("dan.example".into()));
+        reduce(&mut state, &Act::NewOwnerAdd);
+        let ReposScreen::NewRepo(form) = &view(&state).screen else {
+            panic!("form open");
+        };
+        let owners = if form.owners.is_empty() {
+            None
+        } else {
+            Some(form.owners.clone())
+        };
+        let request = Request::Create {
+            namespace: "ns_1".into(),
+            name: "sprockets".into(),
+            visibility: git_ns::Visibility::Public,
+            description: None,
+            owners,
+        };
+        assert_eq!(request.consent_class(), git_ns::ConsentClass::Elevated);
+    }
+
+    #[test]
+    fn self_grant_not_allowed_is_shown_on_the_new_repo_form() {
+        let mut state = open_state();
+        reduce(&mut state, &Act::NewStart);
+        pend(&mut state, "t", Purpose::Change("creating".into()));
+        apply_replies(
+            &mut state,
+            &config(),
+            vec![from_vtc("t", refused("git-ns:selfGrantNotAllowed", None))],
+        );
+        let ReposScreen::NewRepo(form) = &view(&state).screen else {
+            panic!("form open");
+        };
+        let text = form.error.as_ref().unwrap().text.clone();
+        assert_eq!(
+            text,
+            "This would give you an elevated right (own, repo.create or ns.admin) on your own \
+             authority. Ask another community administrator to do it, or use break-glass \
+             (`cnm git break-glass`), which is audited and must be ratified."
+        );
     }
 
     // --- add person ---------------------------------------------------------

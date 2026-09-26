@@ -31,6 +31,7 @@ arbitrary = { workspace = true, optional = true }
 argon2.workspace = true
 affinidi-tdk.workspace = true
 affinidi-data-integrity.workspace = true
+affinidi-status-list.workspace = true
 affinidi-did-resolver-cache-sdk.workspace = true
 # `health` probes mediator transport URLs over HTTP: resolving a DID proves the
 # document is fetchable, not that the transport host behind it answers, and the
@@ -111,7 +112,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # 0.7 is the line built on messaging-sdk 0.24 / TDK 0.14 / trust-tasks 0.20.
 # Leaving it behind puts a second copy of each in the **dev** graph — including
 # `trust-tasks-rs`, whose types the messaging sdk carries in its own API.
-affinidi-messaging-test-mediator = "0.10"
+affinidi-messaging-test-mediator = "0.11.1"
 # In-process MockVta for the bootstrap e2e (VTI#406/#427 test-support seams).
 # `vta-service` is the VTA server crate; it carries the credential-vault
 # lifecycle tasks (receive/query/archive/delete/restore/purge) + the
@@ -150,7 +151,7 @@ affinidi-messaging-test-mediator = "0.10"
 # ApproveScope, ContextDirection}` as its own public API, so a graph holding two
 # sdks has two distinct `ApproveScope` types that do not unify. VTI republished
 # this crate for exactly this reason (see its Cargo.toml note on `publish`).
-vta-service = { version = "0.41.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
+vta-service = { version = "0.43.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }

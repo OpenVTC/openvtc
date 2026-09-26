@@ -64,8 +64,12 @@ argon2 = "0.6"
 # The floor is set by the graph, not chosen here: `vta-sdk` 0.42 and
 # `vta-service` 0.32 both declare `^0.16`, and `affinidi-messaging-test-mediator`
 # 0.9 does too. This line only records it.
-affinidi-tdk = "0.17"
+affinidi-tdk = "0.18"
 affinidi-data-integrity = "0.7"
+# Decodes a community's Bitstring Status List. Already in the graph through
+# `vta-sdk`, whose status reader cannot verify a list signed with a proof set;
+# openvtc reads the list itself (`openvtc-core::status_list`).
+affinidi-status-list = "0.1"
 # The delivery layer (D1). Replaced `affinidi-messaging-didcomm-service`, the
 # type-routed framework both VTI services had already cut over from (#189).
 # `-delivery` is the durable outbox + `MessagingService`; `-core` is the
@@ -105,7 +109,7 @@ affinidi-messaging-core = "0.1.8"
 # geometric reconnect cascade behind `#231`–`#234`; and 0.19.4 (#694) was the
 # `live_stream_next*` read guard that blocked `stop_websocket` for the remainder
 # of a 10s poll window.
-affinidi-messaging-sdk = "0.27.1"
+affinidi-messaging-sdk = "0.28.1"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
@@ -173,7 +177,7 @@ async-trait = "0.1"
 arbitrary = { version = "1", features = ["derive"] }
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 base64 = "0.23"
-bip39 = "2.2"
+bip39 = "3.0"
 byteorder = "1.5"
 chrono = "0.4"
 clap = { version = "4.6", features = ["derive"] }
@@ -340,8 +344,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # the Repos panel sends to adopt or revert drift the bridge reported. 0.22.7 is
 # the patch the VTI workspace is on; a patch move on the same line, so nothing
 # else follows it.
-trust-tasks-rs = { version = "0.22.7", features = ["git-ns"] }
-trust-tasks-capability-client = "0.22.7"
+#
+# **0.23** for `git-ns/repo/create` 0.3 (generated from `specs::git_ns::repo::
+# create::v0_3`), which this branch adopts: a namespace admin whose
+# `git.repo.create` is only implied by `git.ns.admin` can no longer make
+# themselves owner of a repository they create, and naming another member as
+# owner is itself a grant of `git.repo.own`, refused with `git-ns:escalation`
+# without the authority to grant it. `trust-tasks-capability-client` moves
+# with it for the same reason it always has — it re-exports the same
+# `TrustTask`.
+trust-tasks-rs = { version = "0.23", features = ["git-ns"] }
+trust-tasks-capability-client = "0.23.0"
 tui-input = "0.15"
 url = "2.5"
 uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
@@ -480,7 +493,7 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # 0.49 was the persona release before it: a credential-backed value is
 # re-derived wherever it is read and fails closed if the credential has gone
 # (VTI #1653), and `binding/set` takes an optional `personaDid` (VTI #1654).
-vta-sdk = { version = "0.51.0", features = [
+vta-sdk = { version = "0.53.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
