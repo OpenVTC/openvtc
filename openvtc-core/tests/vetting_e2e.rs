@@ -50,9 +50,7 @@ use openvtc_core::vetting::wire;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use vta_sdk::protocols::join_requests::{
-    JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, JOIN_REQUEST_MANIFEST_0_2_TYPE, manifest,
-};
+use vta_sdk::protocols::join_requests::{JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, manifest};
 use vta_sdk::protocols::vetting::{
     COMMUNITY_ROLE_ENDORSEMENT_TYPE, IDENTITY_VETTING_ENDORSEMENT_TYPE, VETTER_ROLE,
     VETTING_REQUEST_RESPONSE_TYPE, VETTING_REQUEST_TYPE, VETTING_SESSION_RESPONSE_TYPE,
@@ -233,10 +231,12 @@ async fn manifest_reply(community: &str, to: &str, signer: &Secret) -> Message {
     )
     .expect("manifest");
     // An operational document: addressed, dated, and signed with the
-    // community's authentication key.
+    // community's authentication key. Its signed type is the response's, the
+    // same as the message's — a VTC signs what it sends, and a document signed
+    // as one kind is not acted on as another.
     let mut document = json!({
         "id": wire::new_id(),
-        "type": JOIN_REQUEST_MANIFEST_0_2_TYPE,
+        "type": JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE,
         "issuer": community,
         "recipient": to,
         "issuedAt": Utc::now().to_rfc3339(),
