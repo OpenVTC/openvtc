@@ -2889,9 +2889,9 @@ dependencies = [
 
 [[package]]
 name = "did-git-sign"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc7c56e7464b23b262e2bbac17f4a3eb8d2f629a4f386db521c4ceeb77a01f03"
+checksum = "8cbf4f796b968ccf43d0864f14ef373bfd236ec09c32e7da289e604f6afa9985"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -2913,7 +2913,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vgi-core",
- "vta-sdk 0.53.0",
+ "vta-sdk 0.56.0",
  "windows-native-keyring-store",
  "zeroize",
 ]
@@ -9803,9 +9803,9 @@ dependencies = [
 
 [[package]]
 name = "vgi-core"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8af31e54fdb7f04c175476f03883e7a003521f85e554056afd17cbaa23f51f2f"
+checksum = "2823159ce23c587607006cb2d6af800e9d1a2a5bebc96d77f16af24eef4870b8"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -10028,7 +10028,6 @@ dependencies = [
  "affinidi-secrets-resolver",
  "affinidi-tdk 0.18.0",
  "affinidi-vc",
- "agent-names",
  "async-trait",
  "base64 0.23.1",
  "chrono",
@@ -10077,6 +10076,7 @@ dependencies = [
  "affinidi-status-list",
  "affinidi-tdk 0.20.0",
  "affinidi-vc",
+ "agent-names",
  "apple-native-keyring-store",
  "async-trait",
  "base64 0.23.1",
