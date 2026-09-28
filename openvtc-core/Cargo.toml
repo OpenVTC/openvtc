@@ -155,25 +155,13 @@ affinidi-messaging-test-mediator = "0.14.0"
 # sdks has two distinct `ApproveScope` types that do not unify. VTI republished
 # this crate for exactly this reason (see its Cargo.toml note on `publish`).
 #
-# **Stays on 0.43.0, deliberately, as of the VTI/TDK 0.56 move.** 0.44.0 does
-# not merely lag the root manifest's `vta-sdk` 0.56 (it is still on `^0.54`,
-# which alone would be the same tolerable dev-only duplicate this note has
-# described before) — it is internally broken: 0.44.0 widens its
-# `vta-cli-common` requirement to `^0.25`, and 0.25.0 re-pins onto
-# `vti-common ^0.27` while every *other* vta-service subcrate (`vta-audit`,
-# `vta-backup`, `vta-config`, `vta-keys`, `vta-persona`, `vta-policy`,
-# `vta-support`, `vta-sweepers`, `vta-vault`, `vta-webvh`, `vti-rooms`,
-# `vti-rooms-dtg`, `vti-secrets`, all pulled in by vta-service 0.44.0 itself)
-# is still capped at `vti-common ^0.26`. That is two non-unifying
-# `VaultStatus`/`KeyspaceHandle` types inside vta-service's own dependency
-# graph — 751 compiler errors, all inside `vta-service`'s own source, none of
-# it reachable from anything this workspace controls. 0.43.0's own
-# `vta-cli-common ^0.24` requirement does not have this problem (0.24.0 pins
-# `vti-common ^0.26`, matching every sibling), so it is the floor until VTI
-# republishes a `vta-service` where the whole subcrate family agrees again.
-# `cargo tree -i vti-common` is the check: two rows means this has not
-# closed yet, whatever `vta-service`'s own version number says.
-vta-service = { version = "0.43.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
+# **0.45.0, on the same stack as the rest of this workspace.** 0.44.0 was
+# skipped: it came from a half-published VTI release whose subcrates disagreed
+# on `vti-common` (`^0.26` vs `^0.27`), so it does not build on a fresh
+# resolve and never will. 0.45.0 is the republished family on `vta-sdk ^0.56` /
+# `vti-common ^0.29`, matching the root manifest. `cargo tree -i vti-common`
+# is the check: one row means the family agrees.
+vta-service = { version = "0.45.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }
