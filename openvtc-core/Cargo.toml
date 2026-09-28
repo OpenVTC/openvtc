@@ -112,7 +112,10 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # 0.7 is the line built on messaging-sdk 0.24 / TDK 0.14 / trust-tasks 0.20.
 # Leaving it behind puts a second copy of each in the **dev** graph — including
 # `trust-tasks-rs`, whose types the messaging sdk carries in its own API.
-affinidi-messaging-test-mediator = "0.11.1"
+#
+# 0.14.0 is the line built on the same `vta-sdk` 0.56 the root manifest now
+# pins, so the dev graph keeps one copy of it too.
+affinidi-messaging-test-mediator = "0.14.0"
 # In-process MockVta for the bootstrap e2e (VTI#406/#427 test-support seams).
 # `vta-service` is the VTA server crate; it carries the credential-vault
 # lifecycle tasks (receive/query/archive/delete/restore/purge) + the
@@ -151,6 +154,25 @@ affinidi-messaging-test-mediator = "0.11.1"
 # ApproveScope, ContextDirection}` as its own public API, so a graph holding two
 # sdks has two distinct `ApproveScope` types that do not unify. VTI republished
 # this crate for exactly this reason (see its Cargo.toml note on `publish`).
+#
+# **Stays on 0.43.0, deliberately, as of the VTI/TDK 0.56 move.** 0.44.0 does
+# not merely lag the root manifest's `vta-sdk` 0.56 (it is still on `^0.54`,
+# which alone would be the same tolerable dev-only duplicate this note has
+# described before) — it is internally broken: 0.44.0 widens its
+# `vta-cli-common` requirement to `^0.25`, and 0.25.0 re-pins onto
+# `vti-common ^0.27` while every *other* vta-service subcrate (`vta-audit`,
+# `vta-backup`, `vta-config`, `vta-keys`, `vta-persona`, `vta-policy`,
+# `vta-support`, `vta-sweepers`, `vta-vault`, `vta-webvh`, `vti-rooms`,
+# `vti-rooms-dtg`, `vti-secrets`, all pulled in by vta-service 0.44.0 itself)
+# is still capped at `vti-common ^0.26`. That is two non-unifying
+# `VaultStatus`/`KeyspaceHandle` types inside vta-service's own dependency
+# graph — 751 compiler errors, all inside `vta-service`'s own source, none of
+# it reachable from anything this workspace controls. 0.43.0's own
+# `vta-cli-common ^0.24` requirement does not have this problem (0.24.0 pins
+# `vti-common ^0.26`, matching every sibling), so it is the floor until VTI
+# republishes a `vta-service` where the whole subcrate family agrees again.
+# `cargo tree -i vti-common` is the check: two rows means this has not
+# closed yet, whatever `vta-service`'s own version number says.
 vta-service = { version = "0.43.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
