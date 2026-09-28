@@ -31,10 +31,16 @@ pub use trust_tasks_capability_client::{
 };
 
 /// Attach an `eddsa-jcs-2022` Data-Integrity proof over `doc` (minus the
-/// `proof` member) signed with the persona's signing key, bound to the
-/// document `issuer`. Signing is kept local rather than in the shared crate:
-/// each consumer signs with its own signer and its own error type, so the
-/// wire crate stays crypto-free.
+/// `proof` member), with `proofPurpose: authentication`, signed by the
+/// document `issuer`'s **authentication** key — the persona proving it is the
+/// party making the request. Every Trust Task request this client sends is
+/// signed this way (a community requires a document proof bound to the sender
+/// on every request); `signing_secret` must therefore be a key the issuer's DID
+/// document lists under `authentication`. This is the one signing path for a
+/// request: there is no purpose to choose, so a request cannot go out under
+/// `assertionMethod` by mistake. Signing is kept local rather than in the
+/// shared crate: each consumer signs with its own signer and its own error
+/// type, so the wire crate stays crypto-free.
 ///
 /// NOTE: v1 signs directly in the client; routing the approval through the
 /// delegated-execution consent flow is the planned upgrade
@@ -48,9 +54,13 @@ pub async fn sign_document(
     if let Some(obj) = doc_value.as_object_mut() {
         obj.remove("proof");
     }
-    let proof = DataIntegrityProof::sign(&doc_value, signing_secret, SignOptions::default())
-        .await
-        .map_err(|e| OpenVTCError::Config(format!("sign capability document: {e}")))?;
+    let proof = DataIntegrityProof::sign(
+        &doc_value,
+        signing_secret,
+        SignOptions::new().with_proof_purpose("authentication"),
+    )
+    .await
+    .map_err(|e| OpenVTCError::Config(format!("sign capability document: {e}")))?;
     let proof_value = serde_json::to_value(&proof)
         .map_err(|e| OpenVTCError::Config(format!("serialise proof: {e}")))?;
     doc.proof = Some(
@@ -107,5 +117,41 @@ mod tests {
             true,
         );
         assert_eq!(enable.payload["config"]["authority"], "did:example:vtc");
+    }
+
+    /// A capability list — a read — is signed like a write: issuer the
+    /// persona, recipient the community, dated, a fresh id, and an
+    /// `authentication` proof.
+    #[tokio::test]
+    async fn a_list_request_is_signed_for_authentication() {
+        use affinidi_tdk::dids::{DID, KeyType};
+        let (me, signer) = DID::generate_did_key(KeyType::Ed25519).unwrap();
+        let mut a = build_list_document(&me, "did:example:vtc");
+        let b = build_list_document(&me, "did:example:vtc");
+        assert_ne!(a.id, b.id, "every request has its own id");
+        sign_document(&mut a, &signer).await.unwrap();
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["issuer"], me.as_str());
+        assert_eq!(v["recipient"], "did:example:vtc");
+        assert!(v.get("issuedAt").is_some(), "{v}");
+        assert_eq!(v["proof"]["proofPurpose"], "authentication");
+    }
+
+    /// A capability toggle acts on the community rather than making a claim,
+    /// so it is signed with the authentication key under `authentication`
+    /// (VTI-KEY-022), like every other request.
+    #[tokio::test]
+    async fn a_toggle_request_is_signed_for_authentication() {
+        use affinidi_tdk::dids::{DID, KeyType};
+
+        let (issuer_did, signer) =
+            DID::generate_did_key(KeyType::Ed25519).expect("did:key generates");
+        let mut doc =
+            build_toggle_document(&issuer_did, "did:example:vtc", "git-trust", "0.1", true);
+
+        sign_document(&mut doc, &signer).await.expect("signs");
+
+        let proof = doc.proof.as_ref().expect("a proof is attached");
+        assert_eq!(proof.proof_purpose, "authentication");
     }
 }

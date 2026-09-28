@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **A Repos panel for a community's git repositories.** `r` on an Active
+  community opens it. It speaks the `git-ns/*` Trust Task family (the member
+  side of VTC Git Namespaces; the VTC side is VTI #1694): *My repos* with your
+  strongest right on each and its status (`ok`, `drift`, `creating n/6`, …); a
+  new-repository form, offered only where you hold `repo.create`, that says when
+  the namespace is manual and shows the steps the community answers with; and a
+  repository view listing its people and rights, where `a` adds a person (from
+  the people you can see, or a pasted DID for an outside contributor if the
+  community's policy allows — a `policyDenied` is shown in the form), `x`
+  revokes, `t` transfers your ownership and `A` archives. Owner grants,
+  transfers, archives and every removal are armed and sent only on `y`. Every
+  document is signed by the persona. A forge-account row links a GitHub account
+  (device code and URL) or a Forgejo one (URL and QR), polling `link-status`
+  every five seconds, and a signing row shows whether did-git-sign is set up for
+  the persona and whether its commit-msg hook is current — an outdated hook says
+  to re-run `did-git-sign init`. Refusals name what to do about them.
+
 - **A vetting application can be abandoned.** `x` on the Applications tab arms a
   confirmation; `Enter` drops it. There was no way to remove one at all, and an
   application's persona is fixed for its whole life — so one started as the
@@ -24,7 +41,176 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a session they open afterwards finds nothing to answer. The message says to
   tell them.
 
+### Changed
+
+- **`git-ns/repo/create` moves to `0.3`, and the new-repository form can name
+  owners.** A namespace admin's `repo.create` is implied by `ns.admin`, and in
+  `0.2` that let them make themselves owner — and so forge admin — of any
+  repository they created, alone. `0.3` closes that: the requester becomes
+  owner only when their `repo.create` is an explicit grant; an admin whose
+  `repo.create` is only implied must name someone else in the form's new
+  Owners field (Ctrl+D pastes a DID for someone not in the picker, Ctrl+A adds
+  it), or the community refuses with `git-ns:selfGrantNotAllowed` — shown with
+  what to do about it: ask another administrator, or break the glass (`cnm git
+  break-glass`). Naming an owner is itself a grant of `repo.own`, so it needs
+  the authority to grant it (`git-ns:escalation` otherwise) and arms the
+  confirmation like any other elevated change.
+
 ### Fixed
+
+- **A community's credential deliveries and VMC requests are taken only as its
+  signed documents.** A VTC now pushes every credential-exchange step, and
+  `vtc/members/request-vmc`, as a signed Trust Task document over TSP or
+  DIDComm (in the binding envelope) — VTI "credential exchange onto the Trust
+  Task spine". A delivered credential (`credential-exchange/issue`) is read
+  from the document's `payload`, and kept only when the document is signed by
+  the community that sent it, under `authentication`, and the credential
+  inside verifies on its own proof — `issued_credential::verify_issued_delivery`
+  checks both, in that order. A vetter grant additionally opens with
+  `wire::open`. A `request-vmc` is answered only once it passes the
+  operational-document check (signed, addressed to the persona, fresh, not seen
+  before), since answering it signs and sends this member's credential. Before,
+  the credential was read from the bare message body, so a pushed document's
+  credential was never found — an admission would never complete — and a
+  `request-vmc` was answered on the transport sender alone.
+  **Breaking (wire):** a community must sign `issue` and `request-vmc` as
+  Trust Task documents; a bare delivery is refused and logged. **Breaking
+  (library):** `VerifyJob::Credential` carries the delivery `document`, not the
+  credential; `IssuedCredentialError` gains `DeliveryIssuerNotSender`,
+  `DeliveryProof` and `NoCredential`; `messaging::credential_in_issue` reads
+  only a document whose `issuer` is the sender.
+
+- **Issued credentials are verified before they are stored.** A membership or
+  role credential a community delivers (`credential-exchange/issue`) is now
+  checked against the community's DID document before it is kept: every Data
+  Integrity proof must verify (Ed25519 `eddsa-jcs-2022`, and ML-DSA-44
+  `mldsa44-jcs-2024` where the community signs with both), each must be made by
+  a key of the issuer's own DID listed under `assertionMethod`, the credential
+  must be inside its validity window, and its revocation status must be
+  established: a revoked credential is refused, and so is one whose status list
+  cannot be reached or does not verify (fail closed; the message says to retry).
+  The status list is read by openvtc itself, so a list signed with a proof set
+  (Ed25519 + ML-DSA-44) verifies — the vetter grant check uses the same reader.
+  A fetched list is reused for at most five minutes (sooner if its `validUntil`
+  or `ttl` says so) and re-verified on every use. A credential lands only on a
+  Pending or Active membership, and only a Pending join is activated — a
+  membership that ended is not revived by a credential arriving. A proof's
+  verification method must be controlled by the signer, and a proof `created`
+  up to five minutes in the future is accepted. A credential
+  that fails is not stored and the activity log says what failed. Account
+  recovery applies the same check to every membership it would restore, and the
+  vault sync no longer pushes a locally held credential that does not verify
+  (the activity log counts them). **Behaviour change:** a join is admitted
+  only by the verified membership credential — an `approved` status or an
+  `allow` verdict (both unsigned) now acknowledges the join and leaves it
+  Pending until the credential arrives, and the reciprocal membership credential
+  goes out only then. **Breaking (library):**
+  `messaging::handle_credential_issue` now takes a
+  `issued_credential::VerifiedIssuedCredential` instead of the message, and
+  `credential_sync::sync_membership_credentials` takes a DID resolver.
+  The cheap local checks run first: a credential from a party we hold no
+  membership with, for someone else, of an unknown kind, or for a membership
+  that ended is refused before anything is resolved or fetched. A status list
+  on a loopback, private, link-local or otherwise non-public host — as written,
+  or as its name resolves, redirects included — is not fetched. A VRC's proof
+  is checked by the same rules (purpose `assertionMethod`, listed by the
+  issuer, a method the issuer controls).
+
+- **Decisions about who said something rest on a proof, not the sender.** The
+  sender a message arrives from is now treated as a routing hint only.
+  - *Relationship DIDs.* A relationship request and its acceptance carry proofs
+    (`didProof`, and `personaProof` when an R-DID is used) that bind the
+    relationship DID to that handshake — its thread id, both personas and the
+    side it is made for (`role`: request or accept, so one side's proof cannot
+    stand as the other's) — signed by an `authentication` key of the DID and of
+    the persona naming it.
+    A request or acceptance without valid proofs is refused. An acceptance,
+    finalize or rejection is matched only by the thread id of a request of ours
+    in the right state and from the party it went to; the fallback that matched
+    by sender alone is gone, so a rejection can no longer end an established
+    relationship. **Breaking (wire):** both peers need this version; a request
+    in flight across the upgrade must be sent again.
+  - *Operational documents from a community* — removal notices and its
+    vetting answers (manifest, vetter directory, profile, resend, withdrawal
+    record) — are acted on only when signed with the community's
+    `authentication` key (an `assertionMethod` proof is refused: VTI-KEY-106),
+    of the type it is handled as (its signed `type` must equal the handler's,
+    so a signed answer cannot be acted on as a removal notice or another
+    answer; the window follows that type), addressed to one of our personas
+    (`recipient` required), dated inside the
+    kind's window (`issuedAt` required; 30 days for a removal notice, a day for
+    an answer; `expiresAt` honoured), and never seen before — document ids are
+    remembered, persisted, until their window passes (VTI-KEY-107). An id is
+    recorded only once the document is bound — from a community we belong to
+    with a payload naming what it should, or answering a request of ours — so
+    a party with no standing cannot write to the set; the set is keyed by
+    issuer, ids are capped at 256 characters, and each issuer's quota refuses
+    new documents rather than evicting a live entry. A refused
+    removal notice is noted in the activity log.
+  - *Vetter role credentials* are kept only when their proof verifies
+    (`assertionMethod`, like every credential).
+  **Breaking (wire):** a community must sign operational documents with an
+  `authentication` key and include `recipient` and `issuedAt`.
+  **Breaking (library):** `handle_member_removal_notice` takes a
+  `VerifiedRemovalNotice` (from `verify_removal_notice`, which now takes our
+  persona DIDs and the seen-document store), `vetting::inbound::handle` takes
+  the seen-document store, `vetting::inbound::Context` has a `did_resolver`,
+  the relationship bodies gained proof fields, and the unused
+  `relationships::create_send_message_accepted` (which sent an unproven
+  acceptance) is removed.
+
+- **Every Trust Task request this client sends is signed as the persona.** A
+  community now requires a document proof bound to the sender on every request
+  it is sent, so each request carries an `authentication` proof by the
+  persona's authentication key (issuer = the persona, recipient = the
+  community, `issuedAt`, a fresh id). The requests that went unsigned — the
+  capability list, the community-profile question and the personhood challenge
+  — are now signed, and the ones already signed (join submit/status,
+  self-remove, member VMC, personhood assertion, capability toggles, git-ns,
+  vetting documents) now use the authentication key and purpose instead of
+  the assertion key. Credentials this client issues (the member VMC, vetting
+  cards and statements, VRCs) stay signed with the assertion key. The
+  anonymous HTTP manifest question sent before joining stays unsigned by
+  design. **Breaking (wire):** a community that checks a request proof's
+  purpose against `assertionMethod` refuses these; deploy with VTI #1739.
+  There is one signing path for a request, and it has no purpose to choose:
+  `capabilities::sign_document`, `trust_task_doc::build_signed_value` and
+  `vetting::wire::sign` always sign for `authentication`, and the
+  purpose-taking variants added alongside them (`sign_document_as`,
+  `build_signed_value_as`, `wire::sign_as`) are removed. A vetter's
+  statement now reaches the applicant in a signed
+  `credential-exchange/issue` document too (issuer = the vetter persona,
+  recipient = the applicant, `authentication` proof), with the statement as
+  its payload keeping its own `assertionMethod` proof; the applicant opens it
+  like any other vetting document and refuses the bare, unsigned delivery.
+  `wire::credential_delivery` and `wire::send_statement` take the signer.
+  **Breaking (wire):** a vetter on an older release sends the bare delivery,
+  which is refused.
+
+- **The last replies taken on the sender's word now need the right party, or a
+  proof.** A capability or git-ns reply — a refusal (`trust-task-error`) as
+  much as a success — must be the community's signed operational document
+  (authentication key, addressed to our persona, fresh, not replayed); an
+  unsigned refusal is ignored with a log line, and a capability reply is taken only from the
+  community the view asked — a thread id alone no longer answers for it. An
+  invitation credential (from `--invitation`, a paste, the Add VIC panel, or the
+  vault) is used only once its proof verifies against its issuer (and its
+  revocation status is established); until then its issuer is not shown as the
+  community or used to prefill the DID. A problem-report from a party we hold no
+  membership with records nothing, not even an activity-log line. The join
+  path's replies — submit-receipt, verdict, status response, and a refusal
+  (`trust-task-error`) — are acted on only as the community's signed
+  operational document; a DIDComm problem-report, which cannot be signed, is
+  now only surfaced (from a community we hold a record with) and never
+  rejects a join. A community-profile answer is taken only when signed and
+  answering a profile question we asked, and a declared `attributed` default
+  is never recorded over pairwise. A VRC rejection closes only our own VRC
+  request, to the party it was sent to. A reply from a party we hold no
+  membership with (Pending included) is refused before its proof is checked,
+  so it never costs a resolve, and each reply is taken only as its own signed
+  `type`.
+  **Breaking (library):** `join::verify_invitation_credential` is the gate;
+  `validate_invitation_credential` is shape-only.
 
 - **Vetting questions and personhood reach a community again.** A community
   (VTI #1687, Keyring VTI-42) now takes a Trust Task over DIDComm only inside
@@ -60,6 +246,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   hint sends someone to run a grant that is not their problem.
 
 ### Changed
+
+- **Checks that go to the network no longer freeze the screen.** Verifying a
+  delivered credential (the issuer's DID document, its revocation status list),
+  a community's signed reply or removal notice, a relationship DID's binding
+  proofs, a VRC's proof and a community's answer to a vetting question each
+  resolve a DID or fetch over HTTPS. They now run off the screen's loop, one at
+  a time, so a slow community no longer stalls the UI. A message waiting on its
+  check is not acted on at all; when the check finishes it is handled with the
+  result, under the same rules as before (a check that did not run, did not
+  finish, or ran for another credential, refuses). A join whose credential is
+  being checked shows *Pending — verifying credential…* until it activates or
+  is refused.
+  - *Local checks first.* Only a message that passes the cheap local checks is
+    queued for a check: a credential or operational document from a party we
+    hold no membership with, an accept that answers no request of ours, a VRC
+    outside an established relationship or a relationship request we would
+    refuse anyway is refused at once, without a resolve or a fetch.
+  - *A bounded queue.* Communities we belong to have their own lane, taken
+    first, so a flood from anyone else cannot delay a removal notice; each lane
+    and each sender is capped (a message over a cap is dropped, and for a
+    community's the activity log says so). Lanes and caps are keyed on the
+    sender the transport authenticated, never the claimed `from`: a message
+    claiming a community's DID from anyone else waits in the other lane under
+    its real sender's cap, and rotating the claimed `from` gains nothing. A
+    message with no authenticated sender is not queued. Relationship-request
+    checks, which resolve DIDs the requester chose, are limited to 20 a
+    minute. Each check has a 30-second limit, and one that times out or fails
+    is a refusal; one failing never stops the queue.
+  - *Nothing lost on exit.* The mediator deletes a message once delivered, so a
+    community's message still waiting on its check (or its turn) is kept
+    (encrypted, with the protected config; at most 128, 32 KiB each) and queued
+    again on the next start, as the queue has room — none is dropped for want
+    of it. It is checked as of the restart, so after a long downtime one past
+    its freshness or validity window is refused, as if it had arrived late.
+  - *Order per sender.* A message whose sender has messages waiting on a check
+    waits behind them — a `members/request-vmc` arriving while the credential
+    that activates the membership is still being verified is answered once it
+    is Active, rather than dropped. On its turn it is triaged again, and set
+    aside for a check if it now needs one.
+  **Breaking (library):** `vetting::inbound::Context` takes the
+  credential-issue's already-verified credential (`issued_credential`) and the
+  community answer's check (`community_answer`), `messaging::bind_removal_notice`
+  is the local half of `verify_removal_notice`, and the protected config gains
+  `deferred_inbound`.
 
 - **The join page for a community that vets is one list of choices.** It had
   grown a row of keys along the foot that was a second, shorter, differently

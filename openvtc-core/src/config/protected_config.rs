@@ -2,6 +2,7 @@
 *   but is not as critical as private key information which is stored in the OS Secure Store
 */
 
+use crate::operational::SeenDocuments;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
@@ -45,6 +46,19 @@ pub const PROTECTED_SCHEMA_VERSION: u32 = 1;
 /// silently relabel old unversioned payloads as the new version.
 fn default_protected_schema_version() -> u32 {
     1
+}
+
+/// An inbound message awaiting its off-loop check, kept across a restart
+/// ([`ProtectedConfig::deferred_inbound`]).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DeferredInbound {
+    /// The sender the transport authenticated, which equalled the message's
+    /// `from` (only such a message is kept). With the message id, the key.
+    pub sender: String,
+    /// The message as it arrived.
+    pub message: affinidi_tdk::didcomm::Message,
+    /// The transport it arrived on.
+    pub transport: crate::didcomm::MessagingTransport,
 }
 
 /// A record for a single known Contact
@@ -264,6 +278,28 @@ pub struct ProtectedConfig {
     #[serde(default, skip_serializing_if = "VettingBook::is_empty")]
     pub vetting: VettingBook,
 
+    /// Ids of operational documents already acted on (removal notices,
+    /// community answers), each kept until its freshness window has passed, so
+    /// a replayed document is refused across restarts too
+    /// ([`crate::operational`]).
+    #[serde(default, skip_serializing_if = "SeenDocuments::is_empty")]
+    pub seen_documents: SeenDocuments,
+
+    /// Inbound messages from communities we belong to that were set aside for
+    /// an off-loop check and not yet applied. The mediator deleted them on
+    /// delivery, so without this a removal notice or credential still queued
+    /// at exit would be lost; they are queued again on the next start, and
+    /// removed once applied. Only a message whose transport-authenticated
+    /// sender is a community we belong to is kept, at most
+    /// `MAX_KEPT_DEFERRED` of them.
+    ///
+    /// After a long downtime a kept message is still checked as of the
+    /// restart: an operational document past its freshness window (a day for
+    /// an answer, thirty-one for a removal notice) or a credential past its
+    /// validity is refused then, exactly as if it had just arrived that late.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_inbound: Vec<DeferredInbound>,
+
     /// Fields written by a newer build, preserved verbatim (D19).
     ///
     /// The protected tier is where the account lives, so an older build
@@ -324,6 +360,8 @@ impl Default for ProtectedConfig {
             vrcs_received: Vrcs::default(),
             agent_names: HashMap::default(),
             vetting: VettingBook::default(),
+            seen_documents: SeenDocuments::default(),
+            deferred_inbound: Vec::new(),
         }
     }
 }

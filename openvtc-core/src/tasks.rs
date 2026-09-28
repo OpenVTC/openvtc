@@ -235,9 +235,68 @@ pub struct Task {
     pub our_persona: Option<PersonaId>,
 }
 
+/// Whether `task_id` is our outbound VRC request, and `from` the party it was
+/// sent to — by its persona DID or the relationship DID it uses with us.
+#[must_use]
+pub fn is_our_vrc_request_to(
+    tasks: &Tasks,
+    relationships: &crate::relationships::Relationships,
+    task_id: &Arc<String>,
+    from: &str,
+) -> bool {
+    let Some(task) = tasks.get_by_id(task_id) else {
+        return false;
+    };
+    let TaskType::VRCRequestOutbound { remote_p_did } = &task.type_ else {
+        return false;
+    };
+    if remote_p_did.as_str() == from {
+        return true;
+    }
+    relationships
+        .get(remote_p_did)
+        .is_some_and(|rel| rel.remote_did.as_str() == from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A VRC rejection may close only our request, to the party it went to.
+    #[test]
+    fn only_our_vrc_request_to_that_party_is_closed() {
+        let mut tasks = Tasks::default();
+        let id = Arc::new("vrc-req-1".to_string());
+        let bob = Arc::new("did:peer:bob".to_string());
+        tasks.new_task(
+            &id,
+            TaskType::VRCRequestOutbound {
+                remote_p_did: bob.clone(),
+            },
+        );
+        let other = Arc::new("ping-1".to_string());
+        tasks.new_task(&other, TaskType::TrustPong);
+        let rels = crate::relationships::Relationships::default();
+        assert!(is_our_vrc_request_to(&tasks, &rels, &id, "did:peer:bob"));
+        assert!(!is_our_vrc_request_to(
+            &tasks,
+            &rels,
+            &id,
+            "did:peer:mallory"
+        ));
+        assert!(!is_our_vrc_request_to(
+            &tasks,
+            &rels,
+            &other,
+            "did:peer:bob"
+        ));
+        assert!(!is_our_vrc_request_to(
+            &tasks,
+            &rels,
+            &Arc::new("nope".into()),
+            "did:peer:bob"
+        ));
+    }
 
     #[test]
     fn test_tasks_default_empty() {

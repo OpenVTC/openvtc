@@ -783,6 +783,13 @@ impl Config {
     pub fn is_persona_did(&self, did: &str) -> bool {
         self.identities.values().any(|i| i.did == did)
     }
+
+    /// Every persona DID this account holds — the recipients an operational
+    /// document may be addressed to.
+    #[must_use]
+    pub fn persona_dids(&self) -> Vec<String> {
+        self.identities.values().map(|i| i.did.clone()).collect()
+    }
 }
 
 /// Build an authenticated [`vta_sdk::client::VtaClient`] from a `KeyBackend::Vta`,

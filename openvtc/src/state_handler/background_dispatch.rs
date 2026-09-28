@@ -97,6 +97,10 @@ pub(crate) enum DispatchDomain {
     /// inbound channel and is matched by thread id — so what this domain
     /// serialises is the sending, which retries against an unreachable peer.
     Capabilities,
+    /// A `git-ns/*` task sent to a community from the Repos panel: a view
+    /// read, a change, or a link poll. Like capabilities, the answer arrives on
+    /// the inbound channel; this serialises the sends.
+    GitNs,
     /// What each persona presents, for the communities panel.
     PersonaBinding,
     /// The identity pane's own reads and writes — the attribute pool, the
@@ -145,6 +149,7 @@ impl DispatchDomain {
             DispatchDomain::Credential => "Credential request",
             DispatchDomain::Community => "Community request",
             DispatchDomain::Capabilities => "Capability request",
+            DispatchDomain::GitNs => "Repository request",
             DispatchDomain::PersonaBinding => "Persona binding refresh",
             DispatchDomain::PersonaManage => "Identity request",
             DispatchDomain::Vic => "Invitation credential refresh",
@@ -250,6 +255,8 @@ pub(crate) enum DispatchOutcome {
     Community(crate::state_handler::community_actions::CommunityOutcome),
     /// A capability query or toggle was sent (or failed to send).
     Capabilities(crate::state_handler::capability_actions::CapabilityOutcome),
+    /// A `git-ns/*` task was sent to a community (or failed to send).
+    Repos(crate::state_handler::repos_actions::ReposOutcome),
     PersonaBinding(
         std::collections::HashMap<
             crate::state_handler::persona_binding_refresh::BindingTarget,
@@ -312,6 +319,7 @@ impl DispatchOutcome {
             DispatchOutcome::Credential(_) => DispatchDomain::Credential,
             DispatchOutcome::Community(_) => DispatchDomain::Community,
             DispatchOutcome::Capabilities(_) => DispatchDomain::Capabilities,
+            DispatchOutcome::Repos(_) => DispatchDomain::GitNs,
             DispatchOutcome::PersonaBinding(_) => DispatchDomain::PersonaBinding,
             DispatchOutcome::PersonaManage(_) => DispatchDomain::PersonaManage,
             DispatchOutcome::Vic(_) => DispatchDomain::Vic,
@@ -512,6 +520,7 @@ pub(crate) fn apply_outcome(
         }
         DispatchOutcome::Credential(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Capabilities(outcome) => outcome.apply(state),
+        DispatchOutcome::Repos(outcome) => outcome.apply(state),
         // Merged, not replaced. A sweep only carries the targets it was given,
         // and replacing the map would blank every row the sweep did not cover
         // — which reads on screen as those personas having stopped presenting

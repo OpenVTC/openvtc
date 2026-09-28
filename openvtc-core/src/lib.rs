@@ -31,8 +31,10 @@ pub mod diagnostics;
 pub mod didcomm;
 pub mod display;
 pub mod errors;
+pub mod git_ns;
 pub mod health;
 pub mod identity;
+pub mod issued_credential;
 pub mod join;
 pub mod logs;
 pub mod members;
@@ -42,14 +44,17 @@ pub mod messaging;
 mod net_guard;
 #[cfg(feature = "openpgp-card")]
 pub mod openpgp_card;
+pub mod operational;
 pub mod persona;
 pub mod personhood;
 pub mod presentation;
 pub mod process_lock;
+pub mod proof_check;
 pub mod rebuild;
 pub mod rebuild_apply;
 pub mod relationships;
 pub mod secure_store;
+pub mod status_list;
 pub mod tasks;
 /// Building a Trust Task document — once, for every verb that sends one.
 pub mod trust_task_doc;

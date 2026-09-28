@@ -5,6 +5,57 @@
 
 use std::borrow::Cow;
 
+/// Returns true for unicode codepoints that can spoof or mangle TUI
+/// display when rendered: bidirectional overrides, isolates, zero-width
+/// spaces/joiners, BOM. These are silently stripped by [`sanitize_display`].
+fn is_dangerous_format_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        // Bidi marks, embeddings, overrides
+        0x200E | 0x200F |               // LRM, RLM
+        0x202A..=0x202E |               // LRE, RLE, PDF, LRO, RLO
+        0x2066..=0x2069 |               // LRI, RLI, FSI, PDI
+        // Zero-width space / joiner / non-joiner
+        0x200B..=0x200D |
+        0xFEFF                          // BOM / zero-width non-breaking space
+    )
+}
+
+/// Sanitize a string from an untrusted source for safe terminal display
+/// and persistence (e.g. contact aliases captured from inbound messages).
+///
+/// Strips, in order:
+///   1. ANSI CSI escape sequences (ESC `[` … letter pattern)
+///   2. Other ASCII control characters, keeping space
+///   3. Bidi-override / zero-width / BOM characters that allow visual
+///      spoofing (e.g. RLO-flipping a contact alias to display text the
+///      operator didn't approve).
+///
+/// Truncates to `max_len` *characters* (not bytes).
+#[must_use]
+pub fn sanitize_display(input: &str, max_len: usize) -> String {
+    let mut stripped = String::with_capacity(input.len());
+    let mut in_escape = false;
+    for c in input.chars() {
+        if c == '\x1b' {
+            in_escape = true;
+            continue;
+        }
+        if in_escape {
+            if c.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+            continue;
+        }
+        stripped.push(c);
+    }
+    stripped
+        .chars()
+        .filter(|c| (!c.is_control() || *c == ' ') && !is_dangerous_format_char(*c))
+        .take(max_len)
+        .collect()
+}
+
 /// Cut `s` down to at most `max_chars` characters, borrowing throughout.
 ///
 /// The cut always lands on a character boundary, so this never panics on any

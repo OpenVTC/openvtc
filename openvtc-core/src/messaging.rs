@@ -22,6 +22,7 @@ use vta_sdk::protocols::members::{RemovalCode, RemovalNoticeBody};
 
 use crate::config::Config;
 use crate::config::account::{Account, DecisionEvidence, PersonaId, RelationshipIdentifierDefault};
+use crate::issued_credential::VerifiedIssuedCredential;
 use crate::relationships::{RelationshipState, Relationships};
 use crate::tasks::{TaskType, Tasks};
 
@@ -184,13 +185,14 @@ pub fn handle_join_submit_receipt(
             return false;
         }
     };
-    let body: JoinRequestSubmitReceiptBody = match serde_json::from_value(message.body.clone()) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(error = %e, "malformed join submit-receipt body — ignoring");
-            return false;
-        }
-    };
+    let body: JoinRequestSubmitReceiptBody =
+        match serde_json::from_value(trust_task_reply_payload(&message.body)) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(error = %e, "malformed join submit-receipt body — ignoring");
+                return false;
+            }
+        };
 
     // Correlate to the specific pending membership (a community may now hold
     // several, one per persona) by the placeholder = our submit id.
@@ -248,40 +250,21 @@ impl CredentialIssueOutcome {
     };
 }
 
-/// What an inbound DIDComm problem-report meant to the join handler.
+/// What an inbound DIDComm problem-report says, read — never acted on.
 ///
-/// A problem-report says "I refused the thing you sent me". This handler can
-/// only interpret one kind: a refusal threaded on a *pending join request*. It
-/// used to return an empty [`StatusOutcome`] for everything else and log a warn
-/// naming the correlation miss — so a community refusing anything else at all
-/// produced, on this client, nothing a user could see.
-///
-/// That is how the broken reciprocal-VMC exchange stayed invisible for its
-/// entire life: the VTC rejected every delivery, said so in a problem-report
-/// threaded on the delivery, and this client discarded each one as "not a join
-/// I know about" while the UI reported the send as a success.
-///
-/// So the miss is now reportable rather than swallowed. This handler still
-/// declines to *interpret* a report it cannot correlate — it genuinely does not
-/// know what failed — but it hands the code and comment back so the caller can
-/// put them where somebody will read them.
-pub struct ProblemReportOutcome {
-    /// The record change, if this report was a join refusal.
-    pub status: StatusOutcome,
-    /// `Some((code, comment))` when the report could not be matched to a
-    /// pending join — i.e. it refused something else this client sent, and
-    /// nothing here knows what. Surface it; do not drop it.
-    pub unclaimed: Option<(String, String)>,
-}
-
-impl ProblemReportOutcome {
-    /// A report this handler recognised and acted on.
-    fn claimed(status: StatusOutcome) -> Self {
-        Self {
-            status,
-            unclaimed: None,
-        }
-    }
+/// A problem-report is a DIDComm message with no Data Integrity proof, so it
+/// cannot show that the community wrote it. It therefore changes nothing: a
+/// join is rejected only by the community's signed `trust-task-error` or
+/// verdict. A report from a community we hold a record with is surfaced (so a
+/// refusal is not invisible); from anyone else it is dropped without a trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemReportNote {
+    /// The report's `code`.
+    pub code: String,
+    /// Its free-text `comment` (possibly empty).
+    pub comment: String,
+    /// Whether it threads on a join of ours that is still pending.
+    pub on_pending_join: bool,
 }
 
 /// Outcome of applying a VTC `join-requests/status-response` to a community.
@@ -335,8 +318,10 @@ fn trust_task_reply_payload(body: &Value) -> Value {
 /// stored id, and gated on the sender being the community's own VTC (anti-spoof).
 /// Maps the protocol status onto the membership lifecycle:
 ///
-/// - `approved` → `Active` (also reached via the issued VMC in
-///   [`handle_credential_issue`]; idempotent here).
+/// - `approved` → stays `Pending`, acknowledged. Admission is the verified
+///   membership credential landing in [`handle_credential_issue`], never this
+///   unsigned status: a reply only the transport vouches for cannot make
+///   anyone a member.
 /// - `rejected` → `Rejected` (inactive — the caller deregisters the session).
 /// - `deferred` → stays `Pending` ("more info required"); the content handling
 ///   (evaluating `needs` / presenting the DCQL) is a **D4 stub**, and a Pending
@@ -366,10 +351,13 @@ pub fn handle_join_status_response(
 
     match body.status.as_str() {
         "approved" => {
-            record.activate(chrono::Utc::now());
-            info!(vtc = %from_did, "join approved by VTC — now Active");
+            // Not `activate`: the membership becomes Active when its credential
+            // arrives and verifies, which is also what closes the join and
+            // sends our reciprocal VMC.
+            let changed = record.mark_acknowledged(chrono::Utc::now());
+            info!(vtc = %from_did, "join approved by VTC — awaiting the membership credential");
             StatusOutcome {
-                changed: true,
+                changed,
                 inactivated: None,
             }
         }
@@ -434,7 +422,9 @@ pub fn handle_join_status_response(
 /// the synchronous admission decision in the trust-task join model (it replaces
 /// the old submit-receipt → status-response path). Correlate by `thid` = our
 /// submit message id (the placeholder held on the `Pending` record), then map
-/// the verdict effect: `allow` → Active, `deny` → Rejected; `refer` /
+/// the verdict effect: `allow` → stays Pending, acknowledged, until the verified
+/// membership credential activates it (see [`handle_join_status_response`]);
+/// `deny` → Rejected; `refer` /
 /// `request_more` leave the record Pending (logged — they still raise the
 /// actions-required indicator). Mirrors [`handle_join_status_response`].
 pub fn handle_join_verdict(
@@ -466,10 +456,12 @@ pub fn handle_join_verdict(
 
     match body.verdict.effect {
         VerdictEffect::Allow => {
-            record.activate(chrono::Utc::now());
-            info!(vtc = %from_did, "join allowed by VTC — now Active");
+            // Not `activate`: only the verified membership credential admits.
+            let changed = record.confirm_request_id(body.request_id)
+                | record.mark_acknowledged(chrono::Utc::now());
+            info!(vtc = %from_did, "join allowed by VTC — awaiting the membership credential");
             StatusOutcome {
-                changed: true,
+                changed,
                 inactivated: None,
             }
         }
@@ -541,62 +533,34 @@ pub fn handle_join_verdict(
     }
 }
 
-/// Handle a DIDComm problem-report threaded to our join submit — the framework
-/// failure path of the trust-task join (invalid/expired/malformed VIC, bad
-/// signature). Correlate by `thid`, then branch on the `e.p.msg.*` code:
-/// `forbidden` (the invitation was not accepted) → Rejected, surfacing the
-/// `comment`; any other code (bad-request / internal) is logged but leaves the
-/// record Pending (it's a transient/client problem, not a policy rejection).
-pub fn handle_join_problem_report(
-    account: &mut Account,
+/// Read a DIDComm problem-report from `from_did`. `None` when the sender is
+/// not a community we hold any record with. See [`ProblemReportNote`] for why
+/// this never changes a record.
+#[must_use]
+pub fn read_problem_report(
+    account: &Account,
     message: &Message,
     from_did: &str,
-) -> ProblemReportOutcome {
-    use vta_sdk::protocols::problem_report_codes as codes;
-
-    let (code, comment) = vta_sdk::protocols::extract_problem_report(&message.body);
-    let unclaimed = || ProblemReportOutcome {
-        status: StatusOutcome::NONE,
-        unclaimed: Some((code.clone(), comment.clone())),
-    };
-
-    let Some(thid) = message.thid.as_deref() else {
-        return unclaimed();
-    };
-    let Ok(placeholder) = Uuid::parse_str(thid) else {
-        return unclaimed();
-    };
-    let Some(record) = account.membership_by_pending_request(from_did, placeholder) else {
-        return unclaimed();
-    };
-    let persona = record.persona_ref;
-
-    if code == codes::FORBIDDEN {
-        // The problem-report's `comment` is free text; keep it verbatim as the
-        // reason, and the report `code` as the code (issue #240). An empty
-        // comment is "no reason given", not an empty reason.
-        record.reject(DecisionEvidence {
-            code: Some(code.clone()),
-            reason: (!comment.is_empty()).then(|| comment.clone()),
-            decided_by: None,
-            decided_at: None,
-            disposition: None,
-        });
-        info!(
-            vtc = %from_did,
-            comment = %comment,
-            "join rejected by VTC — invitation not accepted (now Rejected)"
-        );
-        ProblemReportOutcome::claimed(StatusOutcome {
-            changed: true,
-            inactivated: Some(persona),
-        })
-    } else {
-        // bad-request / internal / other: the submit didn't admit, but it's not a
-        // policy rejection — surface the detail and leave the record Pending.
-        warn!(vtc = %from_did, code = %code, comment = %comment, "join submit failed — left Pending");
-        ProblemReportOutcome::claimed(StatusOutcome::NONE)
+) -> Option<ProblemReportNote> {
+    if account.memberships_for(from_did).is_empty() {
+        return None;
     }
+    let (code, comment) = vta_sdk::protocols::extract_problem_report(&message.body);
+    let on_pending_join = message
+        .thid
+        .as_deref()
+        .and_then(|t| Uuid::parse_str(t).ok())
+        .is_some_and(|id| {
+            account
+                .memberships_for(from_did)
+                .iter()
+                .any(|m| matches!(m.status, crate::config::account::CommunityStatus::Pending { request_id } if request_id == id))
+        });
+    Some(ProblemReportNote {
+        code,
+        comment,
+        on_pending_join,
+    })
 }
 
 /// Type-URI prefix of a framework `trust-task-error` document, version-agnostic
@@ -631,7 +595,7 @@ fn is_join_denial_code(code: &str) -> bool {
 /// - A definitive authorization denial (`permissionDenied` / `forbidden` /
 ///   `identityMismatch`) → `Rejected` (terminal; inactivates the session so the
 ///   loop deregisters it). Mirrors the `forbidden` branch of
-///   [`handle_join_problem_report`].
+///   [`read_problem_report`], which never acts on it.
 /// - Any other code (malformed / unsupported / internal / unavailable / …) is a
 ///   client or transient failure, not a policy decision: surface the detail and
 ///   leave the record `Pending` so a corrected retry can still succeed.
@@ -710,12 +674,120 @@ pub fn handle_join_trust_task_error(
     }
 }
 
-/// Handle a VTC → member **removal notice** (`vtc/members/removal-notice/0.1`):
-/// the community telling a member it removed them (issue #240). Unlike every
-/// join-decision path above it is *unsolicited* — not threaded on any request we
-/// sent — so it is correlated by its two named parties instead: the sender
-/// (`from_did`, the community's VTC) and the removed member's persona
-/// (`body.did`, which must be one of ours).
+/// Why a removal notice was not acted on. Names what failed, never the
+/// notice's contents or a DID.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RemovalNoticeError {
+    #[error("the notice {0}")]
+    Document(#[from] crate::operational::OperationalError),
+    #[error("the notice's payload is malformed")]
+    Malformed,
+    #[error("the notice is addressed to one persona but names another")]
+    WrongRecipient,
+    #[error("the notice is for a membership we do not hold with that community")]
+    NoMembership,
+}
+
+/// A removal notice whose proof by the sending community verified
+/// ([`verify_removal_notice`]). The only way to obtain one outside tests.
+#[derive(Debug, Clone)]
+pub struct VerifiedRemovalNotice(RemovalNoticeBody);
+
+impl VerifiedRemovalNotice {
+    /// Wrap a payload without verifying it. Tests only: the transition logic
+    /// downstream of verification is tested separately from it.
+    #[cfg(test)]
+    pub(crate) fn assume_verified(body: RemovalNoticeBody) -> Self {
+        Self(body)
+    }
+}
+
+/// Verify a removal notice before anything acts on it.
+///
+/// Removal ends a membership, so it is taken only as the community's signed
+/// operational document ([`crate::operational`]): `issuer` is `from_did`, the
+/// proof is by the community's `authentication` key (VTI-KEY-106), it names a
+/// `recipient` that is one of `our_dids` and is the persona the payload
+/// removes, its `issuedAt` is inside the notice's delivery window, and its id
+/// has not been acted on before (VTI-KEY-107). A bare or unsigned notice is
+/// refused.
+///
+/// # Errors
+///
+/// [`RemovalNoticeError`] naming the check that failed.
+pub async fn verify_removal_notice(
+    message: &Message,
+    from_did: &str,
+    account: &Account,
+    resolver: &affinidi_did_resolver_cache_sdk::DIDCacheClient,
+    seen: &mut crate::operational::SeenDocuments,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<VerifiedRemovalNotice, RemovalNoticeError> {
+    let ours: Vec<&str> = account.personas.values().map(|p| p.did.as_str()).collect();
+    let verified = crate::operational::verify_operational(
+        &message.body,
+        from_did,
+        &ours,
+        vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE,
+        resolver,
+        seen,
+        now,
+    )
+    .await;
+    bind_removal_notice(message, from_did, account, seen, verified, now)
+}
+
+/// The local half of [`verify_removal_notice`]: given the result of
+/// verifying the document (which may have run elsewhere — the network-bound
+/// half runs off the dispatch loop), bind it to a membership we hold and
+/// record it. Nothing is recorded unless every check passes.
+///
+/// # Errors
+///
+/// As [`verify_removal_notice`].
+pub fn bind_removal_notice(
+    message: &Message,
+    from_did: &str,
+    account: &Account,
+    seen: &mut crate::operational::SeenDocuments,
+    verified: Result<crate::operational::VerifiedOperational, crate::operational::OperationalError>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<VerifiedRemovalNotice, RemovalNoticeError> {
+    let document = &message.body;
+    let body: RemovalNoticeBody = document
+        .get("payload")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| RemovalNoticeError::Malformed)?
+        .ok_or(crate::operational::OperationalError::NotADocument)?;
+    if let Some(recipient) = document.get("recipient").and_then(Value::as_str)
+        && recipient != body.did
+    {
+        return Err(RemovalNoticeError::WrongRecipient);
+    }
+    let verified = verified?;
+    // Bound before it is recorded: the sender is a community the named
+    // persona holds a membership with. A party with no standing — however
+    // well it signs with its own key — never reaches the replay set.
+    let bound = account
+        .persona_id_for_did(&body.did)
+        .is_some_and(|persona| account.membership(from_did, persona).is_some());
+    if !bound {
+        return Err(RemovalNoticeError::NoMembership);
+    }
+    verified.check(seen, now)?;
+    verified.commit(seen, now)?;
+    Ok(VerifiedRemovalNotice(body))
+}
+
+/// Handle a VTC → member **removal notice** (`vtc/members/removal-notice/0.1`)
+/// that [`verify_removal_notice`] accepted: the community telling a member it
+/// removed them (issue #240). Unlike every join-decision path above it is
+/// *unsolicited* — not threaded on any request we sent — so it is correlated
+/// by its two named parties instead: the community (`from_did`, whose proof
+/// verified) and the removed member's persona (`body.did`, which must be one of
+/// ours).
 ///
 /// Transitions the matching **Active** membership to `Removed`, persisting the
 /// notice's authority (`decided_by`), reason, decision time (`decided_at`) and
@@ -728,16 +800,10 @@ pub fn handle_join_trust_task_error(
 /// removed member can no longer authenticate to the community to be told twice.
 pub fn handle_member_removal_notice(
     account: &mut Account,
-    message: &Message,
+    notice: VerifiedRemovalNotice,
     from_did: &str,
 ) -> StatusOutcome {
-    let body: RemovalNoticeBody = match serde_json::from_value(message.body.clone()) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(error = %e, "malformed removal-notice body — ignoring");
-            return StatusOutcome::NONE;
-        }
-    };
+    let body = notice.0;
     let Some(persona) = account.persona_id_for_did(&body.did) else {
         warn!(
             vtc = %from_did,
@@ -803,8 +869,10 @@ pub fn handle_member_removal_notice(
 /// does not need, so a strict parse would drop a valid response over a field it
 /// never reads.
 ///
-/// **Anti-spoof:** only a community we actually hold a membership with may set
-/// this — a response from a DID we know nothing about is ignored. An absent or
+/// **Anti-spoof:** the caller passes only the community's signed answer to a
+/// profile question we asked it; and only a community we actually hold a
+/// membership with may set this. A declared `attributed` is never recorded —
+/// it would weaken the pairwise default, which is the member's choice. An absent or
 /// unrecognised value stores `None`, which reads as "default to pairwise" (the
 /// field is a declaration, not an enforcement); it does not fail the message.
 ///
@@ -848,6 +916,21 @@ pub fn handle_community_profile_show_response(
     }
     let mut changed = false;
     for record in records {
+        // Never weaken pairwise to attributed on the community's say-so: an
+        // attributed edge links the member's persona DID into a legible graph,
+        // which is the member's choice to make. The declaration is logged; the
+        // form's toggle is where the member makes it. A move towards pairwise
+        // (or back to undeclared) is taken.
+        if declared == Some(RelationshipIdentifierDefault::Attributed)
+            && record.relationship_identifier_default
+                != Some(RelationshipIdentifierDefault::Attributed)
+        {
+            info!(
+                "community declares attributed relationship identifiers — kept pairwise; \
+                 choose attributed per relationship if you want it"
+            );
+            continue;
+        }
         if record.relationship_identifier_default != declared {
             record.relationship_identifier_default = declared;
             changed = true;
@@ -861,67 +944,112 @@ pub fn handle_community_profile_show_response(
     changed
 }
 
-/// Handle a VTC `credential-exchange/issue`: store the issued credential on the
+/// The credential a VTC `credential-exchange/issue` carries, unverified.
+///
+/// The known-holder delivery carries the VC at `credential_response.credential`
+/// of the task's payload. A VTC pushes every `issue` as a signed Trust Task
+/// document, so this reads only a document whose `issuer` is the party that
+/// delivered it; a bare body, or a document naming anyone else, carries
+/// nothing this client will act on. Reading here is not verifying: pass the
+/// document to [`crate::issued_credential::verify_issued_delivery`], and only
+/// what that returns can be stored.
+///
+/// `sealed` issues (invite / air-gap) are not handled here.
+#[must_use]
+pub fn credential_in_issue(message: &Message) -> Option<Value> {
+    let issuer = message.body.get("issuer").and_then(Value::as_str)?;
+    if Some(issuer) != message.from.as_deref() {
+        return None;
+    }
+    message
+        .body
+        .pointer("/payload/credential_response/credential")
+        .cloned()
+}
+
+/// Whether a `credential-exchange/issue` from `from_did` carrying
+/// `credential` (unverified) could be stored at all: issued by the sender, to
+/// one of our personas, of a known kind, for a membership that persona holds
+/// with the sender and that is still live (Pending or Active).
+///
+/// Local and cheap — no resolve, no fetch. It runs **before** the credential
+/// is verified, so a party we hold no membership with cannot make this client
+/// resolve DIDs or fetch status lists on its behalf, and again when the
+/// verified credential is stored ([`handle_credential_issue`]).
+///
+/// # Errors
+///
+/// Why it could not be stored; the text names no DID.
+pub fn credential_issue_admissible(
+    account: &Account,
+    credential: &Value,
+    from_did: &str,
+) -> Result<(crate::config::account::PersonaId, crate::CredentialKind), &'static str> {
+    // Anti-misdelivery: issuer must be this community's VTC. The credential's
+    // subject (a persona DID) also selects WHICH membership it is for — a
+    // community may hold several, one per persona.
+    if crate::issued_credential::issuer_of(credential) != Some(from_did) {
+        return Err("its issuer is not the community that sent it");
+    }
+    let subject = credential
+        .get("credentialSubject")
+        .and_then(|s| s.get("id"))
+        .and_then(Value::as_str)
+        .ok_or("it has no subject")?;
+    let persona_id = account
+        .persona_id_for_did(subject)
+        .ok_or("its subject is not one of our personas")?;
+    // Classified against the typed registry — the one place that knows
+    // credential kinds, so a new kind is handled here without edits.
+    let kind =
+        crate::CredentialKind::from_credential(credential).ok_or("it is of no known kind")?;
+    let record = account
+        .membership(from_did, persona_id)
+        .ok_or("we hold no membership with that community for its subject")?;
+    // A credential lands only on a live membership: one waiting on our join
+    // (Pending) or already Active. A membership that ended — Left, Withdrawn,
+    // Rejected, Removed, Expired — is not revived by a credential arriving,
+    // however well signed: re-joining is a new join the member starts.
+    let pending = matches!(
+        record.status,
+        crate::config::account::CommunityStatus::Pending { .. }
+    );
+    if !pending && !record.status.is_active() {
+        return Err("it is for a membership that has ended");
+    }
+    Ok((persona_id, kind))
+}
+
+/// Handle a VTC `credential-exchange/issue` whose credential has been verified
+/// ([`crate::issued_credential::verify_issued_credential`]): store it on the
 /// matching community and, for the membership credential (VMC), flip the
 /// membership to `Active`. The issuing VTC is the authcrypt sender; the
 /// credential must be issued by that VTC and to the community's own persona
 /// (anti-misdelivery).
 ///
+/// Taking a [`VerifiedIssuedCredential`] rather than the message is the point:
+/// the proof check cannot be skipped by a caller, because nothing else
+/// produces one.
+///
 /// See [`CredentialIssueOutcome`] for why this reports the join request it
 /// closed rather than just whether anything changed.
 pub fn handle_credential_issue(
     account: &mut Account,
-    message: &Message,
+    credential: VerifiedIssuedCredential,
     from_did: &str,
 ) -> CredentialIssueOutcome {
-    // The known-holder delivery carries the VC at `credential_response.credential`.
-    // `sealed` issues (invite / air-gap) are not handled here.
-    let Some(credential) = message
-        .body
-        .get("credential_response")
-        .and_then(|cr| cr.get("credential"))
-        .cloned()
-    else {
-        warn!(vtc = %from_did, "credential-issue without credential_response.credential — ignoring");
-        return CredentialIssueOutcome::NONE;
-    };
+    let credential = credential.into_value();
 
-    // Anti-misdelivery: issuer must be this community's VTC. The credential's
-    // subject (a persona DID) also selects WHICH membership it is for — a
-    // community may now hold several, one per persona.
-    let issuer = credential.get("issuer").and_then(|i| match i {
-        Value::String(s) => Some(s.as_str()),
-        Value::Object(o) => o.get("id").and_then(Value::as_str),
-        _ => None,
-    });
-    if issuer != Some(from_did) {
-        warn!(vtc = %from_did, ?issuer, "issued credential's issuer is not the community VTC — ignoring");
-        return CredentialIssueOutcome::NONE;
-    }
-    let Some(subject) = credential
-        .get("credentialSubject")
-        .and_then(|s| s.get("id"))
-        .and_then(Value::as_str)
-    else {
-        warn!(vtc = %from_did, "issued credential has no subject — ignoring");
-        return CredentialIssueOutcome::NONE;
+    // Checked again, although the caller ran the same checks before verifying,
+    // so this function stands on its own.
+    let (persona_id, kind) = match credential_issue_admissible(account, &credential, from_did) {
+        Ok(target) => target,
+        Err(reason) => {
+            warn!(vtc = %from_did, "issued credential ignored: {reason}");
+            return CredentialIssueOutcome::NONE;
+        }
     };
-    // The subject must be one of our personas, and that persona must hold a
-    // membership with this community.
-    let Some(persona_id) = account.persona_id_for_did(subject) else {
-        warn!(vtc = %from_did, "issued credential subject is not our persona — ignoring");
-        return CredentialIssueOutcome::NONE;
-    };
-
-    // Classify the credential against the typed registry — the one place that
-    // knows credential kinds, so a new kind is handled here without edits.
-    let Some(kind) = crate::CredentialKind::from_credential(&credential) else {
-        warn!(vtc = %from_did, "issued credential is of no known kind — ignoring");
-        return CredentialIssueOutcome::NONE;
-    };
-
     let Some(record) = account.membership_mut(from_did, persona_id) else {
-        warn!(vtc = %from_did, "credential-issue for a community we don't hold a matching membership with — ignoring");
         return CredentialIssueOutcome::NONE;
     };
     record.credentials.insert(kind, credential);
@@ -931,15 +1059,15 @@ pub fn handle_credential_issue(
     // id exists — which is why a caller could not simply read it back
     // afterwards and why the reciprocal VMC has always gone out with
     // `requestId: None`.
-    let closed_join = if kind.activates_membership() && !record.status.is_active() {
-        let request_id = match record.status {
-            crate::config::account::CommunityStatus::Pending { request_id } => Some(request_id),
-            _ => None,
-        };
-        record.activate(chrono::Utc::now());
-        request_id.map(|id| (persona_id, id))
-    } else {
-        None
+    // Only a Pending membership — our outstanding join — is activated.
+    let closed_join = match record.status {
+        crate::config::account::CommunityStatus::Pending { request_id }
+            if kind.activates_membership() =>
+        {
+            record.activate(chrono::Utc::now());
+            Some((persona_id, request_id))
+        }
+        _ => None,
     };
     info!(
         vtc = %from_did,
@@ -1030,22 +1158,28 @@ pub fn vet_vrc_issued(
 
 /// Cryptographically verify an inbound VRC's data-integrity proof (task R2).
 ///
-/// The proof's `verificationMethod` must belong to the credential's issuer
-/// DID — without that binding an attacker could present a proof made with
-/// *their own* key over a credential naming someone else as issuer. The
-/// public key is then resolved from the issuer's DID Document via the TDK
-/// resolver and the proof verified over the proof-stripped credential.
+/// Checked by the same rules as every other signed document this client acts
+/// on ([`crate::proof_check`]): every proof verifies, by a method whose DID is
+/// exactly the credential's issuer, that the issuer's DID document lists under
+/// `assertionMethod` and whose controller is the issuer — without which an
+/// attacker could present a proof made with *their own* key over a credential
+/// naming someone else as issuer, or with a key the issuer publishes for
+/// another purpose.
+///
+/// # Errors
+///
+/// What failed, naming no DID.
 pub async fn verify_vrc_proof(tdk: &TDK, vrc: &DTGCredential) -> Result<(), String> {
-    let proof = check_vrc_issuer_binding(vrc)?;
-
-    // `verify_data` expects the signed document with the proof stripped.
-    let mut unsigned = vrc.clone();
-    unsigned.credential_mut().proof = None;
-
-    tdk.verify_data(&unsigned, None, &proof)
-        .await
-        .map_err(|e| format!("proof verification failed: {e}"))?;
-    Ok(())
+    let document = serde_json::to_value(vrc)
+        .map_err(|e| format!("the credential could not be read for verification: {e}"))?;
+    crate::proof_check::verify_signed(
+        &document,
+        vrc.issuer(),
+        tdk.did_resolver(),
+        &[crate::proof_check::Purpose::AssertionMethod],
+    )
+    .await
+    .map_err(|e| format!("proof verification failed: {e}"))
 }
 
 /// Verify a VRC's data-integrity proof against an **explicitly supplied** issuer
@@ -1063,7 +1197,7 @@ pub fn verify_vrc_proof_with_key(
         .map_err(|e| format!("proof verification failed: {e}"))
 }
 
-/// Shared guard for the VRC proof verifiers: the credential must carry a
+/// Guard for the key-injected VRC verifier: the credential must carry a
 /// data-integrity proof and its `verification_method` must belong to the named
 /// issuer (no "issuer signs with their own key over a credential naming someone
 /// else"). Returns the proof on success.
@@ -1390,20 +1524,19 @@ mod tests {
         .finalize()
     }
 
+    /// Pairwise is recorded; attributed is not — the community declaring it
+    /// never weakens the member's pairwise default without their say.
     #[test]
-    fn profile_response_records_attributed_and_pairwise() {
+    fn profile_response_records_pairwise_but_never_weakens_to_attributed() {
         let vtc = "did:webvh:example:vtc";
 
         let mut acct = pending_account(vtc, Uuid::new_v4());
-        assert!(handle_community_profile_show_response(
+        assert!(!handle_community_profile_show_response(
             &mut acct,
             &profile_response(vtc, Some("attributed")),
             vtc,
         ));
-        assert_eq!(
-            only(&acct, vtc).relationship_identifier_default,
-            Some(RelationshipIdentifierDefault::Attributed)
-        );
+        assert_eq!(only(&acct, vtc).relationship_identifier_default, None);
 
         let mut acct = pending_account(vtc, Uuid::new_v4());
         assert!(handle_community_profile_show_response(
@@ -1452,7 +1585,7 @@ mod tests {
     }
 
     #[test]
-    fn status_response_approved_activates_from_response_document() {
+    fn status_response_approved_is_read_from_response_document() {
         let vtc = "did:webvh:example:vtc";
         let rid = Uuid::new_v4();
         let mut acct = pending_account(vtc, rid);
@@ -1464,9 +1597,12 @@ mod tests {
         );
         assert!(
             out.changed,
-            "an approved status response in its wire form must activate the membership"
+            "an approved status response in its wire form is read (and acknowledged)"
         );
-        assert!(matches!(only(&acct, vtc).status, CommunityStatus::Active));
+        assert!(matches!(
+            only(&acct, vtc).status,
+            CommunityStatus::Pending { .. }
+        ));
     }
 
     /// Both reply shapes reach the same payload, and a bare body is left alone.
@@ -1483,22 +1619,22 @@ mod tests {
         assert_eq!(trust_task_reply_payload(&document), bare);
     }
 
+    /// An approval is not an admission. The status reply is unsigned, so it
+    /// acknowledges the join and waits for the membership credential, whose
+    /// verified arrival is what activates (and closes the join).
     #[test]
-    fn status_response_approved_activates() {
+    fn status_response_approved_awaits_the_credential() {
         let vtc = "did:webvh:example:vtc";
         let rid = Uuid::new_v4();
         let mut acct = pending_account(vtc, rid);
 
         let out =
             handle_join_status_response(&mut acct, &status_response(vtc, rid, "approved"), vtc);
-        assert!(out.changed);
+        assert!(out.changed, "the approval is acknowledged");
         assert!(out.inactivated.is_none(), "approval keeps the live session");
         let rec = only(&acct, vtc);
-        assert!(rec.status.is_active());
-        assert!(
-            rec.member_since.is_some(),
-            "member_since stamped on activate"
-        );
+        assert!(!rec.status.is_active(), "no credential yet, so not Active");
+        assert!(rec.member_since.is_none());
     }
 
     #[test]
@@ -1614,49 +1750,6 @@ mod tests {
         assert_eq!(d.reason.as_deref(), Some("membership full"));
     }
 
-    /// A FORBIDDEN problem-report persists its code and the free-text comment.
-    #[test]
-    fn problem_report_forbidden_persists_code_and_comment() {
-        let vtc = "did:webvh:example:vtc";
-        let rid = Uuid::new_v4();
-        let mut acct = pending_account(vtc, rid);
-
-        let out = handle_join_problem_report(
-            &mut acct,
-            &problem_report(
-                &rid.to_string(),
-                vtc,
-                "e.p.msg.forbidden",
-                "invitation rejected",
-            ),
-            vtc,
-        );
-        assert!(out.status.changed);
-        let d = only(&acct, vtc)
-            .decision
-            .clone()
-            .expect("forbidden records evidence");
-        assert_eq!(d.code.as_deref(), Some("e.p.msg.forbidden"));
-        assert_eq!(d.reason.as_deref(), Some("invitation rejected"));
-    }
-
-    /// An empty problem-report comment is "no reason given", not an empty reason.
-    #[test]
-    fn problem_report_forbidden_empty_comment_gives_no_reason() {
-        let vtc = "did:webvh:example:vtc";
-        let rid = Uuid::new_v4();
-        let mut acct = pending_account(vtc, rid);
-
-        handle_join_problem_report(
-            &mut acct,
-            &problem_report(&rid.to_string(), vtc, "e.p.msg.forbidden", ""),
-            vtc,
-        );
-        let d = only(&acct, vtc).decision.clone().expect("records evidence");
-        assert!(d.reason.is_none(), "an empty comment is an absent reason");
-        assert_eq!(d.code.as_deref(), Some("e.p.msg.forbidden"));
-    }
-
     /// A denial trust-task-error persists its code and human `message`.
     #[test]
     fn trust_task_error_denial_persists_code_and_detail() {
@@ -1680,7 +1773,46 @@ mod tests {
 
     // ----- removal notice (issue #240) --------------------------------------
 
-    fn removal_notice(from: &str, body: serde_json::Value) -> Message {
+    /// A removal-notice payload, treated as verified — these tests cover the
+    /// transition after verification (see `verify_removal_notice` tests for
+    /// the proof).
+    fn removal_notice(_from: &str, body: serde_json::Value) -> VerifiedRemovalNotice {
+        VerifiedRemovalNotice::assume_verified(serde_json::from_value(body).expect("a payload"))
+    }
+
+    fn did_key_secret(seed: u8) -> affinidi_tdk::secrets_resolver::secrets::Secret {
+        let mut secret = affinidi_tdk::secrets_resolver::secrets::Secret::generate_ed25519(
+            None,
+            Some(&[seed; 32]),
+        );
+        let public = secret.get_public_keymultibase().unwrap();
+        secret.id = format!("did:key:{public}#{public}");
+        secret
+    }
+
+    fn did_of_secret(secret: &affinidi_tdk::secrets_resolver::secrets::Secret) -> String {
+        secret.id.split('#').next().unwrap().to_string()
+    }
+
+    /// The Trust Task document a VTC sends as a removal notice, unsigned.
+    fn notice_document(vtc: &str, persona: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("urn:uuid:{}", Uuid::new_v4()),
+            "type": vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE,
+            "issuer": vtc,
+            "recipient": persona,
+            "issuedAt": Utc::now().to_rfc3339(),
+            "payload": {
+                "did": persona,
+                "code": "adminRemoved",
+                "disposition": "tombstone",
+                "decidedAt": "2026-08-23T09:14:02Z",
+                "decidedBy": "did:key:z6MkAdmin",
+            },
+        })
+    }
+
+    fn notice_message(from: &str, body: serde_json::Value) -> Message {
         Message::build(
             Uuid::new_v4().to_string(),
             vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE.to_string(),
@@ -1688,6 +1820,140 @@ mod tests {
         )
         .from(from.to_string())
         .finalize()
+    }
+
+    async fn test_resolver() -> affinidi_did_resolver_cache_sdk::DIDCacheClient {
+        affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
+            affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+        )
+        .await
+        .expect("resolver")
+    }
+
+    /// A removal ends a membership, so it is acted on only as the community's
+    /// signed operational document — authentication key, addressed, fresh,
+    /// once — not on who the transport says sent it.
+    #[tokio::test]
+    async fn a_removal_notice_needs_the_communitys_operational_proof() {
+        use crate::operational::{OperationalError, SeenDocuments};
+        use crate::proof_check::{ProofError, Purpose, test_support::sign_for};
+        let resolver = test_resolver().await;
+        let vtc_key = did_key_secret(0x51);
+        let vtc = did_of_secret(&vtc_key);
+        let persona = "did:webvh:example:persona";
+        let acct = account_with_persona(&vtc, persona);
+        let mut seen = SeenDocuments::default();
+        let signers = [&vtc_key];
+        let auth = |doc| sign_for(doc, &signers, Purpose::Authentication);
+        macro_rules! run {
+            ($m:expr, $from:expr) => {
+                verify_removal_notice(&$m, &$from, &acct, &resolver, &mut seen, Utc::now()).await
+            };
+        }
+
+        // Signed with the community's authentication key: accepted, once.
+        let signed = auth(notice_document(&vtc, persona)).await;
+        assert!(run!(notice_message(&vtc, signed.clone()), vtc).is_ok());
+        assert_eq!(
+            run!(notice_message(&vtc, signed.clone()), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Replayed)
+        );
+
+        // A stranger signing its own notice with its own key: it has no
+        // membership, so it is refused and records nothing.
+        let stranger_key = did_key_secret(0x5a);
+        let stranger = did_of_secret(&stranger_key);
+        let theirs = sign_for(
+            notice_document(&stranger, persona),
+            &[&stranger_key],
+            Purpose::Authentication,
+        )
+        .await;
+        let rev = seen.revision();
+        assert_eq!(
+            run!(notice_message(&stranger, theirs), stranger).unwrap_err(),
+            RemovalNoticeError::NoMembership
+        );
+        assert_eq!(seen.revision(), rev, "nothing recorded for a stranger");
+
+        // Signed under assertionMethod (VTI-KEY-106): refused.
+        let asserted = sign_for(
+            notice_document(&vtc, persona),
+            &[&vtc_key],
+            Purpose::AssertionMethod,
+        )
+        .await;
+        assert_eq!(
+            run!(notice_message(&vtc, asserted), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Proof(ProofError::WrongPurpose(0)))
+        );
+
+        // Unsigned: refused.
+        assert_eq!(
+            run!(notice_message(&vtc, notice_document(&vtc, persona)), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Proof(ProofError::NoProof))
+        );
+
+        // A bare payload (no document): refused.
+        let bare = notice_document(&vtc, persona)["payload"].clone();
+        assert!(run!(notice_message(&vtc, bare), vtc).is_err());
+
+        // Changed after signing: refused.
+        let mut tampered = auth(notice_document(&vtc, persona)).await;
+        tampered["payload"]["code"] = serde_json::json!("purged");
+        assert_eq!(
+            run!(notice_message(&vtc, tampered), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Proof(ProofError::Invalid(0)))
+        );
+
+        // Claimed as the community's but signed by somebody else: refused.
+        let other = did_key_secret(0x52);
+        let forged = sign_for(
+            notice_document(&vtc, persona),
+            &[&other],
+            Purpose::Authentication,
+        )
+        .await;
+        assert_eq!(
+            run!(notice_message(&vtc, forged), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::Proof(
+                ProofError::ForeignVerificationMethod(0)
+            ))
+        );
+
+        // A genuine notice arriving as another sender's: refused.
+        let elsewhere = did_of_secret(&other);
+        let fresh = auth(notice_document(&vtc, persona)).await;
+        assert_eq!(
+            run!(notice_message(&elsewhere, fresh), elsewhere).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::IssuerNotSender)
+        );
+
+        // No recipient, or one naming another persona than the payload: refused.
+        let mut unaddressed = notice_document(&vtc, persona);
+        unaddressed.as_object_mut().unwrap().remove("recipient");
+        let unaddressed = auth(unaddressed).await;
+        assert_eq!(
+            run!(notice_message(&vtc, unaddressed), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::NoRecipient)
+        );
+        let mut misaddressed = notice_document(&vtc, persona);
+        misaddressed["recipient"] = serde_json::json!("did:webvh:example:someone-else");
+        let misaddressed = auth(misaddressed).await;
+        assert_eq!(
+            run!(notice_message(&vtc, misaddressed), vtc).unwrap_err(),
+            RemovalNoticeError::WrongRecipient
+        );
+
+        // Too old for the delivery window: refused.
+        let mut stale = notice_document(&vtc, persona);
+        stale["issuedAt"] =
+            serde_json::json!((Utc::now() - chrono::TimeDelta::days(40)).to_rfc3339());
+        let stale = auth(stale).await;
+        assert_eq!(
+            run!(notice_message(&vtc, stale), vtc).unwrap_err(),
+            RemovalNoticeError::Document(OperationalError::TooOld)
+        );
     }
 
     /// A removal notice for an active member transitions it to Removed, persists
@@ -1702,7 +1968,7 @@ mod tests {
 
         let out = handle_member_removal_notice(
             &mut acct,
-            &removal_notice(
+            removal_notice(
                 vtc,
                 serde_json::json!({
                     "did": persona,
@@ -1742,7 +2008,7 @@ mod tests {
 
         handle_member_removal_notice(
             &mut acct,
-            &removal_notice(
+            removal_notice(
                 vtc,
                 serde_json::json!({
                     "did": persona,
@@ -1768,7 +2034,7 @@ mod tests {
 
         let out = handle_member_removal_notice(
             &mut acct,
-            &removal_notice(
+            removal_notice(
                 vtc,
                 serde_json::json!({
                     "did": "did:webvh:example:someone-else",
@@ -1795,7 +2061,7 @@ mod tests {
 
         let out = handle_member_removal_notice(
             &mut acct,
-            &removal_notice(
+            removal_notice(
                 vtc,
                 serde_json::json!({
                     "did": persona,
@@ -1900,7 +2166,7 @@ mod tests {
     }
 
     #[test]
-    fn verdict_allow_activates_from_response_document() {
+    fn verdict_allow_is_read_from_response_document() {
         let vtc = "did:webvh:example:vtc";
         let rid = Uuid::new_v4();
         let mut acct = pending_account(vtc, rid);
@@ -1913,13 +2179,18 @@ mod tests {
         assert!(
             out.changed,
             "an allow verdict in its wire form (payload nested in the #response \
-             document) must activate the membership"
+             document) is read and acknowledged"
         );
-        assert!(matches!(only(&acct, vtc).status, CommunityStatus::Active));
+        assert!(matches!(
+            only(&acct, vtc).status,
+            CommunityStatus::Pending { .. }
+        ));
     }
 
+    /// Like an approved status: an allow verdict is unsigned, so it does not
+    /// admit — the verified membership credential does.
     #[test]
-    fn verdict_allow_activates() {
+    fn verdict_allow_awaits_the_credential() {
         let vtc = "did:webvh:example:vtc";
         let rid = Uuid::new_v4();
         let mut acct = pending_account(vtc, rid);
@@ -1931,7 +2202,7 @@ mod tests {
         );
         assert!(out.changed);
         assert!(out.inactivated.is_none());
-        assert!(matches!(only(&acct, vtc).status, CommunityStatus::Active));
+        assert!(!only(&acct, vtc).status.is_active());
     }
 
     #[test]
@@ -2094,13 +2365,16 @@ mod tests {
 
         let out = handle_join_verdict(
             &mut acct,
-            &verdict(&rid_a.to_string(), vtc, "allow", serde_json::json!({})),
+            &verdict(&rid_a.to_string(), vtc, "deny", serde_json::json!({})),
             vtc,
         );
         assert!(out.changed);
         assert!(
-            acct.membership(vtc, pa).unwrap().status.is_active(),
-            "the membership whose request id matched is activated"
+            matches!(
+                acct.membership(vtc, pa).unwrap().status,
+                CommunityStatus::Rejected
+            ),
+            "the membership whose request id matched is transitioned"
         );
         assert!(
             matches!(
@@ -2222,75 +2496,16 @@ mod tests {
         .finalize()
     }
 
-    /// A problem-report on a thread no pending join matches must be reported,
-    /// not swallowed.
-    ///
-    /// This is the exact shape that hid the broken reciprocal-VMC exchange: the
-    /// community refused every delivery and said so in a report threaded on the
-    /// delivery, which correlates to no join, so the handler returned "nothing
-    /// happened" and the only trace was a warn naming the correlation miss
-    /// rather than the failure.
+    /// A problem-report carries no proof, so it never changes a record — even a
+    /// `forbidden` threaded on our pending join. It is read, so the refusal is
+    /// visible, with the community's own words.
     #[test]
-    fn a_report_matching_no_pending_join_is_handed_back_not_dropped() {
+    fn a_problem_report_is_read_but_never_acted_on() {
         let vtc = "did:webvh:example:vtc";
         let rid = Uuid::new_v4();
-        let mut acct = pending_account(vtc, rid);
-
-        // Threaded on something else entirely — a members/vmc delivery, say.
-        let unrelated = Uuid::new_v4();
-        let out = handle_join_problem_report(
-            &mut acct,
-            &problem_report(
-                &unrelated.to_string(),
-                vtc,
-                "e.p.msg.bad-request",
-                "member vmc has no top-level `id`",
-            ),
-            vtc,
-        );
-
-        let (code, comment) = out
-            .unclaimed
-            .expect("an uncorrelated report must be reported");
-        assert_eq!(code, "e.p.msg.bad-request");
-        assert!(
-            comment.contains("member vmc"),
-            "the community's own words must survive: {comment}"
-        );
-        assert!(
-            !out.status.changed,
-            "it still must not touch the pending join it does not belong to"
-        );
-        assert!(matches!(
-            only(&acct, vtc).status,
-            CommunityStatus::Pending { .. }
-        ));
-    }
-
-    /// A report with no thread id at all cannot be correlated either, and is
-    /// equally not a reason to stay quiet.
-    #[test]
-    fn a_report_with_no_thread_id_is_still_reported() {
-        let vtc = "did:webvh:example:vtc";
-        let mut acct = pending_account(vtc, Uuid::new_v4());
-        let mut msg = problem_report("ignored", vtc, "e.p.msg.internal", "boom");
-        msg.thid = None;
-
-        let out = handle_join_problem_report(&mut acct, &msg, vtc);
-        assert!(
-            out.unclaimed.is_some(),
-            "no thid is not a reason to drop it"
-        );
-    }
-
-    #[test]
-    fn problem_report_forbidden_rejects() {
-        let vtc = "did:webvh:example:vtc";
-        let rid = Uuid::new_v4();
-        let mut acct = pending_account(vtc, rid);
-
-        let out = handle_join_problem_report(
-            &mut acct,
+        let acct = pending_account(vtc, rid);
+        let note = read_problem_report(
+            &acct,
             &problem_report(
                 &rid.to_string(),
                 vtc,
@@ -2298,35 +2513,58 @@ mod tests {
                 "invitation rejected",
             ),
             vtc,
-        );
-        assert!(out.status.changed);
-        assert!(out.status.inactivated.is_some());
-        assert!(matches!(only(&acct, vtc).status, CommunityStatus::Rejected));
-    }
-
-    #[test]
-    fn problem_report_bad_request_stays_pending() {
-        let vtc = "did:webvh:example:vtc";
-        let rid = Uuid::new_v4();
-        let mut acct = pending_account(vtc, rid);
-
-        let out = handle_join_problem_report(
-            &mut acct,
-            &problem_report(&rid.to_string(), vtc, "e.p.msg.bad-request", "malformed"),
-            vtc,
-        );
-        assert!(
-            !out.status.changed,
-            "a client/transient error must not mark Rejected"
-        );
-        assert!(
-            out.unclaimed.is_none(),
-            "a report threaded on a known pending join is this handler's to interpret"
-        );
+        )
+        .expect("our community's report is read");
+        assert_eq!(note.code, "e.p.msg.forbidden");
+        assert_eq!(note.comment, "invitation rejected");
+        assert!(note.on_pending_join);
         assert!(matches!(
             only(&acct, vtc).status,
             CommunityStatus::Pending { .. }
         ));
+
+        let unrelated = read_problem_report(
+            &acct,
+            &problem_report(&Uuid::new_v4().to_string(), vtc, "e.p.msg.bad-request", "x"),
+            vtc,
+        )
+        .unwrap();
+        assert!(!unrelated.on_pending_join);
+    }
+
+    /// A join failure is heard only from the community the join was sent to:
+    /// a problem-report or trust-task-error from anyone else, even threaded on
+    /// the real request id, changes nothing.
+    #[test]
+    fn join_failures_from_another_party_change_nothing() {
+        let vtc = "did:webvh:example:vtc";
+        let mallory = "did:webvh:example:mallory";
+        let rid = Uuid::new_v4();
+        let mut acct = pending_account(vtc, rid);
+
+        assert!(
+            read_problem_report(
+                &acct,
+                &problem_report(&rid.to_string(), mallory, "e.p.msg.forbidden", "no"),
+                mallory,
+            )
+            .is_none(),
+            "a stranger's report is not even read"
+        );
+        let out = handle_join_trust_task_error(
+            &mut acct,
+            &trust_task_error(&rid.to_string(), mallory, "permissionDenied", "no"),
+            mallory,
+        );
+        assert!(!out.changed && out.inactivated.is_none());
+        assert!(!handle_join_submit_receipt(
+            &mut acct,
+            &receipt(&rid.to_string(), mallory, Uuid::new_v4(), "received"),
+            mallory,
+        ));
+        let rec = only(&acct, vtc);
+        assert!(matches!(rec.status, CommunityStatus::Pending { .. }));
+        assert!(rec.receipt_at.is_none(), "not even acknowledged");
     }
 
     #[test]
@@ -2389,14 +2627,85 @@ mod tests {
         acct
     }
 
+    /// An `issue` as a VTC pushes it: a Trust Task document from `from`. Not
+    /// signed — these tests start after verification.
     fn issue(from: &str, credential: serde_json::Value) -> Message {
+        enveloped_issue_message(from, from, &credential)
+    }
+
+    /// A VTC pushes `issue` as a signed Trust Task document in the binding
+    /// envelope; opened, the message body is the document and the credential
+    /// sits under its `payload`.
+    fn enveloped_issue_message(
+        from: &str,
+        issuer: &str,
+        credential: &serde_json::Value,
+    ) -> Message {
         Message::build(
+            Uuid::new_v4().to_string(),
+            CREDENTIAL_ISSUE_TYPE.to_string(),
+            serde_json::json!({
+                "id": format!("urn:uuid:{}", Uuid::new_v4()),
+                "type": CREDENTIAL_ISSUE_TYPE,
+                "issuer": issuer,
+                "recipient": "did:example:persona",
+                "payload": { "credential_response": { "credential": credential } },
+                "proof": { "type": "DataIntegrityProof" },
+            }),
+        )
+        .from(from.to_string())
+        .finalize()
+    }
+
+    #[test]
+    fn the_credential_is_read_from_a_pushed_issue_document() {
+        let credential = vc(
+            &["VerifiableCredential"],
+            "did:example:vtc",
+            "did:example:p",
+        );
+        let m = enveloped_issue_message("did:example:vtc", "did:example:vtc", &credential);
+        assert_eq!(credential_in_issue(&m), Some(credential));
+    }
+
+    /// A document delivered by one party naming another as its issuer is not
+    /// read at all: nothing downstream is asked to verify a credential whose
+    /// delivery already contradicts itself.
+    #[test]
+    fn an_issue_document_from_someone_other_than_its_issuer_is_not_read() {
+        let credential = vc(
+            &["VerifiableCredential"],
+            "did:example:vtc",
+            "did:example:p",
+        );
+        let m = enveloped_issue_message("did:example:relay", "did:example:vtc", &credential);
+        assert_eq!(credential_in_issue(&m), None);
+    }
+
+    /// A bare body — the shape a VTC sent before every `issue` was a signed
+    /// document — carries nothing this client acts on.
+    #[test]
+    fn a_bare_issue_body_is_not_read() {
+        let credential = vc(
+            &["VerifiableCredential"],
+            "did:example:vtc",
+            "did:example:p",
+        );
+        let m = Message::build(
             Uuid::new_v4().to_string(),
             CREDENTIAL_ISSUE_TYPE.to_string(),
             serde_json::json!({ "credential_response": { "credential": credential } }),
         )
-        .from(from.to_string())
-        .finalize()
+        .from("did:example:vtc".to_string())
+        .finalize();
+        assert_eq!(credential_in_issue(&m), None);
+    }
+
+    /// The message's credential, treated as verified — these tests cover what
+    /// happens after verification (see `issued_credential` for the proof
+    /// checks themselves).
+    fn verified(m: &Message) -> VerifiedIssuedCredential {
+        VerifiedIssuedCredential::assume_verified(credential_in_issue(m).expect("a credential"))
     }
 
     fn vc(types: &[&str], issuer: &str, subject: &str) -> serde_json::Value {
@@ -2436,7 +2745,7 @@ mod tests {
                 persona,
             ),
         );
-        let outcome = handle_credential_issue(&mut acct, &m, vtc);
+        let outcome = handle_credential_issue(&mut acct, verified(&m), vtc);
 
         assert_eq!(
             outcome.closed_join,
@@ -2467,7 +2776,7 @@ mod tests {
             ),
         );
         assert!(
-            handle_credential_issue(&mut acct, &vmc, vtc)
+            handle_credential_issue(&mut acct, verified(&vmc), vtc)
                 .closed_join
                 .is_some()
         );
@@ -2482,7 +2791,7 @@ mod tests {
                 persona,
             ),
         );
-        let outcome = handle_credential_issue(&mut acct, &again, vtc);
+        let outcome = handle_credential_issue(&mut acct, verified(&again), vtc);
         assert!(outcome.changed, "the credential is still stored");
         assert_eq!(
             outcome.closed_join, None,
@@ -2504,7 +2813,7 @@ mod tests {
                 persona,
             ),
         );
-        assert!(handle_credential_issue(&mut acct, &m, vtc).changed);
+        assert!(handle_credential_issue(&mut acct, verified(&m), vtc).changed);
 
         let rec = only(&acct, vtc);
         assert!(rec.status.is_active());
@@ -2528,7 +2837,7 @@ mod tests {
                 persona,
             ),
         );
-        assert!(handle_credential_issue(&mut acct, &m, vtc).changed);
+        assert!(handle_credential_issue(&mut acct, verified(&m), vtc).changed);
 
         let rec = only(&acct, vtc);
         assert!(
@@ -2554,7 +2863,7 @@ mod tests {
                 vc(&["VerifiableCredential", kind.vc_type()], vtc, persona),
             );
             assert!(
-                handle_credential_issue(&mut acct, &m, vtc).changed,
+                handle_credential_issue(&mut acct, verified(&m), vtc).changed,
                 "kind {kind:?} should be accepted",
             );
             let rec = only(&acct, vtc);
@@ -2567,6 +2876,48 @@ mod tests {
                 kind.activates_membership(),
                 "activation for {kind:?} must match the registry",
             );
+        }
+    }
+
+    /// A membership that ended is not revived by a credential arriving: only a
+    /// Pending join is activated.
+    #[test]
+    fn a_credential_does_not_revive_an_ended_membership() {
+        let vtc = "did:webvh:example:vtc";
+        let persona = "did:webvh:example:persona";
+        for end in ["left", "removed", "rejected", "withdrawn"] {
+            let mut acct = account_with_persona(vtc, persona);
+            {
+                let rec = acct.memberships_mut().next().unwrap();
+                match end {
+                    "left" => {
+                        rec.activate(Utc::now());
+                        rec.leave();
+                    }
+                    "removed" => {
+                        rec.activate(Utc::now());
+                        rec.remove(DecisionEvidence::default());
+                    }
+                    "rejected" => rec.reject(DecisionEvidence::default()),
+                    _ => {
+                        rec.withdraw();
+                    }
+                }
+            }
+            let before = only(&acct, vtc).status.clone();
+            let m = issue(
+                vtc,
+                vc(
+                    &["VerifiableCredential", "MembershipCredential"],
+                    vtc,
+                    persona,
+                ),
+            );
+            let out = handle_credential_issue(&mut acct, verified(&m), vtc);
+            assert!(!out.changed && out.closed_join.is_none(), "{end}");
+            let rec = only(&acct, vtc);
+            assert_eq!(rec.status, before, "{end}: status unchanged");
+            assert!(rec.credentials.is_empty(), "{end}: nothing stored");
         }
     }
 
@@ -2585,7 +2936,7 @@ mod tests {
                 persona,
             ),
         );
-        assert!(!handle_credential_issue(&mut acct, &m, vtc).changed);
+        assert!(!handle_credential_issue(&mut acct, verified(&m), vtc).changed);
         assert!(!only(&acct, vtc).status.is_active());
     }
 
@@ -2604,8 +2955,43 @@ mod tests {
                 "did:webvh:someone-else",
             ),
         );
-        assert!(!handle_credential_issue(&mut acct, &m, vtc).changed);
+        assert!(!handle_credential_issue(&mut acct, verified(&m), vtc).changed);
         assert!(!only(&acct, vtc).status.is_active());
+    }
+
+    /// The cheap local checks run before any proof or status work: a
+    /// credential from a party we hold no membership with (or otherwise not
+    /// storable) is refused without resolving or fetching anything.
+    #[test]
+    fn a_credential_is_admissible_only_for_a_live_membership_with_its_sender() {
+        let vtc = "did:webvh:example:vtc";
+        let persona = "did:webvh:example:persona";
+        let acct = account_with_persona(vtc, persona);
+        let vmc = |issuer: &str, subject: &str| {
+            vc(
+                &["VerifiableCredential", "MembershipCredential"],
+                issuer,
+                subject,
+            )
+        };
+
+        assert!(credential_issue_admissible(&acct, &vmc(vtc, persona), vtc).is_ok());
+        // A stranger issuing about itself: no membership with it.
+        let stranger = "did:webvh:example:stranger";
+        assert!(
+            credential_issue_admissible(&acct, &vmc(stranger, persona), stranger)
+                .unwrap_err()
+                .contains("no membership")
+        );
+        // Issued by someone other than the sender.
+        assert!(credential_issue_admissible(&acct, &vmc(stranger, persona), vtc).is_err());
+        // For someone else.
+        assert!(credential_issue_admissible(&acct, &vmc(vtc, "did:webvh:other"), vtc).is_err());
+        // Of no known kind.
+        assert!(
+            credential_issue_admissible(&acct, &vc(&["VerifiableCredential"], vtc, persona), vtc)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2908,6 +3294,22 @@ mod tests {
         vrc.sign(&attacker_secret, None).await.expect("signs");
 
         assert!(verify_vrc_proof(&tdk, &vrc).await.is_err());
+    }
+
+    /// A VRC is an assertion: a proof made for another purpose (here
+    /// `authentication`) does not stand for it, whoever made it.
+    #[tokio::test]
+    async fn vrc_proof_for_another_purpose_is_rejected() {
+        let tdk = test_tdk().await;
+        let (issuer_did, issuer_secret) =
+            DID::generate_did_key(KeyType::Ed25519).expect("did:key generates");
+        let mut vrc = unsigned_vrc(&issuer_did);
+        vrc.sign(&issuer_secret, None).await.expect("signs");
+        if let Some(proof) = vrc.credential_mut().proof.as_mut() {
+            proof.proof_purpose = "authentication".to_string();
+        }
+        let error = verify_vrc_proof(&tdk, &vrc).await.unwrap_err();
+        assert!(error.contains("purpose"), "{error}");
     }
 
     #[tokio::test]

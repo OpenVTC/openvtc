@@ -23,7 +23,7 @@
 //!
 //! # Absent is not false
 //!
-//! `crossesFacets` is **absent** when the agent does not implement worlds at
+//! `crossesWorlds` is **absent** when the agent does not implement worlds at
 //! all, which is a different answer from "this link stays inside one part of
 //! your life". [`Finding::crosses_worlds`] keeps that as an `Option` and the
 //! pane says nothing rather than guessing — a reassurance nobody computed is
@@ -144,7 +144,7 @@ impl Finding {
                         .collect()
                 })
                 .unwrap_or_default(),
-            crosses_worlds: value.get("crossesFacets").and_then(Value::as_bool),
+            crosses_worlds: value.get("crossesWorlds").and_then(Value::as_bool),
             shared_with: value
                 .get("sharedWith")
                 .and_then(Value::as_array)
@@ -238,7 +238,7 @@ mod tests {
             "sharedWith": [{ "profileId": "01P" }, { "profileId": "02P" }],
         });
         if let Some(c) = crosses {
-            row["crossesFacets"] = json!(c);
+            row["crossesWorlds"] = json!(c);
         }
         row
     }
@@ -266,7 +266,7 @@ mod tests {
         assert!(f.crosses_a_world());
     }
 
-    /// An absent `crossesFacets` is not `false`.
+    /// An absent `crossesWorlds` is not `false`.
     ///
     /// The agent does not implement worlds, which is a different answer from
     /// "this link stays inside one part of your life" — and a reassurance

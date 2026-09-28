@@ -38,18 +38,19 @@
 use std::collections::HashMap;
 
 use openvtc_core::persona::{
-    binding, claim_types, contacts, correlation, disclosure, facet, family, lifecycle,
+    binding, claim_types, contacts, correlation, disclosure, family, lifecycle,
     pool::{self, AttributeDraft, PoolAttribute},
     profile::{self, ProfileDetail, ProfileSummary},
+    world,
 };
 use vta_sdk::client::VtaClient;
 
 use crate::state_handler::actions::PersonaAction;
 use crate::state_handler::main_page::content::{
     AttributeField, AttributeForm, BindPicker, ComposeForm, ComposeRow, ContactForm, FacePlacer,
-    FacetForm, FacetFormFocus, KnownHereView, LocalFaceForm, LocalFacesView, PeopleView,
-    PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus, RenderersView,
-    VALUE_TYPES,
+    KnownHereView, LocalFaceForm, LocalFacesView, PeopleView, PersonaConfirm, PersonaMode,
+    PersonaTab, ProfileForm, ProfileFormFocus, RenderersView, VALUE_TYPES, WorldForm,
+    WorldFormFocus,
 };
 use crate::state_handler::persona_binding_refresh::{self, BindingTarget};
 use crate::state_handler::state::State;
@@ -102,9 +103,12 @@ pub(crate) enum PersonaJob {
     /// Fetch one attribute's value on its own (`s` on a sensitive row), so the
     /// bulk listing never has to carry every sensitive value into memory. The
     /// result is spliced into the in-memory row and the mask lifted.
+    /// Read one attribute's value, for the mask the holder lifted.
+    ///
+    /// It carried the claim type too, because the read was a prefix listing
+    /// filtered by id. `persona/attribute/get` takes the id alone.
     AttributeReveal {
         attribute_id: String,
-        claim_type: String,
     },
     ProfilePut {
         profile_id: Option<String>,
@@ -205,9 +209,9 @@ pub(crate) enum PersonaJob {
         edit: bool,
     },
     /// Create or replace one world.
-    FacetPut(facet::FacetDraft),
-    FacetDelete {
-        facet_id: String,
+    WorldPut(world::WorldDraft),
+    WorldDelete {
+        world_id: String,
         expected_version: Option<u64>,
     },
     /// Move one face into a world, or out of every world.
@@ -217,7 +221,7 @@ pub(crate) enum PersonaJob {
     /// the holder chose. A job that re-read first would be deciding against a
     /// list nobody looked at.
     FacePlace {
-        facets: Vec<facet::Facet>,
+        worlds: Vec<world::World>,
         profile_id: String,
         into: Option<String>,
     },
@@ -272,7 +276,7 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                 PersonaTab::Personas => p.persona_selected = *index,
                 PersonaTab::Attributes => p.attribute_selected = *index,
                 PersonaTab::Profiles => p.profile_selected = *index,
-                PersonaTab::Facets => p.facet_selected = *index,
+                PersonaTab::Worlds => p.world_selected = *index,
                 PersonaTab::Communities => p.membership_selected = *index,
                 PersonaTab::Disclosures => p.disclosure_selected = *index,
             }
@@ -306,7 +310,6 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             if attr.is_withheld_sensitive(&p.claim_types, p.show_values) {
                 return PersonaEffect::Job(PersonaJob::AttributeReveal {
                     attribute_id: attr.attribute_id.clone(),
-                    claim_type: attr.claim_type.clone(),
                 });
             }
             // Otherwise just lift the mask over a value already in memory — no
@@ -527,7 +530,7 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             // Start on the world that holds it now, so ⏎ on an unchanged
             // picker is a no-op rather than a silent removal.
             let cursor = p
-                .facets
+                .worlds
                 .iter()
                 .position(|f| f.holds_face(&face.profile_id))
                 .map_or(0, |i| i + 1);
@@ -541,35 +544,35 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
         }
 
         // ── Worlds ───────────────────────────────────────────────────────
-        PersonaAction::FacetNew => {
-            state.main_page.content_panel.identity.mode = PersonaMode::Facet(FacetForm::default());
+        PersonaAction::WorldNew => {
+            state.main_page.content_panel.identity.mode = PersonaMode::World(WorldForm::default());
             PersonaEffect::None
         }
-        PersonaAction::FacetEdit(index) => {
+        PersonaAction::WorldEdit(index) => {
             let p = &mut state.main_page.content_panel.identity;
-            let Some(facet) = p.facets.get(*index).cloned() else {
+            let Some(world) = p.worlds.get(*index).cloned() else {
                 return PersonaEffect::None;
             };
-            p.mode = PersonaMode::Facet(form_for_facet(&facet));
+            p.mode = PersonaMode::World(form_for_world(&world));
             PersonaEffect::None
         }
-        PersonaAction::FacetDeleteArm(index) => {
+        PersonaAction::WorldDeleteArm(index) => {
             let p = &mut state.main_page.content_panel.identity;
-            let Some(facet) = p.facets.get(*index) else {
+            let Some(world) = p.worlds.get(*index) else {
                 return PersonaEffect::None;
             };
             // Counted against the face list rather than off the record: a world
             // may name faces that have since been deleted, and the prompt has
             // to say the number the holder can see.
-            let faces = facet
+            let faces = world
                 .face_ids
                 .iter()
                 .filter(|id| p.profiles.iter().any(|x| &&x.profile_id == id))
                 .count();
-            p.confirm = PersonaConfirm::DeleteFacet {
-                facet_id: facet.facet_id.clone(),
-                name: facet.display_name().to_string(),
-                expected_version: Some(facet.version),
+            p.confirm = PersonaConfirm::DeleteWorld {
+                world_id: world.world_id.clone(),
+                name: world.display_name().to_string(),
+                expected_version: Some(world.version),
                 faces,
             };
             PersonaEffect::None
@@ -790,16 +793,16 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                         form.name.handle_event(&event);
                     }
                 }
-                PersonaMode::Facet(form) => match form.focus {
-                    FacetFormFocus::Name => {
+                PersonaMode::World(form) => match form.focus {
+                    WorldFormFocus::Name => {
                         form.name.handle_event(&event);
                     }
-                    FacetFormFocus::Icon => {
+                    WorldFormFocus::Icon => {
                         form.icon.handle_event(&event);
                     }
                     // The colour is a choice, not a text field: ←/→ move it and
                     // a keystroke here is not an edit.
-                    FacetFormFocus::Colour => {}
+                    WorldFormFocus::Colour => {}
                 },
                 PersonaMode::Compose(form) => {
                     let field = form.field;
@@ -885,7 +888,7 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                         ProfileFormFocus::Entries => ProfileFormFocus::Name,
                     };
                 }
-                PersonaMode::Facet(form) => {
+                PersonaMode::World(form) => {
                     form.focus = if *forwards {
                         form.focus.next()
                     } else {
@@ -933,7 +936,7 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
             let option_count = state.main_page.content_panel.identity.profiles.len() + 1;
             // …and one more than the worlds, because row 0 is always "belongs
             // to no world".
-            let world_count = state.main_page.content_panel.identity.facets.len() + 1;
+            let world_count = state.main_page.content_panel.identity.worlds.len() + 1;
             let p = &mut state.main_page.content_panel.identity;
             match &mut p.mode {
                 PersonaMode::Attribute(form) => {
@@ -949,9 +952,9 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                 PersonaMode::Profile(form) => {
                     form.cursor = step(form.cursor, attribute_count, *forwards);
                 }
-                PersonaMode::Facet(form) => {
-                    if form.focus == FacetFormFocus::Colour {
-                        form.colour = step(form.colour, facet::Colour::all().len(), *forwards);
+                PersonaMode::World(form) => {
+                    if form.focus == WorldFormFocus::Colour {
+                        form.colour = step(form.colour, world::Colour::all().len(), *forwards);
                     }
                 }
                 PersonaMode::PlaceFace(picker) => {
@@ -1164,12 +1167,12 @@ fn confirm_yes(state: &mut State) -> PersonaEffect {
         PersonaConfirm::RetireFace { profile_id, .. } => {
             PersonaEffect::Job(PersonaJob::ProfileRetire { profile_id })
         }
-        PersonaConfirm::DeleteFacet {
-            facet_id,
+        PersonaConfirm::DeleteWorld {
+            world_id,
             expected_version,
             ..
-        } => PersonaEffect::Job(PersonaJob::FacetDelete {
-            facet_id,
+        } => PersonaEffect::Job(PersonaJob::WorldDelete {
+            world_id,
             expected_version,
         }),
         PersonaConfirm::PurgeAttribute { attribute_id, .. } => {
@@ -1201,11 +1204,11 @@ fn form_submit(state: &mut State) -> PersonaEffect {
     // Taken here, before the mode is borrowed mutably, and handed to the job
     // whole: placing a face is two conditional writes, and both need the
     // versions that were on screen when the holder chose.
-    let facets: Vec<facet::Facet> = state
+    let worlds: Vec<world::World> = state
         .main_page
         .content_panel
         .identity
-        .facets
+        .worlds
         .iter()
         .cloned()
         .collect();
@@ -1261,7 +1264,7 @@ fn form_submit(state: &mut State) -> PersonaEffect {
                 expected_version: form.expected_version,
             })
         }
-        PersonaMode::Facet(form) => {
+        PersonaMode::World(form) => {
             let name = form.name.value().trim().to_string();
             if name.is_empty() {
                 form.error = Some("A world needs a name — \"Work\", \"Home\".".to_string());
@@ -1280,12 +1283,12 @@ fn form_submit(state: &mut State) -> PersonaEffect {
             }
             form.error = None;
             form.working = true;
-            PersonaEffect::Job(PersonaJob::FacetPut(facet::FacetDraft {
-                facet_id: form.facet_id.clone(),
+            PersonaEffect::Job(PersonaJob::WorldPut(world::WorldDraft {
+                world_id: form.world_id.clone(),
                 name,
-                colour: facet::Colour::all()[form.colour.min(facet::Colour::all().len() - 1)],
+                colour: world::Colour::all()[form.colour.min(world::Colour::all().len() - 1)],
                 icon: (!icon.is_empty()).then(|| icon.to_string()),
-                // Straight back out as they came in. See `FacetForm`.
+                // Straight back out as they came in. See `WorldForm`.
                 face_ids: form.face_ids.clone(),
                 attribute_ids: form.attribute_ids.clone(),
                 // `Some(0)` on a create, so a retry after a lost response
@@ -1298,12 +1301,12 @@ fn form_submit(state: &mut State) -> PersonaEffect {
             let into = picker
                 .cursor
                 .checked_sub(1)
-                .and_then(|i| facets.get(i))
-                .map(|f| f.facet_id.clone());
+                .and_then(|i| worlds.get(i))
+                .map(|f| f.world_id.clone());
             picker.error = None;
             picker.working = true;
             PersonaEffect::Job(PersonaJob::FacePlace {
-                facets,
+                worlds,
                 profile_id: picker.profile_id.clone(),
                 into,
             })
@@ -1495,7 +1498,7 @@ pub(crate) fn release_form(state: &mut State, reason: String) {
             form.working = false;
             form.error = Some(reason);
         }
-        PersonaMode::Facet(form) => {
+        PersonaMode::World(form) => {
             form.working = false;
             form.error = Some(reason);
         }
@@ -1610,23 +1613,23 @@ fn step(cursor: usize, len: usize, forwards: bool) -> usize {
 
 /// The editor, filled from a world that already exists.
 ///
-/// Membership comes across whole and untouched. `persona/facet/put` is a
+/// Membership comes across whole and untouched. `persona/world/put` is a
 /// replace, so a form that carried only the fields it can edit would empty the
 /// world's faces and attributes the first time somebody renamed it — and the
 /// world would still be there afterwards, just with nothing in it.
-fn form_for_facet(facet: &facet::Facet) -> FacetForm {
-    FacetForm {
-        facet_id: Some(facet.facet_id.clone()),
-        expected_version: Some(facet.version),
-        name: tui_input::Input::new(facet.name.clone()),
-        colour: facet::Colour::all()
+fn form_for_world(world: &world::World) -> WorldForm {
+    WorldForm {
+        world_id: Some(world.world_id.clone()),
+        expected_version: Some(world.version),
+        name: tui_input::Input::new(world.name.clone()),
+        colour: world::Colour::all()
             .iter()
-            .position(|c| *c == facet.colour)
+            .position(|c| *c == world.colour)
             .unwrap_or_default(),
-        icon: tui_input::Input::new(facet.icon.clone().unwrap_or_default()),
-        face_ids: facet.face_ids.clone(),
-        attribute_ids: facet.attribute_ids.clone(),
-        ..FacetForm::default()
+        icon: tui_input::Input::new(world.icon.clone().unwrap_or_default()),
+        face_ids: world.face_ids.clone(),
+        attribute_ids: world.attribute_ids.clone(),
+        ..WorldForm::default()
     }
 }
 
@@ -1637,8 +1640,8 @@ fn form_for_facet(facet: &facet::Facet) -> FacetForm {
 /// because "belongs to no world" is the group the console draws last and it is
 /// the honest end of the list: every face belonging somewhere is fine too, and
 /// leading with the ones that do not would read as a fault.
-fn world_rank(facets: &[facet::Facet], profile_id: &str) -> usize {
-    facets
+fn world_rank(worlds: &[world::World], profile_id: &str) -> usize {
+    worlds
         .iter()
         .position(|f| f.holds_face(profile_id))
         .unwrap_or(usize::MAX)
@@ -1694,7 +1697,7 @@ impl PersonaReadJob {
         let retired = lifecycle::list_retired(&self.admin_vta)
             .await
             .map_err(|e| format!("{e}"));
-        let facets = facet::list(&self.admin_vta)
+        let worlds = world::list(&self.admin_vta)
             .await
             .map_err(|e| format!("{e}"));
         let links = correlation::analyze(&self.admin_vta)
@@ -1720,7 +1723,7 @@ impl PersonaReadJob {
             attributes,
             profiles,
             retired,
-            facets,
+            worlds,
             links,
             disclosures,
             bindings,
@@ -1782,12 +1785,9 @@ impl PersonaJobRun {
                     },
                 }
             }
-            PersonaJob::AttributeReveal {
-                attribute_id,
-                claim_type,
-            } => PersonaOutcome::AttributeRevealed {
+            PersonaJob::AttributeReveal { attribute_id } => PersonaOutcome::AttributeRevealed {
                 attribute_id: attribute_id.clone(),
-                result: pool::reveal(&client, &claim_type, &attribute_id)
+                result: pool::reveal(&client, &attribute_id)
                     .await
                     .map_err(|e| format!("{e}")),
             },
@@ -2037,20 +2037,20 @@ impl PersonaJobRun {
                     .map_err(|e| format!("{e}")),
                 profile_id,
             },
-            PersonaJob::FacetPut(draft) => PersonaOutcome::Written {
-                verb: match draft.facet_id.is_some() {
+            PersonaJob::WorldPut(draft) => PersonaOutcome::Written {
+                verb: match draft.world_id.is_some() {
                     true => "Saved the world",
                     false => "Made the world",
                 },
-                error: facet::put(&client, draft)
+                error: world::put(&client, draft)
                     .await
                     .err()
                     .map(|e| format!("{e}")),
             },
-            PersonaJob::FacetDelete {
-                facet_id,
+            PersonaJob::WorldDelete {
+                world_id,
                 expected_version,
-            } => match facet::delete(&client, &facet_id, expected_version).await {
+            } => match world::delete(&client, &world_id, expected_version).await {
                 // The count finishes the sentence honestly. "Deleted the world"
                 // on its own reads to almost everyone as though the faces in it
                 // went too, and they did not: a world arranges, it does not
@@ -2085,7 +2085,7 @@ impl PersonaJobRun {
                 },
             },
             PersonaJob::FacePlace {
-                facets,
+                worlds,
                 profile_id,
                 into,
             } => PersonaOutcome::Written {
@@ -2093,7 +2093,7 @@ impl PersonaJobRun {
                     true => "Moved the face",
                     false => "Took the face out of its world",
                 },
-                error: facet::place_face(&client, &facets, &profile_id, into.as_deref())
+                error: world::place_face(&client, &worlds, &profile_id, into.as_deref())
                     .await
                     .err()
                     .map(|e| format!("{e}")),
@@ -2127,7 +2127,7 @@ pub(crate) enum PersonaOutcome {
         /// The retired faces. Its own result: it feeds an optional view, and a
         /// failure there must not blank the faces the holder wears.
         retired: Result<Vec<ProfileSummary>, String>,
-        facets: Result<Vec<facet::Facet>, String>,
+        worlds: Result<Vec<world::World>, String>,
         links: Result<Vec<correlation::Finding>, String>,
         disclosures: Result<Vec<disclosure::DisclosureRow>, String>,
         bindings: HashMap<BindingTarget, openvtc_core::persona::binding::BindingSummary>,
@@ -2218,7 +2218,7 @@ impl PersonaOutcome {
                 attributes,
                 profiles,
                 retired,
-                facets,
+                worlds,
                 links,
                 disclosures,
                 bindings,
@@ -2242,7 +2242,7 @@ impl PersonaOutcome {
                     .as_ref()
                     .err()
                     .or(profiles.as_ref().err())
-                    .or(facets.as_ref().err())
+                    .or(worlds.as_ref().err())
                     .or(links.as_ref().err())
                     .or(disclosures.as_ref().err())
                     .or_else(|| claim_types.as_ref().and_then(|r| r.as_ref().err()))
@@ -2282,9 +2282,9 @@ impl PersonaOutcome {
                 if let Ok(list) = links {
                     p.links = list.into();
                 }
-                if let Ok(list) = facets {
-                    p.facet_selected = p.facet_selected.min(list.len().saturating_sub(1));
-                    p.facets = list.into();
+                if let Ok(list) = worlds {
+                    p.world_selected = p.world_selected.min(list.len().saturating_sub(1));
+                    p.worlds = list.into();
                 }
                 if let Ok(mut list) = profiles {
                     // Grouped order, for the reason the pool is grouped here
@@ -2292,8 +2292,8 @@ impl PersonaOutcome {
                     // order has to *be* the list order or `j` moves the
                     // highlight between worlds at random.
                     list.sort_by(|a, b| {
-                        world_rank(&p.facets, &a.profile_id)
-                            .cmp(&world_rank(&p.facets, &b.profile_id))
+                        world_rank(&p.worlds, &a.profile_id)
+                            .cmp(&world_rank(&p.worlds, &b.profile_id))
                             .then_with(|| a.display_name().cmp(b.display_name()))
                     });
                     if !p.show_retired {
@@ -2350,7 +2350,7 @@ impl PersonaOutcome {
                                 form.working = false;
                                 form.error = Some(e.clone());
                             }
-                            PersonaMode::Facet(form) => {
+                            PersonaMode::World(form) => {
                                 form.working = false;
                                 form.error = Some(e.clone());
                             }
@@ -2736,7 +2736,7 @@ mod tests {
             profiles: Ok(Vec::new()),
             retired: Ok(vec![]),
             disclosures: Ok(Vec::new()),
-            facets: Ok(Vec::new()),
+            worlds: Ok(Vec::new()),
             links: Ok(Vec::new()),
             bindings: HashMap::new(),
             claim_types: None,
@@ -3066,7 +3066,7 @@ mod tests {
             profiles: Ok(Vec::new()),
             retired: Ok(vec![]),
             disclosures: Ok(Vec::new()),
-            facets: Ok(Vec::new()),
+            worlds: Ok(Vec::new()),
             links: Ok(Vec::new()),
             bindings: HashMap::new(),
             claim_types: None,
@@ -3101,7 +3101,7 @@ mod tests {
             profiles: Ok(Vec::new()),
             retired: Ok(vec![]),
             disclosures: Ok(Vec::new()),
-            facets: Ok(Vec::new()),
+            worlds: Ok(Vec::new()),
             links: Ok(Vec::new()),
             bindings: HashMap::new(),
             claim_types: None,
@@ -3131,7 +3131,7 @@ mod tests {
             profiles: Ok(Vec::new()),
             retired: Ok(vec![]),
             disclosures: Ok(Vec::new()),
-            facets: Ok(Vec::new()),
+            worlds: Ok(Vec::new()),
             links: Ok(Vec::new()),
             bindings: HashMap::new(),
             claim_types: None,

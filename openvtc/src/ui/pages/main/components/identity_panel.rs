@@ -51,17 +51,17 @@ use crate::colors::{
 };
 use crate::state_handler::{
     main_page::content::{
-        AttributeField, AttributeForm, BindPicker, ComposeForm, ContactForm, FacePlacer, FacetForm,
-        FacetFormFocus, IdentityState, KnownHereView, LocalFaceForm, LocalFacesView, PeopleView,
-        PersonaConfirm, PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus, RenderersView,
-        VALUE_TYPES,
+        AttributeField, AttributeForm, BindPicker, ComposeForm, ContactForm, FacePlacer,
+        IdentityState, KnownHereView, LocalFaceForm, LocalFacesView, PeopleView, PersonaConfirm,
+        PersonaMode, PersonaTab, ProfileForm, ProfileFormFocus, RenderersView, VALUE_TYPES,
+        WorldForm, WorldFormFocus,
     },
     state::ConnectionState,
 };
 use openvtc_core::display::display_identifier;
 use openvtc_core::persona::correlation;
-use openvtc_core::persona::facet::Colour;
 use openvtc_core::persona::family::Family;
+use openvtc_core::persona::world::Colour;
 use ratatui::{
     style::{Style, Stylize},
     text::{Line, Span},
@@ -95,7 +95,7 @@ pub fn render(state: &IdentityState) -> Vec<Line<'static>> {
     match &state.mode {
         PersonaMode::Attribute(form) => render_attribute_form(form),
         PersonaMode::Profile(form) => render_profile_form(state, form),
-        PersonaMode::Facet(form) => render_facet_form(form),
+        PersonaMode::World(form) => render_world_form(form),
         PersonaMode::PlaceFace(picker) => render_face_placer(state, picker),
         PersonaMode::Bind(picker) => render_bind_picker(state, picker),
         PersonaMode::Compose(form) => render_compose_form(form),
@@ -139,7 +139,7 @@ fn render_tabs(state: &IdentityState) -> Vec<Line<'static>> {
         PersonaTab::Personas => render_personas(state, &mut lines),
         PersonaTab::Attributes => render_attributes(state, &mut lines),
         PersonaTab::Profiles => render_profiles(state, &mut lines),
-        PersonaTab::Facets => render_facets(state, &mut lines),
+        PersonaTab::Worlds => render_worlds(state, &mut lines),
         PersonaTab::Communities => render_communities(state, &mut lines),
         PersonaTab::Disclosures => render_disclosures(state, &mut lines),
     }
@@ -235,7 +235,7 @@ fn confirm_prompt(state: &IdentityState) -> Option<String> {
                  {faces}   This cannot be undone.   y: confirm    n: cancel"
             ))
         }
-        PersonaConfirm::DeleteFacet { name, faces, .. } => Some(match faces {
+        PersonaConfirm::DeleteWorld { name, faces, .. } => Some(match faces {
             // The sentence a holder needs is about what *survives*. "Delete
             // Work" reads to almost everyone as though the faces in it go too,
             // and a prompt that leaves that uncorrected is answered under a
@@ -285,7 +285,7 @@ fn hints(state: &IdentityState) -> &'static str {
             "↑/↓ select   ⏎: what it shows   n: make a face   e: edit   m: move to a world   \
              x: retire   d: delete   z: retired   r: refresh   ⇥/⇧⇥: tab"
         }
-        PersonaTab::Facets => {
+        PersonaTab::Worlds => {
             "↑/↓ select   n: new world   e: edit   d: delete   r: refresh   ⇥/⇧⇥: tab"
         }
         PersonaTab::Communities => {
@@ -658,7 +658,7 @@ fn render_attributes(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
 /// reading is "you have an identity".
 ///
 /// Nothing is drawn when the holder has arranged no worlds, because
-/// `crossesFacets` is then absent from every finding and there is no question
+/// `crossesWorlds` is then absent from every finding and there is no question
 /// for this line to answer.
 fn push_link_summary(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
     let crossing = state.links.iter().filter(|f| f.crosses_a_world()).count();
@@ -972,7 +972,7 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
     // wherever that answer changes. Drawn only when the holder has arranged
     // something: a single "Belongs to no world" heading over every face they
     // own is a question asked of somebody who has not been offered the answer.
-    let arranged = !state.facets.is_empty();
+    let arranged = !state.worlds.is_empty();
     let mut current_world: Option<Option<usize>> = None;
 
     // The offer, and only when the answer is worth something (§5.8 of the
@@ -980,7 +980,7 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
     // "make a world" step shown on arrival asks the holder to pre-think a
     // taxonomy before they have the members, which is the pool-first mistake
     // one level up. Below the threshold a world would arrange one thing.
-    if suggests_worlds(state.profiles.len(), state.facets.len()) {
+    if suggests_worlds(state.profiles.len(), state.worlds.len()) {
         lines.push(
             Line::from(
                 " You have a few faces now. Worlds group them — \"Work\", \"Home\" — and warn \
@@ -995,15 +995,15 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
     for (i, profile) in state.profiles.iter().enumerate() {
         if arranged {
             let world = state
-                .facets
+                .worlds
                 .iter()
                 .position(|f| f.holds_face(&profile.profile_id));
             if current_world != Some(world) {
                 if current_world.is_some() {
                     lines.push(Line::from(""));
                 }
-                match world.and_then(|w| state.facets.get(w)) {
-                    Some(facet) => lines.push(world_heading(facet)),
+                match world.and_then(|w| state.worlds.get(w)) {
+                    Some(world) => lines.push(world_heading(world)),
                     None => lines.push(
                         Line::from(" Belongs to no world")
                             .fg(COLOR_DARK_GRAY)
@@ -1046,13 +1046,13 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
 /// channel would make "Money" look like an error to anyone who did not choose
 /// it. The mark is the carrier that survives a terminal, and the name is the
 /// carrier that survives everything.
-fn world_heading(facet: &openvtc_core::persona::facet::Facet) -> Line<'static> {
-    let mark = facet
+fn world_heading(world: &openvtc_core::persona::world::World) -> Line<'static> {
+    let mark = world
         .icon
         .as_deref()
         .map(|i| format!("{i} "))
         .unwrap_or_default();
-    Line::from(format!(" {mark}{}", facet.display_name()))
+    Line::from(format!(" {mark}{}", world.display_name()))
         .fg(COLOR_TEXT_DEFAULT)
         .bold()
 }
@@ -1061,7 +1061,7 @@ fn world_heading(facet: &openvtc_core::persona::facet::Facet) -> Line<'static> {
 // Worlds
 // ---------------------------------------------------------------------------
 
-fn render_facets(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
+fn render_worlds(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
     if push_agent_state(state, lines, "worlds") {
         return;
     }
@@ -1069,14 +1069,14 @@ fn render_facets(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
     lines.push(
         Line::from(format!(
             " {} world{}",
-            state.facets.len(),
-            if state.facets.len() == 1 { "" } else { "s" }
+            state.worlds.len(),
+            if state.worlds.len() == 1 { "" } else { "s" }
         ))
         .fg(COLOR_TEXT_DEFAULT),
     );
     lines.push(Line::from(""));
 
-    if state.facets.is_empty() {
+    if state.worlds.is_empty() {
         lines.push(
             Line::from(
                 " No worlds yet. A world is a part of your life, and the faces that belong to \
@@ -1095,14 +1095,14 @@ fn render_facets(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         return;
     }
 
-    for (i, facet) in state.facets.iter().enumerate() {
-        let is_selected = i == state.facet_selected;
+    for (i, world) in state.worlds.iter().enumerate() {
+        let is_selected = i == state.world_selected;
         let row_style = if is_selected {
             Style::new().fg(COLOR_SUCCESS).bold()
         } else {
             Style::new().fg(COLOR_TEXT_DEFAULT)
         };
-        let mark = facet
+        let mark = world
             .icon
             .as_deref()
             .map(|m| format!("{m} "))
@@ -1112,7 +1112,7 @@ fn render_facets(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         // that matters to a holder is what they will actually see under this
         // heading, so it is resolved rather than taken from the record — and
         // the difference is named below rather than quietly absorbed.
-        let live = facet
+        let live = world
             .face_ids
             .iter()
             .filter(|id| state.profiles.iter().any(|p| &&p.profile_id == id))
@@ -1123,7 +1123,7 @@ fn render_facets(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
             Span::styled(
                 format!(
                     "{:<26}",
-                    truncate(&format!("{mark}{}", facet.display_name()), 25)
+                    truncate(&format!("{mark}{}", world.display_name()), 25)
                 ),
                 row_style,
             ),
@@ -1131,8 +1131,8 @@ fn render_facets(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
                 format!(
                     "{live} face{}   {} attribute{}",
                     if live == 1 { "" } else { "s" },
-                    facet.attribute_ids.len(),
-                    if facet.attribute_ids.len() == 1 {
+                    world.attribute_ids.len(),
+                    if world.attribute_ids.len() == 1 {
                         ""
                     } else {
                         "s"
@@ -1145,7 +1145,7 @@ fn render_facets(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         // A world may name a face that has since been deleted. The agent keeps
         // those deliberately — a dangling id is how a holder can be offered the
         // chance to tidy — so saying so is the point of keeping them.
-        let dangling = facet.face_ids.len().saturating_sub(live);
+        let dangling = world.face_ids.len().saturating_sub(live);
         if dangling > 0 {
             lines.push(
                 Line::from(format!(
@@ -2163,10 +2163,10 @@ fn render_known_here(view: &KnownHereView) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_facet_form(form: &FacetForm) -> Vec<Line<'static>> {
+fn render_world_form(form: &WorldForm) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("")];
     lines.push(
-        Line::from(match form.facet_id.is_some() {
+        Line::from(match form.world_id.is_some() {
             true => " Edit this world",
             false => " A new part of your life",
         })
@@ -2184,7 +2184,7 @@ fn render_facet_form(form: &FacetForm) -> Vec<Line<'static>> {
     );
     lines.push(Line::from(""));
 
-    let focused = |field: FacetFormFocus| {
+    let focused = |field: WorldFormFocus| {
         if form.focus == field {
             Style::new().fg(COLOR_SUCCESS).bold()
         } else {
@@ -2193,15 +2193,15 @@ fn render_facet_form(form: &FacetForm) -> Vec<Line<'static>> {
     };
 
     lines.push(Line::from(vec![
-        Span::styled(" What do you call it?  ", focused(FacetFormFocus::Name)),
-        Span::styled(form.name.value().to_string(), focused(FacetFormFocus::Name)),
+        Span::styled(" What do you call it?  ", focused(WorldFormFocus::Name)),
+        Span::styled(form.name.value().to_string(), focused(WorldFormFocus::Name)),
         Span::styled(
-            if form.focus == FacetFormFocus::Name {
+            if form.focus == WorldFormFocus::Name {
                 "▏"
             } else {
                 ""
             },
-            focused(FacetFormFocus::Name),
+            focused(WorldFormFocus::Name),
         ),
     ]));
     lines.push(
@@ -2216,7 +2216,7 @@ fn render_facet_form(form: &FacetForm) -> Vec<Line<'static>> {
     // anyone who did not choose it.
     let mut swatches = vec![Span::styled(
         " Colour               ",
-        focused(FacetFormFocus::Colour),
+        focused(WorldFormFocus::Colour),
     )];
     for (i, colour) in Colour::all().into_iter().enumerate() {
         let chosen = i == form.colour;
@@ -2234,15 +2234,15 @@ fn render_facet_form(form: &FacetForm) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
 
     lines.push(Line::from(vec![
-        Span::styled(" A mark (optional)    ", focused(FacetFormFocus::Icon)),
-        Span::styled(form.icon.value().to_string(), focused(FacetFormFocus::Icon)),
+        Span::styled(" A mark (optional)    ", focused(WorldFormFocus::Icon)),
+        Span::styled(form.icon.value().to_string(), focused(WorldFormFocus::Icon)),
         Span::styled(
-            if form.focus == FacetFormFocus::Icon {
+            if form.focus == WorldFormFocus::Icon {
                 "▏"
             } else {
                 ""
             },
-            focused(FacetFormFocus::Icon),
+            focused(WorldFormFocus::Icon),
         ),
     ]));
     lines.push(
@@ -2326,13 +2326,13 @@ pub fn place_options(state: &IdentityState) -> Vec<String> {
     // belonging somewhere is fine too, and a picker with no way back out would
     // make a world a trap rather than an arrangement.
     let mut options = vec!["Belongs to no world".to_string()];
-    options.extend(state.facets.iter().map(|facet| {
-        let mark = facet
+    options.extend(state.worlds.iter().map(|world| {
+        let mark = world
             .icon
             .as_deref()
             .map(|m| format!("{m} "))
             .unwrap_or_default();
-        format!("{mark}{}", facet.display_name())
+        format!("{mark}{}", world.display_name())
     }));
     options
 }
@@ -2456,8 +2456,8 @@ mod tests {
     use crate::state_handler::main_page::content::{ManagedDid, PersonaMembership};
     use openvtc_core::persona::binding::BindingSummary;
     use openvtc_core::persona::correlation::{Finding, Remedy};
-    use openvtc_core::persona::facet::Facet;
     use openvtc_core::persona::pool::PoolAttribute;
+    use openvtc_core::persona::world::World;
 
     fn text(lines: &[Line<'static>]) -> String {
         lines
@@ -2553,12 +2553,12 @@ mod tests {
         for mode in [
             PersonaMode::Attribute(AttributeForm::default()),
             PersonaMode::Profile(ProfileForm::default()),
-            PersonaMode::Facet(FacetForm::default()),
-            PersonaMode::Facet(FacetForm {
+            PersonaMode::World(WorldForm::default()),
+            PersonaMode::World(WorldForm {
                 // The edit heading and the save path differ from the create
                 // ones, and only an id tells them apart.
-                facet_id: Some("01FACET".into()),
-                ..FacetForm::default()
+                world_id: Some("01FACET".into()),
+                ..WorldForm::default()
             }),
             PersonaMode::PlaceFace(FacePlacer {
                 face_name: "Work".into(),
@@ -2630,24 +2630,24 @@ mod tests {
             }]
             .into(),
             attributes: vec![attr, card].into(),
-            facets: vec![
-                Facet {
-                    facet_id: "01FACET".into(),
+            worlds: vec![
+                World {
+                    world_id: "01FACET".into(),
                     name: "Working life".into(),
                     colour: Colour::Moss,
                     icon: Some("💼".into()),
                     face_ids: vec!["01P".into(), "01GONE".into()],
                     attribute_ids: vec!["01A".into()],
                     version: 2,
-                    ..Facet::default()
+                    ..World::default()
                 },
                 // A second world with nothing in it, so the empty-group and
                 // the dangling-reference copy are both read by the guard.
-                Facet {
-                    facet_id: "02FACET".into(),
+                World {
+                    world_id: "02FACET".into(),
                     name: "Home".into(),
                     version: 1,
-                    ..Facet::default()
+                    ..World::default()
                 },
             ]
             .into(),
@@ -2943,7 +2943,7 @@ mod tests {
         let mut state = populated(PersonaTab::Profiles);
         loaded(&mut state);
         state.open_profile = None;
-        state.facets = Vec::new().into();
+        state.worlds = Vec::new().into();
         let shown = text(&render(&state));
 
         assert!(!shown.contains("Belongs to no world"), "{shown}");
@@ -2958,7 +2958,7 @@ mod tests {
     /// see.
     #[test]
     fn a_world_says_what_it_still_holds() {
-        let mut state = populated(PersonaTab::Facets);
+        let mut state = populated(PersonaTab::Worlds);
         loaded(&mut state);
         let shown = text(&render(&state));
 
@@ -2975,10 +2975,10 @@ mod tests {
     /// almost everyone as though the faces in it go too.
     #[test]
     fn deleting_a_world_says_what_it_keeps() {
-        let mut state = populated(PersonaTab::Facets);
+        let mut state = populated(PersonaTab::Worlds);
         loaded(&mut state);
-        state.confirm = PersonaConfirm::DeleteFacet {
-            facet_id: "01FACET".into(),
+        state.confirm = PersonaConfirm::DeleteWorld {
+            world_id: "01FACET".into(),
             name: "Working life".into(),
             expected_version: Some(2),
             faces: 2,
@@ -2989,8 +2989,8 @@ mod tests {
 
         // …and a world with nothing in it makes no such promise, because there
         // is nothing for the sentence to be about.
-        state.confirm = PersonaConfirm::DeleteFacet {
-            facet_id: "02FACET".into(),
+        state.confirm = PersonaConfirm::DeleteWorld {
+            world_id: "02FACET".into(),
             name: "Home".into(),
             expected_version: Some(1),
             faces: 0,

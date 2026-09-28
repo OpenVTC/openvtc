@@ -53,14 +53,19 @@ use crate::errors::OpenVTCError;
 /// credential. The credential comes back so the caller can keep a copy: a
 /// member who cannot show what they sent cannot answer "did I acknowledge
 /// this?", and cannot re-send it without minting a different one.
+///
+/// Two keys, for two different acts: `signing_secret` (assertionMethod) signs
+/// the credential, and `document_signer` (authentication) signs the Trust Task
+/// request that carries it.
 pub async fn issue_and_send_member_vmc(
     route: &Delivery<'_>,
     signing_secret: &Secret,
+    document_signer: &Secret,
     grant: &Value,
     closes_request: Option<Uuid>,
 ) -> Result<(Uuid, Value), OpenVTCError> {
     let vc = build_member_vmc(signing_secret, grant).await?;
-    let msg_id = submit_member_vmc(route, signing_secret, vc.clone(), closes_request).await?;
+    let msg_id = submit_member_vmc(route, document_signer, vc.clone(), closes_request).await?;
     Ok((msg_id, vc))
 }
 

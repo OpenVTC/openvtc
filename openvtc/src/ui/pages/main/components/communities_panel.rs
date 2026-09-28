@@ -634,6 +634,7 @@ fn key_hints(state: &CommunitiesState) -> String {
         if community.is_active {
             hints.push("m: issue VMC".to_string());
             hints.push("c: capabilities".to_string());
+            hints.push("r: repos".to_string());
             hints.push("p: personhood".to_string());
             hints.push("l: leave".to_string());
         }
@@ -766,6 +767,7 @@ mod key_hint_tests {
     fn an_active_row_offers_capabilities_and_leave() {
         let hints = hints_for(row(true, false, false));
         assert!(hints.contains("c: capabilities"), "{hints}");
+        assert!(hints.contains("r: repos"), "{hints}");
         assert!(hints.contains("l: leave"), "{hints}");
         assert!(hints.contains("m: issue VMC"), "{hints}");
         assert!(!hints.contains("c: cancel"), "{hints}");
@@ -781,6 +783,7 @@ mod key_hint_tests {
         let hints = hints_for(row(false, false, true));
         assert!(hints.contains("c: cancel"), "{hints}");
         assert!(!hints.contains("c: capabilities"), "{hints}");
+        assert!(!hints.contains("r: repos"), "{hints}");
         assert!(!hints.contains("l: leave"), "{hints}");
     }
 

@@ -261,6 +261,18 @@ impl VicJob {
     pub(crate) async fn run(self) -> VicMutationOutcome {
         let verb = self.verb.verb();
         let is_add = matches!(self.verb, VicVerb::Add(_));
+        // An invitation is stored only once its proof verifies against the
+        // issuing community's DID document: the vault is where the join flow
+        // later picks invitations from, and it must not hold forgeries.
+        if let VicVerb::Add(vic) = &self.verb
+            && let Err(e) = verify_before_storing(vic).await
+        {
+            return VicMutationOutcome {
+                verb,
+                is_add,
+                error: Some(e),
+            };
+        }
         let result = match self.verb {
             VicVerb::Add(vic) => self
                 .admin_vta
@@ -299,6 +311,16 @@ impl VicJob {
             error: result.err().map(|e| format!("{e}")),
         }
     }
+}
+
+/// Verify a pasted invitation before it is stored.
+async fn verify_before_storing(vic: &serde_json::Value) -> Result<(), String> {
+    let resolver = affinidi_tdk::did_resolver::DIDCacheClient::new(
+        affinidi_tdk::did_resolver::config::DIDCacheConfigBuilder::default().build(),
+    )
+    .await
+    .map_err(|e| format!("could not start a DID resolver to check the invitation: {e}"))?;
+    openvtc_core::join::verify_invitation_credential(vic, &resolver, chrono::Utc::now()).await
 }
 
 /// What a vault mutation did. Data only; applied on the loop thread.
