@@ -6435,8 +6435,8 @@ dependencies = [
  "serde_json",
  "serde_json_canonicalizer",
  "sha2 0.11.0",
- "thiserror 2.0.20",
- "vta-sdk 0.49.0",
+ "thiserror 2.0.21",
+ "vta-sdk",
 ]
 
 [[package]]
@@ -7119,6 +7119,8 @@ dependencies = [
 [[package]]
 name = "predicate-credential-system"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca56c675955e5b667c886572087f32f61687e51ec62843b3f32b296b87f472d8"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -7128,7 +7130,7 @@ dependencies = [
  "multibase",
  "serde",
  "sha2 0.10.9",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "zeroize",
 ]
 

@@ -6,16 +6,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-# Development branch `zkp-pcs`. The whole workspace is `publish = false`; this
-# crate would be anyway, because it depends on a vendored path crate.
+# Development branch `zkp-pcs`. The whole workspace is `publish = false`; nothing
+# else depends on this crate anyway.
 publish = false
 
 [dependencies]
-# Vendored, temporarily: see `vendor/PROVENANCE.md`.
-predicate-credential-system = { version = "0.1.0", path = "../vendor/predicate-credential-system", features = [
-  "serde",
-] }
-# arkworks, pinned to the versions the vendored crate itself pins.
+# https://github.com/OpenVTC/predicate-credential-system, forked from
+# https://github.com/etairi/predicate-credential-system and published by us.
+predicate-credential-system = { version = "0.1", features = ["serde"] }
+# arkworks, pinned to the versions predicate-credential-system itself pins.
 ark-bls12-381 = { version = "0.6.0", default-features = false, features = ["curve", "std"] }
 ark-ec = { version = "0.6.0", default-features = false, features = ["std"] }
 ark-ff = { version = "0.6.0", default-features = false, features = ["std"] }

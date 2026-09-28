@@ -1,5 +1,0 @@
-[alias]
-# `cargo docs`: the API documentation as docs.rs builds it: with the optional `serde` layer and
-# with rendered math (docs/katex-header.html), opened in the browser. Dependencies are not
-# documented. A plain `cargo doc` works too; it shows the formulas as LaTeX source.
-docs = ["rustdoc", "--lib", "--features", "serde", "--open", "--", "--html-in-header", "docs/katex-header.html"]

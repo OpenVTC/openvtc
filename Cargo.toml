@@ -2,17 +2,9 @@
 members = [
   "openvtc-core",
   "openvtc",
-  # Hidden-vetter admission (ZKP), development branch `zkp-pcs`. Both are
-  # `publish = false` and nothing else in the workspace depends on them; see
-  # `vendor/PROVENANCE.md` for why the crate is vendored and what ends it.
+  # Hidden-vetter admission (ZKP), development branch `zkp-pcs`. `publish = false`
+  # and nothing else in the workspace depends on it.
   "openvtc-vetting-pcs",
-]
-# The vendored crate is a path DEPENDENCY, not a member: as a member its
-# dev-dependencies (criterion) would be built by a workspace-wide `cargo test`,
-# and its `[profile]` would be ignored with a warning. Excluding it keeps the
-# copy verbatim — see `vendor/PROVENANCE.md`, which forbids editing it in place.
-exclude = [
-  "vendor/predicate-credential-system",
 ]
 resolver = "3"
 

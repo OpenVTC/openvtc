@@ -126,11 +126,3 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # `Cargo.toml` went with them, so nothing resolves from a git source and there is
 # nothing left to allow.
 allow-git = []
-#
-# `zkp-pcs` (development branch) adds no entry here, deliberately.
-# `predicate-credential-system` is not on crates.io, and the branch that carries
-# our change is not pushed anywhere, so there is no git source to allow: the
-# crate is VENDORED under `vendor/` and reached by path. A path dependency is not
-# a source in cargo-deny's sense, which is why `sources` passes untouched.
-# `vendor/PROVENANCE.md` says what ends the vendoring; when it becomes a git
-# dependency, its repository goes here AND in `[patch.crates-io]`, as above.
