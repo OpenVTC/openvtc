@@ -1627,16 +1627,19 @@ mod tests {
     /// generated round trip is the proof — and names the right task.
     #[test]
     fn every_request_builds_a_payload_its_task_accepts() {
-        // `git-ns/view/0.4` does not declare `proof` REQUIRED (0.1–0.3 did);
-        // the view is signed all the same, like every request (`build_signed`).
+        // `git-ns/view/0.4` declares `proof` REQUIRED again as of trust-tasks-rs
+        // 0.24 (0.1–0.3 always did; the 0.23 line's codegen had it relaxed).
+        // The view is signed all the same either way, like every request
+        // (`build_signed`), so this is a spec-generated constant this test
+        // tracks rather than a behaviour this crate chooses.
         let cases = [
-            (Request::View { resource: None }, "git-ns/view", false),
+            (Request::View { resource: None }, "git-ns/view", true),
             (
                 Request::View {
                     resource: Some("github.com/acme".into()),
                 },
                 "git-ns/view",
-                false,
+                true,
             ),
             (
                 Request::Create {
