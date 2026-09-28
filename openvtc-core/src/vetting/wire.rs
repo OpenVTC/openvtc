@@ -26,7 +26,7 @@ use vta_sdk::protocols::credential_exchange::ISSUE as CREDENTIAL_ISSUE_TYPE;
 use vta_sdk::trust_task_proof::{TrustTaskVmResolver, verify_trust_task_proof_with};
 
 use crate::errors::OpenVTCError;
-use crate::messaging::{MESSAGE_EXPIRY_SECS, unix_now};
+use crate::messaging::{MESSAGE_EXPIRY_SECS, build_didcomm_message, unix_now};
 
 /// Why an inbound vetting document was not accepted.
 #[derive(Debug, thiserror::Error)]
