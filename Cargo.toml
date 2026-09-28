@@ -507,13 +507,10 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # No source change here: nothing in this workspace names a type from the
 # surface those releases reshaped.
 #
-# This reopens the `vta-service` / `did-git-sign` dev-edge duplicate the note
-# below describes — published `did-git-sign` 0.5.1 (from VGI) is still on
-# `vta-sdk ^0.53`, not yet released against 0.56. `cargo tree -d` shows the
-# residual: bounded the same way every past cycle was — `did-git-sign` is
-# consumed only through `connect_auto`, display names and session helpers, so
-# no vta-sdk type crosses that boundary. Check it after any `cargo update`
-# here rather than assuming it has closed.
+# The `did-git-sign` half of that duplicate closed with VGI 0.5.2, released
+# against `vta-sdk` 0.56: `did-git-sign` 0.5.2 resolves the same `vta-sdk`
+# node as everything else here. Check `cargo tree -d` after any
+# `cargo update` rather than assuming it stays closed.
 #
 # `vta-service` is a separate matter this cycle: see the `vta-service` note in
 # `openvtc-core/Cargo.toml` for why that pin stays at 0.43.0 rather than
