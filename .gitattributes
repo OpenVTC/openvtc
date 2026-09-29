@@ -1,0 +1,5 @@
+# tests/wire_fixture.rs byte-compares this file's on-disk content against a freshly
+# serde_json::to_string_pretty-rendered string, which always uses `\n`. Without this, a
+# Windows checkout's default core.autocrlf rewrites the fixture to `\r\n` and the comparison
+# fails on content that hasn't actually changed.
+openvtc-vetting-pcs/tests/fixtures/*.json text eol=lf

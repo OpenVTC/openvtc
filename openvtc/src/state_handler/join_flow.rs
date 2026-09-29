@@ -520,9 +520,10 @@ async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Resul
         .map_err(|e| NotLearned::Unresolvable(format!("it could not be resolved ({e})")))?;
     let doc = serde_json::to_value(&resolved.doc)
         .map_err(|e| NotLearned::Unanswered(format!("its DID document could not be read ({e})")))?;
-    let manifest = discover::fetch_manifest(&doc, vtc_did, resolver, ProbePolicy::PublicOnly)
-        .await
-        .map_err(|e| NotLearned::Unanswered(e.to_string()))?;
+    let (manifest, raw) =
+        discover::fetch_manifest(&doc, vtc_did, resolver, ProbePolicy::PublicOnly)
+            .await
+            .map_err(|e| NotLearned::Unanswered(e.to_string()))?;
 
     let book = &mut config.private.vetting;
     book.learn_manifest(vtc_did, &manifest, Utc::now());
@@ -531,7 +532,7 @@ async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Resul
         .iter_mut()
         .filter(|a| a.community == vtc_did)
     {
-        if let Err(e) = application.adopt_manifest(&manifest) {
+        if let Err(e) = application.adopt_manifest(&manifest, &raw) {
             debug!(community = %vtc_did, error = %e, "community manifest not adopted");
         }
     }
@@ -3070,6 +3071,38 @@ async fn run_join_sequence(
     // Peer identity vetting: present the statements gathered for this community
     // under this persona, and name the requirements they were gathered against
     // so the community applies the same criterion (vetting-process.md §10.1).
+    // Under a hidden-vetting criterion the proof is built here, bound to a challenge of this
+    // submission's own, and rides in `extensions` (design §8). The statements themselves never
+    // travel: there are none that name a vetter.
+    if let Some(application) = config
+        .private
+        .vetting
+        .application_mut(&vtc_did, persona_id)
+        .filter(|a| a.join_did == applicant_did && a.hidden.is_some())
+    {
+        // The challenge is the COMMUNITY's, asked for over `vtc/vetting/pcs-challenge/0.1` and
+        // recorded on the application when it arrives. A proof over one we minted ourselves
+        // verifies and is refused, which is the whole point of the exchange: the community
+        // accepts each challenge exactly once, so a submission cannot be replayed.
+        let Some(challenge) = application.hidden_challenge.clone() else {
+            state.join.info(
+                "Waiting for this community's submission challenge — it is asked for once per                  submission, and a proof cannot be built without it."
+                    .to_string(),
+            );
+            return;
+        };
+        match application.prepare_hidden_submission(&challenge) {
+            Ok(true) => state
+                .join
+                .info("Proving that enough vetters vetted you, without naming them…".to_string()),
+            Ok(false) => {}
+            Err(e) => {
+                state
+                    .join
+                    .info(format!("The proof could not be built: {e}"));
+            }
+        }
+    }
     let presentation = match config.private.vetting.application(&vtc_did, persona_id) {
         Some(application) if application.join_did == applicant_did => {
             let statements = application.presentable_statements(chrono::Utc::now());

@@ -72,6 +72,7 @@ pub fn mode_id(state: &VettingState) -> &'static str {
         (VettingMode::Profile(form), _) if form.event.is_some() => "profile-event",
         (VettingMode::Profile(_), _) => "profile",
         (VettingMode::Resend { .. }, _) => "resend",
+        (VettingMode::EventMode { .. }, _) => "event-mode",
         (VettingMode::SendCard { .. }, _) => "card",
         (VettingMode::NewTicket { .. }, _) => "new-ticket",
         (VettingMode::ShowTicket { .. }, _) => "show-ticket",
@@ -528,6 +529,72 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             }
             lines.push(line);
             lines.push(Line::from(""));
+            lines.push(hint("Enter: ask  ←/→: choose  Esc: cancel"));
+        }
+        VettingMode::EventMode { index } => {
+            lines.push(heading("Vet at an event"));
+            lines.push(Line::from(""));
+            lines.push(hint(
+                "A conference desk needs a faster rate than an ordinary week. Event mode is a",
+            ));
+            lines.push(hint(
+                "separate batch of tokens that expires with the event — not a bigger drip.",
+            ));
+            lines.push(Line::from(""));
+            let offer = v.event_offers.get(*index);
+            lines.push(field(
+                "Community",
+                offer.map(|o| o.community_name.clone()).unwrap_or_default(),
+                false,
+                false,
+            ));
+            lines.push(field(
+                "Event",
+                offer.map(|o| o.event_id.clone()).unwrap_or_default(),
+                true,
+                false,
+            ));
+            lines.push(field(
+                "Rate",
+                offer
+                    .map(|o| format!("{} — {} tokens a day", o.tier, o.drip_per_tick))
+                    .unwrap_or_default(),
+                false,
+                false,
+            ));
+            lines.push(field(
+                "Days",
+                offer
+                    .map(|o| format!("{} to {}", o.start_date, o.end_date))
+                    .unwrap_or_default(),
+                false,
+                false,
+            ));
+            lines.push(Line::from(""));
+            // The price of the faster rate, said before it is asked for: a token spent under
+            // this event came from somebody in the event's group rather than from somebody in
+            // the community, and the floor is what keeps that group from being a name.
+            if let Some(o) = offer {
+                lines.push(hint(format!(
+                    "An attestation made here says \"someone vetting at {}\" rather than",
+                    o.event_id
+                )));
+                lines.push(hint(format!(
+                    "\"someone in this community\". It needs {} vetters before it opens at all.",
+                    o.group_floor
+                )));
+                match (&o.state, o.group_size) {
+                    (Some(state), Some(size)) if state == "approved" => lines.push(hint(format!(
+                        "You are in it, with {size} vetter(s) so far."
+                    ))),
+                    (Some(_), Some(size)) => lines.push(hint(format!(
+                        "You have asked. {size} of {} so far, and it still needs an approver.",
+                        o.group_floor
+                    ))),
+                    _ => {}
+                }
+                lines.push(Line::from(""));
+            }
             lines.push(hint("Enter: ask  ←/→: choose  Esc: cancel"));
         }
         VettingMode::SendCard {
@@ -1521,10 +1588,12 @@ fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     lines.push(hint(DESK_KEYS));
 }
 
-/// The keys every desk view carries, on its last line. `p` and `g` are the
-/// desk's, not any one view's — the profile and the vetter credential belong to
-/// the whole desk — and `←/→` is how the views are reached at all.
+/// The keys every desk view carries, on its last line. `p`, `g` and `e` are the
+/// desk's, not any one view's — the profile, the vetter credential and a place
+/// at an event belong to the whole desk — and `←/→` is how the views are
+/// reached at all.
 const DESK_KEYS: &str = "p: your vetter profile  g: ask for your vetter credential again  \
+                         e: vet at an event  \
                          ←/→: Requests · Tickets · Issued  Tab: Applications";
 
 fn attest(lines: &mut Vec<Line<'static>>, v: &VettingState, request_id: &str, form: &AttestForm) {

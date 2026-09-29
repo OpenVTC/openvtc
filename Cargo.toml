@@ -2,6 +2,9 @@
 members = [
   "openvtc-core",
   "openvtc",
+  # Hidden-vetter admission (ZKP), development branch `zkp-pcs`. `publish = false`
+  # and nothing else in the workspace depends on it.
+  "openvtc-vetting-pcs",
 ]
 resolver = "3"
 

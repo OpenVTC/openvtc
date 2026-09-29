@@ -16,7 +16,7 @@ use super::applicant::{Application, RequestState};
 use super::queries::CommunityQuery;
 use super::registry::VetterProfileRecord;
 use super::tickets::{GuessThrottle, Ticket};
-use super::vetter::{DeskEntry, DeskState, IssuedStatement};
+use super::vetter::{DeskEntry, DeskState, IssuedStatement, VetterError};
 use crate::config::account::{Account, CommunityRecord, PersonaId};
 
 /// A vetter's own rules (design §11.2). Every number is the vetter's choice;
@@ -119,6 +119,96 @@ pub struct VetterGrant {
     pub received_at: DateTime<Utc>,
     /// The signed credential, exactly as delivered.
     pub credential: serde_json::Value,
+}
+
+/// Our hidden-vetting engine for one community and persona.
+///
+/// A vetter holds one of these per community that runs hidden vetting: the key its identifier
+/// and every tag derive from, the class credentials it has been issued, and the tokens it has
+/// drawn. It is created when the community first issues a class credential and kept until the
+/// last label it holds has closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HiddenVetterState {
+    /// The community whose parameters this engine was built under.
+    pub community: String,
+    /// Our persona there — the member the community enrolled.
+    pub persona: PersonaId,
+    /// The community's published parameters, as they stood when we enrolled.
+    ///
+    /// Kept beside the engine rather than looked up per attestation, because a parsed criterion
+    /// drops `ext` — the manifest's own extension point is where these live, and a
+    /// `VettingRequirements` that has been through serde no longer carries them.
+    pub params: super::hidden::HiddenParams,
+    /// The engine, as [`openvtc_vetting_pcs::snapshot::VetterSnapshot`] stores it.
+    pub snapshot: openvtc_vetting_pcs::snapshot::VetterSnapshot,
+    /// The last drip tick we were served, **per token label**, so the next ask is the next tick
+    /// and a restart does not re-ask for one the community has already served.
+    ///
+    /// Per label because a vetter in event mode owes two draws a tick: the event's, and the
+    /// ordinary monthly one that must not be skipped while the event runs (§5.1). One counter
+    /// would make the second draw look already served.
+    #[serde(default)]
+    pub last_ticks: std::collections::BTreeMap<String, u32>,
+    /// When we last drew tokens. The drip is a schedule, not a response to demand (§5.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_drawn_at: Option<DateTime<Utc>>,
+    /// Events we have asked to vet at, with where each request stands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<HiddenEventState>,
+}
+
+impl HiddenVetterState {
+    /// The event labels this vetter may draw under today, with the rate each yields.
+    ///
+    /// Only the approved ones, and only while their label is still accepted. A label the
+    /// community publishes says an event exists; it never says we are in its group, and drawing
+    /// under one we were not approved for would be refused — and would announce that we tried.
+    #[must_use]
+    pub fn event_draws(&self, today: chrono::NaiveDate) -> Vec<super::hidden::EventDraw> {
+        self.events
+            .iter()
+            .filter(|e| e.state == super::wire::pcs::EVENT_APPROVED)
+            .filter_map(|e| {
+                let label = e.label.clone()?;
+                let closes_after = e.closes_after?;
+                (today <= closes_after).then_some(super::hidden::EventDraw {
+                    label,
+                    rate: e.drip_per_tick.unwrap_or(self.params.drip_per_tick),
+                    closes_after,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Where one event-mode request stands, as the community last answered it.
+///
+/// `group_size` is a count and never a roster: who else is at the event is the anonymity set the
+/// event's smaller token label is bought with. It is kept because it is the only way a vetter
+/// can tell the two reasons for waiting apart — nobody has approved it, or not enough people
+/// have asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HiddenEventState {
+    /// The community's name for the gathering.
+    pub event_id: String,
+    /// The tier we asked for.
+    pub tier: String,
+    /// `pending` or `approved`, in the community's own words.
+    pub state: String,
+    pub group_size: usize,
+    pub group_floor: usize,
+    /// The token label, once the event is live. Absent while pending — reading one as
+    /// permission to draw is the mistake this shape makes awkward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drip_per_tick: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closes_after: Option<chrono::NaiveDate>,
+    /// When we last heard about it.
+    pub answered_at: DateTime<Utc>,
 }
 
 /// Where one community has put us as a vetter: its grant, and the profile we
@@ -350,16 +440,153 @@ pub struct VettingBook {
     /// The vetter profile we last sent each community, per persona.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vetter_profiles: Vec<VetterProfileRecord>,
+    /// Our hidden-vetting engine per community, where one runs it.
+    ///
+    /// **This carries secrets.** A snapshot's `usk` is the key every tag of ours derives from,
+    /// so a copy of one links every attestation that persona ever made. It belongs exactly where
+    /// the persona keys belong, and in the design's intended shape it lives in the VTA rather
+    /// than here — see `openvtc_vetting_pcs::snapshot`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_vetter: Vec<HiddenVetterState>,
+    /// Hidden-vetting parameters each community published in its manifest, by community DID.
+    ///
+    /// Kept whether or not we vet for that community, and separately from
+    /// [`HiddenVetterState::params`], because the two answer different questions: this is *what
+    /// the community publishes*, refreshed every time a manifest arrives, and that is *what we
+    /// enrolled under*, which must not move beneath a credential we already hold.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hidden_published: std::collections::BTreeMap<String, super::hidden::HiddenParams>,
     /// Questions put to communities and not yet answered. Memory only — see
     /// [`super::queries`].
     #[serde(skip)]
     pub queries: Vec<CommunityQuery>,
+    /// The blinding state of an enrolment in flight. **Memory only, and deliberately**: it is
+    /// useless without the community's answer and dangerous to keep past it, so an answer that
+    /// arrives after a restart is dropped and the vetter asks again. That costs nothing — a
+    /// request whose answer was never unblinded issued no credential anyone will count.
+    #[serde(skip)]
+    pub pending_enrolment: Option<std::sync::Arc<openvtc_vetting_pcs::vetter::EnrolmentBlinding>>,
     /// Fields written by a newer build, preserved verbatim (D19).
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl VettingBook {
+    /// Our hidden-vetting engine for `community` and `persona`, if one has been enrolled.
+    #[must_use]
+    pub fn hidden_vetter(&self, community: &str, persona: PersonaId) -> Option<&HiddenVetterState> {
+        self.hidden_vetter
+            .iter()
+            .find(|h| h.community == community && h.persona == persona)
+    }
+
+    /// The same, to write.
+    pub fn hidden_vetter_mut(
+        &mut self,
+        community: &str,
+        persona: PersonaId,
+    ) -> Option<&mut HiddenVetterState> {
+        self.hidden_vetter
+            .iter_mut()
+            .find(|h| h.community == community && h.persona == persona)
+    }
+
+    /// Attest to a request the hidden way: no statement, no signature, nothing that names us.
+    ///
+    /// The facts are the ones [`Self::statement_draft`] builds — the same checklist, the same
+    /// refusals, the same identity commitment and card digest — so a vetter's obligations do not
+    /// change with the path. What changes is the last step: instead of signing an endorsement
+    /// whose issuer is this persona, the engine spends a token and produces an attestation that
+    /// carries a tag in place of a name.
+    ///
+    /// The desk entry moves to `Attested` with the attestation's own identifier in place of a
+    /// statement id, so the request closes exactly as the named path closes it. Nothing is added
+    /// to [`Self::issued`]: there is no statement to withdraw, and a withdrawal on this path is a
+    /// different mechanism (design §4.4).
+    ///
+    /// # Errors
+    ///
+    /// - [`VetterError::NoSuchRequest`] / [`VetterError::WrongState`] as for the named path.
+    /// - [`VetterError::Shape`] if the checklist does not support the statement.
+    /// - [`VetterError::Hidden`] if this persona holds no engine for the community, if the
+    ///   request carries no PCS identifier, or if the engine has no live credential or no free
+    ///   token — the last is `atCapacity`, and the vetter declines rather than attests.
+    pub fn attest_hidden<R: rand::RngCore + rand::CryptoRng>(
+        &mut self,
+        request_id: &str,
+        vetter_did: &str,
+        attestation: super::vetter::Attestation,
+        now: DateTime<Utc>,
+        rng: &mut R,
+    ) -> Result<serde_json::Value, VetterError> {
+        let entry = self
+            .desk_entry(request_id)
+            .ok_or(VetterError::NoSuchRequest)?
+            .clone();
+        let applicant_id = super::hidden::read_request_ext(
+            entry
+                .request
+                .ext
+                .as_ref()
+                .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+                .as_ref(),
+        )
+        .map_err(VetterError::Hidden)?
+        .ok_or_else(|| {
+            VetterError::Hidden(super::hidden::HiddenError::Unreadable(
+                "this request carries no hidden-vetting identifier, so there is nobody to attest \
+                 to under this community's criterion"
+                    .into(),
+            ))
+        })?;
+
+        // The same draft the named path signs. Building it here is what keeps one checklist:
+        // a claim the card does not carry, or a documentary method with nothing to rely on, is
+        // refused on both paths by the same code.
+        let draft = self.statement_draft(request_id, vetter_did, attestation, now)?;
+        // The digest the applicant asked under. A vetter attests to the criterion the
+        // applicant is applying for, and the community checks that the two agree.
+        let digest = entry
+            .request
+            .requirements_digest
+            .as_ref()
+            .map(|d| d.as_str().to_string())
+            .unwrap_or_default();
+        let meta = super::hidden::statement_meta(&draft, &entry.community, &digest);
+
+        let state = self
+            .hidden_vetter_mut(&entry.community, entry.persona)
+            .ok_or_else(|| {
+                VetterError::Hidden(super::hidden::HiddenError::Unreadable(
+                    "this persona holds no hidden-vetting credential for the community".into(),
+                ))
+            })?;
+        let params = state.params.clone();
+        let wire = super::hidden::attest(
+            &entry.community,
+            &params,
+            &mut state.snapshot,
+            &applicant_id,
+            meta,
+            rng,
+        )
+        .map_err(VetterError::Hidden)?;
+
+        let entry = self
+            .desk_entry_mut(request_id)
+            .ok_or(VetterError::NoSuchRequest)?;
+        let DeskState::CardReceived { card, .. } = &entry.state else {
+            return Err(VetterError::WrongState("be attested"));
+        };
+        entry.state = DeskState::Attested {
+            statement_id: format!("urn:openvtc:hidden-attestation:{request_id}"),
+            issued_at: now,
+            card: card.clone(),
+        };
+        entry.updated_at = now;
+        Ok(wire)
+    }
+
     /// Nothing to persist — keeps a config without vetting byte-identical.
     #[must_use]
     pub fn is_empty(&self) -> bool {

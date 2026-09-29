@@ -1,0 +1,164 @@
+//! The wire format both repos must agree on.
+//!
+//! Round-trips a submission through `extensions.hiddenVetting`, and regenerates
+//! `tests/fixtures/submission.json`, which the VTI `zkp-pcs` branch reads back with its own
+//! copy of the verifier. If this file and the VTI one ever disagree, that fixture is what says
+//! so.
+//!
+//! Regenerate with `REGEN_FIXTURE=1 cargo test -p openvtc-vetting-pcs --test wire_fixture`.
+
+use chrono::{NaiveDate, TimeZone, Utc};
+use openvtc_vetting_pcs::{
+    applicant::ApplicantEngine, meta::StatementMeta, scheme::point_text, vetter::VetterEngine,
+    vtc::Vtc, wire::SubmissionWire,
+};
+use predicate_credential_system::serialization::{to_bytes, to_multibase};
+use rand::{SeedableRng, rngs::StdRng};
+use serde_json::json;
+use vta_sdk::protocols::vetting::{
+    IDENTITY_VETTING_ENDORSEMENT_TYPE, VettingMethod, VettingRelationship,
+};
+
+const COMMUNITY: &str = "did:example:kernel-vtc";
+const PERIOD: &str = "2026-09";
+
+fn requirements() -> serde_json::Value {
+    json!({
+        "version": "0.1",
+        "statementType": IDENTITY_VETTING_ENDORSEMENT_TYPE,
+        "minStatements": 2,
+        "minByMethod": { "inPerson": 1 },
+        "acceptedMethods": ["inPerson", "video", "priorAcquaintance"],
+        "requiredClaims": ["name.legal"],
+        "maxStatementAge": "P120D",
+        "eligibleVetters": { "role": "vetter" },
+        "independence": {
+            "maxByDeclaredRelationship": { "family": 0 },
+            "requireConsistentIdentityCommitment": true
+        }
+    })
+}
+
+#[test]
+fn a_submission_round_trips_through_extensions_and_pins_the_fixture() {
+    // A seeded world: two vetters, one applicant, one in-person and one video statement.
+    let mut rng = StdRng::seed_from_u64(0x2026_0922);
+    let mut vtc = Vtc::new(COMMUNITY, PERIOD, requirements(), &mut rng).unwrap();
+    let token_label = vtc.current_token_label().to_string();
+    let mut vetters: Vec<VetterEngine> = Vec::new();
+    for i in 0..2 {
+        let member = format!("member-{i}");
+        vtc.grant(&member);
+        let mut v = VetterEngine::new(&member, &vtc, &mut rng).unwrap();
+        v.enroll(&mut vtc, &mut rng).unwrap();
+        v.drip(&mut vtc, 1, &token_label, 2, &mut rng).unwrap();
+        vetters.push(v);
+    }
+    let mut bob =
+        ApplicantEngine::new(&vtc.params().unwrap(), "did:example:bob-kernel", &mut rng).unwrap();
+    for (j, method) in [
+        (0usize, VettingMethod::InPerson),
+        (1usize, VettingMethod::Video),
+    ] {
+        let meta = bob.statement_meta(
+            &vtc.params().unwrap(),
+            vtc.requirements_digest(),
+            StatementMeta {
+                community: String::new(),
+                requirements_digest: String::new(),
+                method,
+                claims_verified: vec!["name.legal".into()],
+                liveness_confirmed: true,
+                declared_relationship: VettingRelationship::None,
+                identity_commitment: "zCommitmentOfThisApplication".into(),
+                card_digest_multibase: "zCardDigest".into(),
+                valid_from: NaiveDate::from_ymd_opt(2026, 9, 20).unwrap(),
+                valid_until: NaiveDate::from_ymd_opt(2027, 1, 18).unwrap(),
+                token_label: String::new(),
+                token_serial: String::new(),
+            },
+        );
+        let reservation = vetters[j].accept(None, 2).unwrap();
+        let att = vetters[j]
+            .attest(
+                &vtc.params().unwrap(),
+                &reservation,
+                bob.id(),
+                meta,
+                &mut rng,
+            )
+            .unwrap();
+        bob.receive(&vtc.params().unwrap(), att).unwrap();
+    }
+
+    let challenge = vtc.challenge(&mut rng);
+    let submission = bob
+        .submit(
+            &vtc.params().unwrap(),
+            vtc.requirements_digest(),
+            &challenge,
+            &mut rng,
+        )
+        .unwrap();
+
+    // Round trip: engine → wire → `extensions` → wire → engine, and the decoded submission is
+    // accepted exactly like the original.
+    let wire = SubmissionWire::from_submission(&submission).unwrap();
+    let extensions = wire.to_extensions().unwrap();
+    let read_back = SubmissionWire::from_extensions(&extensions)
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_back, wire);
+    assert!(
+        SubmissionWire::from_extensions(&json!({"requirementsDigest": "z…"}))
+            .unwrap()
+            .is_none()
+    );
+
+    let decoded = read_back.to_submission().unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 9, 22, 12, 0, 0).unwrap();
+    let decision = vtc.submit(&decoded, now).unwrap();
+    assert!(decision.evaluation.satisfied(), "{:?}", decision.evaluation);
+    assert_eq!(decision.evaluation.distinct_vetters(), 2);
+
+    // Nothing in the JSON names a vetter.
+    let json = serde_json::to_string(&wire).unwrap();
+    for v in &vetters {
+        assert!(!json.contains(&v.member));
+        assert!(!json.contains(&point_text(v.id()).unwrap()));
+    }
+
+    // The fixture the VTI branch reads: public parameters plus this submission.
+    let fixture = json!({
+        "README": "Generated by openvtc-vetting-pcs/tests/wire_fixture.rs on the openvtc zkp-pcs branch. \
+                   vti-vetting-pcs reads it back with its own verifier: if the two copies of the wire \
+                   format ever drift, that test fails.",
+        "community": COMMUNITY,
+        "requirements": requirements(),
+        "requirementsDigest": vtc.requirements_digest(),
+        "hvk": to_multibase(&to_bytes(vtc.hvk()).unwrap()),
+        "tvk": to_multibase(&to_bytes(vtc.tvk()).unwrap()),
+        "livePeriods": vtc.live_periods(),
+        "liveTokenLabels": vtc.token_verifier().live_labels().iter().collect::<Vec<_>>(),
+        "now": now.to_rfc3339(),
+        "expect": { "satisfied": true, "distinctVetters": 2 },
+        "extensions": extensions,
+    });
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/submission.json"
+    );
+    let rendered = format!("{}\n", serde_json::to_string_pretty(&fixture).unwrap());
+    if std::env::var("REGEN_FIXTURE").is_ok() {
+        std::fs::create_dir_all(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures")).unwrap();
+        std::fs::write(path, &rendered).unwrap();
+    } else {
+        let on_disk = std::fs::read_to_string(path)
+            .expect("tests/fixtures/submission.json is missing; regenerate with REGEN_FIXTURE=1");
+        assert_eq!(
+            on_disk, rendered,
+            "the wire format changed: regenerate with REGEN_FIXTURE=1 and copy the fixture to \
+             the VTI zkp-pcs branch"
+        );
+    }
+}

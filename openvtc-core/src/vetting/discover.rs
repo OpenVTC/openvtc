@@ -173,12 +173,19 @@ fn anonymous_request(community_did: &str) -> Value {
 /// the answer's proof; it is separate from `doc` because the proof's
 /// verification method is resolved in its own right rather than read out of a
 /// document the answer came packaged with.
+/// Returns the parsed manifest **and the payload as received**.
+///
+/// The raw payload is not a convenience: a generated criterion carries the members its schema
+/// names and drops the rest, so `vetting.ext` — where a community publishes what this version
+/// does not enumerate, and marks what a client must honour — is readable only from these bytes
+/// (`vetting::hidden`). Re-serialising the parse gives a criterion with those members missing,
+/// and a `requirementsDigest` that no longer matches.
 pub async fn fetch_manifest(
     doc: &Value,
     community_did: &str,
     resolver: &DIDCacheClient,
     policy: ProbePolicy,
-) -> Result<manifest::v0_2::Response, DiscoverError> {
+) -> Result<(manifest::v0_2::Response, Value), DiscoverError> {
     let endpoint = rest_endpoint(doc).ok_or(DiscoverError::NoEndpoint)?;
     let url = trust_tasks_url(&endpoint, policy)?;
 
@@ -225,7 +232,10 @@ pub async fn fetch_manifest(
         return Err(DiscoverError::WrongSigner { proven });
     }
 
-    serde_json::from_value(reply.payload).map_err(|e| DiscoverError::Unreadable(e.to_string()))
+    let raw = reply.payload;
+    let parsed = serde_json::from_value(raw.clone())
+        .map_err(|e| DiscoverError::Unreadable(e.to_string()))?;
+    Ok((parsed, raw))
 }
 
 /// The `message` out of a `trust-task-error` body, or the body itself.

@@ -1,0 +1,43 @@
+[package]
+name = "openvtc-vetting-pcs"
+description = "Hidden-vetter admission (ZKP) for OpenVTC: the Predicate Credential System behind the vetting flow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Development branch `zkp-pcs`. The whole workspace is `publish = false`; nothing
+# else depends on this crate anyway.
+publish = false
+
+[dependencies]
+# https://github.com/OpenVTC/predicate-credential-system, forked from
+# https://github.com/etairi/predicate-credential-system and published by us.
+predicate-credential-system = { version = "0.1", features = ["serde"] }
+# arkworks, pinned to the versions predicate-credential-system itself pins.
+ark-bls12-381 = { version = "0.6.0", default-features = false, features = ["curve", "std"] }
+ark-ec = { version = "0.6.0", default-features = false, features = ["std"] }
+ark-ff = { version = "0.6.0", default-features = false, features = ["std"] }
+ark-serialize = { version = "0.6.0", default-features = false, features = ["std"] }
+# MUST stay 0.8: `ark_std::rand` re-exports rand 0.8 and its traits are what the
+# randomized algorithms take. It is the workspace pin as well.
+rand.workspace = true
+# Pairs with rand 0.8. Used for ONE thing: deriving a community's keys from a
+# secret over a specified stream, so the same secret gives the same keys on any
+# build (`issuer::Issuer::derive`).
+rand_chacha = "0.3"
+chrono = { workspace = true, features = ["clock", "serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+# JCS, so the application contexts both sides build are canonical bytes rather
+# than whatever serde happened to emit.
+serde_json_canonicalizer.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+# The counting rule the VTC already uses, unchanged: `requirements::evaluate`
+# and `StatementFacts`.
+vta-sdk.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

@@ -26,7 +26,7 @@ use vta_sdk::protocols::credential_exchange::ISSUE as CREDENTIAL_ISSUE_TYPE;
 use vta_sdk::trust_task_proof::{TrustTaskVmResolver, verify_trust_task_proof_with};
 
 use crate::errors::OpenVTCError;
-use crate::messaging::{MESSAGE_EXPIRY_SECS, unix_now};
+use crate::messaging::{MESSAGE_EXPIRY_SECS, build_didcomm_message, unix_now};
 
 /// Why an inbound vetting document was not accepted.
 #[derive(Debug, thiserror::Error)]
@@ -134,6 +134,10 @@ pub fn is_community_bound(type_uri: &str) -> bool {
             | VETTING_VETTER_LIST_TYPE
             | VETTING_VETTER_PROFILE_TYPE
             | VETTING_VETTER_RESEND_TYPE
+            | pcs::ROOT_TYPE
+            | pcs::TOKENS_TYPE
+            | pcs::EVENT_MODE_TYPE
+            | pcs::CHALLENGE_TYPE
     )
 }
 
@@ -203,6 +207,41 @@ pub async fn credential_delivery(
     sign(&mut doc, signer).await?;
     to_message(&doc)
 }
+
+/// `vetting/attestation/0.1` — a vetter gives an applicant an attestation that names nobody.
+///
+/// The hidden path's answer to [`credential_delivery`]. The document is signed like any other, so
+/// the applicant knows the delivery came from the vetter it sat with; what is *inside* carries no
+/// issuer, and it is the inside that reaches the community.
+///
+/// The type URI is the published task's. Until the pinned `trust-tasks-rs` carries its generated
+/// module, the payload is assembled here and checked against the published schema by
+/// `openvtc-core`'s own fixture test — see `docs/design/vetting-hidden-vetters-pcs.md` §19.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the message cannot be built.
+pub fn hidden_attestation(
+    vetter_did: &str,
+    applicant_did: &str,
+    attestation: &Value,
+    session_id: &str,
+) -> Result<Message, OpenVTCError> {
+    build_didcomm_message(
+        HIDDEN_ATTESTATION_TYPE,
+        attestation.clone(),
+        vetter_did,
+        applicant_did,
+        Some(session_id),
+    )
+    .map_err(|e| config_error("attestation delivery", e))
+}
+
+/// The published type URI of `vetting/attestation/0.1`.
+///
+/// Inside OpenVTC's inbound filter (`trusttasks.org/spec/vetting/*`), so it reaches
+/// [`crate::vetting::inbound::handle`] without a filter change.
+pub const HIDDEN_ATTESTATION_TYPE: &str = "https://trusttasks.org/spec/vetting/attestation/0.1";
 
 /// A verified inbound document.
 #[derive(Debug, Clone)]
@@ -284,6 +323,214 @@ pub fn vetter_profile_request(
         community_did,
         new_id(),
         body,
+    )
+}
+
+/// The three Trust Tasks hidden vetting's community half serves.
+///
+/// Published specifications (`dtgwg-trust-tasks-tf`, branch `hidden-vetting-tasks`); the payload
+/// types are written here rather than taken from `trust_tasks_rs::specs` because the generated
+/// bindings are 0.22 and this workspace pins `^0.21`. `vetting::hidden::tests` validates each of
+/// them against the published schema, which is the check the generated type would have carried.
+pub mod pcs {
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+
+    /// `vtc/vetting/vetters/pcs-root/0.1`.
+    pub const ROOT_TYPE: &str = "https://trusttasks.org/spec/vtc/vetting/vetters/pcs-root/0.1";
+    /// `vtc/vetting/vetters/pcs-tokens/0.1`.
+    pub const TOKENS_TYPE: &str = "https://trusttasks.org/spec/vtc/vetting/vetters/pcs-tokens/0.1";
+    /// `vtc/vetting/vetters/event-mode/0.1`.
+    pub const EVENT_MODE_TYPE: &str =
+        "https://trusttasks.org/spec/vtc/vetting/vetters/event-mode/0.1";
+    /// `vtc/vetting/pcs-challenge/0.1`.
+    pub const CHALLENGE_TYPE: &str = "https://trusttasks.org/spec/vtc/vetting/pcs-challenge/0.1";
+
+    /// `#response` of each, which is what an inbound arm matches on.
+    #[must_use]
+    pub fn response_of(type_uri: &str) -> String {
+        format!("{type_uri}#response")
+    }
+
+    /// What a vetter sends to enrol.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct RootRequest {
+        pub label: String,
+        pub id: String,
+        pub request: Value,
+    }
+
+    /// What the community answers with.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct RootResponse {
+        pub label: String,
+        pub pre_credential: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ext: Option<Value>,
+    }
+
+    /// One tick of the drip, asked for.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct TokensRequest {
+        pub label: String,
+        pub tick: u32,
+        pub requests: Vec<TokenRequest>,
+    }
+
+    /// One blinded serial with its opening proof.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct TokenRequest {
+        pub commitment: String,
+        pub opening_proof: String,
+    }
+
+    /// One tick of the drip, served.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct TokensResponse {
+        pub label: String,
+        pub tick: u32,
+        pub pre_credentials: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ext: Option<Value>,
+    }
+
+    /// A vetter asking to vet at a named event, at one of the rates the community publishes.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct EventModeRequest {
+        pub event_id: String,
+        pub tier: String,
+        pub window: EventWindow,
+    }
+
+    /// The days a vetter expects to be vetting at an event. Dates, never timestamps: an hour
+    /// would say when this vetter expects to be at a desk.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct EventWindow {
+        pub start_date: chrono::NaiveDate,
+        pub end_date: chrono::NaiveDate,
+    }
+
+    /// Where the request stands.
+    ///
+    /// `pending` is the ordinary answer to a first request and is not a refusal — a refusal
+    /// arrives as a `trust-task-error`. The three optional members are present only once the
+    /// label is live; reading them as permission while `state` is `pending` is the mistake this
+    /// shape is arranged to make awkward.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct EventModeResponse {
+        pub event_id: String,
+        pub state: String,
+        pub tier: String,
+        pub window: EventWindow,
+        /// How many vetters have asked, including us. A count and never a list: who else is at
+        /// the event is the anonymity set.
+        pub group_size: usize,
+        /// How many this community needs before the event may be approved at all.
+        pub group_floor: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub drip_per_tick: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub closes_after: Option<chrono::NaiveDate>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ext: Option<Value>,
+    }
+
+    /// The word the community uses for a live event.
+    pub const EVENT_APPROVED: &str = "approved";
+
+    /// An applicant asking for the challenge its proof must bind. Every member is optional: the
+    /// applicant is identified by `issuer`.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct ChallengeRequest {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub criterion_id: Option<String>,
+    }
+
+    /// The challenge, and when it stops being accepted.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct ChallengeResponse {
+        pub challenge: String,
+        pub expires_at: chrono::DateTime<chrono::Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ext: Option<Value>,
+    }
+}
+
+/// A `vtc/vetting/vetters/pcs-root/0.1` request: enrol this persona for a class label.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the document cannot be built.
+pub fn pcs_root_request(
+    vetter_did: &str,
+    community_did: &str,
+    body: &pcs::RootRequest,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    document(pcs::ROOT_TYPE, vetter_did, community_did, new_id(), body)
+}
+
+/// A `vtc/vetting/vetters/pcs-tokens/0.1` request: draw one tick of the drip.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the document cannot be built.
+pub fn pcs_tokens_request(
+    vetter_did: &str,
+    community_did: &str,
+    body: &pcs::TokensRequest,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    document(pcs::TOKENS_TYPE, vetter_did, community_did, new_id(), body)
+}
+
+/// A `vtc/vetting/vetters/event-mode/0.1` request: ask to vet at a named event.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the document cannot be built.
+pub fn pcs_event_mode_request(
+    vetter_did: &str,
+    community_did: &str,
+    body: &pcs::EventModeRequest,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    document(
+        pcs::EVENT_MODE_TYPE,
+        vetter_did,
+        community_did,
+        new_id(),
+        body,
+    )
+}
+
+/// A `vtc/vetting/pcs-challenge/0.1` request: ask for the nonce this submission must bind.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the document cannot be built.
+pub fn pcs_challenge_request(
+    applicant_did: &str,
+    community_did: &str,
+    criterion_id: Option<&str>,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    document(
+        pcs::CHALLENGE_TYPE,
+        applicant_did,
+        community_did,
+        new_id(),
+        &pcs::ChallengeRequest {
+            criterion_id: criterion_id.map(ToString::to_string),
+        },
     )
 }
 
@@ -615,6 +862,32 @@ pub(crate) mod tests {
             assert_eq!(message.body, serde_json::to_value(doc).unwrap());
             assert!(is_community_bound(&doc.type_uri.to_string()));
         }
+
+        // Hidden vetting's four community-side tasks go to the community too. They were written
+        // before the envelope rule and name a string constant rather than a generated type, so
+        // nothing else would notice them going task-typed — and a community refuses that.
+        for type_uri in [
+            pcs::ROOT_TYPE,
+            pcs::TOKENS_TYPE,
+            pcs::EVENT_MODE_TYPE,
+            pcs::CHALLENGE_TYPE,
+        ] {
+            let doc = document(
+                type_uri,
+                "did:key:zVetter",
+                "did:key:zVtc",
+                new_id(),
+                &json!({}),
+            )
+            .unwrap();
+            assert_eq!(
+                to_message(&doc).unwrap().typ,
+                crate::capabilities::TRUST_TASK_ENVELOPE_TYPE,
+                "{type_uri} must ride the envelope"
+            );
+        }
+        // The attestation is a peer leg: vetter to applicant.
+        assert!(!is_community_bound(HIDDEN_ATTESTATION_TYPE));
 
         for type_uri in [VETTING_REQUEST_TYPE, VETTING_DECLINE_TYPE] {
             let doc = document(

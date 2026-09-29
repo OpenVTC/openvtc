@@ -57,8 +57,8 @@ use crate::state_handler::join_flow;
 use crate::state_handler::main_page::content::{
     ApplicationRow, AttestForm, CardPreview, DIRECTORY_FIELDS, DIRECTORY_LABELS, DIRECTORY_METHODS,
     DeskRow, DeskStage, DeskView, DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS,
-    EventForm, FaceChoice, IssuedRow, LineTone, ListedVetterRow, NewFaceFocus, NewFaceForm,
-    PROFILE_FIELDS, PROFILE_LABELS, PoolRow, RequestRow, TicketRow, VETTING_METHODS,
+    EventForm, EventOffer, FaceChoice, IssuedRow, LineTone, ListedVetterRow, NewFaceFocus,
+    NewFaceForm, PROFILE_FIELDS, PROFILE_LABELS, PoolRow, RequestRow, TicketRow, VETTING_METHODS,
     VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm,
     VetterStandingRow, VettingMembership, VettingMode, VettingPersona, VettingState, VettingTab,
     method_label, row_of,
@@ -171,6 +171,34 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
         })
         .collect();
 
+    // The event menu, one row per (event, tier), with where our own request
+    // stands beside it. Read from the parameters each community published —
+    // what is on offer — never from anything that would say who else asked.
+    let mut offers = Vec::new();
+    for held in &book.hidden_vetter {
+        let name =
+            community_name(&held.community).unwrap_or_else(|| shorten_did(&held.community, 48));
+        for event in &held.params.events {
+            let ours = held.events.iter().find(|e| e.event_id == event.event_id);
+            for tier in &event.tiers {
+                offers.push(EventOffer {
+                    community: held.community.clone(),
+                    community_name: name.clone(),
+                    persona: held.persona,
+                    event_id: event.event_id.clone(),
+                    tier: tier.name.clone(),
+                    drip_per_tick: tier.drip_per_tick,
+                    start_date: event.start_date,
+                    end_date: event.end_date,
+                    group_floor: event.group_floor,
+                    state: ours.map(|e| e.state.clone()),
+                    group_size: ours.map(|e| e.group_size),
+                });
+            }
+        }
+    }
+    vetting.event_offers = offers.into();
+
     // The desk's header. Built from `vetter_standing`, which — alone among the
     // vetter-side reads — keeps lapsed grants, so a vetter who has quietly
     // stopped being one can see that rather than infer it from an empty page.
@@ -252,7 +280,16 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                 accent: accent(&app.community),
                 next_step: Some(next_step_words(&app.next_step(now))),
                 join_did: app.join_did.clone(),
-                requirements: app.requirements.as_ref().map(requirements_line),
+                requirements: app.requirements.as_ref().map(|r| {
+                    let mut line = requirements_line(r);
+                    // The whole feature, in the one place the applicant reads what is being
+                    // asked of them. Without it, a criterion that hides its vetters looks
+                    // exactly like one that does not, and the difference is the point.
+                    if app.hidden.is_some() {
+                        line.push_str(" — their names never reach this community");
+                    }
+                    line
+                }),
                 progress: evaluation.as_ref().map(progress_line),
                 satisfied: evaluation.as_ref().is_some_and(Evaluation::satisfied),
                 face: app.face.as_ref().map(|f| f.name.clone()),
@@ -650,6 +687,17 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 page(ctx).mode = VettingMode::Resend { index: 0 };
             }
         }
+        VettingAction::AskEventMode => {
+            if page(ctx).event_offers.is_empty() {
+                status(
+                    ctx,
+                    "No community you vet for is running an event. Event mode is the exception, \
+                     not the setting — an ordinary week is the slow drip.",
+                );
+            } else {
+                page(ctx).mode = VettingMode::EventMode { index: 0 };
+            }
+        }
         VettingAction::Status(message) => status(ctx, message),
         VettingAction::Input(text) => {
             input(&mut page(ctx).mode, text);
@@ -733,6 +781,35 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             let v = page(ctx);
             if let Some(row) = v.applications.get(v.selected).cloned() {
                 refresh_requirements(ctx, &row.id).await;
+                // A hidden application also needs the community's challenge, and asking early
+                // is free: the community keeps one per applicant, and asking again replaces it.
+                ask_for_challenge(ctx, &row.id).await;
+            }
+            // A vetter has no application, so nothing else would ever fetch the manifest of a
+            // community it vets for — and the manifest is where a community says it hides its
+            // vetters. Asking here is what lets a vetter-only member reach the mode at all.
+            refresh_vetter_communities(ctx).await;
+            // And whatever each community's vetter schedule owes us — enrolment or a tick of
+            // the drip. On a schedule, never in response to a balance (design §5.1).
+            //
+            // Over the communities that publish the mode as well as those we already hold an
+            // engine for: the first pass through has no engine yet, and `hidden_vetting_tick`
+            // is what makes one.
+            let mut communities: Vec<String> = ctx
+                .config
+                .private
+                .vetting
+                .hidden_vetter
+                .iter()
+                .map(|h| h.community.clone())
+                .collect();
+            for community in ctx.config.private.vetting.hidden_published.keys() {
+                if !communities.contains(community) {
+                    communities.push(community.clone());
+                }
+            }
+            for community in communities {
+                hidden_vetting_tick(ctx, &community).await;
             }
         }
         VettingAction::ReviewCard => {
@@ -943,6 +1020,7 @@ fn cycle(v: &mut VettingState, forward: bool) {
     let (personas, memberships, documentation) =
         (v.personas.len(), v.memberships.len(), v.documentation.len());
     let (communities, resend) = (v.directory_communities.len(), v.resend_candidates.len());
+    let offers = v.event_offers.len();
     match &mut v.mode {
         VettingMode::Directory(view) => match view.field {
             0 => turn(&mut view.community_index, communities),
@@ -953,6 +1031,7 @@ fn cycle(v: &mut VettingState, forward: bool) {
             turn(&mut form.membership_index, memberships);
         }
         VettingMode::Resend { index } => turn(index, resend),
+        VettingMode::EventMode { index } => turn(index, offers),
         VettingMode::NewApplication {
             persona_index,
             field: 1,
@@ -1035,6 +1114,7 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
         },
         VettingMode::Profile(form) => profile_submit(ctx, *form).await,
         VettingMode::Resend { index } => ask_resend(ctx, index).await,
+        VettingMode::EventMode { index } => ask_event_mode(ctx, index).await,
         VettingMode::SendCard {
             application_id,
             session_id,
@@ -1767,6 +1847,66 @@ async fn publish_profile(ctx: &mut ActionCtx<'_>, form: &VetterProfileForm) {
     }
 }
 
+/// Ask a community to let us vet at one of its events, at one of its published tiers.
+///
+/// The window we ask for is the event's own. A vetter naming their own days would say which
+/// days of a conference they expect to be at the desk, and a community that had to compare two
+/// vetters' windows would learn more from the difference than from either.
+///
+/// What comes back is never a grant — approval is somebody else's act — so the answer is
+/// recorded and the label opens later, or not at all.
+async fn ask_event_mode(ctx: &mut ActionCtx<'_>, index: usize) {
+    let Some(offer) = page(ctx).event_offers.get(index).cloned() else {
+        return;
+    };
+    let Some(did) = persona_did(ctx.config, offer.persona) else {
+        return status(
+            ctx,
+            "The persona that belongs to this community is not available.",
+        );
+    };
+    if !begin(ctx) {
+        return;
+    }
+    let body = openvtc_core::vetting::wire::pcs::EventModeRequest {
+        event_id: offer.event_id.clone(),
+        tier: offer.tier.clone(),
+        window: openvtc_core::vetting::wire::pcs::EventWindow {
+            start_date: offer.start_date,
+            end_date: offer.end_date,
+        },
+    };
+    let document = match wire::pcs_event_mode_request(&did, &offer.community, &body) {
+        Ok(d) => d,
+        Err(e) => return abandon(ctx, "Could not ask to vet at the event", e),
+    };
+    let document_id = document.id.clone();
+    ctx.config.private.vetting.ask(CommunityQuery {
+        document_id: document_id.clone(),
+        community: offer.community.clone(),
+        persona: offer.persona,
+        kind: QueryKind::PcsEventMode,
+        sent_at: Utc::now(),
+    });
+    page(ctx).mode = VettingMode::List;
+    status(
+        ctx,
+        format!(
+            "Asking {} to vet at {} ({})…",
+            offer.community_name, offer.event_id, offer.tier
+        ),
+    );
+    let sent = Sent::Query {
+        document_id: document_id.clone(),
+        community: offer.community.clone(),
+        kind: QueryKind::PcsEventMode,
+    };
+    if let Err(e) = sign_and_send(ctx, offer.persona, document, sent).await {
+        ctx.config.private.vetting.forget_query(&document_id);
+        abandon(ctx, "Could not ask to vet at the event", e);
+    }
+}
+
 async fn ask_resend(ctx: &mut ActionCtx<'_>, index: usize) {
     let Some(target) = page(ctx).resend_candidates.get(index).cloned() else {
         return;
@@ -2370,6 +2510,371 @@ async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, method_index: u
     }
 }
 
+/// Attest the hidden way: no statement, no signature, nothing that names this vetter.
+///
+/// Split from [`attest`] rather than branched inside it because the two paths diverge at every
+/// step after the draft — what is produced, what is recorded, what is sent, and what the operator
+/// is told. The refusals an operator can act on are surfaced in their own words: a vetter with no
+/// tokens left has not failed, it is at capacity until the next drip.
+/// Ask the community for the challenge this submission must bind.
+///
+/// Called when an applicant opens a hidden-vetting application and before it submits. The
+/// community issues one per applicant and spends it when the proof is counted, so asking twice
+/// replaces rather than accumulates — which is why this is safe to call again on a retry.
+pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &str) {
+    let Some(app) = ctx
+        .config
+        .private
+        .vetting
+        .applications
+        .iter()
+        .find(|a| a.id == application_id && a.hidden.is_some())
+        .cloned()
+    else {
+        return;
+    };
+    let document = match wire::pcs_challenge_request(&app.join_did, &app.community, None) {
+        Ok(d) => d,
+        Err(e) => return abandon(ctx, "Could not ask for a submission challenge", e),
+    };
+    let document_id = document.id.clone();
+    ctx.config.private.vetting.ask(CommunityQuery {
+        document_id: document_id.clone(),
+        community: app.community.clone(),
+        persona: app.persona,
+        kind: QueryKind::PcsChallenge,
+        sent_at: Utc::now(),
+    });
+    status(ctx, "Asking the community for a submission challenge…");
+    let sent = Sent::Query {
+        document_id,
+        community: app.community.clone(),
+        kind: QueryKind::PcsChallenge,
+    };
+    if let Err(e) = sign_and_send(ctx, app.persona, document, sent).await {
+        abandon(ctx, "Could not ask for a submission challenge", e);
+    }
+}
+
+/// Do whatever this community's hidden-vetting schedule owes it now: enrol under the current
+/// class label, or draw this tick of the drip — under every label it owes one for.
+///
+/// Driven by the clock and never by the wallet. A client that drew when it was running low
+/// would publish, in the timing of its own requests, how much vetting it had been doing — which
+/// is the one thing the whole exchange is built to withhold. So this runs on a tick whether the
+/// vetter has attested to nobody or to three people, and asks for the same number either way.
+///
+/// A vetter in event mode owes two draws a tick, and the loop below is why the ordinary one is
+/// still among them: dropping the monthly draw for the three days of a conference would say, in
+/// the timing of the requests alone, that those three days were a conference.
+pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str) {
+    let now = Utc::now();
+    ensure_hidden_vetter(ctx, community);
+    let Some(state) = ctx
+        .config
+        .private
+        .vetting
+        .hidden_vetter
+        .iter()
+        .find(|h| h.community == community)
+        .cloned()
+    else {
+        return;
+    };
+    let Some(did) = persona_did(ctx.config, state.persona) else {
+        return;
+    };
+    // Only the events this community has approved us for, and only while their labels are still
+    // accepted. A label the community publishes says an event exists, never that we are in it.
+    let events = state.event_draws(now.date_naive());
+
+    // Plan first, then send. `last_ticks` only advances when the community answers, so a
+    // working copy is what stops one pass asking for the same label over and over; the bound is
+    // there so that a schedule which somehow never settles cannot spin.
+    let mut ticks = state.last_ticks.clone();
+    let mut plan = Vec::new();
+    for _ in 0..8 {
+        match openvtc_core::vetting::hidden::due(
+            &state.params,
+            Some(&state.snapshot),
+            &ticks,
+            &events,
+            now,
+        ) {
+            openvtc_core::vetting::hidden::Due::Nothing => break,
+            // Enrolment blocks every draw behind it, so it is the whole plan.
+            enrol @ openvtc_core::vetting::hidden::Due::Enrol { .. } => {
+                plan.push(enrol);
+                break;
+            }
+            draw @ openvtc_core::vetting::hidden::Due::Draw { .. } => {
+                if let openvtc_core::vetting::hidden::Due::Draw { label, tick, .. } = &draw {
+                    ticks.insert(label.clone(), *tick);
+                }
+                plan.push(draw);
+            }
+        }
+    }
+    for owed in plan {
+        hidden_vetting_send(ctx, community, &state, &did, owed, now).await;
+    }
+}
+
+/// Ask every community that has named us a vetter what it requires.
+///
+/// An applicant refreshes a manifest because it is applying. A vetter has no application, so
+/// without this nothing ever asks — and a community that hides its vetters says so in its
+/// manifest and nowhere else. The answer is what [`ensure_hidden_vetter`] acts on.
+///
+/// Skips a community we already hold an engine for: the parameters we enrolled under are the
+/// ones that matter, and re-reading them changes nothing until a rotation, which the schedule
+/// notices on its own.
+async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>) {
+    let standing: Vec<(String, PersonaId)> = {
+        let book = &ctx.config.private.vetting;
+        book.vetter_standing(Utc::now())
+            .into_iter()
+            .filter(|s| s.live)
+            .filter(|s| {
+                !book
+                    .hidden_vetter
+                    .iter()
+                    .any(|h| h.community == s.community)
+            })
+            .map(|s| (s.community, s.persona))
+            .collect()
+    };
+    for (community, persona) in standing {
+        let Some(did) = persona_did(ctx.config, persona) else {
+            continue;
+        };
+        let Ok(document) = wire::manifest_request(&did, &community) else {
+            continue;
+        };
+        let sent = Sent::Manifest {
+            community: community.clone(),
+        };
+        if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
+            tracing::warn!(community = %community, error = %e, "could not ask a community what it requires");
+        }
+    }
+}
+
+/// Mint this vetter's engine for a community, the first time we learn it runs hidden vetting
+/// and has named us a vetter.
+///
+/// Both halves of that condition matter. A community's published parameters say the mode exists,
+/// never that we are in it; the grant says we vet here, and nothing about how. Only together do
+/// they mean there is an engine to make — and making one we have no grant for would enrol us
+/// into a refusal.
+///
+/// Once. The key pair is what every tag of ours derives from, so a second one would make the
+/// same person count twice in one proof. An engine already held is left alone even if the
+/// community republishes different parameters: the credential we hold was issued under the old
+/// ones, and a rotation is an enrolment, which the schedule handles.
+fn ensure_hidden_vetter(ctx: &mut ActionCtx<'_>, community: &str) {
+    let book = &ctx.config.private.vetting;
+    if book.hidden_vetter.iter().any(|h| h.community == community) {
+        return;
+    }
+    let Some(params) = book.hidden_published.get(community).cloned() else {
+        return;
+    };
+    let Some(standing) = book
+        .vetter_standing(Utc::now())
+        .into_iter()
+        .find(|s| s.community == community && s.live)
+    else {
+        return;
+    };
+    let Some(did) = persona_did(ctx.config, standing.persona) else {
+        return;
+    };
+    let snapshot = {
+        let mut rng = rand::thread_rng();
+        match openvtc_core::vetting::hidden::vetter_start(community, &params, &did, &mut rng) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                return status(
+                    ctx,
+                    format!("Could not set up hidden vetting for this community: {e}"),
+                );
+            }
+        }
+    };
+    ctx.config
+        .private
+        .vetting
+        .hidden_vetter
+        .push(openvtc_core::vetting::book::HiddenVetterState {
+            community: community.to_string(),
+            persona: standing.persona,
+            params,
+            snapshot,
+            last_ticks: std::collections::BTreeMap::new(),
+            last_drawn_at: None,
+            events: Vec::new(),
+        });
+    status(
+        ctx,
+        format!(
+            "{} hides its vetters. Enrolling you — your attestations there will name nobody.",
+            community_display(ctx.config, community)
+        ),
+    );
+}
+
+/// Send one thing the schedule owes.
+async fn hidden_vetting_send(
+    ctx: &mut ActionCtx<'_>,
+    community: &str,
+    state: &openvtc_core::vetting::book::HiddenVetterState,
+    did: &str,
+    owed: openvtc_core::vetting::hidden::Due,
+    now: DateTime<Utc>,
+) {
+    match owed {
+        openvtc_core::vetting::hidden::Due::Nothing => {}
+        openvtc_core::vetting::hidden::Due::Enrol { period } => {
+            let mut rng = rand::thread_rng();
+            let (body, blinding) = match openvtc_core::vetting::hidden::enrolment_request(
+                community,
+                &state.params,
+                &state.snapshot,
+                &period,
+                &mut rng,
+            ) {
+                Ok(pair) => pair,
+                Err(e) => return status(ctx, format!("Could not ask to enrol: {e}")),
+            };
+            let document = match wire::pcs_root_request(did, community, &body) {
+                Ok(d) => d,
+                Err(e) => return abandon(ctx, "Could not ask to enrol", e),
+            };
+            // Held for this round trip only: an answer that arrives after a restart finds no
+            // blinding state and the client asks again, which costs nothing.
+            ctx.config.private.vetting.pending_enrolment = Some(std::sync::Arc::new(blinding));
+            let document_id = document.id.clone();
+            ctx.config.private.vetting.ask(CommunityQuery {
+                document_id: document_id.clone(),
+                community: community.to_string(),
+                persona: state.persona,
+                kind: QueryKind::PcsRoot,
+                sent_at: now,
+            });
+            status(ctx, format!("Asking to enrol as a vetter for {period}…"));
+            let sent = Sent::Query {
+                document_id,
+                community: community.to_string(),
+                kind: QueryKind::PcsRoot,
+            };
+            if let Err(e) = sign_and_send(ctx, state.persona, document, sent).await {
+                abandon(ctx, "Could not ask to enrol", e);
+            }
+        }
+        openvtc_core::vetting::hidden::Due::Draw { label, tick, rate } => {
+            let mut rng = rand::thread_rng();
+            let mut snapshot = state.snapshot.clone();
+            let body = match openvtc_core::vetting::hidden::drip_request(
+                community,
+                &state.params,
+                &mut snapshot,
+                tick,
+                &label,
+                rate,
+                &mut rng,
+            ) {
+                Ok(body) => body,
+                Err(e) => return status(ctx, format!("Could not draw tokens: {e}")),
+            };
+            if let Some(held) = ctx
+                .config
+                .private
+                .vetting
+                .hidden_vetter_mut(community, state.persona)
+            {
+                held.snapshot = snapshot;
+            }
+            let document = match wire::pcs_tokens_request(did, community, &body) {
+                Ok(d) => d,
+                Err(e) => return abandon(ctx, "Could not draw tokens", e),
+            };
+            let document_id = document.id.clone();
+            ctx.config.private.vetting.ask(CommunityQuery {
+                document_id: document_id.clone(),
+                community: community.to_string(),
+                persona: state.persona,
+                kind: QueryKind::PcsTokens,
+                sent_at: now,
+            });
+            let sent = Sent::Query {
+                document_id,
+                community: community.to_string(),
+                kind: QueryKind::PcsTokens,
+            };
+            if let Err(e) = sign_and_send(ctx, state.persona, document, sent).await {
+                abandon(ctx, "Could not draw tokens", e);
+            }
+        }
+    }
+}
+
+async fn attest_hidden(
+    ctx: &mut ActionCtx<'_>,
+    request_id: &str,
+    entry: &openvtc_core::vetting::vetter::DeskEntry,
+    vetter_did: &str,
+    attestation: Attestation,
+    now: DateTime<Utc>,
+) -> () {
+    let previous = entry.state.clone();
+    let wire = {
+        let mut rng = rand::thread_rng();
+        match ctx.config.private.vetting.attest_hidden(
+            request_id,
+            vetter_did,
+            attestation,
+            now,
+            &mut rng,
+        ) {
+            Ok(wire) => wire,
+            Err(e) => return status(ctx, format!("Cannot attest: {e}")),
+        }
+    };
+
+    let Some(session_id) = session_id_of(entry) else {
+        return status(ctx, "This request has no open session to attest on.");
+    };
+    let message = match wire::hidden_attestation(vetter_did, &entry.applicant, &wire, &session_id) {
+        Ok(message) => message,
+        Err(e) => {
+            // Put the desk back: the token is spent either way, but the request is not closed on
+            // a delivery that never left.
+            if let Some(e2) = ctx.config.private.vetting.desk_entry_mut(request_id) {
+                e2.state = previous;
+            }
+            return abandon(ctx, "Could not send the attestation", e);
+        }
+    };
+    page(ctx).mode = VettingMode::List;
+    persist(ctx, "Sending your attestation — it names nobody.");
+    let sent = Sent::Attestation {
+        request_id: request_id.to_string(),
+        previous: entry.state.clone(),
+    };
+    spawn_send(ctx, message, vetter_did, &entry.applicant, sent);
+}
+
+/// The session id a desk entry is at, if it has one.
+fn session_id_of(entry: &openvtc_core::vetting::vetter::DeskEntry) -> Option<String> {
+    match &entry.state {
+        DeskState::Session { session, .. } | DeskState::CardReceived { session, .. } => {
+            Some(session.id.clone())
+        }
+        _ => None,
+    }
+}
+
 async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
     if !form.attested {
         return status(
@@ -2413,6 +2918,19 @@ async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
             [form.relationship_index.min(VETTING_RELATIONSHIPS.len() - 1)],
         attestation_text_digest: None,
     };
+    // Hidden vetting: this community counts a proof, not a signature. The desk builds the same
+    // draft from the same checklist and then does not sign it — what goes to the applicant
+    // carries a tag where an issuer would be, and nothing on the way names this persona.
+    if ctx
+        .config
+        .private
+        .vetting
+        .hidden_vetter(&entry.community, entry.persona)
+        .is_some()
+    {
+        return attest_hidden(ctx, request_id, &entry, &vetter_did, attestation, now).await;
+    }
+
     let draft =
         match ctx
             .config
@@ -2612,6 +3130,11 @@ pub(crate) enum Sent {
     Statement {
         request_id: String,
         statement_id: String,
+        previous: DeskState,
+    },
+    /// A hidden attestation, which has no statement id because it names nobody.
+    Attestation {
+        request_id: String,
         previous: DeskState,
     },
     Decline {
@@ -3393,6 +3916,14 @@ fn sent_result(sent: Sent, error: Option<String>, config: &mut Config) -> (Strin
                 clear(tasks, format!("vetting-card-{request_id}"));
                 ("Statement signed and sent.".to_string(), true)
             }
+            (Sent::Attestation { request_id, .. }, None) => {
+                clear(tasks, format!("vetting-card-{request_id}"));
+                (
+                    "Attestation sent. The community will count it without learning it was you."
+                        .to_string(),
+                    true,
+                )
+            }
             (Sent::Decline { request_id, .. }, None) => {
                 clear(tasks, format!("vetting-card-{request_id}"));
                 clear(tasks, format!("vetting-request-{request_id}"));
@@ -3480,6 +4011,24 @@ fn sent_result(sent: Sent, error: Option<String>, config: &mut Config) -> (Strin
                 }
                 (
                     format!("Could not send the statement, so it was not issued: {e}"),
+                    true,
+                )
+            }
+            (
+                Sent::Attestation {
+                    request_id,
+                    previous,
+                },
+                Some(e),
+            ) => {
+                if let Some(entry) = book.desk_entry_mut(&request_id) {
+                    entry.state = previous;
+                }
+                (
+                    format!(
+                        "Could not send the attestation: {e}. The token it spent is gone — \
+                         attesting again draws on the next one."
+                    ),
                     true,
                 )
             }

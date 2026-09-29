@@ -216,6 +216,74 @@ pub enum Notice {
         /// The community.
         community: String,
     },
+    /// Applicant: the community requires something this build cannot honour, so the
+    /// application stops here rather than gathering evidence the community will not accept
+    /// ([`super::hidden`]).
+    RequirementsUnsupported {
+        /// The application.
+        application_id: String,
+        /// The community.
+        community: String,
+        /// What it asked for, in the applicant's words.
+        detail: String,
+    },
+    /// Vetter: the community issued our class credential for a label.
+    HiddenVetterEnrolled {
+        /// The community.
+        community: String,
+        /// The label it issued under.
+        label: String,
+    },
+    /// Vetter: a tick of the drip was served.
+    HiddenTokensDrawn {
+        /// The community.
+        community: String,
+        /// How many tokens it added.
+        taken: usize,
+    },
+    /// Vetter: where our event-mode request stands.
+    ///
+    /// Sent on every answer, including the ones that change nothing, because the two reasons a
+    /// request waits — nobody has approved it, not enough people have asked — look identical
+    /// from the outside and only the counts tell them apart.
+    HiddenEventMode {
+        /// The community.
+        community: String,
+        /// The event, as the community names it.
+        event_id: String,
+        /// Whether the label is live for us yet.
+        approved: bool,
+        /// How many vetters have asked, including us.
+        group_size: usize,
+        /// How many this community needs.
+        group_floor: usize,
+    },
+    /// Applicant: the community issued the challenge this submission must bind.
+    ChallengeIssued {
+        /// The application.
+        application_id: String,
+        /// When the challenge stops being accepted.
+        expires_at: DateTime<Utc>,
+    },
+    /// Vetter or applicant: the community refused a hidden-vetting request.
+    HiddenVettingRefused {
+        /// The community.
+        community: String,
+        /// What was asked for, from [`super::queries::QueryKind::describe`].
+        what: &'static str,
+        /// Its declared code.
+        code: String,
+    },
+    /// Applicant: a vetter's hidden attestation arrived and verified.
+    ///
+    /// It names no vetter, deliberately — the applicant knows who it sat with, and nothing
+    /// in the notice or the store repeats it.
+    AttestationReceived {
+        /// The application.
+        application_id: String,
+        /// How many attestations this application now holds.
+        held: usize,
+    },
     /// Vetter: the community recorded our withdrawal.
     WithdrawalRecorded {
         /// The statement.
@@ -312,6 +380,40 @@ impl Notice {
             Notice::RequirementsUpdated { community, .. } => {
                 format!("Vetting requirements for {community} updated.")
             }
+            Notice::RequirementsUnsupported { detail, .. } => detail.clone(),
+            Notice::HiddenVetterEnrolled { community, label } => format!(
+                "{community} enrolled you under {label}. Your attestations will name nobody."
+            ),
+            Notice::HiddenTokensDrawn { taken, .. } => format!(
+                "Drew {taken} attestation token{}.",
+                if *taken == 1 { "" } else { "s" }
+            ),
+            Notice::HiddenEventMode {
+                event_id,
+                approved: true,
+                ..
+            } => format!("You are in {event_id}. Your tokens there draw at the event's rate."),
+            Notice::HiddenEventMode {
+                event_id,
+                group_size,
+                group_floor,
+                ..
+            } => format!(
+                "Asked to vet at {event_id}. {group_size} of {group_floor} vetters so far, and \
+                 it still needs an approver."
+            ),
+            Notice::ChallengeIssued { expires_at, .. } => format!(
+                "The community issued your submission challenge; it stands until {}.",
+                expires_at.format("%H:%M")
+            ),
+            Notice::HiddenVettingRefused {
+                community,
+                what,
+                code,
+            } => format!("{community} refused {what} ({code})."),
+            Notice::AttestationReceived { held, .. } => format!(
+                "An attestation arrived and verified. You now hold {held} for this application."
+            ),
             Notice::WithdrawalRecorded { statement_id } => {
                 format!("The community recorded the withdrawal of statement {statement_id}.")
             }
@@ -449,6 +551,19 @@ pub async fn handle(
         VETTING_VETTER_RESEND_RESPONSE_TYPE => resent(book, message, sender),
         JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE => manifest(book, ctx, message, sender),
         CREDENTIAL_ISSUE_TYPE => return statement(book, ctx, message, sender).await,
+        wire::HIDDEN_ATTESTATION_TYPE => return attestation(book, ctx, message, sender),
+        t if t == wire::pcs::response_of(wire::pcs::ROOT_TYPE) => {
+            enrolled(book, ctx, message, sender)
+        }
+        t if t == wire::pcs::response_of(wire::pcs::TOKENS_TYPE) => {
+            tokens_served(book, ctx, message, sender)
+        }
+        t if t == wire::pcs::response_of(wire::pcs::EVENT_MODE_TYPE) => {
+            event_mode_answered(book, ctx, message, sender)
+        }
+        t if t == wire::pcs::response_of(wire::pcs::CHALLENGE_TYPE) => {
+            challenge_issued(book, message, sender)
+        }
         t if is_trust_task_error_type(t) => return refused(book, ctx, message, sender),
         PROBLEM_REPORT_TYPE => return problem_reported(book, ctx, message, sender),
         _ => return None,
@@ -961,6 +1076,241 @@ async fn statement(
     Some(Handled::default())
 }
 
+/// `vtc/vetting/vetters/pcs-root/0.1#response` — the community enrolled us.
+///
+/// The blinding state is held in memory for the round trip (`pending_enrolment`), because it is
+/// useless without this answer and dangerous to keep past it. An answer that arrives after a
+/// restart therefore cannot be unblinded — the vetter asks again, which costs nothing, because a
+/// request that was never unblinded issued no credential the community will count.
+fn enrolled(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender: &str) -> Handled {
+    let Some((query, body)) =
+        answer_to::<wire::pcs::RootResponse>(book, message, sender, QueryKind::PcsRoot)
+    else {
+        return Handled::default();
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(unreadable) => {
+            return Handled {
+                answer: Some(unreadable),
+                ..Handled::default()
+            };
+        }
+    };
+    let Some(blinding) = book.pending_enrolment.take() else {
+        warn!(community = %sender, "enrolled, but the blinding state is gone — asking again");
+        return Handled::default();
+    };
+    let Some(state) = book.hidden_vetter_mut(sender, query.persona) else {
+        return Handled::default();
+    };
+    let params = state.params.clone();
+    let mut snapshot = state.snapshot.clone();
+    match super::hidden::accept_enrolment(sender, &params, &mut snapshot, &body, &blinding) {
+        Ok(()) => {
+            if let Some(state) = book.hidden_vetter_mut(sender, query.persona) {
+                state.snapshot = snapshot;
+            }
+            Handled {
+                changed: true,
+                notice: Some(Notice::HiddenVetterEnrolled {
+                    community: sender.to_string(),
+                    label: body.label,
+                }),
+                ..Handled::default()
+            }
+        }
+        Err(e) => {
+            warn!(community = %sender, error = %e, "enrolment answer did not unblind");
+            let _ = ctx;
+            Handled::default()
+        }
+    }
+}
+
+/// `vtc/vetting/vetters/pcs-tokens/0.1#response` — a tick of the drip was served.
+fn tokens_served(
+    book: &mut VettingBook,
+    ctx: &Context<'_>,
+    message: &Message,
+    sender: &str,
+) -> Handled {
+    let Some((query, body)) =
+        answer_to::<wire::pcs::TokensResponse>(book, message, sender, QueryKind::PcsTokens)
+    else {
+        return Handled::default();
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(unreadable) => {
+            return Handled {
+                answer: Some(unreadable),
+                ..Handled::default()
+            };
+        }
+    };
+    let Some(state) = book.hidden_vetter_mut(sender, query.persona) else {
+        return Handled::default();
+    };
+    let params = state.params.clone();
+    let mut snapshot = state.snapshot.clone();
+    match super::hidden::accept_drip(sender, &params, &mut snapshot, &body) {
+        Ok(taken) => {
+            if let Some(state) = book.hidden_vetter_mut(sender, query.persona) {
+                state.snapshot = snapshot;
+                state.last_ticks.insert(body.label.clone(), body.tick);
+                state.last_drawn_at = Some(ctx.now);
+            }
+            Handled {
+                changed: true,
+                notice: Some(Notice::HiddenTokensDrawn {
+                    community: sender.to_string(),
+                    taken,
+                }),
+                ..Handled::default()
+            }
+        }
+        Err(e) => {
+            warn!(community = %sender, error = %e, "served tokens did not verify");
+            Handled::default()
+        }
+    }
+}
+
+/// `vtc/vetting/vetters/event-mode/0.1#response` — where our event-mode request stands.
+///
+/// The answer is recorded whatever it says, and `pending` is an answer. What it is **not** is a
+/// grant: only an `approved` answer carrying a label opens one, and [`HiddenVetterState::
+/// event_draws`](super::book::HiddenVetterState::event_draws) is what the schedule reads, so a
+/// pending row can never put a label into the drip.
+fn event_mode_answered(
+    book: &mut VettingBook,
+    ctx: &Context<'_>,
+    message: &Message,
+    sender: &str,
+) -> Handled {
+    let Some((query, body)) =
+        answer_to::<wire::pcs::EventModeResponse>(book, message, sender, QueryKind::PcsEventMode)
+    else {
+        return Handled::default();
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(unreadable) => {
+            return Handled {
+                answer: Some(unreadable),
+                ..Handled::default()
+            };
+        }
+    };
+    let approved = body.state == wire::pcs::EVENT_APPROVED;
+    let Some(state) = book.hidden_vetter_mut(sender, query.persona) else {
+        return Handled::default();
+    };
+    let row = super::book::HiddenEventState {
+        event_id: body.event_id.clone(),
+        tier: body.tier,
+        state: body.state,
+        group_size: body.group_size,
+        group_floor: body.group_floor,
+        label: body.label,
+        drip_per_tick: body.drip_per_tick,
+        closes_after: body.closes_after,
+        answered_at: ctx.now,
+    };
+    match state.events.iter_mut().find(|e| e.event_id == row.event_id) {
+        Some(existing) => *existing = row,
+        None => state.events.push(row),
+    }
+    Handled {
+        changed: true,
+        notice: Some(Notice::HiddenEventMode {
+            community: sender.to_string(),
+            event_id: body.event_id,
+            approved,
+            group_size: body.group_size,
+            group_floor: body.group_floor,
+        }),
+        ..Handled::default()
+    }
+}
+
+/// `vtc/vetting/pcs-challenge/0.1#response` — the nonce this submission must bind.
+fn challenge_issued(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
+    let Some((query, body)) =
+        answer_to::<wire::pcs::ChallengeResponse>(book, message, sender, QueryKind::PcsChallenge)
+    else {
+        return Handled::default();
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(unreadable) => {
+            return Handled {
+                answer: Some(unreadable),
+                ..Handled::default()
+            };
+        }
+    };
+    let Some(application) = book
+        .applications
+        .iter_mut()
+        .find(|a| a.community == sender && a.persona == query.persona)
+    else {
+        return Handled::default();
+    };
+    application.hidden_challenge = Some(body.challenge);
+    Handled {
+        changed: true,
+        notice: Some(Notice::ChallengeIssued {
+            application_id: application.id.clone(),
+            expires_at: body.expires_at,
+        }),
+        ..Handled::default()
+    }
+}
+
+/// `vetting/attestation/0.1` — a hidden attestation from a vetter we asked.
+///
+/// The applicant verifies it **here**, on arrival, rather than discovering at submit that it
+/// holds something unusable: an attestation that does not verify under the community's published
+/// parameters, or is not bound to the card it showed, is dropped with a warning and never
+/// reaches the application.
+///
+/// The sender is authenticated by the envelope and is deliberately **not** recorded beside the
+/// attestation. Keeping it would rebuild, in the applicant's own store, the link the whole
+/// exchange removes (design §18).
+fn attestation(
+    book: &mut VettingBook,
+    ctx: &Context<'_>,
+    message: &Message,
+    sender: &str,
+) -> Option<Handled> {
+    let Some((persona, _)) = ctx.recipient else {
+        return Some(Handled::default());
+    };
+    for application in book
+        .applications
+        .iter_mut()
+        .filter(|a| a.persona == persona && a.hidden.is_some())
+    {
+        match application.receive_hidden_attestation(&message.body) {
+            Ok(()) => {
+                return Some(Handled {
+                    changed: true,
+                    notice: Some(Notice::AttestationReceived {
+                        application_id: application.id.clone(),
+                        held: application.hidden_held(),
+                    }),
+                    ..Handled::default()
+                });
+            }
+            // Not for this application — try the next one; the last error is reported.
+            Err(e) => warn!(%sender, error = %e, "hidden attestation refused"),
+        }
+    }
+    Some(Handled::default())
+}
+
 /// A community's vetter role credential for one of our personas.
 ///
 /// Kept when the community that it names issued and signed it (its proof is
@@ -1111,6 +1461,21 @@ fn refusal_of(
                     code: code.clone(),
                 }),
             ),
+            // Hidden vetting: the community refused to enrol us, to serve a tick, or to
+            // issue a challenge. Each is worth saying in the operator's own terms, because
+            // each has a different answer — a vetter who is not granted, a tick already
+            // served, a criterion that does not run hidden vetting at all.
+            QueryKind::PcsRoot
+            | QueryKind::PcsTokens
+            | QueryKind::PcsEventMode
+            | QueryKind::PcsChallenge => (
+                false,
+                Some(Notice::HiddenVettingRefused {
+                    community: sender.to_string(),
+                    what: query.kind.describe(),
+                    code: code.clone(),
+                }),
+            ),
             QueryKind::Manifest | QueryKind::VetterList => (false, None),
         };
         return Some(Handled {
@@ -1197,16 +1562,49 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
             };
         }
     };
+    // The payload as received. A generated criterion drops the members its schema does not
+    // name, and `vetting.ext` is one of them until this workspace takes a `trust-tasks-rs`
+    // release carrying it, so the mode is read from these bytes (`vetting::hidden`).
+    let raw = message.body.get("payload").cloned().unwrap_or(Value::Null);
     let mut handled = Handled {
         changed: book.learn_manifest(sender, &body, ctx.now),
         ..Handled::default()
     };
+    // What this community publishes about hidden vetting, kept whether or not we have an
+    // application here — a vetter has no application, and this is how its client learns the
+    // community runs the mode at all. The first criterion that publishes parameters wins: a
+    // community running two hidden criteria under different keys is not a shape this build
+    // serves, and picking one silently is better than picking one silently *and* saying so.
+    let published = raw
+        .get("criteria")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|c| match super::hidden::read_mode(c) {
+            Ok(super::hidden::Mode::Hidden(p)) => Some(*p),
+            _ => None,
+        });
+    match published {
+        Some(params) => {
+            if book.hidden_published.get(sender) != Some(&params) {
+                book.hidden_published.insert(sender.to_string(), params);
+                handled.changed = true;
+            }
+        }
+        // It stopped publishing them, so stop believing it does. An engine we already hold is
+        // left alone: a credential does not become worthless because the advertisement moved.
+        None => {
+            if book.hidden_published.remove(sender).is_some() {
+                handled.changed = true;
+            }
+        }
+    }
     for application in book
         .applications
         .iter_mut()
         .filter(|a| a.community == sender)
     {
-        match application.adopt_manifest(&body) {
+        match application.adopt_manifest(&body, &raw) {
             Ok(true) => {
                 handled.changed = true;
                 handled.notice = Some(Notice::RequirementsUpdated {
@@ -1215,6 +1613,16 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
                 });
             }
             Ok(false) => {}
+            // A refusal the applicant has to see: the community requires something this build
+            // cannot honour, and carrying on would gather evidence it does not accept.
+            Err(e @ super::applicant::ApplicantError::Hidden(_)) => {
+                handled.notice = Some(Notice::RequirementsUnsupported {
+                    application_id: application.id.clone(),
+                    community: sender.to_string(),
+                    detail: e.to_string(),
+                });
+                warn!(community = %sender, error = %e, "community requires an unsupported extension");
+            }
             Err(e) => warn!(community = %sender, error = %e, "community manifest not adopted"),
         }
     }

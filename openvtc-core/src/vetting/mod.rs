@@ -59,6 +59,8 @@ pub mod applicant;
 pub mod book;
 pub mod discover;
 pub mod guide;
+/// Hidden-vetter admission: the parameters a community publishes, and the criticality rule.
+pub mod hidden;
 pub mod inbound;
 pub mod queries;
 pub mod registry;
