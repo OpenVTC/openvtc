@@ -165,7 +165,9 @@ affinidi-messaging-test-mediator = "0.14.0"
 # resolve and never will. 0.45.0 is the republished family on `vta-sdk ^0.56` /
 # `vti-common ^0.29`, matching the root manifest. `cargo tree -i vti-common`
 # is the check: one row means the family agrees.
-vta-service = { version = "0.45.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
+#
+# **0.46.0** is the family on `vta-sdk` 0.57 (DTG Credentials v1).
+vta-service = { version = "0.46.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }

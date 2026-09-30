@@ -477,8 +477,9 @@ pub struct AssertReply {
     pub personhood: bool,
     /// The re-minted VMC, carrying `PersonhoodCredential` in its `type`.
     pub vmc: Value,
-    /// The re-minted role credential.
-    pub role_vec: Value,
+    /// The re-minted role credential — a community role VAC (wire `roleVac`,
+    /// `vtc/members/personhood/assert/0.1`).
+    pub role_vac: Value,
 }
 
 /// Parse a `members/personhood/assert/0.1#response`.
@@ -495,7 +496,7 @@ pub fn parse_assert_reply(body: &Value) -> Result<AssertReply, OpenVTCError> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         vmc: payload.get("vmc").cloned().unwrap_or(Value::Null),
-        role_vec: payload.get("roleVec").cloned().unwrap_or(Value::Null),
+        role_vac: payload.get("roleVac").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -706,16 +707,20 @@ mod tests {
         let bare = json!({
             "did": MEMBER,
             "personhood": true,
-            "vmc": { "type": ["VerifiableCredential", "MembershipCredential",
+            "vmc": { "type": ["VerifiableCredential", "DTGCredential", "MembershipCredential",
                               "PersonhoodCredential"] },
-            "roleVec": { "type": ["VerifiableCredential", "EndorsementCredential"] },
+            "roleVac": { "type": ["VerifiableCredential", "DTGCredential", "AuthorityCredential"] },
         });
         let reply = parse_assert_reply(&bare).expect("parse assert reply");
 
         assert!(reply.personhood);
         assert_eq!(reply.did, MEMBER);
         assert_eq!(
-            reply.vmc["type"][2].as_str(),
+            reply.role_vac["type"][2], "AuthorityCredential",
+            "the role credential is read from `roleVac`"
+        );
+        assert_eq!(
+            reply.vmc["type"][3].as_str(),
             Some("PersonhoodCredential"),
             "the re-minted VMC is what carries the claim"
         );

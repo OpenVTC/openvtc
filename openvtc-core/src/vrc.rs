@@ -17,21 +17,88 @@ use std::{
     sync::Arc,
     time::SystemTime,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
-/// Collection of VRCs, keyed by remote P-DID and then by VRC ID.
+/// Collection of VRCs, keyed by the remote party's persona DID and then by VRC ID.
 ///
 /// Typically two instances are maintained: one for issued VRCs and one for received VRCs.
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+///
+/// # Stored VRCs are held to the current specification on load
+///
+/// A VRC stored by an earlier build carries the retired pre-v1 DTG context and no
+/// `issuerScope`, and `dtg-credentials` refuses it. Deserializing the map
+/// strictly would make one such credential fail the whole protected config — a
+/// crash at unlock. Instead each stored VRC is parsed on its own: a
+/// non-conformant one is **dropped with a logged reason** and counted in
+/// [`Vrcs::retired`], which the relationships view shows so the member knows to
+/// ask the peer for a fresh one. Nothing non-conformant is kept, and nothing is
+/// dropped silently.
+#[derive(Serialize, Debug, Clone, Default)]
 pub struct Vrcs {
     /// Hashmap of VRCs
-    /// key = remote P-DID
+    /// key = the remote party's persona DID
     /// secondary key is the VRC-ID
     vrcs: HashMap<Arc<String>, HashMap<Arc<String>, Arc<DTGCredential>>>,
+    /// How many stored VRCs were set aside on load as non-conformant (pre-v1).
+    /// Persisted, so the notice survives the save that drops them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    retired: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+impl<'de> Deserialize<'de> for Vrcs {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            vrcs: HashMap<Arc<String>, HashMap<Arc<String>, serde_json::Value>>,
+            #[serde(default)]
+            retired: usize,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let mut vrcs: HashMap<Arc<String>, HashMap<Arc<String>, Arc<DTGCredential>>> =
+            HashMap::new();
+        let mut retired = raw.retired;
+        for (remote, by_id) in raw.vrcs {
+            for (vrc_id, value) in by_id {
+                match serde_json::from_value::<DTGCredential>(value) {
+                    Ok(vrc) => {
+                        vrcs.entry(remote.clone())
+                            .or_default()
+                            .insert(vrc_id, Arc::new(vrc));
+                    }
+                    Err(e) => {
+                        retired += 1;
+                        warn!(
+                            remote = %remote,
+                            reason = %e,
+                            "dropping a stored VRC that does not conform to DTG Credentials v1 — ask the peer to issue a fresh one"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(Vrcs { vrcs, retired })
+    }
 }
 
 impl Vrcs {
+    /// How many stored VRCs were set aside on load because they pre-date DTG
+    /// Credentials v1. See the type's docs.
+    #[must_use]
+    pub fn retired(&self) -> usize {
+        self.retired
+    }
+
+    /// Forget the retired count, once the member has been told.
+    pub fn clear_retired(&mut self) {
+        self.retired = 0;
+    }
+
     /// Returns an iterator over all per-relationship VRC maps.
     pub fn values(&self) -> Values<'_, Arc<String>, HashMap<Arc<String>, Arc<DTGCredential>>> {
         self.vrcs.values()
@@ -229,7 +296,7 @@ impl VRCRequestReject {
 /// `DTGCredential::new_vrc` leaves `id` unset, and a credential with no
 /// identifier cannot be stored under one — so a peer that keys relationship
 /// credentials by `id` cannot make a re-issue idempotent, tell a renewal from a
-/// duplicate, or reference this VRC from a witness credential's `digest`.
+/// duplicate, or reference this VRC from a `witnessed/1` statement (`object.digestMultibase`).
 ///
 /// Nothing rejects a VRC for a missing `id` *today*. That is exactly what the
 /// reciprocal membership credential looked like, right up until a community
@@ -240,14 +307,20 @@ impl VRCRequestReject {
 /// proof covers every member but `proof`, so one spliced in afterwards leaves a
 /// document whose proof no longer verifies. Building and identifying in one
 /// call is what stops the two being separated later.
+///
+/// `issuer_scope` is the scope declared for `issuer` — pass
+/// [`crate::dtg::relationship_issuer_scope`] for the identifier the relationship
+/// uses: `pairwise` for a relationship DID, `directed` for a persona DID.
 pub fn new_identified_vrc(
     issuer: &str,
+    issuer_scope: dtg_credentials::IssuerScope,
     subject: &str,
     valid_from: chrono::DateTime<chrono::Utc>,
     valid_until: Option<chrono::DateTime<chrono::Utc>>,
 ) -> DTGCredential {
     DTGCredential::new_vrc(
         issuer.to_string(),
+        issuer_scope,
         subject.to_string(),
         valid_from,
         valid_until,
@@ -265,11 +338,14 @@ mod tests {
     fn an_issued_vrc_carries_its_own_identifier() {
         let vrc = new_identified_vrc(
             "did:key:zIssuerR",
+            dtg_credentials::IssuerScope::Pairwise,
             "did:key:zSubjectR",
             chrono::Utc::now(),
             None,
         );
         let value = serde_json::to_value(&vrc).expect("serialise");
+        assert_eq!(value["issuerScope"], "pairwise");
+        assert_eq!(value["@context"][1], dtg_credentials::DTG_CONTEXT_V1);
 
         let id = value["id"].as_str().expect("a top-level id");
         assert!(id.starts_with("urn:uuid:"), "got {id}");
@@ -282,10 +358,42 @@ mod tests {
     #[test]
     fn each_issued_vrc_gets_a_fresh_identifier() {
         let now = chrono::Utc::now();
-        let a = new_identified_vrc("did:key:zI", "did:key:zS", now, None);
-        let b = new_identified_vrc("did:key:zI", "did:key:zS", now, None);
+        let scope = dtg_credentials::IssuerScope::Pairwise;
+        let a = new_identified_vrc("did:key:zI", scope, "did:key:zS", now, None);
+        let b = new_identified_vrc("did:key:zI", scope, "did:key:zS", now, None);
         assert_ne!(a.id(), b.id());
         assert!(a.id().is_some());
+    }
+
+    /// A VRC stored before DTG Credentials v1 must not stop the config loading:
+    /// it is dropped, counted, and the conformant ones beside it survive.
+    #[test]
+    fn a_pre_v1_stored_vrc_is_set_aside_on_load() {
+        let current = serde_json::to_value(new_identified_vrc(
+            "did:key:zI",
+            dtg_credentials::IssuerScope::Pairwise,
+            "did:key:zS",
+            chrono::Utc::now(),
+            None,
+        ))
+        .unwrap();
+        let mut old = current.clone();
+        old["@context"][1] = serde_json::json!(crate::dtg::fixtures::RETIRED_CONTEXT);
+        old.as_object_mut().unwrap().remove("issuerScope");
+        let stored = serde_json::json!({
+            "vrcs": { "did:key:zRemote": { "zOld": old, "zNew": current } }
+        });
+
+        let vrcs: Vrcs = serde_json::from_value(stored).expect("loads despite the old VRC");
+        assert_eq!(vrcs.retired(), 1);
+        let remote = Arc::new("did:key:zRemote".to_string());
+        let kept = vrcs.get(&remote).expect("the conformant VRC is kept");
+        assert_eq!(kept.len(), 1);
+        assert!(kept.contains_key(&Arc::new("zNew".to_string())));
+
+        // The count survives a save, so the notice outlives the drop.
+        let again: Vrcs = serde_json::from_value(serde_json::to_value(&vrcs).unwrap()).unwrap();
+        assert_eq!(again.retired(), 1);
     }
 
     #[test]

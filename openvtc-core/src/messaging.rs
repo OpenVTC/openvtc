@@ -1053,6 +1053,8 @@ pub fn handle_credential_issue(
         return CredentialIssueOutcome::NONE;
     };
     record.credentials.insert(kind, credential);
+    // A conformant replacement answers a pre-v1 one set aside on load.
+    record.clear_retired(kind.config_key());
 
     // Capture the join request id *before* activating. `activate` replaces
     // `Pending { request_id }` with `Active`, so this is the last moment the
@@ -2708,12 +2710,20 @@ mod tests {
         VerifiedIssuedCredential::assume_verified(credential_in_issue(m).expect("a credential"))
     }
 
+    /// A conformant, unsigned credential of the kind `types` names — built through
+    /// `dtg-credentials` so the fixture is what a v1 community actually issues.
     fn vc(types: &[&str], issuer: &str, subject: &str) -> serde_json::Value {
-        serde_json::json!({
-            "type": types,
-            "issuer": issuer,
-            "credentialSubject": { "id": subject },
-        })
+        match types.last().copied() {
+            Some("MembershipCredential") => crate::dtg::fixtures::grant(issuer, subject),
+            Some("AuthorityCredential") => {
+                crate::dtg::fixtures::role_vac(issuer, subject, "member")
+            }
+            _ => serde_json::json!({
+                "type": types,
+                "issuer": issuer,
+                "credentialSubject": { "id": subject },
+            }),
+        }
     }
 
     /// Admission must report the join request it closed.
@@ -2757,7 +2767,7 @@ mod tests {
         assert!(only(&acct, vtc).status.is_active());
     }
 
-    /// A credential that does not admit anyone closes no join. A role VEC
+    /// A credential that does not admit anyone closes no join. A role VAC
     /// landing on an already-active membership must not re-send a reciprocal
     /// VMC naming a request that was closed long ago.
     #[test]
@@ -2824,7 +2834,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_issue_role_vec_stores_without_activating() {
+    fn credential_issue_role_vac_stores_without_activating() {
         let vtc = "did:webvh:example:vtc";
         let persona = "did:webvh:example:persona";
         let mut acct = account_with_persona(vtc, persona);
@@ -2832,7 +2842,7 @@ mod tests {
         let m = issue(
             vtc,
             vc(
-                &["VerifiableCredential", "EndorsementCredential"],
+                &["VerifiableCredential", "AuthorityCredential"],
                 vtc,
                 persona,
             ),
@@ -2842,9 +2852,25 @@ mod tests {
         let rec = only(&acct, vtc);
         assert!(
             !rec.status.is_active(),
-            "role VEC must not activate on its own"
+            "role VAC must not activate on its own"
         );
         assert!(rec.credentials.contains_key(&crate::CredentialKind::Role));
+    }
+
+    /// The role credential retired with DTG Credentials v1 — a role
+    /// endorsement credential under the old context — is of no known kind now,
+    /// so a community still issuing it is refused rather than stored.
+    #[test]
+    fn a_pre_v1_role_endorsement_is_not_stored() {
+        let vtc = "did:webvh:example:vtc";
+        let persona = "did:webvh:example:persona";
+        let mut acct = account_with_persona(vtc, persona);
+        let m = issue(
+            vtc,
+            crate::dtg::fixtures::retired_role_endorsement(vtc, persona),
+        );
+        assert!(!handle_credential_issue(&mut acct, verified(&m), vtc).changed);
+        assert!(only(&acct, vtc).credentials.is_empty());
     }
 
     /// The dispatch path is purely registry-driven: every kind in
@@ -3079,6 +3105,7 @@ mod tests {
     fn unsigned_vrc(issuer: &str) -> DTGCredential {
         DTGCredential::new_vrc(
             issuer.to_string(),
+            dtg_credentials::IssuerScope::Pairwise,
             "did:webvh:example:subject".to_string(),
             Utc::now(),
             None,
