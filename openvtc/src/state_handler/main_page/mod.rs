@@ -404,6 +404,13 @@ impl MainPageState {
         )
         .into();
         self.content_panel.credentials.membership = collect_membership_creds(config).into();
+        self.content_panel.credentials.retired_vrcs = config.private.vrcs_received.retired()
+            + config.private.vrcs_issued.retired()
+            + config
+                .account
+                .memberships()
+                .map(|m| m.vrcs_received.retired() + m.vrcs_issued.retired())
+                .sum::<usize>();
 
         // Sync settings
         self.content_panel.settings.friendly_name = config.public.friendly_name.clone();
@@ -674,6 +681,30 @@ impl MainPageState {
                 has_role_credential: c
                     .credentials
                     .contains_key(&openvtc_core::CredentialKind::Role),
+                role_names: c
+                    .credentials
+                    .get(&openvtc_core::CredentialKind::Role)
+                    .and_then(|vc| openvtc_core::dtg::parse_conformant(vc).ok())
+                    .and_then(|vac| openvtc_core::dtg::community_roles(&vac))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| sanitize_display(&r, 64))
+                    .collect(),
+                retired_credentials: c
+                    .retired_credentials
+                    .iter()
+                    .map(|r| {
+                        let what = match r.kind.as_str() {
+                            "Membership" => "membership credential",
+                            "Role" => "role credential",
+                            _ => "membership acknowledgement",
+                        };
+                        format!(
+                            "Your {what} pre-dates DTG Credentials v1 and was set aside — \
+                             ask the community to re-issue it (renew your membership)."
+                        )
+                    })
+                    .collect(),
                 decision: community_decision_summary(c),
             });
         }
@@ -974,7 +1005,9 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
                     .map(|n| sanitize_display(n, 256)),
                 validity,
                 status,
-                kind: Some(kind.config_key().to_string()),
+                // What it asserts, read from the credential itself: "Membership",
+                // "Role: vetter", or for a statement its predicate.
+                kind: Some(sanitize_display(&openvtc_core::dtg::describe(vc), 128)),
                 subject_is_self: config.is_persona_did(&subject),
                 valid_from,
                 valid_until,
@@ -1445,6 +1478,7 @@ mod tests {
                 member_vmc: None,
                 decision: None,
                 relationship_identifier_default: None,
+                retired_credentials: Vec::new(),
                 extra: serde_json::Map::new(),
                 vtc_did: vtc_did.to_string(),
                 display_name: display_name.map(str::to_owned),
@@ -1883,9 +1917,13 @@ mod tests {
     /// so an unsigned credential cannot be stored.
     fn signed_vrc(issuer: &str, subject: &str) -> Arc<dtg_credentials::DTGCredential> {
         let json = serde_json::json!({
-            "@context": ["https://www.w3.org/ns/credentials/v2"],
+            "@context": [
+                dtg_credentials::W3C_VC_V2_CONTEXT,
+                dtg_credentials::DTG_CONTEXT_V1
+            ],
             "type": ["VerifiableCredential", "DTGCredential", "RelationshipCredential"],
             "issuer": issuer,
+            "issuerScope": "pairwise",
             "validFrom": "2024-06-18T10:00:00Z",
             "credentialSubject": { "id": subject },
             "proof": {
@@ -2502,6 +2540,7 @@ mod tests {
         let valid_from = Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
         let vrc = DTGCredential::new_vrc(
             "did:test:issuer".to_string(),
+            dtg_credentials::IssuerScope::Pairwise,
             "did:test:subject".to_string(),
             valid_from,
             Some(Utc.with_ymd_and_hms(2025, 6, 7, 8, 9, 10).unwrap()),
@@ -2519,11 +2558,15 @@ mod tests {
     #[test]
     fn test_raw_credential_value_matches_eager_output() {
         let vc = serde_json::json!({
-            "@context": ["https://www.w3.org/ns/credentials/v2"],
-            "type": ["VerifiableCredential", "MembershipCredential"],
+            "@context": [
+                "https://www.w3.org/ns/credentials/v2",
+                "https://registry.trustoverip.org/dtg/context/v1"
+            ],
+            "type": ["VerifiableCredential", "DTGCredential", "MembershipCredential"],
             "issuer": "did:test:vtc",
+            "issuerScope": "public",
             "validFrom": "2024-01-01T00:00:00Z",
-            "credentialSubject": { "id": "did:test:member", "role": "member" }
+            "credentialSubject": { "id": "did:test:member" }
         });
         let eager = serde_json::to_string_pretty(&vc).unwrap();
 

@@ -784,7 +784,7 @@ async fn prepare_accept_vrc_request(
     // publish to the community trust graph, so a persona-attributed issuer
     // correlated every relationship a persona had, indefinitely, from a
     // credential that outlives the handshake that produced it. The subject was
-    // already the peer's R-DID; only the issuer half was persona-attributed,
+    // already the peer's relationship DID; only the issuer half was persona-attributed,
     // which meant the pairwise channel led straight back to the persona.
     //
     // This could not be fixed here until the VTC stopped requiring it: its
@@ -798,18 +798,32 @@ async fn prepare_accept_vrc_request(
     // unset, and a credential with no identifier cannot be stored under one —
     // so a peer that keys relationship credentials by `id` cannot make a
     // re-issue idempotent, tell a renewal from a duplicate, or reference this
-    // VRC from a witness credential. Nothing rejects a VRC for it *today*,
+    // VRC from a `witnessed/1` statement. Nothing rejects a VRC for it *today*,
     // which is exactly what the reciprocal VMC looked like right up until a
     // community started keying on it.
     //
     // Before signing, necessarily: a Data Integrity proof covers every member
     // but `proof`, so an id spliced in afterwards leaves a document whose
     // proof no longer verifies.
-    let mut vrc = openvtc_core::vrc::new_identified_vrc(&our_r_did, &their_r_did, valid_from, None);
+    //
+    // It declares the scope of that identifier (DTG Credentials `issuerScope`):
+    // `pairwise` for a relationship DID minted for this one peer, `directed`
+    // when the relationship uses the persona DID — the legible graph a
+    // community declaring `relationshipIdentifierDefault: attributed` asks for.
+    // See `openvtc_core::dtg::relationship_issuer_scope`.
+    //
     // `our_did` is the persona DID for a relationship established without a
-    // dedicated R-DID, so sign as whichever identity it actually is — the same
-    // discriminator `listener_id_for_did` routes sends on.
-    if config.is_persona_did(&our_r_did) {
+    // dedicated relationship DID, so sign as whichever identity it actually is —
+    // the same discriminator `listener_id_for_did` routes sends on.
+    let issuer_is_persona = config.is_persona_did(&our_r_did);
+    let mut vrc = openvtc_core::vrc::new_identified_vrc(
+        &our_r_did,
+        openvtc_core::dtg::relationship_issuer_scope(issuer_is_persona),
+        &their_r_did,
+        valid_from,
+        None,
+    );
+    if issuer_is_persona {
         let persona_keys = config.get_persona_keys(tdk).await?;
         vrc.sign(&persona_keys.signing.secret, None).await?;
     } else {

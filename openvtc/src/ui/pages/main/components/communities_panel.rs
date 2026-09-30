@@ -250,9 +250,19 @@ pub fn render(
                     } else {
                         "—"
                     },
-                    if c.has_role_credential { "✓" } else { "—" },
+                    match (c.has_role_credential, c.role_names.is_empty()) {
+                        (false, _) => "—".to_string(),
+                        (true, true) => "✓".to_string(),
+                        (true, false) => format!("✓ ({})", c.role_names.join(", ")),
+                    },
                 ),
             ));
+            // Credentials set aside on load because they pre-date DTG
+            // Credentials v1: say what went and what to do, rather than
+            // showing the membership as if nothing were missing.
+            for note in &c.retired_credentials {
+                lines.push(Line::from(format!("⚠ {note}")).fg(COLOR_ORANGE));
+            }
             // Why a Rejected/Removed membership ended, as the community stated it
             // (issue #240). The reason always renders — "no reason given" when
             // none travelled — so a terminal row never silently omits its cause;
@@ -729,6 +739,8 @@ mod key_hint_tests {
             request_id: String::new(),
             has_membership_credential: false,
             has_role_credential: false,
+            role_names: Vec::new(),
+            retired_credentials: Vec::new(),
             accent: None,
             decision: None,
         }

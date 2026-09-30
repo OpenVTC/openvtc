@@ -234,6 +234,9 @@ impl CommunityOutcome {
                     && let Some(c) = config.account.membership_mut(&self.vtc_did, self.persona)
                 {
                     c.member_vmc = Some(vmc);
+                    c.clear_retired(
+                        openvtc_core::config::account::RetiredCredential::MEMBER_ACKNOWLEDGEMENT,
+                    );
                     save.mark_dirty();
                 }
                 // Only the *send* succeeded. A DIDComm `Ok` means the frame was

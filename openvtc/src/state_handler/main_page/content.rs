@@ -637,8 +637,14 @@ pub struct CommunitySummary {
     pub request_id: String,
     /// Whether the membership credential (VMC) has been received + stored.
     pub has_membership_credential: bool,
-    /// Whether the role endorsement credential (VEC) has been received.
+    /// Whether the role credential (a community VAC) has been received.
     pub has_role_credential: bool,
+    /// The roles that credential confers (`role:<name>` actions), for display.
+    pub role_names: Vec<String>,
+    /// One line per stored credential set aside on load because it pre-dates
+    /// DTG Credentials v1 ([`openvtc_core::config::account::RetiredCredential`]).
+    /// Shown as a warning with what to do about it.
+    pub retired_credentials: Vec<String>,
     /// The accent colour the community publishes in its manifest's branding.
     pub accent: Option<(u8, u8, u8)>,
     /// Why the membership ended, for a `Rejected`/`Removed` row (issue #240).
@@ -2050,6 +2056,9 @@ pub struct VettingState {
     /// than naming one, so that what they asked for is not itself a
     /// distinguishing detail.
     pub event_offers: Arc<[EventOffer]>,
+    /// Stored vetting credentials set aside on load because they pre-date DTG
+    /// Credentials v1 (`VettingBook::retired`), one sentence each.
+    pub retired: Arc<[String]>,
 }
 
 /// One (event, tier) a community we vet for is offering.
@@ -3011,7 +3020,7 @@ pub struct CredentialsState {
     pub received: Arc<[VrcSummary]>,
     /// VRCs we issued. `Arc<[…]>` for cheap per-frame clones.
     pub issued: Arc<[VrcSummary]>,
-    /// Membership (VMC) + role (VEC) credentials issued to us by the VTCs we've
+    /// Membership (VMC) + role (VAC) credentials issued to us by the VTCs we've
     /// joined, one or two entries per community (reuses [`VrcSummary`]).
     /// `Arc<[…]>` for cheap per-frame clones.
     pub membership: Arc<[VrcSummary]>,
@@ -3023,6 +3032,10 @@ pub struct CredentialsState {
     pub mode: CredentialsMode,
     /// Transient status message
     pub status_message: Option<String>,
+    /// Stored VRCs set aside on load because they pre-date DTG Credentials v1
+    /// ([`openvtc_core::vrc::Vrcs::retired`]), across every store. Shown as a
+    /// warning so the member knows to ask those peers for fresh ones.
+    pub retired_vrcs: usize,
     /// When `Some(vrc_id)`, removal of that credential is awaiting `y`/`n`
     /// confirmation (armed from the detail view). Mirrors the Communities/
     /// VTA-DID confirm pattern (R25).
