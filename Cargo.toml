@@ -550,7 +550,7 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # `openvtc-core/Cargo.toml` for why that pin stays at 0.43.0 rather than
 # following `vta-sdk` here to 0.56 — 0.44.0 is broken independent of what
 # `vta-sdk` line it is paired with.
-vta-sdk = { version = "0.57.0", features = [
+vta-sdk = { version = "0.58.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses

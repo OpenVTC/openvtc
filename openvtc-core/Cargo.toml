@@ -167,7 +167,7 @@ affinidi-messaging-test-mediator = "0.15.0"
 # is the check: one row means the family agrees.
 #
 # **0.46.0** is the family on `vta-sdk` 0.57 (DTG Credentials v1).
-vta-service = { version = "0.46.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
+vta-service = { version = "0.47.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }
