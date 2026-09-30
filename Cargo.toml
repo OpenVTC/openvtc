@@ -63,7 +63,7 @@ openvtc-core = { version = "0.3", path = "openvtc-core", default-features = fals
 # The requirement reads "0.11" only because the unreleased 0.12 is still
 # versioned 0.11.0 in its worktree and the patch block at the bottom has to
 # match it. Raise it to "0.12" when 0.12 is published, as the patch comes out.
-dtg-credentials = "0.11"
+dtg-credentials = "0.12"
 
 aes-gcm = "0.11"
 # The one direct requirement in this workspace that was behind its latest
@@ -85,7 +85,7 @@ argon2 = "0.6"
 #
 # 0.18 -> 0.20 follows `vta-sdk` 0.53 -> 0.56 below, the release that declares
 # `affinidi-tdk ^0.20`.
-affinidi-tdk = "0.20"
+affinidi-tdk = "0.21"
 affinidi-data-integrity = "0.7"
 # Decodes a community's Bitstring Status List. Already in the graph through
 # `vta-sdk`, whose status reader cannot verify a list signed with a proof set;
@@ -130,7 +130,7 @@ affinidi-messaging-core = "0.1.11"
 # geometric reconnect cascade behind `#231`–`#234`; and 0.19.4 (#694) was the
 # `live_stream_next*` read guard that blocked `stop_websocket` for the remainder
 # of a 10s poll window.
-affinidi-messaging-sdk = "0.30.0"
+affinidi-messaging-sdk = "0.31.0"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
@@ -385,8 +385,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # decide / personhood / renew / rotate responses, the vetting specs carry
 # `vetted/1` statements and role VACs, and `vtc/endorsements/issue` gains
 # `predicateNotIssuable`.
-trust-tasks-rs = { version = "0.24.8", features = ["git-ns"] }
-trust-tasks-capability-client = "0.24.8"
+trust-tasks-rs = { version = "0.25.0", features = ["git-ns"] }
+trust-tasks-capability-client = "0.25.0"
 tui-input = "0.15"
 url = "2.5"
 uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }

@@ -119,7 +119,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 #
 # 0.14.0 is the line built on the same `vta-sdk` 0.56 the root manifest now
 # pins, so the dev graph keeps one copy of it too.
-affinidi-messaging-test-mediator = "0.14.0"
+affinidi-messaging-test-mediator = "0.15.0"
 # In-process MockVta for the bootstrap e2e (VTI#406/#427 test-support seams).
 # `vta-service` is the VTA server crate; it carries the credential-vault
 # lifecycle tasks (receive/query/archive/delete/restore/purge) + the
