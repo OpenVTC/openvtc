@@ -293,7 +293,12 @@ and **vrcs_received** (credentials you have received from others).
 
 | Field  | Type                                                          | Description                                                    |
 | ------ | ------------------------------------------------------------- | -------------------------------------------------------------- |
-| `vrcs` | `HashMap<Arc<String>, HashMap<Arc<String>, Arc<DTGCredential>>>` | Map of remote P-DID to VRC credentials (nested map by VRC ID). |
+| `vrcs` | `HashMap<Arc<String>, HashMap<Arc<String>, Arc<DTGCredential>>>` | Map of the remote party's persona DID to VRC credentials (nested map by VRC ID). |
+| `retired` | `usize` (omitted when 0) | How many stored VRCs were set aside on load because they pre-date DTG Credentials v1 (the retired pre-v1 context, no `issuerScope`). Each is dropped with a logged reason; the count drives a notice in the Credentials panel. |
+
+Every stored VRC is parsed on its own when the config loads, so one VRC in a
+pre-v1 shape is dropped rather than failing the whole protected config. The
+same applies to a `VRCIssued` task carrying one.
 
 **VRC Structure:**
 

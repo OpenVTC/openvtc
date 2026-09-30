@@ -80,7 +80,7 @@ this design are marked ⚠.
 | Kernel today | Detail | OpenVTC vetting |
 |---|---|---|
 | **Identity** = PGP key | Key held by the developer; 2-year expiry recommended | Persona DID (`did:webvh`) with keys in the VTA, pre-rotation, witnesses |
-| **Vouch** = key signature | Signer has "met you personally… OR worked with you for some period", video OK | **Vetting Statement** (VEC) issued by an eligible vetter (§9.4) |
+| **Vouch** = key signature | Signer has "met you personally… OR worked with you for some period", video OK | **Vetting Statement** (VSC) issued by an eligible vetter (§9.4) |
 | **Account gate** | Key signed by ≥2 existing kernel.org account holders (2015 AMA said 3) + MAINTAINERS listing or admin exception; helpdesk reviews by hand | `minStatements` from distinct eligible vetters; policy decides automatically, `refer` for edge cases (§10) |
 | **Keyring gate** (`pgpkeys.git`) | ≥1 in-repo signature and a trust path to Linus (reported max 5 hops) | Vetter eligibility tiers + **vetting depth** from founding anchors (§10.3) |
 | **Key-signing parties**, `ksmap` | ⚠ Public YAML of names + coordinates; in-person bias; geographic exclusion | Opt-in **vetter directory** with coarse region only; tickets/QR at events; video method (§7, §8) |
@@ -119,14 +119,15 @@ model, and this spec keeps its terms:
 | **Vetting Requirements** | Manifest criterion extension | VTC | public | New field on `vtc/join-requests/manifest` (§6) |
 | **Vetting Ticket** | Short code / QR payload (not a credential) | Vetter | applicant | New (§8) |
 | **Vetting Card** | VDS, profile of the **r-card** | Applicant's join DID | one vetter | New VDS profile; signs the existing unsigned r-card render (§9.2) |
-| **Vetting Statement** | **VEC** (`EndorsementCredential`) with registered endorsement type `IdentityVetting` | Vetter's member DID | applicant's join DID | New endorsement type; no new DTG credential type (§9.4, D1) |
-| **Vetter role** | Role **VEC** (`CommunityRole: vetter`) | VTC | vetter's member DID | Existing mechanism, new role (§10.3) |
+| **Vetting Statement** | **VSC** (`StatementCredential`) under the registered predicate `https://registry.trustoverip.org/dtg/vsc/vetted/1` | Vetter's member DID | applicant's join DID | Registered predicate; no new DTG credential type (§9.4, D1) |
+| **Vetter role** | Community-issued role **VAC** (`AuthorityCredential`, action `role:vetter`) | VTC (community DID) | vetter's member DID | Existing mechanism, new role (§10.3) |
 | **Admission bundle** | VP in `vtc/join-requests/submit/0.2` | Applicant | VTC | Existing task (§10.1) |
-| **Membership** | VMC grant + member acknowledgement, role VEC | VTC / member | — | Existing |
+| **Membership** | VMC grant (`issuerScope: public`) + member acknowledgement VMC (`directed`, `digestMultibase` over the grant), role VAC | VTC / member | — | Existing |
 
-Terms follow DTG Credentials Working Draft 02. Avoid the retired
-M-DID/C-DID/R-DID/P-DID terms. "Face" means a persona **profile**, and
-"world" means a **facet**.
+Terms follow DTG Credentials v1 and the DTG VSC predicate registry. Use the
+WD02+ identifier-role terms — persona DID, member DID, community DID,
+relationship DID (pairwise identifier) — not the retired abbreviations.
+"Face" means a persona **profile**, and "world" means a **facet**.
 
 ### 3.3 Which DIDs are used
 
@@ -177,7 +178,7 @@ sequenceDiagram
   Note over A: sign the card with the join persona key (D19)
   A-->>V: #response signed Vetting Card (VDS)
   Note over V: Human check — person ↔ document ↔ card
-  Note over V: confirm the attestation, sign the VEC with the member persona key (D19)
+  Note over V: confirm the attestation, sign the VSC with the member persona key (D19)
   V->>A: credential-exchange/issue/0.1 {Vetting Statement}
   A->>AV: vault store (purpose: vetting, community)
   end
@@ -189,7 +190,7 @@ sequenceDiagram
   A->>C: vtc/join-requests/submit/0.2 {VP: [VIC?] + statements}
   C->>C: verify → VerifiedFacts → join.rego (vetting module) → verdict
   alt allow
-    C-->>A: VMC grant + role VEC → reciprocal VMC → git-trust/grant
+    C-->>A: VMC grant + role VAC → reciprocal VMC → git-trust/grant
   else requestMore
     C-->>A: needs (e.g. "1 more in-person statement")
   else refer
@@ -292,10 +293,10 @@ community demands a passport check and walk away having disclosed nothing.
   "id": "kernel-developer",
   "description": "Two existing kernel vetters must confirm who you are. At least one must meet you in person.",
   "presentationDefinition": { "credentials": [ { "id": "vetting", "format": "ldp_vc", "multiple": true,
-      "meta": { "type_values": [["EndorsementCredential"]] } } ] },
+      "meta": { "type_values": [["StatementCredential"]] } } ] },
   "vetting": {
     "version": "0.1",
-    "statementType": "https://firstperson.network/endorsements/identity-vetting/0.1",
+    "statementType": "https://registry.trustoverip.org/dtg/vsc/vetted/1",
     "minStatements": 2,
     "minByMethod": { "inPerson": 1 },
     "acceptedMethods": ["inPerson", "video", "priorAcquaintance"],
@@ -319,7 +320,9 @@ community demands a passport check and walk away having disclosed nothing.
 ```
 
 The DCQL shape above is illustrative. It must follow what
-`vta_sdk::vp::select_credentials` accepts (VTI#437).
+`vta_sdk::vp::select_credentials` accepts (VTI#437). It selects every
+`StatementCredential`; the verifier then classifies each one by its
+`credentialSubject.predicate`, never by type.
 
 **Every number here is community policy** (D15). The protocol has no default
 statement count, method floor or age limit; the values above are an example
@@ -328,14 +331,14 @@ each vetter decides what they accept (D16).
 
 | Field | Meaning |
 |---|---|
-| `statementType` | Endorsement `typeUri` registered via `vtc/endorsement-types/register/0.1`, with its `claimSchema` (§9.4) |
+| `statementType` | Predicate IRI of the Vetting Statement in the DTG VSC predicate registry, `https://registry.trustoverip.org/dtg/vsc/vetted/1`; its profile fixes the `object.value` body (§9.4) |
 | `minStatements` | Distinct eligible vetters, counted by **member record**, not DID (§10.2). Set by each community; no protocol default (D15) |
 | `minByMethod` | Per-method floors (e.g. at least one `inPerson`) |
 | `acceptedMethods` | Methods that count at all. `priorAcquaintance` encodes the kernel's written "worked with you" standard |
 | `acceptedDocumentClasses` | **Optional, absent by default.** When absent, each vetter decides what documentation they accept (D16). A community that later needs a floor can set it; statements outside it then don't count |
 | `requiredClaims` | Claim types (from the VTA claim-type registry) the Vetting Card must carry and the vetter must mark verified |
 | `maxStatementAge` | A statement older than this at submit does not count |
-| `eligibleVetters` | How eligibility is proven; V0 = holds the community's `vetter` role VEC (§10.3) |
+| `eligibleVetters` | How eligibility is proven; V0 = holds the community's `role:vetter` VAC (§10.3) |
 | `independence` | Caps on declared vetter↔applicant relationships; require the identity commitment to match across statements (§9.3) |
 | `invitation` | `required` / `optional` / `none` — whether a VIC must also be in the VP |
 | `decisionSla` | What the applicant's client uses in place of the hardcoded 7-day pending expiry (D16) |
@@ -428,9 +431,14 @@ In OpenVTC:
 ### 7.1 Confirming a vetter is eligible before spending effort
 
 The vetter's `vetting/request` `#response` carries an **eligibility VP**: the
-vetter's community-issued VMC plus the `CommunityRole: vetter` VEC, bound to
-the `requestId` as the challenge. The applicant's client verifies:
-- the issuer is the community DID;
+vetter's community-issued VMC plus the community's `role:vetter` VAC
+(`authority` = `{ scope: <community DID>, actions: ["role:vetter"],
+maxAttenuation: 0 }`), bound to the `requestId` as the challenge. The
+applicant's client verifies (`vta_sdk::vetting::eligibility::verify_eligibility_vp`):
+- the issuer is the community DID, and the VAC's `authority.scope` is that
+  same DID with no parent;
+- both declare `issuerScope: public`; a non-public scope or any attenuation
+  is refused;
 - the subject is the vetter DID;
 - neither credential has been revoked.
 
@@ -595,7 +603,12 @@ the code, and the vetter's statement records `livenessConfirmed`.
 
 **`#response`** (applicant → vetter): the signed **Vetting Card** (§9.2).
 The session request's `id` is the value the statement later carries as
-`taskContext`, mirroring `witness/session/0.1`.
+`taskContext`, mirroring `witness/session/0.1`, and its task digest (JCS over
+the document minus its top-level proof, SHA-256 multihash, base58btc) is the
+statement's `taskDigestMultibase`. The vetted/1 profile requires both, so the
+vetter's desk keeps the signed session document it sent
+(`VettingBook::record_session_document`, `DeskSession::document`) and the
+applicant keeps the one it received (`OpenSession::document`).
 
 ### 9.2 Vetting Card — a VDS
 
@@ -716,83 +729,104 @@ document details. The card itself is retained only per the vetter's
 `cardRetention` (default: delete 7 days after the statement is issued; keep
 only `cardDigestMultibase`).
 
-### 9.4 Vetting Statement — a VEC
+### 9.4 Vetting Statement — a VSC
 
-**Why a VEC** (D1). DTG WD02 defines a VEC as the credential that "enables
-one party to a DTG edge trust relationship to issue verifiable assertions
-about the counterparty", with an `endorsement` object whose "structure and
-fields [are] determined by community policy". A VTC already has an
-endorsement-type registry with `claimSchema`. The two other candidates don't
-fit:
-- a **VWC**'s digest must point at an edge credential;
+**Why a VSC** (D1). DTG Credentials v1 defines the Verifiable Statement
+Credential (`StatementCredential`) as an assertion by its issuer about a
+subject, whose `credentialSubject.predicate` is an IRI from the DTG VSC
+predicate registry and whose `object` is shaped by that predicate's profile.
+The registry's `https://registry.trustoverip.org/dtg/vsc/vetted/1` predicate
+is exactly an identity-vetting assertion. So the statement is a VSC under a
+registered predicate — again no new DTG credential type. The two other
+candidates don't fit:
+- a **VWC** (a `witnessed/1` statement) attests that its subject issued another credential, named by digest;
 - an **IDVC** is defined as issued by a commercial IDVP.
 
 A new DTG type would need coordination with the cred task force (governance
 consideration 9) for no gain.
 
-The VEC definition presumes an edge. The accepted `vetting/request` + session
-exchange is that relationship. A VRC pair is **not required** in V0 (D8); a
-community may require one (`vetting.requireVrc`) if it wants the edges for
-later graph analysis (§10.5).
+The statement rests on a relationship: the accepted `vetting/request` +
+session exchange, which the vetted/1 profile makes explicit by requiring the
+statement to cite the session document. A VRC pair is **not required** in V0
+(D8); a community may require one (`vetting.requireVrc`) if it wants the edges
+for later graph analysis (§10.5).
 
 ```json
 {
   "@context": ["https://www.w3.org/ns/credentials/v2",
-               "https://firstperson.network/credentials/dtg/v1"],
-  "type": ["VerifiableCredential", "DTGCredential", "EndorsementCredential"],
+               "https://registry.trustoverip.org/dtg/context/v1"],
+  "type": ["VerifiableCredential", "DTGCredential", "StatementCredential"],
+  "id": "urn:uuid:5d2f7b1e-9c4a-4e8b-a3f6-0b7d2e19c845",
   "issuer": "did:webvh:…:carol-kernel",
+  "issuerScope": "directed",
   "validFrom": "2026-09-20T10:14:00Z",
   "validUntil": "2027-01-18T10:14:00Z",
-  "taskContext": "urn:uuid:<vetting/session document id>",
+  "taskContext": "urn:uuid:8b0e2c4a-5d7f-4e61-9a3b-2f6c1d9e7a10",
+  "taskDigestMultibase": "zQm…",
   "credentialSubject": {
     "id": "did:webvh:…:alice-kernel",
-    "endorsement": {
-      "type": "https://firstperson.network/endorsements/identity-vetting/0.1",
-      "community": "did:webvh:…:kernel-vtc",
-      "method": "video",
-      "documentClasses": ["passport"],
-      "claimsVerified": ["name.legal"],
-      "livenessConfirmed": true,
-      "identityCommitment": "z…",
-      "cardDigestMultibase": "z…",
-      "declaredRelationship": "communityColleague",
-      "attestationTextDigest": "z…"
+    "predicate": "https://registry.trustoverip.org/dtg/vsc/vetted/1",
+    "object": {
+      "value": {
+        "community": "did:webvh:…:kernel-vtc",
+        "method": "video",
+        "documentClasses": ["passport"],
+        "claimsVerified": ["name.legal"],
+        "livenessConfirmed": true,
+        "identityCommitment": "z…",
+        "cardDigestMultibase": "z…",
+        "declaredRelationship": "communityColleague",
+        "attestationTextDigest": "z…"
+      }
     }
   },
   "proof": { "type": "DataIntegrityProof", "cryptosuite": "eddsa-jcs-2022", "…": "…" }
 }
 ```
 
-The `taskContext` shape must match WD02 §taskContext; the value above is
-illustrative.
+`taskContext` is the `vetting/session` document's `id`, and
+`taskDigestMultibase` is that document's task digest (§9.1); the vetted/1
+profile requires both. The `object.value` body has no `type` member — the
+predicate says what it is — and its digests and commitment are multibase
+base58btc (`z…`).
 
 | Field | Rule |
 |---|---|
 | `issuer` | Vetter's member DID in `community` |
+| `issuerScope` | At least `directed` (vetted/1). OpenVTC's vetter declares `directed`: the issuer is the member's persona DID |
 | `credentialSubject.id` | The applicant's `joinDid` |
 | `validUntil` | = `validFrom` + the community's `maxStatementAge`. Statements are *pre-admission evidence*, not a lifelong credential |
-| `endorsement.community` | Scopes the statement. Another community MUST NOT count it without explicit recognition policy (VTI-REG "Recognition MUST NOT be transitive") |
-| `endorsement.documentClasses` | What the vetter relied on, from their own accepted list (D16); `[]` with `priorAcquaintance` |
+| `taskContext`, `taskDigestMultibase` | Required. Cite the session the statement came from, by id and by digest |
+| `object.value.community` | Scopes the statement. Another community MUST NOT count it without explicit recognition policy (VTI-REG "Recognition MUST NOT be transitive") |
+| `object.value.documentClasses` | What the vetter relied on, from their own accepted list (D16); `[]` with `priorAcquaintance` |
 | `cardDigestMultibase` | Digest of the card **in the exact transmitted form** (VTI-MEM-021; `dtg_credentials::digest_multibase_json`). Used for dispute and audit. The VTC never needs the card |
-| `attestationTextDigest` | Digest of the governance text the vetter saw, so the text version is provable |
+| `attestationTextDigest` | Optional. Digest of the governance text the vetter saw, so the text version is provable |
 | `credentialStatus` | Absent in V0; revocation goes to the VTC (§9.6, D18). Added in V1 with VTA-hosted status lists |
 
 The vetter's client signs the statement as the vetter's member persona DID
 (`vta_sdk::vetting::statement::sign_statement`, D19) once the vetter confirms
 the attestation text. That confirmation is the V0 gate; see §11.3.
+`sign_statement` takes a `StatementDraft { id, issuer, issuer_scope, subject,
+value: VettedObjectValue, valid_from, valid_until, session }`, where `session`
+is the signed `vetting/session` document the desk kept, and derives
+`taskContext` and `taskDigestMultibase` from it.
 Delivery uses the existing `credential-exchange/issue/0.1`. The applicant's
-client verifies the statement (proof, subject, community, commitment equals
-its own, card digest equals what it sent) and stores it in the VTA vault
-with `purpose: "vetting"`, tagged with the community.
+client verifies the statement (`verify_statement`, then
+`VerifiedVettingStatement::check_against_session` against the session
+document it received: proof, subject, community, commitment equals its own,
+card digest equals what it sent, and the session cited by both id and
+digest — a statement that does not cite its session is refused) and stores
+it in the VTA vault with `purpose: "vetting"`, tagged with the community.
 
-**Registration.** The VTC registers the type once via
-`vtc/endorsement-types/register/0.1` with a `claimSchema` covering
-`endorsement`.
+**Registration.** The predicate and its `object.value` profile are registered
+once, in the DTG VSC predicate registry (`vetted/1`), not per community. A
+community names it in its manifest as `vetting.statementType`.
 
 **Implementation note.** The VTC's issuance route
 `vtc/endorsements/issue` (Admin/Issuer only, community-issued) is **not**
 used. Statements are member-issued by the vetter's own client, using
-`DTGCredential::new_vec` from `dtg-credentials`.
+`DTGCredential::new_vetted_vsc` from `dtg-credentials` (through
+`sign_statement`).
 
 ### 9.5 Decline
 
@@ -871,22 +905,25 @@ It sends the VP via `submit_join_request` (`openvtc-core/src/join.rs`):
 ### 10.2 Verification → facts
 
 The VTC's ceremony pipeline (`vtc-service/src/join/orchestrate.rs`,
-`ceremony/*`) is extended. For each `EndorsementCredential` whose
-`endorsement.type` is a registered vetting type, the VTC checks:
+`ceremony/*`) is extended. For each `StatementCredential` whose
+`credentialSubject.predicate` is the criterion's `statementType` (statements
+are classified by predicate, never by type), the VTC checks:
 
 1. The VP proof is valid, holder = `joinDid`, and challenge + audience are
    correct (already done).
-2. The VEC proof is valid; the issuer DID resolves (webvh log verified).
-3. `endorsement` validates against the registered `claimSchema`.
+2. The VSC proof is valid; the issuer DID resolves (webvh log verified).
+3. The credential conforms to DTG Credentials v1 and `object.value` to the
+   vetted/1 profile: `issuerScope` at least `directed`, `taskContext` and
+   `taskDigestMultibase` present.
 4. `credentialSubject.id` = VP holder.
-5. `endorsement.community` = this VTC.
+5. `object.value.community` = this VTC.
 6. `validFrom ≤ now ≤ validUntil` and age ≤ `maxStatementAge`.
 7. Not revoked: no revocation notice for this statement id (§9.6). From V1,
    also the `credentialStatus` entry, within the freshness window.
 8. **Issuer is an eligible vetter.** This check is new. The issuer DID
    resolves to a member record that:
    - is `active`;
-   - held a valid `vetter` role VEC **at `validFrom`**;
+   - held a valid `role:vetter` VAC **at `validFrom`**;
    - still holds it **now**, or policy allows post-issuance lapse
      (`eligibleAtIssuanceOnly`).
 
@@ -947,8 +984,8 @@ Facts (`input.evidence.vetting`), as built (`vtc-service/src/vetting/mod.rs`):
 
 ### 10.3 Vetter eligibility — the `vetter` role
 
-Eligibility is **materialised** as a role VEC (`CommunityRole: vetter`),
-issued and revoked by the VTC (D5). This gives three things:
+Eligibility is **materialised** as a community-issued role VAC (action
+`role:vetter`), issued and revoked by the VTC (D5). This gives three things:
 - applicants can verify a vetter offline (§7.1);
 - the VTC can verify "eligible at issuance" from its own records;
 - the kernel's "trust path to Linus ≤ 5 hops" becomes a policy input rather
@@ -956,13 +993,23 @@ issued and revoked by the VTC (D5). This gives three things:
 
 *As built:*
 - **Issuing.** An admin grants the role with `vtc/vetting/vetters/grant/0.1`
-  (`POST /v1/vetting/vetters`). The credential is an `EndorsementCredential`
-  with endorsement `{type: "CommunityRole", role: "vetter", communityDid}`,
-  a `validUntil`, and a status-list `credentialStatus`. Leaving the community
+  (`POST /v1/vetting/vetters`). The credential is a VAC: `type` includes
+  `AuthorityCredential`, `issuer` = the community DID, `issuerScope: public`,
+  `credentialSubject.authority` = `{ scope: <community DID>, actions:
+  ["role:vetter"], maxAttenuation: 0 }`, a `validUntil`, and a status-list
+  `credentialStatus`. It is built with `dtg-credentials`
+  `new_community_role_vac(community, member, "vetter", from, until)` and
+  `.with_max_attenuation(0)`; `vta_sdk::vetting::eligibility::community_roles`
+  reads (community, roles) back from it (`VETTER_ROLE_ACTION`,
+  `role_action`, `role_of_action`). Leaving the community
   revokes it. Running `vetter_eligibility.rego` automatically is V1.
 - **Holding.** The member's client keeps the credential apart from their
   ordinary community role credential. It refuses requests (`notEligible`) and
-  offers no tickets for a community without a live grant.
+  offers no tickets for a community without a live grant. A grant or held
+  statement an older build stored in a pre-v1 shape is set aside on load
+  (`VettingBook::retire_nonconformant`), with a logged reason, and listed in
+  `VettingBook::retired` so the Vetting page can say so; the vetter asks for
+  the grant again.
 - **Presenting.** Every acceptance carries the credential as `eligibilityVp`,
   with `nonce` = the request document `id` and `domain` = the applicant's
   `joinDid`. The applicant verifies it and shows the result; the check is
@@ -1109,7 +1156,7 @@ Verdict handling, reusing the existing `Verdict` enum:
 
 | Verdict | VTC effect | Applicant sees |
 |---|---|---|
-| `allow` | `EffectPlan::Admit`: VMC grant + role VEC; solicit reciprocal VMC; record evidence; write lineage (§10.5); optional `git-trust/grant` | "Admitted" |
+| `allow` | `EffectPlan::Admit`: VMC grant + role VAC; solicit reciprocal VMC; record evidence; write lineage (§10.5); optional `git-trust/grant` | "Admitted" |
 | `requestMore` | Request stays `deferred` with `needs` | Checklist updated with what's missing, and why |
 | `refer` | Request queued for moderators; moderators notified (missing today — §14) | "Under human review — expected by <decisionSla>" |
 | `deny` | Rejected with a reason code | Reason in plain language + governance link |
@@ -1324,7 +1371,7 @@ Following the existing patterns in
   with expiry).
 
   *As built, in part:* the **Membership** tab now lists the `vetter` role
-  credential beside the VMC and role VEC from the same community, with its
+  credential beside the VMC and role VAC from the same community, with its
   validity window and its raw JSON — it is stored apart from them (§10.3) but
   is a credential from that community like the others. Held *statements* still
   have no tab of their own.
@@ -1509,7 +1556,7 @@ modern-signature subgraph only (O7).
 | Repo | Change | Phase |
 |---|---|---|
 | `trustoverip/dtgwg-trust-tasks-tf` | New specs: `vetting/request/0.1`, `vetting/session/0.1`, `vetting/decline/0.1`, `vtc/vetting/revoke-statement/0.1`, `vetting/tickets/{issue,list,revoke}/0.1`, `vtc/vetters/list/0.1`, `vtc/vetting/concern/0.1`; `vtc/join-requests/manifest/0.2` (`vetting` object, `requirementsDigest`); ceremony `vetting/identity-vetting/0.1` | V0 (manifest, request, session, decline, revoke-statement, ceremony); V1 (rest) |
-| `trustoverip/dtgwg-cred-spec` | Profile note: `IdentityVetting` endorsement for VEC; note the vetting exchange as the edge the VEC definition presumes; cite salted commitment re #38 | V0 |
+| `trustoverip/dtgwg-cred-spec` / DTG VSC predicate registry | The `vetted/1` predicate and its `object.value` profile (session cited by `taskContext` + `taskDigestMultibase`, `issuerScope` at least `directed`); note the vetting exchange as the relationship the statement rests on; cite salted commitment re #38 | V0 |
 | `trustoverip/dtgwg-vds-spec` | First VDS profile: Vetting Card (r-card profile; signing, binding, commitment) | V0 draft |
 | VTI `vta-sdk` (`vetting` feature) | Card and statement signing and verification, commitment, requirements evaluation, match code — client-side signing (D19) | V0 |
 | VTI `vta-service` / `vta-policy` | Step-up on statement signing and revocation; vault `purpose: vetting`; V1: ticket store + inbound gate, push events, VTA-hosted status lists shared across issuers (§9.6) | V0 / V1 |
@@ -1517,14 +1564,14 @@ modern-signature subgraph only (O7).
 | VTI `vta-sdk` | Protocol types for the new tasks; manifest 0.2 types | V0 |
 | `OpenVTC/openvtc` | `openvtc-core::vetting` (tickets V0, requests, sessions, match code domain, card verify, statement verify/store, requirement checker); first call sites for `presentation.rs`; `MainMenu::Vetting`; Inbox `TaskType`s; Credentials tab; join-flow branch; replace fixed 7-day pending expiry with `decisionSla`; remove the `kernel.org/maintainers` stubs | V0 |
 | `OpenVTC/verifiable-git-infrastructure` | None required — `git-trust/grant` exists; wire the VTC admit effect to it for the kernel instance | V0 config |
-| `OpenVTC/wiki` | Replace the "Two-VRC vouching — target design" text; retire C-DID/M-DID terms | V1 |
+| `OpenVTC/wiki` | Replace the "Two-VRC vouching — target design" text; use the WD02+ terms community DID and member DID throughout | V1 |
 
 ### 14.2 Phases
 
 - **V0 — walking skeleton.** Everything marked V0 above.
   - **Covers:** discovery via manifest only; out-of-band vetter contact
     (agent name / DID / QR); client-side tickets; session + signed card +
-    VEC; submit; `allow` / `requestMore` / `refer` decisions.
+    VSC; submit; `allow` / `requestMore` / `refer` decisions.
   - **Excludes:** directory, push, cascade review, PGP bridge.
   - **Target: 5 Oct 2026** (Prague, ahead of the Kernel Maintainer Summit on
     8 Oct), full V0 scope. That is about 3½ weeks from this draft, so the
@@ -1574,15 +1621,15 @@ modern-signature subgraph only (O7).
 
 | # | Decision | Proposal |
 |---|---|---|
-| D1 | Statement credential type | **VEC** with a registered `IdentityVetting` endorsement type. No new DTG credential type |
+| D1 | Statement credential type | **VSC** (`StatementCredential`) under the registered predicate `https://registry.trustoverip.org/dtg/vsc/vetted/1`. No new DTG credential type |
 | D2 | Card format | **Signed r-card profile (VDS)**, its claims released from the join persona's face by persona disclosure (preview shown, then present), signed as the join persona DID (D19) |
 | D3 | Does the VTC see card/PII? | **No, by default.** Statements + salted commitment only |
 | D4 | Anti-spam default | **Ticket required**; introductions and `open` are vetter opt-ins |
-| D5 | Vetter eligibility | **Materialised as a VTC-issued `vetter` role VEC**, driven by `vetter_eligibility.rego` plus manual grants |
+| D5 | Vetter eligibility | **Materialised as a VTC-issued `role:vetter` VAC**, driven by `vetter_eligibility.rego` plus manual grants |
 | D6 | When evidence is evaluated | **Once, at admission**, recorded; later expiry does not affect membership; revocation → review, not removal |
 | D7 | Vetter identity on statements | **Vetter's member DID** (accountable within the community) |
 | D8 | VRC required between vetter and applicant? | **No** in V0; community option `requireVrc` |
-| D9 | Statement scope | **One community** (`endorsement.community`); cross-community reuse only through explicit recognition policy |
+| D9 | Statement scope | **One community** (`object.value.community`); cross-community reuse only through explicit recognition policy |
 | D10 | Liveness | **Match code required** for every method except `priorAcquaintance` with no session. Recommendation: require it there too |
 | D11 | Document data | **Never transmitted or retained**; the vetter looks, attests, forgets |
 | D12 | Client requirement checker | **Advisory only**; VTC verdict is authoritative |
@@ -1616,9 +1663,9 @@ modern-signature subgraph only (O7).
   vetted is admitted? Closure and accountability vs applicant privacy.
 - **O9 — Spec home for peer tasks.** Top-level `vetting/*` (peer-to-peer,
   not community-hosted — proposed) vs `vtc/vetting/*`.
-- **O10 — VEC edge wording.** Whether the cred task force accepts a
-  vetting exchange, rather than a VRC, as the "edge" the VEC definition
-  presumes.
+- **O10 — Relationship wording.** Whether the cred task force accepts a
+  vetting exchange (cited by `taskContext` + `taskDigestMultibase`), rather
+  than a VRC, as the relationship a `vetted/1` statement rests on.
 - **O11 — Kernel instance numbers.** The kernel VTC still has to pick its own
   `minStatements`, `minByMethod` and `maxStatementAge` for 5 Oct.
 

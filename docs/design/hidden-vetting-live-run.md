@@ -52,7 +52,7 @@ curl -sS -X POST http://localhost:8200/v1/schemas/accepts \
                 "claims": [ { "path": ["givenName"] } ] } ] },
     "vetting": {
       "version": "0.1",
-      "statementType": "https://firstperson.network/endorsements/identity-vetting/0.1",
+      "statementType": "https://registry.trustoverip.org/dtg/vsc/vetted/1",
       "minStatements": 3,
       "minByMethod": { "inPerson": 1 },
       "acceptedMethods": ["inPerson", "video"],

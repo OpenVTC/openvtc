@@ -59,7 +59,7 @@ hands back* and *what the VTC verifies* change.
 
 | Today (V0, named) | Hidden mode (PCS) |
 |---|---|
-| The vetter signs a VEC with `issuer` = its member DID (D7, `vta-sdk/src/vetting/statement.rs`) | The vetter returns a PCS **attestation** plus public statement metadata. No DID of the vetter appears |
+| The vetter signs a Vetting Statement — a VSC (`StatementCredential`, predicate `https://registry.trustoverip.org/dtg/vsc/vetted/1`) — with `issuer` = its member DID (D7, `vta-sdk/src/vetting/statement.rs`) | The vetter returns a PCS **attestation** plus public statement metadata. No DID of the vetter appears |
 | The VTC checks the issuer's member row and `vetter` grant (`vtc-service/src/vetting/mod.rs:371`) | The VTC checks the proof. `φ` ∈ AllowList{`vetter`} under this epoch's `hvk` proves an eligible vetter |
 | `StatementFacts.vetter` = the issuer DID, deduplicated in `requirements::evaluate` (`vta-sdk/src/vetting/requirements.rs:215`) | `StatementFacts.vetter` = the tag `T_j` (multibase). The same function deduplicates, unchanged |
 | `VettingFacts.statements[].issuer` = DID | `issuer` = the tag. **`join.rego` is untouched** |
@@ -148,7 +148,7 @@ anonymous channel. `persona-to-membership-design.md` §4.4 recorded exactly this
 
 ### 4.5 Replay
 
-Attestations are standing endorsements. `ctx_j` pins them to one community, one requirements
+Attestations are standing statements. `ctx_j` pins them to one community, one requirements
 version and one validity window. `ctx_0` pins the proof to the VTC's single-use challenge. The
 VTC also records the tag set per `id`, which is needed for `requestMore` and supplement anyway,
 because the same vetter keeps the same tag across resubmissions.
@@ -429,7 +429,7 @@ Bob (applicant)          Vetter_j (pairwise DID)              VTC
                     ◀── attestation(id, ctx_j = metadata) + metadata
   … repeat until k
   prove(id, usk, atts, ctx_0 = challenge ‖ joinDid-binding)
-  submit {vp(no VECs), vettingProof} ─────────────────────▶ verify_proof (AllowList{vetter}, epoch e|e-1)
+  submit {vp(no VSCs), vettingProof} ─────────────────────▶ verify_proof (AllowList{vetter}, epoch e|e-1)
                                                            → VettingFacts{issuer = T_j …}
                                                            → join.rego (unchanged) → VMC
 ```
@@ -481,7 +481,7 @@ Bob (applicant)          Vetter_j (pairwise DID)              VTC
 
 **Correctness of the design:**
 1. **Never mix named and hidden vetting within one criterion.** A vetter could give Bob both a
-   VEC and a PCS attestation. The VTC cannot tell they come from the same person, so that vetter
+   named Vetting Statement (VSC) and a PCS attestation. The VTC cannot tell they come from the same person, so that vetter
    would count twice. A criterion is either `mode: named` or `mode: hidden`.
 2. **PCS self-exclusion gives no protection here.** It compares keys, and the applicant's `usk`
    is fresh for every application. A vetter who applies under a second persona can attest for
@@ -736,21 +736,21 @@ It does not, and the reason is structural: the hidden path rejoins the named one
 `vetting::vetting_facts`. `join::orchestrate` calls it, gets the same `VettingFacts` shape with a
 tag where each vetter's DID would be, and everything downstream — `requirements::evaluate`,
 `join.rego`, `EffectPlan::Admit`, `ceremony::execute::issue_member_credentials` — is untouched.
-So a live hidden admission already mints the VMC against a revocation slot, the role VEC at the
+So a live hidden admission already mints the VMC against a revocation slot, the role VAC at the
 granted role, and solicits the member's reciprocal VMC, exactly as a named one does. Nothing in
 the hidden branch had to be taught about credentials.
 
 The reference example (`openvtc-core/examples/zkp_reference_flow.rs`) now mints the same three
 in-process, and asserts each proof verifies, that the reciprocal's subject is the community, and
 that its `digestMultibase` matches a digest of the grant **as it arrived** — the wire-form rule
-`DTGCredential::new_member_vmc` exists to enforce. It also asserts no vetter DID appears in any
+`DTGCredential::new_member_vmc_for` exists to enforce. It also asserts no vetter DID appears in any
 of the three.
 
 Deliberately **not** issued on this path, and each for its own reason:
 
 | credential | why not |
 | --- | --- |
-| Vetting statement VEC (`IdentityVettingEndorsement`) | it names its issuer. This is the whole point: the endorsement is still built — it is where the attested facts come from — but never signed and never sent. `presentable_statements()` returns 0. |
+| Vetting Statement VSC (`vetted/1`, `VettedObjectValue`) | it names its issuer. This is the whole point: the statement value (`object.value`) is still built — it is where the attested facts come from — but never signed and never sent. `presentable_statements()` returns 0. |
 | VRC pair | not part of admission on any path; VRCs are the peer relationship layer, and D8 does not require one for V0 membership. Worth stating plainly: a community that required a VRC pair **with its vetters** could not run hidden vetting at all, because a VRC names both ends. |
 | VIC | invitation-gated admission only. |
 | Personhood (VPC / `personhood: true`) | a separate evaluation; `admit` mints the VMC with `personhood = false`. |
@@ -806,7 +806,7 @@ the community's own records.
   count twice in one proof (§13 C2). Across a rotation the same member re-enrols under the new
   label with the *same* identifier, which the test pins.
 - **The grant check is the community's own**, not a list of the minting half's: `vetter_eligible`
-  — membership row, not removed, joined before the grant, live role endorsement — the same
+  — membership row, not removed, joined before the grant, live `role:vetter` VAC — the same
   function the named path calls.
 - **The drip is capped by the issuer.** This closed a real hole: `TokenIssuer::issue` checked the
   label, the tick and every opening proof, and never checked *how many* requests were in the
