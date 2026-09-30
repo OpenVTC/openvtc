@@ -15,11 +15,10 @@ use trust_tasks_rs::TrustTask;
 use uuid::Uuid;
 use vta_sdk::protocols::join_requests::{JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, manifest};
 use vta_sdk::protocols::vetting::{
-    COMMUNITY_ROLE_ENDORSEMENT_TYPE, IDENTITY_VETTING_ENDORSEMENT_TYPE, VETTER_ROLE,
-    VETTING_DECLINE_TYPE, VETTING_REQUEST_ERR_INVALID_TICKET, VETTING_REQUEST_ERR_NOT_ELIGIBLE,
-    VETTING_REQUEST_TYPE, VETTING_SESSION_TYPE, VETTING_VETTER_PROFILE_ERR_NOT_ELIGIBLE,
-    VETTING_VETTER_RESEND_ERR_NOT_GRANTED, VettingMethod, VettingRelationship, VettingRequirements,
-    decline, request, revoke_statement, session, vetters,
+    VETTED_PREDICATE, VETTER_ROLE, VETTING_DECLINE_TYPE, VETTING_REQUEST_ERR_INVALID_TICKET,
+    VETTING_REQUEST_ERR_NOT_ELIGIBLE, VETTING_REQUEST_TYPE, VETTING_SESSION_TYPE,
+    VETTING_VETTER_PROFILE_ERR_NOT_ELIGIBLE, VETTING_VETTER_RESEND_ERR_NOT_GRANTED, VettingMethod,
+    VettingRelationship, VettingRequirements, decline, request, revoke_statement, session, vetters,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::card::sign_card;
@@ -108,21 +107,30 @@ fn the_community_is_its_key() {
     assert_eq!(did(&secret(COMMUNITY_SEED)), COMMUNITY);
 }
 
+/// A community role credential — a VAC conferring `role:<role>` in
+/// `community`'s scope, `issuerScope` public, `maxAttenuation` 0 — signed by
+/// `issuer`. `issuer` other than `community` is a forgery: authority in a scope
+/// the signer does not govern.
+fn role_vac(issuer: &Secret, community: &str, subject: &str, role: &str) -> DTGCredential {
+    let now = Utc::now();
+    DTGCredential::new_vac(
+        did(issuer),
+        dtg_credentials::IssuerScope::Public,
+        subject.to_string(),
+        community.to_string(),
+        vec![vta_sdk::protocols::vetting::role_action(role)],
+        now - chrono::Duration::minutes(1),
+        now + chrono::Duration::days(365),
+    )
+    .unwrap()
+    .with_max_attenuation(0)
+    .unwrap()
+    .with_id(wire::new_id())
+}
+
 /// A community role credential, signed by `issuer`.
 async fn role_credential(issuer: &Secret, community: &str, subject: &str, role: &str) -> Value {
-    let now = Utc::now();
-    let mut credential = DTGCredential::new_vec(
-        did(issuer),
-        subject.to_string(),
-        now - chrono::Duration::minutes(1),
-        Some(now + chrono::Duration::days(365)),
-        json!({
-            "type": COMMUNITY_ROLE_ENDORSEMENT_TYPE,
-            "role": role,
-            "communityDid": community,
-        }),
-    )
-    .with_id(wire::new_id());
+    let mut credential = role_vac(issuer, community, subject, role);
     credential.sign(issuer, None).await.unwrap();
     serde_json::to_value(&credential).unwrap()
 }
@@ -209,6 +217,13 @@ impl Party {
     }
 
     async fn receive(&mut self, message: &Message, sender: &str) -> Handled {
+        self.try_receive(message, sender)
+            .await
+            .expect("a vetting message is claimed")
+    }
+
+    /// [`Self::receive`] for a message the vetting handler may not claim at all.
+    async fn try_receive(&mut self, message: &Message, sender: &str) -> Option<Handled> {
         let resolver = TrustTaskVmResolver::did_key_only();
         let did_resolver = did_resolver().await;
         // As the dispatcher does off the loop: a delivered credential is
@@ -223,9 +238,7 @@ impl Party {
             recipient: Some((self.persona, &self.did)),
             now: Utc::now(),
         };
-        handle(&mut self.book, &ctx, &mut self.seen, message, sender)
-            .await
-            .expect("a vetting message is claimed")
+        handle(&mut self.book, &ctx, &mut self.seen, message, sender).await
     }
 
     /// [`Self::receive`], with the community answer already checked off the
@@ -270,7 +283,7 @@ async fn signed(mut document: TrustTask<Value>, signer: &Secret) -> Message {
 fn requirements() -> VettingRequirements {
     serde_json::from_value(json!({
         "version": "0.1",
-        "statementType": IDENTITY_VETTING_ENDORSEMENT_TYPE,
+        "statementType": VETTED_PREDICATE,
         "minStatements": 1,
         "minByMethod": { "inPerson": 1 },
         "acceptedMethods": ["inPerson", "video"],
@@ -538,6 +551,13 @@ async fn in_session(applicant: &mut Party, vetter: &mut Party) -> (String, Trust
         &body,
     )
     .unwrap();
+    // The statement cites this document by task digest, which leaves out the
+    // proof — so the unsigned document digests the same as the signed one the
+    // applicant receives.
+    vetter
+        .book
+        .record_session_document(&request_id, serde_json::to_value(&doc).unwrap())
+        .unwrap();
     (request_id, doc)
 }
 
@@ -918,11 +938,13 @@ async fn a_member_the_community_has_not_named_cannot_vet() {
 async fn a_vetter_grant_is_kept_only_from_its_community() {
     let mut member = Party::new(5).member_of(COMMUNITY);
     let impostor = secret(0xC1);
+    // Authority in a scope the signer does not govern is not a community role
+    // credential at all, so the vetting handler does not even claim it.
     let forged = role_credential(&impostor, COMMUNITY, &member.did.clone(), VETTER_ROLE).await;
     let handled = member
-        .receive(&delivery(&forged, &impostor).await, &did(&impostor))
+        .try_receive(&delivery(&forged, &impostor).await, &did(&impostor))
         .await;
-    assert!(handled.notice.is_none() && member.book.vetter_grants.is_empty());
+    assert!(handled.is_none_or(|h| h.notice.is_none()) && member.book.vetter_grants.is_empty());
 
     let for_someone_else = role_credential(
         &secret(COMMUNITY_SEED),
@@ -1614,22 +1636,9 @@ async fn a_manifest_answers_whoever_asked_and_brings_the_communitys_branding() {
 }
 
 /// A community role credential carrying a status list entry, signed by
-/// `issuer`. `DTGCredential` does not model `credentialStatus`, so the
-/// credential is signed as JSON.
+/// `issuer`. Signed as JSON, as a community's own signer does.
 async fn role_credential_with_status(issuer: &Secret, subject: &str) -> Value {
-    let now = Utc::now();
-    let credential = DTGCredential::new_vec(
-        did(issuer),
-        subject.to_string(),
-        now - Duration::minutes(1),
-        Some(now + Duration::days(365)),
-        json!({
-            "type": COMMUNITY_ROLE_ENDORSEMENT_TYPE,
-            "role": VETTER_ROLE,
-            "communityDid": COMMUNITY,
-        }),
-    )
-    .with_id(wire::new_id());
+    let credential = role_vac(issuer, COMMUNITY, subject, VETTER_ROLE);
     let mut value = serde_json::to_value(&credential).unwrap();
     value.as_object_mut().unwrap().remove("proof");
     value["credentialStatus"] = json!({

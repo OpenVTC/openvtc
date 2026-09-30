@@ -408,8 +408,15 @@ impl ProtectedConfig {
     /// the post-decrypt half of [`load`](Self::load), split out so the
     /// deserializer can be exercised directly (e.g. by fuzz harnesses) without a
     /// keyring or real keys.
+    ///
+    /// Credentials stored by an earlier build that do not conform to DTG
+    /// Credentials v1 are set aside here, each with a logged reason and a
+    /// notice the UI shows (see [`crate::dtg`]); relationship credentials and
+    /// tasks do the same as they deserialize ([`Vrcs`]).
     pub fn parse(plaintext: &[u8]) -> Result<ProtectedConfig, OpenVTCError> {
-        Ok(serde_json::from_slice(plaintext)?)
+        let mut config: ProtectedConfig = serde_json::from_slice(plaintext)?;
+        config.vetting.retire_nonconformant();
+        Ok(config)
     }
 
     pub fn get_seed(

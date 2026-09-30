@@ -456,6 +456,11 @@ pub struct VettingBook {
     /// enrolled under*, which must not move beneath a credential we already hold.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub hidden_published: std::collections::BTreeMap<String, super::hidden::HiddenParams>,
+    /// What [`Self::retire_nonconformant`] set aside, one sentence each, for the
+    /// Vetting page. Persisted so the notice survives the save that drops the
+    /// credentials, and cleared by the operator ([`Self::clear_retired`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<String>,
     /// Questions put to communities and not yet answered. Memory only — see
     /// [`super::queries`].
     #[serde(skip)]
@@ -472,6 +477,76 @@ pub struct VettingBook {
 }
 
 impl VettingBook {
+    /// Set aside every stored vetting credential that does not conform to DTG
+    /// Credentials v1, and say so in [`Self::retired`]. Run once on load
+    /// (`ProtectedConfig::parse`).
+    ///
+    /// Two stores hold credentials:
+    ///
+    /// - **vetter grants** — the community role credential we present to
+    ///   applicants. A pre-v1 one (a role endorsement credential) is refused by
+    ///   every applicant under the current specification, so presenting it only
+    ///   produces `notEligible` at the far end. Dropped; the community has to
+    ///   grant the role again, as a VAC.
+    /// - **held statements** — the Vetting Statements an application collected.
+    ///   A pre-v1 statement is not a `vetted/1` VSC and a community will not
+    ///   count it. Dropped; the application asks for vetting again.
+    ///
+    /// What we *issued* as a vetter is kept: it records an id and a digest for
+    /// withdrawal, not a credential.
+    ///
+    /// Returns how many were set aside.
+    pub fn retire_nonconformant(&mut self) -> usize {
+        let mut notes = Vec::new();
+        self.vetter_grants.retain(|grant| {
+            match crate::dtg::nonconformance(&grant.credential) {
+                None => true,
+                Some(reason) => {
+                    tracing::warn!(
+                        community = %grant.community,
+                        %reason,
+                        "dropping a stored vetter role credential that does not conform to DTG Credentials v1"
+                    );
+                    notes.push(format!(
+                        "Your vetter role credential from {} pre-dates DTG Credentials v1 and \
+                         was set aside. Ask the community to grant the vetter role again.",
+                        grant.community
+                    ));
+                    false
+                }
+            }
+        });
+        for application in &mut self.applications {
+            let community = application.community.clone();
+            application.statements.retain(|held| {
+                match crate::dtg::nonconformance(&held.credential) {
+                    None => true,
+                    Some(reason) => {
+                        tracing::warn!(
+                            %community,
+                            vetter = %held.vetter,
+                            %reason,
+                            "dropping a stored vetting statement that does not conform to DTG Credentials v1"
+                        );
+                        notes.push(format!(
+                            "A vetting statement from {} for {community} pre-dates DTG \
+                             Credentials v1 and was set aside. Ask to be vetted again.",
+                            held.vetter
+                        ));
+                        false
+                    }
+                }
+            });
+        }
+        let count = notes.len();
+        for note in notes {
+            if !self.retired.contains(&note) {
+                self.retired.push(note);
+            }
+        }
+        count
+    }
+
     /// Our hidden-vetting engine for `community` and `persona`, if one has been enrolled.
     #[must_use]
     pub fn hidden_vetter(&self, community: &str, persona: PersonaId) -> Option<&HiddenVetterState> {
@@ -600,6 +675,7 @@ impl VettingBook {
             && self.vetter_grants.is_empty()
             && self.communities.is_empty()
             && self.vetter_profiles.is_empty()
+            && self.retired.is_empty()
             && self.extra.is_empty()
     }
 
@@ -611,11 +687,20 @@ impl VettingBook {
             if existing.credential == grant.credential {
                 return false;
             }
+            let community = grant.community.clone();
             *existing = grant;
+            self.clear_retired_for(&community);
         } else {
+            self.clear_retired_for(&grant.community.clone());
             self.vetter_grants.push(grant);
         }
         true
+    }
+
+    /// Drop the [`Self::retired`] notices about `community` once a conformant
+    /// replacement from it has been stored.
+    pub fn clear_retired_for(&mut self, community: &str) {
+        self.retired.retain(|note| !note.contains(community));
     }
 
     /// `persona`'s live vetter grant from `community`.
@@ -1175,7 +1260,7 @@ mod tests {
     ) -> manifest::v0_2::Response {
         let requirements: VettingRequirements = serde_json::from_value(serde_json::json!({
             "version": "0.1",
-            "statementType": vta_sdk::protocols::vetting::IDENTITY_VETTING_ENDORSEMENT_TYPE,
+            "statementType": vta_sdk::protocols::vetting::VETTED_PREDICATE,
             "minStatements": 1,
             "acceptedMethods": ["inPerson"],
             "requiredClaims": ["name.legal"],
@@ -1443,6 +1528,48 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&book).unwrap()["vetterDirectory"]["listed"],
             true
+        );
+    }
+
+    /// A pre-v1 vetter grant is set aside on load with a notice, a conformant
+    /// one stays, and a conformant replacement clears the notice.
+    #[test]
+    fn a_pre_v1_vetter_grant_is_set_aside_with_a_notice() {
+        let community = "did:example:kernel";
+        let grant = |credential: serde_json::Value| VetterGrant {
+            community: community.to_string(),
+            persona: PersonaId::new(),
+            credential_id: None,
+            valid_until: None,
+            received_at: Utc::now(),
+            credential,
+        };
+        let mut book = VettingBook::default();
+        book.vetter_grants
+            .push(grant(crate::dtg::fixtures::retired_role_endorsement(
+                community,
+                "did:example:m",
+            )));
+        book.vetter_grants
+            .push(grant(crate::dtg::fixtures::role_vac(
+                "did:example:other",
+                "did:example:m",
+                "vetter",
+            )));
+        assert_eq!(book.retire_nonconformant(), 1);
+        assert_eq!(book.vetter_grants.len(), 1);
+        assert_eq!(book.retired.len(), 1);
+        assert!(book.retired[0].contains(community));
+        assert!(!book.is_empty());
+
+        book.keep_vetter_grant(grant(crate::dtg::fixtures::role_vac(
+            community,
+            "did:example:m",
+            "vetter",
+        )));
+        assert!(
+            book.retired.is_empty(),
+            "the replacement answers the notice"
         );
     }
 }

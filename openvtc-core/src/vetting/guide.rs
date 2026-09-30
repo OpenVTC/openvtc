@@ -145,7 +145,7 @@ mod tests {
     fn requirements() -> VettingRequirements {
         serde_json::from_value(serde_json::json!({
             "version": "0.1",
-            "statementType": vta_sdk::protocols::vetting::IDENTITY_VETTING_ENDORSEMENT_TYPE,
+            "statementType": vta_sdk::protocols::vetting::VETTED_PREDICATE,
             "minStatements": 2,
             "minByMethod": { "inPerson": 1 },
             "acceptedMethods": ["inPerson", "video", "priorAcquaintance"],

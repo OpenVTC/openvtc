@@ -43,7 +43,7 @@ use vta_sdk::protocols::vetting::{
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::eligibility::{
-    EligibilityExpectations, community_role, verify_eligibility_vp,
+    EligibilityExpectations, community_roles, verify_eligibility_vp,
 };
 
 use super::applicant::{GrantStatus, VetterEligibility};
@@ -909,7 +909,15 @@ async fn session(
         warn!(%sender, "vetting session for a community we are not applying to");
         return Handled::default();
     };
-    match application.on_session(&opened.document.id, sender, opened.payload, ctx.now) {
+    // The body is the signed document as it arrived: the statement that
+    // closes this session cites its task digest, so it is kept verbatim.
+    match application.on_session(
+        &opened.document.id,
+        &message.body,
+        sender,
+        opened.payload,
+        ctx.now,
+    ) {
         Ok(session) => Handled {
             changed: true,
             notice: Some(Notice::SessionOpened {
@@ -1006,8 +1014,8 @@ async fn statement(
     // every `issue` as a signed document, the credential under `payload`.
     let issued = crate::messaging::credential_in_issue(message);
     if let Some(credential) = issued.as_ref()
-        && let Some((community, role)) = community_role(credential)
-        && role_matches(&role, VETTER_ROLE)
+        && let Some((community, roles)) = community_roles(credential)
+        && roles.iter().any(|role| role_matches(role, VETTER_ROLE))
     {
         // The delivery first: signed by the community that sent it, under
         // `authentication`. A grant that arrives any other way is not the
@@ -1060,6 +1068,9 @@ async fn statement(
             .await
         {
             Ok(held) => {
+                let community = application.community.clone();
+                book.retired
+                    .retain(|note| !(note.contains(&community) && note.contains(sender)));
                 return Some(Handled {
                     changed: true,
                     notice: Some(Notice::StatementReceived {

@@ -406,7 +406,7 @@ pub fn statement_meta(
     community: &str,
     requirements_digest: &str,
 ) -> StatementMeta {
-    let e = &draft.endorsement;
+    let e = &draft.value;
     StatementMeta {
         community: community.to_string(),
         requirements_digest: requirements_digest.to_string(),
@@ -738,8 +738,7 @@ mod tests {
             "2026-09",
             json!({
                 "version": "0.1",
-                "statementType":
-                    "https://firstperson.network/endorsements/identity-vetting/0.1",
+                "statementType": vta_sdk::protocols::vetting::VETTED_PREDICATE,
                 "minStatements": 3,
                 "acceptedMethods": ["inPerson", "video"],
                 "eligibleVetters": { "role": "vetter" }
@@ -753,7 +752,7 @@ mod tests {
             "id": "kernel-developer",
             "vetting": {
                 "version": "0.1",
-                "statementType": "https://firstperson.network/endorsements/identity-vetting/0.1",
+                "statementType": vta_sdk::protocols::vetting::VETTED_PREDICATE,
                 "minStatements": 3,
                 "acceptedMethods": ["inPerson", "video"],
                 "eligibleVetters": { "role": "vetter" },

@@ -664,14 +664,19 @@ pub fn delivered_statement(body: &Value) -> Option<&Value> {
 }
 
 /// The identity-vetting statement at `credential_response.credential` in an
-/// issue payload, if that is what it holds.
+/// issue payload, if that is what it holds: a statement credential whose
+/// `credentialSubject.predicate` is the registry's `vetted/1` predicate.
+///
+/// Classified by predicate, never by a type string — a VSC's meaning is its
+/// predicate. This only claims the delivery for the vetting handler; the
+/// statement is parsed and verified in full by `verify_statement`.
 #[must_use]
 pub fn statement_in(payload: &Value) -> Option<&Value> {
     let credential = payload.pointer("/credential_response/credential")?;
     (credential
-        .pointer("/credentialSubject/endorsement/type")
+        .pointer("/credentialSubject/predicate")
         .and_then(Value::as_str)
-        == Some(vta_sdk::protocols::vetting::IDENTITY_VETTING_ENDORSEMENT_TYPE))
+        == Some(vta_sdk::protocols::vetting::VETTED_PREDICATE))
     .then_some(credential)
 }
 
@@ -933,9 +938,9 @@ pub(crate) mod tests {
 
     fn a_statement() -> Value {
         json!({
-            "credentialSubject": { "endorsement": {
-                "type": vta_sdk::protocols::vetting::IDENTITY_VETTING_ENDORSEMENT_TYPE
-            } }
+            "credentialSubject": {
+                "predicate": vta_sdk::protocols::vetting::VETTED_PREDICATE
+            }
         })
     }
 

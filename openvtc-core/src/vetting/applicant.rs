@@ -338,7 +338,7 @@ pub enum RequestState {
         /// The vetter's handle.
         request_id: String,
         /// The open session.
-        session: OpenSession,
+        session: Box<OpenSession>,
         /// The card we sent, once we have.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         card: Option<SentCard>,
@@ -389,6 +389,12 @@ pub struct OpenSession {
     pub expires_at: DateTime<Utc>,
     /// The code both people read aloud.
     pub match_code: String,
+    /// The signed `vetting/session` document as it arrived. A statement for
+    /// this session must cite it — `taskContext` its `id`, `taskDigestMultibase`
+    /// its task digest — or it is not the statement for this session.
+    /// `None` on a session recorded before statements carried the digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<Box<Value>>,
 }
 
 /// The card we sent into a session.
@@ -848,9 +854,13 @@ impl Application {
     ///
     /// A malformed or expired session, one for another community, or one for
     /// a request this vetter never accepted.
+    ///
+    /// `document` is the signed session document exactly as received; it is
+    /// kept, because the statement that closes the session cites its digest.
     pub fn on_session(
         &mut self,
         session_document_id: &str,
+        document: &Value,
         vetter: &str,
         body: session::v0_1::Payload,
         now: DateTime<Utc>,
@@ -890,10 +900,11 @@ impl Application {
                 .collect(),
             expires_at: body.expires_at,
             match_code: vetting_match_code(session_document_id),
+            document: Some(Box::new(document.clone())),
         };
         request.state = RequestState::Session {
             request_id: body.request_id.as_str().to_string(),
-            session: session.clone(),
+            session: Box::new(session.clone()),
             card: None,
         };
         request.updated_at = now;
@@ -905,7 +916,7 @@ impl Application {
     pub fn session(&self, session_id: &str) -> Option<(&str, &OpenSession)> {
         self.requests.iter().find_map(|r| match &r.state {
             RequestState::Session { session, .. } if session.id == session_id => {
-                Some((r.vetter.as_str(), session))
+                Some((r.vetter.as_str(), &**session))
             }
             _ => None,
         })
@@ -1156,7 +1167,7 @@ impl Application {
         if verified.subject() != self.join_did {
             return Err(ApplicantError::Binding("subject"));
         }
-        let endorsement = verified.endorsement();
+        let endorsement = verified.value();
         if endorsement.community != self.community {
             return Err(ApplicantError::Binding("community"));
         }
@@ -1173,11 +1184,21 @@ impl Application {
             })
             .ok_or(ApplicantError::NoMatchingRequest)?;
         let RequestState::Session {
-            request_id, card, ..
+            request_id,
+            card,
+            session,
         } = &request.state
         else {
             unreachable!("matched a session above");
         };
+        // `vetted/1` REQUIRES the statement to cite the session by digest as
+        // well as by id: an `id` locates the exchange, only the digest binds
+        // the statement to the document we were actually shown.
+        let document = session
+            .document
+            .as_ref()
+            .ok_or(ApplicantError::Binding("taskDigestMultibase"))?;
+        verified.check_against_session(document)?;
         let card = card
             .as_ref()
             .ok_or(ApplicantError::WrongState("take a statement before a card"))?;
