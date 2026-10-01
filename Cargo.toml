@@ -48,7 +48,22 @@ openvtc-core = { version = "0.3", path = "openvtc-core", default-features = fals
 # round-trips a grant losslessly — the old hazard that digesting a parsed grant
 # dropped `credentialStatus` (guarded by a test in `members.rs`) is closed at the
 # library.
-dtg-credentials = "0.9.1"
+#
+# **0.12 is DTG Credentials v1, and nothing crosses it.** The `@context` is
+# `https://registry.trustoverip.org/dtg/context/v1` (the `firstperson.network`
+# context is refused, no alias), `issuerScope` is REQUIRED, `type` carries
+# exactly one concrete subtype, and the endorsement / witness types are
+# statements (VSCs) under registry predicates. A 0.12 verifier refuses every
+# credential 0.11 emitted and the reverse, so the whole stack (VTI, trust-tasks,
+# this client) moves together; `openvtc-core::dtg` is where the client's side of
+# it lives, and credentials an older build stored are set aside on load there.
+# It crosses 0.10 and 0.11 too (`new_member_vmc` -> `new_member_vmc_for`,
+# `taskDigestMultibase`).
+#
+# The requirement reads "0.11" only because the unreleased 0.12 is still
+# versioned 0.11.0 in its worktree and the patch block at the bottom has to
+# match it. Raise it to "0.12" when 0.12 is published, as the patch comes out.
+dtg-credentials = "0.12"
 
 aes-gcm = "0.11"
 # The one direct requirement in this workspace that was behind its latest
@@ -70,7 +85,7 @@ argon2 = "0.6"
 #
 # 0.18 -> 0.20 follows `vta-sdk` 0.53 -> 0.56 below, the release that declares
 # `affinidi-tdk ^0.20`.
-affinidi-tdk = "0.20"
+affinidi-tdk = "0.21"
 affinidi-data-integrity = "0.7"
 # Decodes a community's Bitstring Status List. Already in the graph through
 # `vta-sdk`, whose status reader cannot verify a list signed with a proof set;
@@ -115,7 +130,7 @@ affinidi-messaging-core = "0.1.11"
 # geometric reconnect cascade behind `#231`–`#234`; and 0.19.4 (#694) was the
 # `live_stream_next*` read guard that blocked `stop_websocket` for the remainder
 # of a 10s poll window.
-affinidi-messaging-sdk = "0.30.0"
+affinidi-messaging-sdk = "0.31.0"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
@@ -364,8 +379,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # `trust-tasks-rs ^0.24.2`, so this line moves with it — the same follow, not
 # lead, discipline this note has kept since 0.4. `trust-tasks-capability-client`
 # moves to 0.24.2 alongside it for the same re-exported-`TrustTask` reason.
-trust-tasks-rs = { version = "0.24.2", features = ["git-ns"] }
-trust-tasks-capability-client = "0.24.2"
+#
+# **0.24.8**, following `vta-sdk` 0.57: the DTG VSC conformance specs
+# (trustoverip/dtgwg-trust-tasks-tf#691). `roleVec` is `roleVac` in the
+# decide / personhood / renew / rotate responses, the vetting specs carry
+# `vetted/1` statements and role VACs, and `vtc/endorsements/issue` gains
+# `predicateNotIssuable`.
+trust-tasks-rs = { version = "0.25.0", features = ["git-ns"] }
+trust-tasks-capability-client = "0.25.0"
 tui-input = "0.15"
 url = "2.5"
 uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
@@ -515,11 +536,19 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # node as everything else here. Check `cargo tree -d` after any
 # `cargo update` rather than assuming it stays closed.
 #
+# **0.57** is the DTG Credentials v1 release: vetting statements are `vetted/1`
+# VSCs built from the `vetting/session` document (`StatementDraft::session`,
+# `issuer_scope`, `value`), role credentials are community VACs
+# (`eligibility::community_roles`, `role_action`), and `role_vec` is `role_vac`.
+#
+# `did-git-sign` 0.6.0 (VGI 0.6.0) is on `vta-sdk` 0.58, `affinidi-tdk` 0.21 and
+# `trust-tasks` 0.25, so the graph holds one copy of each again.
+#
 # `vta-service` is a separate matter this cycle: see the `vta-service` note in
 # `openvtc-core/Cargo.toml` for why that pin stays at 0.43.0 rather than
 # following `vta-sdk` here to 0.56 — 0.44.0 is broken independent of what
 # `vta-sdk` line it is paired with.
-vta-sdk = { version = "0.56.0", features = [
+vta-sdk = { version = "0.58.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
@@ -600,3 +629,4 @@ strip = "symbols"
 # places, and writing down here what has to happen for it to leave again — the
 # entries removed each carried that note, and it is the only reason this unwind
 # and the one before it were tractable.
+

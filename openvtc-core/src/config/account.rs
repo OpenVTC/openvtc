@@ -370,9 +370,13 @@ pub struct CommunityRecord {
     pub vrcs_received: Vrcs,
     /// Verifiable credentials this VTC has issued to us, keyed by
     /// [`CredentialKind`]. The membership credential (VMC) lands here on
-    /// admission and activates the membership; the role endorsement (VEC)
-    /// arrives alongside. Stored as the signed W3C VC JSON. Empty until the
-    /// join is accepted and credentials arrive (R-B-8).
+    /// admission and activates the membership; the role credential (a
+    /// community VAC) arrives alongside. Stored as the signed W3C VC JSON. Empty
+    /// until the join is accepted and credentials arrive (R-B-8).
+    ///
+    /// Only conformant DTG credentials are held here: one stored by an earlier
+    /// build in a pre-v1 shape is moved to
+    /// [`retired_credentials`](Self::retired_credentials) on load.
     ///
     /// Persisted as a JSON object keyed by [`CredentialKind::config_key`].
     /// Configs written before R19 used flat `membership_credential` /
@@ -417,6 +421,17 @@ pub struct CommunityRecord {
     /// [`RelationshipIdentifierDefault`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relationship_identifier_default: Option<RelationshipIdentifierDefault>,
+
+    /// Credentials this membership held that do not conform to the current DTG
+    /// Credentials specification — the retired pre-v1 context, no
+    /// `issuerScope`, a retired type such as the pre-v1 role endorsement —
+    /// and were set aside on load. See [`RetiredCredential`].
+    ///
+    /// The credential itself is not kept: a non-conformant credential is not
+    /// one this client may present or answer, and holding it would only invite
+    /// that. What is kept is enough to tell the member what went and what to do.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_credentials: Vec<RetiredCredential>,
 
     /// Fields written by a newer build, preserved verbatim (D19). See
     /// [`Account::extra`] for why.
@@ -472,6 +487,8 @@ struct CommunityRecordShadow {
     decision: Option<DecisionEvidence>,
     #[serde(default)]
     relationship_identifier_default: Option<RelationshipIdentifierDefault>,
+    #[serde(default)]
+    retired_credentials: Vec<RetiredCredential>,
     // Legacy pre-R19 flat fields, folded into `credentials` below.
     #[serde(default)]
     membership_credential: Option<serde_json::Value>,
@@ -504,9 +521,44 @@ impl From<CommunityRecordShadow> for CommunityRecord {
         if let Some(vmc) = shadow.membership_credential {
             credentials.entry(CredentialKind::Membership).or_insert(vmc);
         }
-        if let Some(vec) = shadow.role_credential {
-            credentials.entry(CredentialKind::Role).or_insert(vec);
+        if let Some(role) = shadow.role_credential {
+            credentials.entry(CredentialKind::Role).or_insert(role);
         }
+        // Hold every stored credential to the current specification. A pre-v1
+        // one is set aside with its reason rather than kept (a verifier would
+        // refuse it) or allowed to fail the load (one stale credential must not
+        // lock the member out of their config).
+        let mut retired_credentials = shadow.retired_credentials;
+        let now = Utc::now();
+        credentials.retain(|kind, vc| match crate::dtg::nonconformance(vc) {
+            None => true,
+            Some(reason) => {
+                RetiredCredential::record(
+                    &mut retired_credentials,
+                    kind.config_key(),
+                    vc,
+                    reason,
+                    now,
+                );
+                false
+            }
+        });
+        let member_vmc = match shadow.member_vmc {
+            Some(vc) => match crate::dtg::nonconformance(&vc) {
+                None => Some(vc),
+                Some(reason) => {
+                    RetiredCredential::record(
+                        &mut retired_credentials,
+                        RetiredCredential::MEMBER_ACKNOWLEDGEMENT,
+                        &vc,
+                        reason,
+                        now,
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
         CommunityRecord {
             // D19: carry forward whatever a newer build wrote.
             extra: shadow.extra,
@@ -528,10 +580,86 @@ impl From<CommunityRecordShadow> for CommunityRecord {
             vrcs_issued: shadow.vrcs_issued,
             vrcs_received: shadow.vrcs_received,
             credentials,
-            member_vmc: shadow.member_vmc,
+            member_vmc,
             decision: shadow.decision,
             relationship_identifier_default: shadow.relationship_identifier_default,
+            retired_credentials,
         }
+    }
+}
+
+/// A credential a membership held that was set aside on load because it does
+/// not conform to the current DTG Credentials specification.
+///
+/// # Why credentials are set aside, not migrated
+///
+/// DTG Credentials v1 makes every credential issued before it non-conformant:
+/// the context changed (`https://registry.trustoverip.org/dtg/context/v1`, with
+/// no alias for the old one), `issuerScope` became REQUIRED, and the role endorsement
+/// credential was retired in favour of a community VAC. Every
+/// digest changed with them. A stored credential cannot be rewritten into the
+/// new shape — its proof covers the old bytes, and only its issuer can sign new
+/// ones — so the only honest options were to keep it (and present something
+/// every current verifier refuses) or to drop it. It is dropped, **explicitly**:
+///
+/// - a `warn!` naming the membership, the kind and the parse error is logged;
+/// - this record is persisted on the membership, so the member sees what went
+///   and why in the Communities view, which asks them to have the community
+///   re-issue it (its `vtc/members/renew` re-issues the VMC and role VAC);
+/// - a conformant credential of the same kind arriving later clears it
+///   ([`CommunityRecord::clear_retired`]).
+///
+/// The member's own acknowledgement (`member_vmc`) is held to the same rule; it
+/// digests the grant it acknowledges, so once the grant is re-issued a fresh one
+/// is owed anyway.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetiredCredential {
+    /// [`CredentialKind::config_key`] of what it was stored as, or
+    /// [`Self::MEMBER_ACKNOWLEDGEMENT`] for our own acknowledgement.
+    pub kind: String,
+    /// The credential's `id`, when it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    /// Why it does not conform, as `dtg-credentials` put it.
+    pub reason: String,
+    /// When it was set aside.
+    pub retired_at: DateTime<Utc>,
+}
+
+impl RetiredCredential {
+    /// [`Self::kind`] of the member-issued acknowledgement VMC.
+    pub const MEMBER_ACKNOWLEDGEMENT: &'static str = "Acknowledgement";
+
+    fn record(
+        into: &mut Vec<RetiredCredential>,
+        kind: &str,
+        vc: &serde_json::Value,
+        reason: String,
+        now: DateTime<Utc>,
+    ) {
+        let credential_id = vc
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        tracing::warn!(
+            credential_kind = %kind,
+            credential_id = credential_id.as_deref().unwrap_or("-"),
+            %reason,
+            "setting aside a stored credential that does not conform to DTG Credentials v1 — \
+             the community must re-issue it"
+        );
+        if into
+            .iter()
+            .any(|r| r.kind == kind && r.credential_id == credential_id)
+        {
+            return;
+        }
+        into.push(RetiredCredential {
+            kind: kind.to_string(),
+            credential_id,
+            reason,
+            retired_at: now,
+        });
     }
 }
 
@@ -547,6 +675,14 @@ pub const PENDING_TIMEOUT_DAYS: i64 = 7;
 pub const PENDING_ACK_GRACE_SECS: i64 = 120;
 
 impl CommunityRecord {
+    /// Clear the [`RetiredCredential`] notices of `kind` (a
+    /// [`CredentialKind::config_key`] or
+    /// [`RetiredCredential::MEMBER_ACKNOWLEDGEMENT`]) once a conformant
+    /// replacement has been stored.
+    pub fn clear_retired(&mut self, kind: &str) {
+        self.retired_credentials.retain(|r| r.kind != kind);
+    }
+
     /// Build a fresh `Pending` join record (State-B join request, R-B-*).
     ///
     /// `request_id` correlates the VTC's asynchronous accept/reject decision
@@ -591,6 +727,7 @@ impl CommunityRecord {
             // Unknown until the community's profile is read (issue #241);
             // `None` seeds the pairwise default.
             relationship_identifier_default: None,
+            retired_credentials: Vec::new(),
         }
     }
 
@@ -1224,6 +1361,7 @@ mod tests {
             member_vmc: None,
             decision: None,
             relationship_identifier_default: None,
+            retired_credentials: Vec::new(),
         }
     }
 
@@ -1288,9 +1426,12 @@ mod tests {
 
     /// Pre-R19 configs stored credentials as flat `membership_credential` /
     /// `role_credential` fields. They must still load, folded into the typed
-    /// `credentials` registry (config round-trip — no migration).
+    /// `credentials` registry (config round-trip — no migration) — and, like
+    /// any stored credential, held to DTG Credentials v1 once folded in.
     #[test]
     fn legacy_flat_credential_fields_load_into_registry() {
+        let mut vmc = crate::dtg::fixtures::grant("did:webvh:vtc.example", "did:webvh:m");
+        vmc["id"] = "vmc-1".into();
         let legacy = serde_json::json!({
             "vtc_did": "did:webvh:vtc.example",
             "display_name": "Example VTC",
@@ -1299,8 +1440,10 @@ mod tests {
             "status": { "state": "active" },
             "member_since": null,
             "requested_at": null,
-            "membership_credential": { "type": ["MembershipCredential"], "id": "vmc-1" },
-            "role_credential": { "type": ["EndorsementCredential"], "id": "vec-1" },
+            "membership_credential": vmc,
+            "role_credential": crate::dtg::fixtures::retired_role_endorsement(
+                "did:webvh:vtc.example", "did:webvh:m"
+            ),
         });
         let rec: CommunityRecord = serde_json::from_value(legacy).unwrap();
         assert_eq!(
@@ -1310,13 +1453,59 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("vmc-1"),
         );
+        // The pre-v1 role endorsement is set aside, with its reason, not kept.
+        assert!(!rec.credentials.contains_key(&CredentialKind::Role));
+        assert_eq!(rec.retired_credentials.len(), 1);
+        assert_eq!(rec.retired_credentials[0].kind, "Role");
+    }
+
+    /// A stored credential that pre-dates DTG Credentials v1 neither fails the
+    /// load nor survives it: it is set aside, the reason is kept for the UI, the
+    /// notice survives a save, and a conformant replacement clears it.
+    #[test]
+    fn pre_v1_stored_credentials_are_set_aside_explicitly() {
+        let vtc = "did:webvh:vtc.example";
+        let mut old_vmc = crate::dtg::fixtures::grant(vtc, "did:webvh:m");
+        old_vmc["@context"][1] = crate::dtg::fixtures::RETIRED_CONTEXT.into();
+        old_vmc.as_object_mut().unwrap().remove("issuerScope");
+        let stored = serde_json::json!({
+            "vtc_did": vtc,
+            "display_name": null,
+            "sub_context_id": "openvtc/x",
+            "persona_ref": PersonaId::new().0,
+            "status": { "state": "active" },
+            "member_since": null,
+            "requested_at": null,
+            "credentials": {
+                "Membership": old_vmc,
+                "Role": crate::dtg::fixtures::retired_role_endorsement(vtc, "did:webvh:m"),
+            },
+            "member_vmc": { "type": ["VerifiableCredential", "MembershipCredential"] },
+        });
+        let mut rec: CommunityRecord = serde_json::from_value(stored).expect("loads");
+        assert!(rec.credentials.is_empty());
+        assert!(rec.member_vmc.is_none());
+        let kinds: Vec<&str> = rec
+            .retired_credentials
+            .iter()
+            .map(|r| r.kind.as_str())
+            .collect();
         assert_eq!(
-            rec.credentials
-                .get(&CredentialKind::Role)
-                .and_then(|v| v.get("id"))
-                .and_then(|v| v.as_str()),
-            Some("vec-1"),
+            kinds,
+            [
+                "Membership",
+                "Role",
+                RetiredCredential::MEMBER_ACKNOWLEDGEMENT
+            ]
         );
+        assert!(rec.retired_credentials.iter().all(|r| !r.reason.is_empty()));
+
+        let saved = serde_json::to_value(&rec).unwrap();
+        let again: CommunityRecord = serde_json::from_value(saved).unwrap();
+        assert_eq!(again.retired_credentials, rec.retired_credentials);
+
+        rec.clear_retired("Role");
+        assert_eq!(rec.retired_credentials.len(), 2);
     }
 
     /// The new `credentials` object round-trips, serializes under stable
@@ -1328,10 +1517,9 @@ mod tests {
             PersonaId::new(),
             CommunityStatus::Active,
         );
-        rec.credentials.insert(
-            CredentialKind::Membership,
-            serde_json::json!({ "id": "vmc-1" }),
-        );
+        let mut vmc = crate::dtg::fixtures::grant("did:webvh:vtc.example", "did:webvh:m");
+        vmc["id"] = "vmc-1".into();
+        rec.credentials.insert(CredentialKind::Membership, vmc);
 
         let json = serde_json::to_value(&rec).unwrap();
         assert!(

@@ -9,7 +9,9 @@
 //! credentials and the Vetting Cards carry real Data Integrity proofs, and the identity
 //! commitment and card digest bound into each attestation are the ones the ceremony computed.
 //! Admission mints the same credentials `vtc-service` mints — the community's VMC against a
-//! revocation slot, the role VEC, and the member's own reciprocal VMC that closes the edge.
+//! revocation slot, the member's role VAC, and the member's own reciprocal VMC that closes the
+//! edge. Every one is a DTG Credentials v1 credential: the `https://registry.trustoverip.org/dtg/context/v1`
+//! context, a declared `issuerScope`, exactly one concrete type.
 //!
 //! Every credential is emitted in full, so the output doubles as a test-vector set: each VC is
 //! self-contained and verifies against the `did:key` in its `issuer` with no network.
@@ -52,8 +54,8 @@ use openvtc_vetting_pcs::{
 use rand::{SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
 use vta_sdk::protocols::vetting::{
-    COMMUNITY_ROLE_ENDORSEMENT_TYPE, IDENTITY_VETTING_ENDORSEMENT_TYPE, VETTER_ROLE, VettingMethod,
-    VettingRelationship, request, session,
+    VETTED_PREDICATE, VETTER_ROLE, VETTING_SESSION_TYPE, VettingMethod, VettingRelationship,
+    request, session,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::card::sign_card;
@@ -75,7 +77,7 @@ fn identity(seed: u8) -> (Secret, String) {
 fn requirements() -> Value {
     json!({
         "version": "0.1",
-        "statementType": IDENTITY_VETTING_ENDORSEMENT_TYPE,
+        "statementType": VETTED_PREDICATE,
         "minStatements": 3,
         "minByMethod": { "inPerson": 1 },
         "acceptedMethods": ["inPerson", "video", "priorAcquaintance"],
@@ -89,34 +91,31 @@ fn requirements() -> Value {
     })
 }
 
-/// A real community role credential: a DTG endorsement credential, signed by the community.
-/// The shape `vtc-service` mints in `credentials::dtg::issue_role` — `{ type: CommunityRole,
-/// role, communityDid }` at `credentialSubject.endorsement`.
+/// A real community role credential: a DTG Verifiable Authority Credential signed by the
+/// community — `issuerScope` public, `credentialSubject.authority` `{ scope: <community DID>,
+/// actions: ["role:<role>"], maxAttenuation: 0 }`, the shape `vtc/vetting/vetters/grant/0.1`
+/// and `vtc/join-requests/decide/0.1` deliver.
 async fn role_credential(issuer: &Secret, community: &str, subject: &str, role: &str) -> Value {
     let now = Utc::now();
-    let mut credential = DTGCredential::new_vec(
+    let mut credential = DTGCredential::new_community_role_vac(
         community.to_string(),
         subject.to_string(),
+        role,
         now - Duration::minutes(1),
-        Some(now + Duration::days(365)),
-        json!({
-            "type": COMMUNITY_ROLE_ENDORSEMENT_TYPE,
-            "role": role,
-            "communityDid": community,
-        }),
+        now + Duration::days(365),
     )
+    .expect("a role VAC")
+    .with_max_attenuation(0)
+    .expect("a VAC")
     .with_id(format!("urn:uuid:{}", uuid::Uuid::new_v4()));
     credential.sign(issuer, None).await.unwrap();
     serde_json::to_value(&credential).unwrap()
 }
 
-/// Sign a credential **document** — the body plus the members the catalog type does not model.
-///
-/// A VMC issued against a status list carries `credentialStatus`, and `DTGCredential` has no
-/// field for it, so signing the parsed credential would leave the status reference outside the
-/// proof: a revoked credential could have it stripped without breaking the signature. This is
-/// `vtc-service`'s `LocalSigner::sign_doc`, which splices `id` + `credentialStatus` onto the
-/// serialised body and signs the whole document.
+/// Sign a credential **document**, the way `vtc-service`'s `LocalSigner::sign_doc` does: the
+/// whole serialised body — `id` and `credentialStatus` included — under one proof, so a
+/// revoked credential cannot have its status reference stripped without breaking the
+/// signature.
 async fn sign_doc(doc: &mut Value, signer: &Secret) {
     doc.as_object_mut().expect("a JSON object").remove("proof");
     let proof = DataIntegrityProof::sign(&*doc, signer, SignOptions::new())
@@ -153,29 +152,23 @@ async fn membership_grant(
     slot: u32,
     now: DateTime<Utc>,
 ) -> Value {
+    // `new_vmc` declares `issuerScope: public`, the only scope a community grant can declare.
     let dtg = DTGCredential::new_vmc(
         community.to_string(),
         member.to_string(),
         now,
         Some(now + Duration::days(30)),
         false,
-    );
-    let mut doc = serde_json::to_value(dtg.credential()).unwrap();
-    let obj = doc.as_object_mut().unwrap();
-    obj.insert(
-        "id".into(),
-        json!(format!("urn:uuid:{}", uuid::Uuid::new_v4())),
-    );
-    obj.insert(
-        "credentialStatus".into(),
-        json!({
-            "id": format!("{status_list}#{slot}"),
-            "type": "BitstringStatusListEntry",
-            "statusPurpose": "revocation",
-            "statusListIndex": slot.to_string(),
-            "statusListCredential": status_list,
-        }),
-    );
+    )
+    .with_id(format!("urn:uuid:{}", uuid::Uuid::new_v4()))
+    .with_credential_status(json!({
+        "id": format!("{status_list}#{slot}"),
+        "type": "BitstringStatusListEntry",
+        "statusPurpose": "revocation",
+        "statusListIndex": slot.to_string(),
+        "statusListCredential": status_list,
+    }));
+    let mut doc = serde_json::to_value(&dtg).unwrap();
     sign_doc(&mut doc, issuer).await;
     doc
 }
@@ -267,7 +260,7 @@ async fn main() {
         );
         role_credentials.push(credential);
         // The community's record of who holds the vetter role. On the VTI side this is the ACL
-        // and the role endorsement the credential above was written from — `pcs_issue::enrol`
+        // and the role grant the credential above was written from — `pcs_issue::enrol`
         // reads those, never a list of its own.
         vtc.grant(did);
 
@@ -577,11 +570,29 @@ async fn main() {
                 Utc::now(),
             )
             .expect("a session opens");
+        // The session document, as it goes on the wire. The named path's statement would cite
+        // it by `taskContext` and `taskDigestMultibase` (both REQUIRED by `vetted/1`), so the
+        // desk keeps it; the digest leaves the proof out, so the unsigned document digests the
+        // same as the signed one.
+        let session_document = serde_json::to_value(
+            openvtc_core::vetting::wire::document(
+                VETTING_SESSION_TYPE,
+                vetter_did,
+                &applicant_did,
+                session_document_id.clone(),
+                &session_payload,
+            )
+            .expect("a session document"),
+        )
+        .unwrap();
+        desk.record_session_document(&request_id, session_document.clone())
+            .expect("the desk keeps the session document");
         let open = book
             .application_mut(&community, persona)
             .unwrap()
             .on_session(
                 &session_document_id,
+                &session_document,
                 vetter_did,
                 session_payload,
                 Utc::now(),
@@ -658,22 +669,22 @@ async fn main() {
                 Utc::now(),
             )
             .expect("a statement draft");
-        let endorsement = serde_json::to_value(&statement_draft.endorsement).unwrap();
+        let vetted_value = serde_json::to_value(&statement_draft.value).unwrap();
 
         let meta = StatementMeta {
             community: community.clone(),
             requirements_digest: digest.clone(),
             method: *method,
             claims_verified: statement_draft
-                .endorsement
+                .value
                 .claims_verified
                 .iter()
                 .map(|c| c.to_string())
                 .collect(),
-            liveness_confirmed: statement_draft.endorsement.liveness_confirmed,
-            declared_relationship: statement_draft.endorsement.declared_relationship,
-            identity_commitment: statement_draft.endorsement.identity_commitment.clone(),
-            card_digest_multibase: statement_draft.endorsement.card_digest_multibase.clone(),
+            liveness_confirmed: statement_draft.value.liveness_confirmed,
+            declared_relationship: statement_draft.value.declared_relationship,
+            identity_commitment: statement_draft.value.identity_commitment.clone(),
+            card_digest_multibase: statement_draft.value.card_digest_multibase.clone(),
             valid_from: statement_draft.valid_from.date_naive(),
             valid_until: statement_draft.valid_until.date_naive(),
             token_label: String::new(),
@@ -711,10 +722,11 @@ async fn main() {
             "vetterDid": vetter_did,
             "matchCode": open.match_code,
             "vettingCard": card,
-            "namedPathStatementEndorsement": endorsement,
+            "namedPathStatementValue": vetted_value,
             "namedPathStatementNote":
-                "On the named path the vetter signs this endorsement into a statement credential \
-                 addressed to the applicant. On the hidden path it is never signed and never \
+                "On the named path the vetter signs this as the `object.value` of a `vetted/1` \
+                 statement credential (VSC) addressed to the applicant, citing the session by \
+                 `taskContext` and `taskDigestMultibase`. On the hidden path it is never signed and never \
                  issued — a signed statement carries the vetter's DID, which is the thing being \
                  withheld. Its facts go into the attestation instead.",
             "hiddenAttestation": attestation.clone(),
@@ -797,7 +809,7 @@ async fn main() {
     // --- 9. Admission: the membership credentials ---------------------------------------------
     // The decision satisfied the criterion, so the community admits. This is what
     // `vtc-service`'s `Admit` effect mints (`ceremony::execute::issue_member_credentials`): a
-    // VMC against the next free revocation slot and a role VEC at the granted role, both signed
+    // VMC against the next free revocation slot and a role VAC at the granted role, both signed
     // by the community. The member then issues the other half of the edge with `openvtc-core`'s
     // own `build_member_vmc` — the same call the TUI makes — which digests the grant **as it
     // arrived**, `credentialStatus` and all.
@@ -814,10 +826,11 @@ async fn main() {
         admitted_at,
     )
     .await;
-    let member_role_vec =
+    let member_role_vac =
         role_credential(&community_secret, &community, &applicant_did, "member").await;
-    // The member's half. Signed by the applicant's own key, subject = the community.
-    let reciprocal = build_member_vmc(&applicant_secret, &grant)
+    // The member's half. Signed by the applicant's own key, subject = the community, declaring
+    // the member's own `issuerScope` (`directed`).
+    let reciprocal = build_member_vmc(&applicant_secret, &applicant_did, &grant)
         .await
         .expect("the grant is a membership grant this member can acknowledge");
 
@@ -826,11 +839,11 @@ async fn main() {
         "step09_admission_credentials".into(),
         json!({
             "membershipGrantVmc": grant,
-            "memberRoleVec": member_role_vec,
+            "memberRoleVac": member_role_vac,
             "reciprocalMemberVmc": reciprocal,
             "checks": {
                 "grantProofVerifies": proof_verifies(&grant, &community_secret),
-                "roleVecProofVerifies": proof_verifies(&member_role_vec, &community_secret),
+                "roleVacProofVerifies": proof_verifies(&member_role_vac, &community_secret),
                 "reciprocalProofVerifies": proof_verifies(&reciprocal, &applicant_secret),
                 "reciprocalSubjectIsTheCommunity":
                     reciprocal["credentialSubject"]["id"] == json!(community),
@@ -847,7 +860,7 @@ async fn main() {
     );
 
     let admission_json =
-        serde_json::to_string(&json!([grant, member_role_vec, reciprocal])).unwrap();
+        serde_json::to_string(&json!([grant, member_role_vac, reciprocal])).unwrap();
     report.insert(
         "step10_what_the_community_learns".into(),
         json!({
@@ -877,7 +890,7 @@ async fn main() {
             "issuedHere": [
                 { "credential": "Vetting Card (VDS)", "issuer": "applicant", "count": VETTING.len(),
                   "note": "one per session, signed by the applicant's key and verified by the vetter" },
-                { "credential": "Vetter role VEC (CommunityRole)", "issuer": "community", "count": VETTERS,
+                { "credential": "Vetter role VAC (role:vetter)", "issuer": "community", "count": VETTERS,
                   "note": "the eligibility the criterion's `eligibleVetters.role` names" },
                 { "credential": "PCS root credential", "issuer": "community (as PCS helper)", "count": VETTERS,
                   "note": "not a W3C VC — a blind PS credential on the class label `vetter/<period>`" },
@@ -887,14 +900,14 @@ async fn main() {
                   "note": "stands in for the named path's signed vetting statement" },
                 { "credential": "Membership grant (VMC)", "issuer": "community", "count": 1,
                   "note": "against revocation slot 0, the shape `issue_member_credentials` mints" },
-                { "credential": "Member role VEC (CommunityRole, role=member)", "issuer": "community", "count": 1 },
+                { "credential": "Member role VAC (role:member)", "issuer": "community", "count": 1 },
                 { "credential": "Reciprocal member VMC", "issuer": "the new member", "count": 1,
                   "note": "closes the membership edge; digests the grant's wire form" },
             ],
             "deliberatelyNotIssued": [
-                { "credential": "Vetting statement credential (IdentityVettingEndorsement VEC)",
+                { "credential": "Vetting statement credential (vetted/1 VSC)",
                   "why": "this is the point of the hidden path — a signed statement names its vetter. \
-                          The endorsement is still built (it is where the attested facts come from) \
+                          The statement value is still built (it is where the attested facts come from) \
                           but never signed and never sent. `presentable_statements()` is 0." },
                 { "credential": "Relationship credential pair (VRC)",
                   "why": "not part of admission in any path — VRCs are the peer relationship layer, and \
@@ -903,10 +916,10 @@ async fn main() {
                           VRC names both ends." },
                 { "credential": "Invitation credential (VIC)",
                   "why": "invitation-gated admission only; this community is vetting-gated" },
-                { "credential": "Personhood credential (VPC / personhood VMC)",
+                { "credential": "Personhood (the PersonhoodCredential hint on the VMC)",
                   "why": "a separate evaluation (`personhood.rego`); this VMC carries personhood = false, \
                           as `admit` mints it" },
-                { "credential": "Withdrawal credential (VWC)",
+                { "credential": "Statement withdrawal (vtc/vetting/revoke-statement)",
                   "why": "withdraws a named statement, which the hidden path does not produce. Hidden \
                           withdrawal is by token spend-set and class-label rotation instead" },
             ],

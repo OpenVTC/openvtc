@@ -198,6 +198,11 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
         }
     }
     vetting.event_offers = offers.into();
+    vetting.retired = book
+        .retired
+        .iter()
+        .map(|note| sanitize_display(note, 320))
+        .collect();
 
     // The desk's header. Built from `vetter_standing`, which — alone among the
     // vetter-side reads — keeps lapsed grants, so a vetter who has quietly
@@ -2483,6 +2488,34 @@ async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, method_index: u
         Ok(d) => d,
         Err(e) => return abandon(ctx, "Could not open the session", e),
     };
+    // Signed here rather than in `sign_and_send`, because the desk keeps the
+    // document exactly as it goes out: the Vetting Statement that closes this
+    // session cites it by `taskDigestMultibase`, which `vetted/1` requires.
+    // Signed and kept before `persist`, so the saved desk holds it.
+    let mut document = document;
+    let keys = match ctx
+        .config
+        .get_persona_keys_for(entry.persona, ctx.tdk)
+        .await
+    {
+        Ok(keys) => keys,
+        Err(e) => return abandon(ctx, "Could not send the session", e),
+    };
+    if let Err(e) = wire::sign(&mut document, &keys.authentication.secret).await {
+        return abandon(ctx, "Could not send the session", e);
+    }
+    let recorded = serde_json::to_value(&document)
+        .map_err(|e| e.to_string())
+        .and_then(|value| {
+            ctx.config
+                .private
+                .vetting
+                .record_session_document(request_id, value)
+                .map_err(|e| e.to_string())
+        });
+    if let Err(e) = recorded {
+        return abandon(ctx, "Could not send the session", e);
+    }
     let code = ctx
         .config
         .private
@@ -2505,9 +2538,13 @@ async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, method_index: u
     let sent = Sent::Session {
         request_id: request_id.to_string(),
     };
-    if let Err(e) = sign_and_send(ctx, entry.persona, document, sent).await {
-        abandon(ctx, "Could not send the session", e);
-    }
+    let message = match wire::to_message(&document) {
+        Ok(message) => message,
+        Err(e) => return abandon(ctx, "Could not send the session", e),
+    };
+    let from = document.issuer.clone().unwrap_or_default();
+    let to = document.recipient.clone().unwrap_or_default();
+    spawn_send(ctx, message, &from, &to, sent);
 }
 
 /// Attest the hidden way: no statement, no signature, nothing that names this vetter.

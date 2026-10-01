@@ -50,6 +50,17 @@ fn render_list(state: &CredentialsState) -> Vec<Line<'static>> {
         super::status::push_status(&mut lines, msg, "");
         lines.push(Line::from(""));
     }
+    if state.retired_vrcs > 0 {
+        lines.push(
+            Line::from(format!(
+                "⚠ {} stored relationship credential(s) pre-date DTG Credentials v1 and were \
+                 set aside — request fresh ones from those relationships.",
+                state.retired_vrcs
+            ))
+            .fg(COLOR_ORANGE),
+        );
+        lines.push(Line::from(""));
+    }
 
     let active_list = match state.selected_tab {
         CredentialTab::Received => &state.received,

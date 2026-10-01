@@ -86,7 +86,7 @@ openvtc --version
 
 ## Decentralised Identity
 
-The OpenVTC tool uses the `did:webvh` to create your **Persona DID (P-DID)**. It enhances the existing `did:web` method, providing:
+The OpenVTC tool uses the `did:webvh` to create your **persona DID**. It enhances the existing `did:web` method, providing:
 
 - Portability with a self-certifying identifier (SCID), allowing you to move to a different domain.
 
@@ -100,7 +100,7 @@ _Sample did:webvh identifier:_
 
 ## Decentralised Communication
 
-OpenVTC seamlessly integrates with DIDComm-compatible mediators for secure, private communication using your **Persona DID (P-DID)** or **Relationship DID (R-DID)**.
+OpenVTC seamlessly integrates with DIDComm-compatible mediators for secure, private communication using your **persona DID** or a per-relationship **relationship DID**.
 
 DIDComm mediators handle message routing and storage while preserving privacy through end-to-end encryption. Messages are structured in multiple "envelope" layers providing:
 
@@ -182,8 +182,8 @@ An encrypted configuration stored inside the public configuration file, containi
 
 - List of known contacts with their Persona DIDs and Alias.
 - List of known relationships with their:
-  - Remote and local Relationship DIDs (R-DIDs)
-  - Remote and local Persona DIDs (P-DIDs)
+  - Remote and local relationship DIDs
+  - Remote and local persona DIDs
   - Relationship aliases
 - Verifiable Relationship Credentials (VRCs)
 

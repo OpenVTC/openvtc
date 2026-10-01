@@ -30,6 +30,7 @@ pub mod devices;
 pub mod diagnostics;
 pub mod didcomm;
 pub mod display;
+pub mod dtg;
 pub mod errors;
 pub mod git_ns;
 pub mod health;
@@ -298,8 +299,8 @@ impl TryFrom<&Message> for MessageType {
 /// dispatch ([`messaging::handle_credential_issue`])
 /// and the "My Credentials" UI. Adding a credential kind means adding a variant
 /// here plus its match arms below — the dispatch and UI code iterate
-/// [`ALL`](Self::ALL) and match on [`vc_type`](Self::vc_type), so they pick the
-/// new kind up without edits.
+/// [`ALL`](Self::ALL) and classify through [`from_credential`](Self::from_credential),
+/// so they pick the new kind up without edits.
 ///
 /// It is kept next to [`MessageType`] deliberately: a `MessageType` identifies
 /// a DIDComm message, while a `CredentialKind` identifies a credential carried
@@ -313,7 +314,11 @@ pub enum CredentialKind {
     /// The membership credential (VMC) proving admission to the community.
     /// Receiving it activates the membership.
     Membership,
-    /// The role endorsement credential (VEC) issued alongside the VMC.
+    /// The community role credential issued alongside the VMC: a
+    /// community-issued VAC (`AuthorityCredential`, `issuerScope` public) whose
+    /// `authority` is `{ scope: <community DID>, actions: ["role:<name>"] }`
+    /// ([`dtg::community_roles`]). It replaced the pre-v1 role endorsement
+    /// credential, a type DTG Credentials no longer defines.
     Role,
 }
 
@@ -322,17 +327,23 @@ impl CredentialKind {
     /// dispatch, storage and UI iterate; adding a variant extends all three.
     pub const ALL: &'static [CredentialKind] = &[CredentialKind::Membership, CredentialKind::Role];
 
-    /// The W3C VC `type` value that identifies this kind in an issued credential.
+    /// The DTG concrete `type` that identifies this kind in an issued credential.
     pub fn vc_type(self) -> &'static str {
         match self {
             CredentialKind::Membership => "MembershipCredential",
-            CredentialKind::Role => "EndorsementCredential",
+            CredentialKind::Role => "AuthorityCredential",
         }
     }
 
     /// Stable key used to persist this kind (the JSON map key in
     /// [`CommunityRecord::credentials`](crate::config::account::CommunityRecord::credentials))
     /// and as the short "My Credentials" display label.
+    ///
+    /// `Role` keeps its key across the move from a role endorsement to a role
+    /// VAC: what sits under it is held to the current specification on load
+    /// instead ([`crate::config::account::RetiredCredential`]), so a pre-v1 role
+    /// endorsement under this key is set aside with a reason rather than being
+    /// read as a VAC.
     pub fn config_key(self) -> &'static str {
         match self {
             CredentialKind::Membership => "Membership",
@@ -341,7 +352,7 @@ impl CredentialKind {
     }
 
     /// Whether receiving this credential activates the community membership.
-    /// The VMC is admission proof; the VEC (role) is supplementary.
+    /// The VMC is admission proof; the role VAC is supplementary.
     pub fn activates_membership(self) -> bool {
         matches!(self, CredentialKind::Membership)
     }
@@ -355,19 +366,27 @@ impl CredentialKind {
             .find(|k| k.config_key() == key)
     }
 
-    /// Classify an issued W3C VC by matching its `type` array against the
-    /// registry. Returns the first kind whose [`vc_type`](Self::vc_type)
-    /// appears, or `None` if the credential is of no known kind.
+    /// Classify an issued credential. It must first be a conformant DTG
+    /// credential ([`dtg::parse_conformant`]) — the v1 context, a declared
+    /// `issuerScope`, exactly one concrete type — and then:
+    ///
+    /// - a `MembershipCredential` is [`Membership`](Self::Membership);
+    /// - an `AuthorityCredential` is [`Role`](Self::Role) only when it is a
+    ///   community role grant ([`dtg::community_roles`]); any other VAC is of
+    ///   no known kind.
+    ///
+    /// `None` for anything else, including every credential in a pre-v1 shape.
     pub fn from_credential(credential: &serde_json::Value) -> Option<CredentialKind> {
-        let types = credential
-            .get("type")
-            .and_then(serde_json::Value::as_array)?;
-        CredentialKind::ALL.iter().copied().find(|k| {
-            types
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .any(|t| t == k.vc_type())
-        })
+        let parsed = dtg::parse_conformant(credential).ok()?;
+        match parsed.type_() {
+            dtg_credentials::DTGCredentialType::Membership => Some(CredentialKind::Membership),
+            dtg_credentials::DTGCredentialType::Authority
+                if dtg::community_roles(&parsed).is_some() =>
+            {
+                Some(CredentialKind::Role)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -477,7 +496,13 @@ mod tests {
         // dispatch / storage / UI rely on, so a newly added variant is picked
         // up everywhere by extending `ALL` + the match arms — and nowhere else.
         for kind in CredentialKind::ALL {
-            let cred = serde_json::json!({ "type": ["VerifiableCredential", kind.vc_type()] });
+            let cred = match kind {
+                CredentialKind::Membership => crate::dtg::fixtures::grant("did:ex:c", "did:ex:m"),
+                CredentialKind::Role => {
+                    crate::dtg::fixtures::role_vac("did:ex:c", "did:ex:m", "member")
+                }
+            };
+            assert_eq!(cred["type"][2], kind.vc_type());
             assert_eq!(
                 CredentialKind::from_credential(&cred),
                 Some(*kind),
@@ -491,6 +516,20 @@ mod tests {
         }
         assert_eq!(
             CredentialKind::from_credential(&serde_json::json!({ "type": ["Other"] })),
+            None,
+        );
+        // A bare `type` is not enough: the credential must conform to DTG v1.
+        assert_eq!(
+            CredentialKind::from_credential(
+                &serde_json::json!({ "type": ["VerifiableCredential", "MembershipCredential"] })
+            ),
+            None,
+        );
+        // The retired role endorsement is of no known kind.
+        assert_eq!(
+            CredentialKind::from_credential(&crate::dtg::fixtures::retired_role_endorsement(
+                "did:ex:c", "did:ex:m"
+            )),
             None,
         );
         assert_eq!(CredentialKind::from_config_key("Nope"), None);

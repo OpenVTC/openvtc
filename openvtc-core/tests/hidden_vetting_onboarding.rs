@@ -22,9 +22,7 @@ use openvtc_vetting_pcs::{
 };
 use rand::{SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
-use vta_sdk::protocols::vetting::{
-    IDENTITY_VETTING_ENDORSEMENT_TYPE, VettingMethod, VettingRelationship,
-};
+use vta_sdk::protocols::vetting::{VETTED_PREDICATE, VettingMethod, VettingRelationship};
 
 const COMMUNITY: &str = "did:webvh:QmVtcScid:kernel-vtc.example";
 const PERIOD: &str = "2026-09";
@@ -33,7 +31,7 @@ const JOIN_DID: &str = "did:webvh:QmVtcScid:bob-kernel";
 fn requirements() -> Value {
     json!({
         "version": "0.1",
-        "statementType": IDENTITY_VETTING_ENDORSEMENT_TYPE,
+        "statementType": VETTED_PREDICATE,
         "minStatements": 2,
         "minByMethod": { "inPerson": 1 },
         "acceptedMethods": ["inPerson", "video"],

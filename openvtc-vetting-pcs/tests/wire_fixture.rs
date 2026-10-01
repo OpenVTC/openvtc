@@ -15,9 +15,7 @@ use openvtc_vetting_pcs::{
 use predicate_credential_system::serialization::{to_bytes, to_multibase};
 use rand::{SeedableRng, rngs::StdRng};
 use serde_json::json;
-use vta_sdk::protocols::vetting::{
-    IDENTITY_VETTING_ENDORSEMENT_TYPE, VettingMethod, VettingRelationship,
-};
+use vta_sdk::protocols::vetting::{VETTED_PREDICATE, VettingMethod, VettingRelationship};
 
 const COMMUNITY: &str = "did:example:kernel-vtc";
 const PERIOD: &str = "2026-09";
@@ -25,7 +23,7 @@ const PERIOD: &str = "2026-09";
 fn requirements() -> serde_json::Value {
     json!({
         "version": "0.1",
-        "statementType": IDENTITY_VETTING_ENDORSEMENT_TYPE,
+        "statementType": VETTED_PREDICATE,
         "minStatements": 2,
         "minByMethod": { "inPerson": 1 },
         "acceptedMethods": ["inPerson", "video", "priorAcquaintance"],

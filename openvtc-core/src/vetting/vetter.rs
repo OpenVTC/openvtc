@@ -21,11 +21,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use vta_sdk::protocols::vetting::{
-    CheckShape, ClaimType, IDENTITY_VETTING_ENDORSEMENT_TYPE, IdentityVettingEndorsement,
-    ShapeError, VETTING_REQUEST_ERR_CAPACITY, VETTING_REQUEST_ERR_DECLINED,
-    VETTING_REQUEST_ERR_METHOD_UNAVAILABLE, VETTING_REQUEST_ERR_NOT_ELIGIBLE, VettingDocumentation,
-    VettingMethod, VettingRelationship, check_request, decline, documentation, request,
-    revoke_statement, session,
+    CheckShape, ClaimType, ShapeError, VETTING_REQUEST_ERR_CAPACITY, VETTING_REQUEST_ERR_DECLINED,
+    VETTING_REQUEST_ERR_METHOD_UNAVAILABLE, VETTING_REQUEST_ERR_NOT_ELIGIBLE, VettedObjectValue,
+    VettingDocumentation, VettingMethod, VettingRelationship, check_request, decline,
+    documentation, request, revoke_statement, session,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::VettingError;
@@ -52,6 +51,10 @@ pub enum VetterError {
     /// Building or verifying an artifact failed.
     #[error(transparent)]
     Vetting(#[from] VettingError),
+    /// The session's signed document was not kept, so a statement cannot cite
+    /// it (`taskDigestMultibase`). Open the session again.
+    #[error("this session predates statement citations — open the session again")]
+    SessionDocumentMissing,
     /// Liveness is required for this method (D10).
     #[error("confirm the match code with the person before attesting")]
     LivenessNotConfirmed,
@@ -169,6 +172,16 @@ pub struct DeskSession {
     pub expires_at: DateTime<Utc>,
     /// The code both people read aloud.
     pub match_code: String,
+    /// The signed `vetting/session` document exactly as we sent it
+    /// ([`VettingBook::record_session_document`]).
+    ///
+    /// The Vetting Statement cites it by `taskContext` (its `id`) **and**
+    /// `taskDigestMultibase` (its task digest), both REQUIRED by the
+    /// `vetted/1` predicate profile, so a statement cannot be drafted without
+    /// it. `None` on a session opened by a build before the profile required
+    /// the digest; such a session has to be opened again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<Box<Value>>,
 }
 
 /// A verified card. The claims and the card itself are forgotten after
@@ -513,10 +526,38 @@ impl VettingBook {
                 optional_claims: optional_claims.clone(),
                 expires_at: body.expires_at,
                 match_code: vetting_match_code(session_document_id),
+                document: None,
             },
         };
         entry.updated_at = now;
         Ok(body)
+    }
+
+    /// Keep the signed `vetting/session` document for `request_id`, exactly as
+    /// it goes on the wire. Call it after signing and before sending: the
+    /// statement cites this document by its task digest, which covers
+    /// everything but the top-level `proof`, so a re-built copy would not do.
+    ///
+    /// # Errors
+    ///
+    /// No such request, no session open on it, or a document whose `id` is not
+    /// the session's.
+    pub fn record_session_document(
+        &mut self,
+        request_id: &str,
+        document: Value,
+    ) -> Result<(), VetterError> {
+        let entry = self
+            .desk_entry_mut(request_id)
+            .ok_or(VetterError::NoSuchRequest)?;
+        let DeskState::Session { session } = &mut entry.state else {
+            return Err(VetterError::WrongState("record its session document"));
+        };
+        if document.get("id").and_then(Value::as_str) != Some(session.id.as_str()) {
+            return Err(VetterError::WrongState("record another session's document"));
+        }
+        session.document = Some(Box::new(document));
+        Ok(())
     }
 
     /// The applicant's card for session `session_id`
@@ -585,12 +626,17 @@ impl VettingBook {
         Ok(entry)
     }
 
-    /// The statement to sign for `request_id`, from the vetter's checklist.
+    /// The statement to sign for `request_id`, from the vetter's checklist: a
+    /// `vetted/1` VSC whose `object.value` is the checklist, issued under the
+    /// vetter's member DID declaring
+    /// [`MEMBER_IDENTIFIER_SCOPE`](crate::dtg::MEMBER_IDENTIFIER_SCOPE)
+    /// (`directed`, which the profile's minimum requires), and citing the
+    /// session document it answers.
     ///
     /// # Errors
     ///
-    /// No card yet, a checklist that does not support the statement, or a
-    /// malformed endorsement.
+    /// No card yet, a session whose signed document was not kept, a checklist
+    /// that does not support the statement, or a malformed value.
     pub fn statement_draft(
         &self,
         request_id: &str,
@@ -640,8 +686,12 @@ impl VettingBook {
             .iter()
             .map(|c| ClaimType::try_from(c.as_str()).map_err(|e| schema(&e)))
             .collect::<Result<Vec<_>, ShapeError>>()?;
-        let endorsement = IdentityVettingEndorsement {
-            endorsement_type: IDENTITY_VETTING_ENDORSEMENT_TYPE.into(),
+        let session_document = session
+            .document
+            .as_deref()
+            .cloned()
+            .ok_or(VetterError::SessionDocumentMissing)?;
+        let value = VettedObjectValue {
             community: entry.community.clone(),
             method: attestation.method,
             document_classes,
@@ -652,15 +702,16 @@ impl VettingBook {
             declared_relationship: attestation.declared_relationship,
             attestation_text_digest: attestation.attestation_text_digest,
         };
-        endorsement.check_shape()?;
+        value.check_shape()?;
         Ok(StatementDraft {
             id: format!("urn:uuid:{}", Uuid::new_v4()),
             issuer: vetter_did.to_string(),
+            issuer_scope: crate::dtg::MEMBER_IDENTIFIER_SCOPE,
             subject: entry.applicant.clone(),
-            endorsement,
+            value,
             valid_from: now,
             valid_until: now + self.policy.statement_validity(),
-            task_context: session.id.clone(),
+            session: session_document,
         })
     }
 
@@ -690,7 +741,7 @@ impl VettingBook {
             applicant: entry.applicant.clone(),
             community: entry.community.clone(),
             persona: entry.persona,
-            method: verified.endorsement().method,
+            method: verified.value().method,
             issued_at: now,
             valid_until: verified.valid_until(),
             withdrawal: None,

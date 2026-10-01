@@ -91,6 +91,13 @@ pub enum RejectionReason {
         /// The unparseable value, verbatim.
         valid_until: String,
     },
+    /// Not a conformant DTG Credentials v1 membership credential — typically
+    /// one the vault kept from before the v1 context and `issuerScope`. The
+    /// community has to re-issue it; it cannot be restored as it stands.
+    Nonconformant {
+        /// What `dtg-credentials` refused.
+        reason: String,
+    },
     /// The credential's proof did not verify against the issuing community's
     /// DID document, or could not be checked.
     Unverified {
@@ -112,6 +119,9 @@ impl RejectionReason {
             RejectionReason::Expired { valid_until } => format!("it expired on {valid_until}"),
             RejectionReason::MalformedValidity { valid_until } => {
                 format!("its validity window is unreadable ({valid_until})")
+            }
+            RejectionReason::Nonconformant { reason } => {
+                format!("it pre-dates DTG Credentials v1 and must be re-issued ({reason})")
             }
             RejectionReason::Unverified { reason } => {
                 format!("its signature could not be verified: {reason}")
@@ -256,6 +266,16 @@ pub fn membership_from_credential(
     }
 
     validity(credential, now)?;
+
+    match crate::dtg::parse_conformant(credential) {
+        Ok(parsed) if parsed.type_() == dtg_credentials::DTGCredentialType::Membership => {}
+        Ok(_) => {
+            return Err(RejectionReason::Nonconformant {
+                reason: "not a MembershipCredential".to_string(),
+            });
+        }
+        Err(reason) => return Err(RejectionReason::Nonconformant { reason }),
+    }
 
     Ok(RebuiltMembership {
         vtc_did: issuer.to_string(),
@@ -447,9 +467,12 @@ mod tests {
 
     fn vmc(issuer: Value, subject: Option<&str>) -> Value {
         let mut vc = serde_json::json!({
+            "@context": [dtg_credentials::W3C_VC_V2_CONTEXT, dtg_credentials::DTG_CONTEXT_V1],
             "id": "vmc-1",
-            "type": ["VerifiableCredential", "MembershipCredential"],
+            "type": ["VerifiableCredential", "DTGCredential", "MembershipCredential"],
             "issuer": issuer,
+            "issuerScope": "public",
+            "validFrom": "2026-01-01T00:00:00Z",
         });
         if let Some(s) = subject {
             vc["credentialSubject"] = serde_json::json!({ "id": s });
@@ -473,16 +496,32 @@ mod tests {
         assert_eq!(m.credential["id"], "vmc-1");
     }
 
-    /// Issuers are written both ways in this ecosystem.
+    /// A DTG credential names its issuer as a DID string; the object form W3C
+    /// also allows is not one `dtg-credentials` parses, so it is refused rather
+    /// than restored on a reading the library would not share.
     #[test]
-    fn an_object_issuer_is_accepted() {
-        let m = membership_from_credential(
-            &vmc(serde_json::json!({ "id": VTC }), Some(ALICE)),
-            &ours(),
-            Utc::now(),
-        )
-        .expect("verifies");
-        assert_eq!(m.vtc_did, VTC);
+    fn an_object_issuer_is_not_a_conformant_membership() {
+        assert!(matches!(
+            membership_from_credential(
+                &vmc(serde_json::json!({ "id": VTC }), Some(ALICE)),
+                &ours(),
+                Utc::now(),
+            ),
+            Err(RejectionReason::Nonconformant { .. })
+        ));
+    }
+
+    /// A membership credential the vault kept from before DTG Credentials v1
+    /// is not restored: the community must re-issue it.
+    #[test]
+    fn a_pre_v1_membership_credential_is_rejected() {
+        let mut vc = vmc(VTC.into(), Some(ALICE));
+        vc["@context"][1] = crate::dtg::fixtures::RETIRED_CONTEXT.into();
+        vc.as_object_mut().unwrap().remove("issuerScope");
+        assert!(matches!(
+            membership_from_credential(&vc, &ours(), Utc::now()),
+            Err(RejectionReason::Nonconformant { .. })
+        ));
     }
 
     /// D18 — the check that stops a hostile VTA inventing a membership. A
@@ -557,6 +596,9 @@ mod tests {
             RejectionReason::NoSubject,
             RejectionReason::SubjectNotOurs {
                 subject: BOB.to_string(),
+            },
+            RejectionReason::Nonconformant {
+                reason: "x".to_string(),
             },
             RejectionReason::Expired {
                 valid_until: "2020-01-01T00:00:00Z".to_string(),

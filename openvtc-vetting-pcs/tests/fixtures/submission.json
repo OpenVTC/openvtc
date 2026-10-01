@@ -9,9 +9,9 @@
     "hiddenVetting": {
       "challenge": "2101bb65d957c15019d8b586a344eccc",
       "id": "z7Maq7iaYFvoymP89sz5H3Yj5ZWRb61NMc7U7HB7QEuBpyHmLojjss1Gp1q2C8MxAMS",
-      "idBinding": "34663f054fb5604c99f946827d4e4248fa7ecd32f98d17dbc5e002e1b9b4bc9b",
+      "idBinding": "5433844cc1c272ef59bdb6fc40af6cf8f9df863167e2ab4f30924622f65d4d43",
       "joinDid": "did:example:bob-kernel",
-      "proof": "z3Xef1JY2x1tDTCQu3iRfrEBKWKCxkKHcQCAmBK47kad85z7MpYWgxypfXSt3Gd81X7FBXmMF1cryU3q6R7mkxdRzqS1wqYbFvy1yQsigvsThMyTroDm1YfYt16P9CjQjG3mGhaTLLHo9FnAFogCuMCWYX1gePidZ7d7yHuJJKtW3WU7h8KzUf65NfUFQxZK7yd9cMDF5sJaqxqRh7AXNbh4oSUf88LxWnLjq5bqF8fjNVh4LAsbcFPZVDS4vQgjtBPwFuUQUXWw9e3AsxVidYMuaDNaKRHFf5443WbRFHZGgjEBqrcL2SoPEfd9AnSVhNGqEmeyteVx1a7jhuA7Wpn4uzjGpszYjN42FgxL2cSYbobQcDC4JBt2gtyRoF6cVVDwG7X45qurKtzQs4RSnNwA5Vs64UFBzz9pgPqvnhq4ZpdFQYJ5RWS5TgSqYnZhUobPDU1PqqoeHvKA7iZk7CHbdQF935LFQiSE3FdvwwHzgoxDieJXDzYAcT7Bsx8JghikJh2tghTxDBKaYh7NGtQvZcnZjZoS4xFbZgzu6rYF1vAFgcA2vwsmZbdJQCkNRvXqaGh2rCLa1uijrRE29ZYUBKMfRub4uLvo6j4DpCJwAZxedNQHF5FH1DXunDUfJ6gLjBBdWf5vriJTMs2mVduTbk5B43VVPceT9KRbNhxN8aMZo4QctZaFEnZ9DFcqmSQLyiaBAghMFLy1VA8iCiE3CPi6S4TBy9QUSvghpMihwQKXof9gNHupdTTFZpGGHDp129fdjgJyjauHo4Hgt9Q1qKDVAVBWaNTSe8SymcKwocjaYyy7ptRB34Apc4eKx9gQm8dPpJgB5RXeQiXdD2jK7bSzYzwnv85Nj34CY3NkEX67Rdrhb4k8TdoVveMM8RvzQC6mPGwNeJkwUW56HtDAU8R2DxHQ7H3mEBGdNx5nHHkUAHNoSs3ZoCggRBajiV",
+      "proof": "z3Xef1JY2x1tDTCQu3iRfrEBKWKCxkKHcQCAmBK47kad85z7MpYWgxypfXSt3Gd81X7FBXmMF1cryU3q6R7mkxdRzqS1wqYbFvy1yQsigvsThMyTroDm1YfYt16P9CjQjG3mGhaTLLHo9FnAFogCuMCWYX1gePidZ7d7yHuJJKtW3WU7h8KzUf65NfUFQxZK7yd9cMDF5sJaqxqRh7AXNbh4oSUf88LxWnLjq5bqF8fjNVh4LAsbcFPZVDS4u3Y6dYugcB8DZkrcn3sdR2vGChxZnwUuAB22uVi952vxi5pn25Lrw2YZU55xZG6G4FEd9DMQ1gahScLgF8eLNGrG1pC9VssbkHR16ZC7eqtsVuj8VmKMiVhwr9VcMKW8xgDzVKFS71M4dDuvaWDoDmdPAAKJKGds7JE3t9dSD1XEuxAoCXmEhhdoSRYHvX2UMtuSebzQLBuEWEA8PKzGPfBho4fikF4EZsAVEzshrFDtjypueJrGNMNAWKLZqXzGRbPiqd5jy7fkQoQr7zD2hkaNYuzs6LF1fehPXv25tYk2zo4cK9kUkCAoC19g2oWmMWjQDq71ooN3RjjbduykkWiUtAiBYXeZPRBWPbdWx4xdeiqw7j3LTNtvyjzW1rKrD4LfPTN1irKQkjU4hhVZgQVQu2fT5dDt8RpNdDE9HxFnVKZ4A9dLP7ZCXdapTAyRBoU5eDr8FgHQ3VSfxzVqvFshLZXZibroHQDsZaj4mS2duhDdkGHDLLwB2Gujdn9a5hnrxbzpmrm9w68pQQqXmfM37dFABYKxYu8KB3AQxQCCg5pd4TsC7CjhMg1GPNid5seYvviFc3ac58rox4ZqHizZWLBKLwWk77Fn2FdUqcK423puGzzP6uSJfNnW9gQufS3sVGw6XcUgv1PZ3GngyPAELZwdEjzSAkoSPu5rmc7khEraBKCTSRW1FyswjnEHaD4cgH",
       "statements": [
         {
           "meta": {
@@ -24,7 +24,7 @@
             "identityCommitment": "zCommitmentOfThisApplication",
             "livenessConfirmed": true,
             "method": "inPerson",
-            "requirementsDigest": "zQmWLpaPx2M8kj8vYGChQPWeL7gkYqxHVGfhzoaCRHnmYeX",
+            "requirementsDigest": "zQmd5MPCDVbwQyjk1aENTUFTcNCEjEGqGzNbTkmxLS5pQEJ",
             "tokenLabel": "token/2026-09",
             "tokenSerial": "z4cExPgjXik8gjzspYn3UQBSceCNMxvyf3WsVXi8gg2r6",
             "validFrom": "2026-09-20",
@@ -47,7 +47,7 @@
             "identityCommitment": "zCommitmentOfThisApplication",
             "livenessConfirmed": true,
             "method": "video",
-            "requirementsDigest": "zQmWLpaPx2M8kj8vYGChQPWeL7gkYqxHVGfhzoaCRHnmYeX",
+            "requirementsDigest": "zQmd5MPCDVbwQyjk1aENTUFTcNCEjEGqGzNbTkmxLS5pQEJ",
             "tokenLabel": "token/2026-09",
             "tokenSerial": "zAMfD5zM58iQen9r6iy3Gjr1fMwyQRwCKvrzCdgND6CrK",
             "validFrom": "2026-09-20",
@@ -94,9 +94,9 @@
     "requiredClaims": [
       "name.legal"
     ],
-    "statementType": "https://firstperson.network/endorsements/identity-vetting/0.1",
+    "statementType": "https://registry.trustoverip.org/dtg/vsc/vetted/1",
     "version": "0.1"
   },
-  "requirementsDigest": "zQmWLpaPx2M8kj8vYGChQPWeL7gkYqxHVGfhzoaCRHnmYeX",
+  "requirementsDigest": "zQmd5MPCDVbwQyjk1aENTUFTcNCEjEGqGzNbTkmxLS5pQEJ",
   "tvk": "zPpoQ2paPusHjJgDp7dnNHT3QdZP6cY39HmZQfNxYoj7jLFCy9qbmPRskAQhbzdARo6pdnvXcUuYFFmEX7SH6seLxhbCpoAGcr3BQAqBUHFCFfdGtxV99Daw6BTGUEtDB2nSdvTZFaVgco94SjbDcuFxAj5NTD6qQaAmH8UNRQ4hnVgM1eZp2p4hMi5XqEsfs2NRbS7EhXt8cBEax7y1SoQibejEtkgFyS1WZRBTEPh4Ghr65zQky3yz3TZS84zh4b4WZHJXZptqbTWFyLUzG6P8Q5HsyDvc5yQKikn5TpWZ2uPhg77qNn8fCHNViHsyQVbQkDaCFRg77nhr1AzuhtEjoiSR7G8RmNrJsuMfoihm6b4P13CXiwCEt5Tami6roD2EznQmtm359t8tFPwp9SUdGxUuufEmWvkiopDEZ18dCSVHe96P6hZqkRKyjkxGuZ6o18cpeX1x"
 }

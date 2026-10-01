@@ -180,6 +180,13 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
         super::status::push_status(&mut lines, message, "");
         lines.push(Line::from(""));
     }
+    // Credentials set aside on load because they pre-date DTG Credentials v1.
+    for note in v.retired.iter() {
+        lines.push(Line::from(format!("⚠ {note}")).fg(COLOR_ORANGE));
+    }
+    if !v.retired.is_empty() {
+        lines.push(Line::from(""));
+    }
 
     match &v.mode {
         VettingMode::List => match v.tab {

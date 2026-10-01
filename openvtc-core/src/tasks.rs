@@ -147,13 +147,48 @@ impl Display for TaskType {
 }
 
 /// Collection of in-progress tasks, indexed by task ID.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+///
+/// # A task carrying a pre-v1 VRC is dropped on load
+///
+/// [`TaskType::VRCIssued`] holds the VRC itself, and a VRC stored before DTG
+/// Credentials v1 no longer parses. Rather than fail the whole protected config
+/// for one inbox item, such a task is dropped with a logged reason (the peer
+/// can issue a fresh VRC). Any other task that fails to parse still fails the
+/// load, as it always has — only the case this migration creates is tolerated.
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Tasks {
     /// key: Task ID
     ///
     /// Plain values (no `Arc<Mutex>`): there is exactly one mutating task (the
     /// `StateHandler` loop), so mutation goes through `&mut` and is infallible.
     pub tasks: HashMap<Arc<String>, Task>,
+}
+
+impl<'de> Deserialize<'de> for Tasks {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            tasks: HashMap<Arc<String>, serde_json::Value>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let mut tasks = HashMap::with_capacity(raw.tasks.len());
+        for (id, value) in raw.tasks {
+            let carries_vrc = value.pointer("/type_/VRCIssued/vrc").is_some();
+            match serde_json::from_value::<Task>(value) {
+                Ok(task) => {
+                    tasks.insert(id, task);
+                }
+                Err(e) if carries_vrc => tracing::warn!(
+                    task = %id,
+                    reason = %e,
+                    "dropping a stored VRC task whose credential does not conform to DTG Credentials v1"
+                ),
+                Err(e) => return Err(serde::de::Error::custom(e)),
+            }
+        }
+        Ok(Tasks { tasks })
+    }
 }
 
 impl Tasks {

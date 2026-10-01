@@ -3935,13 +3935,15 @@ mod tests {
             // contexts and the `DTGCredential` base type. A fixture that omits
             // them is not a VIC a community could have issued.
             "@context": [
-                "https://www.w3.org/ns/credentials/v2",
-                "https://firstperson.network/credentials/dtg/v1"
+                openvtc_core::join::W3C_VC_V2_CONTEXT,
+                openvtc_core::join::DTG_CONTEXT
             ],
             "id": id,
             "type": ["VerifiableCredential", "DTGCredential", "InvitationCredential"],
             "issuer": COMMUNITY,
+            "issuerScope": "public",
             "credentialSubject": { "id": "did:webvh:example.com:alice" },
+            "validFrom": "2026-01-01T00:00:00Z",
             "validUntil": "2099-01-01T00:00:00Z",
             "credentialStatus": { "type": "BitstringStatusListEntry" },
             "proof": { "type": "DataIntegrityProof" }
@@ -4158,15 +4160,16 @@ mod tests {
         assert_eq!(state.join.invitation_issuer.as_deref(), Some(COMMUNITY));
     }
 
-    /// `issuer` also has an object form; both must yield the community DID, or
-    /// the prefill silently stops working for half the issuers out there.
+    /// A DTG credential names its issuer as a DID string. The W3C object form
+    /// is not one `dtg-credentials` parses, so a pasted invitation carrying it
+    /// is refused rather than half-read — and leaves no issuer behind.
     #[test]
-    fn an_object_form_issuer_is_recorded_too() {
+    fn an_object_form_issuer_is_refused() {
         let mut state = State::default();
         let mut vic = pasteable_vic("urn:uuid:one");
         vic["issuer"] = json!({ "id": COMMUNITY, "name": "Example Community" });
         paste_verified(&mut state, &vic.to_string(), None);
-        assert_eq!(state.join.invitation_issuer.as_deref(), Some(COMMUNITY));
+        assert_eq!(state.join.invitation_issuer, None);
     }
 
     /// A rejected paste must not leave an issuer behind: the entry page would
@@ -4272,7 +4275,7 @@ mod vetting_tests {
     fn manifest(vets: bool) -> manifest::v0_2::Response {
         let requirements = serde_json::from_value(serde_json::json!({
             "version": "0.1",
-            "statementType": vta_sdk::protocols::vetting::IDENTITY_VETTING_ENDORSEMENT_TYPE,
+            "statementType": vta_sdk::protocols::vetting::VETTED_PREDICATE,
             "minStatements": 2,
             "acceptedMethods": ["inPerson", "video"],
             "requiredClaims": ["name.legal"],
@@ -4485,7 +4488,7 @@ mod vetting_tests {
     fn requirements(invitation: Option<&str>) -> VettingRequirements {
         let mut value = serde_json::json!({
             "version": "0.1",
-            "statementType": vta_sdk::protocols::vetting::IDENTITY_VETTING_ENDORSEMENT_TYPE,
+            "statementType": vta_sdk::protocols::vetting::VETTED_PREDICATE,
             "minStatements": 2,
             "acceptedMethods": ["inPerson"],
             "eligibleVetters": { "role": "vetter" }

@@ -13,9 +13,9 @@
 //!
 //! ## It carries a digest of the grant
 //!
-//! DTG Core Credentials: "A member-issued VMC whose `digest` does not match a
-//! valid community-issued VMC MUST NOT be treated as completing a membership
-//! edge." The digest is over the grant **as the community sent it** — the JSON
+//! DTG Core Credentials: "A member-issued VMC whose `digestMultibase` does not
+//! match a valid community-issued VMC MUST NOT be treated as completing a
+//! membership edge." The digest is over the grant **as the community sent it** — the JSON
 //! stored on the membership record, not a re-serialisation of a parse of it,
 //! which drops members the local model does not know (`credentialStatus`, which
 //! every VMC issued against a status list carries).
@@ -23,6 +23,14 @@
 //! That binding is also what makes renewal safe: a re-issued grant has different
 //! claims and therefore a different digest, so consent to one membership cannot
 //! carry over to another.
+//!
+//! ## It declares the member's scope
+//!
+//! Each half of the edge declares its own issuer's `issuerScope`: the grant
+//! `public` (the community), the acknowledgement the member's
+//! [`MEMBER_IDENTIFIER_SCOPE`](crate::dtg::MEMBER_IDENTIFIER_SCOPE) — `directed`,
+//! because the persona DID a membership names is recognised by the community,
+//! by the members it relates to and vets, and possibly by other communities.
 
 use std::sync::Arc;
 
@@ -64,7 +72,7 @@ pub async fn issue_and_send_member_vmc(
     grant: &Value,
     closes_request: Option<Uuid>,
 ) -> Result<(Uuid, Value), OpenVTCError> {
-    let vc = build_member_vmc(signing_secret, grant).await?;
+    let vc = build_member_vmc(signing_secret, route.member_did, grant).await?;
     let msg_id = submit_member_vmc(route, document_signer, vc.clone(), closes_request).await?;
     Ok((msg_id, vc))
 }
@@ -93,9 +101,14 @@ pub struct Delivery<'a> {
 /// without a mediator.
 ///
 /// `grant` is the community-issued VMC **as it arrived** — the JSON on the membership
-/// record. The member and the community are read off it, so the two halves of the edge
-/// cannot disagree about who they are between, and the digest covers the document the
-/// community will recompute it over.
+/// record. The community is read off it and the digest covers the document the community
+/// will recompute it over. `member_did` is the persona whose key signs — established by
+/// the caller from the membership record, never read out of the grant — and the grant must
+/// name it: an acknowledgement on behalf of whoever a grant happens to name is refused
+/// (`NotTheGrantSubject`). The grant must also be a conformant v1 grant declaring
+/// `issuerScope: public`; a pre-v1 grant cannot be acknowledged.
+///
+/// The acknowledgement declares [`MEMBER_IDENTIFIER_SCOPE`](crate::dtg::MEMBER_IDENTIFIER_SCOPE).
 ///
 /// # The credential carries its own `id`
 ///
@@ -111,15 +124,28 @@ pub struct Delivery<'a> {
 /// verifies. The same is true of the digest, which is why it is set at construction.
 pub async fn build_member_vmc(
     signing_secret: &Secret,
+    member_did: &str,
     grant: &Value,
 ) -> Result<Value, OpenVTCError> {
-    let mut vmc = DTGCredential::new_member_vmc(grant, Utc::now(), None)
-        .map_err(|e| {
-            OpenVTCError::Config(format!(
-                "cannot acknowledge this community's membership credential: {e}"
-            ))
-        })?
-        .with_id(format!("urn:uuid:{}", Uuid::new_v4()));
+    // An acknowledgement may not outlive what it acknowledges.
+    let valid_until = grant
+        .get("validUntil")
+        .and_then(Value::as_str)
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&Utc));
+    let mut vmc = DTGCredential::new_member_vmc_for(
+        grant,
+        member_did,
+        crate::dtg::MEMBER_IDENTIFIER_SCOPE,
+        Utc::now(),
+        valid_until,
+    )
+    .map_err(|e| {
+        OpenVTCError::Config(format!(
+            "cannot acknowledge this community's membership credential: {e}"
+        ))
+    })?
+    .with_id(format!("urn:uuid:{}", Uuid::new_v4()));
     vmc.sign(signing_secret, None)
         .await
         .map_err(|e| OpenVTCError::Config(format!("sign member VMC: {e}")))?;
@@ -209,19 +235,19 @@ mod tests {
     const COMMUNITY: &str = "did:example:community";
 
     /// A community-issued grant in the wire form a member receives — including
-    /// `credentialStatus`, which every VMC issued against a status list carries and
-    /// which `dtg-credentials` does not model. The fixture carries it deliberately:
-    /// a grant built through the local model would not exercise the case the digest
-    /// has to get right.
+    /// `credentialStatus`, which every VMC issued against a status list carries. The
+    /// fixture carries it deliberately: a grant built through the local model would
+    /// not exercise the case the digest has to get right.
     fn grant() -> Value {
         serde_json::json!({
             "@context": [
-                "https://www.w3.org/ns/credentials/v2",
-                "https://firstperson.network/credentials/dtg/v1"
+                dtg_credentials::W3C_VC_V2_CONTEXT,
+                dtg_credentials::DTG_CONTEXT_V1
             ],
             "type": ["VerifiableCredential", "DTGCredential", "MembershipCredential"],
             "id": "urn:uuid:0d7f4d2c-1b8e-4a55-9e1f-7c4a2b9d3e60",
             "issuer": COMMUNITY,
+            "issuerScope": "public",
             "validFrom": "2026-01-01T00:00:00Z",
             "credentialStatus": {
                 "id": "https://community.example/status#7",
@@ -236,7 +262,7 @@ mod tests {
 
     async fn signed_vmc() -> (Secret, Value) {
         let secret = Secret::generate_ed25519(None, None);
-        let vc = build_member_vmc(&secret, &grant())
+        let vc = build_member_vmc(&secret, MEMBER, &grant())
             .await
             .expect("build the member VMC");
         (secret, vc)
@@ -257,22 +283,20 @@ mod tests {
             "the digest must cover the grant the community sent"
         );
 
-        // Digesting a round trip through the local model now produces the *same*
+        // Digesting a round trip through the local model produces the *same*
         // value. This used to be the hazard the acknowledgement guarded against:
         // the model had no field for `credentialStatus`, so parsing dropped it and
-        // a digest over the parse mismatched the one the community recomputes. As
-        // of `dtg-credentials` 0.9.1 (Working Draft 02) the model carries
-        // `credentialStatus`, so the round trip is lossless and either route
-        // digests to the same bytes — the divergence is closed at the library
-        // rather than worked around here. Parsed without the proof, which the
-        // digest excludes anyway.
+        // a digest over the parse mismatched the one the community recomputes. The
+        // model carries `credentialStatus` (and `issuerScope`), so the round trip
+        // is lossless and either route digests to the same bytes. Parsed without
+        // the proof, which the digest excludes anyway.
         let mut proofless = grant();
         proofless.as_object_mut().expect("object").remove("proof");
         let parsed: DTGCredential = serde_json::from_value(proofless).expect("parses");
         assert_eq!(
             vc["credentialSubject"]["digestMultibase"],
             Value::String(parsed.digest_multibase().expect("digest")),
-            "0.9.1 models credentialStatus, so digesting the parsed grant matches the wire"
+            "the model is lossless, so digesting the parsed grant matches the wire"
         );
     }
 
@@ -304,7 +328,45 @@ mod tests {
             "issuer": COMMUNITY,
             "credentialSubject": { "id": MEMBER }
         });
-        assert!(build_member_vmc(&secret, &not_a_grant).await.is_err());
+        assert!(
+            build_member_vmc(&secret, MEMBER, &not_a_grant)
+                .await
+                .is_err()
+        );
+    }
+
+    /// The member acknowledges only a grant naming the persona that signs. A grant
+    /// for someone else — relayed, misdelivered or forged — is refused rather than
+    /// answered on their behalf.
+    #[tokio::test]
+    async fn a_grant_naming_someone_else_is_refused() {
+        let secret = Secret::generate_ed25519(None, None);
+        assert!(
+            build_member_vmc(&secret, "did:example:someone-else", &grant())
+                .await
+                .is_err()
+        );
+    }
+
+    /// A pre-v1 grant — the retired context, no `issuerScope` — is not a grant this
+    /// client can acknowledge: the edge it would complete does not exist under the
+    /// current specification.
+    #[tokio::test]
+    async fn a_pre_v1_grant_is_refused() {
+        let secret = Secret::generate_ed25519(None, None);
+        let mut old = grant();
+        old["@context"][1] = Value::String(crate::dtg::fixtures::RETIRED_CONTEXT.into());
+        old.as_object_mut().unwrap().remove("issuerScope");
+        assert!(build_member_vmc(&secret, MEMBER, &old).await.is_err());
+    }
+
+    /// The acknowledgement declares the member's own scope: `directed`, for the
+    /// persona DID a membership names.
+    #[tokio::test]
+    async fn the_acknowledgement_declares_the_member_scope() {
+        let (_secret, vc) = signed_vmc().await;
+        assert_eq!(vc["issuerScope"], "directed");
+        assert_eq!(vc["@context"][1], dtg_credentials::DTG_CONTEXT_V1);
     }
 
     /// The community keys a member's VMC by its top-level `id` and refuses one that has

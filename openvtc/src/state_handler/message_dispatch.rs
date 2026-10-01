@@ -1062,6 +1062,7 @@ async fn process_inbound(
                     // re-send it without minting a different credential.
                     if let Some(record) = config.account.membership_mut(&from_did, persona_id) {
                         record.member_vmc = Some(vmc);
+                        record.clear_retired(openvtc_core::config::account::RetiredCredential::MEMBER_ACKNOWLEDGEMENT);
                     }
                     info!(
                         vtc = %from_did,
@@ -1311,6 +1312,7 @@ async fn process_inbound(
                     Ok((_, vmc)) => {
                         if let Some(record) = config.account.membership_mut(&from_did, persona_id) {
                             record.member_vmc = Some(vmc);
+                            record.clear_retired(openvtc_core::config::account::RetiredCredential::MEMBER_ACKNOWLEDGEMENT);
                         }
                         info!(
                             vtc = %from_did,
@@ -1855,10 +1857,14 @@ mod tests {
 
     async fn membership_vmc(vtc: &str, key: &Secret) -> serde_json::Value {
         let mut vc = serde_json::json!({
-            "@context": ["https://www.w3.org/ns/credentials/v2"],
+            "@context": [
+                dtg_credentials::W3C_VC_V2_CONTEXT,
+                dtg_credentials::DTG_CONTEXT_V1
+            ],
             "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-            "type": ["VerifiableCredential", "MembershipCredential"],
+            "type": ["VerifiableCredential", "DTGCredential", "MembershipCredential"],
             "issuer": vtc,
+            "issuerScope": "public",
             "validFrom": "2026-01-01T00:00:00Z",
             "validUntil": "2099-01-01T00:00:00Z",
             "credentialSubject": { "id": PERSONA },

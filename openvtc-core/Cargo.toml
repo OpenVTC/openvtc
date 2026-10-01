@@ -119,7 +119,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 #
 # 0.14.0 is the line built on the same `vta-sdk` 0.56 the root manifest now
 # pins, so the dev graph keeps one copy of it too.
-affinidi-messaging-test-mediator = "0.14.0"
+affinidi-messaging-test-mediator = "0.15.0"
 # In-process MockVta for the bootstrap e2e (VTI#406/#427 test-support seams).
 # `vta-service` is the VTA server crate; it carries the credential-vault
 # lifecycle tasks (receive/query/archive/delete/restore/purge) + the
@@ -165,7 +165,9 @@ affinidi-messaging-test-mediator = "0.14.0"
 # resolve and never will. 0.45.0 is the republished family on `vta-sdk ^0.56` /
 # `vti-common ^0.29`, matching the root manifest. `cargo tree -i vti-common`
 # is the check: one row means the family agrees.
-vta-service = { version = "0.45.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
+#
+# **0.46.0** is the family on `vta-sdk` 0.57 (DTG Credentials v1).
+vta-service = { version = "0.47.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }

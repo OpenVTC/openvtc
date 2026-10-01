@@ -52,9 +52,9 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 use vta_sdk::protocols::join_requests::{JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, manifest};
 use vta_sdk::protocols::vetting::{
-    COMMUNITY_ROLE_ENDORSEMENT_TYPE, IDENTITY_VETTING_ENDORSEMENT_TYPE, VETTER_ROLE,
-    VETTING_REQUEST_RESPONSE_TYPE, VETTING_REQUEST_TYPE, VETTING_SESSION_RESPONSE_TYPE,
-    VETTING_SESSION_TYPE, VettingMethod, VettingRelationship, VettingRequirements, session,
+    VETTED_PREDICATE, VETTER_ROLE, VETTING_REQUEST_RESPONSE_TYPE, VETTING_REQUEST_TYPE,
+    VETTING_SESSION_RESPONSE_TYPE, VETTING_SESSION_TYPE, VettingMethod, VettingRelationship,
+    VettingRequirements, session,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::card::sign_card;
@@ -200,7 +200,7 @@ impl Party {
 fn requirements() -> VettingRequirements {
     serde_json::from_value(json!({
         "version": "0.1",
-        "statementType": IDENTITY_VETTING_ENDORSEMENT_TYPE,
+        "statementType": VETTED_PREDICATE,
         "minStatements": 1,
         "minByMethod": { "inPerson": 1 },
         "acceptedMethods": ["inPerson", "video"],
@@ -262,18 +262,24 @@ async fn manifest_reply(community: &str, to: &str, signer: &Secret) -> Message {
 
 /// The community's `vetter` role credential for `subject`.
 async fn role_credential(issuer: &Secret, community: &str, subject: &str) -> Value {
-    let now = Utc::now();
-    let mut credential = DTGCredential::new_vec(
+    // A community-issued VAC: `role:vetter` in the community's own scope,
+    // `issuerScope` public, not further attenuable.
+    assert_eq!(
         did_of(issuer),
+        community,
+        "a community grants roles in itself"
+    );
+    let now = Utc::now();
+    let mut credential = DTGCredential::new_community_role_vac(
+        community.to_string(),
         subject.to_string(),
+        VETTER_ROLE,
         now - chrono::Duration::minutes(1),
-        Some(now + chrono::Duration::days(365)),
-        json!({
-            "type": COMMUNITY_ROLE_ENDORSEMENT_TYPE,
-            "role": VETTER_ROLE,
-            "communityDid": community,
-        }),
+        now + chrono::Duration::days(365),
     )
+    .expect("a role VAC")
+    .with_max_attenuation(0)
+    .expect("a VAC")
     .with_id(wire::new_id());
     credential.sign(issuer, None).await.expect("sign the grant");
     serde_json::to_value(&credential).expect("credential json")
@@ -470,6 +476,13 @@ async fn the_vetting_ceremony_completes_over_the_wire() {
     )
     .expect("session document");
     wire::sign(&mut document, &bob.secret).await.expect("sign");
+    // Kept as sent: the statement cites it by `taskDigestMultibase`.
+    bob.book
+        .record_session_document(
+            &request_id,
+            serde_json::to_value(&document).expect("session json"),
+        )
+        .expect("record the session document");
     let session_doc = document.clone();
     let session_msg = wire::to_message(&document).expect("session message");
 

@@ -43,6 +43,81 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Every DTG credential conforms to DTG Credentials v1 and the DTG VSC
+  predicate registry.** *Breaking, on the wire and in stored state.* Every
+  credential this client issues, receives, verifies, stores or shows now
+  carries `@context` `["https://www.w3.org/ns/credentials/v2",
+  "https://registry.trustoverip.org/dtg/context/v1"]`, a top-level
+  `issuerScope`, and exactly one concrete type; the pre-v1
+  `firstperson.network/credentials/dtg/v1` context is refused with no alias.
+  Built on `dtg-credentials` 0.12 (unreleased; carried as 0.11 by the patch
+  block), `vta-sdk` 0.57, `vta-service` 0.46 and `trust-tasks-rs` /
+  `trust-tasks-capability-client` 0.24.8, all of which change together — a
+  0.12 verifier refuses the old shapes and an old verifier refuses the new
+  ones, so upgrade the community and its members together. By flow:
+  - **Invitations (VIC)** are validated by parsing through `dtg-credentials`:
+    the v1 context second, `issuerScope: public`, one concrete type.
+    `join::DTG_CONTEXT` is now `dtg_credentials::DTG_CONTEXT_V1`. An
+    invitation naming its issuer in the W3C object form is refused, because
+    `dtg-credentials` models `issuer` as a DID string.
+  - **Membership.** The community's grant declares `public`; the member's
+    acknowledgement is built with `new_member_vmc_for` — which refuses a grant
+    that does not name the signing persona — and declares **`directed`**
+    (`dtg::MEMBER_IDENTIFIER_SCOPE`): the persona DID a membership names is
+    recognised by the community, the members it relates to and vets, and
+    possibly other communities, so `pairwise` would not stay true.
+    `build_member_vmc` takes the member DID.
+  - **Role credentials are community VACs**, not role endorsements:
+    `AuthorityCredential`, `authority.scope` the community DID, `actions`
+    `["role:<name>"]`, `maxAttenuation: 0`. `CredentialKind::Role` classifies
+    one only when it is a community role grant (`dtg::community_roles`), and
+    `CredentialKind::from_credential` classifies only conformant credentials.
+    The Communities view shows the role names (`role ✓ (vetter)`), and the
+    credential views describe a credential from its content ("Role: vetter",
+    "Statement: vetted (identity vetting)"). `personhood::AssertReply::role_vec`
+    is `role_vac`, read from `roleVac`.
+  - **Vetting Statements are `vetted/1` VSCs**
+    (`https://registry.trustoverip.org/dtg/vsc/vetted/1`), with the body at
+    `credentialSubject.object.value`, citing the `vetting/session` document by
+    `taskContext` **and** `taskDigestMultibase`, issued `directed`. The vetter
+    desk keeps the signed session document it sent
+    (`VettingBook::record_session_document`) and the applicant the one it
+    received, and the applicant refuses a statement that does not cite its
+    session by both. Statements are recognised by predicate, never by type; the
+    manifest `statementType` is the predicate IRI. The hidden-vetting wire
+    fixture is regenerated for the new `statementType`, which changes its
+    `requirementsDigest`.
+  - **Relationships (VRC)** declare the scope of the identifier the
+    relationship uses (`dtg::relationship_issuer_scope`): a relationship DID
+    (the `pairwise` default) declares `pairwise`; the persona DID (seeded by a
+    community's `relationshipIdentifierDefault: attributed`) declares
+    `directed`. `vrc::new_identified_vrc` takes the scope.
+  - **Statements the client shows** are summarised by predicate and object
+    (`dtg::describe_statement`); a predicate it does not know is shown as its
+    IRI, and `dtg::core_accept_list` (the four core predicates) fails closed on
+    anything else.
+
+- **Credentials stored in a pre-v1 shape are set aside on load, explicitly.**
+  None can be rewritten — each proof covers the old bytes and only the issuer
+  can sign new ones — and none would verify anywhere now, so each is dropped
+  with a `warn!` naming what and why, never kept and never allowed to fail the
+  config load:
+  - a membership's VMC, role credential or own acknowledgement goes to
+    `CommunityRecord::retired_credentials` (persisted), and the Communities view
+    shows a warning asking the member to have the community re-issue it
+    (renewing the membership re-issues the VMC and role VAC); a conformant
+    replacement clears it;
+  - a stored VRC, anywhere, is dropped and counted (`Vrcs::retired`), and the
+    Credentials panel says how many; a `VRCIssued` inbox task carrying one is
+    dropped;
+  - a vetter role grant or a held Vetting Statement is dropped with a sentence
+    on the Vetting page (`VettingBook::retired`), cleared when a replacement
+    arrives;
+  - a rebuild from the VTA vault rejects a pre-v1 membership credential as
+    `RejectionReason::Nonconformant` instead of restoring it;
+  - a session opened by an older build has no stored session document, so
+    attesting it says to open the session again.
+
 - **`git-ns/repo/create` moves to `0.3`, and the new-repository form can name
   owners.** A namespace admin's `repo.create` is implied by `ns.admin`, and in
   `0.2` that let them make themselves owner — and so forge admin — of any

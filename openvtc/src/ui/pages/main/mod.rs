@@ -3760,6 +3760,8 @@ mod key_handler_tests {
             request_id: String::new(),
             has_membership_credential: false,
             has_role_credential: false,
+            role_names: Vec::new(),
+            retired_credentials: Vec::new(),
             accent: None,
             decision: None,
         }

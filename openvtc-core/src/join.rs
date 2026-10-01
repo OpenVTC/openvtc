@@ -607,16 +607,21 @@ pub fn invitation_is_expired(vic: &Value, now: DateTime<Utc>) -> bool {
     }
 }
 
-/// The two `@context` entries DTG Credentials §Common Structure requires of
-/// every DTG credential, and the base `type` every one of them carries.
+/// The two `@context` entries DTG Credentials §Base Structure requires of
+/// every DTG credential — the W3C VC 2.0 context first, the frozen DTG v1
+/// context second — and the base `type` every one of them carries.
 ///
-/// `dtg-credentials` builds all three into the credentials it mints but does
-/// not export them, so they are named here rather than spelled out inline.
-/// Removing this duplication needs a public constant upstream —
-/// OpenVTC/dtg-credentials#10.
-pub const W3C_VC_V2_CONTEXT: &str = "https://www.w3.org/ns/credentials/v2";
-pub const DTG_CONTEXT: &str = "https://firstperson.network/credentials/dtg/v1";
+/// The contexts are `dtg-credentials`' own constants, re-exported so the
+/// client and the library cannot disagree about them. The pre-v1 DTG context
+/// is refused, with no alias.
+pub use dtg_credentials::{DTG_CONTEXT_V1 as DTG_CONTEXT, W3C_VC_V2_CONTEXT};
 pub const DTG_BASE_TYPE: &str = "DTGCredential";
+/// The `issuerScope` a community's invitation declares. The VIC a joining
+/// client presents is issued by the community itself
+/// ([`invitation_matches_community`]), and a community can truthfully declare
+/// nothing narrower than `public`.
+pub const INVITATION_ISSUER_SCOPE: dtg_credentials::IssuerScope =
+    dtg_credentials::IssuerScope::Public;
 
 /// Whether a JSON value is an InvitationCredential (its `type` array carries
 /// the `InvitationCredential` tag). Used to validate a pasted/loaded VIC
@@ -642,8 +647,12 @@ pub fn is_invitation_credential(value: &Value) -> bool {
 /// The required set is the intersection of:
 /// - **W3C VC Data Model 2.0** mandatory properties: `@context` (ordered set
 ///   whose first value is `https://www.w3.org/ns/credentials/v2`), `type`
-///   (here ⊇ `VerifiableCredential` + `InvitationCredential`), `issuer`,
-///   `credentialSubject` (with an `id`), and a securing `proof`.
+///   (here `VerifiableCredential` + `DTGCredential` + `InvitationCredential`),
+///   `issuer`, `credentialSubject` (with an `id`), and a securing `proof`.
+/// - **DTG Credentials v1**: the DTG v1 context second, a top-level
+///   `issuerScope` — `public` for a community's invitation — and exactly one
+///   concrete type, checked by parsing through `dtg-credentials` once every
+///   member above is present.
 /// - the **VIC profile** the receiving VTC enforces: a top-level `id` (the
 ///   single-use consumption handle — W3C makes `id` optional, the VIC profile
 ///   does not), `validUntil` (the invite's expiry), and `credentialStatus`
@@ -667,8 +676,14 @@ pub fn validate_invitation_credential(vic: &Value) -> Result<(), String> {
             "@context (must be an array whose first item is \"https://www.w3.org/ns/credentials/v2\")",
         ),
     }
-    if !ctx.is_some_and(|c| c.iter().any(|v| v.as_str() == Some(DTG_CONTEXT))) {
-        missing.push("@context entry \"https://firstperson.network/credentials/dtg/v1\"");
+    if !ctx.is_some_and(|c| c.get(1).and_then(Value::as_str) == Some(DTG_CONTEXT)) {
+        missing.push(
+            "@context second item \"https://registry.trustoverip.org/dtg/context/v1\" \
+             (an invitation under an older DTG context must be re-issued)",
+        );
+    }
+    if vic.get("issuerScope").and_then(Value::as_str) != Some(INVITATION_ISSUER_SCOPE.as_str()) {
+        missing.push("issuerScope (a community's invitation declares \"public\")");
     }
     if !is_invitation_credential(vic) {
         missing
@@ -707,6 +722,14 @@ pub fn validate_invitation_credential(vic: &Value) -> Result<(), String> {
     }
 
     if missing.is_empty() {
+        // Every member is there; now hold the whole document to the
+        // specification — the one-subtype rule, the validity window, the
+        // subject shape — through the library that defines it.
+        let parsed = crate::dtg::parse_conformant(vic)
+            .map_err(|e| format!("not a conformant DTG Invitation Credential: {e}"))?;
+        if parsed.type_() != dtg_credentials::DTGCredentialType::Invitation {
+            return Err("not an Invitation Credential".to_string());
+        }
         Ok(())
     } else {
         Err(format!(
@@ -988,14 +1011,13 @@ mod tests {
             // previously carried only the W3C half and still called itself
             // complete — the validator agreed, because it checked only the
             // same half.
-            "@context": [
-                "https://www.w3.org/ns/credentials/v2",
-                "https://firstperson.network/credentials/dtg/v1"
-            ],
+            "@context": [W3C_VC_V2_CONTEXT, DTG_CONTEXT],
             "id": "urn:uuid:vic-1",
             "type": ["VerifiableCredential", "DTGCredential", "InvitationCredential"],
             "issuer": "did:webvh:example.com:community",
+            "issuerScope": "public",
             "credentialSubject": { "id": "did:webvh:example.com:alice" },
+            "validFrom": "2026-01-01T00:00:00Z",
             "validUntil": "2099-01-01T00:00:00Z",
             "credentialStatus": { "type": "BitstringStatusListEntry" },
             "proof": { "type": "DataIntegrityProof" }
@@ -1068,10 +1090,11 @@ mod tests {
     #[test]
     fn validate_accepts_a_complete_vic() {
         assert!(validate_invitation_credential(&complete_vic()).is_ok());
-        // Object-form issuer is accepted too.
+        // A DTG credential names its issuer as a DID string; the W3C object form
+        // is not one `dtg-credentials` parses, so it is refused.
         let mut v = complete_vic();
         v["issuer"] = json!({ "id": "did:webvh:example.com:community" });
-        assert!(validate_invitation_credential(&v).is_ok());
+        assert!(validate_invitation_credential(&v).is_err());
     }
 
     /// DTG Credentials §Common Structure is normative for *every* DTG
@@ -1084,9 +1107,33 @@ mod tests {
         no_ctx["@context"] = json!(["https://www.w3.org/ns/credentials/v2"]);
         let err = validate_invitation_credential(&no_ctx).expect_err("missing DTG context");
         assert!(
-            err.contains("firstperson.network/credentials/dtg/v1"),
+            err.contains(DTG_CONTEXT),
             "error should name the missing context: {err}"
         );
+
+        // The pre-v1 context is refused outright, not accepted as an alias.
+        let mut old_ctx = complete_vic();
+        old_ctx["@context"][1] = json!(crate::dtg::fixtures::RETIRED_CONTEXT);
+        assert!(validate_invitation_credential(&old_ctx).is_err());
+
+        // `issuerScope` is REQUIRED, and a community's invitation is `public`.
+        let mut no_scope = complete_vic();
+        no_scope.as_object_mut().unwrap().remove("issuerScope");
+        let err = validate_invitation_credential(&no_scope).expect_err("no issuerScope");
+        assert!(err.contains("issuerScope"), "{err}");
+        let mut narrow = complete_vic();
+        narrow["issuerScope"] = json!("directed");
+        assert!(validate_invitation_credential(&narrow).is_err());
+
+        // Exactly one concrete type.
+        let mut two = complete_vic();
+        two["type"] = json!([
+            "VerifiableCredential",
+            "DTGCredential",
+            "InvitationCredential",
+            "MembershipCredential"
+        ]);
+        assert!(validate_invitation_credential(&two).is_err());
 
         let mut no_base = complete_vic();
         no_base["type"] = json!(["VerifiableCredential", "InvitationCredential"]);

@@ -75,7 +75,7 @@ against `vta-sdk` 0.25.1.
 | VICs (invitations) | **VTA** — credential vault | unchanged |
 | Account model — persona list, labels, mediator refs | OpenVTC only | **→ VTA** |
 | Community memberships — status, sub-context, VMC, request ids | OpenVTC only | **→ VTA** |
-| Relationships (R-DIDs, `did:peer`) | OpenVTC only | **→ VTA** |
+| Relationships (relationship DIDs, `did:peer`) | OpenVTC only | **→ VTA** |
 | VRCs issued / received | OpenVTC only | **→ VTA credential vault** |
 | Contacts (DID + your alias) | OpenVTC only | **→ VTA** (D22) |
 | Agent-name cache | OpenVTC only | **→ VTA** as a *stale* hint (D22) |
