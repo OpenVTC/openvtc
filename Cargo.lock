@@ -195,9 +195,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-did-resolver-cache-sdk"
-version = "0.8.38"
+version = "0.8.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44ba0a3f03ecdf9e4f561df39514b32b4cd8fb8e69ad9c1cf67fd7ec1e487264"
+checksum = "a8db50e6a452df1d799843e3064cf162b4f11d2dbee65bdbe4ae2f1c89f65284"
 dependencies = [
  "affinidi-did-common",
  "affinidi-did-resolver-traits",
@@ -2958,9 +2958,9 @@ dependencies = [
 
 [[package]]
 name = "did-scid"
-version = "0.2.7"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32bb54e6769f547fc641bbe63bb06f253fe41ad552e47e24cbd6c62a7b6436d8"
+checksum = "b3cb51b0528373d016d6bea1cc14cbadd3ddbc87855e6f1b8cdcfd95ab41a86c"
 dependencies = [
  "affinidi-did-common",
  "didwebvh-rs",
