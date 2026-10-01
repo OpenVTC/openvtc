@@ -205,6 +205,25 @@ pub async fn send_trust_task(
             ))
         })?;
     if matches!(state, RelationshipState::None) {
+        // Tell the SDK which mediator the peer lives behind *before* the invite.
+        //
+        // The invite goes through the SDK's `send_control`, which only routes
+        // `[our_mediator, peer_mediator, peer]` when it knows a peer mediator —
+        // learned earlier, or advertised as a `TSPTransport` service in the
+        // peer's DID document. A VTC whose document does not carry it left the
+        // SDK sending the invite Direct, and our own mediator refused it with
+        // `403 e.p.delivery.refused` ("recipient is not local to this
+        // mediator"). We already know the mediator (the caller resolved it), so
+        // say so rather than depend on the document.
+        atm.tsp()
+            .set_peer_mediator(profile, to_did, Some(tsp_mediator_did.to_string()))
+            .await
+            .map_err(|e| {
+                OpenVTCError::Config(format!(
+                    "TSP send to {to_did}: could not record its mediator \
+                     {tsp_mediator_did} before forming the relationship: {e}"
+                ))
+            })?;
         // `form_relationship_routed` supplies a `Reply_Path` of
         // `[our_mediator, our_did]` (§5.3.3 / §7.2.4) so the peer's accept comes
         // back through our mediator rather than being sent to us direct — the
