@@ -149,14 +149,14 @@ impl VtaAclInstructions {
         let commands = PnmCommands::build(state, self.context_id.value());
 
         // Vertical sections within the bordered block:
-        //   intro       — prose + setup DID (5 lines + 1 spacer = 6)
+        //   intro       — prose + setup DID + new-each-run note (6 lines + 1 spacer = 7)
         //   ctx_label   — "Context id" label
         //   ctx_input   — "> " + editable input on the same row
         //   cmd_header  — spacer + "Run this command:" header
         //   rest        — pnm command + footer prose
         let area = middle.inner(Margin::new(3, 2));
         let [intro, ctx_label, ctx_input, cmd_header, rest] =
-            Layout::vertical([Length(6), Length(1), Length(1), Length(2), Min(0)]).areas(area);
+            Layout::vertical([Length(7), Length(1), Length(1), Length(2), Min(0)]).areas(area);
 
         frame.render_widget(
             Paragraph::new(vec![
@@ -171,6 +171,13 @@ impl VtaAclInstructions {
                 Line::default(),
                 Line::styled("Setup DID", Style::new().fg(COLOR_BORDER).bold()),
                 Line::from(Span::styled(setup_did, Style::new().fg(COLOR_SOFT_PURPLE))),
+                // The key is minted per run and held only in memory, so a grant
+                // made for the DID an earlier run showed is for a key that no
+                // longer exists — and the VTA reports it as "DID not in ACL".
+                Line::styled(
+                    "New each run — a grant for an earlier run's setup DID does not carry over.",
+                    Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+                ),
             ]),
             intro,
         );
