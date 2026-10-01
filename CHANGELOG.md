@@ -153,6 +153,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A community whose `VTCRest` endpoint carries `/v1` is reached over REST.**
+  VTI's `vtc-host` template advertises the API base with its mount
+  (`https://<host>/v1`), and the manifest read appended `v1/trust-tasks` to
+  it, so it posted to `/v1/v1/trust-tasks` and got 405, then fell back to
+  DIDComm. The mount is now added only when the endpoint does not already end
+  with it, so both that form and the bare host of older communities work
+  (Keyring VTI-55).
+- **The setup page's VTA command includes `--admin-handoff`.** Setup rolls the
+  one-hour setup key over to a long-term admin the VTA mints, and VTI now
+  refuses that rollover unless the setup entry was created as a one-time
+  hand-off (VTI-ACL-054). The printed `pnm contexts create` command left the
+  flag out, so a setup that followed it was refused (Keyring VTI-Q38).
 - **A community's credential deliveries and VMC requests are taken only as its
   signed documents.** A VTC now pushes every credential-exchange step, and
   `vtc/members/request-vmc`, as a signed Trust Task document over TSP or

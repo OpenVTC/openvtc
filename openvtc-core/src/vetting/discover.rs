@@ -147,9 +147,28 @@ pub fn rest_endpoint(doc: &Value) -> Option<String> {
 
 /// The Trust Task document endpoint under `base`, vetted for dialling.
 fn trust_tasks_url(base: &str, policy: ProbePolicy) -> Result<reqwest::Url, DiscoverError> {
+    crate::health::vet_probe_url(&trust_tasks_url_string(base), policy)
+        .map_err(DiscoverError::Blocked)
+}
+
+/// `base` joined with the Trust Task path, without doubling the API mount.
+///
+/// A community publishes its `VTCRest` endpoint in one of two forms: the API
+/// base including its `/v1` mount (what VTI's `vtc-host` template advertises
+/// since VTI #1615), or the bare host (communities minted before it). Appending
+/// `v1/trust-tasks` to the first gave `/v1/v1/trust-tasks`, which a VTC answers
+/// with 405 (VTI-55), so the mount is added only when `base` does not already
+/// end with it.
+fn trust_tasks_url_string(base: &str) -> String {
     let base = base.trim_end_matches('/');
-    let url = format!("{base}/{TRUST_TASKS_PATH}");
-    crate::health::vet_probe_url(&url, policy).map_err(DiscoverError::Blocked)
+    let (mount, rest) = TRUST_TASKS_PATH
+        .split_once('/')
+        .expect("TRUST_TASKS_PATH is <mount>/<path>");
+    if base.rsplit('/').next() == Some(mount) {
+        format!("{base}/{rest}")
+    } else {
+        format!("{base}/{TRUST_TASKS_PATH}")
+    }
 }
 
 /// The manifest question, as a document that names nobody.
@@ -265,6 +284,35 @@ mod tests {
 
     fn doc_with(service: Value) -> Value {
         json!({ "id": "did:webvh:x", "service": service })
+    }
+
+    /// VTI-55: a `VTCRest` endpoint that already carries the `/v1` mount (VTI's
+    /// current `vtc-host` template) must not get a second one. A bare host
+    /// (communities minted before the template carried it) still gets it.
+    #[test]
+    fn vti_55_the_api_mount_is_added_only_when_missing() {
+        for base in [
+            "https://vtc.example/v1",
+            "https://vtc.example/v1/",
+            "https://vtc.example",
+            "https://vtc.example/",
+        ] {
+            assert_eq!(
+                trust_tasks_url_string(base),
+                "https://vtc.example/v1/trust-tasks",
+                "{base}"
+            );
+        }
+        // A community mounted under a path prefix keeps it.
+        assert_eq!(
+            trust_tasks_url_string("https://host.example/community/v1"),
+            "https://host.example/community/v1/trust-tasks"
+        );
+        // A segment that merely ends in "v1" is not the mount.
+        assert_eq!(
+            trust_tasks_url_string("https://host.example/apiv1"),
+            "https://host.example/apiv1/v1/trust-tasks"
+        );
     }
 
     #[test]
