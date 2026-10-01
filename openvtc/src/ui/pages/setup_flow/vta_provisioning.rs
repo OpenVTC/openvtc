@@ -37,6 +37,15 @@ use crate::{
 #[derive(Clone, Debug, Default)]
 pub struct VtaProvisioning;
 
+/// Whether the failure is the VTA refusing the rollover because the setup
+/// entry carries no one-time hand-off (VTI-ACL-054) — matched on the VTA's
+/// specific phrase, so other refusals are not sent to re-grant.
+fn needs_handoff_regrant(messages: &[MessageType]) -> bool {
+    messages.iter().any(|m| {
+        matches!(m, MessageType::Error(e) if e.to_ascii_lowercase().contains("no one-time hand-off"))
+    })
+}
+
 impl VtaProvisioning {
     pub fn handle_key_event(state: &mut SetupFlow, key: KeyEvent) {
         match key.code {
@@ -186,6 +195,25 @@ impl VtaProvisioning {
                 ]));
             }
             Completion::CompletedFail => {
+                // The VTA's own re-grant suggestion spells `pnm acl delete
+                // --did <did>`, but `acl delete` takes the DID positionally,
+                // and its `acl create` drops `persona-holder`. Point at the
+                // instructions page, which carries the verified commands.
+                if needs_handoff_regrant(&state.vta.messages) {
+                    lines.push(Line::default());
+                    lines.push(Line::styled(
+                        "  The setup DID's entry was created without the one-time hand-off.",
+                        Style::new().fg(COLOR_TEXT_DEFAULT),
+                    ));
+                    lines.push(Line::styled(
+                        "  Use the \"Context already exists, or retrying\" commands on the next",
+                        Style::new().fg(COLOR_TEXT_DEFAULT),
+                    ));
+                    lines.push(Line::styled(
+                        "  screen: delete the entry, then re-create it with --handoff.",
+                        Style::new().fg(COLOR_TEXT_DEFAULT),
+                    ));
+                }
                 lines.push(Line::default());
                 lines.push(Line::from(vec![
                     Span::styled("[ENTER]", Style::new().fg(COLOR_BORDER).bold()),
@@ -210,5 +238,37 @@ impl VtaProvisioning {
             Paragraph::new(bottom_line).block(Block::new().padding(Padding::new(2, 0, 1, 0))),
             bottom,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_missing_handoff_refusal_is_recognised() {
+        let refusal = MessageType::Error(
+            "provision-integration call failed: forbidden: did:key:z6Mk's entry expires at \
+             1790859174 and carries no one-time hand-off, so it cannot roll over"
+                .to_string(),
+        );
+        assert!(needs_handoff_regrant(&[refusal]));
+    }
+
+    #[test]
+    fn other_failures_are_not_sent_to_regrant() {
+        for other in [
+            "forbidden: not authorized",
+            "connection refused",
+            "timed out",
+        ] {
+            assert!(
+                !needs_handoff_regrant(&[MessageType::Error(other.to_string())]),
+                "{other}"
+            );
+        }
+        assert!(!needs_handoff_regrant(&[MessageType::Info(
+            "carries no one-time hand-off".to_string()
+        )]));
     }
 }

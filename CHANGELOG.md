@@ -153,6 +153,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Setup's ACL instructions cover an existing context and a retry.** The page
+  printed only `pnm contexts create`, which refuses a context that already
+  exists — and a retry after the VTA refuses the rollover to the long-term admin
+  (VTI-ACL-054) needs the setup DID's entry re-created, since the hand-off is
+  fixed when an entry is created. It now also shows `pnm acl delete <did>` and
+  `pnm acl create --did <did> --role admin --contexts <ctx> --expires 1h
+  --handoff --capabilities persona-holder` (`F3` copies it), carrying the same
+  grant as the `contexts create` form. The VTA's own suggestion for this refusal
+  passes `--did` to `acl delete`, which takes the DID positionally, and leaves
+  out `persona-holder`; the failure screen now points at the instructions page
+  instead.
+
 - **A community whose `VTCRest` endpoint carries `/v1` is reached over REST.**
   VTI's `vtc-host` template advertises the API base with its mount
   (`https://<host>/v1`), and the manifest read appended `v1/trust-tasks` to
