@@ -257,9 +257,14 @@ fn build_pnm_command(state: &SetupState, typed_ctx: &str) -> String {
     // always waiting for. The entry stays scoped to this one context and gains
     // authority over the holder's own identity, which is exactly what a client
     // that *is* the holder should have and an integration should not.
+    //
+    // `--admin-handoff` marks the entry as a one-time hand-off (VTI-ACL-054).
+    // Setup asks for `AdminRotated`: the VTA mints a long-term admin DID and
+    // this one-hour setup key rolls over to it, and the VTA refuses that
+    // rollover unless the entry allows it — the long-term admin outlives it.
     format!(
         "pnm contexts create --id {display_ctx} --name \"OpenVTC\" \\\n  \
-         --admin-did {setup_did} --admin-expires 1h --admin-holder",
+         --admin-did {setup_did} --admin-expires 1h --admin-holder --admin-handoff",
     )
 }
 
@@ -298,6 +303,10 @@ mod tests {
         assert!(
             cmd.contains("--admin-holder"),
             "without it the identity pane is refused the pool: {cmd}"
+        );
+        assert!(
+            cmd.contains("--admin-handoff"),
+            "without it the VTA refuses the rollover to the long-term admin: {cmd}"
         );
         // The second line is indented by two spaces on purpose; what must not
         // appear is a run of spaces *within* a line, which is what a collapsed
