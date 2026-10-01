@@ -157,7 +157,12 @@ agent-names = "0.1.3"
 # `openvtc-core::health::build_report_with_progress`). A caret below this
 # release admits 0.8.36, where the webvh half is simply absent, so the patch is
 # the floor rather than a record of what happens to resolve today.
-affinidi-did-resolver-cache-sdk = { version = "0.8.38", features = [
+#
+# 0.8.39 raises it (SEC-4045 / VGI-04): before it, a did:webvh whose log ends
+# in a deactivation resolved to its last document, keys included, so a retired
+# DID kept being trusted as a peer or signer. It now fails to resolve, as a
+# deactivated did:web (a 404) already did.
+affinidi-did-resolver-cache-sdk = { version = "0.8.39", features = [
   "agent-names",
 ] }
 # The SSRF guard the resolver above already applies to did:web fetches, taken
