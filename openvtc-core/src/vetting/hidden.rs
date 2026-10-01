@@ -400,14 +400,18 @@ pub fn read_request_ext(ext: Option<&serde_json::Value>) -> Result<Option<String
 /// One function, so the two paths cannot drift about what a statement says. Dates, never
 /// timestamps: an exact time would let a community line an attestation up with a vetter's
 /// activity, which undoes the proof without touching it (design §6).
+///
+/// `None` when the draft carries none of the vetter-only members: only a vetter attests on
+/// the hidden path, and a vetter's statement always carries all three.
 #[must_use]
 pub fn statement_meta(
     draft: &vta_sdk::vetting::statement::StatementDraft,
     community: &str,
     requirements_digest: &str,
-) -> StatementMeta {
+) -> Option<StatementMeta> {
     let e = &draft.value;
-    StatementMeta {
+    let members = e.vetter_members()?;
+    Some(StatementMeta {
         community: community.to_string(),
         requirements_digest: requirements_digest.to_string(),
         method: e.method,
@@ -417,14 +421,14 @@ pub fn statement_meta(
             .map(|c| c.as_str().to_string())
             .collect(),
         liveness_confirmed: e.liveness_confirmed,
-        declared_relationship: e.declared_relationship,
-        identity_commitment: e.identity_commitment.clone(),
-        card_digest_multibase: e.card_digest_multibase.clone(),
+        declared_relationship: members.declared_relationship,
+        identity_commitment: members.identity_commitment.to_string(),
+        card_digest_multibase: members.card_digest_multibase.to_string(),
         valid_from: draft.valid_from.date_naive(),
         valid_until: draft.valid_until.date_naive(),
         token_label: String::new(),
         token_serial: String::new(),
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------------------------

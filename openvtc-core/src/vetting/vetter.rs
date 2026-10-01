@@ -697,9 +697,11 @@ impl VettingBook {
             document_classes,
             claims_verified,
             liveness_confirmed: attestation.liveness_confirmed,
-            identity_commitment: card.identity_commitment.clone(),
-            card_digest_multibase: card.digest_multibase.clone(),
-            declared_relationship: attestation.declared_relationship,
+            // A vetter's statement always carries all three vetter-only
+            // members; only a statement the community issues for itself omits them.
+            identity_commitment: Some(card.identity_commitment.clone()),
+            card_digest_multibase: Some(card.digest_multibase.clone()),
+            declared_relationship: Some(attestation.declared_relationship),
             attestation_text_digest: attestation.attestation_text_digest,
         };
         value.check_shape()?;
