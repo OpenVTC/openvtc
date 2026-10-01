@@ -541,10 +541,8 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # `issuer_scope`, `value`), role credentials are community VACs
 # (`eligibility::community_roles`, `role_action`), and `role_vec` is `role_vac`.
 #
-# `did-git-sign` 0.5.2 still requires `vta-sdk ^0.56`, so until VGI releases on
-# 0.57 the graph holds a second, registry `vta-sdk` beneath it. It builds —
-# `did_git_sign::{config, init}` passes no sdk type across — but `cargo tree -d`
-# shows it, and it closes only with a VGI release.
+# `did-git-sign` 0.6.0 (VGI 0.6.0) is on `vta-sdk` 0.58, `affinidi-tdk` 0.21 and
+# `trust-tasks` 0.25, so the graph holds one copy of each again.
 #
 # `vta-service` is a separate matter this cycle: see the `vta-service` note in
 # `openvtc-core/Cargo.toml` for why that pin stays at 0.43.0 rather than
