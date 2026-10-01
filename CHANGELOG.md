@@ -153,6 +153,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Setup's start page lists the steps setup runs.** "New profile setup"
+  promised choosing a mediator and creating your DID; both moved to joining a
+  community (R-A-5). It now lists connecting to your VTA, authorising OpenVTC
+  from PNM, the optional hardware token and the unlock code, and says the DID
+  comes when you join your first community.
+- **The ACL instructions page says the setup DID is new each run.** The key is
+  minted per run and held only in memory, so a grant made for an earlier run's
+  DID fails as "DID not in ACL"; the page now says so under the DID.
+
 - **Setup's ACL instructions cover an existing context and a retry.** The page
   printed only `pnm contexts create`, which refuses a context that already
   exists — and a retry after the VTA refuses the rollover to the long-term admin

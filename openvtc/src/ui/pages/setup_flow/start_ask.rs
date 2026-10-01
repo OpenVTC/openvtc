@@ -1,4 +1,4 @@
-use crate::colors::{COLOR_BORDER, COLOR_SUCCESS, COLOR_TEXT_DEFAULT};
+use crate::colors::{COLOR_BORDER, COLOR_DARK_GRAY, COLOR_SUCCESS, COLOR_TEXT_DEFAULT};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -119,17 +119,20 @@ fn render_left_panel(frame: &mut Frame, rect: Rect, state: &StartAskPanel) {
         ),
         Line::default(),
         Line::styled("You will:", Style::new().fg(COLOR_TEXT_DEFAULT)),
-        Line::styled(
-            "• Configure key management",
-            Style::new().fg(COLOR_TEXT_DEFAULT),
-        ),
-        Line::styled("• Choose a mediator", Style::new().fg(COLOR_TEXT_DEFAULT)),
-        Line::styled(
-            "• Create your Decentralized Identifier (DID)",
-            Style::new().fg(COLOR_TEXT_DEFAULT),
-        ),
-        Line::styled("• Verify the setup", Style::new().fg(COLOR_TEXT_DEFAULT)),
     ];
+    // What setup actually walks through. Mediator choice and DID creation used
+    // to be listed here; both moved to joining a community (R-A-5) — the VTA's
+    // DID document names its own mediator, and the persona is minted per join.
+    lines.extend(
+        new_profile_steps()
+            .iter()
+            .map(|step| Line::styled(format!("• {step}"), Style::new().fg(COLOR_TEXT_DEFAULT))),
+    );
+    lines.push(Line::default());
+    lines.push(Line::styled(
+        "Your DID is created later, when you join your first community.",
+        Style::new().fg(COLOR_DARK_GRAY),
+    ));
 
     if let StartAskPanel::Create = state {
         lines.push(Line::default());
@@ -145,6 +148,18 @@ fn render_left_panel(frame: &mut Frame, rect: Rect, state: &StartAskPanel) {
             .block(block),
         rect,
     );
+}
+
+/// The steps a new-profile setup runs, in order — one per wizard section.
+fn new_profile_steps() -> Vec<&'static str> {
+    let mut steps = vec![
+        "Connect to your Verifiable Trust Agent (VTA)",
+        "Authorise OpenVTC from your Personal Network Manager (PNM)",
+    ];
+    #[cfg(feature = "openpgp-card")]
+    steps.push("Optionally set up a hardware token");
+    steps.push("Set an unlock code to protect this profile");
+    steps
 }
 
 // ****************************************************************************
@@ -202,4 +217,21 @@ fn render_right_panel(frame: &mut Frame, rect: Rect, state: &StartAskPanel) {
             .block(block),
         rect,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::new_profile_steps;
+
+    /// The list promises what setup does. Mediator choice and DID creation
+    /// left setup for the join flow (R-A-5); listing them again would send an
+    /// operator looking for a step that never comes.
+    #[test]
+    fn the_new_profile_steps_name_only_what_setup_does() {
+        let steps = new_profile_steps().join("\n").to_ascii_lowercase();
+        assert!(steps.contains("vta"), "{steps}");
+        assert!(steps.contains("unlock code"), "{steps}");
+        assert!(!steps.contains("mediator"), "{steps}");
+        assert!(!steps.contains("identifier"), "{steps}");
+    }
 }
