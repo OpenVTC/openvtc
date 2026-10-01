@@ -458,7 +458,7 @@ pub struct VettingBook {
     pub hidden_published: std::collections::BTreeMap<String, super::hidden::HiddenParams>,
     /// What [`Self::retire_nonconformant`] set aside, one sentence each, for the
     /// Vetting page. Persisted so the notice survives the save that drops the
-    /// credentials, and cleared by the operator ([`Self::clear_retired`]).
+    /// credentials, and cleared by the operator ([`Self::clear_retired_for`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired: Vec<String>,
     /// Questions put to communities and not yet answered. Memory only — see

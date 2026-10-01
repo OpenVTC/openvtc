@@ -30,8 +30,6 @@ pub mod devices;
 pub mod diagnostics;
 pub mod didcomm;
 pub mod display;
-/// DTG Credentials conformance: issuer scopes, the conformance check stored and
-/// received credentials are held to, and predicate-based statement display.
 pub mod dtg;
 pub mod errors;
 pub mod git_ns;
