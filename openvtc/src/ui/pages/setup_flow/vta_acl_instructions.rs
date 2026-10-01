@@ -3,9 +3,24 @@
 //! for them to confirm it has been done.
 //!
 //! The page owns an editable `Input` for the context id so the operator can
-//! pick something other than the default `openvtc`. The displayed pnm command
-//! reflects the live input value, so what's on screen is what they paste into
+//! pick something other than the default `openvtc`. The displayed pnm commands
+//! reflect the live input value, so what's on screen is what they paste into
 //! their PNM session.
+//!
+//! Two paths, because the operator may be in either position:
+//!
+//! - **New context** — `pnm contexts create … --admin-did`, which creates the
+//!   context and the setup entry in one step.
+//! - **Existing context, or a retry** — `pnm acl create`. `contexts create`
+//!   refuses a context that already exists, and a retry after a refused
+//!   rollover needs the setup DID's entry re-created, since the hand-off flag
+//!   is fixed when an entry is created (VTI-ACL-054).
+//!
+//! Both must carry the same grant: a 1h expiry, the one-time hand-off and the
+//! `persona-holder` capability. The flags are spelled differently on the two
+//! commands (`--admin-handoff` / `--handoff`, `--admin-holder` /
+//! `--capabilities persona-holder`), which is exactly how one of them ends up
+//! missing a flag — the tests below pin both.
 
 use crate::colors::{
     COLOR_BORDER, COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS,
@@ -68,11 +83,16 @@ impl VtaAclInstructions {
             KeyCode::F(10) => {
                 let _ = state.action_tx.send(Action::Exit);
             }
-            KeyCode::F(2) => {
-                let cmd = build_pnm_command(
+            KeyCode::F(n @ (2 | 3)) => {
+                let commands = PnmCommands::build(
                     &state.props.state,
                     state.vta_acl_instructions.context_id.value(),
                 );
+                let cmd = if n == 2 {
+                    commands.create_context
+                } else {
+                    commands.grant_existing
+                };
                 state.vta_acl_instructions.copy_status =
                     Some(match crate::clipboard::copy_to_clipboard(&cmd) {
                         Ok(method) => CopyStatus::Copied(method.label().to_string()),
@@ -126,7 +146,7 @@ impl VtaAclInstructions {
             .map(|k| k.did.clone())
             .unwrap_or_else(|| "<setup key not yet generated>".to_string());
 
-        let pnm_cmd = build_pnm_command(state, self.context_id.value());
+        let commands = PnmCommands::build(state, self.context_id.value());
 
         // Vertical sections within the bordered block:
         //   intro       — prose + setup DID (5 lines + 1 spacer = 6)
@@ -177,18 +197,35 @@ impl VtaAclInstructions {
             Paragraph::new(vec![
                 Line::default(),
                 Line::styled(
-                    "Run this command in your PNM session:",
+                    "New context — run this in your PNM session:",
                     Style::new().fg(COLOR_BORDER).bold(),
                 ),
             ]),
             cmd_header,
         );
 
-        let mut footer = vec![
+        let command_style = Style::new().fg(COLOR_ORANGE).bold();
+        let mut footer = vec![Line::default()];
+        footer.extend(command_lines(&commands.create_context, command_style));
+        footer.extend([
             Line::default(),
-            Line::from(Span::styled(pnm_cmd, Style::new().fg(COLOR_ORANGE).bold())),
+            Line::styled(
+                "Context already exists, or retrying — grant the setup DID instead:",
+                Style::new().fg(COLOR_BORDER).bold(),
+            ),
+            Line::styled(
+                "(run the delete first only if this DID already has an entry; the hand-off",
+                Style::new().fg(COLOR_DARK_GRAY),
+            ),
+            Line::styled(
+                " is fixed when an entry is created, so a retry must re-create it)",
+                Style::new().fg(COLOR_DARK_GRAY),
+            ),
             Line::default(),
-        ];
+            Line::from(Span::styled(commands.delete_existing, command_style)),
+        ]);
+        footer.extend(command_lines(&commands.grant_existing, command_style));
+        footer.push(Line::default());
         match &self.copy_status {
             Some(CopyStatus::Copied(method)) => {
                 footer.push(Line::styled(
@@ -218,7 +255,12 @@ impl VtaAclInstructions {
 
         let bottom_line = Line::from(vec![
             Span::styled("[F2]", Style::new().fg(COLOR_BORDER).bold()),
-            Span::styled(" copy command  |  ", Style::new().fg(COLOR_TEXT_DEFAULT)),
+            Span::styled(
+                " copy new-context  |  ",
+                Style::new().fg(COLOR_TEXT_DEFAULT),
+            ),
+            Span::styled("[F3]", Style::new().fg(COLOR_BORDER).bold()),
+            Span::styled(" copy acl create  |  ", Style::new().fg(COLOR_TEXT_DEFAULT)),
             Span::styled("[ESC]", Style::new().fg(COLOR_BORDER).bold()),
             Span::styled(" reset context  |  ", Style::new().fg(COLOR_TEXT_DEFAULT)),
             Span::styled("[ENTER]", Style::new().fg(COLOR_BORDER).bold()),
@@ -233,39 +275,79 @@ impl VtaAclInstructions {
     }
 }
 
-fn build_pnm_command(state: &SetupState, typed_ctx: &str) -> String {
-    let setup_did = state
-        .vta
-        .setup_key
-        .as_ref()
-        .map(|k| k.did.as_str())
-        .unwrap_or("<setup key not yet generated>");
-    let trimmed = typed_ctx.trim();
-    let display_ctx = if trimmed.is_empty() {
-        DEFAULT_CONTEXT_ID
-    } else {
-        trimmed
-    };
-    // `--admin-holder` grants the `persona-holder` capability alongside the
-    // context-scoped admin entry. Without it OpenVTC can administer its own
-    // context and nothing of the holder's: the attribute pool and the profiles
-    // over it sit *above* every context, so the identity pane's Attributes,
-    // Profiles and Disclosures tabs are refused — correctly — by a gate a
-    // context-scoped credential cannot satisfy.
-    //
-    // It is not a way around that boundary; it is the grant the boundary was
-    // always waiting for. The entry stays scoped to this one context and gains
-    // authority over the holder's own identity, which is exactly what a client
-    // that *is* the holder should have and an integration should not.
-    //
-    // `--admin-handoff` marks the entry as a one-time hand-off (VTI-ACL-054).
-    // Setup asks for `AdminRotated`: the VTA mints a long-term admin DID and
-    // this one-hour setup key rolls over to it, and the VTA refuses that
-    // rollover unless the entry allows it — the long-term admin outlives it.
-    format!(
-        "pnm contexts create --id {display_ctx} --name \"OpenVTC\" \\\n  \
-         --admin-did {setup_did} --admin-expires 1h --admin-holder --admin-handoff",
-    )
+/// The `pnm` commands that authorise the setup DID, for both paths.
+///
+/// Flags verified against `pnm-cli`'s `ContextsCommands::Create` and
+/// `AclCommands::{Create, Delete}`: `acl delete` takes the DID positionally —
+/// there is no `--did` flag on it, unlike `acl create`.
+struct PnmCommands {
+    /// `pnm contexts create` — a new context and its setup entry in one step.
+    create_context: String,
+    /// `pnm acl delete` — clears a previous entry for the setup DID so it can
+    /// be re-created with the hand-off.
+    delete_existing: String,
+    /// `pnm acl create` — the same grant as `create_context`, onto a context
+    /// that already exists.
+    grant_existing: String,
+}
+
+impl PnmCommands {
+    fn build(state: &SetupState, typed_ctx: &str) -> Self {
+        let setup_did = state
+            .vta
+            .setup_key
+            .as_ref()
+            .map(|k| k.did.as_str())
+            .unwrap_or("<setup key not yet generated>");
+        let trimmed = typed_ctx.trim();
+        let ctx = if trimmed.is_empty() {
+            DEFAULT_CONTEXT_ID
+        } else {
+            trimmed
+        };
+        // `--admin-holder` grants the `persona-holder` capability alongside the
+        // context-scoped admin entry. Without it OpenVTC can administer its own
+        // context and nothing of the holder's: the attribute pool and the
+        // profiles over it sit *above* every context, so the identity pane's
+        // Attributes, Profiles and Disclosures tabs are refused — correctly —
+        // by a gate a context-scoped credential cannot satisfy.
+        //
+        // It is not a way around that boundary; it is the grant the boundary
+        // was always waiting for. The entry stays scoped to this one context
+        // and gains authority over the holder's own identity, which is exactly
+        // what a client that *is* the holder should have and an integration
+        // should not.
+        //
+        // `--admin-handoff` marks the entry as a one-time hand-off
+        // (VTI-ACL-054). Setup asks for `AdminRotated`: the VTA mints a
+        // long-term admin DID and this one-hour setup key rolls over to it, and
+        // the VTA refuses that rollover unless the entry allows it — the
+        // long-term admin outlives it.
+        //
+        // The `acl create` form carries the same grant under its own spellings:
+        // `--handoff` and `--capabilities persona-holder`. On `acl create`,
+        // `persona-holder` is an additive grant, not a narrowing — the admin
+        // role keeps everything else it carries.
+        Self {
+            create_context: format!(
+                "pnm contexts create --id {ctx} --name \"OpenVTC\" \\\n  \
+                 --admin-did {setup_did} --admin-expires 1h --admin-holder --admin-handoff",
+            ),
+            delete_existing: format!("pnm acl delete {setup_did}"),
+            grant_existing: format!(
+                "pnm acl create --did {setup_did} --role admin --contexts {ctx} \\\n  \
+                 --expires 1h --handoff --capabilities persona-holder",
+            ),
+        }
+    }
+}
+
+/// A line-continued command as one `Line` per physical line, so the break
+/// lands where the `\\` says rather than wherever the panel wraps it.
+fn command_lines(cmd: &str, style: Style) -> Vec<Line<'static>> {
+    cmd.lines()
+        .map(|l| Line::from(Span::styled(l.to_string(), style)))
+        .collect()
 }
 
 fn render_input(input: &Input, frame: &mut Frame, area: Rect) {
@@ -291,26 +373,7 @@ mod tests {
     /// It has to be one clean line-continued command — a stray run of spaces
     /// from a mangled string literal is invisible in review and survives all
     /// the way to the operator's shell.
-    #[test]
-    fn the_pnm_command_is_clean_and_carries_the_holder_grant() {
-        let state = SetupState::default();
-        let cmd = build_pnm_command(&state, "openvtc");
-
-        assert!(
-            cmd.starts_with("pnm contexts create --id openvtc "),
-            "{cmd}"
-        );
-        assert!(
-            cmd.contains("--admin-holder"),
-            "without it the identity pane is refused the pool: {cmd}"
-        );
-        assert!(
-            cmd.contains("--admin-handoff"),
-            "without it the VTA refuses the rollover to the long-term admin: {cmd}"
-        );
-        // The second line is indented by two spaces on purpose; what must not
-        // appear is a run of spaces *within* a line, which is what a collapsed
-        // string-literal continuation leaves behind.
+    fn assert_clean(cmd: &str) {
         for line in cmd.lines() {
             assert!(
                 !line.trim_start().contains("  "),
@@ -320,36 +383,105 @@ mod tests {
         assert_eq!(cmd.lines().count(), 2, "one continued command: {cmd:?}");
     }
 
-    /// The setup DID the operator is authorising is the one in the command.
     #[test]
-    fn the_setup_did_reaches_the_command() {
+    fn the_new_context_command_is_clean_and_carries_the_full_grant() {
+        let cmd = PnmCommands::build(&SetupState::default(), "openvtc").create_context;
+
+        assert!(
+            cmd.starts_with("pnm contexts create --id openvtc "),
+            "{cmd}"
+        );
+        assert!(cmd.contains("--admin-expires 1h"), "{cmd}");
+        assert!(
+            cmd.contains("--admin-holder"),
+            "without it the identity pane is refused the pool: {cmd}"
+        );
+        assert!(
+            cmd.contains("--admin-handoff"),
+            "without it the VTA refuses the rollover to the long-term admin: {cmd}"
+        );
+        assert_clean(&cmd);
+    }
+
+    /// The existing-context path grants exactly what the new-context path
+    /// does, under `acl create`'s own flag names. A missing `--handoff` here is
+    /// the refusal this path exists to recover from.
+    #[test]
+    fn the_existing_context_command_is_clean_and_carries_the_full_grant() {
+        let cmd = PnmCommands::build(&SetupState::default(), "openvtc").grant_existing;
+
+        assert!(cmd.starts_with("pnm acl create --did "), "{cmd}");
+        assert!(cmd.contains("--role admin"), "{cmd}");
+        assert!(cmd.contains("--contexts openvtc "), "{cmd}");
+        assert!(cmd.contains("--expires 1h"), "{cmd}");
+        assert!(
+            cmd.contains("--handoff"),
+            "without it the VTA refuses the rollover to the long-term admin: {cmd}"
+        );
+        assert!(
+            cmd.contains("--capabilities persona-holder"),
+            "without it the identity pane is refused the pool: {cmd}"
+        );
+        assert_clean(&cmd);
+    }
+
+    /// `did` is positional on `pnm acl delete`; there is no `--did` flag, and a
+    /// command carrying one is rejected by clap before it reaches the VTA.
+    #[test]
+    fn the_delete_takes_the_did_positionally() {
+        let cmd = PnmCommands::build(&SetupState::default(), "openvtc").delete_existing;
+        assert!(cmd.starts_with("pnm acl delete "), "{cmd}");
+        assert!(!cmd.contains("--did"), "{cmd}");
+    }
+
+    /// The setup DID the operator is authorising is the one in every command.
+    #[test]
+    fn the_setup_did_reaches_the_commands() {
         let mut state = SetupState::default();
         let key =
             vta_sdk::provision_client::EphemeralSetupKey::generate().expect("generate a setup key");
         let did = key.did.clone();
         state.vta.setup_key = Some(std::sync::Arc::new(key));
 
-        assert!(
-            build_pnm_command(&state, "openvtc").contains(&format!("--admin-did {did}")),
-            "the command must authorise the key this page is showing"
-        );
+        let cmds = PnmCommands::build(&state, "openvtc");
+        assert!(cmds.create_context.contains(&format!("--admin-did {did}")));
+        assert!(cmds.grant_existing.contains(&format!("--did {did}")));
+        assert_eq!(cmds.delete_existing, format!("pnm acl delete {did}"));
     }
 
-    /// The typed context id is what ends up in the command. The page lets the
+    /// The typed context id is what ends up in the commands. The page lets the
     /// operator choose one, and a command that named the default anyway would
-    /// grant admin over a context they are not creating.
+    /// grant admin over a context they are not using.
     #[test]
-    fn the_typed_context_id_reaches_the_command() {
-        let cmd = build_pnm_command(&SetupState::default(), "  my-ctx  ");
-        assert!(cmd.contains("--id my-ctx "), "{cmd}");
-        assert!(!cmd.contains("--id openvtc"), "{cmd}");
+    fn the_typed_context_id_reaches_the_commands() {
+        let cmds = PnmCommands::build(&SetupState::default(), "  my-ctx  ");
+        assert!(
+            cmds.create_context.contains("--id my-ctx "),
+            "{}",
+            cmds.create_context
+        );
+        assert!(!cmds.create_context.contains("--id openvtc"));
+        assert!(
+            cmds.grant_existing.contains("--contexts my-ctx "),
+            "{}",
+            cmds.grant_existing
+        );
     }
 
     /// An empty input falls back to the default rather than emitting `--id `
     /// with nothing after it.
     #[test]
     fn an_empty_context_id_falls_back_to_the_default() {
-        let cmd = build_pnm_command(&SetupState::default(), "   ");
-        assert!(cmd.contains("--id openvtc "), "{cmd}");
+        let cmds = PnmCommands::build(&SetupState::default(), "   ");
+        assert!(
+            cmds.create_context.contains("--id openvtc "),
+            "{}",
+            cmds.create_context
+        );
+        assert!(
+            cmds.grant_existing.contains("--contexts openvtc "),
+            "{}",
+            cmds.grant_existing
+        );
     }
 }
