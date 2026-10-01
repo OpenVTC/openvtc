@@ -604,8 +604,9 @@ impl From<CommunityRecordShadow> for CommunityRecord {
 ///
 /// - a `warn!` naming the membership, the kind and the parse error is logged;
 /// - this record is persisted on the membership, so the member sees what went
-///   and why in the Communities view, which asks them to have the community
-///   re-issue it (its `vtc/members/renew` re-issues the VMC and role VAC);
+///   and why in the Communities view, which offers to renew the membership
+///   ([`crate::renewal`], `vtc/members/renew`: the community re-issues the VMC
+///   and role VAC, and a fresh acknowledgement goes back);
 /// - a conformant credential of the same kind arriving later clears it
 ///   ([`CommunityRecord::clear_retired`]).
 ///

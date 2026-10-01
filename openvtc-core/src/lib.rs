@@ -54,6 +54,7 @@ pub mod proof_check;
 pub mod rebuild;
 pub mod rebuild_apply;
 pub mod relationships;
+pub mod renewal;
 pub mod secure_store;
 pub mod status_list;
 pub mod tasks;

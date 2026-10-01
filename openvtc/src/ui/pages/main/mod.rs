@@ -1273,6 +1273,14 @@ impl MainPage {
                 let _ = self.action_tx.send(Action::IssueMemberVmc(selected));
                 true
             }
+            KeyCode::Char('R') if sel_active => {
+                // Ask the community to renew this membership — re-issue its
+                // membership and role credentials (vtc/members/renew/0.1).
+                // Active-only: there is nothing to renew otherwise. This is how
+                // a member replaces credentials set aside as pre-v1.
+                let _ = self.action_tx.send(Action::RenewMembership(selected));
+                true
+            }
             KeyCode::Char('c') if sel_active => {
                 // Open the community's capabilities view (governance/capability/*).
                 let _ = self.action_tx.send(Action::CapabilitiesOpen(selected));
@@ -4500,6 +4508,13 @@ mod key_handler_tests {
             Ok(Action::IssueMemberVmc(0)) => {}
             _ => panic!("expected IssueMemberVmc(0)"),
         }
+        // Active row: `R` asks the community to renew this membership.
+        let (mut page, mut rx) = active();
+        page.handle_key_event(press(KeyCode::Char('R')));
+        match rx.try_recv() {
+            Ok(Action::RenewMembership(0)) => {}
+            _ => panic!("expected RenewMembership(0)"),
+        }
         // Active row: `c` opens the community's capabilities view (the
         // cancel-pending-join meaning of `c` is Pending-only; the two are
         // disjoint by status).
@@ -4547,6 +4562,12 @@ mod key_handler_tests {
             rx.try_recv().is_err(),
             "leave is gated off for inactive rows"
         );
+        let (mut page, mut rx) = inactive();
+        page.handle_key_event(press(KeyCode::Char('R')));
+        assert!(
+            rx.try_recv().is_err(),
+            "renew is gated off for inactive rows"
+        );
 
         // Pending row: `c` arms a cancel; `d`/`x`/`l` do nothing.
         let pending = || {
@@ -4561,7 +4582,12 @@ mod key_handler_tests {
             Ok(Action::CommunityConfirmWithdraw(0)) => {}
             _ => panic!("expected CommunityConfirmWithdraw(0)"),
         }
-        for (k, what) in [('d', "delete"), ('x', "archive"), ('l', "leave")] {
+        for (k, what) in [
+            ('d', "delete"),
+            ('x', "archive"),
+            ('l', "leave"),
+            ('R', "renew"),
+        ] {
             let (mut page, mut rx) = pending();
             page.handle_key_event(press(KeyCode::Char(k)));
             assert!(

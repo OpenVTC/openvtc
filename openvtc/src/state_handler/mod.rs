@@ -1359,6 +1359,7 @@ impl StateHandler {
                                 personhood_challenges,
                                 vetting_answers,
                                 vetting_grant_checks,
+                                renewals,
                                 deferred,
                             } = effects;
                             if returning_credential {
@@ -1438,6 +1439,24 @@ impl StateHandler {
                                         reply.match_code
                                     ),
                                 );
+                            }
+
+                            // How a renewal the member asked for ended: on the
+                            // Communities status line, where they asked, and in
+                            // the activity log with the community named.
+                            for (vtc, outcome) in renewals {
+                                let line = outcome.describe();
+                                match &outcome {
+                                    openvtc_core::renewal::RenewalOutcome::Renewed { .. } => {
+                                        state.main_page.log(&line)
+                                    }
+                                    _ => state.main_page.log_error(
+                                        "Membership renewal",
+                                        &format!("{vtc}: {line}"),
+                                    ),
+                                }
+                                state.main_page.content_panel.communities.status_message =
+                                    Some(line);
                             }
 
                             match dispatched
@@ -2858,6 +2877,7 @@ impl StateHandler {
                     Action::Inbox(..) | Action::Relationship(..) | Action::Credential(..) |
                     Action::IssueMemberVmc(..) | Action::CapabilitiesOpen(..) | Action::Repos(..) |
                     Action::RequestPersonhoodChallenge(..) | Action::AssertPersonhood |
+                    Action::RenewMembership(..) |
                     Action::CapabilitiesRefresh | Action::CapabilitiesToggleCommit |
                     Action::SetActiveCommunity(..) | Action::ToggleFavourite(..) |
                     Action::AcknowledgeCommunity(..) | Action::LeaveCommunity(..) |

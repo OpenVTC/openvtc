@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **A membership can be renewed from the Communities view.** `R` on an Active
+  community sends `vtc/members/renew/0.1`, signed by the persona (the task
+  declares `proof` and `issuedAt` REQUIRED). The community answers with a
+  re-issued membership credential and role VAC inline, and nothing is stored
+  until the answer has been checked off the loop: it must be the community's
+  signed operational document, threaded on a renewal this client asked for and
+  addressed to the persona that asked; both credentials must be conformant DTG
+  v1 credentials issued by the community to that persona (the VMC a
+  `MembershipCredential` with `issuerScope: public`, the VAC a community role
+  credential in the community's own scope); and both must verify as issued
+  credentials (proof under the community's `assertionMethod`, validity window,
+  revocation status, failing closed). The new credentials replace the old ones,
+  which clears any pre-v1 notice for them, and a fresh acknowledgement
+  (`members/vmc`) is sent for the new grant, as on admission — its digest
+  changed with the grant. The status line says what happened: renewed (with the
+  role and any personhood change), refused as not a member
+  (`vtc/members/renew:notMember`), refused for another reason, or not taken and
+  why. The pre-v1 notice now points at `R` instead of asking the member to
+  contact the community. Core API: `openvtc_core::renewal`.
+
 - **A Repos panel for a community's git repositories.** `r` on an Active
   community opens it. It speaks the `git-ns/*` Trust Task family (the member
   side of VTC Git Namespaces; the VTC side is VTI #1694): *My repos* with your
