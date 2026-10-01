@@ -51,6 +51,7 @@ fn routed_types() -> Vec<&'static str> {
         vta_sdk::protocols::PROBLEM_REPORT_TYPE,
         openvtc_core::personhood::PERSONHOOD_CHALLENGE_RESPONSE_TYPE,
         openvtc_core::personhood::PERSONHOOD_ASSERT_RESPONSE_TYPE,
+        openvtc_core::renewal::MEMBERS_RENEW_RESPONSE_TYPE,
         vta_sdk::protocols::members::MEMBER_VMC_RESPONSE_TYPE,
         vta_sdk::protocols::members::MEMBER_REQUEST_VMC_TYPE,
         vta_sdk::protocols::members::MEMBER_REMOVAL_NOTICE_TYPE,

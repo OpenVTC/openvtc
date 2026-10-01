@@ -643,6 +643,7 @@ fn key_hints(state: &CommunitiesState) -> String {
         hints.push("a: acknowledge".to_string());
         if community.is_active {
             hints.push("m: issue VMC".to_string());
+            hints.push("R: renew".to_string());
             hints.push("c: capabilities".to_string());
             hints.push("r: repos".to_string());
             hints.push("p: personhood".to_string());
@@ -863,6 +864,22 @@ mod key_hint_tests {
             selected_index: 0,
             personhood_challenge: c,
             ..CommunitiesState::default()
+        }
+    }
+
+    /// `R` is Active-only, matching the key handler: a Pending or ended row has
+    /// no membership to renew.
+    #[test]
+    fn renew_is_offered_only_on_an_active_row() {
+        assert!(hints_for(row(true, false, false)).contains("R: renew"));
+        for hints in [
+            hints_for(row(false, true, false)),
+            hints_for(row(false, false, true)),
+        ] {
+            assert!(
+                !hints.contains("R: renew"),
+                "renewal needs an Active membership: {hints}"
+            );
         }
     }
 

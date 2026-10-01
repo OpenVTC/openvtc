@@ -699,9 +699,13 @@ impl MainPageState {
                             "Role" => "role credential",
                             _ => "membership acknowledgement",
                         };
+                        // The acknowledgement is ours to re-send; the two
+                        // community credentials come back by renewing, which
+                        // also sends a fresh acknowledgement.
                         format!(
                             "Your {what} pre-dates DTG Credentials v1 and was set aside — \
-                             ask the community to re-issue it (renew your membership)."
+                             press R to renew your membership and have the community \
+                             re-issue it."
                         )
                     })
                     .collect(),

@@ -531,6 +531,55 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 }
             }
         }
+        Action::RenewMembership(i) => {
+            // `vtc/members/renew/0.1` declares `proof` REQUIRED: signed with
+            // the persona's authentication key, like the other member verbs.
+            let target = ctx
+                .config
+                .account
+                .communities_for_display(
+                    ctx.state.main_page.content_panel.communities.show_archived,
+                )
+                .get(i)
+                .filter(|c| c.status.is_active())
+                .map(|c| (c.vtc_did.clone(), c.persona_ref));
+            if let Some((vtc, persona_id)) = target {
+                let keys = ctx.config.get_persona_keys_for(persona_id, ctx.tdk).await;
+                match (capability_sender(ctx.config, ctx.tdk, persona_id), keys) {
+                    (Some((atm, profile, member_did, mediator)), Ok(keys)) => {
+                        // Progress until the send lands; a busy dispatcher
+                        // replaces it with its own line.
+                        ctx.state.main_page.content_panel.communities.status_message =
+                            Some("Asking the community to renew your membership…".to_string());
+                        spawn_community_job(
+                            ctx.dispatch_tx,
+                            ctx.in_flight,
+                            ctx.state,
+                            community_actions::CommunityJob {
+                                atm,
+                                profile,
+                                member_did,
+                                mediator,
+                                vtc_did: vtc,
+                                persona: persona_id,
+                                verb: community_actions::Verb::Renew {
+                                    document_signer: Box::new(keys.authentication.secret.clone()),
+                                },
+                            },
+                        )
+                    }
+                    (_, Err(e)) => {
+                        ctx.state.main_page.content_panel.communities.status_message = Some(
+                            format!("Could not load the persona's key to sign the renewal: {e}"),
+                        );
+                    }
+                    (None, _) => {
+                        ctx.state.main_page.content_panel.communities.status_message =
+                            Some("Messaging unavailable — cannot renew right now.".to_string());
+                    }
+                }
+            }
+        }
         Action::AssertPersonhood => {
             // The challenge names its own membership, so the target comes from
             // the challenge rather than from whichever row is highlighted.

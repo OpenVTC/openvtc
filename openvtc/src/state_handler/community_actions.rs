@@ -1,8 +1,9 @@
 //! Community sends, off the loop thread (R14).
 //!
-//! Two verbs address a community directly: leaving it (`members/self-remove`)
-//! and issuing it the reciprocal membership credential (`members/vmc`). Both
-//! were awaited inline, and both send to a peer that may be exactly the thing
+//! The verbs that address a community directly: leaving it
+//! (`members/self-remove`), issuing it the reciprocal membership credential
+//! (`members/vmc`), renewing the membership (`members/renew`) and the two
+//! personhood verbs. The first two were awaited inline, and both send to a peer that may be exactly the thing
 //! that has gone wrong — leaving a community whose VTC is unreachable is a
 //! *likely* reason to leave it, and that is precisely when the send retries
 //! longest.
@@ -64,6 +65,14 @@ pub(crate) enum Verb {
         challenge_id: uuid::Uuid,
         credentials: Vec<serde_json::Value>,
     },
+    /// `members/renew` — ask the community to re-issue this membership's VMC
+    /// and role VAC. The reply carries both and arrives asynchronously; it is
+    /// verified, stored and acknowledged by
+    /// [`crate::state_handler::message_dispatch`].
+    ///
+    /// `document_signer` is the persona's authentication key: the task
+    /// declares `proof` REQUIRED.
+    Renew { document_signer: Box<Secret> },
 }
 
 /// What a job did, for the apply path to report.
@@ -77,6 +86,7 @@ pub(crate) enum Performed {
     IssueVmc,
     RequestPersonhoodChallenge,
     AssertPersonhood,
+    Renew,
 }
 
 /// Everything the send needs, resolved on the loop thread.
@@ -98,6 +108,7 @@ impl CommunityJob {
             Verb::IssueVmc { .. } => Performed::IssueVmc,
             Verb::RequestPersonhoodChallenge { .. } => Performed::RequestPersonhoodChallenge,
             Verb::AssertPersonhood { .. } => Performed::AssertPersonhood,
+            Verb::Renew { .. } => Performed::Renew,
         };
         // The personhood verbs share one route; building it once keeps the
         // member/community/mediator triple from being re-spelled per arm.
@@ -168,6 +179,18 @@ impl CommunityJob {
                 signing_secret,
                 challenge_id,
                 credentials.clone(),
+            )
+            .await
+            .map(|_| ()),
+            Verb::Renew { document_signer } => openvtc_core::renewal::request_renewal(
+                &openvtc_core::members::Delivery {
+                    atm: &self.atm,
+                    profile: &self.profile,
+                    member_did: &self.member_did,
+                    vtc_did: &self.vtc_did,
+                    mediator_did: &self.mediator,
+                },
+                document_signer,
             )
             .await
             .map(|_| ()),
@@ -268,6 +291,16 @@ impl CommunityOutcome {
                     "Personhood assertion sent — waiting for the community's decision.".to_string(),
                 );
             }
+            (None, Performed::Renew) => {
+                // Only the ask went out. The credentials arrive in the
+                // community's reply, which replaces this line with the outcome.
+                status(
+                    state,
+                    "Renewal requested — waiting for the community to re-issue your \
+                     credentials."
+                        .to_string(),
+                );
+            }
             (Some(e), Performed::Leave) => {
                 state.main_page.log_error("Leave failed", e.as_str());
                 status(state, format!("Couldn't leave: {e}"));
@@ -286,6 +319,12 @@ impl CommunityOutcome {
                     .main_page
                     .log_error("Personhood challenge request failed", e.as_str());
                 status(state, format!("Couldn't ask for a challenge: {e}"));
+            }
+            (Some(e), Performed::Renew) => {
+                state
+                    .main_page
+                    .log_error("Membership renewal request failed", e.as_str());
+                status(state, format!("Couldn't ask to renew: {e}"));
             }
             (Some(e), Performed::AssertPersonhood) => {
                 // The challenge is single-use, but a send that never left does
@@ -462,6 +501,25 @@ mod tests {
         );
     }
 
+    /// A sent renewal has renewed nothing yet: the credentials come in the
+    /// reply, so the line says what is being waited for and nothing is saved.
+    #[test]
+    fn a_sent_renewal_says_it_is_waiting_on_the_community() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+
+        let deregister = outcome(Performed::Renew, None).apply(&mut state, &mut config, &mut save);
+
+        assert!(deregister.is_none());
+        assert!(!save.is_pending());
+        let msg = status_of(&state).expect("a status line");
+        assert!(
+            msg.contains("Renewal requested") && msg.contains("waiting"),
+            "a sent renewal is not a renewed membership; got: {msg}"
+        );
+    }
+
     /// Each verb reports its own failure. With the previous `leaving: bool`
     /// this could not be expressed — two of the four would have had to borrow
     /// another's wording and tell the member the wrong thing went wrong.
@@ -475,6 +533,7 @@ mod tests {
                 "Couldn't ask for a challenge",
             ),
             (Performed::AssertPersonhood, "Couldn't assert personhood"),
+            (Performed::Renew, "Couldn't ask to renew"),
         ] {
             let mut state = State::default();
             let mut config = test_config();

@@ -653,6 +653,12 @@ pub enum Action {
     /// to, and answering it against whichever row happens to be highlighted is
     /// exactly the confusion the stored `vtc_did` exists to prevent.
     AssertPersonhood,
+    /// Ask the community at display index `usize` to renew this Active
+    /// membership (`vtc/members/renew/0.1`): re-issue its membership credential
+    /// and role credential. The reply arrives asynchronously; when it verifies,
+    /// the new credentials replace the old (clearing any pre-v1 notice) and a
+    /// fresh acknowledgement is sent back.
+    RenewMembership(usize),
     /// Open the capabilities view for the community at display index `usize`
     /// and fire the `governance/capability/list` query.
     CapabilitiesOpen(usize),

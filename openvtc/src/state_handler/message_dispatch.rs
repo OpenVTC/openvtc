@@ -145,6 +145,9 @@ pub struct InboundEffects {
     /// Vetters' grants to check for revocation. The check fetches over HTTPS,
     /// so the loop runs it as a background job.
     pub vetting_grant_checks: Vec<openvtc_core::vetting::status::GrantCheck>,
+    /// How renewals we asked for ended (`vtc/members/renew/0.1`), keyed by the
+    /// community — the panel's status line says what happened.
+    pub renewals: Vec<(String, openvtc_core::renewal::RenewalOutcome)>,
     /// A message whose handling waits on a network-bound check (a DID resolve,
     /// a status-list fetch). The loop runs [`VerifyJob::run`] off the loop and
     /// hands the message back with the result; nothing about it is applied
@@ -185,6 +188,14 @@ pub enum VerifyJob {
     },
     /// A VRC's proof against its issuer's key.
     Vrc(Box<DTGCredential>),
+    /// A community's answer to our renewal: the document's proof, and the
+    /// re-issued VMC and role VAC it carries, each as an issued credential
+    /// (proof, validity, revocation — fails closed).
+    Renewal {
+        document: serde_json::Value,
+        sender: String,
+        our_dids: Vec<String>,
+    },
     /// No check: the message needs none, but its sender has messages queued
     /// ahead of it, and it waits its turn behind them rather than overtaking
     /// them — a `members/request-vmc` behind the credential that makes the
@@ -215,6 +226,7 @@ pub enum PreVerified {
     ),
     DidBinding(Result<(), openvtc_core::relationships::DidBindingError>),
     Vrc(Result<(), String>),
+    Renewal(Result<openvtc_core::renewal::VerifiedRenewal, openvtc_core::renewal::RenewalError>),
     /// Nothing was checked ([`VerifyJob::Barrier`]).
     Barrier,
 }
@@ -314,6 +326,23 @@ impl VerifyJob {
                 .await,
             ),
             VerifyJob::Vrc(vrc) => PreVerified::Vrc(verify_vrc_proof(&tdk, &vrc).await),
+            VerifyJob::Renewal {
+                document,
+                sender,
+                our_dids,
+            } => {
+                let ours: Vec<&str> = our_dids.iter().map(String::as_str).collect();
+                PreVerified::Renewal(
+                    openvtc_core::renewal::verify_renewal_response(
+                        &document,
+                        &sender,
+                        &ours,
+                        tdk.did_resolver(),
+                        now,
+                    )
+                    .await,
+                )
+            }
             VerifyJob::Barrier => PreVerified::Barrier,
             #[cfg(test)]
             VerifyJob::Hang => std::future::pending().await,
@@ -336,6 +365,9 @@ impl VerifyJob {
             VerifyJob::Vrc(_) => PreVerified::Vrc(Err(
                 "its proof's check did not finish (timed out or failed)".to_string(),
             )),
+            VerifyJob::Renewal { .. } => {
+                PreVerified::Renewal(Err(openvtc_core::renewal::RenewalError::CheckUnfinished))
+            }
             VerifyJob::Barrier => PreVerified::Barrier,
             #[cfg(test)]
             VerifyJob::Hang | VerifyJob::Panic => PreVerified::Operational(Err(
@@ -439,6 +471,25 @@ fn verification_job(
                 .any(|a| a.community == from_did)
             || member;
         return business.then(operational);
+    }
+    // Our renewal's answer: only one threading on a renewal we asked this
+    // community for. It carries credentials, so it is checked as both an
+    // operational document and two issued credentials.
+    if typ == openvtc_core::renewal::MEMBERS_RENEW_RESPONSE_TYPE {
+        let asked = message
+            .thid
+            .as_deref()
+            .is_some_and(|thid| openvtc_core::renewal::is_pending(from_did, thid));
+        return (member && asked).then(|| VerifyJob::Renewal {
+            document: message.body.clone(),
+            sender: from_did.to_string(),
+            our_dids: config
+                .account
+                .personas
+                .values()
+                .map(|p| p.did.clone())
+                .collect(),
+        });
     }
     if is_capability_reply_type(typ)
         || openvtc_core::git_ns::is_reply_type(typ)
@@ -706,6 +757,7 @@ async fn process_inbound(
         personhood_challenges,
         vetting_answers,
         vetting_grant_checks,
+        renewals,
         deferred,
     } = effects;
     // A message handed back with its check's result (or restored from before
@@ -1142,6 +1194,137 @@ async fn process_inbound(
                 note.code, note.comment
             ),
         );
+        return Ok(true);
+    }
+
+    // The community's answer to a renewal we asked for
+    // (`vtc/members/renew/0.1#response`): the re-issued VMC and role VAC,
+    // verified off the loop as the community's signed document and as two
+    // issued credentials. Stored on the membership, replacing what it held —
+    // which is what clears a pre-v1 notice — and then answered with a fresh
+    // acknowledgement, because the new grant has a new digest.
+    if message.typ == openvtc_core::renewal::MEMBERS_RENEW_RESPONSE_TYPE {
+        use openvtc_core::renewal::{RenewalError, RenewalOutcome};
+        let thid = message.thid.as_deref().unwrap_or_default();
+        let verified = match &pre {
+            Some(PreVerified::Renewal(Ok(v))) => v.clone(),
+            other => {
+                let e = match other {
+                    Some(PreVerified::Renewal(Err(e))) => e.clone(),
+                    _ => RenewalError::NotChecked,
+                };
+                warn!(vtc = %from_did, reason = %e, "renewal reply refused");
+                // Reported only when it threads on a renewal of ours: anything
+                // else answers nothing the member is waiting on. The request is
+                // not consumed — a forged reply must not be able to cancel the
+                // genuine one still on its way.
+                if openvtc_core::renewal::is_pending(&from_did, thid) {
+                    let outcome = RenewalOutcome::Failed(e.to_string());
+                    config.public.logs.insert(
+                        LogFamily::Community,
+                        format!("Community ({from_did}): {}", outcome.describe()),
+                    );
+                    renewals.push((from_did.to_string(), outcome));
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+        };
+        let now = chrono::Utc::now();
+        if let Err(e) = verified
+            .document()
+            .check(&config.private.seen_documents, now)
+        {
+            warn!(vtc = %from_did, reason = %e, "renewal reply refused");
+            return Ok(false);
+        }
+        match openvtc_core::renewal::take_pending(&from_did, thid) {
+            Some(member) if member == verified.member_did() => {}
+            _ => {
+                warn!(vtc = %from_did, "renewal reply answers no renewal of ours — ignored");
+                return Ok(false);
+            }
+        }
+        commit_community_document(config, verified.document().clone());
+        let outcome =
+            match openvtc_core::renewal::apply_renewal(&mut config.account, &verified, &from_did) {
+                Err(e) => RenewalOutcome::Failed(e.to_string()),
+                Ok(summary) => {
+                    // The new grant has a new digest, so the community is owed a
+                    // fresh acknowledgement — sent the way the join flow sends one
+                    // on admission. Best-effort: the renewed credentials are
+                    // already stored, and the member can send it with `m`.
+                    let acknowledged =
+                        match issue_member_vmc_for(config, tdk, &from_did, summary.persona, None)
+                            .await
+                        {
+                            Ok((_, vmc)) => {
+                                openvtc_core::renewal::store_acknowledgement(
+                                    &mut config.account,
+                                    &from_did,
+                                    summary.persona,
+                                    vmc,
+                                );
+                                Ok(())
+                            }
+                            Err(e) => {
+                                warn!(
+                                    vtc = %from_did,
+                                    error = %e,
+                                    "membership renewed, but our acknowledgement could not be sent"
+                                );
+                                Err(e.to_string())
+                            }
+                        };
+                    info!(
+                        vtc = %from_did,
+                        personhood = summary.personhood,
+                        personhood_changed = summary.personhood_changed,
+                        cleared_retired = summary.cleared_retired,
+                        "membership renewed"
+                    );
+                    RenewalOutcome::Renewed {
+                        summary,
+                        acknowledged,
+                    }
+                }
+            };
+        config.public.logs.insert(
+            LogFamily::Community,
+            format!("Community ({from_did}): {}", outcome.describe()),
+        );
+        renewals.push((from_did.to_string(), outcome));
+        return Ok(true);
+    }
+
+    // A refusal of a renewal we asked for — `vtc/members/renew:notMember`, or
+    // anything else the community answers it with. Matched on the thread
+    // before the join handler below, which would otherwise take it for a
+    // refusal of a join and drop it for matching no pending request.
+    if is_trust_task_error_type(&message.typ)
+        && let Some(thid) = message.thid.as_deref()
+        && openvtc_core::renewal::is_pending(&from_did, thid)
+    {
+        if !community_reply_proven(
+            config,
+            &pre,
+            message,
+            &from_did,
+            &recipient_did,
+            &mut reply_proven,
+        ) {
+            return Ok(false);
+        }
+        let _ = openvtc_core::renewal::take_pending(&from_did, thid);
+        let outcome = openvtc_core::renewal::RenewalOutcome::Refused(
+            openvtc_core::renewal::RenewalRefusal::read(&message.body),
+        );
+        warn!(vtc = %from_did, "renewal refused by the community");
+        config.public.logs.insert(
+            LogFamily::Community,
+            format!("Community ({from_did}): {}", outcome.describe()),
+        );
+        renewals.push((from_did.to_string(), outcome));
         return Ok(true);
     }
 
@@ -2074,6 +2257,271 @@ mod tests {
         let deferred = effects.deferred.expect("set aside for its check");
         assert!(matches!(deferred.job, VerifyJob::Operational { .. }));
         assert_eq!(deferred.job.verifying_community(), None);
+    }
+
+    /// A config holding one persona with an Active membership of `vtc` whose
+    /// pre-v1 credentials were set aside on load — what the v1 migration leaves.
+    ///
+    /// The persona also has a runtime identity, so a reply addressed to it is
+    /// recognised as ours (`Config::is_persona_did`), as it is at run time.
+    fn retired_config(vtc: &str) -> Config {
+        use affinidi_tdk::messaging::profiles::{ATMProfile, ATMProfileInner};
+        let mut config = pending_config(vtc);
+        let pid = config.account.persona_id_for_did(PERSONA).unwrap();
+        config.identities.insert(
+            pid,
+            openvtc_core::identity::IdentityContext {
+                persona_id: pid,
+                did: PERSONA.to_string(),
+                document: serde_json::from_value(serde_json::json!({ "id": PERSONA }))
+                    .expect("minimal DID document"),
+                profile: Arc::new(ATMProfile {
+                    inner: Arc::new(ATMProfileInner {
+                        did: PERSONA.to_string(),
+                        alias: PERSONA.to_string(),
+                        mediator: Arc::new(None),
+                    }),
+                }),
+                mediator_did: None,
+            },
+        );
+        let record = &mut config.account.communities.get_mut(vtc).unwrap()[0];
+        record.activate(chrono::Utc::now());
+        for kind in ["Membership", "Role"] {
+            record
+                .retired_credentials
+                .push(openvtc_core::config::account::RetiredCredential {
+                    kind: kind.into(),
+                    credential_id: None,
+                    reason: "pre-v1".into(),
+                    retired_at: chrono::Utc::now(),
+                });
+        }
+        config
+    }
+
+    /// A Trust Task document from the community to `PERSONA`, threaded on
+    /// `thid`, signed under `authentication` and carried in the binding
+    /// envelope — the shape a VTC answers a member verb with.
+    async fn community_reply(
+        vtc: &str,
+        key: &Secret,
+        typ: &str,
+        thid: &str,
+        payload: serde_json::Value,
+    ) -> Message {
+        let mut document = serde_json::from_value(serde_json::json!({
+            "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+            "type": typ,
+            "issuer": vtc,
+            "recipient": PERSONA,
+            "issuedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "threadId": thid,
+            "payload": payload,
+        }))
+        .expect("a reply document");
+        openvtc_core::capabilities::sign_document(&mut document, key)
+            .await
+            .expect("sign the reply");
+        Message::build(
+            uuid::Uuid::new_v4().to_string(),
+            openvtc_core::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
+            serde_json::to_value(&document).expect("document json"),
+        )
+        .from(vtc.to_string())
+        .to(PERSONA.to_string())
+        .thid(thid.to_string())
+        .created_time(chrono::Utc::now().timestamp() as u64)
+        .finalize()
+    }
+
+    /// A community role VAC conferring `role:member`, signed by `key`.
+    async fn role_vac(vtc: &str, key: &Secret) -> serde_json::Value {
+        let vac = DTGCredential::new_community_role_vac(
+            vtc.to_string(),
+            PERSONA.to_string(),
+            "member",
+            chrono::Utc::now() - chrono::Duration::minutes(1),
+            chrono::Utc::now() + chrono::Duration::days(365),
+        )
+        .unwrap()
+        .with_max_attenuation(0)
+        .unwrap();
+        let mut vc = serde_json::to_value(vac).unwrap();
+        let proof = affinidi_data_integrity::DataIntegrityProof::sign(
+            &vc,
+            key,
+            affinidi_data_integrity::SignOptions::new(),
+        )
+        .await
+        .unwrap();
+        vc["proof"] = serde_json::to_value(proof).unwrap();
+        vc
+    }
+
+    /// **Renewal, end to end through the dispatcher.** The community's answer
+    /// to a renewal we asked for is set aside for its check, and only then
+    /// stored: the re-issued VMC and role VAC replace the set-aside pre-v1
+    /// credentials, and the notices go with them.
+    #[tokio::test]
+    async fn a_renewal_reply_is_checked_then_stored_clearing_the_retired_notices() {
+        let (vtc, key) = community_key();
+        let tdk = test_tdk().await;
+        let mut config = retired_config(&vtc);
+        let request = uuid::Uuid::new_v4();
+        openvtc_core::renewal::record_request(request, &vtc, PERSONA);
+
+        let vmc = membership_vmc(&vtc, &key).await;
+        let vac = role_vac(&vtc, &key).await;
+        let m = community_reply(
+            &vtc,
+            &key,
+            openvtc_core::renewal::MEMBERS_RENEW_RESPONSE_TYPE,
+            &format!("urn:uuid:{request}"),
+            serde_json::json!({
+                "did": PERSONA,
+                "vmc": vmc,
+                "roleVac": vac,
+                "personhood": false,
+                "personhoodChanged": false,
+            }),
+        )
+        .await;
+
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+        let deferred = effects.deferred.expect("set aside for its check");
+        assert!(matches!(deferred.job, VerifyJob::Renewal { .. }));
+        assert!(
+            config.account.memberships_for(&vtc)[0]
+                .credentials
+                .is_empty(),
+            "nothing stored before the check"
+        );
+
+        let pre = deferred.job.run(tdk.clone()).await;
+        assert!(matches!(&pre, PreVerified::Renewal(Ok(_))));
+        let effects = dispatch(
+            &mut config,
+            &tdk,
+            &deferred.message,
+            Arrival::Returning(pre),
+        )
+        .await;
+
+        let record = &config.account.memberships_for(&vtc)[0];
+        assert_eq!(
+            record
+                .credentials
+                .get(&openvtc_core::CredentialKind::Membership),
+            Some(&vmc)
+        );
+        assert_eq!(
+            record.credentials.get(&openvtc_core::CredentialKind::Role),
+            Some(&vac)
+        );
+        assert!(record.retired_credentials.is_empty(), "the notices clear");
+        let [(from, outcome)] = effects.renewals.as_slice() else {
+            panic!("one renewal outcome");
+        };
+        assert_eq!(from, &vtc);
+        let openvtc_core::renewal::RenewalOutcome::Renewed {
+            summary,
+            acknowledged,
+        } = outcome
+        else {
+            panic!("renewed, got {outcome:?}");
+        };
+        assert_eq!(summary.roles, vec!["member".to_string()]);
+        // The test config has no messaging identity, so the acknowledgement
+        // cannot go out — and the member is told how to send it.
+        assert!(acknowledged.is_err());
+        assert!(outcome.describe().contains("press m"));
+
+        // Answered once: the same reply again is not taken.
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+        assert!(effects.deferred.is_none());
+        assert!(effects.renewals.is_empty());
+    }
+
+    /// A reply threading on no renewal of ours is never checked or stored.
+    #[tokio::test]
+    async fn a_renewal_reply_we_did_not_ask_for_is_ignored() {
+        let (vtc, key) = community_key();
+        let tdk = test_tdk().await;
+        let mut config = retired_config(&vtc);
+        let m = community_reply(
+            &vtc,
+            &key,
+            openvtc_core::renewal::MEMBERS_RENEW_RESPONSE_TYPE,
+            &format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+            serde_json::json!({
+                "did": PERSONA,
+                "vmc": membership_vmc(&vtc, &key).await,
+                "roleVac": role_vac(&vtc, &key).await,
+                "personhood": false,
+                "personhoodChanged": false,
+            }),
+        )
+        .await;
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+        assert!(effects.deferred.is_none());
+        assert!(effects.renewals.is_empty());
+        assert!(
+            config.account.memberships_for(&vtc)[0]
+                .credentials
+                .is_empty()
+        );
+    }
+
+    /// **notMember.** The community's signed refusal of our renewal reaches
+    /// the member as such — not as a join refusal, and with nothing changed.
+    #[tokio::test]
+    async fn a_renewal_refused_as_not_a_member_is_reported() {
+        let (vtc, key) = community_key();
+        let tdk = test_tdk().await;
+        let mut config = retired_config(&vtc);
+        let request = uuid::Uuid::new_v4();
+        openvtc_core::renewal::record_request(request, &vtc, PERSONA);
+        let m = community_reply(
+            &vtc,
+            &key,
+            "https://trusttasks.org/spec/trust-task-error/0.1",
+            &format!("urn:uuid:{request}"),
+            serde_json::json!({
+                "code": openvtc_core::renewal::RENEW_NOT_MEMBER,
+                "message": "no ACL row — not a member",
+                "retryable": false,
+            }),
+        )
+        .await;
+
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+        let deferred = effects.deferred.expect("set aside for its check");
+        let pre = deferred.job.run(tdk.clone()).await;
+        let effects = dispatch(
+            &mut config,
+            &tdk,
+            &deferred.message,
+            Arrival::Returning(pre),
+        )
+        .await;
+
+        let [(_, outcome)] = effects.renewals.as_slice() else {
+            panic!("one renewal outcome");
+        };
+        assert_eq!(
+            outcome,
+            &openvtc_core::renewal::RenewalOutcome::Refused(
+                openvtc_core::renewal::RenewalRefusal::NotMember
+            )
+        );
+        let record = &config.account.memberships_for(&vtc)[0];
+        assert!(record.status.is_active(), "a refused renewal ends nothing");
+        assert_eq!(record.retired_credentials.len(), 2);
+        assert!(!openvtc_core::renewal::is_pending(
+            &vtc,
+            &request.to_string()
+        ));
     }
 
     /// Dispatch `m` as `arrival`, returning the effects.
