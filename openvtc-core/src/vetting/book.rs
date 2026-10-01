@@ -627,7 +627,14 @@ impl VettingBook {
             .as_ref()
             .map(|d| d.as_str().to_string())
             .unwrap_or_default();
-        let meta = super::hidden::statement_meta(&draft, &entry.community, &digest);
+        let meta =
+            super::hidden::statement_meta(&draft, &entry.community, &digest).ok_or_else(|| {
+                VetterError::Hidden(super::hidden::HiddenError::Unreadable(
+                    "the statement carries no vetter members, so it is not a vetter's to attest \
+                     with"
+                        .into(),
+                ))
+            })?;
 
         let state = self
             .hidden_vetter_mut(&entry.community, entry.persona)

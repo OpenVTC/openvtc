@@ -1202,17 +1202,22 @@ impl Application {
         let card = card
             .as_ref()
             .ok_or(ApplicantError::WrongState("take a statement before a card"))?;
-        if endorsement.card_digest_multibase != card.digest_multibase {
+        // A vetter's statement carries all three vetter-only members; one
+        // without them (the community's own check) answers no request of ours.
+        let members = endorsement
+            .vetter_members()
+            .ok_or(ApplicantError::Binding("identityCommitment"))?;
+        if members.card_digest_multibase != card.digest_multibase {
             return Err(ApplicantError::Binding("cardDigestMultibase"));
         }
-        if endorsement.identity_commitment != card.identity_commitment {
+        if members.identity_commitment != card.identity_commitment {
             return Err(ApplicantError::Binding("identityCommitment"));
         }
         let held = HeldStatement {
             id: verified.id().to_string(),
             vetter: vetter.to_string(),
             method: endorsement.method,
-            declared_relationship: endorsement.declared_relationship,
+            declared_relationship: members.declared_relationship,
             document_classes: endorsement
                 .document_classes
                 .iter()
@@ -1223,7 +1228,7 @@ impl Application {
                 .iter()
                 .map(|c| c.as_str().to_string())
                 .collect(),
-            identity_commitment: endorsement.identity_commitment.clone(),
+            identity_commitment: members.identity_commitment.to_string(),
             valid_from: verified.valid_from(),
             valid_until: verified.valid_until(),
             received_at: now,

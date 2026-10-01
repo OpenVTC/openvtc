@@ -671,6 +671,10 @@ async fn main() {
             .expect("a statement draft");
         let vetted_value = serde_json::to_value(&statement_draft.value).unwrap();
 
+        let members = statement_draft
+            .value
+            .vetter_members()
+            .expect("a vetter's statement carries the vetter-only members");
         let meta = StatementMeta {
             community: community.clone(),
             requirements_digest: digest.clone(),
@@ -682,9 +686,9 @@ async fn main() {
                 .map(|c| c.to_string())
                 .collect(),
             liveness_confirmed: statement_draft.value.liveness_confirmed,
-            declared_relationship: statement_draft.value.declared_relationship,
-            identity_commitment: statement_draft.value.identity_commitment.clone(),
-            card_digest_multibase: statement_draft.value.card_digest_multibase.clone(),
+            declared_relationship: members.declared_relationship,
+            identity_commitment: members.identity_commitment.to_string(),
+            card_digest_multibase: members.card_digest_multibase.to_string(),
             valid_from: statement_draft.valid_from.date_naive(),
             valid_until: statement_draft.valid_until.date_naive(),
             token_label: String::new(),

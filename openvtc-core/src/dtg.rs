@@ -176,6 +176,35 @@ pub fn predicate_label(predicate: &str) -> Option<&'static str> {
     })
 }
 
+/// The label [`describe_statement`] gives a `vetted/1` statement the community
+/// issued for itself — its own identity check, not a vetter's.
+pub const COMMUNITY_VERIFIED_LABEL: &str = "vetted (verified by the community)";
+
+/// Whether `credential` is a `vetted/1` statement **the community issued for
+/// itself**: its issuer is the community its `object.value.community` names, and
+/// the value carries none of the three vetter-only members
+/// (`identityCommitment`, `cardDigestMultibase`, `declaredRelationship`).
+///
+/// It records the community's own identity check of the member (in-person
+/// identity evidence, which the community used to issue as an
+/// `IdentityVerificationCredential`). It is not a vetter's statement and is
+/// never counted toward a vetter threshold: a vetter's statement carries all
+/// three vetter-only members, and one carrying only some is malformed.
+#[must_use]
+pub fn is_community_vetting(credential: &DTGCredential) -> bool {
+    let Some(statement) = credential.statement() else {
+        return false;
+    };
+    if statement.predicate != VETTED_V1 {
+        return false;
+    }
+    let StatementObject::Value(value) = &statement.object else {
+        return false;
+    };
+    serde_json::from_value::<vta_sdk::protocols::vetting::VettedObjectValue>(value.clone())
+        .is_ok_and(|v| v.has_no_vetter_members() && v.community == credential.issuer())
+}
+
 /// What a statement says, for display.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatementSummary {
@@ -199,7 +228,11 @@ pub struct StatementSummary {
 #[must_use]
 pub fn describe_statement(credential: &DTGCredential) -> Option<StatementSummary> {
     let statement = credential.statement()?;
-    let known = predicate_label(&statement.predicate);
+    let known = if is_community_vetting(credential) {
+        Some(COMMUNITY_VERIFIED_LABEL)
+    } else {
+        predicate_label(&statement.predicate)
+    };
     let object = match &statement.object {
         StatementObject::Id(id) => format!("id {id}"),
         StatementObject::DigestMultibase(digest) => format!("digest {digest}"),
@@ -221,7 +254,8 @@ pub fn describe_statement(credential: &DTGCredential) -> Option<StatementSummary
 }
 
 /// One line saying what a credential is — `Membership`, `Role: vetter`,
-/// `Statement: vetted (identity vetting)`, … — for the credential views.
+/// `Statement: vetted (identity vetting)`, `Statement: vetted (verified by the
+/// community)`, … — for the credential views.
 /// A non-conformant document says so rather than being described as whatever
 /// its `type` array claims.
 #[must_use]
@@ -356,6 +390,90 @@ mod tests {
         )
         .unwrap();
         assert_eq!(community_roles(&other), None);
+    }
+
+    /// A `vetted/1` value: a vetter's (all three vetter-only members) or the
+    /// community's own (none).
+    fn vetted_value(community: &str, vetter: bool) -> Value {
+        use vta_sdk::protocols::vetting::{VettedObjectValue, VettingMethod, VettingRelationship};
+        serde_json::to_value(VettedObjectValue {
+            community: community.into(),
+            method: VettingMethod::Video,
+            document_classes: vec!["passport".try_into().unwrap()],
+            claims_verified: vec!["name.legal".try_into().unwrap()],
+            liveness_confirmed: true,
+            identity_commitment: vetter.then(|| "zC".to_string()),
+            card_digest_multibase: vetter.then(|| "zD".to_string()),
+            declared_relationship: vetter.then_some(VettingRelationship::None),
+            attestation_text_digest: None,
+        })
+        .unwrap()
+    }
+
+    fn vetted(issuer: &str, scope: IssuerScope, value: Value) -> DTGCredential {
+        let task = json!({
+            "id": "urn:uuid:issue-request-1",
+            "type": "https://trusttasks.org/spec/vtc/endorsements/issue/0.1",
+            "issuer": "did:example:admin",
+            "recipient": issuer,
+            "issuedAt": "2026-10-01T09:30:00Z",
+            "payload": { "subjectDid": "did:example:m" }
+        });
+        DTGCredential::new_vetted_vsc(
+            issuer.into(),
+            scope,
+            "did:example:m".into(),
+            value,
+            &task,
+            chrono::Utc::now(),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_community_issued_vetted_statement_reads_as_verified_by_the_community() {
+        let community = "did:example:c";
+        let own = vetted(
+            community,
+            IssuerScope::Public,
+            vetted_value(community, false),
+        );
+        assert!(is_community_vetting(&own));
+        let summary = describe_statement(&own).unwrap();
+        assert!(summary.known);
+        assert_eq!(summary.label, COMMUNITY_VERIFIED_LABEL);
+        assert_eq!(
+            describe(&serde_json::to_value(&own).unwrap()),
+            "Statement: vetted (verified by the community)"
+        );
+        // Still a core-profile statement the client accepts.
+        assert!(core_accept_list().accept(&own).is_ok());
+
+        // A vetter's statement is a vetter's statement.
+        let vetters = vetted(
+            "did:example:v",
+            IssuerScope::Directed,
+            vetted_value(community, true),
+        );
+        assert!(!is_community_vetting(&vetters));
+        assert_eq!(
+            describe_statement(&vetters).unwrap().label,
+            "vetted (identity vetting)"
+        );
+
+        // No vetter members but issued by someone other than the community it
+        // names: not the community's own check.
+        let stranger = vetted(
+            "did:example:v",
+            IssuerScope::Directed,
+            vetted_value(community, false),
+        );
+        assert!(!is_community_vetting(&stranger));
+        assert_eq!(
+            describe_statement(&stranger).unwrap().label,
+            "vetted (identity vetting)"
+        );
     }
 
     #[test]

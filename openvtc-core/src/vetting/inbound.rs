@@ -7,9 +7,10 @@
 //! - `credential-exchange/issue` carries a community's membership and role
 //!   credentials, a community's vetter grant, and a vetter's statement. Only
 //!   the last two are claimed: a vetter grant, which would otherwise take the
-//!   member's role credential's place, and an identity-vetting statement
-//!   ([`wire::delivered_statement`]). Everything else still reaches the join
-//!   handler.
+//!   member's role credential's place, and a vetter's identity-vetting
+//!   statement ([`wire::delivered_statement`]). Everything else — a `vetted/1`
+//!   statement the community issued for itself among it — still reaches the
+//!   join handler.
 //! - `trust-task-error` answers any Trust Task. Only one threaded on a request
 //!   or withdrawal of ours is claimed.
 //!

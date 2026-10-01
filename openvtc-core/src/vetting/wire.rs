@@ -670,14 +670,47 @@ pub fn delivered_statement(body: &Value) -> Option<&Value> {
 /// Classified by predicate, never by a type string — a VSC's meaning is its
 /// predicate. This only claims the delivery for the vetting handler; the
 /// statement is parsed and verified in full by `verify_statement`.
+///
+/// A `vetted/1` statement **the community issued for itself** is not claimed
+/// ([`is_community_issued`]): it records the community's own identity check,
+/// not a vetter's, so it answers no vetting request and counts toward no
+/// vetter threshold. It is left to the community-credential handling.
 #[must_use]
 pub fn statement_in(payload: &Value) -> Option<&Value> {
     let credential = payload.pointer("/credential_response/credential")?;
     (credential
         .pointer("/credentialSubject/predicate")
         .and_then(Value::as_str)
-        == Some(vta_sdk::protocols::vetting::VETTED_PREDICATE))
+        == Some(vta_sdk::protocols::vetting::VETTED_PREDICATE)
+        && !is_community_issued(credential))
     .then_some(credential)
+}
+
+/// Whether a `vetted/1` statement, unverified, is one the community issued for
+/// itself: its `issuer` is the community its `object.value.community` names,
+/// and the value carries none of the vetter-only members (`identityCommitment`,
+/// `cardDigestMultibase`, `declaredRelationship`). A shape read only — the
+/// verified form is [`crate::dtg::is_community_vetting`].
+#[must_use]
+pub fn is_community_issued(credential: &Value) -> bool {
+    let issuer = match credential.get("issuer") {
+        Some(Value::String(id)) => Some(id.as_str()),
+        Some(Value::Object(o)) => o.get("id").and_then(Value::as_str),
+        _ => None,
+    };
+    let Some(value) = credential.pointer("/credentialSubject/object/value") else {
+        return false;
+    };
+    let community = value.get("community").and_then(Value::as_str);
+    issuer.is_some()
+        && issuer == community
+        && [
+            "identityCommitment",
+            "cardDigestMultibase",
+            "declaredRelationship",
+        ]
+        .iter()
+        .all(|member| value.get(member).is_none())
 }
 
 #[cfg(test)]
@@ -1017,5 +1050,43 @@ pub(crate) mod tests {
             "type": ["VerifiableCredential", "MembershipCredential"]
         } } });
         assert!(delivered_statement(&vmc).is_none());
+    }
+
+    /// The community recording its own identity check is not a vetter's
+    /// statement: the vetting handler leaves it alone.
+    #[test]
+    fn a_community_issued_vetted_statement_is_not_a_vetter_statement() {
+        let statement = |issuer: &str, vetter_members: bool| {
+            let mut value = json!({
+                "community": "did:example:c",
+                "method": "video",
+                "claimsVerified": ["name.legal"],
+                "livenessConfirmed": true,
+            });
+            if vetter_members {
+                value["identityCommitment"] = json!("zC");
+                value["cardDigestMultibase"] = json!("zD");
+                value["declaredRelationship"] = json!("none");
+            }
+            json!({ "credential_response": { "credential": {
+                "issuer": issuer,
+                "credentialSubject": {
+                    "predicate": vta_sdk::protocols::vetting::VETTED_PREDICATE,
+                    "object": { "value": value }
+                }
+            } } })
+        };
+        let own = statement("did:example:c", false);
+        assert!(is_community_issued(
+            &own["credential_response"]["credential"]
+        ));
+        assert!(statement_in(&own).is_none());
+        // A vetter's statement for the same community is claimed.
+        assert!(statement_in(&statement("did:example:v", true)).is_some());
+        // Bare of vetter members but not from the community: still claimed, and
+        // refused by the vetter-path checks rather than waved through here.
+        assert!(statement_in(&statement("did:example:v", false)).is_some());
+        // The community's DID with vetter members: a vetter-shaped statement.
+        assert!(statement_in(&statement("did:example:c", true)).is_some());
     }
 }
