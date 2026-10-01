@@ -547,13 +547,22 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # (`eligibility::community_roles`, `role_action`), and `role_vec` is `role_vac`.
 #
 # `did-git-sign` 0.6.0 (VGI 0.6.0) is on `vta-sdk` 0.58, `affinidi-tdk` 0.21 and
-# `trust-tasks` 0.25, so the graph holds one copy of each again.
+# `trust-tasks` 0.25. On the 0.59 move below it holds a second `vta-sdk`
+# (0.58.1, reached only through `did-git-sign`) until VGI releases against 0.59;
+# no `vta-sdk` type crosses that edge, and `vti-common` / `trust-tasks-rs` stay
+# single. `cargo tree -i vta-sdk@0.58.1` is the check.
 #
 # `vta-service` is a separate matter this cycle: see the `vta-service` note in
 # `openvtc-core/Cargo.toml` for why that pin stays at 0.43.0 rather than
 # following `vta-sdk` here to 0.56 — 0.44.0 is broken independent of what
 # `vta-sdk` line it is paired with.
-vta-sdk = { version = "0.58.0", features = [
+# **0.59** makes the three vetter-only members of a `vetted/1` value
+# (`identityCommitment`, `cardDigestMultibase`, `declaredRelationship`)
+# optional and all-or-nothing (VTI #1874, #1876): a vetter's statement carries
+# all three, read through `VettedObjectValue::vetter_members`, and a statement
+# the community issues for itself — its own identity check, which replaced the
+# community-issued `IdentityVerificationCredential` — carries none.
+vta-sdk = { version = "0.59.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses

@@ -63,6 +63,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`vta-sdk` 0.59 / `vta-service` 0.48: a community may issue `vetted/1` for
+  its own identity check.** The three vetter-only members of a vetting
+  statement's value (`identityCommitment`, `cardDigestMultibase`,
+  `declaredRelationship`) are now optional and all-or-nothing (VTI #1874,
+  #1876). A vetter's statement still always carries all three: the vetter
+  desk builds them in, and the applicant, the hidden-vetting attestation and
+  the reference example read them through `VettedObjectValue::vetter_members`,
+  refusing a statement without them. A `vetted/1` the community issues for
+  itself — in-person identity evidence, which replaced the community-issued
+  `IdentityVerificationCredential` — carries none: the credential views label
+  it `Statement: vetted (verified by the community)`
+  (`dtg::is_community_vetting`), and the vetting handler no longer claims it as
+  a vetter's statement (`vetting::wire::is_community_issued`), so it answers no
+  vetting request and counts toward no vetter threshold.
+  `vetting::hidden::statement_meta` returns `Option`. `did-git-sign` 0.6 still
+  requires `vta-sdk ^0.58`, so the graph holds a second `vta-sdk` (0.58.1)
+  through that edge alone until VGI releases against 0.59.
+
 - **Every DTG credential conforms to DTG Credentials v1 and the DTG VSC
   predicate registry.** *Breaking, on the wire and in stored state.* Every
   credential this client issues, receives, verifies, stores or shows now
