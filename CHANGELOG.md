@@ -227,6 +227,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   relationship, and its replies (the membership credential, a vetter grant)
   were discarded as "no relationship with <persona>". The sending ATM now uses
   the shared store.
+- **A seated vetter can hand out tickets before its membership credential
+  lands.** The Vetting panel said "You vet for … until …" while `t` answered
+  that no community had named you a vetter: the ticket form only counted Active
+  memberships, and an approved join still waiting for its membership credential
+  is Pending. It now also counts an approved join with a live vetter grant.
 - **Leaving a community joined over TSP goes over TSP**, like every other
   member verb since #413. A leave that never arrived left the community
   holding a member who had gone.

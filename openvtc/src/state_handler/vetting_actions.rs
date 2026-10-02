@@ -148,7 +148,10 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
     vetting.memberships = config
         .account
         .memberships()
-        .filter(|m| m.status.is_active())
+        // Active, or approved with only the membership credential's delivery
+        // missing: the community already lists the persona and named it a vetter,
+        // and it is the community that decides eligibility, not this credential.
+        .filter(|m| m.status.is_active() || m.approved_awaiting_credential())
         // Tickets are for communities that named us a vetter: a request made
         // with one to anyone else would be refused as not eligible.
         .filter(|m| book.vetter_grant(&m.vtc_did, m.persona_ref, now).is_some())
@@ -4940,6 +4943,57 @@ mod tests {
                 .as_deref()
                 .is_some_and(|m| m.contains("unreachable"))
         );
+    }
+
+    /// A live vetter grant opens the ticket form for an Active membership, and
+    /// for an approved join whose membership credential has not arrived; not for
+    /// a join nobody approved, nor without a grant.
+    #[test]
+    fn a_seated_vetter_can_hand_out_tickets() {
+        use openvtc_core::config::account::CommunityRecord;
+        use openvtc_core::vetting::book::VetterGrant;
+        let community = "did:web:vtc.example";
+        let persona = PersonaId::new();
+        let now = Utc::now();
+        let sync_with = |active: bool, approved: bool, grant: bool| {
+            let mut config = test_config();
+            let mut record = CommunityRecord::new_pending(
+                community.to_string(),
+                None,
+                "openvtc/test".to_string(),
+                persona,
+                uuid::Uuid::new_v4(),
+                now,
+            );
+            if approved {
+                record.mark_approved(now);
+            }
+            if active {
+                record.activate(now);
+            }
+            config.account.add_membership(record);
+            if grant {
+                config.private.vetting.keep_vetter_grant(VetterGrant {
+                    community: community.to_string(),
+                    persona,
+                    credential_id: None,
+                    valid_until: Some(now + chrono::TimeDelta::days(30)),
+                    received_at: now,
+                    credential: serde_json::json!({}),
+                });
+            }
+            let mut v = VettingState::default();
+            sync(&mut v, &config);
+            v.memberships.len()
+        };
+        assert_eq!(sync_with(true, false, true), 1, "active and named");
+        assert_eq!(
+            sync_with(false, true, true),
+            1,
+            "approved, credential in transit"
+        );
+        assert_eq!(sync_with(false, false, true), 0, "pending, nobody approved");
+        assert_eq!(sync_with(true, false, false), 0, "not named a vetter");
     }
 
     /// The page lists what the book holds.
