@@ -600,6 +600,11 @@ pub struct CommunitySummary {
     /// grace window — the submit may have been dropped rather than healthily
     /// awaiting a decision. Drives a warning hint on the row (D16).
     pub pending_unacknowledged: bool,
+    /// Whether this is a `Pending` join the VTC approved whose membership
+    /// credential has not arrived. Drives its own hint on the row, and is the
+    /// one non-Active state `R` (renew) is offered for: the manual rescue for a
+    /// lost credential delivery.
+    pub approved_awaiting_credential: bool,
     /// Which transport carried the join submit, when the record knows.
     ///
     /// Only used to qualify the unacknowledged warning. Without it the warning

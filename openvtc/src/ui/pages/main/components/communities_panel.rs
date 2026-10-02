@@ -194,6 +194,18 @@ pub fn render(
             )));
         }
 
+        // Approved, but the membership credential never arrived: the decision
+        // is made and delivery is what failed, which needs different words —
+        // and a different remedy — than a request nobody acknowledged.
+        if c.approved_awaiting_credential {
+            lines.push(Line::from(Span::styled(
+                "    ✓ approved — membership credential not received yet. Press R to ask the \
+                 community to re-issue it."
+                    .to_string(),
+                Style::new().fg(COLOR_ORANGE),
+            )));
+        }
+
         // Expanded troubleshooting detail for the selected community: which
         // persona this community actually uses (full DID), the VTC, the
         // sub-context, the in-flight request id, and which credentials are held.
@@ -649,6 +661,10 @@ fn key_hints(state: &CommunitiesState) -> String {
             hints.push("p: personhood".to_string());
             hints.push("l: leave".to_string());
         }
+        if community.approved_awaiting_credential {
+            // The rescue for a lost delivery; matches the key handler's gate.
+            hints.push("R: renew".to_string());
+        }
         if community.is_pending {
             hints.push("c: cancel".to_string());
         }
@@ -727,6 +743,7 @@ mod key_hint_tests {
             is_inactive,
             is_pending,
             pending_unacknowledged: false,
+            approved_awaiting_credential: false,
             submit_transport: None,
             archived: false,
             needs_attention: false,
@@ -867,8 +884,33 @@ mod key_hint_tests {
         }
     }
 
-    /// `R` is Active-only, matching the key handler: a Pending or ended row has
-    /// no membership to renew.
+    /// `R` is offered where the key handler accepts it: an Active row, and a
+    /// Pending row the community approved whose credential never arrived.
+    #[test]
+    fn renew_is_offered_on_an_approved_join_awaiting_its_credential() {
+        let mut approved = row(false, false, true);
+        approved.approved_awaiting_credential = true;
+        let hints = hints_for(approved.clone());
+        assert!(hints.contains("R: renew"), "{hints}");
+        assert!(hints.contains("c: cancel"), "still cancellable: {hints}");
+
+        let lines = render_for_test(&state_with(Some(approved), None));
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            text.contains("approved — membership credential not received"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("may not have been received"),
+            "an approved join was received: {text}"
+        );
+    }
+
+    /// `R` is Active-only otherwise, matching the key handler: a Pending join
+    /// nobody approved, or an ended row, has no membership to renew.
     #[test]
     fn renew_is_offered_only_on_an_active_row() {
         assert!(hints_for(row(true, false, false)).contains("R: renew"));

@@ -414,6 +414,11 @@ pub struct RenewalSummary {
     pub personhood_changed: bool,
     /// How many pre-v1 credential notices the renewal answered.
     pub cleared_retired: usize,
+    /// The join request this renewal closed, when it rescued an approved join
+    /// whose credential never arrived: the membership is now `Active`, and the
+    /// caller owes the community the acknowledgement that closes the request —
+    /// the one a delivered credential would have produced.
+    pub closed_join: Option<uuid::Uuid>,
 }
 
 /// Store a verified renewal on the membership it renews: the new VMC and role
@@ -433,8 +438,15 @@ pub struct RenewalSummary {
 /// # Errors
 ///
 /// [`RenewalError::WrongMember`] if the renewed DID is not one of our personas,
-/// [`RenewalError::NoMembership`] if that persona holds no Active membership
-/// with `from_did`.
+/// [`RenewalError::NoMembership`] if that persona holds no membership with
+/// `from_did` that may be renewed ([`CommunityRecord::can_renew`]): an Active
+/// one, or a join the community approved whose credential never arrived.
+///
+/// The second is activated here, as a delivered credential would have
+/// activated it ([`crate::messaging::handle_credential_issue`]), and its
+/// request id is returned in [`RenewalSummary::closed_join`].
+///
+/// [`CommunityRecord::can_renew`]: crate::config::account::CommunityRecord::can_renew
 pub fn apply_renewal(
     account: &mut Account,
     renewal: &VerifiedRenewal,
@@ -445,7 +457,7 @@ pub fn apply_renewal(
         .ok_or(RenewalError::WrongMember)?;
     let record = account
         .membership_mut(from_did, persona)
-        .filter(|r| r.status.is_active())
+        .filter(|r| r.can_renew())
         .ok_or(RenewalError::NoMembership)?;
     let before = record.retired_credentials.len();
     record
@@ -457,12 +469,23 @@ pub fn apply_renewal(
         .insert(CredentialKind::Role, renewal.role_vac.value().clone());
     record.clear_retired(CredentialKind::Role.config_key());
     let cleared_retired = before - record.retired_credentials.len();
+    // An approved join rescued by renewal: the membership credential is now
+    // held, so it becomes Active exactly as on delivery, and the request it
+    // closes is captured before `activate` replaces the Pending state.
+    let closed_join = match record.status {
+        crate::config::account::CommunityStatus::Pending { request_id } => {
+            record.activate(chrono::Utc::now());
+            Some(request_id)
+        }
+        _ => None,
+    };
     Ok(RenewalSummary {
         persona,
         roles: renewal.roles.clone(),
         personhood: renewal.personhood,
         personhood_changed: renewal.personhood_changed,
         cleared_retired,
+        closed_join,
     })
 }
 
@@ -874,6 +897,48 @@ mod tests {
         );
     }
 
+    /// The manual rescue for a lost delivery: a join the community approved
+    /// whose credential never arrived is renewed, becomes Active as delivery
+    /// would have made it, and reports the request it closed so the caller
+    /// sends the acknowledgement that closes it. A Pending join nobody approved
+    /// is still refused (above).
+    #[tokio::test]
+    async fn a_renewal_rescues_an_approved_join_whose_credential_never_arrived() {
+        let (key, vtc) = community_key(17);
+        let doc = reply(&key, &vtc, MEMBER, "member").await;
+        let verified =
+            verify_renewal_response(&doc, &vtc, &[MEMBER], &resolver().await, Utc::now())
+                .await
+                .unwrap();
+
+        let (mut acct, pid) = account(&vtc, false);
+        let request_id = {
+            let record = acct.membership_mut(&vtc, pid).unwrap();
+            assert!(record.mark_approved(Utc::now()));
+            assert!(record.approved_awaiting_credential() && record.can_renew());
+            match record.status {
+                crate::config::account::CommunityStatus::Pending { request_id } => request_id,
+                _ => unreachable!("the fixture is Pending"),
+            }
+        };
+
+        let summary = apply_renewal(&mut acct, &verified, &vtc).expect("an approved join renews");
+        assert_eq!(summary.closed_join, Some(request_id));
+        let record = acct.membership(&vtc, pid).unwrap();
+        assert!(record.status.is_active(), "{:?}", record.status);
+        assert!(record.credentials.contains_key(&CredentialKind::Membership));
+        assert!(!record.approved_awaiting_credential());
+
+        // An Active renewal closes nothing.
+        let (mut active, _) = account(&vtc, true);
+        assert_eq!(
+            apply_renewal(&mut active, &verified, &vtc)
+                .unwrap()
+                .closed_join,
+            None
+        );
+    }
+
     /// **notMember.** The declared refusal is recognised, and tells the member
     /// what it means.
     #[test]
@@ -904,6 +969,7 @@ mod tests {
             personhood: true,
             personhood_changed: true,
             cleared_retired: 2,
+            closed_join: None,
         };
         let line = RenewalOutcome::Renewed {
             summary: summary.clone(),

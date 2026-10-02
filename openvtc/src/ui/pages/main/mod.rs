@@ -1228,6 +1228,10 @@ impl MainPage {
         let sel_active = comms.items.get(selected).is_some_and(|c| c.is_active);
         let sel_inactive = comms.items.get(selected).is_some_and(|c| c.is_inactive);
         let sel_pending = comms.items.get(selected).is_some_and(|c| c.is_pending);
+        let sel_renewable = comms
+            .items
+            .get(selected)
+            .is_some_and(|c| c.is_active || c.approved_awaiting_credential);
         let sel_own_context = comms.items.get(selected).is_some_and(|c| c.has_own_context);
 
         match key.code {
@@ -1273,11 +1277,13 @@ impl MainPage {
                 let _ = self.action_tx.send(Action::IssueMemberVmc(selected));
                 true
             }
-            KeyCode::Char('R') if sel_active => {
+            KeyCode::Char('R') if sel_renewable => {
                 // Ask the community to renew this membership — re-issue its
-                // membership and role credentials (vtc/members/renew/0.1).
-                // Active-only: there is nothing to renew otherwise. This is how
-                // a member replaces credentials set aside as pre-v1.
+                // membership and role credentials (vtc/members/renew/0.1). This
+                // is how a member replaces credentials set aside as pre-v1, and
+                // the manual rescue for an approved join whose credential never
+                // arrived: the community re-issues, and the renewal activates
+                // the membership as delivery would have.
                 let _ = self.action_tx.send(Action::RenewMembership(selected));
                 true
             }
@@ -3755,6 +3761,7 @@ mod key_handler_tests {
             is_inactive,
             is_pending,
             pending_unacknowledged: false,
+            approved_awaiting_credential: false,
             submit_transport: None,
             archived: false,
             needs_attention: false,

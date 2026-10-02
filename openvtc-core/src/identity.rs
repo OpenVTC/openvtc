@@ -203,6 +203,7 @@ mod tests {
             member_since: None,
             requested_at: None,
             receipt_at: None,
+            approved_at: None,
             relationships: Default::default(),
             tasks: Default::default(),
             vrcs_issued: Default::default(),

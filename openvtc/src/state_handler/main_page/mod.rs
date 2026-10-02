@@ -653,6 +653,7 @@ impl MainPageState {
                     openvtc_core::config::account::CommunityStatus::Pending { .. }
                 ),
                 pending_unacknowledged: c.pending_unacknowledged(now),
+                approved_awaiting_credential: c.approved_awaiting_credential(),
                 submit_transport: c.submit_transport.map(|t| t.to_string()),
                 archived: c.archived,
                 needs_attention: c.needs_attention(),
@@ -1497,6 +1498,7 @@ mod tests {
                 member_since: None,
                 requested_at: None,
                 receipt_at: None,
+                approved_at: None,
                 relationships: Default::default(),
                 tasks: Default::default(),
                 vrcs_issued: Default::default(),
