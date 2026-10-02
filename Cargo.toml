@@ -130,7 +130,14 @@ affinidi-messaging-core = "0.1.11"
 # geometric reconnect cascade behind `#231`–`#234`; and 0.19.4 (#694) was the
 # `live_stream_next*` read guard that blocked `stop_websocket` for the remainder
 # of a 10s poll window.
-affinidi-messaging-sdk = "0.32.0"
+#
+# **0.32.1** (affinidi-tdk-rs #921) is the floor: `live_stream_next` /
+# `live_stream_get` dropped a DIDComm message that arrived after a `wait`
+# expired, sending it to the dead waiter rather than caching it (3–5% of single
+# messages under a 500 ms poll). vta-sdk's `send_and_wait`, which every
+# DIDComm-backed `VtaClient` call here goes through, polls exactly that way, so
+# a VTA reply could vanish and the call time out. No API change.
+affinidi-messaging-sdk = "0.32.1"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
