@@ -333,6 +333,13 @@ pub struct CommunityRecord {
     /// what entitles a member to ask the community to renew before it has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_at: Option<DateTime<Utc>>,
+    /// What the community last said about delivering this approved join's
+    /// credentials (`join-requests/status/0.1`, trust-tasks-tf #709): whether
+    /// it holds our acknowledgement, and its answer to the last
+    /// `resendCredentials` we sent. Drives when we ask again, and what the row
+    /// says. `None` until an `approved` reply reports delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_delivery: Option<CredentialDelivery>,
     /// Which transport carried the join submit.
     ///
     /// Recorded so an unacknowledged join can say *which* transport went
@@ -476,6 +483,8 @@ struct CommunityRecordShadow {
     #[serde(default)]
     approved_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    credential_delivery: Option<CredentialDelivery>,
+    #[serde(default)]
     submit_transport: Option<crate::didcomm::MessagingTransport>,
     #[serde(default)]
     request_id_confirmed: bool,
@@ -586,6 +595,7 @@ impl From<CommunityRecordShadow> for CommunityRecord {
             requested_at: shadow.requested_at,
             receipt_at: shadow.receipt_at,
             approved_at: shadow.approved_at,
+            credential_delivery: shadow.credential_delivery,
             submit_transport: shadow.submit_transport,
             request_id_confirmed: shadow.request_id_confirmed,
             relationships: shadow.relationships,
@@ -725,6 +735,7 @@ impl CommunityRecord {
             requested_at: Some(now),
             receipt_at: None,
             approved_at: None,
+            credential_delivery: None,
             // Set by the join flow once it knows which transport carried the
             // submit; `new_pending` itself is transport-agnostic.
             submit_transport: None,
@@ -930,11 +941,6 @@ impl CommunityRecord {
         matches!(self.status, CommunityStatus::Pending { .. })
     }
 
-    /// Whether this is a `Pending` join the VTC has not acknowledged within
-    /// [`PENDING_ACK_GRACE_SECS`] of submission — the signal that the submit may
-    /// have been dropped (size limit / unhandled type) rather than healthily
-    /// awaiting a decision. False once any response has set `receipt_at`, for
-    /// non-`Pending` states, or while still inside the grace window.
     /// Record that the VTC approved this join, once. Returns whether anything
     /// changed, so the caller knows whether to persist.
     pub fn mark_approved(&mut self, now: DateTime<Utc>) -> bool {
@@ -965,6 +971,52 @@ impl CommunityRecord {
         self.status.is_active() || self.approved_awaiting_credential()
     }
 
+    /// Whether the next status poll should carry `resendCredentials`.
+    ///
+    /// Only for an approved join still waiting on its credential, only after
+    /// [`CREDENTIAL_RESEND_GRACE_SECS`] — a delivery takes a moment — and only
+    /// once the community has itself reported `credentialsDelivered: false`.
+    /// That report is what proves it supports re-delivery: a community that
+    /// predates the member refuses a poll carrying it as malformed, which would
+    /// stop the poll answering at all.
+    ///
+    /// After that the community's own answer paces us: a `retryAfter` is waited
+    /// out, a `queued` re-delivery is given [`CREDENTIAL_RESEND_GRACE_SECS`] to
+    /// land, and `notNeeded` or an exhausted limit ends the asking. The poll is
+    /// already backed off, so this never asks more often than the poll runs,
+    /// and the poller caps how many polls carry it.
+    pub fn wants_credential_resend(&self, now: DateTime<Utc>) -> bool {
+        if !self.approved_awaiting_credential() {
+            return false;
+        }
+        let grace = TimeDelta::seconds(CREDENTIAL_RESEND_GRACE_SECS);
+        if self.approved_at.is_none_or(|at| now - at < grace) {
+            return false;
+        }
+        let Some(delivery) = &self.credential_delivery else {
+            return false;
+        };
+        if delivery.delivered {
+            return false;
+        }
+        match delivery.last_answer {
+            None => true,
+            Some(CredentialResendAnswer::Queued { at }) => now - at >= grace,
+            Some(CredentialResendAnswer::RateLimited {
+                retry_after: Some(t),
+            }) => now >= t,
+            Some(
+                CredentialResendAnswer::RateLimited { retry_after: None }
+                | CredentialResendAnswer::NotNeeded,
+            ) => false,
+        }
+    }
+
+    /// Whether this is a `Pending` join the VTC has not acknowledged within
+    /// [`PENDING_ACK_GRACE_SECS`] of submission — the signal that the submit may
+    /// have been dropped (size limit / unhandled type) rather than healthily
+    /// awaiting a decision. False once any response has set `receipt_at`, for
+    /// non-`Pending` states, or while still inside the grace window.
     pub fn pending_unacknowledged(&self, now: DateTime<Utc>) -> bool {
         matches!(self.status, CommunityStatus::Pending { .. })
             && self.receipt_at.is_none()
@@ -993,6 +1045,39 @@ pub struct PendingPoll {
     /// The transport the submit used, so the poll takes the same route. A
     /// community reachable only over TSP would never see a DIDComm poll.
     pub submit_transport: Option<crate::didcomm::MessagingTransport>,
+    /// Ask the community to re-deliver the credentials it issued
+    /// ([`CommunityRecord::wants_credential_resend`]).
+    pub resend_credentials: bool,
+}
+
+/// How long after an approval — or after a re-delivery was queued — before we
+/// ask for the credentials (again). Delivery is a push through a mediator, and
+/// asking before it could have arrived only spends the community's limit.
+pub const CREDENTIAL_RESEND_GRACE_SECS: i64 = 10 * 60;
+
+/// What a community has said about delivering an approved join's credentials.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialDelivery {
+    /// The community holds our acknowledgement that the credential arrived.
+    pub delivered: bool,
+    /// Its answer to the last `resendCredentials` we sent, if we sent one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_answer: Option<CredentialResendAnswer>,
+}
+
+/// A community's answer to `resendCredentials`, as recorded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "answer", rename_all = "camelCase")]
+pub enum CredentialResendAnswer {
+    /// A re-delivery was queued at `at`.
+    Queued { at: DateTime<Utc> },
+    /// Too soon; `retry_after` is when to ask again, `None` once the
+    /// community's limit is spent.
+    #[serde(rename_all = "camelCase")]
+    RateLimited { retry_after: Option<DateTime<Utc>> },
+    /// The community says delivery is already acknowledged.
+    NotNeeded,
 }
 
 /// The account — the OpenVTC ↔ VTA relationship (State-A bootstrap) plus its
@@ -1125,7 +1210,7 @@ impl Account {
     ///
     /// Read-only and cheap — the caller (a periodic reconcile) runs this on
     /// every tick and expects an empty vector to be the normal answer.
-    pub fn pollable_pending(&self) -> Vec<PendingPoll> {
+    pub fn pollable_pending(&self, now: DateTime<Utc>) -> Vec<PendingPoll> {
         self.memberships()
             .filter(|c| c.is_pollable_pending())
             .filter_map(|c| {
@@ -1141,6 +1226,7 @@ impl Account {
                     // question that can actually be answered.
                     request_id: c.request_id_confirmed.then_some(request_id),
                     submit_transport: c.submit_transport,
+                    resend_credentials: c.wants_credential_resend(now),
                 })
             })
             .collect()
@@ -1399,6 +1485,7 @@ mod tests {
             requested_at: None,
             receipt_at: None,
             approved_at: None,
+            credential_delivery: None,
             relationships: Relationships::default(),
             tasks: Tasks::default(),
             vrcs_issued: Vrcs::default(),
@@ -1850,6 +1937,70 @@ mod tests {
         assert_eq!(c.receipt_at, Some(now));
     }
 
+    /// `resendCredentials` is carried only for an approved join still without
+    /// its credential, after the grace, once the community has reported
+    /// delivery — and then on the community's own terms.
+    #[test]
+    fn credential_resend_is_asked_only_when_the_community_offers_it() {
+        let pid = PersonaId::new();
+        let now = Utc::now();
+        let grace = TimeDelta::seconds(CREDENTIAL_RESEND_GRACE_SECS);
+        let approved = |delivery: Option<CredentialDelivery>| {
+            let mut c = community("v", pid, pending());
+            c.mark_approved(now - grace);
+            c.credential_delivery = delivery;
+            c
+        };
+        let undelivered = |last_answer| {
+            Some(CredentialDelivery {
+                delivered: false,
+                last_answer,
+            })
+        };
+
+        // Not approved, or approved but the community never reported delivery
+        // (a community that predates the member would refuse the flag).
+        assert!(!community("v", pid, pending()).wants_credential_resend(now));
+        assert!(!approved(None).wants_credential_resend(now));
+
+        // Reported undelivered, past the grace: ask.
+        assert!(approved(undelivered(None)).wants_credential_resend(now));
+        // Inside the grace: not yet.
+        let mut early = approved(undelivered(None));
+        early.approved_at = Some(now);
+        assert!(!early.wants_credential_resend(now));
+        // The community holds our acknowledgement: nothing to ask for.
+        assert!(
+            !approved(Some(CredentialDelivery {
+                delivered: true,
+                last_answer: None
+            }))
+            .wants_credential_resend(now)
+        );
+
+        // Its answers pace us.
+        let queued = |at| undelivered(Some(CredentialResendAnswer::Queued { at }));
+        assert!(!approved(queued(now)).wants_credential_resend(now));
+        assert!(approved(queued(now - grace)).wants_credential_resend(now));
+        let limited =
+            |retry_after| undelivered(Some(CredentialResendAnswer::RateLimited { retry_after }));
+        assert!(!approved(limited(Some(now + grace))).wants_credential_resend(now));
+        assert!(approved(limited(Some(now))).wants_credential_resend(now));
+        assert!(
+            !approved(limited(None)).wants_credential_resend(now),
+            "limit spent"
+        );
+        assert!(
+            !approved(undelivered(Some(CredentialResendAnswer::NotNeeded)))
+                .wants_credential_resend(now)
+        );
+
+        // And it reaches the poll.
+        let mut acct = Account::default();
+        acct.add_membership(approved(undelivered(None)));
+        assert!(acct.pollable_pending(now)[0].resend_credentials);
+    }
+
     #[test]
     fn pending_unacknowledged_flags_only_unacked_pending_past_grace() {
         let pid = PersonaId::new();
@@ -1926,7 +2077,7 @@ mod tests {
         confirmed.submit_transport = Some(crate::didcomm::MessagingTransport::Tsp);
         acct.add_membership(confirmed);
 
-        let pollable = acct.pollable_pending();
+        let pollable = acct.pollable_pending(Utc::now());
         assert_eq!(
             pollable.len(),
             2,

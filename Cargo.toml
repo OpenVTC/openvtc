@@ -584,7 +584,12 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # `dtg-credentials` 0.13, which the pins above follow. `did-git-sign` 0.10.0
 # (VGI 0.10.0) is on `vta-sdk` ^0.61, so the graph holds one copy;
 # `cargo tree -d` is the check.
-vta-sdk = { version = "0.61.0", features = [
+#
+# **0.62** carries credential re-delivery on `join-requests/status/0.1`
+# (VTI #1900, trust-tasks-tf #709): `resendCredentials` on the poll, and
+# `credentialsDelivered` / `credentialResend` / `retryAfter` on an approved
+# reply, which the join-status poller sends and records.
+vta-sdk = { version = "0.62.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses

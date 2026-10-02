@@ -187,6 +187,7 @@ fn oversized_join_submit(body: &Value) -> Option<usize> {
 pub async fn poll_join_status(
     route: &Applicant<'_>,
     request_id: Option<Uuid>,
+    resend_credentials: bool,
 ) -> Result<(), OpenVTCError> {
     let Applicant {
         atm,
@@ -198,7 +199,10 @@ pub async fn poll_join_status(
         tsp_mediator_did,
     } = *route;
     let document_id = format!("urn:uuid:{}", Uuid::new_v4());
-    let payload = JoinRequestStatusBody { request_id };
+    let payload = JoinRequestStatusBody {
+        request_id,
+        resend_credentials,
+    };
     let body = crate::trust_task_doc::build_signed_value(
         JOIN_REQUEST_STATUS_TYPE,
         persona_did,
@@ -829,6 +833,7 @@ mod tests {
             "urn:uuid:doc-1",
             JoinRequestStatusBody {
                 request_id: Some(request_id),
+                resend_credentials: false,
             },
         )
         .expect("the status document builds");

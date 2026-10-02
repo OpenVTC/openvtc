@@ -654,6 +654,10 @@ impl MainPageState {
                 ),
                 pending_unacknowledged: c.pending_unacknowledged(now),
                 approved_awaiting_credential: c.approved_awaiting_credential(),
+                credential_resend_note: c
+                    .approved_awaiting_credential()
+                    .then(|| credential_resend_note(c.credential_delivery.as_ref()))
+                    .flatten(),
                 submit_transport: c.submit_transport.map(|t| t.to_string()),
                 archived: c.archived,
                 needs_attention: c.needs_attention(),
@@ -1444,9 +1448,66 @@ impl MainPanel {
     }
 }
 
+/// What the community last said about re-delivering an approved join's
+/// credential, for the Communities row. `None` when it has said nothing yet.
+fn credential_resend_note(
+    delivery: Option<&openvtc_core::config::account::CredentialDelivery>,
+) -> Option<String> {
+    use openvtc_core::config::account::CredentialResendAnswer as A;
+    let fmt = |t: &chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%d %H:%M UTC").to_string();
+    match &delivery?.last_answer {
+        None => None,
+        Some(A::Queued { at }) => Some(format!(
+            "the community is re-sending it (asked {})",
+            fmt(at)
+        )),
+        Some(A::RateLimited {
+            retry_after: Some(t),
+        }) => Some(format!("the community will re-send it after {}", fmt(t))),
+        Some(A::RateLimited { retry_after: None }) => {
+            Some("the community will not re-send it again — ask its administrators".to_string())
+        }
+        Some(A::NotNeeded) => Some("the community believes it was delivered".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each answer the community can give reads as what it means for the
+    /// member, and silence reads as nothing.
+    #[test]
+    fn the_credential_resend_note_says_what_the_community_said() {
+        use openvtc_core::config::account::{CredentialDelivery, CredentialResendAnswer as A};
+        let t: chrono::DateTime<chrono::Utc> = "2026-10-02T12:00:00Z".parse().unwrap();
+        let note = |last_answer| {
+            credential_resend_note(Some(&CredentialDelivery {
+                delivered: false,
+                last_answer,
+            }))
+        };
+        assert_eq!(credential_resend_note(None), None);
+        assert_eq!(note(None), None);
+        assert!(
+            note(Some(A::Queued { at: t }))
+                .unwrap()
+                .contains("re-sending")
+        );
+        assert!(
+            note(Some(A::RateLimited {
+                retry_after: Some(t)
+            }))
+            .unwrap()
+            .contains("after 2026-10-02 12:00 UTC")
+        );
+        assert!(
+            note(Some(A::RateLimited { retry_after: None }))
+                .unwrap()
+                .contains("administrators")
+        );
+        assert!(note(Some(A::NotNeeded)).unwrap().contains("delivered"));
+    }
 
     // --- community row labelling (agent names) ---
 
@@ -1499,6 +1560,7 @@ mod tests {
                 requested_at: None,
                 receipt_at: None,
                 approved_at: None,
+                credential_delivery: None,
                 relationships: Default::default(),
                 tasks: Default::default(),
                 vrcs_issued: Default::default(),

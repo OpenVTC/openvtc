@@ -198,10 +198,18 @@ pub fn render(
         // is made and delivery is what failed, which needs different words —
         // and a different remedy — than a request nobody acknowledged.
         if c.approved_awaiting_credential {
+            let status = match &c.credential_resend_note {
+                Some(note) => {
+                    format!("    ✓ approved — membership credential not received yet; {note}.")
+                }
+                None => "    ✓ approved — membership credential not received yet.".to_string(),
+            };
             lines.push(Line::from(Span::styled(
-                "    ✓ approved — membership credential not received yet. Press R to ask the \
-                 community to re-issue it."
-                    .to_string(),
+                status,
+                Style::new().fg(COLOR_ORANGE),
+            )));
+            lines.push(Line::from(Span::styled(
+                "      Press R to have the community re-issue it.".to_string(),
                 Style::new().fg(COLOR_ORANGE),
             )));
         }
@@ -744,6 +752,7 @@ mod key_hint_tests {
             is_pending,
             pending_unacknowledged: false,
             approved_awaiting_credential: false,
+            credential_resend_note: None,
             submit_transport: None,
             archived: false,
             needs_attention: false,

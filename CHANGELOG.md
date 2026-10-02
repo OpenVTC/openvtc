@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **An approved join asks its community to re-send a credential that never
+  came.** On vta-sdk 0.62 (VTI #1900, trust-tasks-tf #709), an approved
+  status reply says whether the community holds our acknowledgement
+  (`credentialsDelivered`). While it doesn't, and 10 minutes after approval,
+  the join-status poll carries `resendCredentials`. It asks only a community
+  that has reported delivery, since an older one would refuse the member. The
+  community's answer paces later asks: `retryAfter` is waited out, a `queued`
+  re-send is given 10 minutes, and `notNeeded` or a spent limit ends the
+  asking. A record's polls carry the flag at most 6 times per run. The approved
+  row says what the community said, and `R` stays the manual rescue.
+
 - **The community's own identity check is kept and offered as personhood
   evidence.** A `vetted/1` statement the community issues about its own check
   of the member (none of the vetter-only members; VTI #1898 now delivers it)

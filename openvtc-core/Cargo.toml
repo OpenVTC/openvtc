@@ -172,7 +172,7 @@ affinidi-messaging-test-mediator = "0.17.0"
 # is the family on `vta-sdk` 0.59 / `vti-common` 0.32; **0.49.0** on `vta-sdk`
 # 0.61 / `vti-common` 0.34; **0.50.0** adds VTI #1894 (a TSP reply reaches a
 # sender on another mediator).
-vta-service = { version = "0.50.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
+vta-service = { version = "0.51.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }
