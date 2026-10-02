@@ -2735,6 +2735,7 @@ mod tests {
             Some("AuthorityCredential") => {
                 crate::dtg::fixtures::role_vac(issuer, subject, "member")
             }
+            Some("StatementCredential") => crate::dtg::fixtures::community_vetting(issuer, subject),
             _ => serde_json::json!({
                 "type": types,
                 "issuer": issuer,
@@ -2918,6 +2919,60 @@ mod tests {
                 rec.status.is_active(),
                 kind.activates_membership(),
                 "activation for {kind:?} must match the registry",
+            );
+        }
+    }
+
+    /// The community's own `vetted/1` identity check is stored on the
+    /// membership — that is what a personhood assertion offers as identity
+    /// evidence — and does not activate it. A `vetted/1` with the vetter-only
+    /// members, or one about another community, is no stored kind.
+    #[test]
+    fn the_communitys_own_vetting_statement_is_stored_and_does_not_activate() {
+        let vtc = "did:webvh:example:vtc";
+        let persona = "did:webvh:example:persona";
+        let mut acct = account_with_persona(vtc, persona);
+        let own = crate::dtg::fixtures::community_vetting(vtc, persona);
+        assert!(
+            handle_credential_issue(&mut acct, verified(&issue(vtc, own.clone())), vtc).changed
+        );
+        let rec = only(&acct, vtc);
+        assert_eq!(
+            rec.credentials
+                .get(&crate::CredentialKind::CommunityVetting),
+            Some(&own)
+        );
+        assert!(
+            !rec.status.is_active(),
+            "an identity check is not admission"
+        );
+
+        for (label, other) in [
+            (
+                "a vetter's value",
+                crate::dtg::fixtures::vetted_statement(
+                    vtc,
+                    dtg_credentials::IssuerScope::Public,
+                    persona,
+                    vtc,
+                    true,
+                ),
+            ),
+            (
+                "another community's check",
+                crate::dtg::fixtures::vetted_statement(
+                    vtc,
+                    dtg_credentials::IssuerScope::Public,
+                    persona,
+                    "did:webvh:example:elsewhere",
+                    false,
+                ),
+            ),
+        ] {
+            assert_eq!(
+                credential_issue_admissible(&acct, &other, vtc).map(|(_, k)| k),
+                Err("it is of no known kind"),
+                "{label}"
             );
         }
     }

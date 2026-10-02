@@ -339,6 +339,63 @@ pub(crate) mod fixtures {
         )
         .expect("serialise")
     }
+
+    /// A `vetted/1` statement by `issuer` about `member`, unsigned. `vetter`
+    /// selects a vetter's value (all three vetter-only members) or the
+    /// community's own check (none).
+    pub(crate) fn vetted_statement(
+        issuer: &str,
+        scope: dtg_credentials::IssuerScope,
+        member: &str,
+        community: &str,
+        vetter: bool,
+    ) -> Value {
+        use vta_sdk::protocols::vetting::{VettedObjectValue, VettingMethod, VettingRelationship};
+        let value = serde_json::to_value(VettedObjectValue {
+            community: community.into(),
+            method: VettingMethod::Video,
+            document_classes: vec!["passport".try_into().unwrap()],
+            claims_verified: vec!["name.legal".try_into().unwrap()],
+            liveness_confirmed: true,
+            identity_commitment: vetter.then(|| "zC".to_string()),
+            card_digest_multibase: vetter.then(|| "zD".to_string()),
+            declared_relationship: vetter.then_some(VettingRelationship::None),
+            attestation_text_digest: None,
+        })
+        .unwrap();
+        let task = json!({
+            "id": "urn:uuid:issue-request-1",
+            "type": "https://trusttasks.org/spec/vtc/endorsements/issue/0.1",
+            "issuer": "did:example:admin",
+            "recipient": issuer,
+            "issuedAt": "2026-10-01T09:30:00Z",
+            "payload": { "subjectDid": member }
+        });
+        serde_json::to_value(
+            DTGCredential::new_vetted_vsc(
+                issuer.into(),
+                scope,
+                member.into(),
+                value,
+                &task,
+                Utc::now() - Duration::minutes(1),
+                None,
+            )
+            .expect("a vetted/1 statement"),
+        )
+        .expect("serialise")
+    }
+
+    /// The community's own `vetted/1` identity check of `member`, unsigned.
+    pub(crate) fn community_vetting(community: &str, member: &str) -> Value {
+        vetted_statement(
+            community,
+            dtg_credentials::IssuerScope::Public,
+            member,
+            community,
+            false,
+        )
+    }
 }
 
 #[cfg(test)]

@@ -321,18 +321,30 @@ pub enum CredentialKind {
     /// ([`dtg::community_roles`]). It replaced the pre-v1 role endorsement
     /// credential, a type DTG Credentials no longer defines.
     Role,
+    /// The community's own identity check of the member: a `vetted/1`
+    /// statement (`StatementCredential`) the community issued for itself, with
+    /// none of the vetter-only members ([`dtg::is_community_vetting`]). It
+    /// replaced the community-issued `IdentityVerificationCredential`, and is
+    /// what a personhood assertion offers as identity evidence. A vetter's
+    /// `vetted/1` is not this kind: it answers a vetting request instead.
+    CommunityVetting,
 }
 
 impl CredentialKind {
     /// Every known credential kind, in display order. The single list that
     /// dispatch, storage and UI iterate; adding a variant extends all three.
-    pub const ALL: &'static [CredentialKind] = &[CredentialKind::Membership, CredentialKind::Role];
+    pub const ALL: &'static [CredentialKind] = &[
+        CredentialKind::Membership,
+        CredentialKind::Role,
+        CredentialKind::CommunityVetting,
+    ];
 
     /// The DTG concrete `type` that identifies this kind in an issued credential.
     pub fn vc_type(self) -> &'static str {
         match self {
             CredentialKind::Membership => "MembershipCredential",
             CredentialKind::Role => "AuthorityCredential",
+            CredentialKind::CommunityVetting => "StatementCredential",
         }
     }
 
@@ -349,6 +361,7 @@ impl CredentialKind {
         match self {
             CredentialKind::Membership => "Membership",
             CredentialKind::Role => "Role",
+            CredentialKind::CommunityVetting => "CommunityVetting",
         }
     }
 
@@ -374,7 +387,11 @@ impl CredentialKind {
     /// - a `MembershipCredential` is [`Membership`](Self::Membership);
     /// - an `AuthorityCredential` is [`Role`](Self::Role) only when it is a
     ///   community role grant ([`dtg::community_roles`]); any other VAC is of
-    ///   no known kind.
+    ///   no known kind;
+    /// - a `StatementCredential` is [`CommunityVetting`](Self::CommunityVetting)
+    ///   only when it is the community's own `vetted/1` check
+    ///   ([`dtg::is_community_vetting`]); any other statement is of no known
+    ///   kind here (a vetter's `vetted/1` is the vetting flow's).
     ///
     /// `None` for anything else, including every credential in a pre-v1 shape.
     pub fn from_credential(credential: &serde_json::Value) -> Option<CredentialKind> {
@@ -385,6 +402,9 @@ impl CredentialKind {
                 if dtg::community_roles(&parsed).is_some() =>
             {
                 Some(CredentialKind::Role)
+            }
+            dtg_credentials::DTGCredentialType::Statement if dtg::is_community_vetting(&parsed) => {
+                Some(CredentialKind::CommunityVetting)
             }
             _ => None,
         }
@@ -502,6 +522,9 @@ mod tests {
                 CredentialKind::Role => {
                     crate::dtg::fixtures::role_vac("did:ex:c", "did:ex:m", "member")
                 }
+                CredentialKind::CommunityVetting => {
+                    crate::dtg::fixtures::community_vetting("did:ex:c", "did:ex:m")
+                }
             };
             assert_eq!(cred["type"][2], kind.vc_type());
             assert_eq!(
@@ -524,6 +547,17 @@ mod tests {
             CredentialKind::from_credential(
                 &serde_json::json!({ "type": ["VerifiableCredential", "MembershipCredential"] })
             ),
+            None,
+        );
+        // A vetter's `vetted/1` is the vetting flow's, not a stored kind.
+        assert_eq!(
+            CredentialKind::from_credential(&crate::dtg::fixtures::vetted_statement(
+                "did:ex:v",
+                dtg_credentials::IssuerScope::Directed,
+                "did:ex:m",
+                "did:ex:c",
+                true,
+            )),
             None,
         );
         // The retired role endorsement is of no known kind.
