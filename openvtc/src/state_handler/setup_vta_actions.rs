@@ -235,7 +235,15 @@ pub(crate) async fn handle_vta_start_provision(
     // AdminRotated mints a fresh long-term admin DID on the VTA side; the
     // ephemeral setup did:key only authenticates the bootstrap call. The reply
     // arrives as `VtaReply::AdminOnly` on both transports.
-    let ask = ProvisionAsk::vta_admin_rotated(context_id.clone()).with_label("openvtc");
+    //
+    // `as_holder` changes nothing on the wire. OpenVTC is the holder's own
+    // client, so its setup grant carries `persona-holder`; marking the ask
+    // makes the SDK's "not authorized" hint say so, matching the ACL
+    // instructions page, rather than print a grant that gets setup through and
+    // leaves the identity pane refused.
+    let ask = ProvisionAsk::vta_admin_rotated(context_id.clone())
+        .with_label("openvtc")
+        .as_holder();
     let setup_did = setup_key.did.clone();
     let setup_priv = setup_key.private_key_multibase().to_string();
 
