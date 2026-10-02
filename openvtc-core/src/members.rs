@@ -81,9 +81,7 @@ pub async fn issue_and_send_member_vmc(
 /// `members` delivery needs, resolved by the caller.
 ///
 /// Grouped rather than passed loose, matching [`crate::personhood::Route`]
-/// beside it. No TSP field: the `members/vmc` exchange has one transport today,
-/// and a field that is always `None` would suggest a choice the caller does not
-/// have.
+/// beside it.
 pub struct Delivery<'a> {
     pub atm: &'a ATM,
     pub profile: &'a Arc<ATMProfile>,
@@ -94,6 +92,53 @@ pub struct Delivery<'a> {
     pub vtc_did: &'a str,
     /// The member's own mediator, for the DIDComm leg.
     pub mediator_did: &'a str,
+    /// The community's advertised TSP mediator, when the membership was joined
+    /// over TSP: the document then goes over TSP rather than DIDComm.
+    ///
+    /// A persona that joined over TSP may have no DIDComm route the community
+    /// can be reached on at all. Its acknowledgement then never arrived, and
+    /// the community could not tell a delivered credential from a lost one —
+    /// so it re-sent, and the member asked again, until both gave up.
+    pub tsp_mediator_did: Option<&'a str>,
+}
+
+/// Send a signed member Trust Task document (`document`, id `document_id`) to
+/// the community on the membership's own transport: TSP when the route names
+/// the community's TSP mediator, the DIDComm Trust Task envelope otherwise.
+pub(crate) async fn send_document(
+    route: &Delivery<'_>,
+    document_id: String,
+    document: Value,
+) -> Result<(), OpenVTCError> {
+    if let Some(tsp_mediator) = route.tsp_mediator_did {
+        return crate::tsp::send_trust_task(
+            route.atm,
+            route.profile,
+            &document,
+            route.vtc_did,
+            tsp_mediator,
+        )
+        .await;
+    }
+    let now = Utc::now().timestamp().max(0) as u64;
+    let msg = Message::build(
+        document_id,
+        crate::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
+        document,
+    )
+    .from(route.member_did.to_string())
+    .to(route.vtc_did.to_string())
+    .created_time(now)
+    .finalize();
+    crate::pack_and_send(
+        route.atm,
+        route.profile,
+        &msg,
+        route.member_did,
+        route.vtc_did,
+        route.mediator_did,
+    )
+    .await
 }
 
 /// Build + sign the reciprocal member VMC, without sending it. The signing half of
@@ -167,11 +212,9 @@ pub async fn submit_member_vmc(
     closes_request: Option<Uuid>,
 ) -> Result<Uuid, OpenVTCError> {
     let Delivery {
-        atm,
-        profile,
         member_did,
         vtc_did,
-        mediator_did,
+        ..
     } = *route;
     // `closes_request` closes an *approved join request* as a side effect of
     // the delivery — `vtc/members/vmc/0.1`'s `requestId`, carrying the retired
@@ -211,18 +254,7 @@ pub async fn submit_member_vmc(
     )
     .await?;
 
-    let now = Utc::now().timestamp().max(0) as u64;
-    let msg = Message::build(
-        document_id,
-        crate::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
-        body,
-    )
-    .from(member_did.to_string())
-    .to(vtc_did.to_string())
-    .created_time(now)
-    .finalize();
-
-    crate::pack_and_send(atm, profile, &msg, member_did, vtc_did, mediator_did).await?;
+    send_document(route, document_id, body).await?;
     Ok(msg_id)
 }
 

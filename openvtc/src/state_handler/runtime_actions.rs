@@ -235,6 +235,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                                 profile,
                                 member_did,
                                 mediator,
+                                over_tsp: false,
                                 vtc_did: vtc,
                                 persona: persona_id,
                                 verb: community_actions::Verb::Leave {
@@ -471,6 +472,11 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                             profile,
                             member_did,
                             mediator,
+                            over_tsp: ctx
+                                .config
+                                .account
+                                .membership(&vtc, persona_id)
+                                .is_some_and(|c| c.joined_over_tsp()),
                             vtc_did: vtc,
                             persona: persona_id,
                             verb: community_actions::Verb::IssueVmc {
@@ -510,6 +516,11 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                             profile,
                             member_did,
                             mediator,
+                            over_tsp: ctx
+                                .config
+                                .account
+                                .membership(&vtc, persona_id)
+                                .is_some_and(|c| c.joined_over_tsp()),
                             vtc_did: vtc,
                             persona: persona_id,
                             verb: community_actions::Verb::RequestPersonhoodChallenge {
@@ -560,6 +571,11 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                                 profile,
                                 member_did,
                                 mediator,
+                                over_tsp: ctx
+                                    .config
+                                    .account
+                                    .membership(&vtc, persona_id)
+                                    .is_some_and(|c| c.joined_over_tsp()),
                                 vtc_did: vtc,
                                 persona: persona_id,
                                 verb: community_actions::Verb::Renew {
@@ -641,6 +657,11 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         profile,
                         member_did,
                         mediator,
+                        over_tsp: ctx
+                            .config
+                            .account
+                            .membership(&challenge.vtc_did, challenge.persona)
+                            .is_some_and(|c| c.joined_over_tsp()),
                         vtc_did: challenge.vtc_did.clone(),
                         persona: challenge.persona,
                         verb: community_actions::Verb::AssertPersonhood {

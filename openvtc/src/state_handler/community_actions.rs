@@ -98,6 +98,10 @@ pub(crate) struct CommunityJob {
     pub(crate) vtc_did: String,
     pub(crate) persona: PersonaId,
     pub(crate) verb: Verb,
+    /// The membership was joined over TSP, so the member verbs go over TSP too:
+    /// issuing our VMC, renewing, and the personhood challenge and assertion.
+    /// Leave (`submit_self_remove`) still goes over DIDComm.
+    pub(crate) over_tsp: bool,
 }
 
 impl CommunityJob {
@@ -110,6 +114,15 @@ impl CommunityJob {
             Verb::AssertPersonhood { .. } => Performed::AssertPersonhood,
             Verb::Renew { .. } => Performed::Renew,
         };
+        // A membership joined over TSP is spoken to over TSP: the community's
+        // advertised TSP mediator, resolved fresh, as the join poll does. A
+        // persona that joined that way may have no DIDComm route the community
+        // can answer on.
+        let tsp_mediator = if self.over_tsp {
+            openvtc_core::config::peer_tsp_mediator(&self.vtc_did).await
+        } else {
+            None
+        };
         // The personhood verbs share one route; building it once keeps the
         // member/community/mediator triple from being re-spelled per arm.
         let route = openvtc_core::personhood::Route {
@@ -118,9 +131,7 @@ impl CommunityJob {
             member_did: &self.member_did,
             vtc_did: &self.vtc_did,
             mediator_did: &self.mediator,
-            // TSP selection is the session's to make; this path sends over the
-            // established DIDComm leg, as the other community verbs do.
-            tsp_mediator_did: None,
+            tsp_mediator_did: tsp_mediator.as_deref(),
         };
         // What the send produced, where it produces something worth keeping. The
         // member's own acknowledgement is the one credential in this exchange
@@ -149,6 +160,7 @@ impl CommunityJob {
                     member_did: &self.member_did,
                     vtc_did: &self.vtc_did,
                     mediator_did: &self.mediator,
+                    tsp_mediator_did: tsp_mediator.as_deref(),
                 },
                 signing_secret,
                 document_signer,
@@ -189,6 +201,7 @@ impl CommunityJob {
                     member_did: &self.member_did,
                     vtc_did: &self.vtc_did,
                     mediator_did: &self.mediator,
+                    tsp_mediator_did: tsp_mediator.as_deref(),
                 },
                 document_signer,
             )

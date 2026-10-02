@@ -962,6 +962,12 @@ impl CommunityRecord {
                 .contains_key(&crate::CredentialKind::Membership)
     }
 
+    /// Whether the join was submitted over TSP — the transport the member
+    /// verbs that follow it ([`crate::members::Delivery`]) take too.
+    pub fn joined_over_tsp(&self) -> bool {
+        self.submit_transport == Some(crate::didcomm::MessagingTransport::Tsp)
+    }
+
     /// Whether the member may ask the community to renew this membership
     /// (`vtc/members/renew/0.1`): an `Active` one, or a join the community has
     /// approved whose credential never arrived. The second is the manual
@@ -1999,6 +2005,20 @@ mod tests {
         let mut acct = Account::default();
         acct.add_membership(approved(undelivered(None)));
         assert!(acct.pollable_pending(now)[0].resend_credentials);
+    }
+
+    /// The member verbs follow the join's transport: a join submitted over TSP
+    /// is spoken to over TSP afterwards, anything else over DIDComm.
+    #[test]
+    fn a_join_submitted_over_tsp_is_spoken_to_over_tsp() {
+        use crate::didcomm::MessagingTransport;
+        let pid = PersonaId::new();
+        let mut c = community("v", pid, pending());
+        assert!(!c.joined_over_tsp(), "no transport recorded: DIDComm");
+        c.submit_transport = Some(MessagingTransport::DidComm);
+        assert!(!c.joined_over_tsp());
+        c.submit_transport = Some(MessagingTransport::Tsp);
+        assert!(c.joined_over_tsp());
     }
 
     #[test]

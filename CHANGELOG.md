@@ -220,6 +220,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A membership joined over TSP is spoken to over TSP afterwards.** The
+  reciprocal VMC (`members/vmc`), renewal (`R`) and the personhood challenge
+  and assertion went over DIDComm whatever the join used. A persona that
+  joined over TSP may have no DIDComm route the community can be reached on,
+  so its acknowledgement never arrived. The community could not tell a
+  delivered credential from a lost one, and re-sent it until both sides' limits
+  ran out. These verbs now follow the join's transport, routed through the
+  community's advertised TSP mediator. Leave still goes over DIDComm.
+
 - **A vetter is seated from a two-key community, and setup's "not authorized"
   hint names `persona-holder`.** vta-sdk 0.61 reads a DTG credential's shape
   without its proof (VTI #1889, VTI-57), so a role VAC carrying a proof set no
