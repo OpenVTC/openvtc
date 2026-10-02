@@ -235,7 +235,11 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                                 profile,
                                 member_did,
                                 mediator,
-                                over_tsp: false,
+                                over_tsp: ctx
+                                    .config
+                                    .account
+                                    .membership(&vtc, persona_id)
+                                    .is_some_and(|c| c.joined_over_tsp()),
                                 vtc_did: vtc,
                                 persona: persona_id,
                                 verb: community_actions::Verb::Leave {

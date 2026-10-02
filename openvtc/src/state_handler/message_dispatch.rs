@@ -1172,6 +1172,17 @@ async fn process_inbound(
             }
         };
         let outcome = handle_join_verdict(&mut config.account, message, &from_did);
+        // A `requestMore` is the one verdict that asks the member to act, so
+        // what it lacks is said where they will see it — not only in a trace.
+        if let Some(needs) = openvtc_core::messaging::join_verdict_needs(message) {
+            config.public.logs.insert(
+                LogFamily::Community,
+                format!(
+                    "Community ({from_did}) has not decided your join yet: {}.",
+                    openvtc_core::messaging::describe_join_needs(&needs)
+                ),
+            );
+        }
         if outcome.changed {
             commit_community_document(config, verified);
         }
