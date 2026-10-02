@@ -7,6 +7,7 @@
 //! V0 keeps this client-local. Moving tickets and the desk into VTA appstate is
 //! V1, once `spec/vta/appstate/*` exists (design §11.2).
 
+use super::protocol::{Admission, CriterionMeta, JoinProtocol};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use vta_sdk::protocols::join_requests::manifest;
@@ -367,6 +368,37 @@ pub struct KnownCommunity {
     pub requested: Vec<crate::persona::join_answers::Asked>,
     /// When its manifest was last read.
     pub fetched_at: DateTime<Utc>,
+    /// The `join-requests` version it answered its manifest in, which is the
+    /// one its submit is sent in. `None` on a record written before this was
+    /// kept, which reads as "ask 0.3 first" ([`super::protocol`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<JoinProtocol>,
+    /// Every criterion it publishes, vetting or not, in published order: the
+    /// routes in, and what meeting each one does. [`VettingBook::criteria`]
+    /// keeps only the vetting ones, with their requirements.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<CommunityCriterion>,
+}
+
+/// One criterion a community publishes, as the join page and the submit need
+/// it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommunityCriterion {
+    pub id: String,
+    /// What a submit names to be decided under it (`submit/0.3` `criterion`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirements_digest: Option<String>,
+    /// Whether meeting it admits or submits for review. `None` from a 0.2
+    /// manifest, which does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<Admission>,
+    /// Whether it requires an invitation credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitation_required: Option<bool>,
+    /// Whether it asks for vetting.
+    #[serde(default)]
+    pub vetting: bool,
 }
 
 /// What this book knows of whether a community vets its members.
@@ -437,6 +469,12 @@ pub struct VettingBook {
     /// Communities whose manifests we have read, with their branding.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub communities: Vec<KnownCommunity>,
+    /// The `join-requests` version to ask a community in, learned from a
+    /// refusal before any manifest arrived: a community that refused 0.3 as an
+    /// unsupported version is asked in 0.2 from then on. A manifest's own
+    /// version ([`KnownCommunity::protocol`]) takes precedence.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub protocol_hints: std::collections::BTreeMap<String, JoinProtocol>,
     /// The vetter profile we last sent each community, per persona.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vetter_profiles: Vec<VetterProfileRecord>,
@@ -834,6 +872,38 @@ impl VettingBook {
         manifest: &manifest::v0_2::Response,
         now: DateTime<Utc>,
     ) -> bool {
+        self.learn_manifest_in(community, manifest, None, &[], now)
+    }
+
+    /// [`Self::learn_manifest`], recording the version the manifest arrived in
+    /// and what that version says about each criterion beyond its 0.2 shape
+    /// ([`super::protocol::read_manifest`]).
+    pub fn learn_manifest_in(
+        &mut self,
+        community: &str,
+        manifest: &manifest::v0_2::Response,
+        protocol: Option<JoinProtocol>,
+        meta: &[CriterionMeta],
+        now: DateTime<Utc>,
+    ) -> bool {
+        let routes: Vec<CommunityCriterion> = manifest
+            .criteria
+            .iter()
+            .map(|c| {
+                let id = c.id.as_str().to_string();
+                let m = meta.iter().find(|m| m.id == id);
+                CommunityCriterion {
+                    requirements_digest: c
+                        .requirements_digest
+                        .as_ref()
+                        .map(|d| d.as_str().to_string()),
+                    admission: m.and_then(|m| m.admission),
+                    invitation_required: m.and_then(|m| m.invitation_required),
+                    vetting: c.vetting.is_some(),
+                    id,
+                }
+            })
+            .collect();
         let fresh: Vec<KnownCriterion> = manifest
             .criteria
             .iter()
@@ -881,9 +951,16 @@ impl VettingBook {
         {
             Some(known) => {
                 known.fetched_at = now;
-                let changed = known.branding != branding || known.requested != requested;
+                let changed = known.branding != branding
+                    || known.requested != requested
+                    || known.routes != routes
+                    || (protocol.is_some() && known.protocol != protocol);
                 known.branding = branding;
                 known.requested = requested;
+                known.routes = routes;
+                if protocol.is_some() {
+                    known.protocol = protocol;
+                }
                 changed
             }
             None => {
@@ -892,6 +969,8 @@ impl VettingBook {
                     branding,
                     requested,
                     fetched_at: now,
+                    protocol,
+                    routes,
                 });
                 true
             }
@@ -913,6 +992,45 @@ impl VettingBook {
         } else {
             Knowledge::Unknown
         }
+    }
+
+    /// The `join-requests` version `community` answered in, or the one to ask
+    /// first when it has not answered.
+    #[must_use]
+    pub fn protocol_for(&self, community: &str) -> JoinProtocol {
+        self.communities
+            .iter()
+            .find(|c| c.community == community)
+            .and_then(|c| c.protocol)
+            .or_else(|| self.protocol_hints.get(community).copied())
+            .unwrap_or_default()
+    }
+
+    /// `community` refused a request in `asked` as a version it does not
+    /// serve: remember the version to fall back to and return it, or `None`
+    /// when there is nothing older to try.
+    pub fn fall_back_from(&mut self, community: &str, asked: JoinProtocol) -> Option<JoinProtocol> {
+        let next = asked.fallback()?;
+        self.protocol_hints.insert(community.to_string(), next);
+        if let Some(known) = self
+            .communities
+            .iter_mut()
+            .find(|c| c.community == community)
+            && known.protocol == Some(asked)
+        {
+            known.protocol = Some(next);
+        }
+        Some(next)
+    }
+
+    /// Every criterion `community` publishes, in published order. Empty when
+    /// its manifest has not been read.
+    #[must_use]
+    pub fn routes(&self, community: &str) -> &[CommunityCriterion] {
+        self.communities
+            .iter()
+            .find(|c| c.community == community)
+            .map_or(&[], |c| c.routes.as_slice())
     }
 
     /// `community`'s branding, if it publishes any.

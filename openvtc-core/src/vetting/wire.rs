@@ -126,10 +126,12 @@ pub fn is_community_bound(type_uri: &str) -> bool {
         VETTING_REVOKE_STATEMENT_TYPE, VETTING_VETTER_GRANT_TYPE, VETTING_VETTER_LIST_TYPE,
         VETTING_VETTER_PROFILE_TYPE, VETTING_VETTER_RESEND_TYPE,
     };
+    if super::protocol::JoinProtocol::from_manifest_request(type_uri).is_some() {
+        return true;
+    }
     matches!(
         type_uri,
-        vta_sdk::protocols::join_requests::JOIN_REQUEST_MANIFEST_0_2_TYPE
-            | VETTING_REVOKE_STATEMENT_TYPE
+        VETTING_REVOKE_STATEMENT_TYPE
             | VETTING_VETTER_GRANT_TYPE
             | VETTING_VETTER_LIST_TYPE
             | VETTING_VETTER_PROFILE_TYPE
@@ -278,14 +280,15 @@ pub async fn open<P: DeserializeOwned>(
     Ok(Opened { document, payload })
 }
 
-/// The `join-requests/manifest/0.2` request an applicant sends a community to
-/// learn what it requires. The payload is empty.
+/// The `join-requests/manifest` request an applicant sends a community to learn
+/// what it requires, in `protocol`. The payload is empty.
 pub fn manifest_request(
     applicant_did: &str,
     community_did: &str,
+    protocol: super::protocol::JoinProtocol,
 ) -> Result<TrustTask<Value>, OpenVTCError> {
     document(
-        vta_sdk::protocols::join_requests::JOIN_REQUEST_MANIFEST_0_2_TYPE,
+        protocol.manifest_type(),
         applicant_did,
         community_did,
         new_id(),
@@ -870,7 +873,12 @@ pub(crate) mod tests {
     fn a_community_gets_the_envelope_and_a_peer_the_task_type() {
         use vta_sdk::protocols::vetting::{VETTING_REVOKE_STATEMENT_TYPE, vetters};
         let community_bound = [
-            manifest_request("did:key:zApplicant", "did:key:zVtc").unwrap(),
+            manifest_request(
+                "did:key:zApplicant",
+                "did:key:zVtc",
+                crate::vetting::protocol::JoinProtocol::V0_2,
+            )
+            .unwrap(),
             vetter_resend_request("did:key:zVetter", "did:key:zVtc").unwrap(),
             vetter_list_request(
                 "did:key:zApplicant",
@@ -940,7 +948,12 @@ pub(crate) mod tests {
             assert_eq!(message.typ, type_uri, "a peer leg stays typed as its task");
         }
         // A response is never community-bound: this client answers peers only.
-        let request = manifest_request("did:key:zApplicant", "did:key:zVtc").unwrap();
+        let request = manifest_request(
+            "did:key:zApplicant",
+            "did:key:zVtc",
+            crate::vetting::protocol::JoinProtocol::V0_2,
+        )
+        .unwrap();
         let reply = response(&request, &json!({})).unwrap();
         assert!(!is_community_bound(&reply.type_uri.to_string()));
     }

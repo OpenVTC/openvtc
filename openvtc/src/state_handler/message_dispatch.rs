@@ -26,6 +26,7 @@ use openvtc_core::messaging::{
 use openvtc_core::personhood::{
     PERSONHOOD_ASSERT_RESPONSE_TYPE, PERSONHOOD_CHALLENGE_RESPONSE_TYPE,
 };
+use openvtc_core::vetting::protocol::JoinProtocol;
 use openvtc_core::{
     MessageType,
     config::{Config, account::VtcDid},
@@ -39,7 +40,6 @@ use vta_sdk::protocols::PROBLEM_REPORT_TYPE;
 use vta_sdk::protocols::credential_exchange::ISSUE as CREDENTIAL_ISSUE_TYPE;
 use vta_sdk::protocols::join_requests::{
     JOIN_REQUEST_STATUS_RESPONSE_TYPE, JOIN_REQUEST_SUBMIT_RECEIPT_TYPE,
-    JOIN_REQUEST_SUBMIT_RESPONSE_TYPE,
 };
 use vta_sdk::protocols::members::{
     MEMBER_REMOVAL_NOTICE_TYPE, MEMBER_REQUEST_VMC_TYPE, MEMBER_VMC_RESPONSE_TYPE,
@@ -502,11 +502,11 @@ fn verification_job(
     }
     if is_capability_reply_type(typ)
         || openvtc_core::git_ns::is_reply_type(typ)
+        || JoinProtocol::is_submit_response(typ)
         || [
             MEMBER_REMOVAL_NOTICE_TYPE,
             MEMBER_REQUEST_VMC_TYPE,
             JOIN_REQUEST_SUBMIT_RECEIPT_TYPE,
-            JOIN_REQUEST_SUBMIT_RESPONSE_TYPE,
             JOIN_REQUEST_STATUS_RESPONSE_TYPE,
             COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE,
         ]
@@ -1163,7 +1163,7 @@ async fn process_inbound(
     // the trust-task join model (allow / deny / refer / request_more), threaded
     // (`thid`) on our submit message id. `allow` → Active, `deny` → Rejected; a
     // rejection inactivates the community so the loop deregisters the session.
-    if message.typ == JOIN_REQUEST_SUBMIT_RESPONSE_TYPE {
+    if JoinProtocol::is_submit_response(&message.typ) {
         let verified = match community_document(config, &pre, &from_did) {
             Ok(v) => v,
             Err(e) => {

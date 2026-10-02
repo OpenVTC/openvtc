@@ -11,8 +11,12 @@
 //!
 //! The same answer is served over HTTPS. A VTC publishes a `VTCRest` service in
 //! its DID document, and `POST {endpoint}/v1/trust-tasks` dispatches on the
-//! document's `type` — so a `join-requests/manifest/0.2` document gets the
+//! document's `type` — so a `join-requests/manifest` document gets the
 //! manifest back, signed, with no session, no mediator and no inbound arm.
+//!
+//! 0.3 is asked first; a community that refuses the version
+//! (`unsupportedVersion` / `unsupportedType`) is asked again in 0.2
+//! ([`super::protocol`]).
 //!
 //! # Nothing about the applicant is sent
 //!
@@ -43,7 +47,9 @@ use std::time::Duration;
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use serde_json::Value;
 use trust_tasks_rs::TrustTask;
-use vta_sdk::protocols::join_requests::{JOIN_REQUEST_MANIFEST_0_2_TYPE, manifest};
+use vta_sdk::protocols::join_requests::manifest;
+
+use super::protocol::{CriterionMeta, JoinProtocol, is_version_refusal, read_manifest};
 use vta_sdk::trust_task_proof::{TrustTaskVmResolver, verify_trust_task_proof_with};
 
 use crate::health::ProbePolicy;
@@ -75,8 +81,13 @@ pub enum DiscoverError {
     Blocked(String),
     /// The endpoint did not answer.
     Unreachable(String),
-    /// It answered and declined.
-    Refused { status: u16, detail: String },
+    /// It answered and declined. `code` is the Trust Task error code, when the
+    /// refusal was one.
+    Refused {
+        status: u16,
+        code: Option<String>,
+        detail: String,
+    },
     /// It answered something that is not a manifest this client can read.
     Unreadable(String),
     /// The answer carries no usable proof, or one that does not verify.
@@ -97,7 +108,7 @@ impl std::fmt::Display for DiscoverError {
             Self::Unreachable(error) => {
                 write!(f, "its endpoint could not be reached ({error})")
             }
-            Self::Refused { status, detail } => {
+            Self::Refused { status, detail, .. } => {
                 write!(f, "its endpoint refused the question ({status}: {detail})")
             }
             Self::Unreadable(detail) => write!(
@@ -176,10 +187,10 @@ fn trust_tasks_url_string(base: &str) -> String {
 /// Built by hand rather than through [`crate::trust_task_doc::build`] because
 /// that one stamps an `issuer`, and this request deliberately has none — see
 /// the module's "Nothing about the applicant is sent".
-fn anonymous_request(community_did: &str) -> Value {
+fn anonymous_request(community_did: &str, protocol: JoinProtocol) -> Value {
     serde_json::json!({
         "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-        "type": JOIN_REQUEST_MANIFEST_0_2_TYPE,
+        "type": protocol.manifest_type(),
         "recipient": community_did,
         "issuedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "payload": {},
@@ -199,12 +210,44 @@ fn anonymous_request(community_did: &str) -> Value {
 /// does not enumerate, and marks what a client must honour — is readable only from these bytes
 /// (`vetting::hidden`). Re-serialising the parse gives a criterion with those members missing,
 /// and a `requirementsDigest` that no longer matches.
+/// A manifest read over REST: the 0.2-shaped manifest, the payload as received,
+/// the version the community answered in, and what that version says per
+/// criterion beyond the 0.2 shape.
+pub struct FetchedManifest {
+    pub manifest: manifest::v0_2::Response,
+    pub raw: Value,
+    pub protocol: JoinProtocol,
+    pub meta: Vec<CriterionMeta>,
+}
+
+/// Read `community_did`'s join manifest, asking in 0.3 and, if the community
+/// refuses that version, once more in 0.2.
 pub async fn fetch_manifest(
     doc: &Value,
     community_did: &str,
     resolver: &DIDCacheClient,
     policy: ProbePolicy,
-) -> Result<(manifest::v0_2::Response, Value), DiscoverError> {
+) -> Result<FetchedManifest, DiscoverError> {
+    let mut protocol = JoinProtocol::default();
+    loop {
+        match fetch_manifest_in(doc, community_did, resolver, policy, protocol).await {
+            Err(DiscoverError::Refused {
+                code: Some(code), ..
+            }) if is_version_refusal(&code) && protocol.fallback().is_some() => {
+                protocol = protocol.fallback().expect("checked above");
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn fetch_manifest_in(
+    doc: &Value,
+    community_did: &str,
+    resolver: &DIDCacheClient,
+    policy: ProbePolicy,
+    protocol: JoinProtocol,
+) -> Result<FetchedManifest, DiscoverError> {
     let endpoint = rest_endpoint(doc).ok_or(DiscoverError::NoEndpoint)?;
     let url = trust_tasks_url(&endpoint, policy)?;
 
@@ -222,7 +265,7 @@ pub async fn fetch_manifest(
 
     let response = client
         .post(url)
-        .json(&anonymous_request(community_did))
+        .json(&anonymous_request(community_did, protocol))
         .send()
         .await
         .map_err(|e| DiscoverError::Unreachable(e.to_string()))?;
@@ -233,14 +276,27 @@ pub async fn fetch_manifest(
         .await
         .map_err(|e| DiscoverError::Unreachable(e.to_string()))?;
     if !status.is_success() {
+        let (code, detail) = refusal_detail(&body);
         return Err(DiscoverError::Refused {
             status: status.as_u16(),
-            detail: refusal_detail(&body),
+            code,
+            detail,
         });
     }
 
     let reply: TrustTask<Value> =
         serde_json::from_str(&body).map_err(|e| DiscoverError::Unreadable(e.to_string()))?;
+    // A refusal is a refusal whatever status it came under. The HTTP binding
+    // derives the status from the error code, and a `trust-task-error` read as
+    // a manifest would hide the very code that says which version to ask in.
+    if crate::messaging::is_trust_task_error_type(&reply.type_uri.to_string()) {
+        let (code, detail) = refusal_detail(&body);
+        return Err(DiscoverError::Refused {
+            status: status.as_u16(),
+            code,
+            detail,
+        });
+    }
 
     // Proof before payload: nothing is read out of a document that has not been
     // shown to come from the community being asked.
@@ -251,30 +307,46 @@ pub async fn fetch_manifest(
         return Err(DiscoverError::WrongSigner { proven });
     }
 
+    // The version is the one the reply says it is, which a conformant
+    // community answers in the version asked.
+    let protocol =
+        JoinProtocol::from_manifest_response(&reply.type_uri.to_string()).unwrap_or(protocol);
     let raw = reply.payload;
-    let parsed = serde_json::from_value(raw.clone())
-        .map_err(|e| DiscoverError::Unreadable(e.to_string()))?;
-    Ok((parsed, raw))
+    let (manifest, meta) =
+        read_manifest(protocol, &raw).map_err(|e| DiscoverError::Unreadable(e.to_string()))?;
+    Ok(FetchedManifest {
+        manifest,
+        raw,
+        protocol,
+        meta,
+    })
 }
 
-/// The `message` out of a `trust-task-error` body, or the body itself.
+/// The `code` and `message` out of a `trust-task-error` body, or no code and
+/// the body itself.
 ///
-/// A refusal names why it refused, and that sentence is the whole value of the
-/// variant — falling back to the raw body keeps a non-Trust-Task error (a proxy
-/// page, say) from becoming an empty parenthesis. Bounded, because it is
-/// someone else's text on its way to a terminal.
-fn refusal_detail(body: &str) -> String {
-    let detail = serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|v| {
+/// The code is what decides whether to ask again in another version; the
+/// message is the whole value of the variant for a reader — falling back to the
+/// raw body keeps a non-Trust-Task error (a proxy page, say) from becoming an
+/// empty parenthesis. Bounded, because it is someone else's text on its way to
+/// a terminal.
+fn refusal_detail(body: &str) -> (Option<String>, String) {
+    let parsed = serde_json::from_str::<Value>(body).ok();
+    let field = |name: &str| {
+        parsed.as_ref().and_then(|v| {
             v.get("payload")
-                .and_then(|p| p.get("message"))
-                .or_else(|| v.get("message"))
+                .and_then(|p| p.get(name))
+                .or_else(|| v.get(name))
                 .and_then(Value::as_str)
                 .map(str::to_string)
         })
-        .unwrap_or_else(|| body.to_string());
-    crate::display::truncate_chars(&detail, 200).to_string()
+    };
+    let code = field("code");
+    let detail = field("message").unwrap_or_else(|| body.to_string());
+    (
+        code,
+        crate::display::truncate_chars(&detail, 200).to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -385,13 +457,13 @@ mod tests {
     /// applicants cannot be what tells it who is considering applying.
     #[test]
     fn the_question_carries_no_issuer() {
-        let request = anonymous_request("did:webvh:community");
+        let request = anonymous_request("did:webvh:community", JoinProtocol::V0_3);
         assert!(
             request.get("issuer").is_none(),
             "a pre-application read must not name the reader"
         );
         assert_eq!(request["recipient"], "did:webvh:community");
-        assert_eq!(request["type"], JOIN_REQUEST_MANIFEST_0_2_TYPE);
+        assert_eq!(request["type"], JoinProtocol::V0_3.manifest_type());
         assert!(request["payload"].as_object().is_some_and(|p| p.is_empty()));
     }
 
@@ -399,17 +471,27 @@ mod tests {
     fn a_refusal_is_reported_by_its_message_not_its_envelope() {
         let trust_task_error = r#"{"type":"…/trust-task-error/0.5",
             "payload":{"code":"malformedRequest","message":"body did not parse"}}"#;
-        assert_eq!(refusal_detail(trust_task_error), "body did not parse");
+        assert_eq!(
+            refusal_detail(trust_task_error),
+            (
+                Some("malformedRequest".to_string()),
+                "body did not parse".to_string()
+            ),
+            "the code is kept: it decides whether to ask in another version"
+        );
 
         // A plain `message` (not every refusal is a Trust Task error).
         assert_eq!(
-            refusal_detail(r#"{"message":"unauthorized"}"#),
+            refusal_detail(r#"{"message":"unauthorized"}"#).1,
             "unauthorized"
         );
 
         // Anything else is shown as it came, so an HTML proxy page does not
         // become an empty parenthesis.
-        assert_eq!(refusal_detail("<html>502</html>"), "<html>502</html>");
+        assert_eq!(
+            refusal_detail("<html>502</html>"),
+            (None, "<html>502</html>".to_string())
+        );
     }
 
     /// Each variant has a different next step for the operator, so each says
@@ -423,6 +505,7 @@ mod tests {
             said(DiscoverError::Unreachable("dns".into())),
             said(DiscoverError::Refused {
                 status: 503,
+                code: None,
                 detail: "down".into(),
             }),
             said(DiscoverError::Unreadable("bad json".into())),

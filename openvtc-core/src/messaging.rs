@@ -635,6 +635,27 @@ pub fn is_trust_task_error_type(typ: &str) -> bool {
 /// must act (different invitation, different identity, request access).
 fn is_join_denial_code(code: &str) -> bool {
     matches!(code, "permissionDenied" | "forbidden" | "identityMismatch")
+        || join_refusal_reason(code).is_some()
+}
+
+/// What to tell the member about a `submit/0.3` refusal that ends the join,
+/// in place of the community's own message when it gave none.
+///
+/// Both are non-retryable, and neither leaves a request open at the community
+/// — so a join left `Pending` on them would wait for a decision nobody is
+/// taking.
+fn join_refusal_reason(code: &str) -> Option<&'static str> {
+    use trust_tasks_rs::specs::vtc::join_requests::submit::v0_3::error_codes;
+    if code == error_codes::NOT_ACCEPTING.code {
+        Some("the community is not accepting applications right now")
+    } else if code == error_codes::CRITERION_UNKNOWN.code {
+        Some(
+            "the community no longer publishes the criterion this join was made under — \
+             join again to apply under its current requirements",
+        )
+    } else {
+        None
+    }
 }
 
 /// Handle a framework `trust-task-error` document threaded to our join submit —
@@ -692,9 +713,14 @@ pub fn handle_join_trust_task_error(
     if is_join_denial_code(&code) {
         // Persist the ceremony error's code + human `message` as the decision
         // evidence (issue #240). No decision time on this document.
+        let reason = if detail.is_empty() {
+            join_refusal_reason(&code).map(str::to_string)
+        } else {
+            Some(detail.clone())
+        };
         record.reject(DecisionEvidence {
             code: (!code.is_empty()).then(|| code.clone()),
-            reason: (!detail.is_empty()).then(|| detail.clone()),
+            reason,
             decided_by: None,
             decided_at: None,
             disposition: None,
@@ -2601,6 +2627,38 @@ mod tests {
             "a denial deregisters the session"
         );
         assert!(matches!(only(&acct, vtc).status, CommunityStatus::Rejected));
+    }
+
+    /// `submit/0.3`'s two refusals end the join — neither leaves a request open
+    /// at the community — and say why when the community gave no message.
+    #[test]
+    fn a_v0_3_submit_refusal_ends_the_join_with_a_reason() {
+        use trust_tasks_rs::specs::vtc::join_requests::submit::v0_3::error_codes;
+        for (code, says) in [
+            (
+                error_codes::NOT_ACCEPTING.code,
+                "not accepting applications",
+            ),
+            (error_codes::CRITERION_UNKNOWN.code, "join again"),
+        ] {
+            let vtc = "did:webvh:example:vtc";
+            let rid = Uuid::new_v4();
+            let mut acct = pending_account(vtc, rid);
+            let out = handle_join_trust_task_error(
+                &mut acct,
+                &trust_task_error(&rid.to_string(), vtc, code, ""),
+                vtc,
+            );
+            assert!(out.inactivated.is_some(), "{code} ends the join");
+            let rec = only(&acct, vtc);
+            assert!(matches!(rec.status, CommunityStatus::Rejected), "{code}");
+            let reason = rec
+                .decision
+                .as_ref()
+                .and_then(|d| d.reason.clone())
+                .unwrap_or_default();
+            assert!(reason.contains(says), "{code}: {reason}");
+        }
     }
 
     #[test]

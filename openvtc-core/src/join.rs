@@ -28,8 +28,8 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 use vta_sdk::protocols::join_requests::{
-    JOIN_REQUEST_STATUS_TYPE, JOIN_REQUEST_SUBMIT_TYPE, JoinRequestStatusBody,
-    JoinRequestSubmitBody, MEMBER_SELF_REMOVE_TYPE, SelfRemoveBody,
+    JOIN_REQUEST_STATUS_TYPE, JoinRequestStatusBody, JoinRequestSubmitBody,
+    MEMBER_SELF_REMOVE_TYPE, SelfRemoveBody,
 };
 
 use crate::capabilities::TRUST_TASK_ENVELOPE_TYPE;
@@ -333,7 +333,7 @@ pub async fn send_community_profile_show(
 /// payload must ride as the document's `payload` field. The document carries the
 /// required `id` (a fresh `urn:uuid`) and `type`, plus the audience-binding
 /// `issuer` (the applicant persona) and `recipient` (the VTC), and it is
-/// **signed** by the persona: `vtc/join-requests/submit/0.2` declares `proof`
+/// **signed** by the persona: `vtc/join-requests/submit` declares `proof`
 /// REQUIRED, and the authcrypt sender or TSP sender VID attributes the carriage
 /// rather than the document.
 async fn build_join_submit_document(
@@ -347,18 +347,29 @@ async fn build_join_submit_document(
         vp,
         extensions,
         attributes,
+        protocol,
+        criterion,
     } = presentation.into();
-    let payload = JoinRequestSubmitBody {
+    let body = JoinRequestSubmitBody {
         vp,
         registry_consent: false,
         extensions,
         attributes,
     };
+    // `submit/0.3` is the 0.2 payload plus `criterion`, so the 0.2 body is
+    // built once and the member added when there is one to name.
+    let mut payload = serde_json::to_value(body)
+        .map_err(|e| OpenVTCError::Config(format!("join submit body serialize: {e}")))?;
+    if protocol == crate::vetting::protocol::JoinProtocol::V0_3
+        && let (Some(criterion), Some(members)) = (criterion, payload.as_object_mut())
+    {
+        members.insert("criterion".to_string(), Value::String(criterion));
+    }
     // `document_id` is supplied rather than minted here: on the DIDComm path this
     // same id is the message id, which is what makes the two transports' reply
     // threading agree (see [`submit_join_request`]).
     crate::trust_task_doc::build_signed_value(
-        JOIN_REQUEST_SUBMIT_TYPE,
+        protocol.submit_type(),
         persona_did,
         vtc_did,
         document_id,
@@ -474,6 +485,14 @@ pub struct JoinPresentation {
     /// disclosure ([`crate::persona::join_answers`]). Empty when it asks
     /// nothing.
     pub attributes: Vec<vta_sdk::protocols::join_requests::JoinRequestAttribute>,
+    /// The `join-requests` version to submit in: the one the community
+    /// answered its manifest in ([`crate::vetting::book::VettingBook::protocol_for`]).
+    pub protocol: crate::vetting::protocol::JoinProtocol,
+    /// `submit/0.3`'s `criterion`: the `requirementsDigest` of the criterion
+    /// this is submitted under. `None` lets the community decide under the
+    /// first criterion met, in published order. Not sent in 0.2, where the
+    /// digest rides in `extensions` instead.
+    pub criterion: Option<String>,
 }
 
 impl From<Value> for JoinPresentation {
@@ -482,6 +501,8 @@ impl From<Value> for JoinPresentation {
             vp,
             extensions: Value::Null,
             attributes: Vec::new(),
+            protocol: Default::default(),
+            criterion: None,
         }
     }
 }
@@ -869,7 +890,10 @@ mod tests {
         .expect("the submit document builds");
 
         assert_eq!(doc["id"], json!("urn:uuid:submit-1"));
-        assert_eq!(doc["type"], json!(JOIN_REQUEST_SUBMIT_TYPE));
+        assert_eq!(
+            doc["type"],
+            json!(crate::vetting::protocol::JoinProtocol::V0_3.submit_type())
+        );
         assert_eq!(doc["issuer"], json!(applicant));
         assert_eq!(doc["recipient"], json!("did:webvh:example.com:community"));
         assert_eq!(
@@ -986,6 +1010,8 @@ mod tests {
                 vp,
                 extensions: json!({ "requirementsDigest": "zDigest" }),
                 attributes: Vec::new(),
+                protocol: crate::vetting::protocol::JoinProtocol::V0_2,
+                criterion: None,
             },
             "urn:uuid:submit-2",
         )
@@ -995,6 +1021,46 @@ mod tests {
             doc["payload"]["extensions"]["requirementsDigest"],
             "zDigest"
         );
+    }
+
+    /// A 0.3 submit names its criterion in `criterion` and is the generated
+    /// `submit/0.3` payload; a 0.2 one never carries the member, which 0.2's
+    /// schema refuses.
+    #[tokio::test]
+    async fn a_v0_3_submit_names_its_criterion() {
+        use crate::vetting::protocol::JoinProtocol;
+        use trust_tasks_rs::specs::vtc::join_requests::submit;
+        let (applicant, signer) =
+            affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
+                .expect("did:key generates");
+        let digest = "zQmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
+        let build = |protocol| {
+            build_join_submit_document(
+                &applicant,
+                &signer,
+                "did:webvh:example.com:community",
+                JoinPresentation {
+                    vp: json!({ "type": ["VerifiablePresentation"] }),
+                    extensions: Value::Null,
+                    attributes: Vec::new(),
+                    protocol,
+                    criterion: Some(digest.to_string()),
+                },
+                "urn:uuid:submit-3",
+            )
+        };
+
+        let v3 = build(JoinProtocol::V0_3).await.unwrap();
+        assert_eq!(v3["type"], json!(JoinProtocol::V0_3.submit_type()));
+        assert_eq!(v3["payload"]["criterion"], digest);
+        serde_json::from_value::<submit::v0_3::Payload>(v3["payload"].clone())
+            .expect("the payload is the generated submit/0.3 shape");
+
+        let v2 = build(JoinProtocol::V0_2).await.unwrap();
+        assert_eq!(v2["type"], json!(JoinProtocol::V0_2.submit_type()));
+        assert!(v2["payload"].get("criterion").is_none());
+        serde_json::from_value::<submit::v0_2::Payload>(v2["payload"].clone())
+            .expect("the payload is the generated submit/0.2 shape");
     }
 
     #[test]
@@ -1202,7 +1268,7 @@ mod tests {
         assert!(doc.id.starts_with("urn:uuid:"), "document carries an id");
         assert_eq!(
             doc.type_uri.to_string(),
-            JOIN_REQUEST_SUBMIT_TYPE,
+            crate::vetting::protocol::JoinProtocol::V0_3.submit_type(),
             "type URI is the submit type"
         );
         assert_eq!(doc.issuer.as_deref(), Some(applicant.as_str()));

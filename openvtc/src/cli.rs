@@ -45,7 +45,8 @@ pub fn cli() -> Command {
                 .help(
                     "Path to a Verifiable Invitation Credential (VIC) JSON file \
                      to present when joining a community. The community verifies \
-                     it and auto-admits on a valid, trusted, unconsumed invitation.",
+                     it, and on a valid, trusted, unconsumed invitation admits you or \
+                     refers the request for review, as its join criteria say.",
                 ),
         ])
         .subcommand(Command::new("setup").about("Initial configuration of the openvtc tool"))

@@ -375,7 +375,9 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
             ]));
             lines.push(Line::default());
             lines.push(Line::styled(
-                "Before it admits you, it asks for:",
+                // Not "before it admits you": a 0.3 community may refer a
+                // request that meets this to its administrators instead.
+                "To decide on your request, it asks for:",
                 Style::new().fg(COLOR_BORDER).bold(),
             ));
             for requirement in &known.requirements {

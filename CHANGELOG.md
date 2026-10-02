@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Joining speaks `join-requests` 0.3 and 0.2.** A community on VTI-13
+  serves only `manifest/0.3` + `submit/0.3`, and one that has not moved serves
+  only 0.2. OpenVTC asks for the 0.3 manifest first. If the community refuses
+  the version (`unsupportedVersion`, or `unsupportedType`), it asks again in
+  0.2, over REST and over DIDComm, and remembers the answer. It then submits in
+  the version the community answered in. A 0.3 submit names its criterion in
+  `criterion` (the vetting application's `requirementsDigest`), or leaves it out
+  so the community decides under the first criterion met. A 0.3 manifest's
+  per-criterion `admission` is kept, and a `review` criterion is no longer
+  described as admitting: the invitation row says it goes to administrators,
+  and the vetting row that an administrator decides. `submit:notAccepting` and
+  `submit:criterionUnknown` end the join with a reason rather than leaving it
+  Pending.
+
 - **An approved join asks its community to re-send a credential that never
   came.** On vta-sdk 0.62 (VTI #1900, trust-tasks-tf #709), an approved
   status reply says whether the community holds our acknowledgement
