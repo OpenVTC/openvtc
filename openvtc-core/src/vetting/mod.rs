@@ -62,6 +62,9 @@ pub mod guide;
 /// Hidden-vetter admission: the parameters a community publishes, and the criticality rule.
 pub mod hidden;
 pub mod inbound;
+/// Which `vtc/join-requests` version a community speaks, and reading a 0.3
+/// manifest into the 0.2 shape.
+pub mod protocol;
 pub mod queries;
 pub mod registry;
 pub mod status;

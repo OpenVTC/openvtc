@@ -662,7 +662,17 @@ async fn an_applicant_is_vetted_end_to_end() {
     let application = applicant.application();
     assert!(application.checklist(Utc::now()).unwrap().satisfied());
     assert_eq!(application.presentable_statements(Utc::now()).len(), 1);
-    assert_eq!(application.join_extensions()["requirementsDigest"], DIGEST);
+    assert_eq!(
+        application.join_extensions(super::protocol::JoinProtocol::V0_2)["requirementsDigest"],
+        DIGEST
+    );
+    assert!(
+        application
+            .join_extensions(super::protocol::JoinProtocol::V0_3)
+            .get("requirementsDigest")
+            .is_none(),
+        "0.3 names the criterion in the submit, not in extensions"
+    );
 
     // Later, the vetter withdraws it.
     let notice_id = wire::new_id();
@@ -1602,7 +1612,12 @@ async fn a_resend_is_answered_or_refused_in_plain_words() {
 #[tokio::test]
 async fn a_manifest_answers_whoever_asked_and_brings_the_communitys_branding() {
     let mut applicant = Party::new(1);
-    let request = wire::manifest_request(&applicant.did, COMMUNITY).unwrap();
+    let request = wire::manifest_request(
+        &applicant.did,
+        COMMUNITY,
+        super::protocol::JoinProtocol::V0_2,
+    )
+    .unwrap();
     applicant
         .book
         .ask(asked(&request, applicant.persona, QueryKind::Manifest));
@@ -1985,5 +2000,120 @@ async fn an_unsolicited_manifest_writes_nothing() {
     assert!(matches!(
         stranger.book.knowledge(COMMUNITY),
         Knowledge::Unknown
+    ));
+}
+
+impl Party {
+    /// The account knows this party's persona, as a real account does — what
+    /// a reply needs to sign as it.
+    fn with_persona_record(mut self) -> Self {
+        self.account.personas.insert(
+            self.persona,
+            crate::config::account::PersonaRecord {
+                extra: serde_json::Map::new(),
+                persona_id: self.persona,
+                did: self.did.clone(),
+                did_document: None,
+                key_refs: Vec::new(),
+                mediator_did: None,
+                origin_context_id: String::new(),
+                created_at: Utc::now(),
+                label: None,
+            },
+        );
+        self
+    }
+}
+
+/// A 0.3 manifest answer is read into the book with its version and what each
+/// criterion's admission is; a vetting criterion is still known as vetting.
+#[tokio::test]
+async fn a_v0_3_manifest_is_learned_with_its_version_and_admission() {
+    use super::protocol::{Admission, JoinProtocol};
+    let mut applicant = Party::new(1);
+    let request = wire::manifest_request(&applicant.did, COMMUNITY, JoinProtocol::V0_3).unwrap();
+    applicant
+        .book
+        .ask(asked(&request, applicant.persona, QueryKind::Manifest));
+    let body = json!({
+        "communityDid": COMMUNITY,
+        "criteria": [
+            { "id": "invited", "admission": "automatic", "invitationRequired": true,
+              "requirementsDigest": DIGEST },
+            { "id": "vetted", "admission": "review", "requirementsDigest": DIGEST,
+              "vetting": serde_json::to_value(requirements()).unwrap() },
+        ],
+    });
+    let handled = applicant
+        .receive(&community_answer(&request, &body).await, COMMUNITY)
+        .await;
+    assert!(
+        matches!(handled.answer, Some(CommunityAnswer::Manifest { .. })),
+        "{:?}",
+        handled.answer
+    );
+    assert_eq!(applicant.book.protocol_for(COMMUNITY), JoinProtocol::V0_3);
+    let routes = applicant.book.routes(COMMUNITY);
+    assert_eq!(routes.len(), 2);
+    assert_eq!(routes[0].admission, Some(Admission::Automatic));
+    assert_eq!(routes[0].invitation_required, Some(true));
+    assert!(routes[1].vetting && routes[1].admission == Some(Admission::Review));
+    assert!(matches!(
+        applicant.book.knowledge(COMMUNITY),
+        Knowledge::Vetting(_)
+    ));
+}
+
+/// A community that does not serve 0.3 — answering `unsupportedVersion`, as a
+/// 0.2 VTC does — is asked again in 0.2, and the person waiting keeps waiting
+/// instead of hearing a refusal. A refusal of 0.2 too is reported as one.
+#[tokio::test]
+async fn a_manifest_refused_as_an_unsupported_version_is_asked_again_in_0_2() {
+    use super::protocol::JoinProtocol;
+    let mut applicant = Party::new(1).with_persona_record();
+    let request = wire::manifest_request(&applicant.did, COMMUNITY, JoinProtocol::V0_3).unwrap();
+    applicant
+        .book
+        .ask(asked(&request, applicant.persona, QueryKind::Manifest));
+
+    let handled = applicant
+        .receive(
+            &community_refusal(&request, "unsupportedVersion"),
+            COMMUNITY,
+        )
+        .await;
+    assert!(
+        handled.answer.is_none(),
+        "not an answer: {:?}",
+        handled.answer
+    );
+    let reply = handled.reply.expect("asked again");
+    assert_eq!(
+        reply.document.type_uri.to_string(),
+        JoinProtocol::V0_2.manifest_type()
+    );
+    assert_eq!(reply.persona, applicant.persona);
+    assert_eq!(applicant.book.protocol_for(COMMUNITY), JoinProtocol::V0_2);
+    assert!(
+        applicant
+            .book
+            .waiting_on(COMMUNITY, QueryKind::Manifest)
+            .is_some_and(|q| q.document_id == reply.document.id),
+        "the new question is the one waited on"
+    );
+
+    let handled = applicant
+        .receive(
+            &community_refusal(&reply.document, "unsupportedVersion"),
+            COMMUNITY,
+        )
+        .await;
+    assert!(handled.reply.is_none(), "nothing older to ask in");
+    assert!(matches!(
+        handled.answer,
+        Some(CommunityAnswer::Refused {
+            kind: QueryKind::Manifest,
+            ..
+        })
     ));
 }

@@ -1356,9 +1356,13 @@ impl Application {
     /// criterion, and — under a hidden-vetting criterion — the proof that `k`
     /// distinct vetters vetted this applicant.
     #[must_use]
-    pub fn join_extensions(&self) -> Value {
+    pub fn join_extensions(&self, protocol: super::protocol::JoinProtocol) -> Value {
         let mut members = serde_json::Map::new();
-        if let Some(digest) = &self.requirements_digest {
+        // 0.2 names the criterion here. 0.3 names it in the submit's own
+        // `criterion` member and no longer reads this one.
+        if protocol == super::protocol::JoinProtocol::V0_2
+            && let Some(digest) = &self.requirements_digest
+        {
             members.insert(REQUIREMENTS_DIGEST_MEMBER.into(), json!(digest));
         }
         if let Some(hidden) = &self.hidden_submission {

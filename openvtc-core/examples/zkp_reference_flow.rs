@@ -753,7 +753,8 @@ async fn main() {
     application
         .prepare_hidden_submission(&challenge)
         .expect("a proof over what it holds");
-    let extensions = application.join_extensions();
+    let extensions =
+        application.join_extensions(openvtc_core::vetting::protocol::JoinProtocol::V0_2);
     report.insert(
         "step07_submission".into(),
         json!({
