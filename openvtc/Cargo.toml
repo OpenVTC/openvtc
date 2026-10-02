@@ -91,8 +91,8 @@ anyhow.workspace = true
 # 0.4.14 is the floor because it publishes `init::commit_msg_hook_status` and
 # `COMMIT_MSG_HOOK_VERSION` (verifiable-git-infrastructure #72), which the Repos
 # panel's signing-health row reads rather than re-implementing the hook's
-# version marker. Same `vta-sdk` 0.51 line as 0.4.13. 0.10.0 is on `vta-sdk` ^0.61.
-did-git-sign = "0.10.0"
+# version marker. Same `vta-sdk` 0.51 line as 0.4.13. 0.11.0 is on `vta-sdk` ^0.62.
+did-git-sign = "0.11.0"
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true

@@ -605,6 +605,9 @@ pub struct CommunitySummary {
     /// one non-Active state `R` (renew) is offered for: the manual rescue for a
     /// lost credential delivery.
     pub approved_awaiting_credential: bool,
+    /// For such a join, what the community last said about re-delivering the
+    /// credential, worded for the row. `None` when it has said nothing.
+    pub credential_resend_note: Option<String>,
     /// Which transport carried the join submit, when the record knows.
     ///
     /// Only used to qualify the unacknowledged warning. Without it the warning

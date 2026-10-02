@@ -313,6 +313,52 @@ fn trust_task_reply_payload(body: &Value) -> Value {
     }
 }
 
+/// Record what an `approved` reply says about delivering the credentials
+/// (trust-tasks-tf #709). Returns whether the record changed.
+///
+/// A reply carrying no `credentialsDelivered` comes from a community that does
+/// not report delivery, and leaves the record alone: we only ask a community
+/// for re-delivery once it has said it offers it
+/// ([`CommunityRecord::wants_credential_resend`]).
+///
+/// A reply with no `credentialResend` keeps the last answer. Nothing here can
+/// tell whether *this* poll carried the flag — the decision was taken at send
+/// time against a clock that has moved on — so absence is not read as a
+/// refusal; the poller's own per-record cap bounds a community that never
+/// answers.
+///
+/// [`CommunityRecord::wants_credential_resend`]: crate::config::account::CommunityRecord::wants_credential_resend
+fn record_credential_delivery(
+    record: &mut crate::config::account::CommunityRecord,
+    body: &JoinRequestStatusResponseBody,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    use crate::config::account::{CredentialDelivery, CredentialResendAnswer};
+    use vta_sdk::protocols::join_requests::CredentialResend;
+
+    let Some(delivered) = body.credentials_delivered else {
+        return false;
+    };
+    let previous = record.credential_delivery.clone();
+    let last_answer = match body.credential_resend {
+        Some(CredentialResend::Queued) => Some(CredentialResendAnswer::Queued { at: now }),
+        Some(CredentialResend::RateLimited) => Some(CredentialResendAnswer::RateLimited {
+            retry_after: body.retry_after,
+        }),
+        Some(CredentialResend::NotNeeded) => Some(CredentialResendAnswer::NotNeeded),
+        None => previous.as_ref().and_then(|d| d.last_answer.clone()),
+    };
+    let next = CredentialDelivery {
+        delivered,
+        last_answer,
+    };
+    if previous.as_ref() == Some(&next) {
+        return false;
+    }
+    record.credential_delivery = Some(next);
+    true
+}
+
 /// Apply a VTC `join-requests/status-response` to the matching Pending community
 /// (R-B-8). Correlated by the body's `request_id` against the Pending record's
 /// stored id, and gated on the sender being the community's own VTC (anti-spoof).
@@ -361,7 +407,8 @@ pub fn handle_join_status_response(
             // request nobody received, and what lets the member renew.
             let acknowledged = record.mark_acknowledged(now);
             let approved = record.mark_approved(now);
-            let changed = acknowledged || approved;
+            let delivery = record_credential_delivery(record, &body, now);
+            let changed = acknowledged || approved || delivery;
             info!(vtc = %from_did, "join approved by VTC — awaiting the membership credential");
             StatusOutcome {
                 changed,
@@ -1654,6 +1701,109 @@ mod tests {
         let again =
             handle_join_status_response(&mut acct, &status_response(vtc, rid, "approved"), vtc);
         assert!(!again.changed);
+    }
+
+    fn approved_reply(vtc: &str, rid: Uuid, extra: serde_json::Value) -> Message {
+        let mut body = serde_json::json!({ "requestId": rid, "status": "approved" });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        Message::build(
+            Uuid::new_v4().to_string(),
+            JOIN_REQUEST_STATUS_RESPONSE_TYPE.to_string(),
+            body,
+        )
+        .from(vtc.to_string())
+        .finalize()
+    }
+
+    /// What an approved reply says about delivery is recorded: whether the
+    /// community holds our acknowledgement and its answer to a re-send. A reply
+    /// without the delivery members (an older community) records nothing, and
+    /// one without an answer keeps the last.
+    #[test]
+    fn status_response_approved_records_credential_delivery() {
+        use crate::config::account::{CredentialDelivery, CredentialResendAnswer};
+        let vtc = "did:webvh:example:vtc";
+        let rid = Uuid::new_v4();
+        let mut acct = pending_account(vtc, rid);
+
+        handle_join_status_response(&mut acct, &approved_reply(vtc, rid, json!({})), vtc);
+        assert_eq!(
+            only(&acct, vtc).credential_delivery,
+            None,
+            "an older community"
+        );
+
+        let out = handle_join_status_response(
+            &mut acct,
+            &approved_reply(vtc, rid, json!({ "credentialsDelivered": false })),
+            vtc,
+        );
+        assert!(out.changed);
+        assert_eq!(
+            only(&acct, vtc).credential_delivery,
+            Some(CredentialDelivery {
+                delivered: false,
+                last_answer: None
+            })
+        );
+
+        let retry = "2026-10-02T12:00:00Z";
+        handle_join_status_response(
+            &mut acct,
+            &approved_reply(
+                vtc,
+                rid,
+                json!({ "credentialsDelivered": false, "credentialResend": "rateLimited", "retryAfter": retry }),
+            ),
+            vtc,
+        );
+        let expected = Some(CredentialResendAnswer::RateLimited {
+            retry_after: Some(retry.parse().unwrap()),
+        });
+        assert_eq!(
+            only(&acct, vtc)
+                .credential_delivery
+                .as_ref()
+                .unwrap()
+                .last_answer,
+            expected
+        );
+
+        // A later plain poll's reply keeps the answer.
+        let again = handle_join_status_response(
+            &mut acct,
+            &approved_reply(vtc, rid, json!({ "credentialsDelivered": false })),
+            vtc,
+        );
+        assert!(!again.changed);
+        assert_eq!(
+            only(&acct, vtc)
+                .credential_delivery
+                .as_ref()
+                .unwrap()
+                .last_answer,
+            expected
+        );
+
+        handle_join_status_response(
+            &mut acct,
+            &approved_reply(
+                vtc,
+                rid,
+                json!({ "credentialsDelivered": false, "credentialResend": "queued" }),
+            ),
+            vtc,
+        );
+        assert!(matches!(
+            only(&acct, vtc)
+                .credential_delivery
+                .as_ref()
+                .unwrap()
+                .last_answer,
+            Some(CredentialResendAnswer::Queued { .. })
+        ));
     }
 
     #[test]

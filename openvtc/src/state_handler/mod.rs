@@ -1994,7 +1994,7 @@ impl StateHandler {
                     // arrives on the persona's listener and goes through inbound
                     // dispatch like any other), and the pacer already prevents
                     // pile-up by marking a record polled before the send.
-                    let candidates = config.account.pollable_pending();
+                    let candidates = config.account.pollable_pending(chrono::Utc::now());
                     if !candidates.is_empty()
                         && let Some(atm) = tdk.atm.clone()
                     {

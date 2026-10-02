@@ -184,6 +184,9 @@ async fn respond_status(
         code: None,
         reason: None,
         decided_at: None,
+        credentials_delivered: None,
+        credential_resend: None,
+        retry_after: None,
     };
     let response = Message::build(
         Uuid::new_v4().to_string(),
