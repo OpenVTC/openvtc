@@ -182,6 +182,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A vetter is seated from a two-key community, and setup's "not authorized"
+  hint names `persona-holder`.** vta-sdk 0.61 reads a DTG credential's shape
+  without its proof (VTI #1889, VTI-57), so a role VAC carrying a proof set no
+  longer files the grant as a plain role. Setup's provisioning ask is marked a
+  holder client's (`ProvisionAsk::as_holder`, VTI #1885), so the SDK's
+  `pnm acl create` hint carries `--capabilities persona-holder`, as the ACL
+  instructions page does.
+
 - **Setup's start page lists the steps setup runs.** "New profile setup"
   promised choosing a mediator and creating your DID; both moved to joining a
   community (R-A-5). It now lists connecting to your VTA, authorising OpenVTC

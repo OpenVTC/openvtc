@@ -63,7 +63,7 @@ openvtc-core = { version = "0.3", path = "openvtc-core", default-features = fals
 # The requirement reads "0.11" only because the unreleased 0.12 is still
 # versioned 0.11.0 in its worktree and the patch block at the bottom has to
 # match it. Raise it to "0.12" when 0.12 is published, as the patch comes out.
-dtg-credentials = "0.12"
+dtg-credentials = "0.13"
 
 aes-gcm = "0.11"
 # The one direct requirement in this workspace that was behind its latest
@@ -85,8 +85,8 @@ argon2 = "0.6"
 #
 # 0.18 -> 0.20 follows `vta-sdk` 0.53 -> 0.56 below, the release that declares
 # `affinidi-tdk ^0.20`.
-affinidi-tdk = "0.21"
-affinidi-data-integrity = "0.7"
+affinidi-tdk = "0.22"
+affinidi-data-integrity = "0.8"
 # Decodes a community's Bitstring Status List. Already in the graph through
 # `vta-sdk`, whose status reader cannot verify a list signed with a proof set;
 # openvtc reads the list itself (`openvtc-core::status_list`).
@@ -130,7 +130,7 @@ affinidi-messaging-core = "0.1.11"
 # geometric reconnect cascade behind `#231`–`#234`; and 0.19.4 (#694) was the
 # `live_stream_next*` read guard that blocked `stop_websocket` for the remainder
 # of a 10s poll window.
-affinidi-messaging-sdk = "0.31.0"
+affinidi-messaging-sdk = "0.32.0"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
@@ -162,7 +162,7 @@ agent-names = "0.1.3"
 # in a deactivation resolved to its last document, keys included, so a retired
 # DID kept being trusted as a peer or signer. It now fails to resolve, as a
 # deactivated did:web (a 404) already did.
-affinidi-did-resolver-cache-sdk = { version = "0.8.39", features = [
+affinidi-did-resolver-cache-sdk = { version = "0.8.41", features = [
   "agent-names",
 ] }
 # The SSRF guard the resolver above already applies to did:web fetches, taken
@@ -245,7 +245,11 @@ dialoguer = { version = "0.12", features = ["password"] }
 # the cost was a `cargo tree -d` row rather than a build failure.
 # `cargo tree -i didwebvh-rs` remains the check: one node, and the **resolution**
 # path (`affinidi-did-resolver-cache-sdk`) must be it.
-didwebvh-rs = "0.7"
+#
+# **0.8** with `vta-sdk` 0.61: 0.7 is on `affinidi-data-integrity` 0.7, and
+# keeping it held a second data-integrity beside the 0.8 the rest of the stack
+# is on. No source change was needed.
+didwebvh-rs = "0.8"
 ed25519-dalek-bip32 = "0.3"
 hkdf = "0.13"
 hex = "0.4"
@@ -390,8 +394,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # decide / personhood / renew / rotate responses, the vetting specs carry
 # `vetted/1` statements and role VACs, and `vtc/endorsements/issue` gains
 # `predicateNotIssuable`.
-trust-tasks-rs = { version = "0.25.0", features = ["git-ns"] }
-trust-tasks-capability-client = "0.25.0"
+trust-tasks-rs = { version = "0.26.0", features = ["git-ns"] }
+trust-tasks-capability-client = "0.26.0"
 tui-input = "0.15"
 url = "2.5"
 uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
@@ -562,7 +566,18 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # all three, read through `VettedObjectValue::vetter_members`, and a statement
 # the community issues for itself — its own identity check, which replaced the
 # community-issued `IdentityVerificationCredential` — carries none.
-vta-sdk = { version = "0.59.0", features = [
+#
+# **0.61** brings two fixes OpenVTC uses. `ProvisionAsk::as_holder` (VTI #1885,
+# first in 0.60): setup marks its ask as a holder client's, so the SDK's "not
+# authorized" hint names `--capabilities persona-holder` as the ACL
+# instructions page does. And a DTG credential's shape is read without its
+# proof (VTI #1889, VTI-57), so a role VAC carrying a proof set from a two-key
+# community seats a vetter rather than filing a plain role. It is on
+# `affinidi-tdk` 0.22 / `trust-tasks` 0.26 / `affinidi-data-integrity` 0.8 /
+# `dtg-credentials` 0.13, which the pins above follow. `did-git-sign` 0.10.0
+# (VGI 0.10.0) is on `vta-sdk` ^0.61, so the graph holds one copy;
+# `cargo tree -d` is the check.
+vta-sdk = { version = "0.61.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
