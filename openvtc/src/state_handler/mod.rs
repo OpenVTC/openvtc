@@ -1028,6 +1028,18 @@ impl StateHandler {
         // been told to offer "Press Enter to continue": awaiting the connects
         // here meant the keypress sat unread in the action channel until the last
         // socket was up, and the main page then arrived in one late jump.
+        // Outbound TSP sends (`tsp::send_trust_task`) run on `tdk.atm`; inbound
+        // frames are unsealed by listener ATMs. Both must record relationships in
+        // the one durable store, or the invite we send is `Pending` where no
+        // listener looks and the peer's accept and replies are dropped (VTI-61).
+        let tdk = match didcomm_service.tsp_store().adopt_into(tdk.clone()).await {
+            Ok(adopted) => adopted,
+            Err(e) => {
+                warn!(error = %e, "could not share the TSP relationship store with the sending ATM");
+                tdk
+            }
+        };
+
         let listener_specs = didcomm::build_listener_configs(&config, &tdk).await;
         let _listener_install =
             didcomm::spawn_install_listeners(didcomm_service.clone(), listener_specs);

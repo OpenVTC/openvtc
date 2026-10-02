@@ -220,6 +220,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A join over TSP to a community on another mediator completes** (VTI-61).
+  TSP invites were sent from the TDK's own ATM, which kept relationships in a
+  private in-memory store, while replies were unsealed by the listener ATMs on
+  the shared store. The community's Accept was refused as a transition from no
+  relationship, and its replies (the membership credential, a vetter grant)
+  were discarded as "no relationship with <persona>". The sending ATM now uses
+  the shared store.
 - **Leaving a community joined over TSP goes over TSP**, like every other
   member verb since #413. A leave that never arrived left the community
   holding a member who had gone.

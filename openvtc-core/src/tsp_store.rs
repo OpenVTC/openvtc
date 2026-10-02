@@ -176,6 +176,39 @@ impl TspStoreHandle {
         TspRelationships::from_map(&guard)
     }
 
+    /// Rebuild `tdk`'s ATM so it records TSP relationships into **this** store.
+    ///
+    /// `TDK::new` builds its ATM with the SDK default, an in-memory
+    /// `RelationshipStore` private to that ATM. Every outbound TSP send
+    /// (`tsp::send_trust_task`: join submit, status poll, vetting, members) runs
+    /// on `tdk.atm`, while every inbound frame is unsealed by a listener's own
+    /// ATM, which is wired to the shared store ([`Self::relationship_store`]).
+    /// With two stores the invite we send is recorded as `Pending` where nothing
+    /// ever looks, and the listener, holding `None`, drops the peer's `Accept`
+    /// (`ReceiveAccept` from `None` is an invalid transition, logged at debug)
+    /// and then discards every application message from that peer under
+    /// Rev 3 section 7.2.2 (`no relationship with <persona>`). VTI-61.
+    ///
+    /// Call once, after [`Self::hydrate`] and before the first send. A TDK built
+    /// without messaging is returned unchanged.
+    pub async fn adopt_into(
+        &self,
+        mut tdk: affinidi_tdk::TDK,
+    ) -> Result<affinidi_tdk::TDK, ATMError> {
+        if tdk.atm.is_none() {
+            return Ok(tdk);
+        }
+        let atm = affinidi_tdk::messaging::ATM::new(
+            affinidi_tdk::messaging::config::ATMConfig::builder()
+                .with_relationship_store(self.relationship_store())
+                .build()?,
+            tdk.get_shared_state(),
+        )
+        .await?;
+        tdk.atm = Some(atm);
+        Ok(tdk)
+    }
+
     /// The relationship state for one `(our_vid, their_vid)` pair, read through the
     /// SDK's own decoder rather than by re-implementing its key layout here (the
     /// same discipline the `didwebvh-rs` / `agent-names` rules state: a private
@@ -235,6 +268,67 @@ mod tests {
             state,
             affinidi_messaging_sdk::protocols::tsp::RelationshipState::Pending,
             "the relationship state must survive a snapshot/hydrate cycle"
+        );
+    }
+
+    /// VTI-61: a relationship recorded by the TDK's own ATM (the sender of every
+    /// outbound TSP invite) must be visible to the shared store a listener ATM
+    /// reads when the peer's reply arrives. Before `adopt_into` they were two
+    /// private stores.
+    #[tokio::test]
+    async fn adopted_tdk_atm_records_into_the_shared_store() {
+        use affinidi_messaging_sdk::protocols::tsp::RelationshipState;
+        use affinidi_tdk::common::config::TDKConfig;
+        use affinidi_tdk::common::profiles::TDKProfile;
+        use affinidi_tdk::messaging::profiles::ATMProfile;
+
+        const US: &str = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+        const THEM: &str = "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH";
+        let tdk = affinidi_tdk::TDK::new(
+            TDKConfig::builder()
+                .with_load_environment(false)
+                .build()
+                .expect("config"),
+            None,
+        )
+        .await
+        .expect("tdk");
+        let handle = TspStoreHandle::new();
+        // An inbound invite recorded through the *sender's* ATM.
+        let invite = affinidi_messaging_sdk::protocols::tsp::ControlMessage::invite();
+        let record = |tdk: affinidi_tdk::TDK| {
+            let invite = invite.clone();
+            async move {
+                let atm = tdk.atm.clone().expect("atm");
+                let p = TDKProfile::new(
+                    "p",
+                    US,
+                    Some("did:key:z6Mkf5rGMoatrSj1f4CyvuHBeXJELe9RPdzo2PKGNCKVtZxP"),
+                    vec![],
+                );
+                let profile = ATMProfile::from_tdk_profile(&atm, &p)
+                    .await
+                    .expect("profile");
+                atm.tsp()
+                    .record_incoming_control(&std::sync::Arc::new(profile), THEM, &invite)
+                    .await
+                    .expect("record");
+            }
+        };
+
+        record(tdk.clone()).await;
+        assert_eq!(
+            handle.state_for(US, THEM).await,
+            RelationshipState::None,
+            "the SDK default store is private to the TDK's ATM"
+        );
+
+        let tdk = handle.adopt_into(tdk).await.expect("adopt");
+        record(tdk).await;
+        assert_eq!(
+            handle.state_for(US, THEM).await,
+            RelationshipState::InviteReceived,
+            "after adopt_into the sender's writes land in the shared store"
         );
     }
 
