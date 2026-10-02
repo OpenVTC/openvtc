@@ -119,8 +119,9 @@ criterion = { version = "0.8", features = ["html_reports"] }
 #
 # 0.14.0 is the line built on the same `vta-sdk` 0.56 the root manifest now
 # pins, so the dev graph keeps one copy of it too. 0.16.0 is on
-# `affinidi-tdk` 0.22 / messaging-sdk 0.32, matching `vta-sdk` 0.61.
-affinidi-messaging-test-mediator = "0.16.0"
+# `affinidi-tdk` 0.22 / messaging-sdk 0.32, matching `vta-sdk` 0.61; 0.17.0
+# (affinidi-tdk-rs #920) is the same line built on `vta-sdk` ^0.61.
+affinidi-messaging-test-mediator = "0.17.0"
 # In-process MockVta for the bootstrap e2e (VTI#406/#427 test-support seams).
 # `vta-service` is the VTA server crate; it carries the credential-vault
 # lifecycle tasks (receive/query/archive/delete/restore/purge) + the
@@ -168,8 +169,10 @@ affinidi-messaging-test-mediator = "0.16.0"
 # is the check: one row means the family agrees.
 #
 # **0.46.0** is the family on `vta-sdk` 0.57 (DTG Credentials v1); **0.48.0**
-# is the family on `vta-sdk` 0.59 / `vti-common` 0.32.
-vta-service = { version = "0.49.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
+# is the family on `vta-sdk` 0.59 / `vti-common` 0.32; **0.49.0** on `vta-sdk`
+# 0.61 / `vti-common` 0.34; **0.50.0** adds VTI #1894 (a TSP reply reaches a
+# sender on another mediator).
+vta-service = { version = "0.50.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }
