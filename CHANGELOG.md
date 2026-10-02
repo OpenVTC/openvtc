@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The community's own identity check is kept and offered as personhood
+  evidence.** A `vetted/1` statement the community issues about its own check
+  of the member (none of the vetter-only members; VTI #1898 now delivers it)
+  is a new stored credential kind, `CommunityVetting`, under the config key
+  `CommunityVetting`. It shows as "Statement: vetted (verified by the
+  community)", and because a personhood assertion offers every credential a
+  membership holds, it is sent as evidence with no further step. It does not
+  activate a membership. A vetter's `vetted/1` is still the vetting flow's, and
+  one about another community is of no known kind. Before this, the statement
+  was logged "of no known kind" and dropped, as the
+  `IdentityVerificationCredential` it replaced had been. An older build
+  reading a config written by this one drops the entry with a warning.
+
 - **An approved join whose credential never arrived can be rescued with `R`.**
   A community can approve a join and list the persona as a member while its
   membership credential is lost in delivery; the join then stays Pending, and
