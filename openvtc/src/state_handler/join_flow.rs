@@ -268,6 +268,42 @@ fn build_routes(
     routes
 }
 
+/// Correct what the rows promise against what the community's criteria say
+/// meeting them does (`manifest/0.3` `admission`).
+///
+/// [`build_routes`] words the invitation row as admitting and the vetting row
+/// as the application it is, which is what a 0.2 community meant. A 0.3
+/// community says per criterion whether meeting it admits or only submits for
+/// review, and a row that said "admits you" over a `review` criterion would
+/// tell someone they are in when an administrator has yet to decide. A 0.2
+/// community says nothing, and its rows are left as they are.
+fn word_routes_by_admission(
+    routes: &mut [RouteOption],
+    criteria: &[openvtc_core::vetting::book::CommunityCriterion],
+) {
+    use openvtc_core::vetting::protocol::Admission;
+    let review = |c: Option<&openvtc_core::vetting::book::CommunityCriterion>| {
+        c.and_then(|c| c.admission) == Some(Admission::Review)
+    };
+    let invitation = criteria
+        .iter()
+        .find(|c| c.invitation_required == Some(true));
+    let vetting = criteria.iter().find(|c| c.vetting);
+    for row in routes.iter_mut() {
+        match row.route {
+            JoinRoute::Invitation if review(invitation) => {
+                if row.detail == "admits you without being vetted" {
+                    row.detail = "goes to its administrators without being vetted".to_string();
+                }
+            }
+            JoinRoute::Vetting if review(vetting) => {
+                row.detail.push_str(" — then an administrator decides");
+            }
+            _ => {}
+        }
+    }
+}
+
 /// What the vetting row says, for the application the persona chooser is on.
 ///
 /// One function because the row is rebuilt every time that choice moves: the
@@ -381,13 +417,14 @@ pub(crate) fn vetting_view(
     );
     let name = vetting_actions::community_display(config, vtc_did);
     let detail_suffix = vetting_detail_suffix(&name, &criterion.requirements, invitations.len());
-    let routes = build_routes(
+    let mut routes = build_routes(
         &name,
         &criterion.requirements,
         application,
         &personas,
         invitations,
     );
+    word_routes_by_admission(&mut routes, book.routes(vtc_did));
     // Open on the first route that can actually be taken, so Enter on arrival
     // does the most useful thing rather than landing on a row that refuses.
     let row = routes.iter().position(RouteOption::available).unwrap_or(0);
@@ -520,13 +557,17 @@ async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Resul
         .map_err(|e| NotLearned::Unresolvable(format!("it could not be resolved ({e})")))?;
     let doc = serde_json::to_value(&resolved.doc)
         .map_err(|e| NotLearned::Unanswered(format!("its DID document could not be read ({e})")))?;
-    let (manifest, raw) =
-        discover::fetch_manifest(&doc, vtc_did, resolver, ProbePolicy::PublicOnly)
-            .await
-            .map_err(|e| NotLearned::Unanswered(e.to_string()))?;
+    let discover::FetchedManifest {
+        manifest,
+        raw,
+        protocol,
+        meta,
+    } = discover::fetch_manifest(&doc, vtc_did, resolver, ProbePolicy::PublicOnly)
+        .await
+        .map_err(|e| NotLearned::Unanswered(e.to_string()))?;
 
     let book = &mut config.private.vetting;
-    book.learn_manifest(vtc_did, &manifest, Utc::now());
+    book.learn_manifest_in(vtc_did, &manifest, Some(protocol), &meta, Utc::now());
     for application in book
         .applications
         .iter_mut()
@@ -557,8 +598,9 @@ async fn ask_requirements(
             "there is no persona to ask as — create one under My Identity".to_string()
         })?;
         let persona = identity.persona_id;
-        let document =
-            wire::manifest_request(identity.persona_did(), vtc_did).map_err(|e| e.to_string())?;
+        let protocol = config.private.vetting.protocol_for(vtc_did);
+        let document = wire::manifest_request(identity.persona_did(), vtc_did, protocol)
+            .map_err(|e| e.to_string())?;
         match tokio::time::timeout(
             ASK_TIMEOUT,
             wire::sign_and_send(config, tdk, service, persona, document),
@@ -3103,6 +3145,7 @@ async fn run_join_sequence(
             }
         }
     }
+    let protocol = config.private.vetting.protocol_for(&vtc_did);
     let presentation = match config.private.vetting.application(&vtc_did, persona_id) {
         Some(application) if application.join_did == applicant_did => {
             let statements = application.presentable_statements(chrono::Utc::now());
@@ -3115,12 +3158,19 @@ async fn run_join_sequence(
             openvtc_core::join::attach_credentials(&mut vp, statements);
             openvtc_core::join::JoinPresentation {
                 vp,
-                extensions: application.join_extensions(),
+                extensions: application.join_extensions(protocol),
                 attributes,
+                protocol,
+                // The vetting criterion this application was made under.
+                criterion: application.requirements_digest.clone(),
             }
         }
+        // No application: the community decides under the first criterion this
+        // submission meets — an invitation, a credential it recognises, or
+        // review — which is the route the person chose.
         _ => openvtc_core::join::JoinPresentation {
             attributes,
+            protocol,
             ..vp.into()
         },
     };
@@ -4540,6 +4590,52 @@ mod vetting_tests {
         assert!(invitation.available());
         assert!(invitation.detail.contains("1 held"));
         assert!(invitation.detail.contains("2026-12-01"));
+    }
+
+    /// A 0.3 community whose invitation and vetting criteria go to review is
+    /// never described as admitting; one whose criteria admit, or a 0.2 one that
+    /// does not say, is left as it was.
+    #[test]
+    fn a_review_criterion_is_never_worded_as_admitting() {
+        use openvtc_core::vetting::book::CommunityCriterion;
+        use openvtc_core::vetting::protocol::Admission;
+        let criterion = |admission, invitation, vetting| CommunityCriterion {
+            id: "c".into(),
+            requirements_digest: None,
+            admission,
+            invitation_required: invitation,
+            vetting,
+        };
+        let fresh = || build_routes("Kernel", &requirements(None), None, &[a_persona()], &[]);
+
+        let mut routes = fresh();
+        word_routes_by_admission(
+            &mut routes,
+            &[
+                criterion(Some(Admission::Review), Some(true), false),
+                criterion(Some(Admission::Review), None, true),
+            ],
+        );
+        let invitation = option_for(&routes, JoinRoute::Invitation).unwrap();
+        assert!(
+            !invitation.detail.contains("admits"),
+            "{}",
+            invitation.detail
+        );
+        assert!(invitation.detail.contains("administrators"));
+        let vetting = option_for(&routes, JoinRoute::Vetting).unwrap();
+        assert!(vetting.detail.contains("an administrator decides"));
+
+        for criteria in [
+            vec![criterion(Some(Admission::Automatic), Some(true), false)],
+            vec![criterion(None, Some(true), true)],
+        ] {
+            let mut routes = fresh();
+            let before: Vec<String> = routes.iter().map(|r| r.detail.clone()).collect();
+            word_routes_by_admission(&mut routes, &criteria);
+            let after: Vec<String> = routes.iter().map(|r| r.detail.clone()).collect();
+            assert_eq!(before, after);
+        }
     }
 
     /// Holding none is two situations, and which one it is follows from the

@@ -593,7 +593,10 @@ async fn the_vetting_ceremony_completes_over_the_wire() {
         "one statement from one vetter meets requirements that ask for one"
     );
     assert_eq!(application.presentable_statements(Utc::now()).len(), 1);
-    assert_eq!(application.join_extensions()["requirementsDigest"], DIGEST);
+    assert_eq!(
+        application.join_extensions(openvtc_core::vetting::protocol::JoinProtocol::V0_2)["requirementsDigest"],
+        DIGEST
+    );
 }
 
 #[tokio::test]

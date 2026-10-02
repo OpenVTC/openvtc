@@ -32,9 +32,6 @@ use tracing::{debug, info, warn};
 use trust_tasks_rs::TrustTask;
 use vta_sdk::protocols::PROBLEM_REPORT_TYPE;
 use vta_sdk::protocols::credential_exchange::ISSUE as CREDENTIAL_ISSUE_TYPE;
-use vta_sdk::protocols::join_requests::{
-    JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, manifest as join_manifest,
-};
 use vta_sdk::protocols::vetting::{
     VETTER_ROLE, VETTING_DECLINE_TYPE, VETTING_REQUEST_RESPONSE_TYPE, VETTING_REQUEST_TYPE,
     VETTING_REVOKE_STATEMENT_RESPONSE_TYPE, VETTING_SESSION_RESPONSE_TYPE, VETTING_SESSION_TYPE,
@@ -506,10 +503,10 @@ pub fn may_claim(typ: &str) -> bool {
                 | VETTING_VETTER_LIST_RESPONSE_TYPE
                 | VETTING_VETTER_PROFILE_RESPONSE_TYPE
                 | VETTING_VETTER_RESEND_RESPONSE_TYPE
-                | JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE
                 | CREDENTIAL_ISSUE_TYPE
                 | PROBLEM_REPORT_TYPE
         )
+        || super::protocol::JoinProtocol::from_manifest_response(typ).is_some()
         || is_trust_task_error_type(typ)
 }
 
@@ -550,7 +547,9 @@ pub async fn handle(
         VETTING_VETTER_LIST_RESPONSE_TYPE => vetter_list(book, message, sender),
         VETTING_VETTER_PROFILE_RESPONSE_TYPE => profile_stored(book, message, sender),
         VETTING_VETTER_RESEND_RESPONSE_TYPE => resent(book, message, sender),
-        JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE => manifest(book, ctx, message, sender),
+        t if super::protocol::JoinProtocol::from_manifest_response(t).is_some() => {
+            manifest(book, ctx, message, sender)
+        }
         CREDENTIAL_ISSUE_TYPE => return statement(book, ctx, message, sender).await,
         wire::HIDDEN_ATTESTATION_TYPE => return attestation(book, ctx, message, sender),
         t if t == wire::pcs::response_of(wire::pcs::ROOT_TYPE) => {
@@ -602,8 +601,7 @@ pub fn is_community_answer_type(typ: &str) -> bool {
             | VETTING_VETTER_LIST_RESPONSE_TYPE
             | VETTING_VETTER_PROFILE_RESPONSE_TYPE
             | VETTING_VETTER_RESEND_RESPONSE_TYPE
-            | JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE
-    )
+    ) || super::protocol::JoinProtocol::from_manifest_response(typ).is_some()
 }
 
 /// Check a community's answer is its signed operational document: issued by
@@ -1427,6 +1425,48 @@ fn problem_reported(
     refusal_of(book, ctx, thread, sender, code, detail)
 }
 
+/// Re-ask `query`, a manifest question `community` refused as an unsupported
+/// version, in the version before the one asked. `None` when there is nothing
+/// older to ask in, or the persona that asked no longer has a DID — the refusal
+/// is then reported like any other.
+fn retry_manifest_in_older_version(
+    book: &mut VettingBook,
+    ctx: &Context<'_>,
+    query: &super::queries::CommunityQuery,
+    community: &str,
+) -> Option<Handled> {
+    let asked = book.protocol_for(community);
+    let applicant_did = ctx.account.personas.get(&query.persona)?.did.clone();
+    let next = book.fall_back_from(community, asked)?;
+    let document = match wire::manifest_request(&applicant_did, community, next) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(%community, error = %e, "could not build the older manifest request");
+            return None;
+        }
+    };
+    info!(
+        %community, ?asked, ?next,
+        "community does not serve this join-requests version; asking in the older one"
+    );
+    book.ask(super::queries::CommunityQuery {
+        document_id: document.id.clone(),
+        community: community.to_string(),
+        persona: query.persona,
+        kind: QueryKind::Manifest,
+        sent_at: ctx.now,
+    });
+    Some(Handled {
+        changed: true,
+        reply: Some(Reply {
+            persona: query.persona,
+            document,
+            eligibility: None,
+        }),
+        ..Handled::default()
+    })
+}
+
 /// Apply a refusal of whatever vetting sent on `thread`: an application's
 /// request to a vetter, a question to a community, or a statement withdrawal.
 fn refusal_of(
@@ -1457,6 +1497,16 @@ fn refusal_of(
         );
     }
     if let Some(query) = book.take_query(sender, thread, None) {
+        // A manifest question refused as a version the community does not
+        // serve is asked again in the older one, and the person waiting keeps
+        // waiting: this is not an answer, it is the community saying which
+        // language to ask in ([`super::protocol`]).
+        if query.kind == QueryKind::Manifest
+            && super::protocol::is_version_refusal(&code)
+            && let Some(retry) = retry_manifest_in_older_version(book, ctx, &query, sender)
+        {
+            return Some(retry);
+        }
         info!(community = %sender, %code, kind = ?query.kind, "community refused a question of ours");
         let (changed, notice) = match query.kind {
             QueryKind::VetterProfile => (
@@ -1553,8 +1603,13 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
         debug!(typ = %message.typ, "manifest from a community we have no business with — ignored");
         return Handled::default();
     }
-    let body = match community_payload::<join_manifest::v0_2::Response>(message) {
-        Ok(body) => body,
+    // The version the community answered in is the one its submit goes in.
+    let protocol =
+        super::protocol::JoinProtocol::from_manifest_response(&message.typ).unwrap_or_default();
+    let read = community_payload::<Value>(message)
+        .and_then(|v| super::protocol::read_manifest(protocol, &v).map_err(|e| e.to_string()));
+    let (body, meta) = match read {
+        Ok(read) => read,
         Err(detail) => {
             warn!(typ = %message.typ, error = %detail, "malformed community reply");
             // Whoever is waiting on this manifest hears why, now.
@@ -1579,7 +1634,7 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
     // release carrying it, so the mode is read from these bytes (`vetting::hidden`).
     let raw = message.body.get("payload").cloned().unwrap_or(Value::Null);
     let mut handled = Handled {
-        changed: book.learn_manifest(sender, &body, ctx.now),
+        changed: book.learn_manifest_in(sender, &body, Some(protocol), &meta, ctx.now),
         ..Handled::default()
     };
     // What this community publishes about hidden vetting, kept whether or not we have an

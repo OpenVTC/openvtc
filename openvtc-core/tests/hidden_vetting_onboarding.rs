@@ -230,7 +230,8 @@ fn the_join_submission_carries_the_proof_in_its_extensions() {
     let application = book.application_mut(COMMUNITY, persona).unwrap();
     let challenge = vtc.challenge(&mut rng);
     assert!(application.prepare_hidden_submission(&challenge).unwrap());
-    let extensions = application.join_extensions();
+    let extensions =
+        application.join_extensions(openvtc_core::vetting::protocol::JoinProtocol::V0_2);
     assert_eq!(
         extensions["requirementsDigest"].as_str(),
         Some(digest.as_str())
