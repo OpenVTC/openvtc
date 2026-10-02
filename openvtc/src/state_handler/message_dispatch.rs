@@ -1254,28 +1254,36 @@ async fn process_inbound(
                     // fresh acknowledgement — sent the way the join flow sends one
                     // on admission. Best-effort: the renewed credentials are
                     // already stored, and the member can send it with `m`.
-                    let acknowledged =
-                        match issue_member_vmc_for(config, tdk, &from_did, summary.persona, None)
-                            .await
-                        {
-                            Ok((_, vmc)) => {
-                                openvtc_core::renewal::store_acknowledgement(
-                                    &mut config.account,
-                                    &from_did,
-                                    summary.persona,
-                                    vmc,
-                                );
-                                Ok(())
-                            }
-                            Err(e) => {
-                                warn!(
-                                    vtc = %from_did,
-                                    error = %e,
-                                    "membership renewed, but our acknowledgement could not be sent"
-                                );
-                                Err(e.to_string())
-                            }
-                        };
+                    //
+                    // A renewal that rescued an approved join closes its
+                    // request, as the delivered credential would have.
+                    let acknowledged = match issue_member_vmc_for(
+                        config,
+                        tdk,
+                        &from_did,
+                        summary.persona,
+                        summary.closed_join,
+                    )
+                    .await
+                    {
+                        Ok((_, vmc)) => {
+                            openvtc_core::renewal::store_acknowledgement(
+                                &mut config.account,
+                                &from_did,
+                                summary.persona,
+                                vmc,
+                            );
+                            Ok(())
+                        }
+                        Err(e) => {
+                            warn!(
+                                vtc = %from_did,
+                                error = %e,
+                                "membership renewed, but our acknowledgement could not be sent"
+                            );
+                            Err(e.to_string())
+                        }
+                    };
                     info!(
                         vtc = %from_did,
                         personhood = summary.personhood,

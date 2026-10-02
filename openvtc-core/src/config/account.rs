@@ -323,6 +323,16 @@ pub struct CommunityRecord {
     /// surfaced in the UI so it isn't mistaken for a healthy wait (D16).
     #[serde(default)]
     pub receipt_at: Option<DateTime<Utc>>,
+    /// When the VTC first told us it **approved** the join (a `status` poll
+    /// answering `approved`).
+    ///
+    /// Distinct from [`receipt_at`](Self::receipt_at), which any correlated
+    /// reply sets. The membership still becomes `Active` only when its
+    /// credential arrives and verifies; this is what lets the UI say "approved,
+    /// credential not received" rather than "may not have been received", and
+    /// what entitles a member to ask the community to renew before it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<DateTime<Utc>>,
     /// Which transport carried the join submit.
     ///
     /// Recorded so an unacknowledged join can say *which* transport went
@@ -464,6 +474,8 @@ struct CommunityRecordShadow {
     #[serde(default)]
     receipt_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    approved_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     submit_transport: Option<crate::didcomm::MessagingTransport>,
     #[serde(default)]
     request_id_confirmed: bool,
@@ -573,6 +585,7 @@ impl From<CommunityRecordShadow> for CommunityRecord {
             member_since: shadow.member_since,
             requested_at: shadow.requested_at,
             receipt_at: shadow.receipt_at,
+            approved_at: shadow.approved_at,
             submit_transport: shadow.submit_transport,
             request_id_confirmed: shadow.request_id_confirmed,
             relationships: shadow.relationships,
@@ -711,6 +724,7 @@ impl CommunityRecord {
             member_since: None,
             requested_at: Some(now),
             receipt_at: None,
+            approved_at: None,
             // Set by the join flow once it knows which transport carried the
             // submit; `new_pending` itself is transport-agnostic.
             submit_transport: None,
@@ -921,6 +935,36 @@ impl CommunityRecord {
     /// have been dropped (size limit / unhandled type) rather than healthily
     /// awaiting a decision. False once any response has set `receipt_at`, for
     /// non-`Pending` states, or while still inside the grace window.
+    /// Record that the VTC approved this join, once. Returns whether anything
+    /// changed, so the caller knows whether to persist.
+    pub fn mark_approved(&mut self, now: DateTime<Utc>) -> bool {
+        if self.approved_at.is_none() {
+            self.approved_at = Some(now);
+            return true;
+        }
+        false
+    }
+
+    /// A `Pending` join the VTC has approved whose membership credential has
+    /// not arrived — the membership is decided, and delivery is what is
+    /// missing.
+    pub fn approved_awaiting_credential(&self) -> bool {
+        matches!(self.status, CommunityStatus::Pending { .. })
+            && self.approved_at.is_some()
+            && !self
+                .credentials
+                .contains_key(&crate::CredentialKind::Membership)
+    }
+
+    /// Whether the member may ask the community to renew this membership
+    /// (`vtc/members/renew/0.1`): an `Active` one, or a join the community has
+    /// approved whose credential never arrived. The second is the manual
+    /// rescue for a lost delivery — the community already holds the member on
+    /// its list, which is all `renew` asks.
+    pub fn can_renew(&self) -> bool {
+        self.status.is_active() || self.approved_awaiting_credential()
+    }
+
     pub fn pending_unacknowledged(&self, now: DateTime<Utc>) -> bool {
         matches!(self.status, CommunityStatus::Pending { .. })
             && self.receipt_at.is_none()
@@ -1354,6 +1398,7 @@ mod tests {
             member_since: None,
             requested_at: None,
             receipt_at: None,
+            approved_at: None,
             relationships: Relationships::default(),
             tasks: Tasks::default(),
             vrcs_issued: Vrcs::default(),

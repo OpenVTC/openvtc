@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **An approved join whose credential never arrived can be rescued with `R`.**
+  A community can approve a join and list the persona as a member while its
+  membership credential is lost in delivery; the join then stays Pending, and
+  the panel said "the request may not have been received", which was wrong.
+  A `status` poll answering `approved` is now recorded as an approval
+  (`approved_at`), the row reads "✓ approved — membership credential not
+  received yet", and `R` (`vtc/members/renew/0.1`) is offered for it. The
+  community re-issues the credentials, and the renewal activates the membership
+  and sends the acknowledgement that closes the join, exactly as a delivered
+  credential would have. Manual only: renewal re-issues rather than re-sends.
+
 - **A membership can be renewed from the Communities view.** `R` on an Active
   community sends `vtc/members/renew/0.1`, signed by the persona (the task
   declares `proof` and `issuedAt` REQUIRED). The community answers with a

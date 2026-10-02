@@ -541,7 +541,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     ctx.state.main_page.content_panel.communities.show_archived,
                 )
                 .get(i)
-                .filter(|c| c.status.is_active())
+                .filter(|c| c.can_renew())
                 .map(|c| (c.vtc_did.clone(), c.persona_ref));
             if let Some((vtc, persona_id)) = target {
                 let keys = ctx.config.get_persona_keys_for(persona_id, ctx.tdk).await;

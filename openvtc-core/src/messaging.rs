@@ -354,7 +354,14 @@ pub fn handle_join_status_response(
             // Not `activate`: the membership becomes Active when its credential
             // arrives and verifies, which is also what closes the join and
             // sends our reciprocal VMC.
-            let changed = record.mark_acknowledged(chrono::Utc::now());
+            let now = chrono::Utc::now();
+            // Both stamps: `receipt_at` says the VTC answered at all, and
+            // `approved_at` says it decided in our favour — which is what lets
+            // a lost credential read as a delivery problem rather than a
+            // request nobody received, and what lets the member renew.
+            let acknowledged = record.mark_acknowledged(now);
+            let approved = record.mark_approved(now);
+            let changed = acknowledged || approved;
             info!(vtc = %from_did, "join approved by VTC — awaiting the membership credential");
             StatusOutcome {
                 changed,
@@ -1637,6 +1644,16 @@ mod tests {
         let rec = only(&acct, vtc);
         assert!(!rec.status.is_active(), "no credential yet, so not Active");
         assert!(rec.member_since.is_none());
+        // Recorded as an approval, not merely a reply: what the panel and the
+        // renew rescue read.
+        assert!(rec.approved_at.is_some());
+        assert!(rec.approved_awaiting_credential() && rec.can_renew());
+        assert!(!rec.pending_unacknowledged(chrono::Utc::now() + chrono::TimeDelta::days(1)));
+
+        // A repeat poll changes nothing.
+        let again =
+            handle_join_status_response(&mut acct, &status_response(vtc, rid, "approved"), vtc);
+        assert!(!again.changed);
     }
 
     #[test]
