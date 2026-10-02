@@ -48,7 +48,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
-use affinidi_tdk::{didcomm::Message, secrets_resolver::secrets::Secret};
+use affinidi_tdk::secrets_resolver::secrets::Secret;
 use chrono::{DateTime, Utc};
 use dtg_credentials::{DTGCredentialType, IssuerScope};
 use serde_json::Value;
@@ -180,30 +180,10 @@ pub async fn request_renewal(
     let document_id = format!("urn:uuid:{request_id}");
     let body = build_renew_request(route.member_did, route.vtc_did, &document_id, signer).await?;
 
-    let now = Utc::now().timestamp().max(0) as u64;
-    let msg = Message::build(
-        document_id,
-        crate::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
-        body,
-    )
-    .from(route.member_did.to_string())
-    .to(route.vtc_did.to_string())
-    .created_time(now)
-    .finalize();
-
     // Remembered before the send, so a reply quicker than the return from
-    // `pack_and_send` still finds its request.
+    // the send still finds its request.
     record_request(request_id, route.vtc_did, route.member_did);
-    if let Err(e) = crate::pack_and_send(
-        route.atm,
-        route.profile,
-        &msg,
-        route.member_did,
-        route.vtc_did,
-        route.mediator_did,
-    )
-    .await
-    {
+    if let Err(e) = crate::members::send_document(route, document_id, body).await {
         forget(request_id);
         return Err(e);
     }

@@ -67,9 +67,9 @@ pub(crate) async fn issue_member_vmc_for(
     // there is nothing to acknowledge: an acknowledgement names a specific
     // grant by digest, and a community that has issued us none has no
     // membership edge for us to complete.
-    let grant = config
-        .account
-        .membership(vtc_did, persona_id)
+    let membership = config.account.membership(vtc_did, persona_id);
+    let over_tsp = membership.is_some_and(|c| c.joined_over_tsp());
+    let grant = membership
         .and_then(|c| {
             c.credentials
                 .get(&openvtc_core::CredentialKind::Membership)
@@ -94,6 +94,14 @@ pub(crate) async fn issue_member_vmc_for(
         .as_ref()
         .ok_or_else(|| OpenVTCError::Config("messaging (ATM) unavailable".into()))?;
     let keys = config.get_persona_keys_for(persona_id, tdk).await?;
+    // The acknowledgement goes the way the join went. Resolved fresh, as the
+    // join poll does: it is the hop the routing layer seals to, and the
+    // community's document may have changed since the submit.
+    let tsp_mediator = if over_tsp {
+        openvtc_core::config::peer_tsp_mediator(vtc_did).await
+    } else {
+        None
+    };
     openvtc_core::members::issue_and_send_member_vmc(
         &openvtc_core::members::Delivery {
             atm,
@@ -101,6 +109,7 @@ pub(crate) async fn issue_member_vmc_for(
             member_did: &member_did,
             vtc_did,
             mediator_did: &mediator,
+            tsp_mediator_did: tsp_mediator.as_deref(),
         },
         &keys.signing.secret,
         &keys.authentication.secret,
