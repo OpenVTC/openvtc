@@ -1198,6 +1198,20 @@ async fn sign_and_send(
     let message = wire::to_message(&document).map_err(|e| e.to_string())?;
     let from = document.issuer.clone().unwrap_or_default();
     let to = document.recipient.clone().unwrap_or_default();
+    // A manifest question is filed, as the join flow's is, so its answer —
+    // and above all its refusal — has a question to land on. Unfiled, a
+    // refusal threaded on it matched nothing and was dropped, which also
+    // meant a community refusing the version asked was never asked again in
+    // the one it serves (`vetting::protocol`).
+    if let Sent::Manifest { community } = &sent {
+        ctx.config.private.vetting.ask(CommunityQuery {
+            document_id: document.id.clone(),
+            community: community.clone(),
+            persona,
+            kind: QueryKind::Manifest,
+            sent_at: chrono::Utc::now(),
+        });
+    }
     spawn_send(ctx, message, &from, &to, sent);
     Ok(())
 }

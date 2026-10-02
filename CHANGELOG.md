@@ -220,6 +220,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Leaving a community joined over TSP goes over TSP**, like every other
+  member verb since #413. A leave that never arrived left the community
+  holding a member who had gone.
+- **A community's manifest refreshes are answered.** The requirements
+  refresh, the vetter's session and the standing refresh sent a manifest
+  request without filing the question, so a refusal threaded on it matched
+  nothing and was dropped. That also meant a community refusing the version
+  asked was never asked again in 0.2. They are filed now, as the join flow's
+  question is.
+- **A join the community wants more for says what it wants.** A `requestMore`
+  verdict's needs (`credentials`, `invitation`, `vetting:*`) were only
+  traced. They are now written to the Community log in the member's terms,
+  for example "it still needs an invitation".
+
 - **A membership joined over TSP is spoken to over TSP afterwards.** The
   reciprocal VMC (`members/vmc`), renewal (`R`) and the personhood challenge
   and assertion went over DIDComm whatever the join used. A persona that

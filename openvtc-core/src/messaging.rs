@@ -587,6 +587,46 @@ pub fn handle_join_verdict(
     }
 }
 
+/// What a `requestMore` verdict says the join still lacks, as the tokens the
+/// community sent (`credentials`, `invitation`, `vetting:*`, …). `None` for any
+/// other verdict, or one that does not parse — [`handle_join_verdict`] has
+/// already logged that.
+#[must_use]
+pub fn join_verdict_needs(message: &Message) -> Option<Vec<String>> {
+    let body: VerdictResponse =
+        serde_json::from_value(trust_task_reply_payload(&message.body)).ok()?;
+    matches!(body.verdict.effect, VerdictEffect::RequestMore).then_some(body.verdict.with.needs)
+}
+
+/// What a join's `requestMore` needs mean for the member, in one sentence.
+///
+/// The tokens are the community's (`submit/0.3`): what the criterion the
+/// request was decided under still lacks. An unknown token is shown as it
+/// came rather than dropped — the member is better served by a word they can
+/// ask about than by a sentence that leaves something out.
+#[must_use]
+pub fn describe_join_needs(needs: &[String]) -> String {
+    if needs.is_empty() {
+        return "it needs more evidence, but did not say what".to_string();
+    }
+    let words: Vec<String> = needs
+        .iter()
+        .map(|need| match need.as_str() {
+            "credentials" => "a credential it recognises".to_string(),
+            "invitation" => "an invitation".to_string(),
+            "vetting:consistency" => "vetting statements that agree on who you are".to_string(),
+            "vetting:independence" => {
+                "vetting statements from vetters independent of you and of each other".to_string()
+            }
+            other => match other.strip_prefix("vetting:") {
+                Some(what) => format!("more vetting ({what})"),
+                None => other.to_string(),
+            },
+        })
+        .collect();
+    format!("it still needs {}", words.join(", "))
+}
+
 /// Read a DIDComm problem-report from `from_did`. `None` when the sender is
 /// not a community we hold any record with. See [`ProblemReportNote`] for why
 /// this never changes a record.
@@ -2659,6 +2699,43 @@ mod tests {
                 .unwrap_or_default();
             assert!(reason.contains(says), "{code}: {reason}");
         }
+    }
+
+    /// The needs a `requestMore` names read as what the member must bring,
+    /// and an unknown one is kept rather than dropped.
+    #[test]
+    fn a_request_more_says_what_the_join_lacks() {
+        let said = describe_join_needs(&[
+            "invitation".to_string(),
+            "vetting:independence".to_string(),
+            "vetting:minStatements".to_string(),
+            "somethingNew".to_string(),
+        ]);
+        assert!(said.contains("an invitation"), "{said}");
+        assert!(said.contains("independent"), "{said}");
+        assert!(said.contains("more vetting (minStatements)"), "{said}");
+        assert!(said.contains("somethingNew"), "{said}");
+        assert!(describe_join_needs(&[]).contains("did not say"));
+    }
+
+    /// The needs come out of a `requestMore` verdict, and out of nothing else.
+    #[test]
+    fn only_a_request_more_verdict_has_needs() {
+        let vtc = "did:webvh:example:vtc";
+        let more = verdict(
+            "t",
+            vtc,
+            "request_more",
+            json!({ "needs": ["invitation"], "presentationDefinition": {} }),
+        );
+        assert_eq!(
+            join_verdict_needs(&more),
+            Some(vec!["invitation".to_string()])
+        );
+        assert_eq!(
+            join_verdict_needs(&verdict("t", vtc, "allow", json!({}))),
+            None
+        );
     }
 
     #[test]

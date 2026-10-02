@@ -390,14 +390,15 @@ async fn build_join_submit_document(
 /// set to `Left` on send success; the receipt is advisory (logged if it
 /// arrives), so callers don't block on it.
 pub async fn submit_self_remove(
-    atm: &ATM,
-    profile: &Arc<ATMProfile>,
-    member_did: &str,
+    route: &crate::members::Delivery<'_>,
     signer: &Secret,
-    vtc_did: &str,
-    mediator_did: &str,
     disposition: Option<String>,
 ) -> Result<Uuid, OpenVTCError> {
+    let crate::members::Delivery {
+        member_did,
+        vtc_did,
+        ..
+    } = *route;
     // A **document**, not a bare payload. The bare form reached a VTC handler
     // that bypasses its dispatch spine, so the reply was never signed and a
     // refusal was never a framework error document. Nothing here reads that
@@ -415,14 +416,11 @@ pub async fn submit_self_remove(
     )
     .await?;
 
-    let now = Utc::now().timestamp().max(0) as u64;
-    let msg = Message::build(document_id, TRUST_TASK_ENVELOPE_TYPE.to_string(), body)
-        .from(member_did.to_string())
-        .to(vtc_did.to_string())
-        .created_time(now)
-        .finalize();
-
-    crate::pack_and_send(atm, profile, &msg, member_did, vtc_did, mediator_did).await?;
+    // On the membership's own transport, as every member verb goes
+    // ([`crate::members::send_document`]): a persona that joined over TSP may
+    // have no DIDComm route the community can be reached on, and a leave that
+    // never arrives leaves the community holding a member who has gone.
+    crate::members::send_document(route, document_id, body).await?;
     Ok(msg_id)
 }
 

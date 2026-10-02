@@ -99,8 +99,8 @@ pub(crate) struct CommunityJob {
     pub(crate) persona: PersonaId,
     pub(crate) verb: Verb,
     /// The membership was joined over TSP, so the member verbs go over TSP too:
-    /// issuing our VMC, renewing, and the personhood challenge and assertion.
-    /// Leave (`submit_self_remove`) still goes over DIDComm.
+    /// leaving, issuing our VMC, renewing, and the personhood challenge and
+    /// assertion.
     pub(crate) over_tsp: bool,
 }
 
@@ -139,12 +139,15 @@ impl CommunityJob {
         let mut issued: Option<serde_json::Value> = None;
         let result = match &self.verb {
             Verb::Leave { signing_secret } => openvtc_core::join::submit_self_remove(
-                &self.atm,
-                &self.profile,
-                &self.member_did,
+                &openvtc_core::members::Delivery {
+                    atm: &self.atm,
+                    profile: &self.profile,
+                    member_did: &self.member_did,
+                    vtc_did: &self.vtc_did,
+                    mediator_did: &self.mediator,
+                    tsp_mediator_did: tsp_mediator.as_deref(),
+                },
                 signing_secret,
-                &self.vtc_did,
-                &self.mediator,
                 None,
             )
             .await
