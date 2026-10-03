@@ -408,6 +408,24 @@ struct MessagingInner {
     /// Hydrated at startup and mirrored into `ProtectedConfig` by the loop; see
     /// [`crate::tsp_store`].
     tsp_store: crate::tsp_store::TspStoreHandle,
+    /// Listeners the supervisor tore down to rebuild and could not bring back,
+    /// keyed by listener id, with the spec it needs to keep trying.
+    ///
+    /// A rebuild removes before it adds (one websocket per DID), so a failed add
+    /// leaves nothing installed — no wire to read the spec from, no transport for
+    /// the supervisor to see as down. Without this the listener was stranded for
+    /// the life of the process after a single failed attempt: the indicator sat
+    /// at `Connecting...` and nothing ever retried. The usual trigger is waking
+    /// from sleep, when the first rebuild races a network that is not back yet.
+    ///
+    /// [`Messaging::remove_listener`] clears an entry — a deliberate removal is
+    /// not ours to resurrect — and an entry whose id is installed again by anyone
+    /// is dropped by the supervisor.
+    stranded: std::sync::Mutex<HashMap<String, ListenerSpec>>,
+    /// Supervisor activity — rebuild attempts and their failures — for the
+    /// activity log. A separate channel from `status_tx` because these are not
+    /// connection transitions, and the session manager has no use for them.
+    supervisor_tx: tokio::sync::broadcast::Sender<LifecycleLog>,
 }
 
 impl Messaging {
@@ -429,6 +447,8 @@ impl Messaging {
             pickup_in_flight: std::sync::Mutex::new(std::collections::HashSet::new()),
             tasks: std::sync::Mutex::new(Vec::new()),
             tsp_store: crate::tsp_store::TspStoreHandle::new(),
+            stranded: std::sync::Mutex::new(HashMap::new()),
+            supervisor_tx: tokio::sync::broadcast::channel(LISTENER_STATUS_CAPACITY).0,
         });
 
         let dispatcher = tokio::spawn(dispatch_inbound(service.clone(), event_tx));
@@ -491,6 +511,11 @@ impl Messaging {
     /// (5 s at worst, waiting on the SDK's deletion handler) but this is called
     /// from the state-handler loop, which must not park on it (R13).
     pub async fn remove_listener(&self, listener_id: &str) {
+        self.inner
+            .stranded
+            .lock()
+            .expect("stranded mutex")
+            .remove(listener_id);
         self.inner.service.remove_transport(listener_id);
         let removed = self.inner.identities.write().await.remove(listener_id);
         if let Some(wire) = removed {
@@ -1806,6 +1831,13 @@ pub enum LifecycleLog {
         attempt: u32,
         delay: std::time::Duration,
     },
+    /// A rebuild attempt failed; the supervisor will try again after `retry_in`.
+    RestartFailed {
+        listener_id: String,
+        attempt: u32,
+        error: String,
+        retry_in: std::time::Duration,
+    },
     /// The event stream lagged and dropped `count` events.
     Missed { count: u64 },
 }
@@ -1911,6 +1943,7 @@ pub fn spawn_lifecycle_logger(
     log_tx: mpsc::UnboundedSender<LifecycleLog>,
 ) -> tokio::task::JoinHandle<()> {
     let mut status_rx = service.subscribe();
+    let mut supervisor_rx = service.inner.supervisor_tx.subscribe();
     tokio::spawn(async move {
         let mut debounce = DropDebounce::default();
         let mut sweep = tokio::time::interval(PENDING_DROP_SWEEP);
@@ -1931,6 +1964,15 @@ pub fn spawn_lifecycle_logger(
                         ) {
                             let _ = log_tx.send(log);
                         }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        let _ = log_tx.send(LifecycleLog::Missed { count });
+                    }
+                },
+                event = supervisor_rx.recv() => match event {
+                    Ok(log) => {
+                        let _ = log_tx.send(log);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
@@ -2014,84 +2056,157 @@ async fn pickup_on_connect(service: Messaging) {
 
 async fn supervise_transports(service: Messaging) {
     let mut down: HashMap<String, DownSince> = HashMap::new();
-
     loop {
         tokio::time::sleep(SUPERVISOR_INTERVAL).await;
-        let now = std::time::Instant::now();
+        supervise_once(&service, &mut down, std::time::Instant::now()).await;
+    }
+}
 
-        for (listener_id, state) in service.inner.service.transport_states() {
-            if state == ConnState::Connected {
-                // Recovered — forget its history so the next outage starts from a
-                // full grace period and the first backoff step.
-                down.remove(&listener_id);
-                continue;
+/// One supervisor pass: rebuild every listener that is due.
+///
+/// Two kinds of listener are candidates — an installed transport that is not
+/// `Connected`, and a stranded one whose last rebuild failed and left nothing
+/// installed. Split from the loop so a test can drive it with a clock that has
+/// already run past the grace period.
+async fn supervise_once(
+    service: &Messaging,
+    down: &mut HashMap<String, DownSince>,
+    now: std::time::Instant,
+) {
+    let states = service.inner.service.transport_states();
+    let installed: std::collections::HashSet<String> =
+        states.iter().map(|(id, _)| id.clone()).collect();
+
+    // A stranded listener that is installed again was brought back by someone
+    // else (a manual reconnect, a re-join); the supervisor's claim on it ends.
+    let stranded: Vec<(String, ListenerSpec)> = {
+        let mut stranded = service.inner.stranded.lock().expect("stranded mutex");
+        stranded.retain(|id, _| !installed.contains(id));
+        stranded
+            .iter()
+            .map(|(id, spec)| (id.clone(), spec.clone()))
+            .collect()
+    };
+
+    let mut candidates: Vec<(String, Option<ListenerSpec>)> = Vec::new();
+    for (listener_id, state) in states {
+        if state == ConnState::Connected {
+            // Recovered — forget its history so the next outage starts from a
+            // full grace period and the first backoff step.
+            down.remove(&listener_id);
+        } else {
+            candidates.push((listener_id, None));
+        }
+    }
+    candidates.extend(stranded.into_iter().map(|(id, spec)| (id, Some(spec))));
+
+    for (listener_id, stranded_spec) in candidates {
+        let tracked = down.entry(listener_id.clone()).or_insert(DownSince {
+            first_seen: now,
+            attempts: 0,
+            last_attempt: None,
+        });
+
+        if !rebuild_due(
+            now.duration_since(tracked.first_seen),
+            tracked.attempts,
+            tracked.last_attempt.map(|at| now.duration_since(at)),
+        ) {
+            continue;
+        }
+
+        let spec = match stranded_spec {
+            Some(spec) => spec,
+            None => {
+                let Some(spec) = service
+                    .inner
+                    .identities
+                    .read()
+                    .await
+                    .get(&listener_id)
+                    .map(|wire| wire.spec.clone())
+                else {
+                    // Deliberately removed (community left, DID deleted) between
+                    // the state sample and here. Not ours to resurrect.
+                    down.remove(&listener_id);
+                    continue;
+                };
+                spec
             }
+        };
 
-            let tracked = down.entry(listener_id.clone()).or_insert(DownSince {
-                first_seen: now,
-                attempts: 0,
-                last_attempt: None,
-            });
+        tracked.attempts = tracked.attempts.saturating_add(1);
+        tracked.last_attempt = Some(now);
+        let attempt = tracked.attempts;
 
-            if !rebuild_due(
-                now.duration_since(tracked.first_seen),
-                tracked.attempts,
-                tracked.last_attempt.map(|at| now.duration_since(at)),
-            ) {
-                continue;
-            }
+        tracing::warn!(
+            listener = %crate::display::truncate_did(&listener_id, 32),
+            attempt,
+            down_for_secs = now.duration_since(tracked.first_seen).as_secs(),
+            "listener has not reconnected on its own — rebuilding its transport"
+        );
+        let _ = service.inner.supervisor_tx.send(LifecycleLog::Restarting {
+            listener_id: listener_id.clone(),
+            attempt,
+            delay: rebuild_backoff(attempt - 1),
+        });
 
-            let Some(spec) = service
-                .inner
-                .identities
-                .read()
-                .await
-                .get(&listener_id)
-                .map(|wire| wire.spec.clone())
-            else {
-                // Deliberately removed (community left, DID deleted) between the
-                // state sample and here. Not ours to resurrect.
-                down.remove(&listener_id);
-                continue;
-            };
+        // Drop the dead transport first: one websocket per DID. Then record the
+        // spec as stranded *before* the add, so a failure below leaves the
+        // supervisor what it needs to try again (and a deliberate removal that
+        // lands meanwhile clears it).
+        service.remove_listener(&listener_id).await;
+        service
+            .inner
+            .stranded
+            .lock()
+            .expect("stranded mutex")
+            .insert(listener_id.clone(), spec.clone());
 
-            tracked.attempts = tracked.attempts.saturating_add(1);
-            tracked.last_attempt = Some(now);
-            let attempt = tracked.attempts;
-
-            tracing::warn!(
-                listener = %crate::display::truncate_did(&listener_id, 32),
-                attempt,
-                down_for_secs = now.duration_since(tracked.first_seen).as_secs(),
-                "listener has not reconnected on its own — rebuilding its transport"
-            );
-
-            // Drop the dead transport first: one websocket per DID.
-            service.remove_listener(&listener_id).await;
-            match add_listener(&service, &spec).await {
-                Ok(()) => tracing::info!(
+        match add_listener(service, &spec).await {
+            Ok(()) => {
+                service
+                    .inner
+                    .stranded
+                    .lock()
+                    .expect("stranded mutex")
+                    .remove(&listener_id);
+                tracing::info!(
                     listener = %crate::display::truncate_did(&listener_id, 32),
                     "transport rebuilt"
-                ),
-                Err(e) => tracing::warn!(
+                );
+            }
+            Err(e) => {
+                let retry_in = rebuild_backoff(attempt);
+                tracing::warn!(
                     listener = %crate::display::truncate_did(&listener_id, 32),
                     attempt,
                     error = %e,
                     "transport rebuild failed; will retry with backoff"
-                ),
+                );
+                let _ = service
+                    .inner
+                    .supervisor_tx
+                    .send(LifecycleLog::RestartFailed {
+                        listener_id: listener_id.clone(),
+                        attempt,
+                        error: format!("{e:#}"),
+                        retry_in,
+                    });
             }
         }
-
-        // Stop tracking transports that no longer exist.
-        let live: std::collections::HashSet<String> = service
-            .inner
-            .service
-            .transport_states()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-        down.retain(|id, _| live.contains(id));
     }
+
+    // Stop tracking listeners that are neither installed nor stranded.
+    let installed: std::collections::HashSet<String> = service
+        .inner
+        .service
+        .transport_states()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    let stranded = service.inner.stranded.lock().expect("stranded mutex");
+    down.retain(|id, _| installed.contains(id) || stranded.contains_key(id));
 }
 
 /// The one connection poller: sample every transport's live state and broadcast
@@ -2516,9 +2631,10 @@ mod drop_debounce_tests {
 #[cfg(test)]
 mod supervisor_policy_tests {
     use super::{
-        ListenerSpec, REBUILD_BACKOFF_CAP, REBUILD_GRACE, rebuild_backoff, rebuild_due,
-        spawn_install_listeners, start_empty_service,
+        LifecycleLog, ListenerSpec, REBUILD_BACKOFF_CAP, REBUILD_GRACE, rebuild_backoff,
+        rebuild_due, spawn_install_listeners, start_empty_service, supervise_once,
     };
+    use std::collections::HashMap;
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -2627,6 +2743,106 @@ mod supervisor_policy_tests {
     #[test]
     fn the_grace_period_outlasts_the_backoff_ceiling() {
         assert!(REBUILD_GRACE > REBUILD_BACKOFF_CAP);
+    }
+
+    fn unreachable_spec() -> ListenerSpec {
+        ListenerSpec {
+            id: "did:example:unreachable".to_string(),
+            did: "did:example:unreachable".to_string(),
+            mediator_did: "did:example:no-such-mediator".to_string(),
+            label: "test".to_string(),
+            secrets: Vec::new(),
+        }
+    }
+
+    /// The regression: a rebuild removes before it adds, so a failed add left
+    /// nothing installed and nothing to retry — the listener was gone for the
+    /// life of the process, with the indicator stuck on `Connecting...`. Waking
+    /// a laptop from sleep did it reliably: the first rebuild raced a network
+    /// that was not back yet. A failed rebuild must stay on the books, be
+    /// reported, and be retried on the backoff schedule.
+    #[tokio::test]
+    async fn a_failed_rebuild_is_retried_not_forgotten() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let service = start_empty_service(event_tx, tokio_util::sync::CancellationToken::new());
+        let mut supervisor_rx = service.inner.supervisor_tx.subscribe();
+        let spec = unreachable_spec();
+        service
+            .inner
+            .stranded
+            .lock()
+            .unwrap()
+            .insert(spec.id.clone(), spec.clone());
+
+        let mut down = HashMap::new();
+        let t0 = std::time::Instant::now();
+        supervise_once(&service, &mut down, t0).await;
+        assert_eq!(
+            down[&spec.id].attempts, 0,
+            "inside the grace: no attempt yet"
+        );
+
+        let due = t0 + REBUILD_GRACE;
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            supervise_once(&service, &mut down, due),
+        )
+        .await
+        .expect("a rebuild attempt is bounded");
+        assert_eq!(down[&spec.id].attempts, 1);
+        assert!(
+            service
+                .inner
+                .stranded
+                .lock()
+                .unwrap()
+                .contains_key(&spec.id),
+            "the failed listener must stay stranded so it is retried"
+        );
+        assert!(matches!(
+            supervisor_rx.try_recv(),
+            Ok(LifecycleLog::Restarting { attempt: 1, .. })
+        ));
+        assert!(matches!(
+            supervisor_rx.try_recv(),
+            Ok(LifecycleLog::RestartFailed { attempt: 1, .. })
+        ));
+
+        // Backed off: one second later is too soon for attempt two...
+        supervise_once(&service, &mut down, due + Duration::from_secs(1)).await;
+        assert_eq!(down[&spec.id].attempts, 1);
+        // ...the first backoff step later is not.
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            supervise_once(&service, &mut down, due + rebuild_backoff(1)),
+        )
+        .await
+        .expect("a rebuild attempt is bounded");
+        assert_eq!(down[&spec.id].attempts, 2);
+    }
+
+    /// A deliberate removal (community left) while a listener is stranded ends
+    /// the supervisor's claim on it — it must not be resurrected.
+    #[tokio::test]
+    async fn removing_a_stranded_listener_stops_its_rebuilds() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let service = start_empty_service(event_tx, tokio_util::sync::CancellationToken::new());
+        let spec = unreachable_spec();
+        service
+            .inner
+            .stranded
+            .lock()
+            .unwrap()
+            .insert(spec.id.clone(), spec.clone());
+        let mut down = HashMap::new();
+        let t0 = std::time::Instant::now();
+        supervise_once(&service, &mut down, t0).await;
+
+        service.remove_listener(&spec.id).await;
+        supervise_once(&service, &mut down, t0 + REBUILD_GRACE).await;
+
+        assert!(service.inner.stranded.lock().unwrap().is_empty());
+        assert!(down.is_empty(), "nothing left to track");
     }
 }
 
