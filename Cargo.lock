@@ -2665,7 +2665,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.6",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -6413,7 +6413,7 @@ dependencies = [
  "hex",
  "predicate-credential-system",
  "rand 0.8.8",
- "rand_chacha 0.3.1",
+ "rand_chacha 0.10.0",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
