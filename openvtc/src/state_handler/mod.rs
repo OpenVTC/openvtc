@@ -194,6 +194,25 @@ pub(crate) fn format_lifecycle_log(
             ),
             detail: Some(detail_for(config, listener_id)),
         },
+        LifecycleLog::RestartFailed {
+            listener_id,
+            attempt,
+            error,
+            retry_in,
+        } => LifecycleLine {
+            // The transport's own error, verbatim: it is what tells an
+            // unresolvable mediator from a refused connect from a timeout (R6.4).
+            summary: format!(
+                "Listener {} could not be restarted (attempt {attempt}): {error} — retrying in {}s",
+                who(config, listener_id),
+                retry_in.as_secs()
+            ),
+            detail: Some(format!(
+                "{}\nattempt: {attempt}\nerror: {error}\nThe supervisor keeps retrying, backing \
+                 off to at most once a minute, until the listener comes back or is removed.",
+                detail_for(config, listener_id)
+            )),
+        },
         LifecycleLog::Missed { count } => LifecycleLine {
             summary: format!("Missed {count} lifecycle event(s)"),
             detail: None,
