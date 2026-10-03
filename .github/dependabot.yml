@@ -37,6 +37,12 @@ updates:
       # because 0.10 removes `OsRng` and splits `RngCore`. The manifest entry
       # explains the pin; lift both together when the OpenPGP stack moves.
       - dependency-name: "rand"
+      # Pairs with `rand` 0.8 and moves with it: `openvtc-vetting-pcs` hands a
+      # `ChaCha20Rng` to code bounded by rand 0.8's `RngCore + CryptoRng`, and
+      # 0.10 implements the newer `rand_core`, so `from_seed` stops resolving.
+      # The stream also derives a community's long-lived keys from its secret
+      # (`Issuer::derive`), so a bump must be checked for identical output.
+      - dependency-name: "rand_chacha"
       # Held at 2.x for the same reason, and bumped to 3.0 in the same commit:
       # our `StaticSecret` goes straight to pgp's `ecdh::Curve25519Legacy`, and
       # a 3.x secret is a different type there. The graph carries a 3.x copy
