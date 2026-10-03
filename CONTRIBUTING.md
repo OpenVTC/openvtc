@@ -20,7 +20,7 @@ Once there is agreement on the approach, you can proceed with an issue or PR and
 1. Install Rust 1.91.0 or later via [rustup](https://rustup.rs/)
 2. Clone the repository:
    ```bash
-   git clone https://github.com/LF-Decentralized-Trust-labs/openvtc.git
+   git clone https://github.com/OpenVTC/openvtc.git
    cd openvtc
    ```
 3. Build the workspace:
