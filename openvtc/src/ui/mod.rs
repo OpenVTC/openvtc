@@ -9,7 +9,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event, EventStream},
+    event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -168,12 +168,11 @@ fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
 
     enable_raw_mode()?;
 
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        DisableMouseCapture,
-        EnableBracketedPaste
-    )?;
+    // No mouse capture is enabled, so none is disabled either: on Windows,
+    // crossterm's `DisableMouseCapture` restores a console mode saved by
+    // `EnableMouseCapture`, and without one fails "Initial console modes not
+    // set" — which aborted startup.
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
 
     // Ensure a panic anywhere in the render loop or a spawned task still
     // returns the terminal to a usable state instead of leaving it in raw
@@ -197,7 +196,6 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture,
         DisableBracketedPaste
     )?;
 
