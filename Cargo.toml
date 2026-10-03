@@ -2,8 +2,7 @@
 members = [
   "openvtc-core",
   "openvtc",
-  # Hidden-vetter admission (ZKP), development branch `zkp-pcs`. `publish = false`
-  # and nothing else in the workspace depends on it.
+  # Hidden-vetter admission (ZKP). Published: `openvtc-core` depends on it.
   "openvtc-vetting-pcs",
 ]
 resolver = "3"
@@ -12,12 +11,12 @@ resolver = "3"
 description = "Open Verifiable Trust Community (OpenVTC) - First Person Protocol"
 version = "0.3.1"
 edition = "2024"
-publish = false
+publish = true
 authors = ["Glenn Gore <glenn@affinidi.com>"]
 rust-version = "1.95.0"
 readme = "README.md"
 license = "Apache-2.0"
-repository = "https://github.com/LF-Decentralized-Trust-labs/openvtc"
+repository = "https://github.com/OpenVTC/openvtc"
 
 [workspace.dependencies]
 openvtc-core = { version = "0.3", path = "openvtc-core", default-features = false }

@@ -6,9 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-# Development branch `zkp-pcs`. The whole workspace is `publish = false`; nothing
-# else depends on this crate anyway.
-publish = false
+publish.workspace = true
 
 [dependencies]
 # https://github.com/OpenVTC/predicate-credential-system, forked from
