@@ -2046,7 +2046,7 @@ impl MainPage {
     }
 
     fn handle_credentials_key(&mut self, key: KeyEvent) -> bool {
-        use crate::state_handler::main_page::content::{CredentialTab, CredentialsMode};
+        use crate::state_handler::main_page::content::CredentialsMode;
 
         let creds = &self.props.main_page.content_panel.credentials;
 
@@ -2141,16 +2141,12 @@ impl MainPage {
                         true
                     }
                     KeyCode::Char('d') => {
-                        let active_list = match creds.selected_tab {
-                            CredentialTab::Received => &creds.received,
-                            CredentialTab::Issued => &creds.issued,
-                            CredentialTab::Membership => &creds.membership,
-                        };
-                        // Membership/role credentials are community-bound — there
-                        // is no local-only removal, so `d` is a no-op there (the
-                        // Remove action won't find a matching VRC).
-                        if creds.selected_tab != CredentialTab::Membership
-                            && let Some(vrc) = active_list.get(detail_index)
+                        // Membership, role and vetting credentials are bound to a
+                        // community or an application — there is no local-only
+                        // removal, so `d` is a no-op there (the Remove action
+                        // won't find a matching VRC).
+                        if creds.selected_tab.allows_local_removal()
+                            && let Some(vrc) = creds.active_list().get(detail_index)
                         {
                             let _ = self.action_tx.send(Action::Credential(
                                 CredentialAction::ConfirmRemove {
@@ -2161,12 +2157,7 @@ impl MainPage {
                         true
                     }
                     KeyCode::Char('c') => {
-                        let active_list = match creds.selected_tab {
-                            CredentialTab::Received => &creds.received,
-                            CredentialTab::Issued => &creds.issued,
-                            CredentialTab::Membership => &creds.membership,
-                        };
-                        if let Some(vrc) = active_list.get(detail_index) {
+                        if let Some(vrc) = creds.active_list().get(detail_index) {
                             copy_to_clipboard(
                                 &vrc.raw_json.to_pretty_json(),
                                 "credential",
@@ -2179,11 +2170,7 @@ impl MainPage {
                 }
             }
             CredentialsMode::List => {
-                let active_list_len = match creds.selected_tab {
-                    CredentialTab::Received => creds.received.len(),
-                    CredentialTab::Issued => creds.issued.len(),
-                    CredentialTab::Membership => creds.membership.len(),
-                };
+                let active_list_len = creds.active_list().len();
                 let selected = creds.selected_index;
 
                 match key.code {
@@ -3825,6 +3812,8 @@ mod key_handler_tests {
             subject_is_self: false,
             validity: String::new(),
             status: "valid".to_string(),
+            note: None,
+            facts: Vec::new(),
         }
     }
 
@@ -5923,6 +5912,25 @@ mod key_handler_tests {
             }
             _ => panic!("expected Credential(Remove)"),
         }
+    }
+
+    #[test]
+    fn credential_detail_d_does_nothing_on_the_vetting_tab() {
+        // A vetting statement belongs to its application; there is no
+        // local-only removal, so `d` must not arm one.
+        let (mut page, mut rx) = page_for(MainMenu::Credentials, |s| {
+            s.main_page.content_panel.credentials.selected_tab = CredentialTab::Vetting;
+            s.main_page.content_panel.credentials.vetting = Arc::from(vec![vrc_summary("st1")]);
+            s.main_page.content_panel.credentials.mode = CredentialsMode::Detail { index: 0 };
+        });
+        page.handle_key_event(press(KeyCode::Char('d')));
+        assert!(
+            !matches!(
+                rx.try_recv(),
+                Ok(Action::Credential(CredentialAction::ConfirmRemove { .. }))
+            ),
+            "no removal is armed for a vetting statement"
+        );
     }
 
     // ----- Settings / Logs / Help (one nav test each) ------------------------

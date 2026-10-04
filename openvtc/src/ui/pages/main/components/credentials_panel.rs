@@ -62,11 +62,7 @@ fn render_list(state: &CredentialsState) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
     }
 
-    let active_list = match state.selected_tab {
-        CredentialTab::Received => &state.received,
-        CredentialTab::Issued => &state.issued,
-        CredentialTab::Membership => &state.membership,
-    };
+    let active_list = state.active_list();
 
     // Tab bar
     let tab_style = |tab: CredentialTab| {
@@ -91,6 +87,11 @@ fn render_list(state: &CredentialsState) -> Vec<Line<'static>> {
         Span::styled(
             format!(" Membership ({}) ", state.membership.len()),
             tab_style(CredentialTab::Membership),
+        ),
+        sep(),
+        Span::styled(
+            format!(" Vetting ({}) ", state.vetting.len()),
+            tab_style(CredentialTab::Vetting),
         ),
     ]));
     lines.push(Line::from(""));
@@ -122,12 +123,19 @@ fn render_list(state: &CredentialsState) -> Vec<Line<'static>> {
                 vrc.valid_from.clone()
             };
 
-            lines.push(Line::from(vec![
+            let mut row = vec![
                 Span::styled(prefix, style),
                 Span::styled(display_name, style),
-                Span::styled("  ", Style::default()),
-                Span::styled(date_display, Style::new().fg(COLOR_DARK_GRAY)),
-            ]));
+            ];
+            if let Some(note) = &vrc.note {
+                row.push(Span::styled(
+                    format!("  {note}"),
+                    Style::new().fg(COLOR_TEXT_DEFAULT),
+                ));
+            }
+            row.push(Span::styled("  ", Style::default()));
+            row.push(Span::styled(date_display, Style::new().fg(COLOR_DARK_GRAY)));
+            lines.push(Line::from(row));
         }
     }
 
@@ -143,11 +151,7 @@ fn render_list(state: &CredentialsState) -> Vec<Line<'static>> {
 fn render_detail(state: &CredentialsState, index: usize) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("")];
 
-    let active_list = match state.selected_tab {
-        CredentialTab::Received => &state.received,
-        CredentialTab::Issued => &state.issued,
-        CredentialTab::Membership => &state.membership,
-    };
+    let active_list = state.active_list();
 
     let Some(vrc) = active_list.get(index) else {
         lines.push(Line::from("Credential not found").fg(COLOR_WARNING_ACCESSIBLE_RED));
@@ -213,6 +217,12 @@ fn render_detail(state: &CredentialsState, index: usize) -> Vec<Line<'static>> {
         Span::styled("Valid       ", Style::new().fg(COLOR_TEXT_DEFAULT)),
         Span::styled(vrc.validity.clone(), Style::new().fg(COLOR_TEXT_DEFAULT)),
     ]));
+    for (label, value) in &vrc.facts {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{label:<12}"), Style::new().fg(COLOR_TEXT_DEFAULT)),
+            Span::styled(value.clone(), Style::new().fg(COLOR_TEXT_DEFAULT)),
+        ]));
+    }
     lines.push(Line::from(vec![
         Span::styled("ID          ", Style::new().fg(COLOR_DARK_GRAY)),
         Span::styled(vrc.vrc_id.clone(), Style::new().fg(COLOR_DARK_GRAY)),
@@ -236,8 +246,10 @@ fn render_detail(state: &CredentialsState, index: usize) -> Vec<Line<'static>> {
                 .fg(COLOR_ORANGE)
                 .bold(),
         );
-    } else {
+    } else if state.selected_tab.allows_local_removal() {
         lines.push(Line::from("d: remove  c: copy JSON  Esc: back").fg(COLOR_DARK_GRAY));
+    } else {
+        lines.push(Line::from("c: copy JSON  Esc: back").fg(COLOR_DARK_GRAY));
     }
 
     lines

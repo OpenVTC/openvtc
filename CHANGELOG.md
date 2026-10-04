@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Held vetting statements have a tab of their own.** My Credentials gains a
+  **Vetting** tab beside Membership. It lists every statement a vetter has
+  issued to us, across all applications, by vetter, method and community.
+  Opening one shows what the vetter signed: the relationship they declared,
+  the documents they relied on, the claims they verified, when it arrived,
+  and the raw credential (`c` copies it). Until now the Vetting page counted
+  statements on its checklist, but none could be opened. Statements cannot be
+  removed from this tab, because they belong to their application. The status
+  shown is the validity window only, since a withdrawal is recorded by the
+  community, not the applicant.
+
 - **Joining speaks `join-requests` 0.3 and 0.2.** A community on VTI-13
   serves only `manifest/0.3` + `submit/0.3`, and one that has not moved serves
   only 0.2. OpenVTC asks for the 0.3 manifest first. If the community refuses
