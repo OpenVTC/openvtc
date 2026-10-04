@@ -357,6 +357,7 @@ pub(crate) fn vetting_view(
     config: &Config,
     vtc_did: &str,
     invitations: &[AvailableVic],
+    prefer: Option<PersonaId>,
     now: chrono::DateTime<Utc>,
 ) -> Option<JoinVettingView> {
     let book = &config.private.vetting;
@@ -391,11 +392,16 @@ pub(crate) fn vetting_view(
     // one that meets the requirements, else the first — so the common case
     // still takes no keystrokes to reach. The difference is that the others
     // are now a ←/→ away instead of unreachable.
-    let opens_on = joins
-        .iter()
-        .find(|a| a.satisfied)
-        .or_else(|| joins.first())
-        .map(|a| a.persona);
+    //
+    // A persona the holder has just made from this page comes first: making it
+    // was the decision about who applies.
+    let opens_on = prefer.or_else(|| {
+        joins
+            .iter()
+            .find(|a| a.satisfied)
+            .or_else(|| joins.first())
+            .map(|a| a.persona)
+    });
     let mut personas: Vec<ApplyAs> = config
         .identities
         .iter()
@@ -459,7 +465,13 @@ pub(crate) fn vetting_view(
 /// Open the vetting page for `vtc_did` when the book knows it vets. Returns
 /// whether it did.
 fn show_vetting(state: &mut State, config: &Config, vtc_did: &str) -> bool {
-    let Some(view) = vetting_view(config, vtc_did, &state.join.available_vics, Utc::now()) else {
+    let Some(view) = vetting_view(
+        config,
+        vtc_did,
+        &state.join.available_vics,
+        state.join.minted_persona,
+        Utc::now(),
+    ) else {
         return false;
     };
     state.join.pending_vtc = Some(vtc_did.to_string());
@@ -777,8 +789,8 @@ fn apply_for_vetting(
     }
     let Some(persona) = known.personas.get(known.persona_index).cloned() else {
         return Err(
-            "Applying needs a persona: every card is signed by the DID you join with. Press n to \
-             create one here, or join anyway (j), which makes one."
+            "Applying needs a persona: every card is signed by the DID you join with. Set Apply \
+             as to \"a new persona\" with ←/→, then press Enter to make one."
                 .to_string(),
         );
     };
@@ -1762,6 +1774,7 @@ impl StateHandler {
             let did = minted.did.clone();
             match minted.persist(config, tdk, profile).await {
                 Ok(persona_id) => {
+                    state.join.minted_persona = Some(persona_id);
                     let copied = crate::clipboard::copy_to_clipboard(&did).is_ok();
                     if let Some(o) = state.main_page.create_persona.as_mut() {
                         o.phase =
@@ -4476,6 +4489,52 @@ mod vetting_tests {
         );
     }
 
+    /// A persona just made from this page is the one the page re-opens on,
+    /// whichever persona its own rules would otherwise have picked.
+    #[test]
+    fn the_page_reopens_on_the_persona_just_made() {
+        use affinidi_tdk::messaging::profiles::{ATMProfile, ATMProfileInner};
+        let mut config = test_config();
+        let now = Utc::now();
+        config
+            .private
+            .vetting
+            .learn_manifest(VTC, &manifest(true), now);
+        let mut add = |did: &str| {
+            let pid = PersonaId::new();
+            config.identities.insert(
+                pid,
+                openvtc_core::identity::IdentityContext {
+                    persona_id: pid,
+                    did: did.to_string(),
+                    document: serde_json::from_value(serde_json::json!({ "id": did }))
+                        .expect("minimal DID document"),
+                    profile: std::sync::Arc::new(ATMProfile {
+                        inner: std::sync::Arc::new(ATMProfileInner {
+                            did: did.to_string(),
+                            alias: did.to_string(),
+                            mediator: std::sync::Arc::new(None),
+                        }),
+                    }),
+                    mediator_did: None,
+                },
+            );
+            pid
+        };
+        let first = add("did:key:zFirst");
+        let second = add("did:key:zSecond");
+        let opened_on = |prefer| {
+            let view = vetting_view(&config, VTC, &[], prefer, now).unwrap();
+            let VettingPhase::Known(known) = view.phase else {
+                panic!("known");
+            };
+            known.personas[known.persona_index].persona
+        };
+        let unpreferred = opened_on(None);
+        let other = if unpreferred == first { second } else { first };
+        assert_eq!(opened_on(Some(other)), other);
+    }
+
     /// The page says what the community requires in words, and shows the
     /// application under way with its next step.
     #[test]
@@ -4483,7 +4542,7 @@ mod vetting_tests {
         let mut config = test_config();
         let now = Utc::now();
         assert!(
-            vetting_view(&config, VTC, &[], now).is_none(),
+            vetting_view(&config, VTC, &[], None, now).is_none(),
             "not known yet"
         );
 
@@ -4492,7 +4551,7 @@ mod vetting_tests {
             .vetting
             .learn_manifest(VTC, &manifest(false), now);
         assert!(
-            vetting_view(&config, VTC, &[], now).is_none(),
+            vetting_view(&config, VTC, &[], None, now).is_none(),
             "does not vet"
         );
 
@@ -4500,7 +4559,7 @@ mod vetting_tests {
             .private
             .vetting
             .learn_manifest(VTC, &manifest(true), now);
-        let view = vetting_view(&config, VTC, &[], now).unwrap();
+        let view = vetting_view(&config, VTC, &[], None, now).unwrap();
         let VettingPhase::Known(known) = &view.phase else {
             panic!("known");
         };
@@ -4517,7 +4576,7 @@ mod vetting_tests {
             .id
             .clone();
         config.private.vetting.adopt_known_requirements(&id);
-        let view = vetting_view(&config, VTC, &[], now).unwrap();
+        let view = vetting_view(&config, VTC, &[], None, now).unwrap();
         let VettingPhase::Known(known) = &view.phase else {
             panic!("known");
         };
@@ -4556,7 +4615,7 @@ mod vetting_tests {
             config.private.vetting.adopt_known_requirements(&id);
         }
 
-        let view = vetting_view(&config, VTC, &[], now).unwrap();
+        let view = vetting_view(&config, VTC, &[], None, now).unwrap();
         let VettingPhase::Known(known) = &view.phase else {
             panic!("known");
         };
