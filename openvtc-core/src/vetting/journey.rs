@@ -16,6 +16,7 @@
 use chrono::{DateTime, Utc};
 
 use super::applicant::{Application, NextStep, RequestState};
+use super::vetter::{DeskEntry, DeskState};
 
 /// Where a step stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -247,6 +248,148 @@ pub fn applicant_journey(app: &Application, now: DateTime<Utc>) -> Vec<JourneySt
         }
     }
     steps
+}
+
+/// The steps a vetter takes for one request, in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VetterStep {
+    /// The request arrived on one of your tickets.
+    Request,
+    /// Open a session when you are together.
+    Session,
+    /// Read the match code aloud and hear it back.
+    Code,
+    /// Their card arrives and is verified.
+    Card,
+    /// Check the person against their document.
+    Check,
+    /// Sign the statement and send it.
+    Sign,
+}
+
+impl VetterStep {
+    /// Every step, in order.
+    pub const ALL: [VetterStep; 6] = [
+        VetterStep::Request,
+        VetterStep::Session,
+        VetterStep::Code,
+        VetterStep::Card,
+        VetterStep::Check,
+        VetterStep::Sign,
+    ];
+
+    /// The step's name, short enough for a strip across the top of a page.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            VetterStep::Request => "Request",
+            VetterStep::Session => "Session",
+            VetterStep::Code => "Match code",
+            VetterStep::Card => "Card",
+            VetterStep::Check => "Check",
+            VetterStep::Sign => "Sign",
+        }
+    }
+
+    /// What this step is for. `hidden` is whether the community proves vetting
+    /// with a PCS zero-knowledge proof, which changes what signing costs you.
+    #[must_use]
+    pub fn explain(self, hidden: bool) -> &'static [&'static str] {
+        match (self, hidden) {
+            (VetterStep::Request, _) => &[
+                "Someone used one of your tickets to ask you to vet them for this community. \
+                 Nothing is decided yet, and you never have to take a request on.",
+                "Arrange to meet — in person or on a call. Decline at any point; the community \
+                 is not told why.",
+            ],
+            (VetterStep::Session, _) => &[
+                "Open a session when the two of you are together. It sends the applicant a \
+                 challenge, and both screens show the same match code.",
+                "Choose how you are meeting. The statement records it, and the community counts \
+                 statements by method.",
+            ],
+            (VetterStep::Code, _) => &[
+                "Read the match code aloud and wait for them to read it back. Do not continue \
+                 if it differs.",
+                "Matching codes prove the card you are about to receive comes from the person \
+                 you are talking to — not from someone who intercepted the request.",
+            ],
+            (VetterStep::Card, _) => &[
+                "Their card is the face they chose to show you, signed by the DID they will \
+                 join with. It is verified before you see it.",
+                "Its values are what you check their documents against. You keep it only \
+                 briefly, and only to make this decision.",
+            ],
+            (VetterStep::Check, _) => &[
+                "Look at their identity document. Check it appears genuine, that the photo is \
+                 the person you are talking to, and that each value on the card matches it.",
+                "Do not keep a copy of the document. Your statement records which kind of \
+                 document you saw, never its contents.",
+            ],
+            (VetterStep::Sign, false) => &[
+                "Signing says, as you, that you checked this person this way. It goes to the \
+                 applicant, who presents it when they join.",
+                "This statement is named: the community will see your DID against this \
+                 applicant. You can withdraw it later if you learn it was wrong.",
+            ],
+            (VetterStep::Sign, true) => &[
+                "Signing sends the applicant an attestation that you checked them this way.",
+                "This community uses a PCS zero-knowledge proof: it counts your attestation \
+                 toward the applicant's admission without ever learning it came from you.",
+            ],
+        }
+    }
+}
+
+/// A desk request's journey, every step in order, and whether it has ended
+/// (signed or declined).
+#[must_use]
+pub fn vetter_journey(entry: &DeskEntry) -> (Vec<JourneyStep<VetterStep>>, Option<VetterEnding>) {
+    use VetterStep as V;
+    let (reached, ending): (usize, Option<VetterEnding>) = match &entry.state {
+        // Index of the current step; everything before it is done.
+        DeskState::Accepted => (1, None),
+        DeskState::Session { .. } => (2, None),
+        DeskState::CardReceived { .. } => (4, None),
+        DeskState::Attested { .. } => (V::ALL.len(), Some(VetterEnding::Signed)),
+        DeskState::Declined { .. } => (0, Some(VetterEnding::Declined)),
+    };
+    let steps = V::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, &step)| {
+            let state = match ending {
+                Some(VetterEnding::Declined) => StepState::Todo,
+                _ if i < reached => StepState::Done,
+                // While the code is being read, the card is theirs to send.
+                _ if matches!(entry.state, DeskState::Session { .. }) && step == V::Card => {
+                    StepState::Waiting
+                }
+                _ if i == reached => StepState::Current,
+                _ => StepState::Todo,
+            };
+            JourneyStep {
+                step,
+                state,
+                detail: match (&entry.state, step) {
+                    (DeskState::Session { session } | DeskState::CardReceived { session, .. }, V::Code) => {
+                        Some(session.match_code.clone())
+                    }
+                    _ => None,
+                },
+            }
+        })
+        .collect();
+    (steps, ending)
+}
+
+/// How a desk request ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VetterEnding {
+    /// You signed a statement (or a hidden attestation).
+    Signed,
+    /// You declined.
+    Declined,
 }
 
 /// The step the holder takes now, if any — every other step is done, or
