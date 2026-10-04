@@ -179,6 +179,9 @@ fn route_lines(known: &KnownVetting) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for (row_index, row) in known.rows().iter().enumerate() {
         let focused = known.row == row_index;
+        if !known.shows(*row) {
+            continue;
+        }
         match row {
             VettingRow::Route(i) => {
                 let Some(option) = known.routes.get(*i) else {

@@ -1298,12 +1298,7 @@ impl StateHandler {
                         }
                         Action::JoinVettingRow(forward) => {
                             if let Some(known) = known_vetting(state) {
-                                let rows = known.row_count().max(1);
-                                known.row = if forward {
-                                    (known.row + 1) % rows
-                                } else {
-                                    (known.row + rows - 1) % rows
-                                };
+                                known.step(forward);
                             }
                         }
                         Action::JoinVettingCycle(forward) => {
