@@ -84,7 +84,7 @@ argon2 = "0.6"
 #
 # 0.18 -> 0.20 follows `vta-sdk` 0.53 -> 0.56 below, the release that declares
 # `affinidi-tdk ^0.20`.
-affinidi-tdk = "0.22"
+affinidi-tdk = "0.23"
 affinidi-data-integrity = "0.8"
 # Decodes a community's Bitstring Status List. Already in the graph through
 # `vta-sdk`, whose status reader cannot verify a list signed with a proof set;
@@ -136,7 +136,7 @@ affinidi-messaging-core = "0.1.11"
 # messages under a 500 ms poll). vta-sdk's `send_and_wait`, which every
 # DIDComm-backed `VtaClient` call here goes through, polls exactly that way, so
 # a VTA reply could vanish and the call time out. No API change.
-affinidi-messaging-sdk = "0.32.1"
+affinidi-messaging-sdk = "0.33.1"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
@@ -400,8 +400,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # decide / personhood / renew / rotate responses, the vetting specs carry
 # `vetted/1` statements and role VACs, and `vtc/endorsements/issue` gains
 # `predicateNotIssuable`.
-trust-tasks-rs = { version = "0.26.0", features = ["git-ns"] }
-trust-tasks-capability-client = "0.26.0"
+trust-tasks-rs = { version = "0.27.4", features = ["git-ns"] }
+trust-tasks-capability-client = "0.27.4"
 tui-input = "0.15"
 url = "2.5"
 uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
@@ -588,7 +588,9 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # (VTI #1900, trust-tasks-tf #709): `resendCredentials` on the poll, and
 # `credentialsDelivered` / `credentialResend` / `retryAfter` on an approved
 # reply, which the join-status poller sends and records.
-vta-sdk = { version = "0.62.0", features = [
+# **0.63** is the line did-git-sign 0.15 is built on; its join submit body
+# carries `criterion` (submit/0.3) and the manifest is 0.3.
+vta-sdk = { version = "0.63.1", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses

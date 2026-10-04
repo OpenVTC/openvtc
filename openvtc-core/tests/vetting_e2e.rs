@@ -50,7 +50,12 @@ use openvtc_core::vetting::wire;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use vta_sdk::protocols::join_requests::{JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, manifest};
+use vta_sdk::protocols::join_requests::manifest;
+
+/// The `manifest/0.2` `#response` type a pre-0.3 community answers with;
+/// `vta-sdk` 0.63 dropped its constant when it moved to `manifest/0.3`.
+const JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE: &str =
+    <manifest::v0_2::Response as trust_tasks_rs::Payload>::TYPE_URI;
 use vta_sdk::protocols::vetting::{
     VETTED_PREDICATE, VETTER_ROLE, VETTING_REQUEST_RESPONSE_TYPE, VETTING_REQUEST_TYPE,
     VETTING_SESSION_RESPONSE_TYPE, VETTING_SESSION_TYPE, VettingMethod, VettingRelationship,

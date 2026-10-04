@@ -13,7 +13,12 @@ use dtg_credentials::DTGCredential;
 use serde_json::{Value, json};
 use trust_tasks_rs::TrustTask;
 use uuid::Uuid;
-use vta_sdk::protocols::join_requests::{JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE, manifest};
+use vta_sdk::protocols::join_requests::manifest;
+
+/// The `manifest/0.2` `#response` type a pre-0.3 community answers with;
+/// `vta-sdk` 0.63 dropped its constant when it moved to `manifest/0.3`.
+const JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE: &str =
+    <manifest::v0_2::Response as trust_tasks_rs::Payload>::TYPE_URI;
 use vta_sdk::protocols::vetting::{
     VETTED_PREDICATE, VETTER_ROLE, VETTING_DECLINE_TYPE, VETTING_REQUEST_ERR_INVALID_TICKET,
     VETTING_REQUEST_ERR_NOT_ELIGIBLE, VETTING_REQUEST_TYPE, VETTING_SESSION_TYPE,
