@@ -600,6 +600,13 @@ pub struct JoinState {
     /// "carries on" reads from. Cleared when it is taken, and when the step
     /// ends without producing what the route was waiting for.
     pub resume_route: Option<JoinRoute>,
+    /// The persona just created from this page, which the page re-opens on.
+    ///
+    /// Without it, rebuilding the page after the create-persona step picked a
+    /// persona by its own rules — one with an application, else the first by
+    /// name — so a holder who had just made a persona to apply as could carry
+    /// on as a different one they already had.
+    pub minted_persona: Option<PersonaId>,
 }
 
 impl JoinState {
