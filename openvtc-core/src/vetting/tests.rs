@@ -2122,3 +2122,33 @@ async fn a_manifest_refused_as_an_unsupported_version_is_asked_again_in_0_2() {
         })
     ));
 }
+
+/// Both journeys follow the real exchange: the applicant's moves on to the
+/// session once a vetter opens one, and the vetter's waits on the card while
+/// the code is read, then puts the person check in front of them.
+#[tokio::test]
+async fn the_journeys_follow_the_exchange() {
+    use super::journey::{
+        ApplicantStep, StepState, VetterStep, applicant_journey, current, vetter_journey,
+    };
+    let (mut applicant, mut vetter, _) = ready().await;
+    let (request_id, _session) = in_session(&mut applicant, &mut vetter).await;
+
+    let entry = vetter.book.desk_entry(&request_id).expect("on the desk");
+    let (steps, ending) = vetter_journey(entry);
+    assert_eq!(ending, None);
+    assert_eq!(current(&steps), Some(VetterStep::Code));
+    let card = steps.iter().find(|s| s.step == VetterStep::Card).unwrap();
+    assert_eq!(card.state, StepState::Waiting, "the card is theirs to send");
+    let code = steps.iter().find(|s| s.step == VetterStep::Code).unwrap();
+    assert!(code.detail.is_some(), "the code is on the step");
+
+    // The applicant's session arrives once the vetter's document is received;
+    // before that it is waiting on the vetter, never the holder's to act on.
+    let journey = applicant_journey(applicant.application(), Utc::now());
+    let sessions = journey
+        .iter()
+        .find(|s| s.step == ApplicantStep::Sessions)
+        .unwrap();
+    assert_ne!(sessions.state, StepState::Todo, "{journey:?}");
+}

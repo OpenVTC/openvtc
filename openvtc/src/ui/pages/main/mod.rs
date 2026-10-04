@@ -2902,6 +2902,72 @@ impl MainPage {
             };
         }
 
+        // A journey is open: its keys are the current step's, and the way out.
+        // A key for a step not reached yet does nothing — the strip says why —
+        // so the steps cannot be taken out of order by accident.
+        if let Some(journey) = &vetting.journey {
+            use crate::state_handler::main_page::content::JourneySteps;
+            use openvtc_core::vetting::journey::{ApplicantStep, StepState, VetterStep};
+            let reached = |state: StepState| state != StepState::Todo;
+            let action = match &journey.steps {
+                JourneySteps::Applicant(steps) => {
+                    let at = |step: ApplicantStep| {
+                        steps.iter().any(|s| s.step == step && reached(s.state))
+                    };
+                    match key.code {
+                        KeyCode::Esc => Some(V::CloseJourney),
+                        KeyCode::Char('m') => Some(V::RefreshRequirements),
+                        KeyCode::Char('x') | KeyCode::Delete => Some(V::ArmAbandon),
+                        // The face can be changed until a card has gone.
+                        KeyCode::Char('f') if at(ApplicantStep::Face) => Some(V::ChooseFace),
+                        KeyCode::Char('r') if at(ApplicantStep::Vetters) => Some(V::RequestVetter),
+                        KeyCode::Char('v') if at(ApplicantStep::Vetters) => Some(V::FindVetters),
+                        KeyCode::Enter | KeyCode::Char('c') if at(ApplicantStep::Sessions) => {
+                            Some(V::ReviewCard)
+                        }
+                        KeyCode::Char('j')
+                            if steps.iter().any(|s| {
+                                s.step == ApplicantStep::Join && s.state == StepState::Current
+                            }) =>
+                        {
+                            if let Some(application) = vetting.applications.get(vetting.selected) {
+                                let _ = self
+                                    .action_tx
+                                    .send(Action::StartJoinFor(application.community.clone()));
+                            }
+                            return true;
+                        }
+                        _ => None,
+                    }
+                }
+                JourneySteps::Vetter(steps, ending) => {
+                    let current = openvtc_core::vetting::journey::current(steps);
+                    match key.code {
+                        KeyCode::Esc => Some(V::CloseJourney),
+                        _ if ending.is_some() => None,
+                        KeyCode::Char('x') => Some(V::ArmDecline),
+                        KeyCode::Char('o')
+                            if matches!(current, Some(VetterStep::Session | VetterStep::Code)) =>
+                        {
+                            Some(V::OpenSession)
+                        }
+                        KeyCode::Enter | KeyCode::Char('a')
+                            if matches!(current, Some(VetterStep::Check | VetterStep::Sign)) =>
+                        {
+                            Some(V::StartAttest)
+                        }
+                        _ => None,
+                    }
+                }
+            };
+            if let Some(action) = action {
+                let _ = self.action_tx.send(Action::Vetting(action));
+            }
+            // Every key is the journey's while it is open, including the ones
+            // it ignores: falling through would act on the list behind it.
+            return true;
+        }
+
         // The desk's views take ←/→, which everywhere else on the main page is
         // how focus returns to the menu (they fall through to the page-level
         // handler). Consuming them without offering another way out would make
@@ -2935,7 +3001,10 @@ impl MainPage {
             (VettingTab::Applications, KeyCode::Char('r')) => V::RequestVetter,
             (VettingTab::Applications, KeyCode::Char('m')) => V::RefreshRequirements,
             (VettingTab::Applications, KeyCode::Char('v')) => V::FindVetters,
-            (VettingTab::Applications, KeyCode::Char('c') | KeyCode::Enter) => V::ReviewCard,
+            // Enter opens the application as a journey; `c` still goes
+            // straight to the card for someone who knows where they are.
+            (VettingTab::Applications, KeyCode::Enter) => V::OpenJourney,
+            (VettingTab::Applications, KeyCode::Char('c')) => V::ReviewCard,
             // An application is otherwise permanent, and its persona is fixed
             // for its whole life — so one started as the wrong persona would
             // own that community's vetting route forever.
@@ -2959,11 +3028,8 @@ impl MainPage {
             (VettingTab::Desk, KeyCode::Char('g')) => V::AskResend,
             (VettingTab::Desk, KeyCode::Char('e')) => V::AskEventMode,
             (VettingTab::Desk, KeyCode::Char('o')) if view == DeskView::Requests => V::OpenSession,
-            (VettingTab::Desk, KeyCode::Char('a') | KeyCode::Enter)
-                if view == DeskView::Requests =>
-            {
-                V::StartAttest
-            }
+            (VettingTab::Desk, KeyCode::Enter) if view == DeskView::Requests => V::OpenJourney,
+            (VettingTab::Desk, KeyCode::Char('a')) if view == DeskView::Requests => V::StartAttest,
             (VettingTab::Desk, KeyCode::Char('x')) if view == DeskView::Requests => V::ArmDecline,
             (VettingTab::Desk, KeyCode::Char('t')) if view == DeskView::Tickets => V::NewTicket,
             (VettingTab::Desk, KeyCode::Enter) if view == DeskView::Tickets => V::ShowTicket,
@@ -3256,14 +3322,24 @@ impl ComponentRender<()> for MainPage {
         // right = actual content
 
         // Main Menu
-        let inbox_task_count = self.props.main_page.content_panel.inbox.tasks.len();
-        self.props
-            .main_page
-            .menu_panel
-            .render(frame, middle[0], inbox_task_count);
+        // A journey takes the whole width: the menu would be a second place to
+        // go in the middle of a process whose point is one place at a time.
+        // Esc closes the journey and the menu comes back.
+        let journey_open = self.props.main_page.menu_panel.selected_menu == MainMenu::Vetting
+            && self.props.main_page.content_panel.vetting.journey.is_some();
+        let content_area = if journey_open {
+            main_middle
+        } else {
+            let inbox_task_count = self.props.main_page.content_panel.inbox.tasks.len();
+            self.props
+                .main_page
+                .menu_panel
+                .render(frame, middle[0], inbox_task_count);
+            middle[1]
+        };
         let max_scroll = self.props.main_page.content_panel.render(
             frame,
-            middle[1],
+            content_area,
             &self.props.main_page.menu_panel,
             &self.props.connection,
             &self.props.main_page.activity_log,
@@ -4168,13 +4244,14 @@ mod key_handler_tests {
         page.handle_key_event(press(KeyCode::Char('u')));
         assert!(rx.try_recv().is_err());
 
+        // Enter on a request opens its journey — the ticket view is the
+        // Tickets view's Enter, not the desk's — and `a` still goes straight to
+        // attesting for a vetter who knows where they are.
         let (mut page, mut rx) = desk_on(DeskView::Requests);
         page.handle_key_event(press(KeyCode::Enter));
-        assert!(
-            matches!(vetting_action(&mut rx), V::StartAttest),
-            "Enter on a request still attests — the ticket view is the Tickets \
-             view's Enter, not the desk's"
-        );
+        assert!(matches!(vetting_action(&mut rx), V::OpenJourney));
+        page.handle_key_event(press(KeyCode::Char('a')));
+        assert!(matches!(vetting_action(&mut rx), V::StartAttest));
 
         let (mut page, mut rx) = desk_on(DeskView::Issued);
         page.handle_key_event(press(KeyCode::Char('w')));
@@ -4255,7 +4332,68 @@ mod key_handler_tests {
         assert!(rx.try_recv().is_err(), "x removes nothing off an event row");
     }
 
-    /// The card page is where a missing face shows up, so `f` chooses one
+    /// With a journey open, only the steps reached take their keys — a key
+    /// for a step still to come does nothing — and Esc closes the journey.
+    #[test]
+    fn a_journey_takes_only_the_keys_of_steps_reached() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::{ApplicationRow, JourneySteps, JourneyView};
+        use openvtc_core::vetting::journey::{ApplicantStep, JourneyStep, StepState};
+        let open = |s: &mut State| {
+            let v = &mut s.main_page.content_panel.vetting;
+            v.applications = vec![ApplicationRow {
+                id: "a1".into(),
+                community: "did:web:kernel".into(),
+                community_name: None,
+                accent: None,
+                pcs_zkp: false,
+                next_step: None,
+                join_did: "did:key:zA".into(),
+                requirements: None,
+                progress: None,
+                satisfied: false,
+                face: None,
+                identity: Vec::new(),
+                requests: Vec::new(),
+                statements: 0,
+            }]
+            .into();
+            v.journey = Some(JourneyView {
+                title: "Applying to kernel as alice".into(),
+                pcs_zkp: false,
+                steps: JourneySteps::Applicant(
+                    ApplicantStep::ALL
+                        .iter()
+                        .map(|&step| JourneyStep {
+                            step,
+                            state: if step == ApplicantStep::Requirements {
+                                StepState::Current
+                            } else {
+                                StepState::Todo
+                            },
+                            detail: None,
+                        })
+                        .collect(),
+                ),
+            });
+        };
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, open);
+        for early in ['f', 'r', 'v', 'j'] {
+            page.handle_key_event(press(KeyCode::Char(early)));
+            assert!(
+                rx.try_recv().is_err(),
+                "`{early}` is for a step not reached"
+            );
+        }
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(rx.try_recv().is_err(), "no session to send a card to yet");
+        page.handle_key_event(press(KeyCode::Char('m')));
+        assert!(matches!(vetting_action(&mut rx), V::RefreshRequirements));
+        page.handle_key_event(press(KeyCode::Esc));
+        assert!(matches!(vetting_action(&mut rx), V::CloseJourney));
+    }
+
+    /// The card page is where a missing face shows up, so `f` chooses one    /// The card page is where a missing face shows up, so `f` chooses one
     /// there rather than only after backing out to the application.
     #[test]
     fn vetting_card_chooses_the_face_on_f() {
