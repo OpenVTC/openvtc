@@ -3,10 +3,11 @@
 //! Opened from Communities with `r`. Every read and change is one signed
 //! `git-ns/*` task sent to the community's VTC ([`openvtc_core::git_ns`]),
 //! off the loop thread in [`DispatchDomain::GitNs`], exactly as the
-//! capabilities view sends its governance documents: the send returns a thread
-//! id, the VTC's answer arrives later on the inbound channel, and
-//! [`apply_replies`] matches it to what is pending. After any change the view
-//! is read again — the VTC is the record, so nothing is patched locally.
+//! capabilities view sends its governance documents: the view waits on the
+//! request's thread id from before the send is spawned, the VTC's answer
+//! arrives later on the inbound channel, and [`apply_replies`] matches it to
+//! what is pending. After any change the view is read again — the VTC is the
+//! record, so nothing is patched locally.
 //!
 //! Changes above the `normal` consent class (design §6: owner, transfer,
 //! archive), every removal and every drift resolution are armed first and
@@ -25,6 +26,7 @@ use affinidi_tdk::messaging::ATM;
 use affinidi_tdk::messaging::profiles::ATMProfile;
 use affinidi_tdk::secrets_resolver::secrets::Secret;
 use chrono::Utc;
+use openvtc_core::capabilities::{RequestDocument, correlation_thread};
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
 use openvtc_core::git_ns::{self, GitRight, Reply, Request};
@@ -572,86 +574,125 @@ pub(crate) struct ReposJob {
     sender: Sender,
     vtc_did: String,
     persona: PersonaId,
-    request: Request,
+    /// Built on the loop, unsigned: its id is the thread the view was armed
+    /// with before this job was spawned, and signing does not change it.
+    doc: RequestDocument,
     purpose: Purpose,
 }
 
 impl ReposJob {
-    /// Build, sign and send. I/O only.
-    pub(crate) async fn run(self) -> ReposOutcome {
+    /// Sign and send. I/O only.
+    pub(crate) async fn run(mut self) -> ReposOutcome {
+        let thid = correlation_thread(&self.doc).to_string();
         let s = &self.sender;
         let result = async {
-            let doc = git_ns::build_signed(&self.request, &s.persona_did, &self.vtc_did, &s.signer)
-                .await?;
+            openvtc_core::capabilities::sign_document(&mut self.doc, &s.signer).await?;
             openvtc_core::capabilities::send_capability_document(
                 &s.atm,
                 &s.profile,
                 &s.persona_did,
                 &self.vtc_did,
                 &s.mediator,
-                &doc,
+                &self.doc,
             )
             .await
         }
         .await
+        .map(|_| ())
         .map_err(|e| e.to_string());
         ReposOutcome {
             vtc_did: self.vtc_did,
             persona: self.persona,
+            thid,
             purpose: self.purpose,
             result,
         }
     }
 }
 
+/// Arm the view to await the answer threaded on `thid`.
+///
+/// Called on the loop before the send is spawned, never from its outcome: the
+/// answer travels the inbound channel, not the dispatch one, and a VTC that
+/// refuses at once can have it dispatched first — to find nothing pending, be
+/// dropped, and leave the view to time out on a request that was answered.
+fn arm(view: &mut ReposView, thid: String, purpose: Purpose, now: Instant) {
+    if purpose == Purpose::LinkPoll {
+        if let Some(link) = view.link.as_mut() {
+            link.last_poll = Some(now);
+            link.poll = Some(Pending {
+                thid,
+                sent_at: now,
+                purpose,
+            });
+        }
+        return;
+    }
+    if let Purpose::Change(what) = &purpose {
+        view.note(
+            Severity::Progress,
+            format!("{what}… awaiting the community's reply"),
+        );
+    }
+    view.pending = Some(Pending {
+        thid,
+        sent_at: now,
+        purpose,
+    });
+}
+
 /// What a send did. Data only; applied on the loop thread.
 pub(crate) struct ReposOutcome {
     vtc_did: String,
     persona: PersonaId,
+    /// The thread the view was armed with for this request.
+    thid: String,
     purpose: Purpose,
-    /// The thread id to match the reply against, or why the send failed.
-    result: Result<String, String>,
+    /// Why the send failed, if it did.
+    result: Result<(), String>,
 }
 
 impl ReposOutcome {
-    /// Arm the view to await the reply, or say the send never left.
+    /// Say the send never left. A send that did needs nothing: the view was
+    /// armed before it was spawned, and its answer may already be applied.
     ///
-    /// Dropped if the view has since closed or moved to another community: a
-    /// thread id armed on the wrong community would match a reply to a question
-    /// nobody asked there.
+    /// A failure is applied only while the view still waits on *this*
+    /// request's thread — not after the view closed or moved to another
+    /// community, nor once a newer request has taken the slot, whose wait a
+    /// stale failure must not end.
     pub(crate) fn apply(self, state: &mut State) {
+        let Err(e) = self.result else {
+            return;
+        };
         let Some(view) = view_mut(state) else {
             return;
         };
-        if view.vtc_did != self.vtc_did || view.persona != self.persona {
+        let slot = if self.purpose == Purpose::LinkPoll {
+            view.link.as_ref().and_then(|l| l.poll.as_ref())
+        } else {
+            view.pending.as_ref()
+        };
+        if view.vtc_did != self.vtc_did
+            || view.persona != self.persona
+            || slot.is_none_or(|p| p.thid != self.thid)
+        {
+            tracing::debug!(
+                thid = %self.thid,
+                "git-ns send failed for a request the view no longer waits on: {e}"
+            );
             return;
         }
-        let now = Instant::now();
-        match (self.result, self.purpose) {
-            (Ok(thid), Purpose::LinkPoll) => {
-                if let Some(link) = view.link.as_mut() {
-                    link.last_poll = Some(now);
-                    link.poll = Some(Pending {
-                        thid,
-                        sent_at: now,
-                        purpose: Purpose::LinkPoll,
-                    });
-                }
+        if self.purpose == Purpose::LinkPoll {
+            // A poll that did not leave is retried on the next tick.
+            if let Some(link) = view.link.as_mut() {
+                link.poll = None;
             }
-            (Ok(thid), purpose) => {
-                if let Purpose::Change(what) = &purpose {
-                    view.note(
-                        Severity::Progress,
-                        format!("{what}… awaiting the community's reply"),
-                    );
-                }
-                view.pending = Some(Pending {
-                    thid,
-                    sent_at: now,
-                    purpose,
-                });
-            }
-            (Err(e), Purpose::View) => {
+            tracing::debug!("git-ns link poll failed to send: {e}");
+            return;
+        }
+        view.pending = None;
+        match self.purpose {
+            Purpose::View => {
                 if view.data.is_none() {
                     view.phase = ReposPhase::Failed(format!(
                         "could not send the query to the community: {e}"
@@ -660,22 +701,16 @@ impl ReposOutcome {
                     view.note(Severity::Error, format!("couldn't refresh: {e}"));
                 }
             }
-            (Err(e), Purpose::Change(what)) => {
+            Purpose::Change(what) => {
                 view.note(Severity::Error, format!("couldn't send ({what}): {e}"));
                 tracing::error!("git-ns change failed to send: {e}");
             }
-            (Err(e), Purpose::LinkStart) => {
+            Purpose::LinkStart => {
                 if let Some(link) = view.link.as_mut() {
                     link.phase = LinkPhase::Failed(format!("couldn't send: {e}"));
                 }
             }
-            // A poll that did not leave is retried on the next tick.
-            (Err(e), Purpose::LinkPoll) => {
-                if let Some(link) = view.link.as_mut() {
-                    link.last_poll = Some(now);
-                }
-                tracing::debug!("git-ns link poll failed to send: {e}");
-            }
+            Purpose::LinkPoll => {}
         }
     }
 }
@@ -739,17 +774,45 @@ impl Loop<'_> {
                 return false;
             }
         };
+        // Built here rather than in the job so its id — the thread the answer
+        // carries — is known before the send is spawned, and the view can wait
+        // on it at once (see `arm`).
+        let doc = match git_ns::build(&request, &sender.persona_did, &vtc_did) {
+            Ok(doc) => doc,
+            Err(e) => {
+                if let Some(view) = view_mut(self.state) {
+                    let e = match &purpose {
+                        Purpose::Change(what) => format!("couldn't send ({what}): {e}"),
+                        _ => format!("couldn't send: {e}"),
+                    };
+                    if view.data.is_none() && purpose == Purpose::View {
+                        view.phase = ReposPhase::Failed(e);
+                    } else {
+                        view.note(Severity::Error, e);
+                    }
+                }
+                return false;
+            }
+        };
         if !self.in_flight.try_begin(DOMAIN) {
             if !quiet && let Some(view) = view_mut(self.state) {
                 view.note(Severity::Warning, InFlight::busy_message(DOMAIN));
             }
             return false;
         }
+        if let Some(view) = view_mut(self.state) {
+            arm(
+                view,
+                correlation_thread(&doc).to_string(),
+                purpose.clone(),
+                Instant::now(),
+            );
+        }
         let job = ReposJob {
             sender,
             vtc_did,
             persona,
-            request,
+            doc,
             purpose,
         };
         background_dispatch::spawn_dispatch(self.dispatch_tx.clone(), DOMAIN, async move {
@@ -1172,7 +1235,22 @@ fn apply_reply(state: &mut State, config: &Config, thid: &str, reply: Reply) -> 
 
     if view.pending.as_ref().is_none_or(|p| p.thid != thid) {
         // Uncorrelated: a reply to a request this view did not make, or one it
-        // gave up on.
+        // gave up on. Logged, never silent: an answer dropped here is a view
+        // that will report the community as not answering. A refusal is
+        // offered here whatever it refuses, so one that is not ours is routine.
+        if matches!(reply, Reply::Refused(_)) {
+            tracing::debug!(
+                %thid,
+                pending = ?view.pending.as_ref().map(|p| &p.thid),
+                "refusal matches no pending git-ns request — not ours"
+            );
+        } else {
+            tracing::warn!(
+                %thid,
+                pending = ?view.pending.as_ref().map(|p| &p.thid),
+                "git-ns reply matches no pending request — dropped"
+            );
+        }
         return false;
     }
     let Some(pending) = view.pending.take() else {
@@ -1549,13 +1627,24 @@ mod tests {
         });
     }
 
-    fn outcome(result: Result<String, String>, purpose: Purpose) -> ReposOutcome {
+    fn outcome(thid: &str, result: Result<(), String>, purpose: Purpose) -> ReposOutcome {
         ReposOutcome {
             vtc_did: VTC.into(),
             persona: persona(),
+            thid: thid.into(),
             purpose,
             result,
         }
+    }
+
+    /// Arm as `Loop::send` does, before the send is spawned.
+    fn sent(state: &mut State, thid: &str, purpose: Purpose) {
+        arm(
+            view_mut(state).unwrap(),
+            thid.into(),
+            purpose,
+            Instant::now(),
+        );
     }
 
     // --- navigation ---------------------------------------------------------
@@ -1999,7 +2088,8 @@ mod tests {
     #[test]
     fn a_sent_change_waits_for_its_reply() {
         let mut state = open_state();
-        outcome(Ok("thid-1".into()), Purpose::Change("archiving x".into())).apply(&mut state);
+        sent(&mut state, "thid-1", Purpose::Change("archiving x".into()));
+        outcome("thid-1", Ok(()), Purpose::Change("archiving x".into())).apply(&mut state);
         let v = view(&state);
         assert_eq!(v.pending.as_ref().unwrap().thid, "thid-1");
         assert!(v.status_text().unwrap().contains("awaiting"));
@@ -2009,17 +2099,97 @@ mod tests {
     fn a_first_read_that_never_left_fails_the_view() {
         let mut state = open_state();
         view_mut(&mut state).unwrap().data = None;
-        outcome(Err("peer unreachable".into()), Purpose::View).apply(&mut state);
+        sent(&mut state, "thid-1", Purpose::View);
+        outcome("thid-1", Err("peer unreachable".into()), Purpose::View).apply(&mut state);
         assert!(matches!(&view(&state).phase, ReposPhase::Failed(m) if m.contains("unreachable")));
+        assert!(view(&state).pending.is_none());
     }
 
     #[test]
     fn an_outcome_for_another_community_is_dropped() {
         let mut state = open_state();
-        let mut o = outcome(Ok("thid-1".into()), Purpose::View);
+        sent(&mut state, "thid-1", Purpose::View);
+        let mut o = outcome("thid-1", Err("peer unreachable".into()), Purpose::View);
         o.vtc_did = "did:webvh:other".into();
         o.apply(&mut state);
-        assert!(view(&state).pending.is_none());
+        assert!(view(&state).pending.is_some(), "still waiting");
+        assert!(view(&state).status.is_none());
+    }
+
+    /// **The race.** The VTC can answer before the send's own outcome is
+    /// applied — its answer comes in on the inbound channel, the outcome on the
+    /// dispatch one. The view waits from before the send, so the answer is
+    /// taken, and the outcome that follows changes nothing.
+    #[test]
+    fn a_reply_that_overtakes_the_send_is_still_matched() {
+        let mut state = open_state();
+        view_mut(&mut state).unwrap().data = None;
+        view_mut(&mut state).unwrap().phase = ReposPhase::Loading;
+        sent(&mut state, "thid-1", Purpose::View);
+
+        apply_replies(
+            &mut state,
+            &config(),
+            vec![from_vtc("thid-1", Reply::View(Box::new(data())))],
+        );
+        outcome("thid-1", Ok(()), Purpose::View).apply(&mut state);
+
+        let v = view(&state);
+        assert_eq!(v.phase, ReposPhase::Loaded);
+        assert!(v.pending.is_none(), "answered; not re-armed");
+    }
+
+    /// The same for a link poll, which waits in a slot of its own.
+    #[test]
+    fn a_poll_answer_that_overtakes_the_send_is_still_matched() {
+        let mut state = open_state();
+        view_mut(&mut state).unwrap().link = Some(LinkFlow::starting("github.com".into()));
+        sent(&mut state, "poll-1", Purpose::LinkPoll);
+
+        apply_replies(
+            &mut state,
+            &config(),
+            vec![from_vtc("poll-1", link_reply())],
+        );
+        outcome("poll-1", Ok(()), Purpose::LinkPoll).apply(&mut state);
+
+        let link = view(&state).link.as_ref().unwrap();
+        assert!(link.poll.is_none(), "answered; not re-armed");
+        assert!(link.last_poll.is_some());
+    }
+
+    /// A send that fails after a newer request took the slot is for a question
+    /// nobody waits on any more: the newer request's wait goes on.
+    #[test]
+    fn a_late_failure_for_a_superseded_request_keeps_the_current_wait() {
+        let mut state = open_state();
+        sent(&mut state, "grant-1", Purpose::Change("granting".into()));
+        sent(&mut state, "view-2", Purpose::View);
+
+        outcome(
+            "grant-1",
+            Err("peer unreachable".into()),
+            Purpose::Change("granting".into()),
+        )
+        .apply(&mut state);
+
+        let v = view(&state);
+        assert_eq!(v.pending.as_ref().unwrap().thid, "view-2");
+        assert!(
+            !v.status_text().unwrap().contains("couldn't send"),
+            "{:?}",
+            v.status_text()
+        );
+    }
+
+    /// A poll that did not leave frees its slot, so the next tick polls again.
+    #[test]
+    fn a_failed_poll_frees_its_slot() {
+        let mut state = open_state();
+        view_mut(&mut state).unwrap().link = Some(LinkFlow::starting("github.com".into()));
+        sent(&mut state, "poll-1", Purpose::LinkPoll);
+        outcome("poll-1", Err("peer unreachable".into()), Purpose::LinkPoll).apply(&mut state);
+        assert!(view(&state).link.as_ref().unwrap().poll.is_none());
     }
 
     // --- replies ------------------------------------------------------------

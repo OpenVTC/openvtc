@@ -3071,7 +3071,9 @@ enum DegradedOutcome {
 
 /// Apply correlated `governance/capability/*` replies to the open
 /// capabilities view. Uncorrelated replies (view closed, or thid from an
-/// older query) are dropped — the reply is stale by definition.
+/// older query) are dropped — the reply is stale by definition — with a log
+/// line: a reply dropped silently is how an answered query once read as a
+/// governance host that never replied.
 fn apply_capability_replies(
     state: &mut State,
     replies: Vec<(String, String, openvtc_core::capabilities::CapabilityReply)>,
@@ -3082,10 +3084,34 @@ fn apply_capability_replies(
         return;
     }
     let Some(view) = state.main_page.content_panel.capabilities.view.as_mut() else {
+        // A `trust-task-error` is offered here for every refusal, whatever it
+        // refuses, so this is routine — not worth more than a debug line.
+        tracing::debug!(
+            count = replies.len(),
+            "capability reply with no capabilities view open — dropped"
+        );
         return;
     };
     for (from, thid, reply) in replies {
         if view.pending_thid.as_deref() != Some(thid.as_str()) {
+            // A refusal is offered here whatever it refuses (a join, a git-ns
+            // change), so one that is not ours is routine; a listing or a
+            // toggle result that is not ours is not.
+            if matches!(reply, CapabilityReply::Rejected { .. }) {
+                tracing::debug!(
+                    %from,
+                    %thid,
+                    pending = ?view.pending_thid,
+                    "refusal matches no pending capability request — not ours"
+                );
+            } else {
+                tracing::warn!(
+                    %from,
+                    %thid,
+                    pending = ?view.pending_thid,
+                    "capability reply matches no pending request — dropped"
+                );
+            }
             continue;
         }
         // A thread id is a correlation key, not a credential: the answer is
@@ -3119,9 +3145,9 @@ fn apply_capability_replies(
                 let detail = message.map(|m| format!(" — {m}")).unwrap_or_default();
                 match view.phase {
                     CapabilitiesPhase::Loaded => {
-                        // A rejected toggle: keep the listing, surface the code.
+                        // A rejected toggle: keep the listing, surface why.
                         view.status_message =
-                            Some(format!("the community rejected the change: {code}{detail}"));
+                            Some(capability_actions::toggle_refusal(&code, &detail));
                     }
                     _ => {
                         view.phase = CapabilitiesPhase::Failed(match code.as_str() {
@@ -3409,6 +3435,10 @@ fn capability_sender(
 /// The busy-guard is what stops a held key queueing a fan of identical
 /// governance documents at a community: the view is armed with exactly one
 /// pending thread id, and a second send would orphan the first.
+///
+/// The view is armed here, before the spawn, not when the send reports back:
+/// the reply travels a different channel from the send's outcome and can be
+/// dispatched first.
 fn spawn_capability_job(
     dispatch_tx: &tokio::sync::mpsc::UnboundedSender<background_dispatch::DispatchOutcome>,
     in_flight: &mut background_dispatch::InFlight,
@@ -3422,8 +3452,10 @@ fn spawn_capability_job(
         }
         return;
     }
+    let send = job.prepare();
+    send.arm(state);
     background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {
-        background_dispatch::DispatchOutcome::Capabilities(job.run().await)
+        background_dispatch::DispatchOutcome::Capabilities(send.run().await)
     });
 }
 

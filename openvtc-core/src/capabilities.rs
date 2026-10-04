@@ -27,8 +27,13 @@ use crate::pack_and_send;
 pub use trust_tasks_capability_client::{
     CAPABILITY_DISABLE_TYPE, CAPABILITY_ENABLE_TYPE, CAPABILITY_LIST_TYPE, CapabilityReply,
     CapabilitySummary, TRUST_TASK_ENVELOPE_TYPE, build_list_document, build_toggle_document,
-    parse_capability_reply, parse_envelope_document, parse_envelope_reply,
+    correlation_thread, parse_capability_reply, parse_envelope_document, parse_envelope_reply,
 };
+
+/// A request document as the builders here (and [`crate::git_ns::build`])
+/// return it — named so a caller can hold one between building and sending
+/// without depending on `trust-tasks-rs` itself.
+pub type RequestDocument = TrustTask<Value>;
 
 /// Attach an `eddsa-jcs-2022` Data-Integrity proof over `doc` (minus the
 /// `proof` member), with `proofPurpose: authentication`, signed by the
@@ -71,7 +76,10 @@ pub async fn sign_document(
 }
 
 /// Pack `doc` in the DIDComm Trust Task envelope and send it to the VTC via
-/// the mediator. Returns the document id — the `threadId` the reply carries.
+/// the mediator. Returns [`correlation_thread`] of `doc` — the `threadId` the
+/// reply carries. That value is fixed by the document, not by the send, so a
+/// caller should take it from the document and wait on it *before* sending:
+/// the reply can be dispatched before this future's result is.
 /// Sending is fire-and-forget: `Ok` means handed to the transport, never that
 /// the host received it; the caller owns a reply timeout.
 pub async fn send_capability_document(
@@ -91,10 +99,10 @@ pub async fn send_capability_document(
     )
     .from(persona_did.to_string())
     .to(vtc_did.to_string())
-    .thid(doc.id.clone())
+    .thid(correlation_thread(doc).to_string())
     .finalize();
     pack_and_send(atm, profile, &message, persona_did, vtc_did, mediator).await?;
-    Ok(doc.id.clone())
+    Ok(correlation_thread(doc).to_string())
 }
 
 #[cfg(test)]
