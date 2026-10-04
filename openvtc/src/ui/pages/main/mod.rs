@@ -380,7 +380,44 @@ fn repos_key(
             _ => R::Cancel,
         });
     }
+    use crate::state_handler::actions::WorkspaceAction as W;
+    use crate::state_handler::main_page::repos::WorkspaceForm;
+    if view.workspace.confirm.is_some() {
+        return Some(R::Workspace(match key.code {
+            KeyCode::Char('y') => W::Confirm,
+            _ => W::Cancel,
+        }));
+    }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if let Some(form) = &view.workspace.form {
+        let (value, settings) = match form {
+            WorkspaceForm::Settings { root, .. } => (root, true),
+            WorkspaceForm::UsePath { path, .. } => (path, false),
+        };
+        let edit = |v: String| {
+            if settings {
+                W::SettingsInput(v)
+            } else {
+                W::UseInput(v)
+            }
+        };
+        return match key.code {
+            KeyCode::Esc => Some(R::Workspace(W::Cancel)),
+            KeyCode::Enter => Some(R::Workspace(if settings {
+                W::SettingsSubmit
+            } else {
+                W::UseSubmit
+            })),
+            KeyCode::Tab | KeyCode::BackTab if settings => Some(R::Workspace(W::SettingsProtocol)),
+            KeyCode::Backspace => {
+                let mut v = value.clone();
+                v.pop();
+                Some(R::Workspace(edit(v)))
+            }
+            KeyCode::Char(c) if !ctrl => Some(R::Workspace(edit(format!("{value}{c}")))),
+            _ => None,
+        };
+    }
     if let Some(form) = &view.add {
         let n = AddPersonForm::FIELDS;
         return match (form.field, key.code) {
@@ -495,8 +532,33 @@ fn repos_key(
         KeyCode::Char('A') if on_repo => Some(R::ArchiveArm),
         KeyCode::Char('v') if on_repo => Some(R::DriftRevertArm),
         KeyCode::Char('o') if on_repo => Some(R::DriftAdoptArm),
+        // This machine: checkouts and signing.
+        KeyCode::Char('c') => Some(R::Workspace(W::Clone)),
+        KeyCode::Char('e') => Some(R::Workspace(W::Sign)),
+        KeyCode::Char('E') => Some(R::Workspace(W::Unsign)),
+        KeyCode::Char('s') => Some(R::Workspace(W::SetUp)),
+        KeyCode::Char('S') => Some(R::Workspace(W::RemoveArm)),
+        KeyCode::Char('u') => Some(R::Workspace(W::UseStart)),
+        KeyCode::Char('w') => Some(R::Workspace(W::SettingsStart)),
         _ => None,
     }
+}
+
+/// The checkout path `p` copies: the highlighted or open repository's, when
+/// it is checked out and nothing else has the keys.
+fn repos_copy_path(view: &crate::state_handler::main_page::repos::ReposView) -> Option<String> {
+    if view.confirm.is_some()
+        || view.add.is_some()
+        || view.workspace.form.is_some()
+        || view.workspace.confirm.is_some()
+    {
+        return None;
+    }
+    let resource = crate::state_handler::repos_workspace::target(view)?;
+    view.workspace
+        .checkouts
+        .get(&resource)
+        .map(|c| c.facts.path.display().to_string())
 }
 
 /// Paste into the Repos view's focused text field, if one is open.
@@ -508,6 +570,20 @@ fn repos_paste(
     use crate::state_handler::main_page::repos::ReposScreen;
     if view.confirm.is_some() {
         return None;
+    }
+    {
+        use crate::state_handler::actions::WorkspaceAction as W;
+        use crate::state_handler::main_page::repos::WorkspaceForm;
+        let text = text.trim_end_matches(['\n', '\r']);
+        match &view.workspace.form {
+            Some(WorkspaceForm::Settings { root, .. }) => {
+                return Some(R::Workspace(W::SettingsInput(format!("{root}{text}"))));
+            }
+            Some(WorkspaceForm::UsePath { path, .. }) => {
+                return Some(R::Workspace(W::UseInput(format!("{path}{text}"))));
+            }
+            None => {}
+        }
     }
     if let Some(form) = &view.add {
         return match form.field {
@@ -1154,6 +1230,20 @@ impl MainPage {
         }
         // Repos view open: the same.
         if let Some(view) = self.props.main_page.content_panel.repos.view.clone() {
+            if key.code == KeyCode::Char('p')
+                && let Some(path) = repos_copy_path(&view)
+            {
+                let said = match crate::clipboard::copy_to_clipboard(&path) {
+                    Ok(method) => format!("✓ Path copied via {}", method.label()),
+                    Err(e) => format!("✗ Copy failed: {e}"),
+                };
+                let _ = self.action_tx.send(Action::Repos(
+                    crate::state_handler::actions::ReposAction::Workspace(
+                        crate::state_handler::actions::WorkspaceAction::Copied(said),
+                    ),
+                ));
+                return true;
+            }
             let action = repos_key(key, &view);
             let handled = action.is_some();
             if let Some(action) = action {
@@ -4311,6 +4401,74 @@ mod key_handler_tests {
             "did:webvh:me".into(),
             "Acme".into(),
         )
+    }
+
+    /// The local keys: clone, sign, set up, workspace — and while a workspace
+    /// form or removal is open, it has the keys.
+    #[test]
+    fn the_repos_view_maps_its_local_keys() {
+        use crate::state_handler::actions::{ReposAction as R, WorkspaceAction as W};
+        use crate::state_handler::main_page::repos::{WorkspaceChange, WorkspaceForm};
+        use openvtc_core::git_workspace::CloneProtocol;
+
+        let list = repos_view();
+        for (key, want) in [
+            (KeyCode::Char('c'), W::Clone),
+            (KeyCode::Char('e'), W::Sign),
+            (KeyCode::Char('E'), W::Unsign),
+            (KeyCode::Char('s'), W::SetUp),
+            (KeyCode::Char('S'), W::RemoveArm),
+            (KeyCode::Char('u'), W::UseStart),
+            (KeyCode::Char('w'), W::SettingsStart),
+        ] {
+            assert_eq!(repos_key(press(key), &list), Some(R::Workspace(want)));
+        }
+        // Nothing checked out: `p` has no path to copy.
+        assert_eq!(repos_copy_path(&list), None);
+
+        let mut form = repos_view();
+        form.workspace.form = Some(WorkspaceForm::Settings {
+            root: "~/sr".into(),
+            protocol: CloneProtocol::Https,
+            error: None,
+        });
+        assert_eq!(
+            repos_key(press(KeyCode::Char('c')), &form),
+            Some(R::Workspace(W::SettingsInput("~/src".into()))),
+            "typing in the form never clones"
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Backspace), &form),
+            Some(R::Workspace(W::SettingsInput("~/s".into())))
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Tab), &form),
+            Some(R::Workspace(W::SettingsProtocol))
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Enter), &form),
+            Some(R::Workspace(W::SettingsSubmit))
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Esc), &form),
+            Some(R::Workspace(W::Cancel))
+        );
+        assert_eq!(
+            repos_paste(&form, "c/x\n"),
+            Some(R::Workspace(W::SettingsInput("~/src/x".into())))
+        );
+
+        let mut armed = repos_view();
+        armed.workspace.confirm = Some(WorkspaceChange::RemoveIdentity);
+        assert_eq!(
+            repos_key(press(KeyCode::Char('y')), &armed),
+            Some(R::Workspace(W::Confirm))
+        );
+        assert_eq!(
+            repos_key(press(KeyCode::Enter), &armed),
+            Some(R::Workspace(W::Cancel)),
+            "only y confirms a removal"
+        );
     }
 
     /// The Repos view owns the keys while open: its screen keys, an armed

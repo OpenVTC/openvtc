@@ -261,6 +261,7 @@ mod credential_actions;
 mod persona_actions;
 mod persona_binding_refresh;
 mod repos_actions;
+pub(crate) mod repos_workspace;
 mod signing_health;
 /// The DIDComm transport module, which now lives in `openvtc-core`.
 ///
@@ -1562,6 +1563,9 @@ impl StateHandler {
                                 .refresh(true)
                                 .await;
                             }
+                            // The answer names the repositories to look for
+                            // on this machine.
+                            repos_workspace::probe_if_due(&mut state, &dispatch_tx, &mut in_flight);
                             // A vetter's grant is checked for revocation off the
                             // loop: the check fetches the community's status list.
                             for check in vetting_grant_checks {

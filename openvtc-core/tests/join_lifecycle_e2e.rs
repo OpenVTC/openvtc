@@ -130,6 +130,7 @@ async fn submit_and_assert(
     });
     let body = JoinRequestSubmitBody {
         vp: vp.clone(),
+        criterion: None,
         registry_consent: false,
         extensions: serde_json::Value::Null,
         attributes: Vec::new(),

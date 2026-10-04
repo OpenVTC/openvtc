@@ -350,21 +350,18 @@ async fn build_join_submit_document(
         protocol,
         criterion,
     } = presentation.into();
+    // `submit/0.3` is the 0.2 payload plus `criterion`, so a 0.2 submission
+    // never names one, whatever the presentation carried.
+    let criterion = criterion.filter(|_| protocol == crate::vetting::protocol::JoinProtocol::V0_3);
     let body = JoinRequestSubmitBody {
         vp,
+        criterion,
         registry_consent: false,
         extensions,
         attributes,
     };
-    // `submit/0.3` is the 0.2 payload plus `criterion`, so the 0.2 body is
-    // built once and the member added when there is one to name.
-    let mut payload = serde_json::to_value(body)
+    let payload = serde_json::to_value(body)
         .map_err(|e| OpenVTCError::Config(format!("join submit body serialize: {e}")))?;
-    if protocol == crate::vetting::protocol::JoinProtocol::V0_3
-        && let (Some(criterion), Some(members)) = (criterion, payload.as_object_mut())
-    {
-        members.insert("criterion".to_string(), Value::String(criterion));
-    }
     // `document_id` is supplied rather than minted here: on the DIDComm path this
     // same id is the message id, which is what makes the two transports' reply
     // threading agree (see [`submit_join_request`]).

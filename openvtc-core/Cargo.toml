@@ -24,6 +24,11 @@ openpgp-card = [
 arbitrary = ["dep:arbitrary", "chrono/arbitrary"]
 
 [dependencies]
+# The commit signer the Repos panel sets up for a persona (`git_signing`): its
+# library writes the keyring entry, profile and include file exactly as
+# `did-git-sign init --profile` does. Kept on the same release as the
+# `openvtc` crate's dependency, and on this workspace's `vta-sdk` line.
+did-git-sign = "0.15.1"
 # Hidden-vetter admission (ZKP). Published from this workspace before this
 # crate; its version moves with the workspace version.
 openvtc-vetting-pcs = { version = "0.4.0", path = "../openvtc-vetting-pcs" }
@@ -99,6 +104,8 @@ card-backend-pcsc = { workspace = true, optional = true }
 openpgp-card-rpgp = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Scratch directories for the git-workspace tests (a real clone, read back).
+tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }
 # In-process mediator for integration tests. `memory-backend` keeps the
 # whole mediator (config + queue + secrets) in RAM — no Redis sidecar,
@@ -120,8 +127,9 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # 0.14.0 is the line built on the same `vta-sdk` 0.56 the root manifest now
 # pins, so the dev graph keeps one copy of it too. 0.16.0 is on
 # `affinidi-tdk` 0.22 / messaging-sdk 0.32, matching `vta-sdk` 0.61; 0.17.0
-# (affinidi-tdk-rs #920) is the same line built on `vta-sdk` ^0.61.
-affinidi-messaging-test-mediator = "0.17.0"
+# (affinidi-tdk-rs #920) is the same line built on `vta-sdk` ^0.61. 0.18.0 is on
+# `affinidi-tdk` 0.23 / messaging-sdk 0.33, matching `vta-sdk` 0.63.
+affinidi-messaging-test-mediator = "0.18.0"
 # In-process MockVta for the bootstrap e2e (VTI#406/#427 test-support seams).
 # `vta-service` is the VTA server crate; it carries the credential-vault
 # lifecycle tasks (receive/query/archive/delete/restore/purge) + the
@@ -171,8 +179,9 @@ affinidi-messaging-test-mediator = "0.17.0"
 # **0.46.0** is the family on `vta-sdk` 0.57 (DTG Credentials v1); **0.48.0**
 # is the family on `vta-sdk` 0.59 / `vti-common` 0.32; **0.49.0** on `vta-sdk`
 # 0.61 / `vti-common` 0.34; **0.50.0** adds VTI #1894 (a TSP reply reaches a
-# sender on another mediator).
-vta-service = { version = "0.51.0", default-features = false, features = ["test-support", "rest", "didcomm"] }
+# sender on another mediator); **0.53.0** is the family on `vta-sdk` 0.63 /
+# `vti-common` 0.37.
+vta-service = { version = "0.53.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }

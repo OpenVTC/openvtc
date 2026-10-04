@@ -34,8 +34,7 @@ use crate::state_handler::actions::ReposAction as Act;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
 use crate::state_handler::main_page::repos::{
     AddPersonForm, ArmedChange, CreatedRepo, EXPIRY_CHOICES, LinkFlow, LinkPhase, LinkedAccount,
-    NewRepoForm, Pending, Purpose, ReposPhase, ReposScreen, ReposView, Severity, SigningHealth,
-    Status,
+    NewRepoForm, Pending, Purpose, ReposPhase, ReposScreen, ReposView, Severity, Status,
 };
 use crate::state_handler::main_page::sanitize_display;
 use crate::state_handler::runtime_actions::ActionCtx;
@@ -96,6 +95,7 @@ fn clip(value: &str) -> String {
 /// [`dispatch`].
 pub(crate) fn reduce(state: &mut State, action: &Act) -> bool {
     match action {
+        Act::Workspace(w) => return super::repos_workspace::reduce(state, w),
         Act::Open(_)
         | Act::Refresh
         | Act::NewSubmit
@@ -273,6 +273,7 @@ pub(crate) fn reduce(state: &mut State, action: &Act) -> bool {
         Act::Cancel => view.confirm = None,
         Act::LinkDismiss => view.link = None,
         Act::Back
+        | Act::Workspace(_)
         | Act::Open(_)
         | Act::Refresh
         | Act::NewSubmit
@@ -290,7 +291,11 @@ fn back(state: &mut State) {
     let Some(view) = repos.view.as_mut() else {
         return;
     };
-    if view.confirm.take().is_some() || view.add.take().is_some() {
+    if view.confirm.take().is_some()
+        || view.add.take().is_some()
+        || view.workspace.confirm.take().is_some()
+        || view.workspace.form.take().is_some()
+    {
         return;
     }
     match view.screen {
@@ -569,21 +574,11 @@ pub(crate) struct ReposJob {
     persona: PersonaId,
     request: Request,
     purpose: Purpose,
-    /// Also check did-git-sign's install and hook (on open and refresh).
-    probe_signing: bool,
 }
 
 impl ReposJob {
     /// Build, sign and send. I/O only.
     pub(crate) async fn run(self) -> ReposOutcome {
-        let signing = if self.probe_signing {
-            let did = self.sender.persona_did.clone();
-            tokio::task::spawn_blocking(move || super::signing_health::probe(&did))
-                .await
-                .ok()
-        } else {
-            None
-        };
         let s = &self.sender;
         let result = async {
             let doc = git_ns::build_signed(&self.request, &s.persona_did, &self.vtc_did, &s.signer)
@@ -605,7 +600,6 @@ impl ReposJob {
             persona: self.persona,
             purpose: self.purpose,
             result,
-            signing,
         }
     }
 }
@@ -617,7 +611,6 @@ pub(crate) struct ReposOutcome {
     purpose: Purpose,
     /// The thread id to match the reply against, or why the send failed.
     result: Result<String, String>,
-    signing: Option<SigningHealth>,
 }
 
 impl ReposOutcome {
@@ -632,9 +625,6 @@ impl ReposOutcome {
         };
         if view.vtc_did != self.vtc_did || view.persona != self.persona {
             return;
-        }
-        if let Some(signing) = self.signing {
-            view.signing = signing;
         }
         let now = Instant::now();
         match (self.result, self.purpose) {
@@ -705,13 +695,7 @@ impl Loop<'_> {
     /// for sends nobody pressed a key for (polls, refresh after a change).
     /// Returns whether the send was dispatched; every early return says why
     /// in the view, unless `quiet`.
-    async fn send(
-        &mut self,
-        request: Request,
-        purpose: Purpose,
-        probe_signing: bool,
-        quiet: bool,
-    ) -> bool {
+    async fn send(&mut self, request: Request, purpose: Purpose, quiet: bool) -> bool {
         let Some((vtc_did, persona, waiting)) = self
             .state
             .main_page
@@ -767,7 +751,6 @@ impl Loop<'_> {
             persona,
             request,
             purpose,
-            probe_signing,
         };
         background_dispatch::spawn_dispatch(self.dispatch_tx.clone(), DOMAIN, async move {
             DispatchOutcome::Repos(job.run().await)
@@ -777,15 +760,29 @@ impl Loop<'_> {
 
     /// Read the view again.
     pub(crate) async fn refresh(&mut self, quiet: bool) {
-        self.send(Request::View { resource: None }, Purpose::View, true, quiet)
+        self.send(Request::View { resource: None }, Purpose::View, quiet)
             .await;
     }
 }
 
 /// Service an action that reads the config or sends a task.
 pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
-    if let Act::Open(index) = action {
-        open(ctx, index);
+    match action {
+        Act::Workspace(w) => {
+            super::repos_workspace::dispatch(ctx, w).await;
+            return;
+        }
+        Act::Open(index) => {
+            open(ctx, index);
+            super::repos_workspace::open(ctx).await;
+        }
+        Act::Refresh => {
+            if let Some(view) = view_mut(ctx.state) {
+                view.workspace.want_probe(true);
+            }
+            super::repos_workspace::probe_if_due(ctx.state, ctx.dispatch_tx, ctx.in_flight);
+        }
+        _ => {}
     }
     let mut lp = Loop {
         state: &mut *ctx.state,
@@ -810,8 +807,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
             let armed = view_mut(lp.state).and_then(|v| v.confirm.take());
             if let Some(armed) = armed {
                 let what = describe(&armed.request);
-                lp.send(armed.request, Purpose::Change(what), false, false)
-                    .await;
+                lp.send(armed.request, Purpose::Change(what), false).await;
             }
         }
         Act::LinkStart => start_link(&mut lp).await,
@@ -942,7 +938,7 @@ async fn submit_new(lp: &mut Loop<'_>) {
         return;
     }
     let what = describe(&request);
-    lp.send(request, Purpose::Change(what), false, false).await;
+    lp.send(request, Purpose::Change(what), false).await;
 }
 
 /// Add the owner picker's highlighted candidate, or its pasted DID, to the
@@ -1032,7 +1028,7 @@ async fn submit_add(lp: &mut Loop<'_>) {
         return;
     }
     let what = describe(&request);
-    lp.send(request, Purpose::Change(what), false, false).await;
+    lp.send(request, Purpose::Change(what), false).await;
 }
 
 async fn start_link(lp: &mut Loop<'_>) {
@@ -1066,7 +1062,6 @@ async fn start_link(lp: &mut Loop<'_>) {
                 forge: forge.clone(),
             },
             Purpose::LinkStart,
-            false,
             false,
         )
         .await
@@ -1194,6 +1189,8 @@ fn apply_reply(state: &mut State, config: &Config, thid: &str, reply: Reply) -> 
                 })
                 .collect();
             view.data = Some(Arc::new(*data));
+            // The repositories to look for on this machine may have changed.
+            view.workspace.want_probe(false);
             view.phase = ReposPhase::Loaded;
             let count = match &view.screen {
                 ReposScreen::List => view.my_repos().len(),
@@ -1469,14 +1466,10 @@ pub(crate) async fn tick(lp: &mut Loop<'_>) {
         }
     }
     if let Some(link_id) = poll {
-        lp.send(
-            Request::LinkStatus { link_id },
-            Purpose::LinkPoll,
-            false,
-            true,
-        )
-        .await;
+        lp.send(Request::LinkStatus { link_id }, Purpose::LinkPoll, true)
+            .await;
     }
+    super::repos_workspace::probe_if_due(lp.state, lp.dispatch_tx, lp.in_flight);
 }
 
 #[cfg(test)]
@@ -1562,7 +1555,6 @@ mod tests {
             persona: persona(),
             purpose,
             result,
-            signing: None,
         }
     }
 

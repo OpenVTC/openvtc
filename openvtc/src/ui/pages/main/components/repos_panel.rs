@@ -4,6 +4,10 @@
 //! Three screens over one `git-ns/view` answer: *My repos* with the forge
 //! account and commit-signing health beside it, one repository's people and
 //! rights (or its creation steps), and the new-repository form.
+//!
+//! Beside the community's record, each repository shows what is on this
+//! machine: whether it is checked out, where, and whether a commit made there
+//! would be signed as this persona — with the one key that fixes it.
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -14,12 +18,16 @@ use crate::colors::{
 };
 use crate::state_handler::main_page::content::ContentPanelState;
 use crate::state_handler::main_page::repos::{
-    AddPersonForm, EXPIRY_CHOICES, HookCheck, HookHealth, HookScope, LinkPhase, LinkedAccount,
-    NewRepoForm, ReposPhase, ReposScreen, ReposView, Severity, Status, expiry_label,
+    AddPersonForm, CheckoutView, EXPIRY_CHOICES, HookHealth, LinkPhase, LinkedAccount, NewRepoForm,
+    ReposPhase, ReposScreen, ReposView, Severity, SignerHealth, Status, WorkspaceChange,
+    WorkspaceForm, expiry_label,
 };
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
+use crate::state_handler::repos_workspace;
 use crate::state_handler::state::ConnectionState;
 use openvtc_core::git_ns::{self, BreakGlassState, GitRight, RepoStatus};
+use openvtc_core::git_signing::{BinaryStatus, CheckoutSigning, MIN_BINARY};
+use openvtc_core::git_workspace::{self, CheckoutFacts, RepoCoords};
 
 use super::panel::Panel;
 
@@ -135,6 +143,7 @@ impl Panel for ReposPanel {
             ReposScreen::Repo { resource } => render_repo(&mut lines, view, resource),
             ReposScreen::NewRepo(form) => render_new(&mut lines, view, form),
         }
+        render_workspace_overlay(&mut lines, view);
 
         if let Some(armed) = &view.confirm {
             lines.push(Line::from(""));
@@ -257,8 +266,8 @@ fn render_list(lines: &mut Vec<Line<'static>>, view: &ReposView, linked: &[Linke
         )));
     } else {
         lines.push(Line::from(dim(format!(
-            "      {:<34}{:<18}{}",
-            "REPOSITORY", "MY RIGHT", "STATUS"
+            "      {:<34}{:<18}{:<14}{}",
+            "REPOSITORY", "MY RIGHT", "STATUS", "THIS MACHINE"
         ))));
         for (i, repo) in mine.iter().enumerate() {
             let selected = i == view.selected;
@@ -274,8 +283,18 @@ fn render_list(lines: &mut Vec<Line<'static>>, view: &ReposView, linked: &[Linke
                     name_style,
                 ),
                 text(format!("{:<18}", repo.right.label())),
-                Span::styled(repo.status.label(), status_style(&repo.status)),
+                Span::styled(
+                    format!("{:<14}", repo.status.label()),
+                    status_style(&repo.status),
+                ),
+                local_summary(view, &repo.resource),
             ]));
+            if selected && let Some(c) = view.workspace.checkouts.get(&repo.resource) {
+                lines.push(Line::from(dim(format!(
+                    "        {}",
+                    checkout_brief(&c.facts)
+                ))));
+            }
         }
     }
     for c in view.creatable() {
@@ -300,12 +319,16 @@ fn render_list(lines: &mut Vec<Line<'static>>, view: &ReposView, linked: &[Linke
     render_accounts(lines, view, linked);
     render_signing(lines, view);
 
+    if view.workspace.form.is_some() {
+        return;
+    }
     let mut keys = vec!["↑/↓ navigate", "⏎ open"];
     if !view.creatable().is_empty() {
         keys.push("n new repo");
     }
     keys.extend(["l link account", "r refresh", "Esc back"]);
     hints(lines, &keys.join("   "));
+    local_hints(lines, view);
 }
 
 fn render_accounts(lines: &mut Vec<Line<'static>>, view: &ReposView, linked: &[LinkedAccount]) {
@@ -408,78 +431,6 @@ fn render_accounts(lines: &mut Vec<Line<'static>>, view: &ReposView, linked: &[L
     }
 }
 
-fn hook_line(check: &HookCheck) -> (&'static str, Color, String, bool) {
-    let at = check
-        .path
-        .as_deref()
-        .map(|p| format!(" at {}", sanitize_display(p, 512)))
-        .unwrap_or_default();
-    let scope = check.scope.label();
-    match &check.health {
-        HookHealth::Current { version } => (
-            "●",
-            COLOR_SUCCESS,
-            format!("{scope}: commit-msg hook v{version} OK{at}"),
-            false,
-        ),
-        HookHealth::Outdated { installed, current } => (
-            "▲",
-            COLOR_WARNING_ACCESSIBLE_RED,
-            format!(
-                "{scope}: commit-msg hook OUTDATED (v{installed}, current v{current}){at}. Older \
-                 hooks put the Signed-by-DID trailer above any `---` line, where verify-trust \
-                 does not read it, and those commits fail."
-            ),
-            true,
-        ),
-        HookHealth::Newer { installed, current } => (
-            "●",
-            COLOR_SOFT_PURPLE,
-            format!(
-                "{scope}: commit-msg hook v{installed}{at} is newer than this openvtc knows \
-                 (v{current}) — fine if did-git-sign was upgraded"
-            ),
-            false,
-        ),
-        HookHealth::Foreign => (
-            "▲",
-            COLOR_WARNING_ACCESSIBLE_RED,
-            format!(
-                "{scope}: the commit-msg hook{at} is not did-git-sign's, so nothing writes the \
-                 Signed-by-DID trailer."
-            ),
-            true,
-        ),
-        HookHealth::Missing => (
-            "▲",
-            COLOR_WARNING_ACCESSIBLE_RED,
-            format!("{scope}: no commit-msg hook{at}."),
-            true,
-        ),
-        HookHealth::NowhereToLook => (
-            "○",
-            COLOR_DARK_GRAY,
-            match check.scope {
-                HookScope::Global => "global: no global core.hooksPath is set".to_string(),
-                _ => format!(
-                    "{scope}: openvtc was not started in a repository, so there is no \
-                     repository hook to check"
-                ),
-            },
-            false,
-        ),
-        HookHealth::Unknown(why) => (
-            "○",
-            COLOR_ORANGE,
-            format!(
-                "{scope}: could not check the commit-msg hook: {}",
-                sanitize_display(why, 256)
-            ),
-            false,
-        ),
-    }
-}
-
 fn wrapped(lines: &mut Vec<Line<'static>>, glyph: &str, color: Color, line: &str) {
     let parts = super::status::wrap_text(
         line,
@@ -498,79 +449,442 @@ fn wrapped(lines: &mut Vec<Line<'static>>, glyph: &str, color: Color, line: &str
     }
 }
 
+/// A fix on a line of its own: a command broken across a wrap can be neither
+/// read in one pass nor selected in one drag.
+fn fix(lines: &mut Vec<Line<'static>>, what: &str) {
+    lines.push(Line::from(vec![
+        dim("      fix: "),
+        Span::styled(what.to_string(), Style::default().fg(COLOR_ORANGE).bold()),
+    ]));
+}
+
+fn severity_color(severity: Severity) -> Color {
+    match severity {
+        Severity::Info | Severity::Progress => COLOR_DARK_GRAY,
+        Severity::Success => COLOR_SUCCESS,
+        Severity::Warning => COLOR_ORANGE,
+        Severity::Error => COLOR_WARNING_ACCESSIBLE_RED,
+    }
+}
+
+/// The list's "this machine" cell.
+fn local_summary(view: &ReposView, resource: &str) -> Span<'static> {
+    let (label, severity) = repos_workspace::summary(view, resource);
+    Span::styled(label, Style::default().fg(severity_color(severity)))
+}
+
+/// Where a checkout is and what state it is in, in one line.
+fn checkout_brief(facts: &CheckoutFacts) -> String {
+    let mut parts = vec![sanitize_display(
+        &git_workspace::display_path(&facts.path),
+        512,
+    )];
+    if facts.is_repo {
+        parts.push(match &facts.branch {
+            Some(b) => sanitize_display(b, 128),
+            None => "detached HEAD".into(),
+        });
+        if facts.upstream && (facts.ahead > 0 || facts.behind > 0) {
+            parts.push(format!("↑{} ↓{}", facts.ahead, facts.behind));
+        }
+        if facts.changed > 0 {
+            parts.push(format!("{} changed", facts.changed));
+        }
+    }
+    parts.join(" · ")
+}
+
+fn hook_line(health: &SignerHealth) -> Option<(&'static str, Color, String, Option<&'static str>)> {
+    let at = health
+        .hook_path
+        .as_deref()
+        .map(|p| format!(" ({})", sanitize_display(p, 512)))
+        .unwrap_or_default();
+    Some(match &health.hook {
+        HookHealth::Current { version } => (
+            "●",
+            COLOR_SUCCESS,
+            format!("commit-msg hook v{version}: writes the Signed-by-DID claim CI checks"),
+            None,
+        ),
+        HookHealth::Outdated { installed, current } => (
+            "▲",
+            COLOR_WARNING_ACCESSIBLE_RED,
+            format!(
+                "commit-msg hook OUTDATED (v{installed}, current v{current}){at}. Older hooks put \
+                 the Signed-by-DID claim above any `---` line, where verify-trust does not read \
+                 it, and those commits fail."
+            ),
+            Some("s rewrites the hook"),
+        ),
+        HookHealth::Newer { installed, current } => (
+            "●",
+            COLOR_SOFT_PURPLE,
+            format!(
+                "commit-msg hook v{installed} is newer than this openvtc knows (v{current}) — \
+                 fine if did-git-sign was upgraded"
+            ),
+            None,
+        ),
+        HookHealth::Foreign => (
+            "▲",
+            COLOR_WARNING_ACCESSIBLE_RED,
+            format!(
+                "the commit-msg hook{at} is not did-git-sign's, so nothing writes the \
+                 Signed-by-DID claim."
+            ),
+            Some("s rewrites the hook"),
+        ),
+        // Before anything is set up, the missing hook is not news.
+        HookHealth::Missing if !health.identity.any() => return None,
+        HookHealth::Missing => (
+            "▲",
+            COLOR_WARNING_ACCESSIBLE_RED,
+            format!("no commit-msg hook{at}, so no Signed-by-DID claim is written."),
+            Some("s writes the hook"),
+        ),
+        HookHealth::NowhereToLook => (
+            "○",
+            COLOR_ORANGE,
+            "no config directory to find did-git-sign's hook in".into(),
+            None,
+        ),
+    })
+}
+
 fn render_signing(lines: &mut Vec<Line<'static>>, view: &ReposView) {
     heading(lines, "Commit signing");
-    let Some(checked) = &view.signing.checked else {
+    let ws = &view.workspace;
+    let signer = match &ws.signer {
+        None => {
+            lines.push(Line::from(dim("    … reading this persona's signing key")));
+            return;
+        }
+        Some(Err(e)) => {
+            wrapped(lines, "○", COLOR_ORANGE, &sanitize_display(e, 512));
+            return;
+        }
+        Some(Ok(signer)) => signer,
+    };
+    let Some(health) = &ws.health else {
         lines.push(Line::from(dim("    … checking did-git-sign")));
         return;
     };
-    // The install, wherever did-git-sign put it.
-    for i in &checked.installs {
-        let (glyph, color, what) = if i.this_persona {
-            ("●", COLOR_SUCCESS, "did-git-sign set up for this persona")
-        } else {
-            ("▲", COLOR_ORANGE, "did-git-sign set up for a different key")
-        };
+    let id = &health.identity;
+    if id.ready() {
         wrapped(
             lines,
-            glyph,
-            color,
+            "●",
+            COLOR_SUCCESS,
             &format!(
-                "{what} ({} config {}) — key {}",
-                i.scope,
-                sanitize_display(&i.path, 512),
-                shorten_did(&i.key_id, 48)
+                "Signs as {} (profile '{}') — {}",
+                sanitize_display(&signer.label, 64),
+                sanitize_display(id.profile.as_deref().unwrap_or_default(), 64),
+                shorten_did(&signer.did_key_id, 56)
             ),
         );
-    }
-    if !checked.set_up() {
+    } else if id.any() {
+        wrapped(
+            lines,
+            "▲",
+            COLOR_WARNING_ACCESSIBLE_RED,
+            &format!(
+                "did-git-sign's identity for this persona is incomplete ({}).",
+                match (&id.profile, &id.credential_did, &id.include) {
+                    (_, None, _) => "no credential in the keyring",
+                    (None, _, _) => "no profile names it",
+                    (_, _, None) => "its signing settings are missing",
+                    _ => "unknown",
+                }
+            ),
+        );
+        fix(lines, "s sets it up again");
+    } else {
         wrapped(
             lines,
             "○",
             COLOR_ORANGE,
             &format!(
-                "did-git-sign is not set up for this persona (looked in {}). Run `did-git-sign \
-                 init` with this persona's DID; commits signed otherwise will not pass the check.",
-                if checked.looked.is_empty() {
-                    "no config location".to_string()
-                } else {
-                    checked
-                        .looked
-                        .iter()
-                        .map(|p| sanitize_display(p, 512))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
+                "did-git-sign is not set up for {}. s sets it up — openvtc grants it a \
+                 credential that can use this persona's key and nothing else. Cloning (c) or \
+                 signing a checkout (e) does it for you.",
+                sanitize_display(&signer.label, 64)
             ),
         );
     }
-    // The hook at each scope, the worst first; the fix, where there is one,
-    // goes on a line of its own: a command broken across a wrap can be neither
-    // read in one pass nor selected in one drag.
-    let headline = checked.headline();
-    let hooks: Vec<&HookCheck> = headline
-        .into_iter()
-        .chain(
-            checked
-                .hooks
-                .iter()
-                .filter(|h| !headline.is_some_and(|top| std::ptr::eq(*h, top))),
-        )
-        .collect();
-    let mut needs_fix = false;
-    for check in hooks {
-        let (glyph, color, line, fix) = hook_line(check);
-        needs_fix |= fix;
+    match &health.binary {
+        BinaryStatus::Found { version } => wrapped(
+            lines,
+            "●",
+            COLOR_SUCCESS,
+            &format!("did-git-sign {} on PATH", sanitize_display(version, 32)),
+        ),
+        BinaryStatus::TooOld { version } => {
+            wrapped(
+                lines,
+                "▲",
+                COLOR_WARNING_ACCESSIBLE_RED,
+                &format!(
+                    "did-git-sign {} is too old to be managed from here (needs {}.{} or later).",
+                    sanitize_display(version, 32),
+                    MIN_BINARY.0,
+                    MIN_BINARY.1
+                ),
+            );
+            fix(lines, "cargo install did-git-sign");
+        }
+        BinaryStatus::Missing => {
+            wrapped(
+                lines,
+                "▲",
+                COLOR_WARNING_ACCESSIBLE_RED,
+                "did-git-sign is not on PATH, and git runs it to sign every commit.",
+            );
+            fix(lines, "cargo install did-git-sign");
+        }
+    }
+    if let Some((glyph, color, line, remedy)) = hook_line(health) {
+        wrapped(lines, glyph, color, &line);
+        if let Some(remedy) = remedy {
+            fix(lines, remedy);
+        }
+    }
+    lines.push(Line::from(dim(format!(
+        "    Checkouts go under {}, cloned over {} — w to change.",
+        sanitize_display(&git_workspace::display_path(&ws.settings.root), 512),
+        ws.settings.protocol.label()
+    ))));
+}
+
+/// The local keys that apply to the highlighted or open repository.
+fn local_hints(lines: &mut Vec<Line<'static>>, view: &ReposView) {
+    let ws = &view.workspace;
+    let target = repos_workspace::target(view);
+    let checkout = target.as_ref().and_then(|r| ws.checkouts.get(r));
+    let mut keys = Vec::new();
+    match checkout {
+        None if target.is_some() => keys.extend(["c clone", "u use existing"]),
+        None => {}
+        Some(c) => {
+            if ws.signs_as_me(c) != Some(true) {
+                keys.push("e sign here");
+            }
+            if !matches!(c.signing, CheckoutSigning::Off) {
+                keys.push("E stop signing");
+            }
+            keys.push("p copy path");
+        }
+    }
+    keys.push("s set up signing");
+    if ws.health.as_ref().is_some_and(|h| h.identity.any()) {
+        keys.push("S remove");
+    }
+    keys.push("w workspace");
+    lines.push(Line::from(dim(format!("    {}", keys.join("   ")))));
+}
+
+/// `HEAD`, and whether it would pass `verify-trust` as this persona.
+fn head_line(view: &ReposView, facts: &CheckoutFacts) -> Option<(&'static str, Color, String)> {
+    let head = facts.head.as_ref()?;
+    let me = view.workspace.did_key_id();
+    let subject = sanitize_display(&head.subject, 72);
+    let commit = format!("HEAD {} {subject}", sanitize_display(&head.short, 16));
+    let claim = head.signed_by_did.as_deref();
+    Some(match (head.signature, claim) {
+        ('N', _) => ("○", COLOR_ORANGE, format!("{commit} — not signed")),
+        ('B', _) => (
+            "▲",
+            COLOR_WARNING_ACCESSIBLE_RED,
+            format!("{commit} — BAD signature"),
+        ),
+        (_, None) => (
+            "▲",
+            COLOR_WARNING_ACCESSIBLE_RED,
+            format!("{commit} — signed, but carries no Signed-by-DID claim (CI: noSignerDid)"),
+        ),
+        (_, Some(c)) if Some(c) == me => ("●", COLOR_SUCCESS, format!("{commit} — signed as you")),
+        (_, Some(c)) => (
+            "▲",
+            COLOR_ORANGE,
+            format!("{commit} — signed as {}", shorten_did(c, 48)),
+        ),
+    })
+}
+
+/// A repository's checkout on this machine, on its own screen.
+fn render_local(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str) {
+    heading(lines, "On this machine");
+    let ws = &view.workspace;
+    let Some(checkout) = ws.checkouts.get(resource) else {
+        let dest = RepoCoords::parse(resource)
+            .map(|c| git_workspace::display_path(&c.default_path(&ws.settings.root)))
+            .unwrap_or_default();
+        wrapped(
+            lines,
+            "○",
+            COLOR_DARK_GRAY,
+            &format!(
+                "Not checked out here. c clones it into {} over {} and makes it sign as you; \
+                 u uses a checkout you already have.",
+                sanitize_display(&dest, 512),
+                ws.settings.protocol.label()
+            ),
+        );
+        return;
+    };
+    let CheckoutView { facts, signing } = checkout;
+    lines.push(Line::from(vec![dim("    "), text(checkout_brief(facts))]));
+    if !facts.is_repo {
+        wrapped(
+            lines,
+            "▲",
+            COLOR_WARNING_ACCESSIBLE_RED,
+            "This is not a git checkout.",
+        );
+        return;
+    }
+    if !facts.origin_matches {
+        wrapped(
+            lines,
+            "▲",
+            COLOR_ORANGE,
+            &match &facts.origin {
+                Some(o) => format!(
+                    "origin is {}, not this repository.",
+                    sanitize_display(o, 256)
+                ),
+                None => "no origin remote.".into(),
+            },
+        );
+    }
+    match (signing, ws.signs_as_me(checkout)) {
+        (CheckoutSigning::On { here, .. }, Some(true)) => wrapped(
+            lines,
+            "●",
+            COLOR_SUCCESS,
+            &format!(
+                "Commits are signed as you{}",
+                if *here {
+                    ""
+                } else {
+                    " (through a directory or global setting)"
+                }
+            ),
+        ),
+        (
+            CheckoutSigning::On {
+                did_key_id,
+                profile,
+                ..
+            },
+            _,
+        ) => {
+            wrapped(
+                lines,
+                "▲",
+                COLOR_WARNING_ACCESSIBLE_RED,
+                &format!(
+                    "Commits are signed as {}{} — not this community's persona, so CI refuses \
+                     them.",
+                    shorten_did(did_key_id, 48),
+                    profile
+                        .as_deref()
+                        .map(|p| format!(" (profile '{}')", sanitize_display(p, 64)))
+                        .unwrap_or_default()
+                ),
+            );
+            fix(lines, "e signs here as you");
+        }
+        (CheckoutSigning::NoClaim { hooks_path, .. }, _) => {
+            wrapped(
+                lines,
+                "▲",
+                COLOR_WARNING_ACCESSIBLE_RED,
+                &format!(
+                    "Signed, but core.hooksPath is {}, so did-git-sign's hook never runs and no \
+                     Signed-by-DID claim is written.",
+                    sanitize_display(hooks_path, 256)
+                ),
+            );
+        }
+        (CheckoutSigning::Off, _) => {
+            wrapped(
+                lines,
+                "○",
+                COLOR_ORANGE,
+                "Commits here are not signed by did-git-sign; the community's check refuses them.",
+            );
+            fix(lines, "e signs here as you");
+        }
+    }
+    if let Some((glyph, color, line)) = head_line(view, facts) {
         wrapped(lines, glyph, color, &line);
     }
-    if needs_fix {
-        lines.push(Line::from(vec![
-            dim("      fix: "),
-            Span::styled(
-                "re-run `did-git-sign init`",
-                Style::default().fg(COLOR_ORANGE).bold(),
-            ),
-        ]));
+}
+
+/// The workspace overlays: a form, or an armed removal.
+fn render_workspace_overlay(lines: &mut Vec<Line<'static>>, view: &ReposView) {
+    match &view.workspace.form {
+        Some(WorkspaceForm::Settings {
+            root,
+            protocol,
+            error: why,
+        }) => {
+            heading(lines, "Workspace");
+            field_label(lines, "Clone repositories under", true);
+            input(lines, root, true, "~/src");
+            lines.push(Line::from(vec![
+                dim("      protocol: "),
+                text(protocol.label()),
+                dim(match protocol {
+                    git_workspace::CloneProtocol::Https => {
+                        "  (a private repository needs a git credential helper)"
+                    }
+                    git_workspace::CloneProtocol::Ssh => {
+                        "  (uses the SSH key your forge account knows, from ssh-agent)"
+                    }
+                }),
+            ]));
+            lines.push(Line::from(dim(
+                "      Each repository goes in <dir>/<forge>/<owner>/<repo>.",
+            )));
+            if let Some(why) = why {
+                error(lines, why);
+            }
+            hints(lines, "⏎ save   Tab switch HTTPS/SSH   Esc cancel");
+        }
+        Some(WorkspaceForm::UsePath {
+            resource,
+            path,
+            error: why,
+        }) => {
+            heading(
+                lines,
+                &format!(
+                    "Use an existing checkout of {}",
+                    git_ns::short_resource(resource)
+                ),
+            );
+            field_label(lines, "Path", true);
+            input(lines, path, true, "~/code/widgets");
+            lines.push(Line::from(dim(
+                "      Its origin must be this repository. It is remembered, and set to sign as you.",
+            )));
+            if let Some(why) = why {
+                error(lines, why);
+            }
+            hints(lines, "⏎ use   Esc cancel");
+        }
+        None => {}
+    }
+    if let Some(WorkspaceChange::RemoveIdentity) = &view.workspace.confirm {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "    Remove did-git-sign's identity for this persona? Checkouts using it stop \
+             signing, and its credential is revoked at the VTA.",
+            Style::default().fg(COLOR_ORANGE).bold(),
+        )));
+        lines.push(Line::from(dim("    y confirm · any other key cancels")));
     }
 }
 
@@ -596,6 +910,8 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
             None => String::new(),
         }),
     ]));
+
+    render_local(lines, view, resource);
 
     // Creation, while it runs: the §5.3 steps as the record reports them.
     if matches!(status, RepoStatus::Creating { .. }) {
@@ -728,6 +1044,9 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
         render_add(lines, view, form);
         return;
     }
+    if view.workspace.form.is_some() {
+        return;
+    }
     let keys = if view.governs(resource) && !drift.is_empty() {
         "↑/↓ navigate   a add   x revoke   t transfer   A archive   v revert drift   l link account   r refresh   Esc back"
     } else if view.governs(resource) {
@@ -736,6 +1055,7 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
         "↑/↓ navigate   x resign your right   l link account   r refresh   Esc back"
     };
     hints(lines, keys);
+    local_hints(lines, view);
 }
 
 fn field_label(lines: &mut Vec<Line<'static>>, label: &str, focused: bool) {
@@ -1037,10 +1357,10 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use crate::state_handler::main_page::repos::{
-        InstallFound, ReposState, SigningChecked, SigningHealth,
-    };
+    use crate::state_handler::main_page::repos::{ReposState, Workspace};
     use openvtc_core::config::account::PersonaId;
+    use openvtc_core::git_signing::{IdentityStatus, PersonaSigner};
+    use openvtc_core::git_workspace::{CloneProtocol, HeadCommit, WorkspaceSettings};
     use serde_json::json;
     use std::sync::Arc;
 
@@ -1105,56 +1425,239 @@ mod tests {
         assert!(out.contains("n new repo"), "{out}");
     }
 
-    #[test]
-    fn an_outdated_hook_says_to_rerun_init() {
-        let mut v = loaded();
-        v.signing = SigningHealth {
-            checked: Some(SigningChecked {
-                installs: vec![InstallFound {
-                    scope: "repository",
-                    path: "/repo/.did-git-sign.json".into(),
-                    key_id: format!("{BOB}#key-0"),
-                    this_persona: true,
-                }],
-                looked: Vec::new(),
-                hooks: vec![
-                    HookCheck {
-                        scope: HookScope::Here,
-                        path: Some("/repo/.git/did-git-sign-hooks/commit-msg".into()),
-                        health: HookHealth::Current { version: 2 },
-                    },
-                    HookCheck {
-                        scope: HookScope::Global,
-                        path: Some("/home/me/.config/did-git-sign/hooks/commit-msg".into()),
-                        health: HookHealth::Outdated {
-                            installed: 1,
-                            current: 2,
-                        },
-                    },
-                ],
+    const KEY: &str = "did:webvh:QmBobScid2:acme-vtc.example:bob#key-0";
+
+    fn with_workspace(mut v: ReposView, identity: IdentityStatus, hook: HookHealth) -> ReposView {
+        v.workspace = Workspace {
+            settings: WorkspaceSettings {
+                root: "/w".into(),
+                protocol: CloneProtocol::Https,
+                ..WorkspaceSettings::default()
+            },
+            signer: Some(Ok(PersonaSigner {
+                did_key_id: KEY.into(),
+                vta_key_id: "k-1".into(),
+                verifying_key: [0; 32],
+                context: "openvtc/bob".into(),
+                label: "Bob".into(),
+            })),
+            health: Some(SignerHealth {
+                identity,
+                binary: BinaryStatus::Found {
+                    version: "0.15.1".into(),
+                },
+                hook,
+                hook_path: Some("/home/me/.config/did-git-sign/hooks/commit-msg".into()),
             }),
+            ..Workspace::default()
         };
+        v
+    }
+
+    fn ready() -> IdentityStatus {
+        IdentityStatus {
+            profile: Some("bob".into()),
+            credential_did: Some("did:key:z6Mk".into()),
+            include: Some("/home/me/.config/did-git-sign/gitconfig/bob.gitconfig".into()),
+            default: true,
+        }
+    }
+
+    fn checkout(signing: CheckoutSigning, head: Option<HeadCommit>) -> CheckoutView {
+        CheckoutView {
+            facts: CheckoutFacts {
+                path: "/w/github.com/acme/gadgets".into(),
+                is_repo: true,
+                origin: Some("https://github.com/acme/gadgets.git".into()),
+                origin_matches: true,
+                branch: Some("main".into()),
+                upstream: true,
+                ahead: 2,
+                changed: 1,
+                head,
+                ..CheckoutFacts::default()
+            },
+            signing,
+        }
+    }
+
+    #[test]
+    fn an_outdated_hook_says_s_rewrites_it() {
+        let v = with_workspace(
+            loaded(),
+            ready(),
+            HookHealth::Outdated {
+                installed: 1,
+                current: 2,
+            },
+        );
         let out = rendered(v);
-        assert!(out.contains("OUTDATED"), "{out}");
-        assert!(out.contains("did-git-sign init"), "{out}");
-        // Both scopes, each with the file looked at; the worst first.
-        let global = out.find("global: commit-msg hook OUTDATED").unwrap();
-        let here = out.find("here: commit-msg hook v2 OK").unwrap();
-        assert!(global < here, "{out}");
+        assert!(out.contains("Signs as Bob (profile 'bob')"), "{out}");
+        assert!(out.contains("did-git-sign 0.15.1 on PATH"), "{out}");
+        assert!(out.contains("OUTDATED (v1, current v2)"), "{out}");
+        assert!(out.contains("fix: s rewrites the hook"), "{out}");
         assert!(
-            out.contains("/home/me/.config/did-git-sign/hooks/commit-msg"),
+            out.contains("Checkouts go under /w, cloned over HTTPS"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn nothing_set_up_says_how_and_hides_the_missing_hook() {
+        let out = rendered(with_workspace(
+            loaded(),
+            IdentityStatus::default(),
+            HookHealth::Missing,
+        ));
         assert!(
-            out.contains("/repo/.git/did-git-sign-hooks/commit-msg"),
+            out.contains("did-git-sign is not set up for Bob. s sets it up"),
             "{out}"
         );
-        // A repository-only install is set up, not "not set up".
+        assert!(!out.contains("no commit-msg hook"), "{out}");
+        assert!(!out.contains("S remove"), "{out}");
+    }
+
+    #[test]
+    fn a_missing_binary_says_how_to_install_it() {
+        let mut v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });
+        if let Some(h) = v.workspace.health.as_mut() {
+            h.binary = BinaryStatus::Missing;
+        }
+        let out = rendered(v);
+        assert!(out.contains("not on PATH"), "{out}");
+        assert!(out.contains("fix: cargo install did-git-sign"), "{out}");
+    }
+
+    #[test]
+    fn the_list_says_what_is_on_this_machine() {
+        let v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });
+        let out = rendered(v.clone());
+        assert!(out.contains("THIS MACHINE"), "{out}");
+        assert!(out.contains("not cloned"), "{out}");
+        assert!(out.contains("c clone   u use existing"), "{out}");
+
+        let mut cloned = v;
+        cloned.workspace.checkouts.insert(
+            "github.com/acme/gadgets".into(),
+            checkout(
+                CheckoutSigning::On {
+                    did_key_id: KEY.into(),
+                    profile: Some("bob".into()),
+                    here: true,
+                },
+                None,
+            ),
+        );
+        let out = rendered(cloned);
+        assert!(out.contains("signed"), "{out}");
         assert!(
-            out.contains("set up for this persona (repository config"),
+            out.contains("/w/github.com/acme/gadgets · main · ↑2 ↓0 · 1 changed"),
             "{out}"
         );
-        assert!(!out.contains("not set up"), "{out}");
+        assert!(out.contains("E stop signing   p copy path"), "{out}");
+        assert!(!out.contains("e sign here"), "{out}");
+    }
+
+    #[test]
+    fn a_repository_shows_its_checkout_and_head() {
+        let mut v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });
+        v.screen = ReposScreen::Repo {
+            resource: "github.com/acme/gadgets".into(),
+        };
+        let out = rendered(v.clone());
+        assert!(out.contains("On this machine"), "{out}");
+        let dest = std::path::Path::new("/w")
+            .join("github.com")
+            .join("acme")
+            .join("gadgets")
+            .display()
+            .to_string();
+        assert!(out.contains(&format!("c clones it into {dest}")), "{out}");
+
+        v.workspace.checkouts.insert(
+            "github.com/acme/gadgets".into(),
+            checkout(
+                CheckoutSigning::Off,
+                Some(HeadCommit {
+                    short: "abc1234".into(),
+                    subject: "wip".into(),
+                    signature: 'G',
+                    signed_by_did: None,
+                }),
+            ),
+        );
+        let out = rendered(v.clone());
+        assert!(out.contains("not signed by did-git-sign"), "{out}");
+        assert!(out.contains("fix: e signs here as you"), "{out}");
+        assert!(out.contains("noSignerDid"), "{out}");
+
+        v.workspace.checkouts.insert(
+            "github.com/acme/gadgets".into(),
+            checkout(
+                CheckoutSigning::On {
+                    did_key_id: KEY.into(),
+                    profile: Some("bob".into()),
+                    here: true,
+                },
+                Some(HeadCommit {
+                    short: "def5678".into(),
+                    subject: "feat: thing".into(),
+                    signature: 'G',
+                    signed_by_did: Some(KEY.into()),
+                }),
+            ),
+        );
+        let out = rendered(v);
+        assert!(out.contains("Commits are signed as you"), "{out}");
+        assert!(
+            out.contains("HEAD def5678 feat: thing — signed as you"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn another_identity_in_a_checkout_is_called_out() {
+        let mut v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });
+        v.screen = ReposScreen::Repo {
+            resource: "github.com/acme/gadgets".into(),
+        };
+        v.workspace.checkouts.insert(
+            "github.com/acme/gadgets".into(),
+            checkout(
+                CheckoutSigning::On {
+                    did_key_id: "did:webvh:other:example#key-0".into(),
+                    profile: Some("work".into()),
+                    here: false,
+                },
+                None,
+            ),
+        );
+        let out = rendered(v);
+        assert!(out.contains("not this community's persona"), "{out}");
+        assert!(out.contains("(profile 'work')"), "{out}");
+    }
+
+    #[test]
+    fn the_workspace_forms_and_removal_render() {
+        let mut v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });
+        v.workspace.form = Some(WorkspaceForm::Settings {
+            root: "~/code".into(),
+            protocol: CloneProtocol::Ssh,
+            error: Some("Use an absolute path".into()),
+        });
+        let out = rendered(v.clone());
+        assert!(out.contains("Clone repositories under"), "{out}");
+        assert!(out.contains("~/code"), "{out}");
+        assert!(out.contains("protocol: SSH"), "{out}");
+        assert!(out.contains("Use an absolute path"), "{out}");
+        assert!(out.contains("⏎ save"), "{out}");
+        assert!(!out.contains("⏎ open"), "a form owns the footer: {out}");
+
+        v.workspace.form = None;
+        v.workspace.confirm = Some(WorkspaceChange::RemoveIdentity);
+        let out = rendered(v);
+        assert!(out.contains("revoked at the VTA"), "{out}");
+        assert!(out.contains("y confirm"), "{out}");
     }
 
     /// Everything the VTC supplies is cleaned before it is drawn: a reason
