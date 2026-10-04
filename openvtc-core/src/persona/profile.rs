@@ -414,12 +414,53 @@ pub async fn delete(
     client: &VtaClient,
     profile_id: &str,
     unbind: bool,
-) -> Result<(), OpenVTCError> {
-    client
+) -> Result<Deleted, OpenVTCError> {
+    match client
         .persona_profile_delete(profile_id, unbind, None)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona profile delete failed: {e}")))?;
-    Ok(())
+    {
+        Ok(_) => Ok(Deleted::Done),
+        Err(e) => match worn_by(&e.to_string()) {
+            Some(n) if !unbind => Ok(Deleted::Worn(n)),
+            _ => Err(OpenVTCError::Vta(format!(
+                "persona profile delete failed: {e}"
+            ))),
+        },
+    }
+}
+
+/// What a [`delete`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Deleted {
+    Done,
+    /// Refused because this many personas still wear the face, and the delete
+    /// did not say to take it off them.
+    ///
+    /// Not an error: the caller decides who wears what from its own binding
+    /// map, and that map only covers this account's memberships. A persona
+    /// wearing the face anywhere else — another client sharing the VTA, or a
+    /// binding made with `pnm` — is invisible until the VTA refuses, and the
+    /// right answer then is to ask again with that consequence named.
+    Worn(usize),
+}
+
+/// How many personas the VTA said wear a face, read from a `delete:bound`
+/// refusal.
+///
+/// Read from the message because the SDK surfaces a trust-task rejection as
+/// `trust task failed [{code}]: {message}` and drops the payload's `details`
+/// (which name the persona DIDs). `None` for any other failure; an unreadable
+/// count still means "worn", so it reads as one.
+fn worn_by(error: &str) -> Option<usize> {
+    let (_, rest) = error.split_once("delete:bound]")?;
+    let count = rest
+        .trim_start_matches(':')
+        .trim_start()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(1);
+    Some(count)
 }
 
 /// Read a string member, defaulting to empty rather than failing the whole
@@ -435,6 +476,29 @@ fn string_at(value: &Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use crate::persona::claim_types::Registry;
+
+    /// The refusal as the SDK words it, from a VTA whose face was worn by a
+    /// persona the caller could not see.
+    #[test]
+    fn a_bound_refusal_reads_as_worn_with_its_count() {
+        let refusal = |n: &str| {
+            format!(
+                "protocol error: trust task failed [persona/profile/delete:bound]: {n} \
+                 persona(s) are bound to this profile"
+            )
+        };
+        assert_eq!(super::worn_by(&refusal("1")), Some(1));
+        assert_eq!(super::worn_by(&refusal("3")), Some(3));
+        // Worded differently, still the bound refusal: worn by someone.
+        assert_eq!(
+            super::worn_by("trust task failed [persona/profile/delete:bound]: in use"),
+            Some(1)
+        );
+        assert_eq!(
+            super::worn_by("trust task failed [persona/profile/put:versionConflict]: 1 behind"),
+            None
+        );
+    }
 
     /// The compiled copy — spec 0.1 — as the table these tests resolve
     /// against. A unit test must not depend on what a live agent happens to

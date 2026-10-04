@@ -119,6 +119,8 @@ pub(crate) enum PersonaJob {
     },
     ProfileDelete {
         profile_id: String,
+        /// Carried for the question a `Worn` refusal asks again.
+        name: String,
         unbind: bool,
     },
     ProfileRetire {
@@ -1167,8 +1169,15 @@ fn confirm_yes(state: &mut State) -> PersonaEffect {
             cascade,
         }),
         PersonaConfirm::DeleteProfile {
-            profile_id, unbind, ..
-        } => PersonaEffect::Job(PersonaJob::ProfileDelete { profile_id, unbind }),
+            profile_id,
+            name,
+            unbind,
+            ..
+        } => PersonaEffect::Job(PersonaJob::ProfileDelete {
+            profile_id,
+            name,
+            unbind,
+        }),
         PersonaConfirm::RetireFace { profile_id, .. } => {
             PersonaEffect::Job(PersonaJob::ProfileRetire { profile_id })
         }
@@ -1816,12 +1825,24 @@ impl PersonaJobRun {
                 .err()
                 .map(|e| format!("{e}")),
             },
-            PersonaJob::ProfileDelete { profile_id, unbind } => PersonaOutcome::Written {
-                verb: "Deleted the face",
-                error: profile::delete(&client, &profile_id, unbind)
-                    .await
-                    .err()
-                    .map(|e| format!("{e}")),
+            PersonaJob::ProfileDelete {
+                profile_id,
+                name,
+                unbind,
+            } => match profile::delete(&client, &profile_id, unbind).await {
+                Ok(profile::Deleted::Done) => PersonaOutcome::Written {
+                    verb: "Deleted the face",
+                    error: None,
+                },
+                Ok(profile::Deleted::Worn(worn)) => PersonaOutcome::ProfileWorn {
+                    profile_id,
+                    name,
+                    worn,
+                },
+                Err(e) => PersonaOutcome::Written {
+                    verb: "Deleted the face",
+                    error: Some(format!("{e}")),
+                },
             },
             PersonaJob::ProfileGet { profile_id, edit } => PersonaOutcome::ProfileRead {
                 edit,
@@ -2156,6 +2177,14 @@ pub(crate) enum PersonaOutcome {
     /// behind. Distinct from a [`Written`](Self::Written) success, whose whole
     /// message is its verb.
     Deleted { message: String },
+    /// A face delete the VTA refused because personas this account cannot see
+    /// still wear it. Asked again, with that named, rather than shown as an
+    /// error the holder has no way to act on.
+    ProfileWorn {
+        profile_id: String,
+        name: String,
+        worn: usize,
+    },
     ProfileRead {
         edit: bool,
         result: Result<ProfileDetail, String>,
@@ -2450,6 +2479,34 @@ impl PersonaOutcome {
                     view.cursor = 0;
                     view.working = false;
                 }
+            }
+
+            PersonaOutcome::ProfileWorn {
+                profile_id,
+                name,
+                worn,
+            } => {
+                // The binding map only covers this account's memberships, so
+                // the first question went out without the consequence. It is
+                // the same question with the consequence named now — never a
+                // silent retry with `unbind`, which would take the face off
+                // personas the holder was never told about.
+                p.refresh_queued = true;
+                let message = format!(
+                    "\"{name}\" is worn by {worn} persona{} outside your communities here — \
+                     another client sharing this VTA, or a binding made with pnm. y deletes it \
+                     and takes it off {}.",
+                    if worn == 1 { "" } else { "s" },
+                    if worn == 1 { "that persona" } else { "them" },
+                );
+                p.status_message = Some(message.clone());
+                p.confirm = PersonaConfirm::DeleteProfile {
+                    profile_id,
+                    name,
+                    unbind: true,
+                    untell: None,
+                };
+                state.main_page.log(message);
             }
 
             PersonaOutcome::Spoken { profile_id, untell } => {
@@ -3473,6 +3530,36 @@ mod tests {
             open(false, None),
             (vec!["01A".to_string(), "01GONE".to_string()], 0)
         );
+    }
+
+    /// A face worn by a persona outside this account's memberships — invisible
+    /// to the binding map, so first asked about as unworn — is asked about
+    /// again once the VTA refuses, with the consequence named and `unbind` set.
+    /// Never retried with `unbind` on the holder's behalf.
+    #[test]
+    fn a_face_worn_elsewhere_is_asked_about_again_not_failed() {
+        let mut state = State::default();
+        PersonaOutcome::ProfileWorn {
+            profile_id: "01F".into(),
+            name: "OSS Developer".into(),
+            worn: 1,
+        }
+        .apply(&mut state);
+
+        assert!(matches!(
+            &personas(&state).confirm,
+            PersonaConfirm::DeleteProfile { profile_id, unbind: true, .. } if profile_id == "01F"
+        ));
+        assert!(
+            personas(&state)
+                .status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("worn by 1 persona outside"))
+        );
+        match apply(&mut state, &PersonaAction::ConfirmYes) {
+            PersonaEffect::Job(PersonaJob::ProfileDelete { unbind, .. }) => assert!(unbind),
+            _ => panic!("y must send the delete with unbind"),
+        }
     }
 
     /// Moving tabs drops what was armed or opened on the one being left: a `y`
