@@ -2764,6 +2764,10 @@ pub struct IssuedRow {
     pub issued: String,
     pub valid_until: String,
     pub withdrawal: Option<String>,
+    /// The community has recorded the withdrawal. Until it has — including
+    /// after it refused one — sending it again is allowed: withdrawal
+    /// converges.
+    pub withdrawal_recorded: bool,
 }
 
 /// A persona an application can use.

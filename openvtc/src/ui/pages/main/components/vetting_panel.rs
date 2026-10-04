@@ -1799,7 +1799,15 @@ fn issued(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(hint("w: withdraw"));
+    // What `w` does for the highlighted statement: nothing once recorded, and
+    // a resend while a withdrawal is still unconfirmed.
+    match v.issued.get(v.selected) {
+        Some(row) if row.withdrawal_recorded => {}
+        Some(row) if row.withdrawal.is_some() => {
+            lines.push(hint("w: send the withdrawal again"));
+        }
+        _ => lines.push(hint("w: withdraw")),
+    }
     lines.push(hint(DESK_KEYS));
 }
 
@@ -1932,6 +1940,39 @@ mod desk_tests {
             "{text}"
         );
         assert!(!text.contains("decline  p:"), "{text}");
+    }
+
+    /// A withdrawal the community has not recorded — refused, or never heard —
+    /// can be sent again, and the key says so; a recorded one offers nothing.
+    #[test]
+    fn an_unrecorded_withdrawal_can_be_sent_again() {
+        use crate::state_handler::main_page::content::{DeskView, IssuedRow};
+        let row = |withdrawal: Option<&str>, recorded| IssuedRow {
+            id: "s1".into(),
+            applicant: "did:example:applicant".into(),
+            community: "VTC".into(),
+            method: "video call".into(),
+            issued: "2026-10-04".into(),
+            valid_until: "2027-02-01".into(),
+            withdrawal: withdrawal.map(str::to_string),
+            withdrawal_recorded: recorded,
+        };
+        let drawn_with = |r| {
+            drawn(&VettingState {
+                tab: VettingTab::Desk,
+                desk_view: DeskView::Issued,
+                issued: vec![r].into(),
+                ..VettingState::default()
+            })
+        };
+        assert!(drawn_with(row(None, false)).contains("w: withdraw"));
+        let pending = drawn_with(row(Some("withdrawal sent — not yet recorded"), false));
+        assert!(
+            pending.contains("w: send the withdrawal again"),
+            "{pending}"
+        );
+        let recorded = drawn_with(row(Some("withdrawn — recorded 2026-10-05"), true));
+        assert!(!recorded.contains("w: "), "{recorded}");
     }
 
     /// Someone no community has named. The page must say so rather than simply

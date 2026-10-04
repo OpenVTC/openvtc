@@ -464,6 +464,10 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                 Some(at) => format!("withdrawn — recorded {}", at.format("%Y-%m-%d")),
                 None => "withdrawal sent — not yet recorded".to_string(),
             }),
+            withdrawal_recorded: s
+                .withdrawal
+                .as_ref()
+                .is_some_and(|w| w.recorded_at.is_some()),
         })
         .collect();
 
@@ -891,12 +895,34 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             }
         }
         VettingAction::StartAttest => {
-            let v = page(ctx);
-            match v.desk.get(v.selected).cloned() {
+            // The form opens on the method the session was opened with: the
+            // statement says how the person was checked, and a default of "in
+            // person" after a video call is a false statement one Enter away.
+            let selected = {
+                let v = page(ctx);
+                v.desk.get(v.selected).cloned()
+            };
+            match selected {
                 Some(row) if row.stage == DeskStage::Card => {
-                    v.mode = VettingMode::Attest {
+                    let method_index = match ctx
+                        .config
+                        .private
+                        .vetting
+                        .desk_entry(&row.request_id)
+                        .map(|e| &e.state)
+                    {
+                        Some(DeskState::CardReceived { session, .. }) => VETTING_METHODS
+                            .iter()
+                            .position(|m| *m == session.method)
+                            .unwrap_or(0),
+                        _ => 0,
+                    };
+                    page(ctx).mode = VettingMode::Attest {
                         request_id: row.request_id,
-                        form: AttestForm::default(),
+                        form: AttestForm {
+                            method_index,
+                            ..AttestForm::default()
+                        },
                     };
                 }
                 Some(_) => status(ctx, "You can attest once their card has arrived."),
@@ -929,13 +955,20 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
         VettingAction::ArmWithdraw => {
             let v = page(ctx);
             match v.issued.get(v.selected).cloned() {
-                Some(row) if row.withdrawal.is_none() => {
+                // Sent but not recorded is not withdrawn: the community may
+                // have refused it, or never heard it, and the core allows the
+                // notice again until it is recorded. Refusing here left a
+                // refused withdrawal with no way forward.
+                Some(row) if !row.withdrawal_recorded => {
                     v.mode = VettingMode::Withdraw {
                         statement_id: row.id,
                         reason_index: 0,
                     };
                 }
-                Some(_) => status(ctx, "That statement is already withdrawn."),
+                Some(_) => status(
+                    ctx,
+                    "That statement is already withdrawn — the community recorded it.",
+                ),
                 None => {}
             }
         }
