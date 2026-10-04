@@ -26,7 +26,7 @@ arbitrary = ["dep:arbitrary", "chrono/arbitrary"]
 [dependencies]
 # Hidden-vetter admission (ZKP). Published from this workspace before this
 # crate; its version moves with the workspace version.
-openvtc-vetting-pcs = { version = "0.3.1", path = "../openvtc-vetting-pcs" }
+openvtc-vetting-pcs = { version = "0.4.0", path = "../openvtc-vetting-pcs" }
 
 aes-gcm.workspace = true
 anyhow.workspace = true

@@ -6,6 +6,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-04
+
+The vetted-admission release. A person can now join a community by being
+vetted by its existing members, and those members can run the vetting from
+OpenVTC. The detailed entries follow the summary below.
+
+### Major changes
+
+- **Vetted admission (peer identity vetting).** There is a new **Vetting**
+  page with two tabs:
+  - **Applications** (applicant side): read a community's requirements before
+    disclosing anything, ask vetters with a ticket, run a session that shows a
+    match code, send a signed Vetting Card built from a persona face, collect
+    `vetted/1` statements against a checklist, and submit once.
+  - **Vetting desk** (vetter side): requests, tickets with QR links (desk mode
+    included), a guided session, issued statements, and withdrawal through the
+    community.
+
+  Vetters are named by their community's `vetter` role credential, which
+  applicants verify and check for revocation before they spend time on a
+  session. There is a vetter registry (find vetters, and publish your own
+  profile), community branding, and an opt-in hidden-vetter mode
+  (`openvtc-vetting-pcs`) for communities that publish it (#294–#297, #302,
+  #325, #355, #358).
+- **A guided join.** Joining a community that vets offers every way in at
+  once: start an application, join anyway, or cancel. A persona and a face can
+  be made without leaving the flow. Requirements are read from the endpoint the
+  community publishes, a community's questions are answered through a
+  disclosure, and you can apply as a second persona. The join speaks
+  `join-requests` 0.3 and falls back to 0.2 (#342–#359, #365, #412).
+- **DTG Credentials v1.** Every credential conforms to DTG Credentials v1 and
+  the DTG VSC predicate registry: role VACs, `vetted/1` and `witnessed/1`
+  statements, and `issuerScope`. The community's own identity check is kept as
+  a `vetted/1` and offered as personhood evidence (#397, #408).
+- **Personas, faces and worlds.** One **My Identity** pane covers your own
+  identity. It shows what each face presents, masks sensitive facts, and lets
+  you make a face for a community, retire and reinstate faces, and see where a
+  face has been shown (#275–#290, #362, #367–#370, #378).
+- **Communities.**
+  - Each community can live in its own VTA context.
+  - A membership can be renewed from the Communities view.
+  - An approved join whose credential never arrived can be rescued.
+  - Rejection and removal reasons are kept and shown.
+  - A Repos panel covers a community's git namespaces (#298, #301, #334,
+    #377–#391, #398, #406, #411).
+- **Security.** Every Trust Task request is signed as the persona. Issued
+  credentials are verified before they are stored. Decisions about who said
+  something rest on a proof, not on the sender, and documents whose specs
+  require a proof now carry one (#371, #380–#390).
+- **Transport and setup.** TSP Rev 3 is supported throughout, including joins,
+  leaves and later traffic over TSP. An account can be rebuilt from what the
+  VTA holds, and setup recovers an existing Trust Context instead of
+  overwriting it (#247–#250, #333, #413, #415).
+- **TUI.** Built-in, custom and imported themes, with live switching,
+  automatic light/dark, accessible themes and `NO_COLOR` (#299, #300).
+  Network-bound checks no longer freeze the screen.
+
+### Breaking
+
+- **Credentials stored in a pre-v1 shape are set aside on load** and listed as
+  retired. Ask the peer or community to issue fresh ones (#397).
+- **Relationship credentials are issued under the relationship DID**, not the
+  persona DID (#255).
+- **What a community may call a face is now kept and shown**, which changes the
+  stored persona records (#362).
+- Peers and communities must speak the signed Trust Task forms this release
+  sends. Unsigned requests and replies taken on the sender's word are refused.
+
 ### Added
 
 - **Joining speaks `join-requests` 0.3 and 0.2.** A community on VTI-13
