@@ -823,7 +823,9 @@ pub enum PersonaConfirm {
     ///
     /// `unbind` is the same decision one layer up: it makes every persona
     /// presenting under this profile present nothing, and it is decided from
-    /// the binding map rather than discovered from a refusal.
+    /// the binding map rather than discovered from a refusal — except where
+    /// the map cannot see: a persona outside this account's memberships. That
+    /// refusal re-asks with `unbind` set (`PersonaOutcome::ProfileWorn`).
     DeleteProfile {
         profile_id: String,
         name: String,
