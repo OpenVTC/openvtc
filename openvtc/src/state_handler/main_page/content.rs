@@ -3032,6 +3032,9 @@ pub struct CredentialsState {
     /// joined, one or two entries per community (reuses [`VrcSummary`]).
     /// `Arc<[…]>` for cheap per-frame clones.
     pub membership: Arc<[VrcSummary]>,
+    /// Vetting statements we hold, across every application (reuses
+    /// [`VrcSummary`]). `Arc<[…]>` for cheap per-frame clones.
+    pub vetting: Arc<[VrcSummary]>,
     /// Which tab is active
     pub selected_tab: CredentialTab,
     /// Currently selected index in the active tab's list
@@ -3050,14 +3053,39 @@ pub struct CredentialsState {
     pub confirm_delete: Option<String>,
 }
 
+impl CredentialsState {
+    /// The list the selected tab shows.
+    #[must_use]
+    pub fn active_list(&self) -> &Arc<[VrcSummary]> {
+        match self.selected_tab {
+            CredentialTab::Received => &self.received,
+            CredentialTab::Issued => &self.issued,
+            CredentialTab::Membership => &self.membership,
+            CredentialTab::Vetting => &self.vetting,
+        }
+    }
+}
+
 /// Which credential tab is active.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CredentialTab {
     #[default]
     Received,
     Issued,
-    /// Membership (VMC) + role (VEC) credentials issued to us by joined VTCs.
+    /// Membership (VMC) + role (VAC) credentials issued to us by joined VTCs.
     Membership,
+    /// Vetting statements (`vetted/1` VSCs) vetters issued to us.
+    Vetting,
+}
+
+impl CredentialTab {
+    /// Whether a credential on this tab can be removed locally. Membership,
+    /// role and vetting credentials are bound to a community or an
+    /// application, so there is no local-only removal for them.
+    #[must_use]
+    pub fn allows_local_removal(self) -> bool {
+        matches!(self, Self::Received | Self::Issued)
+    }
 }
 
 /// Display modes for the credentials panel.
@@ -3121,6 +3149,14 @@ pub struct VrcSummary {
     /// `not yet valid`. Derived from the window only — this is **not** a
     /// revocation check, which needs the issuer's status list.
     pub status: String,
+    /// A short note shown after the name in the list, when the name alone
+    /// does not say what the row is — a vetting statement's method and
+    /// community.
+    pub note: Option<String>,
+    /// Labelled facts shown in the detail view after the validity window, for
+    /// credentials whose meaning is in their body rather than their type —
+    /// how a vetter checked, and what they relied on.
+    pub facts: Vec<(&'static str, String)>,
 }
 
 // ****************************************************************************
