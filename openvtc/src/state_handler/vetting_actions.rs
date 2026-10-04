@@ -496,7 +496,6 @@ pub(crate) fn sync_journey(vetting: &mut VettingState, config: &Config, now: Dat
                     vetting.selected = i;
                 }
                 JourneyView {
-                    target: JourneyTarget::Application(id.clone()),
                     title: format!(
                         "Applying to {} as {}",
                         community_display(config, &app.community),
@@ -515,7 +514,6 @@ pub(crate) fn sync_journey(vetting: &mut VettingState, config: &Config, now: Dat
             }
             let (steps, ending) = vetter_journey(entry);
             JourneyView {
-                target: JourneyTarget::Desk(id.clone()),
                 title: format!(
                     "Vetting {} for {}",
                     openvtc_core::display::display_identifier(

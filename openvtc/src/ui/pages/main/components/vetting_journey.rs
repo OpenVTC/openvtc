@@ -18,7 +18,7 @@ use crate::ui::{badges, journey};
 use openvtc_core::display::display_identifier;
 use openvtc_core::vetting::journey::{ApplicantStep, StepState, VetterEnding, VetterStep, current};
 use ratatui::{
-    style::{Style, Stylize},
+    style::Style,
     text::{Line, Span},
 };
 
@@ -283,4 +283,116 @@ fn vetter_part(
         },
         dim(),
     )));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state_handler::main_page::content::{ApplicationRow, DeskRow, DeskStage};
+    use openvtc_core::vetting::journey::JourneyStep;
+
+    fn text(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn no_mode(_: &mut Vec<Line<'static>>, _: &VettingState) {}
+
+    fn steps<S: Copy + PartialEq>(all: &[S], current: S) -> Vec<JourneyStep<S>> {
+        let at = all.iter().position(|s| *s == current).unwrap();
+        all.iter()
+            .enumerate()
+            .map(|(i, &step)| JourneyStep {
+                step,
+                state: match i.cmp(&at) {
+                    std::cmp::Ordering::Less => StepState::Done,
+                    std::cmp::Ordering::Equal => StepState::Current,
+                    std::cmp::Ordering::Greater => StepState::Todo,
+                },
+                detail: None,
+            })
+            .collect()
+    }
+
+    /// The applicant's page shows the whole process, explains the step they
+    /// are on, names the one key that takes it, and says how to leave.
+    #[test]
+    fn the_applicant_page_shows_the_process_and_the_step_to_take() {
+        let v = VettingState {
+            applications: vec![ApplicationRow {
+                id: "a1".into(),
+                community: "did:web:kernel".into(),
+                community_name: None,
+                accent: None,
+                pcs_zkp: true,
+                next_step: None,
+                join_did: "did:key:zA".into(),
+                requirements: Some("2 statements".into()),
+                progress: None,
+                satisfied: false,
+                face: None,
+                identity: Vec::new(),
+                requests: Vec::new(),
+                statements: 0,
+            }]
+            .into(),
+            ..VettingState::default()
+        };
+        let j = JourneyView {
+            title: "Applying to kernel as alice".into(),
+            pcs_zkp: true,
+            steps: JourneySteps::Applicant(steps(&ApplicantStep::ALL, ApplicantStep::Face)),
+        };
+        let drawn = text(&render(&v, &j, no_mode));
+        assert!(drawn.contains("Applying to kernel as alice"), "{drawn}");
+        assert!(drawn.contains("PCS ZKP"), "{drawn}");
+        assert!(
+            drawn.contains("✓ Requirements ─ ● Face ─ ○ Vetters"),
+            "{drawn}"
+        );
+        assert!(drawn.contains("What's happening — Face"), "{drawn}");
+        assert!(drawn.contains("choose the face vetters see"), "{drawn}");
+        assert!(drawn.contains("Esc: back to your applications"), "{drawn}");
+    }
+
+    /// The vetter's page puts the match code in front of them with what to do
+    /// with it, and says the card will arrive by itself.
+    #[test]
+    fn the_vetter_page_puts_the_match_code_in_front_of_them() {
+        let v = VettingState {
+            desk: vec![DeskRow {
+                request_id: "r1".into(),
+                applicant: "did:example:applicant".into(),
+                applicant_name: None,
+                community: "did:example:community".into(),
+                pcs_zkp: false,
+                state: "session open".into(),
+                stage: DeskStage::Session,
+                method: Some("in person".into()),
+                match_code: Some("PFCD-EQ2G".into()),
+                claims: Vec::new(),
+                required_claims: Vec::new(),
+                message: None,
+            }]
+            .into(),
+            ..VettingState::default()
+        };
+        let j = JourneyView {
+            title: "Vetting someone for kernel".into(),
+            pcs_zkp: false,
+            steps: JourneySteps::Vetter(steps(&VetterStep::ALL, VetterStep::Code), None),
+        };
+        let drawn = text(&render(&v, &j, no_mode));
+        assert!(drawn.contains("What's happening — Match code"), "{drawn}");
+        assert!(drawn.contains("Read PFCD-EQ2G aloud"), "{drawn}");
+        assert!(drawn.contains("x: decline"), "{drawn}");
+    }
 }

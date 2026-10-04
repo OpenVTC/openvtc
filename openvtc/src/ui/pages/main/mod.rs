@@ -4332,7 +4332,68 @@ mod key_handler_tests {
         assert!(rx.try_recv().is_err(), "x removes nothing off an event row");
     }
 
-    /// The card page is where a missing face shows up, so `f` chooses one
+    /// With a journey open, only the steps reached take their keys — a key
+    /// for a step still to come does nothing — and Esc closes the journey.
+    #[test]
+    fn a_journey_takes_only_the_keys_of_steps_reached() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::{ApplicationRow, JourneySteps, JourneyView};
+        use openvtc_core::vetting::journey::{ApplicantStep, JourneyStep, StepState};
+        let open = |s: &mut State| {
+            let v = &mut s.main_page.content_panel.vetting;
+            v.applications = vec![ApplicationRow {
+                id: "a1".into(),
+                community: "did:web:kernel".into(),
+                community_name: None,
+                accent: None,
+                pcs_zkp: false,
+                next_step: None,
+                join_did: "did:key:zA".into(),
+                requirements: None,
+                progress: None,
+                satisfied: false,
+                face: None,
+                identity: Vec::new(),
+                requests: Vec::new(),
+                statements: 0,
+            }]
+            .into();
+            v.journey = Some(JourneyView {
+                title: "Applying to kernel as alice".into(),
+                pcs_zkp: false,
+                steps: JourneySteps::Applicant(
+                    ApplicantStep::ALL
+                        .iter()
+                        .map(|&step| JourneyStep {
+                            step,
+                            state: if step == ApplicantStep::Requirements {
+                                StepState::Current
+                            } else {
+                                StepState::Todo
+                            },
+                            detail: None,
+                        })
+                        .collect(),
+                ),
+            });
+        };
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, open);
+        for early in ['f', 'r', 'v', 'j'] {
+            page.handle_key_event(press(KeyCode::Char(early)));
+            assert!(
+                rx.try_recv().is_err(),
+                "`{early}` is for a step not reached"
+            );
+        }
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(rx.try_recv().is_err(), "no session to send a card to yet");
+        page.handle_key_event(press(KeyCode::Char('m')));
+        assert!(matches!(vetting_action(&mut rx), V::RefreshRequirements));
+        page.handle_key_event(press(KeyCode::Esc));
+        assert!(matches!(vetting_action(&mut rx), V::CloseJourney));
+    }
+
+    /// The card page is where a missing face shows up, so `f` chooses one    /// The card page is where a missing face shows up, so `f` chooses one
     /// there rather than only after backing out to the application.
     #[test]
     fn vetting_card_chooses_the_face_on_f() {

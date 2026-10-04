@@ -2921,7 +2921,6 @@ pub enum JourneyTarget {
 /// A journey, ready to draw.
 #[derive(Clone, Debug)]
 pub struct JourneyView {
-    pub target: JourneyTarget,
     /// "Applying to first-vtc as alice", "Vetting did:… for first-vtc".
     pub title: String,
     /// The community proves vetting with a PCS zero-knowledge proof.
