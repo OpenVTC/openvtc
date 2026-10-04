@@ -1364,15 +1364,46 @@ async fn process_inbound(
     if is_trust_task_error_type(&message.typ) {
         // A refusal that rejects a join is taken only from the community's
         // signed document; an unsigned one is ignored with a log line.
-        let verified = match community_document(config, &pre, &from_did) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(reason = %e, "unverified community refusal ignored");
+        //
+        // Every refusal is first offered to the capability and git-ns views
+        // above, which prove it and record it as acted on. Checked again here
+        // it would read as a replay of itself — and warn that a community
+        // refusal was ignored, when it was the answer a view was waiting for.
+        // Proven in this pass, it needs no second check; and unless it refuses
+        // a join of ours it is none of this handler's business, so it is let
+        // go quietly rather than reported as matching nothing.
+        let verified = if reply_proven == Some(true) {
+            let refuses_a_join = message
+                .thid
+                .as_deref()
+                .and_then(|thid| uuid::Uuid::parse_str(thid).ok())
+                .is_some_and(|id| {
+                    config
+                        .account
+                        .membership_by_pending_request(&from_did, id)
+                        .is_some()
+                });
+            if !refuses_a_join {
+                debug!(
+                    vtc = %from_did,
+                    "community refusal for a capability or git-ns request — not a join's"
+                );
                 return Ok(false);
+            }
+            None
+        } else {
+            match community_document(config, &pre, &from_did) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    warn!(reason = %e, "unverified community refusal ignored");
+                    return Ok(false);
+                }
             }
         };
         let outcome = handle_join_trust_task_error(&mut config.account, message, &from_did);
-        if outcome.changed {
+        if outcome.changed
+            && let Some(verified) = verified
+        {
             commit_community_document(config, verified);
         }
         if let Some(persona) = outcome.inactivated {
@@ -2293,8 +2324,27 @@ mod tests {
     /// The persona also has a runtime identity, so a reply addressed to it is
     /// recognised as ours (`Config::is_persona_did`), as it is at run time.
     fn retired_config(vtc: &str) -> Config {
+        let mut config = with_identity(pending_config(vtc));
+        let record = &mut config.account.communities.get_mut(vtc).unwrap()[0];
+        record.activate(chrono::Utc::now());
+        for kind in ["Membership", "Role"] {
+            record
+                .retired_credentials
+                .push(openvtc_core::config::account::RetiredCredential {
+                    kind: kind.into(),
+                    credential_id: None,
+                    reason: "pre-v1".into(),
+                    retired_at: chrono::Utc::now(),
+                });
+        }
+        config
+    }
+
+    /// `config` with a runtime identity for `PERSONA`, so a reply addressed
+    /// to it is recognised as ours (`Config::is_persona_did`), as it is at run
+    /// time.
+    fn with_identity(mut config: Config) -> Config {
         use affinidi_tdk::messaging::profiles::{ATMProfile, ATMProfileInner};
-        let mut config = pending_config(vtc);
         let pid = config.account.persona_id_for_did(PERSONA).unwrap();
         config.identities.insert(
             pid,
@@ -2313,18 +2363,6 @@ mod tests {
                 mediator_did: None,
             },
         );
-        let record = &mut config.account.communities.get_mut(vtc).unwrap()[0];
-        record.activate(chrono::Utc::now());
-        for kind in ["Membership", "Role"] {
-            record
-                .retired_credentials
-                .push(openvtc_core::config::account::RetiredCredential {
-                    kind: kind.into(),
-                    credential_id: None,
-                    reason: "pre-v1".into(),
-                    retired_at: chrono::Utc::now(),
-                });
-        }
         config
     }
 
@@ -2550,6 +2588,144 @@ mod tests {
             &vtc,
             &request.to_string()
         ));
+    }
+
+    /// Collects what is logged at `WARN` and above while it is the default
+    /// subscriber on this thread.
+    #[derive(Clone, Default)]
+    struct Warnings(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Warnings {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Warnings {
+        fn capture(&self) -> tracing::subscriber::DefaultGuard {
+            let sink = self.clone();
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_max_level(tracing::Level::WARN)
+                    .with_ansi(false)
+                    .with_writer(move || sink.clone())
+                    .finish(),
+            )
+        }
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    /// Dispatch `m` once it has been through its off-loop check, as the loop
+    /// does: on arrival it is set aside, then handled with the check's result.
+    async fn dispatch_checked(config: &mut Config, tdk: &TDK, m: &Message) -> InboundEffects {
+        let effects = dispatch(config, tdk, m, Arrival::FRESH).await;
+        let deferred = effects.deferred.expect("set aside for its check");
+        let pre = deferred.job.run(tdk.clone()).await;
+        dispatch(config, tdk, &deferred.message, Arrival::Returning(pre)).await
+    }
+
+    /// A community that offers no capability management refuses the query
+    /// with a signed `trust-task-error`. It is proven and recorded once, for
+    /// the capability view, and then falls through the other refusal handlers
+    /// — which must not re-check it, find it already recorded, and warn that a
+    /// community refusal was ignored as a replay.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_capability_refusal_is_not_reported_as_its_own_replay() {
+        let (vtc, key) = community_key();
+        let tdk = test_tdk().await;
+        let mut config = retired_config(&vtc);
+        let thid = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+        let m = community_reply(
+            &vtc,
+            &key,
+            "https://trusttasks.org/spec/trust-task-error/0.1",
+            &thid,
+            serde_json::json!({
+                "code": "unsupportedType",
+                "message": "governance/capability/list is not served here",
+                "retryable": false,
+            }),
+        )
+        .await;
+
+        let warnings = Warnings::default();
+        let effects = {
+            let _guard = warnings.capture();
+            dispatch_checked(&mut config, &tdk, &m).await
+        };
+
+        let [(from, reply_thid, reply)] = effects.capability_replies.as_slice() else {
+            panic!("one capability reply, got {:?}", effects.capability_replies);
+        };
+        assert_eq!(from, &vtc);
+        assert_eq!(reply_thid, &thid);
+        assert!(matches!(
+            reply,
+            openvtc_core::capabilities::CapabilityReply::Rejected { code, .. }
+                if code == "unsupportedType"
+        ));
+        let logged = warnings.text();
+        assert!(!logged.contains("replay"), "{logged}");
+        assert!(!logged.contains("refusal ignored"), "{logged}");
+        assert!(
+            !logged.contains("did not match a pending request"),
+            "{logged}"
+        );
+        assert!(
+            config.account.memberships_for(&vtc)[0].status.is_active(),
+            "a capability refusal ends nothing"
+        );
+
+        // Replay protection across messages is untouched: the same refusal
+        // again is not handed to the view a second time.
+        let effects = dispatch_checked(&mut config, &tdk, &m).await;
+        assert!(effects.capability_replies.is_empty());
+    }
+
+    /// A genuine join refusal still reaches the join handler, though it too is
+    /// proven first by the capability arm: a `permissionDenied` threaded on
+    /// our submit rejects the pending join.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_join_refusal_still_rejects_the_pending_join() {
+        let (vtc, key) = community_key();
+        let tdk = test_tdk().await;
+        let mut config = with_identity(pending_config(&vtc));
+        let CommunityStatus::Pending { request_id } = status(&config, &vtc) else {
+            panic!("pending");
+        };
+        let m = community_reply(
+            &vtc,
+            &key,
+            "https://trusttasks.org/spec/trust-task-error/0.1",
+            &request_id.to_string(),
+            serde_json::json!({
+                "code": "permissionDenied",
+                "message": "not admitted",
+                "retryable": false,
+            }),
+        )
+        .await;
+
+        let warnings = Warnings::default();
+        let effects = {
+            let _guard = warnings.capture();
+            dispatch_checked(&mut config, &tdk, &m).await
+        };
+
+        assert!(
+            status(&config, &vtc) == CommunityStatus::Rejected,
+            "{:?}",
+            status(&config, &vtc)
+        );
+        assert_eq!(effects.inactivated.len(), 1);
+        let logged = warnings.text();
+        assert!(!logged.contains("replay"), "{logged}");
     }
 
     /// Dispatch `m` as `arrival`, returning the effects.

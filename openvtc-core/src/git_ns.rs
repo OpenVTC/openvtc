@@ -516,10 +516,33 @@ impl Request {
     }
 }
 
-/// Build the request as an addressed, dated, signed Trust Task document.
+/// Build the request as an addressed, dated Trust Task document, unsigned.
 ///
 /// The document id is fresh; it opens the exchange, so it is the `threadId`
-/// the reply carries (SPEC §4.9) and what the caller correlates on.
+/// the reply carries (SPEC §4.9) and what the caller correlates on. Split from
+/// [`build_signed`] so a caller can learn that id — and start waiting on it —
+/// before handing the signing and the send to another task: the reply can
+/// arrive before that task reports back.
+///
+/// # Errors
+///
+/// A payload the schema refuses.
+pub fn build(
+    request: &Request,
+    issuer_did: &str,
+    vtc_did: &str,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    let payload = request.payload()?;
+    crate::trust_task_doc::build(
+        request.type_uri(),
+        issuer_did,
+        vtc_did,
+        format!("urn:uuid:{}", Uuid::new_v4()),
+        payload,
+    )
+}
+
+/// Build the request as an addressed, dated, signed Trust Task document.
 ///
 /// # Errors
 ///
@@ -530,14 +553,7 @@ pub async fn build_signed(
     vtc_did: &str,
     signer: &Secret,
 ) -> Result<TrustTask<Value>, OpenVTCError> {
-    let payload = request.payload()?;
-    let mut doc = crate::trust_task_doc::build(
-        request.type_uri(),
-        issuer_did,
-        vtc_did,
-        format!("urn:uuid:{}", Uuid::new_v4()),
-        payload,
-    )?;
+    let mut doc = build(request, issuer_did, vtc_did)?;
     crate::capabilities::sign_document(&mut doc, signer).await?;
     Ok(doc)
 }

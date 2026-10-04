@@ -145,7 +145,7 @@ impl Panel for CapabilitiesPanel {
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "    ↑/↓ navigate   ⏎ details   e enable/disable   r refresh   Esc back",
+            "    ↑/↓ navigate   ⏎ details   e enable/disable (administrators)   r refresh   Esc back",
             Style::default().fg(COLOR_DARK_GRAY),
         )));
         lines

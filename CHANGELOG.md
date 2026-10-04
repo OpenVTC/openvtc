@@ -57,6 +57,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A fast reply is no longer lost to the send that asked for it.** The
+  Capabilities and Repos panels started waiting for a reply only once the send
+  reported back, but the reply arrives on a different channel and can get there
+  first. A community that refused at once — one that offers no capability
+  management answers in well under a millisecond — had its answer dropped, and
+  the panel waited out its 30 s window to say the governance host may be
+  offline. The request is now built on the loop and the panel waits on its
+  thread before the send starts; a send that fails ends only the wait it
+  started, never a newer one. A reply that matches nothing pending is logged
+  instead of dropped silently.
+- **A community's refusal is no longer reported as a replay of itself.** A
+  signed `trust-task-error` was recorded as acted on when the Capabilities and
+  Repos panels took it, then checked again by the join handler, which found it
+  recorded and logged `unverified community refusal ignored … (replay)`. Worse,
+  a genuine refusal of a pending join went the same way, so the join was never
+  marked rejected. A refusal proven once in a pass is no longer checked again,
+  and one that refuses no join of ours is let go quietly.
+- **Members refused a capability change are told it is for administrators.**
+  Enabling and disabling a community's capabilities is an administrator's act,
+  and the community refuses anyone else with `permissionDenied`. The panel now
+  says "only the community's administrators can enable or disable
+  capabilities" instead of the bare code, and its `e` hint is marked
+  *(administrators)*.
 - **A join that never got a reply now recovers on its own.** If every reply to
   a join was lost, OpenVTC asks the community about it without quoting a
   request id, and the community answers with its own id. That answer matched
