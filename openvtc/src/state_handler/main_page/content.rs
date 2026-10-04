@@ -2866,6 +2866,22 @@ pub enum TaskKind {
     TrustPing,
     /// Informational task (accepted, rejected, finalized, etc.)
     Informational(String),
+    /// A step in a vetting exchange that waits on us. Opening it goes to the
+    /// page where that step is taken, rather than to a detail view that could
+    /// only say it exists.
+    Vetting(VettingTarget),
+}
+
+/// Where a vetting task is acted on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VettingTarget {
+    /// Applicant: an application, and the session whose card is now due.
+    Card {
+        application_id: String,
+        session_id: String,
+    },
+    /// Vetter: a request on the desk.
+    Desk { request_id: String },
 }
 
 /// Detailed view of a specific task for the interaction screen.

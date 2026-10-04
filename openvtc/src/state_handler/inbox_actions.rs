@@ -156,8 +156,22 @@ fn handle_inbox_select(state: &mut State, index: usize) {
     state.main_page.content_panel.inbox.selected_index = index;
 }
 
-fn handle_inbox_open_detail(state: &mut State, index: usize) {
+fn handle_inbox_open_detail(state: &mut State, config: &Config, index: usize) {
     state.main_page.content_panel.inbox.selected_index = index;
+    // A vetting step is taken on its own page, so opening it goes there. A
+    // detail view here could only name the task and offer to dismiss it, which
+    // is what made these rows a dead end.
+    if let Some(TaskKind::Vetting(target)) = state
+        .main_page
+        .content_panel
+        .inbox
+        .tasks
+        .get(index)
+        .map(|t| t.kind.clone())
+    {
+        crate::state_handler::vetting_actions::focus_vetting_target(state, config, &target);
+        return;
+    }
     if let Some(task) = state.main_page.content_panel.inbox.tasks.get(index) {
         let view = match &task.kind {
             TaskKind::RelationshipRequestInbound {
@@ -203,6 +217,8 @@ fn handle_inbox_open_detail(state: &mut State, index: usize) {
                 remote_did: task.remote_did.clone(),
                 remote_agent_name: task.remote_agent_name.clone(),
             }),
+            // Handled above, before a detail view is built.
+            TaskKind::Vetting(_) => None,
             TaskKind::TrustPing | TaskKind::Informational(_) => Some(ActiveTaskView::Info {
                 task_id: task.id.clone(),
                 type_display: task.type_display.clone(),
@@ -984,7 +1000,7 @@ pub(crate) async fn dispatch(
 ) -> InboxDispatch {
     match action {
         InboxAction::SelectTask(index) => handle_inbox_select(state, index),
-        InboxAction::OpenDetail(index) => handle_inbox_open_detail(state, index),
+        InboxAction::OpenDetail(index) => handle_inbox_open_detail(state, config, index),
         InboxAction::Back => {
             state.main_page.content_panel.inbox.active_task = None;
         }
