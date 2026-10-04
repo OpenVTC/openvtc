@@ -19,6 +19,7 @@ use tokio::sync::{broadcast, mpsc, mpsc::UnboundedReceiver, watch};
 use tokio::time::MissedTickBehavior;
 use tokio_stream::StreamExt;
 
+pub mod badges;
 pub mod component;
 pub mod pages;
 

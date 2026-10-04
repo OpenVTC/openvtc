@@ -101,6 +101,25 @@ pub struct KnownCriterion {
     pub fetched_at: DateTime<Utc>,
 }
 
+impl KnownCriterion {
+    /// Whether this criterion proves vetting with a PCS zero-knowledge proof
+    /// rather than named statements — read the same way an application adopts
+    /// it ([`super::hidden::read_mode`]), so the badge and the join agree.
+    ///
+    /// An unreadable or refused mode reads as not hidden: this answers "should
+    /// the page say vetters are hidden", and saying so wrongly is the error
+    /// that matters.
+    #[must_use]
+    pub fn hidden_vetting(&self) -> bool {
+        serde_json::to_value(&self.requirements).is_ok_and(|vetting| {
+            matches!(
+                super::hidden::read_mode(&serde_json::json!({ "vetting": vetting })),
+                Ok(super::hidden::Mode::Hidden(_))
+            )
+        })
+    }
+}
+
 /// A community naming one of our personas a vetter: the role credential it
 /// issued through `vtc/vetting/vetters/grant` (design §10.3). Presented to
 /// applicants with every acceptance, and needed to hand out tickets.
@@ -378,6 +397,11 @@ pub struct KnownCommunity {
     /// keeps only the vetting ones, with their requirements.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<CommunityCriterion>,
+    /// Whether its DID document, when last resolved, listed a post-quantum
+    /// (ML-DSA) key for signing. `None` until it has been resolved here — the
+    /// DIDComm route learns the manifest without a resolve of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_quantum_key: Option<bool>,
 }
 
 /// One criterion a community publishes, as the join page and the submit need
@@ -971,6 +995,7 @@ impl VettingBook {
                     fetched_at: now,
                     protocol,
                     routes,
+                    post_quantum_key: None,
                 });
                 true
             }
@@ -1025,6 +1050,38 @@ impl VettingBook {
 
     /// Every criterion `community` publishes, in published order. Empty when
     /// its manifest has not been read.
+    /// Record what `community`'s DID document says about post-quantum signing.
+    /// Only for a community this book has a record of; the manifest read that
+    /// makes one comes first.
+    pub fn note_post_quantum_key(&mut self, community: &str, publishes: bool) {
+        if let Some(known) = self
+            .communities
+            .iter_mut()
+            .find(|c| c.community == community)
+        {
+            known.post_quantum_key = Some(publishes);
+        }
+    }
+
+    /// Whether `community`'s DID document listed a post-quantum signing key
+    /// when last resolved; `None` when it has not been resolved here.
+    #[must_use]
+    pub fn post_quantum_key(&self, community: &str) -> Option<bool> {
+        self.communities
+            .iter()
+            .find(|c| c.community == community)
+            .and_then(|c| c.post_quantum_key)
+    }
+
+    /// Whether `community` proves vetting with a PCS zero-knowledge proof, as
+    /// far as its last-read requirements say.
+    #[must_use]
+    pub fn hidden_vetting(&self, community: &str) -> bool {
+        self.criteria
+            .iter()
+            .any(|k| k.community == community && k.hidden_vetting())
+    }
+
     #[must_use]
     pub fn routes(&self, community: &str) -> &[CommunityCriterion] {
         self.communities

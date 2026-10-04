@@ -283,6 +283,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                 community: app.community.clone(),
                 community_name: community_name(&app.community),
                 accent: accent(&app.community),
+                pcs_zkp: app.hidden.is_some(),
                 next_step: Some(next_step_words(&app.next_step(now))),
                 join_did: app.join_did.clone(),
                 requirements: app.requirements.as_ref().map(|r| {
@@ -403,6 +404,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                 applicant: entry.applicant.clone(),
                 applicant_name: name(&entry.applicant),
                 community: entry.community.clone(),
+                pcs_zkp: book.hidden_vetting(&entry.community),
                 state: state.to_string(),
                 stage,
                 method: session.map(|s| method_label(s.method).to_string()),

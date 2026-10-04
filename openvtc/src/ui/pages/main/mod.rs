@@ -3834,6 +3834,8 @@ mod key_handler_tests {
         is_pending: bool,
     ) -> CommunitySummary {
         CommunitySummary {
+            post_quantum: false,
+            pcs_zkp: false,
             display_name: name.to_string(),
             status_label: if is_active { "Active" } else { "Left" }.to_string(),
             persona_label: "persona".to_string(),
@@ -3905,6 +3907,8 @@ mod key_handler_tests {
             valid_until: None,
             kind: None,
             subject_is_self: false,
+            subject_label: None,
+            post_quantum: false,
             validity: String::new(),
             status: "valid".to_string(),
             note: None,
@@ -3971,6 +3975,7 @@ mod key_handler_tests {
             community: community.into(),
             community_name: None,
             accent: None,
+            pcs_zkp: false,
             next_step: None,
             join_did: "did:key:zA".into(),
             requirements: None,

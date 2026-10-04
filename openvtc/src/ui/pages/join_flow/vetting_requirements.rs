@@ -39,6 +39,7 @@ use crate::state_handler::{
     join::{JoinRoute, JoinState, JoinVettingView, KnownVetting, VettingPhase, VettingRow},
     setup_sequence::MessageType,
 };
+use crate::ui::badges;
 use crate::ui::pages::join_flow::JoinFlow;
 use crate::ui::pages::main::components::vetting_panel::accent_swatch;
 
@@ -265,6 +266,65 @@ fn nested_choice(name: &str, shown: String, focused: bool) -> Line<'static> {
     ])
 }
 
+/// What this community does to protect the people in it: whether vetters are
+/// hidden behind a zero-knowledge proof, and whether it signs post-quantum.
+///
+/// Both are said either way. A badge that only appears when present leaves its
+/// absence unread, and "your vetters will be named to this community" is
+/// exactly what someone asking a friend to vet them should know first.
+fn protection_lines(known: &KnownVetting) -> Vec<Line<'static>> {
+    let row = |label: &str, badge: Option<Span<'static>>, said: String, style: Style| {
+        let mut spans = vec![Span::styled(format!("  {label:<10}"), text())];
+        if let Some(badge) = badge {
+            spans.push(badge);
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(said, style));
+        Line::from(spans)
+    };
+    let mut lines = vec![Line::styled(
+        "How it protects you",
+        Style::new().fg(COLOR_BORDER).bold(),
+    )];
+    lines.push(if known.pcs_zkp {
+        row(
+            "Vetters",
+            Some(badges::pcs_zkp()),
+            badges::PCS_ZKP_MEANING.to_string(),
+            Style::new().fg(COLOR_SOFT_PURPLE),
+        )
+    } else {
+        row(
+            "Vetters",
+            None,
+            "named — the community sees which vetters vouched for you".to_string(),
+            dim(),
+        )
+    });
+    lines.push(match known.post_quantum {
+        Some(true) => row(
+            "Signing",
+            Some(badges::pqc()),
+            "its DID lists a post-quantum key, so what it issues is signed with ML-DSA as well"
+                .to_string(),
+            Style::new().fg(COLOR_SOFT_PURPLE),
+        ),
+        Some(false) => row(
+            "Signing",
+            None,
+            "classical keys only — not post-quantum".to_string(),
+            dim(),
+        ),
+        None => row(
+            "Signing",
+            None,
+            "not checked — its DID document was not read on this route".to_string(),
+            dim(),
+        ),
+    });
+    lines
+}
+
 /// The page's lines, below its border.
 pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -392,6 +452,8 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
             if let Some(url) = &known.governance_url {
                 lines.push(Line::styled(format!("How it decides: {url}"), dim()));
             }
+            lines.push(Line::default());
+            lines.extend(protection_lines(known));
             lines.push(Line::default());
             lines.push(Line::styled(
                 format!(
@@ -755,6 +817,36 @@ mod tests {
         }
         let shown = text_of(&body_lines(&JoinState::default(), &view(elsewhere)));
         assert!(!shown.contains("Apply as"), "{shown}");
+    }
+
+    /// How the community protects people is said either way: hidden vetters
+    /// and post-quantum signing with their badges, and their absence in words.
+    #[test]
+    fn the_page_says_whether_vetters_are_hidden_and_how_it_signs() {
+        let with = |pcs_zkp, post_quantum| {
+            let mut phase = known(None);
+            if let VettingPhase::Known(k) = &mut phase {
+                k.pcs_zkp = pcs_zkp;
+                k.post_quantum = post_quantum;
+            }
+            text_of(&body_lines(&JoinState::default(), &view(phase)))
+        };
+        let protected = with(true, Some(true));
+        assert!(protected.contains("PCS ZKP"), "{protected}");
+        assert!(protected.contains("PQC-SIGNED"), "{protected}");
+
+        let plain = with(false, Some(false));
+        assert!(
+            plain.contains("named — the community sees which vetters"),
+            "{plain}"
+        );
+        assert!(plain.contains("classical keys only"), "{plain}");
+        assert!(
+            !plain.contains("PCS ZKP") && !plain.contains("PQC-SIGNED"),
+            "{plain}"
+        );
+
+        assert!(with(false, None).contains("not checked"));
     }
 
     #[test]

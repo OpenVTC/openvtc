@@ -782,6 +782,28 @@ mod tests {
         })
     }
 
+    /// The badge reads the stored criterion the same way the join adopts it:
+    /// published parameters are hidden, a plain criterion is named.
+    #[test]
+    fn a_stored_criterion_knows_whether_its_vetters_are_hidden() {
+        let known = |raw: &Value| crate::vetting::book::KnownCriterion {
+            community: "did:web:vtc".into(),
+            criterion_id: "c".into(),
+            requirements_digest: None,
+            requirements: serde_json::from_value(raw["vetting"].clone()).expect("requirements"),
+            fetched_at: chrono::Utc::now(),
+        };
+        assert!(known(&as_the_service_serves_it()).hidden_vetting());
+
+        let mut named = as_the_service_serves_it();
+        named["vetting"].as_object_mut().unwrap().remove("ext");
+        named["vetting"]
+            .as_object_mut()
+            .unwrap()
+            .remove("extCritical");
+        assert!(!known(&named).hidden_vetting());
+    }
+
     #[test]
     fn the_shape_the_service_serves_is_the_shape_this_client_reads() {
         let params = match read_mode(&as_the_service_serves_it()).expect("readable") {

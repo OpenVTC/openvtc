@@ -49,6 +49,20 @@ impl RawCredential {
                 .unwrap_or_else(|_| "Failed to serialize credential".to_string()),
         }
     }
+
+    /// Whether the credential carries a post-quantum proof (ML-DSA or
+    /// SLH-DSA, alone or in a proof set). Serializes a VRC, so call it when a
+    /// list is built, not per frame.
+    #[must_use]
+    pub fn signed_post_quantum(&self) -> bool {
+        match self {
+            RawCredential::Vrc(vrc) => serde_json::to_value(vrc.credential())
+                .is_ok_and(|v| openvtc_core::proof_check::signed_post_quantum(&v)),
+            RawCredential::Value(value) => {
+                openvtc_core::proof_check::signed_post_quantum(value.as_ref())
+            }
+        }
+    }
 }
 
 // ****************************************************************************
@@ -578,6 +592,12 @@ pub struct DecisionSummary {
 pub struct CommunitySummary {
     /// Display name (resolved name, or the VTC DID when unnamed).
     pub display_name: String,
+    /// The community signed a credential it issued to this membership with a
+    /// post-quantum key as well as a classical one.
+    pub post_quantum: bool,
+    /// The community proves vetting with a PCS zero-knowledge proof: it learns
+    /// that enough vetters vouched for an applicant, not who they were.
+    pub pcs_zkp: bool,
     /// Human-readable membership status (e.g. "Active", "Pending", "Left").
     pub status_label: String,
     /// Label of the persona presented to this community.
@@ -2676,6 +2696,9 @@ pub struct ApplicationRow {
     pub community_name: Option<String>,
     /// The community's published accent colour.
     pub accent: Option<(u8, u8, u8)>,
+    /// This application's vetting is proven with a PCS zero-knowledge proof:
+    /// the community will not learn who the vetters were.
+    pub pcs_zkp: bool,
     /// What to do next, with the key that does it.
     pub next_step: Option<String>,
     pub join_did: String,
@@ -2730,6 +2753,9 @@ pub struct DeskRow {
     pub applicant: String,
     pub applicant_name: Option<String>,
     pub community: String,
+    /// The community proves vetting with a PCS zero-knowledge proof, so an
+    /// attestation for it is counted without naming this vetter.
+    pub pcs_zkp: bool,
     pub state: String,
     pub stage: DeskStage,
     pub method: Option<String>,
@@ -3156,6 +3182,11 @@ pub struct VrcSummary {
     /// Whether the subject is one of this account's own personas, so the detail
     /// view can say which side is you rather than leaving two names to compare.
     pub subject_is_self: bool,
+    /// That persona's own label, when the subject is one of ours. What tells
+    /// two otherwise identical membership credentials apart: one per persona.
+    pub subject_label: Option<String>,
+    /// Signed with a post-quantum key as well as a classical one.
+    pub post_quantum: bool,
     /// The validity window in human form, with a relative note — e.g.
     /// `"22 Jul 2026 → 21 Aug 2026 · 29 days left"`.
     ///
