@@ -248,6 +248,20 @@ impl MainPageState {
                     } else {
                         format!("Your vetter credential from {community} expires {valid_until}")
                     }),
+                    TaskType::VettingSessionInbound {
+                        application_id,
+                        session_id,
+                        ..
+                    } => TaskKind::Vetting(content::VettingTarget::Card {
+                        application_id: application_id.clone(),
+                        session_id: session_id.clone(),
+                    }),
+                    TaskType::VettingRequestInbound { request_id, .. }
+                    | TaskType::VettingCardReceived { request_id, .. } => {
+                        TaskKind::Vetting(content::VettingTarget::Desk {
+                            request_id: request_id.clone(),
+                        })
+                    }
                     _ => TaskKind::Informational("Unknown".to_string()),
                 };
                 let remote_did = match &task.type_ {
@@ -265,6 +279,10 @@ impl MainPageState {
                     }
                     TaskType::VRCRequestOutbound { remote_p_did } => shorten_did(remote_p_did, 60),
                     TaskType::VRCIssued { vrc } => sanitize_display(vrc.issuer(), 40),
+                    // Who the step is with, so the row says more than its type.
+                    TaskType::VettingRequestInbound { applicant, .. }
+                    | TaskType::VettingCardReceived { applicant, .. } => shorten_did(applicant, 60),
+                    TaskType::VettingSessionInbound { vetter, .. } => shorten_did(vetter, 60),
                     _ => String::new(),
                 };
                 // The verified name for *exactly* the DID `remote_did` renders,

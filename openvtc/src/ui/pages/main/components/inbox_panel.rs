@@ -99,6 +99,7 @@ pub fn render(state: &InboxState, connection: &ConnectionState) -> Vec<Line<'sta
                 TaskKind::VRCIssued => "📄 VRC ",
                 TaskKind::TrustPing => "🏓 PING",
                 TaskKind::Informational(_) => "ℹ INFO",
+                TaskKind::Vetting(_) => "✓ VET ",
             };
 
             lines.push(Line::from(vec![

@@ -4460,6 +4460,55 @@ impl GrantChecked {
 
 /// Show application `application_id` on the Vetting page, with `message`. Used
 /// by the join flow when a person starts or continues an application there.
+/// Go to where a vetting task is acted on: the card page for an applicant's
+/// open session, or the request on the vetter's desk.
+pub(crate) fn focus_vetting_target(
+    state: &mut State,
+    config: &Config,
+    target: &crate::state_handler::main_page::content::VettingTarget,
+) {
+    use crate::state_handler::main_page::content::VettingTarget;
+    match target {
+        VettingTarget::Card {
+            application_id,
+            session_id,
+        } => {
+            focus_application(
+                state,
+                config,
+                application_id,
+                "A vetter opened a session. Read the match code to each other, then Enter \
+                 previews your card."
+                    .to_string(),
+            );
+            state.main_page.content_panel.vetting.mode = VettingMode::SendCard {
+                application_id: application_id.clone(),
+                session_id: session_id.clone(),
+                preview: None,
+            };
+        }
+        VettingTarget::Desk { request_id } => {
+            state.main_page.sync_from_config(config);
+            state.main_page.menu_panel.selected_menu = MainMenu::Vetting;
+            state.main_page.menu_panel.selected = false;
+            state.main_page.content_panel.selected = true;
+            let v = &mut state.main_page.content_panel.vetting;
+            v.tab = VettingTab::Desk;
+            v.desk_view = DeskView::Requests;
+            v.mode = VettingMode::List;
+            match v.desk.iter().position(|r| &r.request_id == request_id) {
+                Some(i) => {
+                    v.selected = i;
+                    v.status_message = Some(format!("{} — what to do is below.", v.desk[i].state));
+                }
+                None => {
+                    v.status_message = Some("That request is no longer on your desk.".to_string());
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn focus_application(
     state: &mut State,
     config: &Config,
@@ -4847,6 +4896,46 @@ mod tests {
         };
         back(&mut v);
         assert!(matches!(v.mode, VettingMode::List));
+    }
+
+    /// An inbox vetting task opens where its step is taken: the card page for
+    /// an applicant's session, the desk for a vetter's request — and says so
+    /// when the request has gone, rather than landing on an unrelated row.
+    #[test]
+    fn a_vetting_task_opens_where_its_step_is_taken() {
+        use crate::state_handler::main_page::content::VettingTarget;
+        let config = test_config();
+        let mut state = State::default();
+        focus_vetting_target(
+            &mut state,
+            &config,
+            &VettingTarget::Card {
+                application_id: "a".into(),
+                session_id: "s".into(),
+            },
+        );
+        assert_eq!(state.main_page.menu_panel.selected_menu, MainMenu::Vetting);
+        assert!(matches!(
+            &state.main_page.content_panel.vetting.mode,
+            VettingMode::SendCard { application_id, session_id, .. }
+                if application_id == "a" && session_id == "s"
+        ));
+
+        let mut state = State::default();
+        focus_vetting_target(
+            &mut state,
+            &config,
+            &VettingTarget::Desk {
+                request_id: "gone".into(),
+            },
+        );
+        let v = &state.main_page.content_panel.vetting;
+        assert_eq!(v.tab, VettingTab::Desk);
+        assert!(
+            v.status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("no longer on your desk"))
+        );
     }
 
     /// The picker opens on the face already worn, and the page remembers it.
