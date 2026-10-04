@@ -3119,34 +3119,28 @@ async fn run_join_sequence(
     // Under a hidden-vetting criterion the proof is built here, bound to a challenge of this
     // submission's own, and rides in `extensions` (design §8). The statements themselves never
     // travel: there are none that name a vetter.
-    if let Some(application) = config
+    //
+    // Every way the proof can be missing stops the join here. Submitting without it sends no
+    // vetting at all — the named statements never travel on this path — so the community would
+    // decide on nothing while the holder believed they had presented their vetting.
+    let hidden_refusal = match config
         .private
         .vetting
         .application_mut(&vtc_did, persona_id)
         .filter(|a| a.join_did == applicant_did && a.hidden.is_some())
     {
-        // The challenge is the COMMUNITY's, asked for over `vtc/vetting/pcs-challenge/0.1` and
-        // recorded on the application when it arrives. A proof over one we minted ourselves
-        // verifies and is refused, which is the whole point of the exchange: the community
-        // accepts each challenge exactly once, so a submission cannot be replayed.
-        let Some(challenge) = application.hidden_challenge.clone() else {
-            state.join.info(
-                "Waiting for this community's submission challenge — it is asked for once per                  submission, and a proof cannot be built without it."
-                    .to_string(),
-            );
-            return;
-        };
-        match application.prepare_hidden_submission(&challenge) {
-            Ok(true) => state
-                .join
-                .info("Proving that enough vetters vetted you, without naming them…".to_string()),
-            Ok(false) => {}
-            Err(e) => {
-                state
-                    .join
-                    .info(format!("The proof could not be built: {e}"));
-            }
+        None => None,
+        Some(application) => hidden_proof_refusal(application, &mut state.join),
+    };
+    if let Some(refusal) = hidden_refusal {
+        state.join.fail(refusal);
+        if let (Some(service), Some(listener_id)) = (messaging, started_listener.take()) {
+            service.remove_listener(&listener_id).await;
         }
+        if minted {
+            rollback_minted_persona(config, persona_id, state, profile, prior_friendly_name);
+        }
+        return;
     }
     let protocol = config.private.vetting.protocol_for(&vtc_did);
     let presentation = match config.private.vetting.application(&vtc_did, persona_id) {
@@ -3474,6 +3468,45 @@ async fn await_persona_online(
     };
     let _ = handler.state_tx.send(state.clone());
     online
+}
+
+/// Build a hidden-vetting application's proof for this submission, or say why it cannot be.
+///
+/// `None` when the proof is built and will ride in `extensions`. `Some` is the sentence the
+/// progress page fails with — each naming what the holder can do, because "the proof could not
+/// be built" alone leaves them nowhere to go.
+fn hidden_proof_refusal(
+    application: &mut openvtc_core::vetting::applicant::Application,
+    join: &mut crate::state_handler::join::JoinState,
+) -> Option<String> {
+    // The challenge is the COMMUNITY's, asked for over `vtc/vetting/pcs-challenge/0.1` and
+    // recorded on the application when it arrives. A proof over one we minted ourselves
+    // verifies and is refused, which is the whole point of the exchange: the community
+    // accepts each challenge exactly once, so a submission cannot be replayed.
+    let Some(challenge) = application.hidden_challenge.clone() else {
+        return Some(
+            "This community hides its vetters, so joining sends a zero-knowledge proof bound to \
+             a challenge the community issues — and none has arrived yet. Nothing was sent. In \
+             Vetting, press m on this application to ask for it, then join again."
+                .to_string(),
+        );
+    };
+    match application.prepare_hidden_submission(&challenge) {
+        Ok(true) => {
+            join.info("Proving that enough vetters vetted you, without naming them…".to_string());
+            None
+        }
+        // Hidden parameters but no engine state: no vetter's attestation has arrived.
+        Ok(false) => Some(
+            "This community hides its vetters, and no vetter's attestation has reached this \
+             application yet, so there is nothing to prove. Nothing was sent."
+                .to_string(),
+        ),
+        Err(e) => Some(format!(
+            "The zero-knowledge proof of your vetting could not be built ({e}). Nothing was sent \
+             — joining without it would present no vetting at all."
+        )),
+    }
 }
 
 /// Persist the config, abstracting over the openpgp-card touch prompt.
@@ -4320,6 +4353,31 @@ mod vetting_tests {
     use super::*;
     use crate::state_handler::dispatch_util::test_config;
     use vta_sdk::protocols::join_requests::manifest;
+
+    /// A hidden-vetting join with no proof to send stops, and says what to do
+    /// — never a submit that presents no vetting at all.
+    #[test]
+    fn a_hidden_join_without_its_proof_stops_and_says_why() {
+        let mut app = openvtc_core::vetting::applicant::Application::new(
+            VTC,
+            PersonaId::new(),
+            "did:key:zApplicant",
+            Utc::now(),
+        )
+        .unwrap();
+        let mut join = JoinState::default();
+
+        let no_challenge = hidden_proof_refusal(&mut app, &mut join).expect("refused");
+        assert!(no_challenge.contains("press m"), "{no_challenge}");
+        assert!(no_challenge.contains("Nothing was sent"), "{no_challenge}");
+
+        app.hidden_challenge = Some("nonce".into());
+        let no_attestation = hidden_proof_refusal(&mut app, &mut join).expect("refused");
+        assert!(
+            no_attestation.contains("no vetter's attestation"),
+            "{no_attestation}"
+        );
+    }
 
     const VTC: &str = "did:web:kernel.example";
     /// Base58btc and at least 16 characters, as the published criterion asks.

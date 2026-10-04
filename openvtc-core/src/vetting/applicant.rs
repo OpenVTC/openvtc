@@ -1383,9 +1383,9 @@ impl Application {
 
     /// Build the proof this application submits, from the attestations it holds.
     ///
-    /// `Ok(false)` when this is not a hidden-vetting application, which is every application
-    /// today. The proof is bound to `challenge`; the community rebuilds the same binding and
-    /// refuses a proof built for another one.
+    /// `Ok(false)` when there is nothing to prove: not a hidden-vetting application, or one no
+    /// vetter's attestation has reached yet. The proof is bound to `challenge`; the community
+    /// rebuilds the same binding and refuses a proof built for another one.
     ///
     /// # Errors
     ///
