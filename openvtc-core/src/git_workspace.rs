@@ -671,7 +671,10 @@ mod tests {
     fn the_default_path_mirrors_the_resource() {
         assert_eq!(
             widgets().default_path(Path::new("/w")),
-            PathBuf::from("/w/github.com/acme/widgets")
+            Path::new("/w")
+                .join("github.com")
+                .join("acme")
+                .join("widgets")
         );
     }
 
@@ -796,11 +799,14 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
+        // An empty global config, on every platform (`/dev/null` is not one).
+        let empty = dir.path().join("empty.gitconfig");
+        std::fs::write(&empty, "").unwrap();
         let run = |args: &[&str], cwd: &Path| {
             let ok = Command::new("git")
                 .args(args)
                 .current_dir(cwd)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_GLOBAL", &empty)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .output()
                 .unwrap()

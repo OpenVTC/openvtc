@@ -1566,10 +1566,13 @@ mod tests {
         };
         let out = rendered(v.clone());
         assert!(out.contains("On this machine"), "{out}");
-        assert!(
-            out.contains("c clones it into /w/github.com/acme/gadgets"),
-            "{out}"
-        );
+        let dest = std::path::Path::new("/w")
+            .join("github.com")
+            .join("acme")
+            .join("gadgets")
+            .display()
+            .to_string();
+        assert!(out.contains(&format!("c clones it into {dest}")), "{out}");
 
         v.workspace.checkouts.insert(
             "github.com/acme/gadgets".into(),
