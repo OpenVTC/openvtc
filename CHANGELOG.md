@@ -6,7 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Breaking
+
+- **`openvtc_core::join::JoinPresentation` has a `registry_consent` field.**
+  A struct literal must now set it; `JoinPresentation::from(vp)` sets it to
+  `false`, which is what every join sent before.
+
 ### Added
+
+- **Choosing to be published in a community's trust registry when you join.**
+  Every join now asks, as the last step before the request goes out, whether
+  the community may publish a public record that the identity you join with is
+  one of its members. The box starts unticked and only Space ticks it. The
+  answer is sent as `registryConsent` on `vtc/join-requests/submit`, which the
+  community copies onto your member record; its registry sync publishes only
+  members who said yes, and approving your request does not say yes for you.
+  Until now openvtc always sent `false`, so nobody who joined through it could
+  ever be published. The success page shows the answer that was sent. There is
+  no way yet to change it after joining, short of leaving and joining again:
+  the community has no member-signed task for it.
 
 - **Checkouts and commit signing in the Repos panel.** Each repository the
   community governs now shows what is on this machine: not cloned, signed, not

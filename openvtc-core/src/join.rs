@@ -81,8 +81,9 @@ pub struct Applicant<'a> {
 /// `persona_did` as the applicant.
 ///
 /// `presentation` is the holder presentation the VTC's `join.rego` decides
-/// over, with any submission `extensions` (a plain `Value` VP converts, with
-/// none).
+/// over, with any submission `extensions` and the applicant's
+/// [`registry_consent`](JoinPresentation::registry_consent) (a plain `Value` VP
+/// converts, with neither — and so without consent).
 /// The message is packed authcrypt and forwarded via the persona's
 /// `mediator_did`; the VTC authenticates the applicant from the
 /// envelope's `from`.
@@ -349,6 +350,7 @@ async fn build_join_submit_document(
         attributes,
         protocol,
         criterion,
+        registry_consent,
     } = presentation.into();
     // `submit/0.3` is the 0.2 payload plus `criterion`, so a 0.2 submission
     // never names one, whatever the presentation carried.
@@ -356,7 +358,12 @@ async fn build_join_submit_document(
     let body = JoinRequestSubmitBody {
         vp,
         criterion,
-        registry_consent: false,
+        // The applicant's own answer, carried through untouched. The community
+        // copies it onto the member record and its registry sync publishes only
+        // members whose record says yes — approval does not consent for them —
+        // so a hard-coded value here decides a privacy question on the
+        // person's behalf, whichever way it is hard-coded.
+        registry_consent,
         extensions,
         attributes,
     };
@@ -488,6 +495,17 @@ pub struct JoinPresentation {
     /// first criterion met, in published order. Not sent in 0.2, where the
     /// digest rides in `extensions` instead.
     pub criterion: Option<String>,
+    /// `registryConsent` (0.2 and 0.3): whether the applicant agrees to the
+    /// community publishing a public record, in its trust registry, that this
+    /// identity is a member.
+    ///
+    /// The applicant's decision and nobody else's. The community copies it onto
+    /// the member record when it admits them; approving the request does not
+    /// consent on their behalf, and a member without consent is skipped by the
+    /// registry sync. So `false` — the default, and what every path that has not
+    /// asked the person sends — means "this membership is never published",
+    /// and `true` is only ever set from an explicit opt-in. Never infer it.
+    pub registry_consent: bool,
 }
 
 impl From<Value> for JoinPresentation {
@@ -498,6 +516,8 @@ impl From<Value> for JoinPresentation {
             attributes: Vec::new(),
             protocol: Default::default(),
             criterion: None,
+            // Not asked, so not given.
+            registry_consent: false,
         }
     }
 }
@@ -1007,6 +1027,7 @@ mod tests {
                 attributes: Vec::new(),
                 protocol: crate::vetting::protocol::JoinProtocol::V0_2,
                 criterion: None,
+                registry_consent: false,
             },
             "urn:uuid:submit-2",
         )
@@ -1040,6 +1061,7 @@ mod tests {
                     attributes: Vec::new(),
                     protocol,
                     criterion: Some(digest.to_string()),
+                    registry_consent: false,
                 },
                 "urn:uuid:submit-3",
             )
@@ -1056,6 +1078,94 @@ mod tests {
         assert!(v2["payload"].get("criterion").is_none());
         serde_json::from_value::<submit::v0_2::Payload>(v2["payload"].clone())
             .expect("the payload is the generated submit/0.2 shape");
+    }
+
+    /// The applicant's registry choice reaches the wire as they made it, in
+    /// both directions and on both submit versions.
+    ///
+    /// Asserted three ways, because each catches a different break: the raw
+    /// JSON member is `registryConsent` (a rename to snake_case would leave the
+    /// community reading its `false` default — silently, since the schema makes
+    /// the member optional); no `registry_consent` member rides beside it; and
+    /// the generated `trust_tasks_rs::specs` payload for that version reads the
+    /// same value back, so the name is checked against the schema rather than
+    /// against a string this test spells.
+    #[tokio::test]
+    async fn the_applicants_registry_consent_reaches_the_wire_as_given() {
+        use crate::vetting::protocol::JoinProtocol;
+        use trust_tasks_rs::specs::vtc::join_requests::submit;
+        let (applicant, signer) =
+            affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
+                .expect("did:key generates");
+        for protocol in [JoinProtocol::V0_2, JoinProtocol::V0_3] {
+            for consent in [false, true] {
+                let doc = build_join_submit_document(
+                    &applicant,
+                    &signer,
+                    "did:webvh:example.com:community",
+                    JoinPresentation {
+                        vp: json!({ "type": ["VerifiablePresentation"] }),
+                        extensions: Value::Null,
+                        attributes: Vec::new(),
+                        protocol,
+                        criterion: None,
+                        registry_consent: consent,
+                    },
+                    "urn:uuid:submit-consent",
+                )
+                .await
+                .unwrap();
+                let payload = &doc["payload"];
+                assert_eq!(
+                    payload["registryConsent"],
+                    json!(consent),
+                    "{protocol:?}: the wire member is camelCase and carries the choice: {payload}"
+                );
+                assert!(
+                    payload.get("registry_consent").is_none(),
+                    "{protocol:?}: no snake_case member alongside it: {payload}"
+                );
+                let read_back = match protocol {
+                    JoinProtocol::V0_2 => {
+                        serde_json::from_value::<submit::v0_2::Payload>(payload.clone())
+                            .expect("the generated submit/0.2 payload")
+                            .registry_consent
+                    }
+                    JoinProtocol::V0_3 => {
+                        serde_json::from_value::<submit::v0_3::Payload>(payload.clone())
+                            .expect("the generated submit/0.3 payload")
+                            .registry_consent
+                    }
+                };
+                assert_eq!(
+                    read_back,
+                    Some(consent),
+                    "{protocol:?}: the spec's own type reads the same answer"
+                );
+            }
+        }
+    }
+
+    /// A presentation built without asking — the `From<Value>` path every
+    /// caller that predates the choice uses — says no. Consent is never the
+    /// default.
+    #[tokio::test]
+    async fn an_unasked_presentation_does_not_consent() {
+        let presentation = JoinPresentation::from(json!({ "type": ["VerifiablePresentation"] }));
+        assert!(!presentation.registry_consent);
+        let (applicant, signer) =
+            affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
+                .expect("did:key generates");
+        let doc = build_join_submit_document(
+            &applicant,
+            &signer,
+            "did:webvh:example.com:community",
+            presentation,
+            "urn:uuid:submit-unasked",
+        )
+        .await
+        .unwrap();
+        assert_eq!(doc["payload"]["registryConsent"], json!(false));
     }
 
     #[test]

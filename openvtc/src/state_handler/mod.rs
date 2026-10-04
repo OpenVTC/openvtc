@@ -2877,6 +2877,7 @@ impl StateHandler {
                     Action::JoinInvitationSelect(..) | Action::JoinInvitationChoose |
                     Action::JoinContextSelect(..) | Action::JoinContextSlug(..) |
                     Action::JoinContextChoose | Action::JoinAnswersSelect(..) | Action::JoinAnswersChoose |
+                    Action::JoinRegistryToggle | Action::JoinRegistryConfirm |
                     Action::JoinVettingTake | Action::JoinVettingApply |
                     Action::JoinVettingJoin |
                     Action::JoinVettingAskAgain | Action::JoinVettingRow(..) |

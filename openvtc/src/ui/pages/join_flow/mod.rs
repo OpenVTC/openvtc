@@ -3,8 +3,10 @@
 //! A small multi-page [`Component`] mirroring [`SetupFlow`](super::setup_flow):
 //! `VtcEnterDid` collects the community DID, `IdentityChoice` picks the persona
 //! to present, `InvitationChoice` asks whether an invitation rides with it (on
-//! the reuse path — a freshly minted persona can hold none), then `JoinProgress`
-//! shows the automated mint + join sequence. The page selection is driven by
+//! the reuse path — a freshly minted persona can hold none), `RegistryConsent`
+//! asks — unticked until ticked — whether the community may publish the
+//! membership in its trust registry, then `JoinProgress` shows the automated
+//! mint + join sequence. The page selection is driven by
 //! [`JoinState.page`](crate::state_handler::join::JoinState::page); the VTC DID
 //! `Input` lives on this component (mirroring how `vta_enter_did` holds its
 //! input), and persists across re-renders via `move_with_state`.
@@ -36,6 +38,7 @@ pub mod context_choice;
 pub mod identity_choice;
 pub mod invitation_choice;
 pub mod join_progress;
+pub mod registry_consent;
 pub mod vetting_requirements;
 pub mod vtc_enter_did;
 
@@ -202,6 +205,9 @@ impl Component for JoinFlow {
             JoinPage::Progress => JoinProgress::handle_key_event(self, key),
             JoinPage::Vetting => VettingPage::handle_key_event(self, key),
             JoinPage::Answers => answers::AnswersPage::handle_key_event(self, key),
+            JoinPage::RegistryConsent => {
+                registry_consent::RegistryConsentPage::handle_key_event(self, key)
+            }
         }
     }
 
@@ -231,7 +237,8 @@ impl Component for JoinFlow {
             | JoinPage::ContextChoice
             | JoinPage::Progress
             | JoinPage::Vetting
-            | JoinPage::Answers => {}
+            | JoinPage::Answers
+            | JoinPage::RegistryConsent => {}
         }
     }
 }
@@ -249,6 +256,9 @@ impl ComponentRender<()> for JoinFlow {
             JoinPage::Progress => self.join_progress.render(&self.props.state, frame),
             JoinPage::Vetting => self.vetting.render(&self.props.state, frame),
             JoinPage::Answers => answers::AnswersPage.render(&self.props.state, frame),
+            JoinPage::RegistryConsent => {
+                registry_consent::RegistryConsentPage.render(&self.props.state, frame)
+            }
         }
         if let Some(overlay) = self.props.create_persona.as_ref() {
             create_persona_overlay::render(frame, overlay);

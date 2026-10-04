@@ -44,6 +44,55 @@ pub enum JoinPage {
     /// asks and why, which face answers, and exactly what that face would send
     /// — before anything is. See [`JoinAnswers`].
     Answers,
+    /// Whether the community may publish this membership in its trust
+    /// registry. The last question before anything is sent, asked on every
+    /// join, and unticked until the person ticks it. See [`RegistryChoice`].
+    RegistryConsent,
+}
+
+/// The applicant's answer to "may this community publish my membership in its
+/// trust registry?", as the Registry page holds it.
+///
+/// This is `registryConsent` on `vtc/join-requests/submit`. The community
+/// copies it onto the member record, and its registry sync publishes only
+/// members whose record says yes — approving the request does not consent for
+/// them. It is the member's privacy decision, so it is asked rather than
+/// assumed: [`publish`](Self::publish) starts `false`, only a keypress on the
+/// page sets it, and nothing about the community, the persona or an earlier
+/// join pre-fills it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RegistryChoice {
+    /// Whether the box is ticked. `false` until the person ticks it.
+    pub publish: bool,
+    /// The community the question is about. An answer is only ever read for
+    /// this community ([`Self::consent_for`]), so an answer given for one join
+    /// cannot ride along with another started from the same open flow.
+    pub community: String,
+    /// The community's display name, when one resolved, for the page's
+    /// wording. Display only.
+    pub community_name: Option<String>,
+    /// Set by Enter: the person has answered, whichever way.
+    pub confirmed: bool,
+    /// The join launch waiting on this page: `(identity, community, context)`.
+    pub parked: Option<(IdentityPick, String, String)>,
+}
+
+impl RegistryChoice {
+    /// What to send as `registryConsent` for a join to `vtc_did`: `true` only
+    /// when the person answered this page, for this community, with the box
+    /// ticked. Every other state — not asked, asked but not answered, answered
+    /// for another community — is `false`, which is also the protocol default.
+    #[must_use]
+    pub fn consent_for(&self, vtc_did: &str) -> bool {
+        self.confirmed && self.publish && self.community == vtc_did
+    }
+
+    /// Whether the person has answered for `vtc_did`, either way. The join
+    /// does not go out until they have.
+    #[must_use]
+    pub fn answered_for(&self, vtc_did: &str) -> bool {
+        self.confirmed && self.community == vtc_did
+    }
 }
 
 /// The community's questions and the holder's answer, as the Answers page
@@ -496,6 +545,13 @@ pub struct JoinState {
     /// What the community asks the applicant to tell it, and how they answer.
     /// `None` when it asks nothing, or before the join reaches that point.
     pub answers: Option<JoinAnswers>,
+    /// The trust-registry question, while it is being asked and once it is
+    /// answered. `None` before the join reaches it; taken by the join sequence
+    /// that sends the answer, so it is used for exactly one submit.
+    pub registry: Option<RegistryChoice>,
+    /// What the sent request said about trust-registry publication, for the
+    /// success page. `None` until a request has been sent.
+    pub registry_consent_sent: Option<bool>,
     /// Display name resolved from the VTC DID document (best-effort).
     pub display_name: Option<String>,
     /// The VTC DID awaiting an identity choice (set on `EnterDid` submit, read
