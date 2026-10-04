@@ -33,6 +33,8 @@ pub mod display;
 pub mod dtg;
 pub mod errors;
 pub mod git_ns;
+pub mod git_signing;
+pub mod git_workspace;
 pub mod health;
 pub mod identity;
 pub mod issued_credential;
