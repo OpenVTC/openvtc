@@ -288,47 +288,67 @@ impl KnownVetting {
         self.applications.iter().find(|a| a.persona == persona)
     }
 
-    /// How many choices are nested under the vetting route.
+    /// Every row the cursor can rest on, in the order they are drawn.
     ///
-    /// One: which persona applies, because that is the decision this route
-    /// *is*. Which context the application's face is worn in used to be a
-    /// second row; it is now taken, always, as a sub-context of its own —
-    /// [`context_options`](Self::context_options) still holds it, and index 0
-    /// is the same value the row opened on. A persona already has exactly one
-    /// context it can be presented from, so for every persona but a brand-new
-    /// one the row had a single value anyway.
-    fn nested_rows(&self) -> usize {
-        1
-    }
-
-    /// Every row the cursor moves over, in the order they are drawn.
+    /// The list never depends on the cursor, so an index always names the same
+    /// row. "Apply as" is in it whether or not it is drawn — it is hidden while
+    /// the cursor is elsewhere (see [`shows`](Self::shows)). Building the list
+    /// from the cursor instead made one index mean two rows: stepping down off
+    /// "Apply as" collapsed it, and the cursor landed past the end of the list,
+    /// so "Send an open request" could never be highlighted.
     #[must_use]
     pub fn rows(&self) -> Vec<VettingRow> {
-        let mut rows = Vec::with_capacity(self.routes.len() + 2);
+        let mut rows = Vec::with_capacity(self.routes.len() + 1);
         for (i, option) in self.routes.iter().enumerate() {
             rows.push(VettingRow::Route(i));
-            // Nested under the route they belong to, and only while it is the
-            // one being considered — the choices are noise on a page whose
-            // reader has already decided to do something else.
-            if option.route == JoinRoute::Vetting && self.row_is_vetting(rows.len() - 1) {
+            // One nested choice: which persona applies, because that is the
+            // decision this route *is*. The context the application's face is
+            // worn in is always a sub-context of its own, so it is not asked.
+            if option.route == JoinRoute::Vetting {
                 rows.push(VettingRow::ApplyAs);
             }
         }
         rows
     }
 
-    /// Whether the cursor is on, or inside, the way in drawn at `route_row`.
-    ///
-    /// Reads the cursor without [`rows`](Self::rows), which is what builds the
-    /// list this answers for — the two would otherwise call each other.
-    fn row_is_vetting(&self, route_row: usize) -> bool {
-        self.row >= route_row && self.row <= route_row + self.nested_rows()
+    /// Whether `row` is drawn. The nested choice shows only while its route is
+    /// the one being considered — it is noise on a page whose reader has
+    /// already decided to do something else.
+    #[must_use]
+    pub fn shows(&self, row: VettingRow) -> bool {
+        match row {
+            VettingRow::Route(_) => true,
+            VettingRow::ApplyAs => {
+                self.selected_route().map(|r| r.route) == Some(JoinRoute::Vetting)
+            }
+        }
     }
 
-    /// Total rows the cursor moves over.
-    #[must_use]
-    pub fn row_count(&self) -> usize {
-        self.rows().len()
+    /// Moves the cursor one drawn row on, wrapping at either end.
+    ///
+    /// Moving down from the vetting route opens its choice; moving up into it
+    /// from below lands on the route itself, since the choice is hidden until
+    /// then and stepping onto an invisible row reads as a lost cursor.
+    pub fn step(&mut self, forward: bool) {
+        let rows = self.rows();
+        if rows.is_empty() {
+            return;
+        }
+        let n = rows.len();
+        let mut next = self.row.min(n - 1);
+        loop {
+            next = if forward {
+                (next + 1) % n
+            } else {
+                (next + n - 1) % n
+            };
+            let entering_from_outside = rows[next] == VettingRow::ApplyAs
+                && !(forward && self.selected_route().map(|r| r.route) == Some(JoinRoute::Vetting));
+            if !entering_from_outside || next == self.row {
+                break;
+            }
+        }
+        self.row = next;
     }
 
     /// What the cursor is on.
@@ -652,6 +672,49 @@ mod tests {
             linked_communities: Vec::new(),
             valid_vic_count: 0,
         }
+    }
+
+    /// Every way in is reachable, and the cursor is always on a drawn row.
+    /// The nested "Apply as" row used to collapse as the cursor left it, which
+    /// shifted the indices under the cursor and stranded it past the end of the
+    /// list — "Send an open request" could never be highlighted.
+    #[test]
+    fn the_cursor_reaches_every_way_in_and_never_rests_on_a_hidden_row() {
+        let route = |route| RouteOption {
+            route,
+            label: String::new(),
+            detail: String::new(),
+            state: RouteState::Ready,
+        };
+        let mut known = KnownVetting {
+            routes: vec![
+                route(JoinRoute::Invitation),
+                route(JoinRoute::Vetting),
+                route(JoinRoute::OpenRequest),
+            ],
+            ..KnownVetting::default()
+        };
+        let walk = |known: &mut KnownVetting, forward| {
+            (0..4)
+                .map(|_| {
+                    known.step(forward);
+                    let row = known.selected().expect("cursor on a row");
+                    assert!(known.shows(row), "cursor on a hidden row");
+                    row
+                })
+                .collect::<Vec<_>>()
+        };
+        use VettingRow::{ApplyAs, Route};
+        assert_eq!(
+            walk(&mut known, true),
+            [Route(1), ApplyAs, Route(2), Route(0)]
+        );
+        // Upward from below, the choice stays shut: the route comes first.
+        known.row = known.row_of(JoinRoute::OpenRequest).unwrap();
+        assert_eq!(
+            walk(&mut known, false),
+            [Route(1), Route(0), Route(2), Route(1)]
+        );
     }
 
     #[test]
