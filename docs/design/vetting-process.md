@@ -1373,8 +1373,12 @@ Following the existing patterns in
   *As built, in part:* the **Membership** tab now lists the `vetter` role
   credential beside the VMC and role VAC from the same community, with its
   validity window and its raw JSON — it is stored apart from them (§10.3) but
-  is a credential from that community like the others. Held *statements* still
-  have no tab of their own.
+  is a credential from that community like the others. Held *statements* have
+  a **Vetting** tab of their own: one row per statement, across every
+  application, naming the vetter, the method and the community. Its detail
+  view shows what the vetter declared, what they relied on and which claims
+  they verified, with the raw JSON. The status is the validity window only;
+  a withdrawal is the community's to record (§9.6).
 - **Inbox**, *as built*, also carries `VetterGrantExpiring`: our own `vetter`
   credential lapsed, or about to. Raised by the hourly sweep, because nothing
   arrives to announce it — the first sign is an applicant's request refused at

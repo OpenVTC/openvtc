@@ -165,7 +165,8 @@ fn handle_switch_tab(state: &mut State) {
         match state.main_page.content_panel.credentials.selected_tab {
             CredentialTab::Received => CredentialTab::Issued,
             CredentialTab::Issued => CredentialTab::Membership,
-            CredentialTab::Membership => CredentialTab::Received,
+            CredentialTab::Membership => CredentialTab::Vetting,
+            CredentialTab::Vetting => CredentialTab::Received,
         };
     state.main_page.content_panel.credentials.selected_index = 0;
 }
@@ -290,7 +291,8 @@ mod tests {
     //! Mirrors the table-test style in `ui/pages/setup_flow/navigation.rs`.
     use super::*;
 
-    /// `handle_switch_tab` cycles Received → Issued → Membership → Received and
+    /// `handle_switch_tab` cycles Received → Issued → Membership → Vetting →
+    /// Received and
     /// resets the selection index each time.
     #[test]
     fn switch_tab_cycles_and_resets_index() {
@@ -298,7 +300,8 @@ mod tests {
         let cases: &[(CredentialTab, CredentialTab)] = &[
             (CredentialTab::Received, CredentialTab::Issued),
             (CredentialTab::Issued, CredentialTab::Membership),
-            (CredentialTab::Membership, CredentialTab::Received),
+            (CredentialTab::Membership, CredentialTab::Vetting),
+            (CredentialTab::Vetting, CredentialTab::Received),
         ];
         for (start, expected) in cases {
             let mut state = State::default();

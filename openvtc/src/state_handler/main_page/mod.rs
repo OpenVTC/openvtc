@@ -404,6 +404,7 @@ impl MainPageState {
         )
         .into();
         self.content_panel.credentials.membership = collect_membership_creds(config).into();
+        self.content_panel.credentials.vetting = collect_vetting_statements(config).into();
         self.content_panel.credentials.retired_vrcs = config.private.vrcs_received.retired()
             + config.private.vrcs_issued.retired()
             + config
@@ -934,6 +935,8 @@ fn collect_vrcs(
                     subject_is_self: config.is_persona_did(vrc.subject()),
                     valid_from: vrc.valid_from().format("%Y-%m-%d").to_string(),
                     valid_until: vrc.valid_until().map(|d| d.format("%Y-%m-%d").to_string()),
+                    note: None,
+                    facts: Vec::new(),
                 });
             }
         }
@@ -1020,6 +1023,8 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
                 subject_is_self: config.is_persona_did(&subject),
                 valid_from,
                 valid_until,
+                note: None,
+                facts: Vec::new(),
             });
         }
 
@@ -1114,6 +1119,8 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
                 subject_is_self: false,
                 valid_from,
                 valid_until,
+                note: None,
+                facts: Vec::new(),
             });
         }
     }
@@ -1202,7 +1209,105 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
             subject_is_self: config.is_persona_did(&subject),
             valid_from,
             valid_until,
+            note: None,
+            facts: Vec::new(),
         });
+    }
+    result
+}
+
+/// Build display summaries for the vetting statements we hold, across every
+/// application.
+///
+/// A statement is the evidence an application rests on. The Vetting page counts
+/// statements on its checklist, but none could be opened: what the vetter
+/// signed — how they checked, what they relied on, what they declared about
+/// knowing us — was stored and shown nowhere. Applications keep their
+/// statements after the join, so members see theirs too.
+///
+/// `status` is the validity window only. Whether a vetter has withdrawn a
+/// statement is the community's to record (design §9.6), and nothing here
+/// claims otherwise.
+fn collect_vetting_statements(config: &Config) -> Vec<VrcSummary> {
+    let now = chrono::Utc::now();
+    let mut result = Vec::new();
+    for app in &config.private.vetting.applications {
+        // Labelled the way the Membership tab labels the same community.
+        let display_name = config
+            .account
+            .memberships()
+            .find(|m| m.vtc_did == app.community)
+            .and_then(|m| m.display_name.clone());
+        let community = crate::state_handler::community_label(
+            config,
+            &app.community,
+            display_name.as_deref(),
+            64,
+        );
+        for statement in &app.statements {
+            let (validity, status) =
+                format_validity_from_dates(statement.valid_from, Some(statement.valid_until), now);
+            let method = content::method_label(statement.method);
+            let mut facts = vec![
+                ("For", community.clone()),
+                ("Method", method.to_string()),
+                (
+                    "Declared",
+                    content::relationship_label(statement.declared_relationship).to_string(),
+                ),
+            ];
+            if !statement.document_classes.is_empty() {
+                facts.push((
+                    "Relied on",
+                    sanitize_display(&statement.document_classes.join(", "), 256),
+                ));
+            }
+            if !statement.claims_verified.is_empty() {
+                facts.push((
+                    "Verified",
+                    sanitize_display(&statement.claims_verified.join(", "), 256),
+                ));
+            }
+            facts.push((
+                "Received",
+                statement
+                    .received_at
+                    .format("%-d %b %Y %H:%M UTC")
+                    .to_string(),
+            ));
+            result.push(VrcSummary {
+                vrc_id: sanitize_display(&statement.id, 256),
+                remote_p_did: sanitize_display(&statement.vetter, 256),
+                remote_agent_name: config
+                    .agent_name_for(&statement.vetter)
+                    .map(|n| sanitize_display(n, 256)),
+                raw_json: content::RawCredential::Value(Arc::new(statement.credential.clone())),
+                // The vetter is the party, as the peer is on a VRC, so their
+                // contact alias leads; the community is in the note.
+                alias: config
+                    .private
+                    .contacts
+                    .find_contact(&statement.vetter)
+                    .and_then(|c| c.alias.as_deref().map(|a| sanitize_display(a, 256))),
+                // The applicant checked the issuer is the vetter on receipt.
+                issuer: sanitize_display(&statement.vetter, 256),
+                issuer_agent_name: config
+                    .agent_name_for(&statement.vetter)
+                    .map(|n| sanitize_display(n, 256)),
+                subject: sanitize_display(&app.join_did, 256),
+                subject_agent_name: config
+                    .agent_name_for(&app.join_did)
+                    .map(|n| sanitize_display(n, 256)),
+                validity,
+                status,
+                kind: Some("Vetting statement".to_string()),
+                subject_is_self: config.is_persona_did(&app.join_did),
+                valid_from: statement.valid_from.format("%Y-%m-%d").to_string(),
+                valid_until: Some(statement.valid_until.format("%Y-%m-%d").to_string()),
+                note: Some(format!("{method} · {community}")),
+                facts,
+            });
+        }
     }
     result
 }
@@ -1622,6 +1727,86 @@ mod tests {
             "the window is what says whether it still works: {}",
             grant.validity
         );
+    }
+
+    /// A held vetting statement is listed on the Vetting tab with what the
+    /// vetter signed: how they checked, what they declared, and what they
+    /// relied on — under the community's own name.
+    #[test]
+    fn a_held_statement_is_listed_with_what_the_vetter_signed() {
+        use openvtc_core::vetting::applicant::HeldStatement;
+        use vta_sdk::protocols::vetting::{VettingMethod, VettingRelationship};
+
+        let mut config = config_with_membership(
+            "did:webvh:scid:example.com:me",
+            Some("Me"),
+            "did:web:vtc",
+            Some("Kernel Developers"),
+        );
+        let persona = *config.account.personas.keys().next().unwrap();
+        let now = chrono::Utc::now();
+        let app = config
+            .private
+            .vetting
+            .start_application("did:web:vtc", persona, "did:webvh:scid:example.com:me", now)
+            .unwrap();
+        app.statements.push(HeldStatement {
+            id: "urn:uuid:statement-1".into(),
+            vetter: "did:webvh:scid:example.com:carol".into(),
+            method: VettingMethod::InPerson,
+            declared_relationship: VettingRelationship::CommunityColleague,
+            document_classes: vec!["passport".into()],
+            claims_verified: vec!["name.legal".into()],
+            identity_commitment: "zCommitment".into(),
+            valid_from: now,
+            valid_until: now + chrono::Duration::days(120),
+            received_at: now,
+            credential: serde_json::json!({ "id": "urn:uuid:statement-1" }),
+        });
+
+        let statements = collect_vetting_statements(&config);
+        let [statement] = statements.as_slice() else {
+            panic!("one statement listed, got {}", statements.len());
+        };
+        assert_eq!(statement.vrc_id, "urn:uuid:statement-1");
+        assert_eq!(statement.issuer, "did:webvh:scid:example.com:carol");
+        assert_eq!(statement.subject, "did:webvh:scid:example.com:me");
+        assert_eq!(statement.status, "valid");
+        assert_eq!(
+            statement.note.as_deref(),
+            Some("in person · Kernel Developers")
+        );
+        let fact = |label: &str| {
+            statement
+                .facts
+                .iter()
+                .find(|(l, _)| *l == label)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(fact("For"), Some("Kernel Developers"));
+        assert_eq!(fact("Declared"), Some("we work together in the community"));
+        assert_eq!(fact("Relied on"), Some("passport"));
+        assert_eq!(fact("Verified"), Some("name.legal"));
+    }
+
+    /// Statements are listed for every application, and an application with
+    /// none lists nothing rather than a placeholder row.
+    #[test]
+    fn an_application_without_statements_lists_none() {
+        let mut config =
+            config_with_membership("did:webvh:scid:example.com:me", None, "did:web:vtc", None);
+        let persona = *config.account.personas.keys().next().unwrap();
+        config
+            .private
+            .vetting
+            .start_application(
+                "did:web:vtc",
+                persona,
+                "did:webvh:scid:example.com:me",
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        assert!(collect_vetting_statements(&config).is_empty());
     }
 
     /// A grant whose stored credential this build cannot read still shows a
