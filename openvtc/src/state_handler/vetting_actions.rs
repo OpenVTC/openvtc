@@ -766,8 +766,30 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
         }
         VettingAction::ChooseFace => {
             let v = page(ctx);
-            if let Some(row) = v.applications.get(v.selected).cloned() {
-                list_faces(ctx, &row.id);
+            // From a card, the card's application — not whichever row the list
+            // behind it last had selected — and the card is where it returns.
+            let id = match &v.mode {
+                VettingMode::SendCard {
+                    application_id,
+                    session_id,
+                    ..
+                } => {
+                    v.card_after_face = Some((application_id.clone(), session_id.clone()));
+                    Some(application_id.clone())
+                }
+                // A retry after granting access keeps whichever card sent it.
+                VettingMode::HolderGrant { .. } => v
+                    .card_after_face
+                    .as_ref()
+                    .map(|(application_id, _)| application_id.clone())
+                    .or_else(|| v.applications.get(v.selected).map(|row| row.id.clone())),
+                _ => {
+                    v.card_after_face = None;
+                    v.applications.get(v.selected).map(|row| row.id.clone())
+                }
+            };
+            if let Some(id) = id {
+                list_faces(ctx, &id);
             }
         }
         VettingAction::RequestVetter => {
@@ -952,7 +974,27 @@ fn back(v: &mut VettingState) {
         form.event = None;
         return;
     }
+    // Backing out of choosing a face that a card asked for goes back to that
+    // card: it is still open, and still the thing the holder was doing.
+    if matches!(
+        v.mode,
+        VettingMode::ChooseFace { .. } | VettingMode::NewFace(_) | VettingMode::HolderGrant { .. }
+    ) && let Some(card) = v.card_after_face.take()
+    {
+        v.mode = card_mode(card);
+        return;
+    }
+    v.card_after_face = None;
     v.mode = VettingMode::List;
+}
+
+/// The card page for `(application_id, session_id)`, before its preview.
+fn card_mode((application_id, session_id): (String, String)) -> VettingMode {
+    VettingMode::SendCard {
+        application_id,
+        session_id,
+        preview: None,
+    }
 }
 
 fn profile_membership(v: &VettingState) -> Option<usize> {
@@ -2059,6 +2101,15 @@ fn abandon_application(ctx: &mut ActionCtx<'_>) {
 /// framing. Everything else is passed through: a failure we cannot explain is
 /// better verbatim than paraphrased into a guess (R6.4).
 fn preview_refusal(error: &str, application_id: &str, config: &Config) -> String {
+    // The persona wears no face in the community's context at all. Making an
+    // application does not choose one — `f` does — so this is the first card of
+    // any application whose face was never picked, and the agent's sentence
+    // names the persona's DID and nothing the holder can press.
+    if error.contains("has no profile bound") {
+        return "This application has no face yet, so there is no card to show. Press f to \
+                choose the face vetters see — you come back here once it is worn."
+            .to_string();
+    }
     if !error.contains("none of the requested claim types are present") {
         return format!("Could not preview the card: {error}");
     }
@@ -2279,7 +2330,11 @@ fn wear_face(ctx: &mut ActionCtx<'_>, application_id: &str, face: Option<FaceCho
         return status(ctx, "Make a face under My Identity first.");
     };
     if face.worn {
-        page(ctx).mode = VettingMode::List;
+        let v = page(ctx);
+        v.mode = v
+            .card_after_face
+            .take()
+            .map_or(VettingMode::List, card_mode);
         return status(
             ctx,
             format!("{} is already the face you show vetters.", face.name),
@@ -3706,12 +3761,22 @@ impl VettingOutcome {
                     }
                 }
                 let message = if faces.is_empty() {
-                    "You have no faces yet — make one under My Identity with the claims the \
-                     community requires, then press f again."
+                    "You have no faces yet — make one here from the attributes you have."
                 } else {
                     "Choose the face you show vetters."
                 };
-                if matches!(v.mode, VettingMode::List) && !faces.is_empty() {
+                // From the list, the card page, or the access-granted retry —
+                // every place `f` is offered. Any other mode is something the
+                // holder moved on to while the read was in flight, and must not
+                // be replaced under them. With no faces the picker still opens:
+                // its last row makes one, and skipping it left only a pointer
+                // to another page.
+                if matches!(
+                    v.mode,
+                    VettingMode::List
+                        | VettingMode::SendCard { .. }
+                        | VettingMode::HolderGrant { .. }
+                ) {
                     let index = faces.iter().position(|f| f.worn).unwrap_or(0);
                     let required = config
                         .private
@@ -3821,14 +3886,25 @@ impl VettingOutcome {
                         name: name.clone(),
                     });
                 }
+                // Back to the card that asked for a face, if this is its
+                // application and the holder is still waiting on the list the
+                // wear left them on.
+                let back_to_card = v
+                    .card_after_face
+                    .take_if(|(card_application, _)| *card_application == application_id)
+                    .filter(|_| matches!(v.mode, VettingMode::List));
                 v.worn_faces.insert(application_id, name.clone());
-                (
-                    format!(
-                        "Vetters are shown your {name} face, and the community sees the same one \
-                         when you join."
-                    ),
-                    true,
-                )
+                let message = format!(
+                    "Vetters are shown your {name} face, and the community sees the same one \
+                     when you join."
+                );
+                match back_to_card {
+                    Some(card) => {
+                        v.mode = card_mode(card);
+                        (format!("{message} Enter previews the card."), true)
+                    }
+                    None => (message, true),
+                }
             }
             VettingOutcome::FaceWorn {
                 name,
@@ -4699,6 +4775,78 @@ mod tests {
         ));
     }
 
+    /// `f` on the card page opens the picker — the read used to land and be
+    /// dropped because the page was not the list — and wearing a face goes
+    /// back to the card that asked for it, not to the list.
+    #[test]
+    fn a_face_chosen_from_the_card_returns_to_the_card() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+        let v = &mut state.main_page.content_panel.vetting;
+        v.mode = VettingMode::SendCard {
+            application_id: "a".into(),
+            session_id: "s".into(),
+            preview: None,
+        };
+        v.card_after_face = Some(("a".into(), "s".into()));
+
+        VettingOutcome::Faces {
+            application_id: "a".into(),
+            result: Ok(Vec::new()),
+        }
+        .apply(&mut state, &mut config, &mut save);
+        // Opened even with no faces: its last row makes one.
+        assert!(matches!(
+            &state.main_page.content_panel.vetting.mode,
+            VettingMode::ChooseFace { faces, index: 0, .. } if faces.is_empty()
+        ));
+
+        // Wearing leaves the page on the list while the job runs…
+        state.main_page.content_panel.vetting.mode = VettingMode::List;
+        VettingOutcome::FaceWorn {
+            application_id: "a".into(),
+            profile_id: "p".into(),
+            name: "WORK".into(),
+            error: None,
+        }
+        .apply(&mut state, &mut config, &mut save);
+        // …and the answer puts the holder back on the card.
+        let v = &state.main_page.content_panel.vetting;
+        assert!(matches!(
+            &v.mode,
+            VettingMode::SendCard { application_id, session_id, preview: None }
+                if application_id == "a" && session_id == "s"
+        ));
+        assert!(v.card_after_face.is_none());
+    }
+
+    /// Backing out of the picker a card opened returns to that card; from the
+    /// list it returns to the list.
+    #[test]
+    fn backing_out_of_the_picker_returns_where_it_came_from() {
+        let picker = || VettingMode::ChooseFace {
+            application_id: "a".into(),
+            faces: Vec::new(),
+            index: 0,
+            required: Vec::new(),
+        };
+        let mut v = VettingState {
+            mode: picker(),
+            card_after_face: Some(("a".into(), "s".into())),
+            ..VettingState::default()
+        };
+        back(&mut v);
+        assert!(matches!(&v.mode, VettingMode::SendCard { session_id, .. } if session_id == "s"));
+
+        let mut v = VettingState {
+            mode: picker(),
+            ..VettingState::default()
+        };
+        back(&mut v);
+        assert!(matches!(v.mode, VettingMode::List));
+    }
+
     /// The picker opens on the face already worn, and the page remembers it.
     #[test]
     fn the_face_picker_opens_on_the_worn_face() {
@@ -4844,6 +4992,23 @@ mod tests {
         assert!(out.contains("Press f"), "{out}");
         // The agent's framing does not survive into the sentence.
         assert!(!out.contains("malformedRequest"), "{out}");
+    }
+
+    /// No face worn at all: making an application does not choose one, so the
+    /// first card of an application whose face was never picked meets this.
+    /// The agent's sentence names a DID; this one names the key.
+    #[test]
+    fn a_card_with_no_face_worn_says_to_choose_one() {
+        let out = preview_refusal(
+            "VTA Error: persona disclosure preview failed: not found: not found: persona \
+             did:webvh:QmS:dids-wonderland.ic3.dev:march-issue has no profile bound, so there \
+             is nothing to disclose",
+            "no-such-application",
+            &test_config(),
+        );
+        assert!(out.contains("no face yet"), "{out}");
+        assert!(out.contains("Press f"), "{out}");
+        assert!(!out.contains("did:webvh"), "{out}");
     }
 
     /// Anything else is passed through. A failure we cannot explain is better

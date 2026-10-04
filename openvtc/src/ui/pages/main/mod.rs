@@ -2837,7 +2837,12 @@ impl MainPage {
             // between, Tab and the arrows did nothing visible either. The view
             // read as frozen, and the only way back to a working `f` was to
             // restart.
-            let holder_grant = matches!(vetting.mode, VettingMode::HolderGrant { .. });
+            // `f` chooses the face wherever a missing or wrong one is what the
+            // page is reporting: the grant page, and the card it reads from.
+            let chooses_face = matches!(
+                vetting.mode,
+                VettingMode::HolderGrant { .. } | VettingMode::SendCard { .. }
+            );
             let on_result = matches!(&vetting.mode, VettingMode::Directory(view) if view.result_index().is_some());
             let on_event = matches!(
                 &vetting.mode,
@@ -2873,7 +2878,7 @@ impl MainPage {
                 KeyCode::Right => Some(V::Cycle(true)),
                 code => match text {
                     Some(current) => edit_text(code, &current).map(V::Input),
-                    None if holder_grant && code == KeyCode::Char('f') => Some(V::ChooseFace),
+                    None if chooses_face && code == KeyCode::Char('f') => Some(V::ChooseFace),
                     None if code == KeyCode::Char('y') && confirming => Some(V::Submit),
                     None if code == KeyCode::Char('n') && confirming => Some(V::Back),
                     None if on_result && code == KeyCode::Char('n') => Some(V::DirectoryPage(true)),
@@ -4243,6 +4248,23 @@ mod key_handler_tests {
         assert!(matches!(vetting_action(&mut rx), V::Toggle));
         page.handle_key_event(press(KeyCode::Char('x')));
         assert!(rx.try_recv().is_err(), "x removes nothing off an event row");
+    }
+
+    /// The card page is where a missing face shows up, so `f` chooses one
+    /// there rather than only after backing out to the application.
+    #[test]
+    fn vetting_card_chooses_the_face_on_f() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::VettingMode;
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s: &mut State| {
+            s.main_page.content_panel.vetting.mode = VettingMode::SendCard {
+                application_id: "a".into(),
+                session_id: "s".into(),
+                preview: None,
+            };
+        });
+        page.handle_key_event(press(KeyCode::Char('f')));
+        assert!(matches!(vetting_action(&mut rx), V::ChooseFace));
     }
 
     /// The holder-grant view ends with "then press f", and that key has to
