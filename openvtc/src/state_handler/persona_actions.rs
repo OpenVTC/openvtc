@@ -2481,14 +2481,28 @@ impl PersonaOutcome {
                 Ok(detail) => {
                     if edit {
                         if detail.is_editable_here() {
+                            // A reference to an attribute that has left the pool
+                            // — deleted from another client sharing this VTA —
+                            // fails every save and has no row to untick. Judged
+                            // only against a pool that read cleanly: a failed
+                            // read must not read as "everything is gone".
+                            let (ticked, missing): (Vec<_>, Vec<_>) =
+                                if p.loaded && p.load_error.is_none() {
+                                    detail.live_refs.iter().cloned().partition(|id| {
+                                        p.attributes.iter().any(|a| &a.attribute_id == id)
+                                    })
+                                } else {
+                                    (detail.live_refs.clone(), Vec::new())
+                                };
                             p.mode = PersonaMode::Profile(ProfileForm {
                                 profile_id: Some(detail.summary.profile_id.clone()),
                                 expected_version: Some(detail.summary.version),
                                 name: tui_input::Input::new(detail.summary.name.clone()),
-                                ticked: detail.live_refs.clone(),
+                                ticked,
                                 cursor: 0,
                                 focus: ProfileFormFocus::Name,
                                 preserved: detail.other_entries.clone(),
+                                dropped: missing.len(),
                                 error: None,
                                 working: false,
                             });
@@ -3384,6 +3398,46 @@ mod tests {
                 .status_message
                 .as_deref()
                 .is_some_and(|m| m.contains("cannot read"))
+        );
+    }
+
+    /// A face that still references an attribute the pool no longer holds —
+    /// deleted from another client on the same VTA — opens with that reference
+    /// left out and counted. Carried, it failed every save with "profile
+    /// references 1 attribute(s) the pool does not hold", and with no row to
+    /// untick the holder could not fix it from here.
+    #[test]
+    fn the_editor_drops_references_to_attributes_the_pool_no_longer_holds() {
+        let open = |loaded: bool, load_error: Option<String>| {
+            let mut state = state_with(IdentityState {
+                attributes: vec![attribute("01A")].into(),
+                loaded,
+                load_error,
+                ..IdentityState::default()
+            });
+            PersonaOutcome::ProfileRead {
+                edit: true,
+                result: Ok(ProfileDetail {
+                    live_refs: vec!["01A".into(), "01GONE".into()],
+                    ..ProfileDetail::default()
+                }),
+            }
+            .apply(&mut state);
+            match &personas(&state).mode {
+                PersonaMode::Profile(form) => (form.ticked.clone(), form.dropped),
+                _ => panic!("the form must be open"),
+            }
+        };
+
+        assert_eq!(open(true, None), (vec!["01A".to_string()], 1));
+        // A pool that did not read cleanly is no evidence anything is gone.
+        assert_eq!(
+            open(true, Some("unreachable".into())),
+            (vec!["01A".to_string(), "01GONE".to_string()], 0)
+        );
+        assert_eq!(
+            open(false, None),
+            (vec!["01A".to_string(), "01GONE".to_string()], 0)
         );
     }
 
