@@ -47,6 +47,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   It no longer depends on the directory openvtc was started in, and no longer
   looks for the repository-local `.did-git-sign.json` that did-git-sign stopped
   writing in 0.14.
+- **Wiping a profile removes did-git-sign's identity for every persona it holds**,
+  not only the default one detected in settings. A wipe has no VTA session, so
+  each credential openvtc granted is named in the log with the `pnm acl delete`
+  that revokes it.
 - **Dependencies:** `vta-sdk` 0.63, `trust-tasks-rs` 0.27, `affinidi-tdk` 0.23,
   `affinidi-messaging-sdk` 0.33 and `did-git-sign` 0.15.1, the signer on
   verifiable-git-infrastructure `main`.

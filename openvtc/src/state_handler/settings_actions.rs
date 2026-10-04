@@ -539,7 +539,7 @@ fn handle_wipe_input(state: &mut State, value: String) {
 
 const WIPE_CONFIRM_TOKEN: &str = "WIPE";
 
-fn handle_wipe_confirm(state: &mut State, profile: &str) -> bool {
+fn handle_wipe_confirm(state: &mut State, config: &Config, profile: &str) -> bool {
     let typed = match &state.main_page.content_panel.settings.mode {
         SettingsMode::WipeConfirm { confirm_input } => confirm_input.trim().to_string(),
         _ => return false,
@@ -552,36 +552,7 @@ fn handle_wipe_confirm(state: &mut State, profile: &str) -> bool {
         return false;
     }
 
-    if let Some(info) = state.main_page.content_panel.settings.did_git_sign.clone() {
-        match did_git_sign::init::uninstall(true, &info.did_key_id) {
-            Ok(summary) => {
-                if let Some(path) = &summary.removed_config_file {
-                    state
-                        .main_page
-                        .log(format!("Removed did-git-sign config: {}", path.display()));
-                }
-                if !summary.removed_keyring_entries.is_empty() {
-                    state.main_page.log(format!(
-                        "Removed did-git-sign keyring entries: {}",
-                        summary.removed_keyring_entries.join(", ")
-                    ));
-                }
-                if summary.allowed_signers_entry_removed {
-                    state
-                        .main_page
-                        .log("Removed did-git-sign allowed_signers entry");
-                }
-                for w in &summary.warnings {
-                    state.main_page.log(format!("did-git-sign uninstall: {w}"));
-                }
-            }
-            Err(e) => {
-                state
-                    .main_page
-                    .log_error("did-git-sign uninstall failed", &e);
-            }
-        }
-    }
+    wipe_signing_identities(state, config);
 
     match openvtc_core::config::public_config::PublicConfig::delete_profile(profile) {
         Ok(summary) => {
@@ -609,6 +580,67 @@ fn handle_wipe_confirm(state: &mut State, profile: &str) -> bool {
 
     state.main_page.log("Profile wiped — exiting.");
     true
+}
+
+/// The did-git-sign identities this profile's personas sign with: each
+/// persona's assertion method, and the default identity the settings panel
+/// detected (an install from before per-persona profiles).
+fn signing_identities(state: &State, config: &Config) -> Vec<String> {
+    let mut ids: Vec<String> = config
+        .identities
+        .values()
+        .filter_map(|id| {
+            id.document()
+                .assertion_method
+                .first()
+                .map(|vm| vm.get_id().to_string())
+        })
+        .collect();
+    if let Some(info) = &state.main_page.content_panel.settings.did_git_sign {
+        ids.push(info.did_key_id.clone());
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Remove did-git-sign's identity for every persona this profile holds, so no
+/// credential is left signing for a profile that no longer exists.
+///
+/// Local only: a wipe has no VTA session, and the VTA account outlives the
+/// profile (it can be rebuilt from). Each credential openvtc granted is named
+/// in the log with the command that revokes it, rather than silently left
+/// able to export its persona's key.
+fn wipe_signing_identities(state: &mut State, config: &Config) {
+    let own = match &config.key_backend {
+        openvtc_core::config::KeyBackend::Vta { credential_did, .. } => credential_did.clone(),
+        _ => String::new(),
+    };
+    for did_key_id in signing_identities(state, config) {
+        let had = openvtc_core::git_signing::identity_status(&did_key_id);
+        if !had.any() {
+            continue;
+        }
+        match openvtc_core::git_signing::remove_identity(&did_key_id) {
+            Ok(removed) => {
+                state
+                    .main_page
+                    .log(format!("Removed did-git-sign identity {did_key_id}"));
+                if let Some(cred) = removed.credential_did.filter(|c| *c != own) {
+                    state.main_page.log(format!(
+                        "did-git-sign's credential {cred} is still granted at the VTA — revoke \
+                         it with: pnm acl delete {cred}"
+                    ));
+                }
+                for w in &removed.warnings {
+                    state.main_page.log(format!("did-git-sign uninstall: {w}"));
+                }
+            }
+            Err(e) => state
+                .main_page
+                .log_error("did-git-sign uninstall failed", &e),
+        }
+    }
 }
 
 #[cfg(feature = "openpgp-card")]
@@ -939,7 +971,7 @@ pub(crate) async fn dispatch(
         SettingsAction::WipeProfileStart => handle_wipe_start(state),
         SettingsAction::WipeProfileInput(value) => handle_wipe_input(state, value),
         SettingsAction::WipeProfileConfirm => {
-            if handle_wipe_confirm(state, profile) {
+            if handle_wipe_confirm(state, config, profile) {
                 return SettingsOutcome::ExitUserInt;
             }
         }
@@ -1342,6 +1374,30 @@ mod tests {
             };
             assert_eq!(field, 0, "tab switch toggled 1 -> 0");
         }
+    }
+
+    /// A wipe covers the identity the settings panel detected, once, beside
+    /// every persona's.
+    #[test]
+    fn a_wipe_covers_the_detected_signing_identity_once() {
+        let config = crate::state_handler::dispatch_util::test_config();
+        let mut state = State::default();
+        let persona_keys = signing_identities(&state, &config);
+        assert!(persona_keys.is_empty() || persona_keys.iter().all(|k| k.contains('#')));
+        state.main_page.content_panel.settings.did_git_sign =
+            Some(crate::state_handler::main_page::content::DidGitSignInfo {
+                did_key_id: "did:webvh:legacy#key-0".into(),
+                ssh_public_key: String::new(),
+                config_path: String::new(),
+            });
+        let all = signing_identities(&state, &config);
+        assert_eq!(
+            all.iter()
+                .filter(|k| *k == "did:webvh:legacy#key-0")
+                .count(),
+            1
+        );
+        assert_eq!(all.len(), persona_keys.len() + 1);
     }
 
     /// `handle_wipe_start` enters `WipeConfirm` (empty input) and
