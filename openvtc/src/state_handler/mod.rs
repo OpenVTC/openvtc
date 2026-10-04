@@ -2018,11 +2018,9 @@ impl StateHandler {
                     {
                         save.mark_dirty();
                     }
-                    // Ask each community about a join it has not resolved.
-                    // Only joins recorded against the *community's* request id
-                    // are askable — see `join_status_poll` — so a join that
-                    // never got any reply is not covered here; that one is
-                    // recovered by collecting the mail its reply is sitting in.
+                    // Ask each community about a join it has not resolved —
+                    // every Pending join, including one that never got any
+                    // reply, which is asked id-less; see `join_status_poll`.
                     //
                     // Spawned detached rather than through `background_dispatch`:
                     // there is no outcome to apply on the loop thread (the reply

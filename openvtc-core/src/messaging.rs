@@ -361,8 +361,10 @@ fn record_credential_delivery(
 
 /// Apply a VTC `join-requests/status-response` to the matching Pending community
 /// (R-B-8). Correlated by the body's `request_id` against the Pending record's
-/// stored id, and gated on the sender being the community's own VTC (anti-spoof).
-/// Maps the protocol status onto the membership lifecycle:
+/// stored id — or, when none matches, to the join still holding our placeholder
+/// (the one an id-less poll asked about), whose id is then adopted — and gated
+/// on the sender being the community's own VTC (anti-spoof). Maps the protocol
+/// status onto the membership lifecycle:
 ///
 /// - `approved` → stays `Pending`, acknowledged. Admission is the verified
 ///   membership credential landing in [`handle_credential_issue`], never this
@@ -372,8 +374,9 @@ fn record_credential_delivery(
 /// - `deferred` → stays `Pending` ("more info required"); the content handling
 ///   (evaluating `needs` / presenting the DCQL) is a **D4 stub**, and a Pending
 ///   record already raises actions-required (R-S-2).
-/// - `pending` / `withdrawn` / unknown → no transition (withdrawal is the
-///   member-initiated leave, owned by T7).
+/// - `pending` → stays `Pending`, acknowledged: the VTC knows the request.
+/// - `withdrawn` → `Withdrawn` (cancelled, perhaps from another client).
+/// - unknown → no transition.
 pub fn handle_join_status_response(
     account: &mut Account,
     message: &Message,
@@ -388,14 +391,36 @@ pub fn handle_join_status_response(
             }
         };
     // Correlate to the specific pending membership by the authoritative
-    // request id (a community may hold several memberships).
-    let Some(record) = account.membership_by_pending_request(from_did, body.request_id) else {
+    // request id (a community may hold several memberships). Failing that, this
+    // is the answer to an id-less poll — sent because the join never got a
+    // reply and we hold only our placeholder — so it quotes an id we have never
+    // seen. Match it to the join still awaiting one and adopt the id; without
+    // this, the poll that exists for that join could never resolve it.
+    let found = if account
+        .membership_by_pending_request(from_did, body.request_id)
+        .is_some()
+    {
+        account.membership_by_pending_request(from_did, body.request_id)
+    } else {
+        let recipients = message.to.clone().unwrap_or_default();
+        account
+            .membership_awaiting_request_id(from_did, &recipients)
+            .inspect(|_| {
+                info!(
+                    vtc = %from_did,
+                    vtc_request_id = %body.request_id,
+                    "status-response answers an id-less poll — adopting the community's request id"
+                );
+            })
+    };
+    let Some(record) = found else {
         warn!(vtc = %from_did, "status-response did not match a pending request id — ignoring");
         return StatusOutcome::NONE;
     };
+    let adopted = record.confirm_request_id(body.request_id);
     let persona = record.persona_ref;
 
-    match body.status.as_str() {
+    let mut outcome = match body.status.as_str() {
         "approved" => {
             // Not `activate`: the membership becomes Active when its credential
             // arrives and verifies, which is also what closes the join and
@@ -465,11 +490,25 @@ pub fn handle_join_status_response(
                 inactivated: None,
             }
         }
+        "pending" => {
+            // Still undecided, but the VTC knows the request — so the submit
+            // arrived, and the "no response" warning no longer applies.
+            let changed = record.mark_acknowledged(chrono::Utc::now());
+            debug!(vtc = %from_did, "status-response: still pending at the VTC");
+            StatusOutcome {
+                changed,
+                inactivated: None,
+            }
+        }
         other => {
             debug!(vtc = %from_did, status = %other, "status-response: no transition");
             StatusOutcome::NONE
         }
-    }
+    };
+    // An adopted id is itself worth persisting: it is what every later poll
+    // quotes, whatever this answer said.
+    outcome.changed |= adopted;
+    outcome
 }
 
 /// Handle a VTC join-request `submit/#response` carrying a [`VerdictResponse`] —
@@ -2875,6 +2914,12 @@ mod tests {
     fn status_response_with_mismatched_request_id_is_ignored() {
         let vtc = "did:webvh:example:vtc";
         let mut acct = pending_account(vtc, Uuid::new_v4());
+        // Holding the community's own id: a reply naming another id is about a
+        // different request, not an answer to an id-less poll.
+        let held = Uuid::new_v4();
+        acct.memberships_mut().for_each(|c| {
+            c.confirm_request_id(held);
+        });
 
         // A reply correlated to a different request id must not transition us.
         let out = handle_join_status_response(
@@ -2888,6 +2933,130 @@ mod tests {
             only(&acct, vtc).status,
             CommunityStatus::Pending { .. }
         ));
+    }
+
+    /// The stuck join (#221 / #226): the submit's replies were all lost, so we
+    /// hold only our placeholder and poll id-less. The VTC answers with its own
+    /// id — which matched nothing, so the answer was dropped and the join sat
+    /// Pending for good while the community already counted a member. It must
+    /// land, adopt the id, and set the record up to ask for its credentials.
+    #[test]
+    fn an_id_less_poll_answer_resolves_the_join_that_never_got_a_reply() {
+        let vtc = "did:webvh:example:vtc";
+        let placeholder = Uuid::new_v4();
+        let vtc_request_id = Uuid::new_v4();
+        let mut acct = pending_account(vtc, placeholder);
+        assert_eq!(
+            acct.pollable_pending(Utc::now())[0].request_id,
+            None,
+            "unconfirmed: the poll goes out id-less"
+        );
+
+        let out = handle_join_status_response(
+            &mut acct,
+            &approved_reply(
+                vtc,
+                vtc_request_id,
+                json!({ "credentialsDelivered": false }),
+            ),
+            vtc,
+        );
+        assert!(out.changed);
+        let rec = only(&acct, vtc);
+        assert!(
+            matches!(rec.status, CommunityStatus::Pending { request_id } if request_id == vtc_request_id),
+            "the community's id replaces the placeholder"
+        );
+        assert!(rec.request_id_confirmed);
+        assert!(rec.receipt_at.is_some(), "no longer reads as unanswered");
+        assert!(rec.approved_awaiting_credential());
+        assert!(
+            rec.wants_credential_resend(
+                Utc::now()
+                    + chrono::TimeDelta::seconds(
+                        crate::config::account::CREDENTIAL_RESEND_GRACE_SECS + 1
+                    )
+            ),
+            "a later poll asks for the credentials that never arrived"
+        );
+        assert_eq!(
+            acct.pollable_pending(Utc::now())[0].request_id,
+            Some(vtc_request_id),
+            "and quotes the community's id from now on"
+        );
+    }
+
+    /// An id-less answer that the VTC is still deciding on is still an answer:
+    /// the request arrived, and the id is worth keeping.
+    #[test]
+    fn an_id_less_poll_answer_still_pending_acknowledges_and_adopts() {
+        let vtc = "did:webvh:example:vtc";
+        let vtc_request_id = Uuid::new_v4();
+        let mut acct = pending_account(vtc, Uuid::new_v4());
+
+        let out = handle_join_status_response(
+            &mut acct,
+            &status_response(vtc, vtc_request_id, "pending"),
+            vtc,
+        );
+        assert!(out.changed);
+        let rec = only(&acct, vtc);
+        assert!(rec.request_id_confirmed);
+        assert!(rec.receipt_at.is_some());
+    }
+
+    /// Two personas each waiting on the same community: the reply's recipient
+    /// decides which join it answers, and a reply that names neither resolves
+    /// nothing rather than guessing.
+    #[test]
+    fn an_id_less_poll_answer_goes_to_the_persona_it_was_sent_to() {
+        let vtc = "did:webvh:example:vtc";
+        let (alice, bob) = ("did:example:alice", "did:example:bob");
+        let mut acct = account_with_persona(vtc, alice);
+        let bob_id = PersonaId::new();
+        acct.personas.insert(
+            bob_id,
+            PersonaRecord {
+                extra: serde_json::Map::new(),
+                persona_id: bob_id,
+                did: bob.to_string(),
+                did_document: None,
+                key_refs: Vec::new(),
+                mediator_did: None,
+                origin_context_id: String::new(),
+                created_at: Utc::now(),
+                label: None,
+            },
+        );
+        acct.add_membership(CommunityRecord::new_pending(
+            vtc.to_string(),
+            None,
+            "openvtc/y".to_string(),
+            bob_id,
+            Uuid::new_v4(),
+            Utc::now(),
+        ));
+        let to = |m: Message, who: Option<&str>| Message {
+            to: who.map(|d| vec![d.to_string()]),
+            ..m
+        };
+
+        let unaddressed = to(status_response(vtc, Uuid::new_v4(), "approved"), None);
+        assert!(!handle_join_status_response(&mut acct, &unaddressed, vtc).changed);
+
+        let vtc_request_id = Uuid::new_v4();
+        let to_bob = to(status_response(vtc, vtc_request_id, "approved"), Some(bob));
+        assert!(handle_join_status_response(&mut acct, &to_bob, vtc).changed);
+        let bob_rec = acct
+            .memberships()
+            .find(|c| c.persona_ref == bob_id)
+            .unwrap();
+        assert!(bob_rec.request_id_confirmed && bob_rec.approved_at.is_some());
+        let alice_rec = acct
+            .memberships()
+            .find(|c| c.persona_ref != bob_id)
+            .unwrap();
+        assert!(!alice_rec.request_id_confirmed && alice_rec.approved_at.is_none());
     }
 
     #[test]
