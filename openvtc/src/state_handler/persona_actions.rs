@@ -303,11 +303,16 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                 p.revealed_attribute = None;
                 return PersonaEffect::None;
             }
-            // A sensitive value the bulk listing withheld is not in memory — fetch
-            // this one on its own (`pool::reveal`). The value is spliced in and the
-            // mask lifted when it returns (`AttributeRevealed`); nothing is
-            // revealed until then. This is the only case that becomes a read.
-            if attr.is_withheld_sensitive(&p.claim_types, p.show_values) {
+            // A value not in memory is fetched on its own (`pool::reveal`): a
+            // sensitive one the bulk listing withheld, or any value at all while
+            // values are hidden — that listing carries none. The value is
+            // spliced in and the mask lifted when it returns
+            // (`AttributeRevealed`); nothing is revealed until then.
+            //
+            // Keyed on the value being absent, not on sensitivity: keyed on
+            // sensitivity, `s` with values hidden lifted the mask over nothing
+            // and the row went on reading "(hidden)" — a key that did nothing.
+            if attr.value.is_none() && !attr.stale {
                 return PersonaEffect::Job(PersonaJob::AttributeReveal {
                     attribute_id: attr.attribute_id.clone(),
                 });
@@ -2807,8 +2812,12 @@ mod tests {
     /// it does not exist yet.
     #[test]
     fn a_reveal_names_one_fact_and_toggles_off() {
+        let held = |id: &str| PoolAttribute {
+            value: Some(serde_json::json!("a@example.com")),
+            ..attribute(id)
+        };
         let mut state = state_with(IdentityState {
-            attributes: vec![attribute("01A"), attribute("01B")].into(),
+            attributes: vec![held("01A"), held("01B")].into(),
             show_values: true,
             ..IdentityState::default()
         });
@@ -2852,6 +2861,31 @@ mod tests {
             personas(&state).revealed_attribute.is_none(),
             "nothing is revealed until the fetched value is spliced in"
         );
+    }
+
+    /// With values hidden the listing carries none, so `s` on any attribute is
+    /// a fetch of that one value — not a mask lifted over nothing, which left
+    /// the row reading "(hidden)" and the key looking dead.
+    #[test]
+    fn a_reveal_while_values_are_hidden_fetches_the_one_value() {
+        let mut attr = attribute("01A");
+        attr.value = None;
+        let mut state = state_with(IdentityState {
+            attributes: vec![attr].into(),
+            show_values: false,
+            ..IdentityState::default()
+        });
+
+        let effect = apply(&mut state, &PersonaAction::RevealValue(0));
+        assert!(
+            matches!(
+                effect,
+                PersonaEffect::Job(PersonaJob::AttributeReveal { ref attribute_id })
+                    if attribute_id == "01A"
+            ),
+            "a value not in memory is fetched"
+        );
+        assert!(personas(&state).revealed_attribute.is_none());
     }
 
     /// The editor opens on the value, never on the mask.
