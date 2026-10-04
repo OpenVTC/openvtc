@@ -1,67 +1,20 @@
-//! "Can I actually commit here?" — did-git-sign's install and its commit-msg
-//! hook, for the Repos panel.
+//! did-git-sign's commit-msg hook, for the Repos panel.
 //!
-//! Two scopes are checked, and both are reported with the file looked at:
+//! The hook is what writes the `Signed-by-DID:` claim `verify-trust` reads, so
+//! an outdated or missing one fails CI however good the signature is. Since
+//! did-git-sign 0.14 every repository that signs includes settings pointing
+//! `core.hooksPath` at did-git-sign's own hook directory, so there is one file
+//! to judge — wherever openvtc happens to have been started.
 //!
-//! - **here** — the hook git would run for a commit in the directory openvtc
-//!   was started in, as did-git-sign's own
-//!   `did_git_sign::init::commit_msg_hook_status` finds it (honouring
-//!   `core.hooksPath` at every scope; the global one outside a repository);
-//! - **global** — the global `core.hooksPath`, which `did-git-sign init
-//!   --global` sets and every repository without its own hooks path uses.
-//!
-//! The worst of the two is the headline. The global file is classified
-//! against the library's own published hook (`COMMIT_MSG_HOOK` and
-//! `COMMIT_MSG_HOOK_VERSION`): did-git-sign exposes no classifier that takes
-//! a path, so the version marker is read off the line of the library's hook
-//! that carries the version, rather than copied here as a string.
-//!
-//! The install is looked for in both places did-git-sign writes it — the
-//! global config and a repository's `.did-git-sign.json` — so a
-//! repository-only install is not reported as "not set up".
+//! The file is classified against the library's own published hook
+//! (`COMMIT_MSG_HOOK` and `COMMIT_MSG_HOOK_VERSION`): did-git-sign exposes no
+//! classifier that takes a path, so the version marker is read off the line of
+//! the library's hook that carries the version, rather than copied here as a
+//! string.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use did_git_sign::init::{COMMIT_MSG_HOOK, COMMIT_MSG_HOOK_VERSION};
 
-use did_git_sign::config::SigningConfig;
-use did_git_sign::init::{
-    COMMIT_MSG_HOOK, COMMIT_MSG_HOOK_VERSION, CommitMsgHookStatus, commit_msg_hook_status,
-};
-
-use super::main_page::repos::{
-    HookCheck, HookHealth, HookScope, InstallFound, SigningChecked, SigningHealth,
-};
-
-/// Translate the library's answer for "here" into a check.
-pub(crate) fn here_check(status: Result<CommitMsgHookStatus, String>) -> HookCheck {
-    let (path, health) = match status {
-        Ok(CommitMsgHookStatus::Current { path }) => (
-            Some(path),
-            HookHealth::Current {
-                version: COMMIT_MSG_HOOK_VERSION,
-            },
-        ),
-        Ok(CommitMsgHookStatus::Outdated {
-            path,
-            installed,
-            current,
-        }) => (Some(path), HookHealth::Outdated { installed, current }),
-        Ok(CommitMsgHookStatus::Newer {
-            path,
-            installed,
-            current,
-        }) => (Some(path), HookHealth::Newer { installed, current }),
-        Ok(CommitMsgHookStatus::Foreign { path }) => (Some(path), HookHealth::Foreign),
-        Ok(CommitMsgHookStatus::Missing { path }) => (Some(path), HookHealth::Missing),
-        Ok(CommitMsgHookStatus::Unknown) => (None, HookHealth::NowhereToLook),
-        Err(e) => (None, HookHealth::Unknown(e)),
-    };
-    HookCheck {
-        scope: HookScope::Here,
-        path: path.map(|p| p.display().to_string()),
-        health,
-    }
-}
+use super::main_page::repos::HookHealth;
 
 /// The version-marker prefix, read off the library's own hook: the comment
 /// line that ends in `COMMIT_MSG_HOOK_VERSION`.
@@ -108,128 +61,22 @@ pub(crate) fn classify(content: Option<&str>) -> HookHealth {
     }
 }
 
-fn git(args: &[&str]) -> Result<Option<String>, String> {
-    let out = Command::new("git")
-        .args(args)
-        .output()
-        .map_err(|e| format!("could not run git: {e}"))?;
-    if !out.status.success() {
-        return Ok(None);
-    }
-    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok((!v.is_empty()).then_some(v))
-}
-
-/// The global scope's hook check.
-fn global_check() -> HookCheck {
-    let dir = match git(&["config", "--global", "--get", "core.hooksPath"]) {
-        Ok(Some(dir)) => dir,
-        Ok(None) => {
-            return HookCheck {
-                scope: HookScope::Global,
-                path: None,
-                health: HookHealth::NowhereToLook,
-            };
-        }
-        Err(e) => {
-            return HookCheck {
-                scope: HookScope::Global,
-                path: None,
-                health: HookHealth::Unknown(e),
-            };
-        }
+/// The hook did-git-sign's include files point git at, and what it is.
+/// Blocking (reads a file); call off the loop thread.
+pub(crate) fn hook_health() -> (Option<String>, HookHealth) {
+    let Some(path) = openvtc_core::git_signing::hook_file() else {
+        return (None, HookHealth::NowhereToLook);
     };
-    // git expands a leading `~/` in this key; do the same.
-    let dir = match dir.strip_prefix("~/") {
-        Some(rest) => dirs::home_dir().map_or_else(|| PathBuf::from(&dir), |h| h.join(rest)),
-        None => PathBuf::from(&dir),
-    };
-    let path = dir.join("commit-msg");
     let content = std::fs::read_to_string(&path).ok();
-    HookCheck {
-        scope: HookScope::Global,
-        path: Some(path.display().to_string()),
-        health: classify(content.as_deref()),
-    }
-}
-
-/// Merge the two checks: one entry when they name the same file.
-pub(crate) fn merge(here: HookCheck, global: HookCheck) -> Vec<HookCheck> {
-    if here.path.is_some() && here.path == global.path {
-        return vec![HookCheck {
-            scope: HookScope::HereAndGlobal,
-            ..here
-        }];
-    }
-    vec![here, global]
-}
-
-fn install_at(scope: &'static str, path: &Path, persona_did: &str) -> Option<InstallFound> {
-    let cfg = SigningConfig::load(path).ok()?;
-    Some(InstallFound {
-        scope,
-        path: path.display().to_string(),
-        this_persona: cfg.did_key_id.starts_with(&format!("{persona_did}#")),
-        key_id: cfg.did_key_id,
-    })
-}
-
-/// did-git-sign's installs for `persona_did`, and its hook at both scopes.
-/// Blocking (runs `git`, reads files); call off the loop thread.
-pub(crate) fn probe(persona_did: &str) -> SigningHealth {
-    let mut installs = Vec::new();
-    let mut looked = Vec::new();
-    if let Ok(global) = SigningConfig::default_global_path() {
-        looked.push(global.display().to_string());
-        installs.extend(install_at("global", &global, persona_did));
-    }
-    if let Ok(Some(top)) = git(&["rev-parse", "--show-toplevel"]) {
-        let local = PathBuf::from(top).join(SigningConfig::repo_local_path());
-        looked.push(local.display().to_string());
-        installs.extend(install_at("repository", &local, persona_did));
-    }
-    let here = here_check(commit_msg_hook_status().map_err(|e| format!("{e:#}")));
-    SigningHealth {
-        checked: Some(SigningChecked {
-            installs,
-            looked,
-            hooks: merge(here, global_check()),
-        }),
-    }
+    (
+        Some(path.display().to_string()),
+        classify(content.as_deref()),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn at() -> PathBuf {
-        PathBuf::from("/home/me/.config/did-git-sign/hooks/commit-msg")
-    }
-
-    #[test]
-    fn the_librarys_answer_keeps_its_path() {
-        let c = here_check(Ok(CommitMsgHookStatus::Outdated {
-            path: at(),
-            installed: 1,
-            current: 2,
-        }));
-        assert_eq!(c.path, Some(at().display().to_string()));
-        assert_eq!(
-            c.health,
-            HookHealth::Outdated {
-                installed: 1,
-                current: 2
-            }
-        );
-        assert_eq!(
-            here_check(Ok(CommitMsgHookStatus::Unknown)).health,
-            HookHealth::NowhereToLook
-        );
-        assert!(matches!(
-            here_check(Err("failed to run git".into())).health,
-            HookHealth::Unknown(m) if m.contains("git")
-        ));
-    }
 
     /// The global file is judged against the library's own hook.
     #[test]
@@ -264,57 +111,5 @@ mod tests {
             HookHealth::Foreign
         );
         assert_eq!(classify(None), HookHealth::Missing);
-    }
-
-    /// Both scopes are reported, the worst is the headline, and one file is
-    /// reported once.
-    #[test]
-    fn both_scopes_are_reported_and_the_worst_leads() {
-        let here = HookCheck {
-            scope: HookScope::Here,
-            path: Some("/repo/.git/did-git-sign-hooks/commit-msg".into()),
-            health: HookHealth::Current { version: 2 },
-        };
-        let global = HookCheck {
-            scope: HookScope::Global,
-            path: Some(at().display().to_string()),
-            health: HookHealth::Outdated {
-                installed: 1,
-                current: 2,
-            },
-        };
-        let checked = SigningChecked {
-            installs: Vec::new(),
-            looked: Vec::new(),
-            hooks: merge(here.clone(), global),
-        };
-        assert_eq!(checked.hooks.len(), 2);
-        assert_eq!(checked.headline().unwrap().scope, HookScope::Global);
-
-        let same = merge(
-            here.clone(),
-            HookCheck {
-                scope: HookScope::Global,
-                ..here
-            },
-        );
-        assert_eq!(same.len(), 1);
-        assert_eq!(same[0].scope, HookScope::HereAndGlobal);
-    }
-
-    /// A repository-only install counts as set up.
-    #[test]
-    fn a_repository_install_is_set_up() {
-        let checked = SigningChecked {
-            installs: vec![InstallFound {
-                scope: "repository",
-                path: "/repo/.did-git-sign.json".into(),
-                key_id: "did:webvh:me#key-0".into(),
-                this_persona: true,
-            }],
-            looked: Vec::new(),
-            hooks: Vec::new(),
-        };
-        assert!(checked.set_up());
     }
 }

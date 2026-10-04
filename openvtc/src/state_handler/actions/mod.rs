@@ -522,6 +522,53 @@ pub enum ReposAction {
     LinkStart,
     /// Stop showing the link attempt.
     LinkDismiss,
+    // ── This machine: checkouts and signing ─────────────────────────────
+    /// A local action — a checkout or did-git-sign — rather than a `git-ns`
+    /// task ([`WorkspaceAction`]).
+    Workspace(WorkspaceAction),
+}
+
+/// The Repos panel's local actions: cloning a repository, making a checkout
+/// sign as the community's persona, and did-git-sign's identity for it.
+///
+/// `Clone`, `Sign`, `Unsign`, `SetUp`, `Confirm`, `SettingsSubmit` and
+/// `UseSubmit` run git, did-git-sign or the VTA, so the runtime loop services
+/// them; the rest move the view's state only.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkspaceAction {
+    /// Clone the highlighted (or open) repository into the workspace, then
+    /// make it sign as this persona.
+    Clone,
+    /// Make the highlighted (or open) checkout sign as this persona, setting
+    /// did-git-sign up first if it is not.
+    Sign,
+    /// Stop that checkout signing with did-git-sign.
+    Unsign,
+    /// Set did-git-sign up for this persona, or repair it (credential, hook).
+    SetUp,
+    /// Arm removing this persona's identity from did-git-sign.
+    RemoveArm,
+    /// Do the armed change.
+    Confirm,
+    /// Disarm it, or close an open form.
+    Cancel,
+    /// Open the workspace settings form.
+    SettingsStart,
+    /// Replace the workspace root being typed.
+    SettingsInput(String),
+    /// Flip the clone protocol.
+    SettingsProtocol,
+    /// Save the workspace settings.
+    SettingsSubmit,
+    /// Open the form for using an existing checkout of the highlighted (or
+    /// open) repository.
+    UseStart,
+    /// Replace the path being typed.
+    UseInput(String),
+    /// Use that path, once it proves to be a checkout of the repository.
+    UseSubmit,
+    /// The UI copied something; say so in the panel.
+    Copied(String),
 }
 
 // ============================================================================

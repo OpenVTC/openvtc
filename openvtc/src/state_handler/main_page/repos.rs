@@ -4,7 +4,13 @@
 //! Everything shown is one `git-ns/view` answer ([`ReposView::data`]) read
 //! through the pure helpers in [`openvtc_core::git_ns`]; every change is a
 //! signed `git-ns/*` task whose reply is matched by thread id, after which the
-//! view is read again. Nothing here is persisted: the VTC is the record.
+//! view is read again. Nothing of that is persisted: the VTC is the record.
+//!
+//! Beside it, [`Workspace`] is this machine's half: where each repository is
+//! checked out and whether a commit there would be signed, and did-git-sign
+//! as this persona would use it. That is read from git and did-git-sign
+//! ([`openvtc_core::git_workspace`], [`openvtc_core::git_signing`]), never
+//! from the community.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,6 +19,8 @@ use std::time::Instant;
 use chrono::{DateTime, TimeDelta, Utc};
 use openvtc_core::config::account::PersonaId;
 use openvtc_core::git_ns::{self, GitRight, Visibility, view};
+use openvtc_core::git_signing::{BinaryStatus, CheckoutSigning, IdentityStatus, PersonaSigner};
+use openvtc_core::git_workspace::{CheckoutFacts, CloneProtocol, WorkspaceSettings};
 
 /// Longest name or DID kept for display.
 pub const MAX_NAME: usize = 256;
@@ -68,7 +76,7 @@ pub enum ReposPhase {
 /// Which screen of the panel is showing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReposScreen {
-    /// *My repos*, the account row and signing health.
+    /// *My repos*, the account row, signing, and each repository's checkout.
     List,
     /// One repository: its people and their rights, or its creation steps.
     Repo { resource: String },
@@ -267,111 +275,113 @@ pub struct LinkedAccount {
     pub id: String,
 }
 
-/// What was found at one commit-msg hook location.
+/// What was found at did-git-sign's commit-msg hook.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HookHealth {
     /// This release's hook.
     Current { version: u32 },
-    /// An older did-git-sign's hook; `did-git-sign init` replaces it.
+    /// An older did-git-sign's hook; setting signing up again (`s`) rewrites it.
     Outdated { installed: u32, current: u32 },
     /// A newer did-git-sign wrote it.
     Newer { installed: u32, current: u32 },
     /// A commit-msg hook did-git-sign did not write.
     Foreign,
-    /// No hook where git will look.
+    /// No hook there: did-git-sign was never set up on this machine.
     Missing,
-    /// Nowhere to look: not in a repository and no global `core.hooksPath`,
-    /// or — for the global scope — no global `core.hooksPath`.
+    /// No config directory to look in.
     NowhereToLook,
-    /// git could not be asked.
-    Unknown(String),
 }
 
-impl HookHealth {
-    /// How bad it is, for choosing the headline: 0 fine, 1 unknown, 2 will
-    /// break commits.
+/// did-git-sign as this persona would use it: the identity it holds, the
+/// binary git runs, and the hook that writes the `Signed-by-DID:` claim.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SignerHealth {
+    pub identity: IdentityStatus,
+    pub binary: BinaryStatus,
+    /// The commit-msg hook did-git-sign's include files point git at.
+    pub hook: HookHealth,
+    pub hook_path: Option<String>,
+}
+
+/// One checkout on this machine, and how a commit made in it would be signed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CheckoutView {
+    pub facts: CheckoutFacts,
+    pub signing: CheckoutSigning,
+}
+
+/// A form over the workspace, shown on top of the screen.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WorkspaceForm {
+    /// `w`: where checkouts go, and how they are cloned.
+    Settings {
+        root: String,
+        protocol: CloneProtocol,
+        error: Option<String>,
+    },
+    /// `u`: a checkout of `resource` that already exists somewhere.
+    UsePath {
+        resource: String,
+        path: String,
+        error: Option<String>,
+    },
+}
+
+/// A local change armed for `y`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceChange {
+    /// Remove this persona's identity from did-git-sign and revoke its
+    /// credential at the VTA.
+    RemoveIdentity,
+}
+
+/// The local half of the panel: checkouts, and signing.
+#[derive(Clone, Debug, Default)]
+pub struct Workspace {
+    /// The profile the settings belong to.
+    pub profile: String,
+    pub settings: WorkspaceSettings,
+    /// The persona's signing key, resolved from the config when the view
+    /// opens; the error says why it could not be.
+    pub signer: Option<Result<PersonaSigner, String>>,
+    /// `None` until probed.
+    pub health: Option<SignerHealth>,
+    /// Located checkouts, by resource.
+    pub checkouts: HashMap<String, CheckoutView>,
+    pub probed_at: Option<Instant>,
+    /// A probe is wanted (after the view or a change lands); `identity` when
+    /// it should also read the keyring.
+    pub probe_wanted: Option<bool>,
+    /// What a running job is doing.
+    pub busy: Option<String>,
+    pub form: Option<WorkspaceForm>,
+    pub confirm: Option<WorkspaceChange>,
+}
+
+impl Workspace {
+    /// The persona's signing VM id, if it resolved.
     #[must_use]
-    pub fn severity(&self) -> u8 {
-        match self {
-            HookHealth::Current { .. } | HookHealth::Newer { .. } => 0,
-            HookHealth::NowhereToLook | HookHealth::Unknown(_) => 1,
-            HookHealth::Outdated { .. } | HookHealth::Foreign | HookHealth::Missing => 2,
+    pub fn did_key_id(&self) -> Option<&str> {
+        self.signer
+            .as_ref()
+            .and_then(|s| s.as_ref().ok())
+            .map(|s| s.did_key_id.as_str())
+    }
+
+    /// Ask for a probe; `identity` is sticky until one runs.
+    pub fn want_probe(&mut self, identity: bool) {
+        self.probe_wanted = Some(self.probe_wanted.unwrap_or(false) || identity);
+    }
+
+    /// How a checkout's signing reads for this persona.
+    #[must_use]
+    pub fn signs_as_me(&self, checkout: &CheckoutView) -> Option<bool> {
+        match &checkout.signing {
+            CheckoutSigning::On { did_key_id, .. } => {
+                Some(Some(did_key_id.as_str()) == self.did_key_id())
+            }
+            _ => None,
         }
-    }
-}
-
-/// Where a hook was looked for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HookScope {
-    /// Where openvtc was started: the hook git would run for a commit there.
-    Here,
-    /// The global `core.hooksPath`, which a `--global` install sets.
-    Global,
-    /// Both resolve to the same file.
-    HereAndGlobal,
-}
-
-impl HookScope {
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            HookScope::Here => "here",
-            HookScope::Global => "global",
-            HookScope::HereAndGlobal => "here and global",
-        }
-    }
-}
-
-/// One hook check: where, which file, and what was found.
-#[derive(Clone, Debug, PartialEq)]
-pub struct HookCheck {
-    pub scope: HookScope,
-    /// The file looked at, when there was one to look at.
-    pub path: Option<String>,
-    pub health: HookHealth,
-}
-
-/// A did-git-sign signing config that was found.
-#[derive(Clone, Debug, PartialEq)]
-pub struct InstallFound {
-    /// `global` or `repository`.
-    pub scope: &'static str,
-    pub path: String,
-    /// The verification method it signs with.
-    pub key_id: String,
-    /// Whether that key is this persona's.
-    pub this_persona: bool,
-}
-
-/// Can this persona sign commits here: did-git-sign's installs, and its hook
-/// at every scope that could apply.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct SigningHealth {
-    /// `None` until checked.
-    pub checked: Option<SigningChecked>,
-}
-
-/// The result of a signing check.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SigningChecked {
-    /// Every signing config found, global and repository-local.
-    pub installs: Vec<InstallFound>,
-    /// Where a config was looked for when none was found.
-    pub looked: Vec<String>,
-    pub hooks: Vec<HookCheck>,
-}
-
-impl SigningChecked {
-    /// The worst hook check — the headline.
-    #[must_use]
-    pub fn headline(&self) -> Option<&HookCheck> {
-        self.hooks.iter().max_by_key(|h| h.health.severity())
-    }
-
-    /// Whether did-git-sign is set up for this persona anywhere.
-    #[must_use]
-    pub fn set_up(&self) -> bool {
-        self.installs.iter().any(|i| i.this_persona)
     }
 }
 
@@ -404,7 +414,7 @@ pub struct ReposView {
     pub pending: Option<Pending>,
     pub link: Option<LinkFlow>,
     pub created: Option<CreatedRepo>,
-    pub signing: SigningHealth,
+    pub workspace: Workspace,
     /// The last thing the panel has to say, with how it should read.
     pub status: Option<Status>,
 }
@@ -427,7 +437,7 @@ impl ReposView {
             pending: None,
             link: None,
             created: None,
-            signing: SigningHealth::default(),
+            workspace: Workspace::default(),
             status: None,
         }
     }

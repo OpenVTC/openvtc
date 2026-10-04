@@ -128,6 +128,18 @@ impl SignerCredential {
     }
 }
 
+/// The credential did-git-sign holds for `did_key_id`, read from the OS
+/// keyring, so it can be proven again ([`verify_signer`]). Blocking.
+#[must_use]
+pub fn stored_credential(did_key_id: &str) -> Option<SignerCredential> {
+    did_git_sign::config::load_vta_credentials(did_key_id)
+        .ok()
+        .map(|c| SignerCredential {
+            did: c.credential_did,
+            private_key_mb: SecretString::from(c.private_key_multibase),
+        })
+}
+
 /// The ACL entry [`grant_signer`] asks for.
 pub fn signer_grant(did: &str, context: &str, label: &str) -> CreateAclRequest {
     CreateAclRequest::new(did, "admin")

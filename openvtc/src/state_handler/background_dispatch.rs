@@ -101,6 +101,15 @@ pub(crate) enum DispatchDomain {
     /// read, a change, or a link poll. Like capabilities, the answer arrives on
     /// the inbound channel; this serialises the sends.
     GitNs,
+    /// A local change from the Repos panel: a clone, did-git-sign set up or
+    /// removed (which grants or revokes its VTA credential), a checkout
+    /// enabled or disabled. Separate from [`Self::GitNs`] so a clone does not
+    /// hold up a send to the community, nor the reverse.
+    GitWorkspace,
+    /// Reading the Repos panel's checkouts and did-git-sign: git and file reads
+    /// only. Its own domain so a periodic read never makes a member's key
+    /// press wait.
+    GitWorkspaceProbe,
     /// What each persona presents, for the communities panel.
     PersonaBinding,
     /// The identity pane's own reads and writes — the attribute pool, the
@@ -150,6 +159,8 @@ impl DispatchDomain {
             DispatchDomain::Community => "Community request",
             DispatchDomain::Capabilities => "Capability request",
             DispatchDomain::GitNs => "Repository request",
+            DispatchDomain::GitWorkspace => "Checkout or signing change",
+            DispatchDomain::GitWorkspaceProbe => "Checkout check",
             DispatchDomain::PersonaBinding => "Persona binding refresh",
             DispatchDomain::PersonaManage => "Identity request",
             DispatchDomain::Vic => "Invitation credential refresh",
@@ -257,6 +268,10 @@ pub(crate) enum DispatchOutcome {
     Capabilities(crate::state_handler::capability_actions::CapabilityOutcome),
     /// A `git-ns/*` task was sent to a community (or failed to send).
     Repos(crate::state_handler::repos_actions::ReposOutcome),
+    /// A Repos-panel local change finished.
+    Workspace(crate::state_handler::repos_workspace::WorkspaceOutcome),
+    /// A Repos-panel checkout and signing read finished.
+    WorkspaceProbe(crate::state_handler::repos_workspace::ProbeOutcome),
     PersonaBinding(
         std::collections::HashMap<
             crate::state_handler::persona_binding_refresh::BindingTarget,
@@ -320,6 +335,8 @@ impl DispatchOutcome {
             DispatchOutcome::Community(_) => DispatchDomain::Community,
             DispatchOutcome::Capabilities(_) => DispatchDomain::Capabilities,
             DispatchOutcome::Repos(_) => DispatchDomain::GitNs,
+            DispatchOutcome::Workspace(_) => DispatchDomain::GitWorkspace,
+            DispatchOutcome::WorkspaceProbe(_) => DispatchDomain::GitWorkspaceProbe,
             DispatchOutcome::PersonaBinding(_) => DispatchDomain::PersonaBinding,
             DispatchOutcome::PersonaManage(_) => DispatchDomain::PersonaManage,
             DispatchOutcome::Vic(_) => DispatchDomain::Vic,
@@ -521,6 +538,8 @@ pub(crate) fn apply_outcome(
         DispatchOutcome::Credential(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Capabilities(outcome) => outcome.apply(state),
         DispatchOutcome::Repos(outcome) => outcome.apply(state),
+        DispatchOutcome::Workspace(outcome) => outcome.apply(state),
+        DispatchOutcome::WorkspaceProbe(outcome) => outcome.apply(state),
         // Merged, not replaced. A sweep only carries the targets it was given,
         // and replacing the map would blank every row the sweep did not cover
         // — which reads on screen as those personas having stopped presenting
@@ -574,6 +593,9 @@ pub(crate) fn apply_outcome(
             // failure so the user isn't left staring at a stuck "in progress"; the
             // busy-flag is cleared below (via `domain()`), freeing the domain.
             let msg = format!("{} failed (internal error)", domain.label());
+            if domain == DispatchDomain::GitWorkspace {
+                crate::state_handler::repos_workspace::job_lost(state, &msg);
+            }
             state.main_page.log(msg);
         }
     }

@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Checkouts and commit signing in the Repos panel.** Each repository the
+  community governs now shows what is on this machine: not cloned, signed, not
+  signing, or signing as another identity, with the checkout's path, branch,
+  ahead/behind and changes when it is highlighted. A repository's own screen
+  adds an *On this machine* section: whether a commit there is signed as you,
+  and whether `HEAD` is signed and carries the `Signed-by-DID:` claim
+  `verify-trust` checks. One key does each thing, and did-git-sign does the
+  signing behind it:
+  - `c` clones the repository into `<workspace>/<forge>/<owner>/<repo>`, sets
+    did-git-sign up for the persona if needed, and makes the new checkout sign.
+  - `e` makes an existing checkout sign as you (`did-git-sign enable
+    --profile`), `E` stops it, and `u` adopts a checkout you already have,
+    once its `origin` proves to be the repository.
+  - `s` sets did-git-sign up for the persona, or repairs it: it re-proves the
+    stored credential against the VTA and rewrites an outdated hook. `S`
+    removes the identity and revokes its credential.
+  - `w` chooses the workspace directory and HTTPS or SSH; `p` copies a
+    checkout's path.
+
+  Setting up never runs `did-git-sign init` or asks for a `pnm` grant. openvtc
+  mints a `did:key` for did-git-sign and grants it, through its own admin
+  session, `admin` of the persona's own context narrowed to `key-export` — the
+  one capability signing uses. did-git-sign never holds the account credential.
+  The grant is proven before anything is stored: the new credential exports the
+  key over the VTA's mediator, and the key must be the one the persona's DID
+  document publishes. The grant is revoked if that fails. The identity is then
+  stored as a named did-git-sign profile, with the library's own calls. A
+  persona whose keys live in the account's top context is refused, since a
+  grant there would reach every persona. Clones never prompt, are bounded, and
+  say whether a failure was credentials, SSH, not-found or the network.
+
+### Changed
+
+- **The Repos panel's signing row reads did-git-sign as it is now.** It shows
+  the persona's profile and credential, whether the `did-git-sign` binary git
+  runs is on `PATH` (and new enough), and did-git-sign's own commit-msg hook.
+  It no longer depends on the directory openvtc was started in, and no longer
+  looks for the repository-local `.did-git-sign.json` that did-git-sign stopped
+  writing in 0.14.
+- **Dependencies:** `vta-sdk` 0.63, `trust-tasks-rs` 0.27, `affinidi-tdk` 0.23,
+  `affinidi-messaging-sdk` 0.33 and `did-git-sign` 0.15.1, the signer on
+  verifiable-git-infrastructure `main`.
+
 ## [0.4.0] - 2026-10-04
 
 The vetted-admission release. A person can now join a community by being
