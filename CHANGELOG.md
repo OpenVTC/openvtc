@@ -55,6 +55,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `affinidi-messaging-sdk` 0.33 and `did-git-sign` 0.15.1, the signer on
   verifiable-git-infrastructure `main`.
 
+### Fixed
+
+- **A join that never got a reply now recovers on its own.** If every reply to
+  a join was lost, OpenVTC asks the community about it without quoting a
+  request id, and the community answers with its own id. That answer matched
+  no record and was dropped, so the join stayed *Pending* indefinitely, even
+  after the community had admitted the member. The answer now goes to the join
+  that is waiting for an id, which adopts it. An approved join then asks for
+  its membership credential again and becomes *Active* when it arrives. When
+  several personas are waiting on the same community, the persona the reply
+  was sent to decides which join it answers.
+
 ## [0.4.0] - 2026-10-04
 
 The vetted-admission release. A person can now join a community by being

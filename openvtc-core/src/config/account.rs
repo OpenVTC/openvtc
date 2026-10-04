@@ -1209,6 +1209,52 @@ impl Account {
         )
     }
 
+    /// The pending membership of community `vtc` that is still holding our own
+    /// placeholder id — the one an id-less status poll asked about, and so the
+    /// one a reply quoting an id we have never seen is for.
+    ///
+    /// [`Self::membership_by_pending_request`] cannot find it: the reply carries
+    /// the community's id and the record holds the placeholder, which is the
+    /// whole reason the poll went out id-less. Several personas may each have an
+    /// unconfirmed join with the same community; then the reply's recipients
+    /// (`to`) decide, and an answer that still names more than one — or none —
+    /// resolves nothing rather than guessing.
+    pub fn membership_awaiting_request_id(
+        &mut self,
+        vtc: &str,
+        recipients: &[String],
+    ) -> Option<&mut CommunityRecord> {
+        let unconfirmed: Vec<PersonaId> = self
+            .communities
+            .get(vtc)?
+            .iter()
+            .filter(|c| {
+                matches!(c.status, CommunityStatus::Pending { .. }) && !c.request_id_confirmed
+            })
+            .map(|c| c.persona_ref)
+            .collect();
+        let persona = match unconfirmed.as_slice() {
+            [only] => *only,
+            [] => return None,
+            several => {
+                let addressed: Vec<PersonaId> = several
+                    .iter()
+                    .copied()
+                    .filter(|p| {
+                        self.personas
+                            .get(p)
+                            .is_some_and(|rec| recipients.contains(&rec.did))
+                    })
+                    .collect();
+                let [only] = addressed.as_slice() else {
+                    return None;
+                };
+                *only
+            }
+        };
+        self.membership_mut(vtc, persona)
+    }
+
     /// Every `Pending` join the community can be asked about, as the tuple a
     /// status poll needs: which community, which persona speaks to it, the
     /// community's request id **if we know it**, and the transport the submit
