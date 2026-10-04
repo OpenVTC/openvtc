@@ -2087,6 +2087,13 @@ pub struct VettingState {
     /// face then returns to that card rather than to the list, which would
     /// leave the holder to find the application and the open session again.
     pub card_after_face: Option<(String, String)>,
+    /// The application or desk request open as a journey, if any. While one
+    /// is, the page is that journey — every step in order, where it stands,
+    /// and what it is for — and takes the whole width of the screen.
+    pub journey_target: Option<JourneyTarget>,
+    /// [`journey_target`](Self::journey_target), worked out from the book on
+    /// every sync. `None` when nothing is open, or what was open has gone.
+    pub journey: Option<JourneyView>,
     /// Communities whose vetter directory can be searched: those applied to,
     /// then those joined.
     pub directory_communities: Arc<[DirectoryCommunity]>,
@@ -2900,6 +2907,44 @@ pub enum TaskKind {
     /// page where that step is taken, rather than to a detail view that could
     /// only say it exists.
     Vetting(VettingTarget),
+}
+
+/// What a journey page follows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JourneyTarget {
+    /// An application, by id.
+    Application(String),
+    /// A request on the vetter's desk, by request id.
+    Desk(String),
+}
+
+/// A journey, ready to draw.
+#[derive(Clone, Debug)]
+pub struct JourneyView {
+    pub target: JourneyTarget,
+    /// "Applying to first-vtc as alice", "Vetting did:… for first-vtc".
+    pub title: String,
+    /// The community proves vetting with a PCS zero-knowledge proof.
+    pub pcs_zkp: bool,
+    pub steps: JourneySteps,
+}
+
+/// The steps of whichever side the journey is.
+#[derive(Clone, Debug)]
+pub enum JourneySteps {
+    Applicant(
+        Vec<
+            openvtc_core::vetting::journey::JourneyStep<
+                openvtc_core::vetting::journey::ApplicantStep,
+            >,
+        >,
+    ),
+    Vetter(
+        Vec<
+            openvtc_core::vetting::journey::JourneyStep<openvtc_core::vetting::journey::VetterStep>,
+        >,
+        Option<openvtc_core::vetting::journey::VetterEnding>,
+    ),
 }
 
 /// Where a vetting task is acted on.

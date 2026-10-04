@@ -327,6 +327,10 @@ pub enum PersonaAction {
 /// Forms are driven generically — the focused field takes text, cycles through
 /// choices, or ticks — so the page needs no variant per field.
 pub enum VettingAction {
+    /// Open the highlighted application or desk request as a journey.
+    OpenJourney,
+    /// Close the journey, back to the list it was opened from.
+    CloseJourney,
     /// Show the next tab.
     SwitchTab,
     /// Move one desk view along (`true` forward): requests → tickets → issued.

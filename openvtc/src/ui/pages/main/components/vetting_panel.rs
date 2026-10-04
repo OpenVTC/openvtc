@@ -151,6 +151,9 @@ pub(crate) fn accent_swatch(accent: Option<(u8, u8, u8)>) -> Span<'static> {
 
 /// Render the Vetting page.
 pub fn render(v: &VettingState) -> Vec<Line<'static>> {
+    if let Some(journey) = &v.journey {
+        return super::vetting_journey::render(v, journey, mode_lines);
+    }
     let mut lines = vec![Line::from("")];
 
     let tab_style = |tab: VettingTab| {
@@ -188,16 +191,25 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
     }
 
+    mode_lines(&mut lines, v);
+
+    lines
+}
+
+/// What the page draws for its current mode — the list, or whichever form or
+/// view is open. A journey page draws the same views under its step strip, so
+/// a face chosen or a card sent from a journey is the same screen as anywhere.
+fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     match &v.mode {
         VettingMode::List => match v.tab {
-            VettingTab::Applications => applications(&mut lines, v),
+            VettingTab::Applications => applications(lines, v),
             VettingTab::Desk => {
-                standing(&mut lines, v);
-                desk_views(&mut lines, v);
+                standing(lines, v);
+                desk_views(lines, v);
                 match v.desk_view {
-                    DeskView::Requests => desk(&mut lines, v),
-                    DeskView::Tickets => tickets(&mut lines, v),
-                    DeskView::Issued => issued(&mut lines, v),
+                    DeskView::Requests => desk(lines, v),
+                    DeskView::Tickets => tickets(lines, v),
+                    DeskView::Issued => issued(lines, v),
                 }
             }
         },
@@ -507,10 +519,10 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.push(hint("Enter: send  Esc: cancel"));
         }
-        VettingMode::Directory(view) => directory(&mut lines, v, view),
+        VettingMode::Directory(view) => directory(lines, v, view),
         VettingMode::Profile(form) => match &form.event {
-            Some(event) => event_form(&mut lines, event),
-            None => profile(&mut lines, v, form),
+            Some(event) => event_form(lines, event),
+            None => profile(lines, v, form),
         },
         VettingMode::Resend { index } => {
             lines.push(heading("Ask for your vetter credential again"));
@@ -608,7 +620,7 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             application_id,
             session_id,
             preview,
-        } => send_card(&mut lines, v, application_id, session_id, preview.as_ref()),
+        } => send_card(lines, v, application_id, session_id, preview.as_ref()),
         VettingMode::NewTicket {
             membership_index,
             uses_index,
@@ -637,7 +649,7 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.push(hint("Enter: issue  Tab: next field  Esc: cancel"));
         }
-        VettingMode::ShowTicket { index } => show_ticket(&mut lines, v, *index),
+        VettingMode::ShowTicket { index } => show_ticket(lines, v, *index),
         VettingMode::OpenSession {
             request_id,
             method_index,
@@ -672,7 +684,7 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.push(hint("Enter: open  Esc: cancel"));
         }
-        VettingMode::Attest { request_id, form } => attest(&mut lines, v, request_id, form),
+        VettingMode::Attest { request_id, form } => attest(lines, v, request_id, form),
         VettingMode::ConfirmDecline { request_id } => {
             lines.push(heading("Decline this request?"));
             lines.push(Line::from(""));
@@ -823,8 +835,6 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
             lines.push(hint("Enter: withdraw  Esc: cancel"));
         }
     }
-
-    lines
 }
 
 fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {

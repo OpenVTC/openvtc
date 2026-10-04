@@ -57,11 +57,11 @@ use crate::state_handler::join_flow;
 use crate::state_handler::main_page::content::{
     ApplicationRow, AttestForm, CardPreview, DIRECTORY_FIELDS, DIRECTORY_LABELS, DIRECTORY_METHODS,
     DeskRow, DeskStage, DeskView, DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS,
-    EventForm, EventOffer, FaceChoice, IssuedRow, LineTone, ListedVetterRow, NewFaceFocus,
-    NewFaceForm, PROFILE_FIELDS, PROFILE_LABELS, PoolRow, RequestRow, TicketRow, VETTING_METHODS,
-    VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm,
-    VetterStandingRow, VettingMembership, VettingMode, VettingPersona, VettingState, VettingTab,
-    method_label, row_of,
+    EventForm, EventOffer, FaceChoice, IssuedRow, JourneySteps, JourneyTarget, JourneyView,
+    LineTone, ListedVetterRow, NewFaceFocus, NewFaceForm, PROFILE_FIELDS, PROFILE_LABELS, PoolRow,
+    RequestRow, TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
+    VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VetterStandingRow, VettingMembership,
+    VettingMode, VettingPersona, VettingState, VettingTab, method_label, row_of,
 };
 use crate::state_handler::main_page::menu::MainMenu;
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
@@ -474,6 +474,66 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
         .collect();
 
     vetting.selected = vetting.selected.min(vetting.tab_len().saturating_sub(1));
+    sync_journey(vetting, config, now);
+}
+
+/// Work the open journey out from the book again, so it follows every change
+/// — a statement arriving, a session opening — without being asked.
+///
+/// Keeps the list's highlight on the journey's own row: every action the
+/// journey offers is one the list already had, and those act on the
+/// highlighted row. A journey whose application or request has gone closes,
+/// rather than drawing steps for something that no longer exists.
+pub(crate) fn sync_journey(vetting: &mut VettingState, config: &Config, now: DateTime<Utc>) {
+    use openvtc_core::vetting::journey::{applicant_journey, vetter_journey};
+    let book = &config.private.vetting;
+    let view = match &vetting.journey_target {
+        None => None,
+        Some(JourneyTarget::Application(id)) => {
+            book.applications.iter().find(|a| &a.id == id).map(|app| {
+                if let Some(i) = vetting.applications.iter().position(|r| &r.id == id) {
+                    vetting.tab = VettingTab::Applications;
+                    vetting.selected = i;
+                }
+                JourneyView {
+                    target: JourneyTarget::Application(id.clone()),
+                    title: format!(
+                        "Applying to {} as {}",
+                        community_display(config, &app.community),
+                        sanitize_display(&config.persona_profile_label_for(app.persona), 64)
+                    ),
+                    pcs_zkp: app.hidden.is_some(),
+                    steps: JourneySteps::Applicant(applicant_journey(app, now)),
+                }
+            })
+        }
+        Some(JourneyTarget::Desk(id)) => book.desk_entry(id).map(|entry| {
+            if let Some(i) = vetting.desk.iter().position(|r| &r.request_id == id) {
+                vetting.tab = VettingTab::Desk;
+                vetting.desk_view = DeskView::Requests;
+                vetting.selected = i;
+            }
+            let (steps, ending) = vetter_journey(entry);
+            JourneyView {
+                target: JourneyTarget::Desk(id.clone()),
+                title: format!(
+                    "Vetting {} for {}",
+                    openvtc_core::display::display_identifier(
+                        config.agent_name_for(&entry.applicant),
+                        &entry.applicant,
+                        48
+                    ),
+                    community_display(config, &entry.community)
+                ),
+                pcs_zkp: book.hidden_vetting(&entry.community),
+                steps: JourneySteps::Vetter(steps, ending),
+            }
+        }),
+    };
+    if view.is_none() {
+        vetting.journey_target = None;
+    }
+    vetting.journey = view;
 }
 
 fn claim_text(value: &Value) -> String {
@@ -642,6 +702,36 @@ fn persist(ctx: &mut ActionCtx<'_>, message: impl Into<String>) {
 /// Handle one Vetting-page action.
 pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
     match action {
+        VettingAction::OpenJourney => {
+            let v = page(ctx);
+            let target = match (v.tab, v.desk_view) {
+                (VettingTab::Applications, _) => v
+                    .applications
+                    .get(v.selected)
+                    .map(|r| JourneyTarget::Application(r.id.clone())),
+                (VettingTab::Desk, DeskView::Requests) => v
+                    .desk
+                    .get(v.selected)
+                    .map(|r| JourneyTarget::Desk(r.request_id.clone())),
+                _ => None,
+            };
+            if let Some(target) = target {
+                v.journey_target = Some(target);
+                v.mode = VettingMode::List;
+                v.status_message = None;
+                sync_journey(
+                    &mut ctx.state.main_page.content_panel.vetting,
+                    ctx.config,
+                    Utc::now(),
+                );
+            }
+        }
+        VettingAction::CloseJourney => {
+            let v = page(ctx);
+            v.journey_target = None;
+            v.journey = None;
+            v.mode = VettingMode::List;
+        }
         VettingAction::SwitchTab => {
             let v = page(ctx);
             v.tab = v.tab.next();
@@ -4532,7 +4622,9 @@ pub(crate) fn focus_vetting_target(
             match v.desk.iter().position(|r| &r.request_id == request_id) {
                 Some(i) => {
                     v.selected = i;
-                    v.status_message = Some(format!("{} — what to do is below.", v.desk[i].state));
+                    v.status_message = None;
+                    v.journey_target = Some(JourneyTarget::Desk(request_id.clone()));
+                    sync_journey(v, config, Utc::now());
                 }
                 None => {
                     v.status_message = Some("That request is no longer on your desk.".to_string());
@@ -4559,6 +4651,11 @@ pub(crate) fn focus_application(
         v.selected = i;
     }
     v.status_message = Some(message);
+    // Every way here — starting from the join page, an Inbox entry — lands on
+    // the application's journey, so the holder always arrives at the same
+    // picture of where they are.
+    v.journey_target = Some(JourneyTarget::Application(application_id.to_string()));
+    sync_journey(v, config, Utc::now());
 }
 
 #[cfg(test)]
