@@ -244,6 +244,12 @@ pub struct KnownVetting {
     pub applications: Vec<JoinApplication>,
     /// The ways in, in the order they are offered.
     pub routes: Vec<RouteOption>,
+    /// It proves vetting with a PCS zero-knowledge proof: it will learn that
+    /// enough vetters vouched for the applicant, not who they were.
+    pub pcs_zkp: bool,
+    /// Whether its DID document lists a post-quantum signing key; `None` when
+    /// it has not been resolved here.
+    pub post_quantum: Option<bool>,
     /// Personas a new application can be made as.
     pub personas: Vec<ApplyAs>,
     pub persona_index: usize,

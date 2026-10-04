@@ -9,6 +9,7 @@ use crate::state_handler::{
     },
     state::ConnectionState,
 };
+use crate::ui::badges;
 use openvtc_core::display::display_identifier;
 use ratatui::{
     style::{Style, Stylize},
@@ -108,38 +109,73 @@ fn render_list(state: &CredentialsState) -> Vec<Line<'static>> {
                 Style::new().fg(COLOR_TEXT_DEFAULT)
             };
 
+            // What it is first: four rows from one community are told apart
+            // by their kind and who they were issued to, not by an issuer
+            // repeated four times beside two timestamps.
+            let kind = vrc.kind.clone().unwrap_or_else(|| "Credential".to_string());
             // Precedence: user alias → verified agent name → the DID itself
             // (matches the relationships panel).
-            let display_name = vrc
+            let party = vrc
                 .alias
-                .as_deref()
-                .or(vrc.remote_agent_name.as_deref())
-                .unwrap_or(&vrc.remote_p_did)
-                .to_string();
-
-            let date_display = if let Some(until) = &vrc.valid_until {
-                format!("{} → {}", vrc.valid_from, until)
-            } else {
-                vrc.valid_from.clone()
-            };
+                .clone()
+                .or_else(|| vrc.remote_agent_name.clone())
+                .unwrap_or_else(|| display_identifier(None, &vrc.remote_p_did, 40).into_owned());
 
             let mut row = vec![
                 Span::styled(prefix, style),
-                Span::styled(display_name, style),
+                Span::styled(format!("{:<26}", truncate(&kind, 25)), style),
+                Span::styled(
+                    format!("{:<34}", truncate(&party, 33)),
+                    Style::new().fg(COLOR_SOFT_PURPLE),
+                ),
             ];
-            if let Some(note) = &vrc.note {
+            // Which of your personas holds it — the other half of telling two
+            // memberships of one community apart.
+            if let Some(persona) = &vrc.subject_label {
                 row.push(Span::styled(
-                    format!("  {note}"),
+                    format!("to {:<14}", truncate(persona, 13)),
                     Style::new().fg(COLOR_TEXT_DEFAULT),
                 ));
             }
-            row.push(Span::styled("  ", Style::default()));
-            row.push(Span::styled(date_display, Style::new().fg(COLOR_DARK_GRAY)));
+            if let Some(note) = &vrc.note {
+                row.push(Span::styled(
+                    format!("{note}  "),
+                    Style::new().fg(COLOR_TEXT_DEFAULT),
+                ));
+            }
+            let validity_style = if vrc.status == "valid" {
+                Style::new().fg(COLOR_DARK_GRAY)
+            } else {
+                Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED)
+            };
+            row.push(Span::styled(
+                match (&vrc.validity, &vrc.valid_until) {
+                    (validity, _) if !validity.is_empty() => validity.clone(),
+                    (_, Some(until)) => format!("{} → {until}", vrc.valid_from),
+                    (_, None) => vrc.valid_from.clone(),
+                },
+                validity_style,
+            ));
+            if vrc.post_quantum {
+                row.push(Span::raw("  "));
+                row.push(badges::pqc());
+            }
             lines.push(Line::from(row));
         }
     }
 
     lines.push(Line::from(""));
+    // The badge is a promise about cryptography, so the page says once what it
+    // means rather than leaving the reader to guess from four letters.
+    if active_list.iter().any(|v| v.post_quantum) {
+        lines.push(Line::from(vec![
+            badges::pqc(),
+            Span::styled(
+                format!(" {}", badges::PQC_MEANING),
+                Style::new().fg(COLOR_DARK_GRAY),
+            ),
+        ]));
+    }
     lines.push(
         Line::from("Tab: switch tab  ↑/↓ navigate  Enter: details  n: request VRC")
             .fg(COLOR_DARK_GRAY),
@@ -217,6 +253,24 @@ fn render_detail(state: &CredentialsState, index: usize) -> Vec<Line<'static>> {
         Span::styled("Valid       ", Style::new().fg(COLOR_TEXT_DEFAULT)),
         Span::styled(vrc.validity.clone(), Style::new().fg(COLOR_TEXT_DEFAULT)),
     ]));
+    lines.push(Line::from(if vrc.post_quantum {
+        vec![
+            Span::styled("Signature   ", Style::new().fg(COLOR_TEXT_DEFAULT)),
+            badges::pqc(),
+            Span::styled(
+                format!("  {}", badges::PQC_MEANING),
+                Style::new().fg(COLOR_TEXT_DEFAULT),
+            ),
+        ]
+    } else {
+        vec![
+            Span::styled("Signature   ", Style::new().fg(COLOR_TEXT_DEFAULT)),
+            Span::styled(
+                "classical only — not post-quantum",
+                Style::new().fg(COLOR_DARK_GRAY),
+            ),
+        ]
+    }));
     for (label, value) in &vrc.facts {
         lines.push(Line::from(vec![
             Span::styled(format!("{label:<12}"), Style::new().fg(COLOR_TEXT_DEFAULT)),
@@ -317,4 +371,94 @@ fn render_new_request(
     lines.push(Line::from("↑/↓ select  Enter: send request  Esc: cancel").fg(COLOR_DARK_GRAY));
 
     lines
+}
+
+/// Cut `text` to `max` characters for a list column, marking the cut so a
+/// clipped value never passes for a whole one.
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let kept: String = text.chars().take(max.saturating_sub(1)).collect();
+        format!("{kept}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state_handler::main_page::content::{RawCredential, VrcSummary};
+    use std::sync::Arc;
+
+    fn row(kind: &str, persona: &str, post_quantum: bool) -> VrcSummary {
+        VrcSummary {
+            vrc_id: "id".into(),
+            remote_p_did: "did:example:vtc".into(),
+            remote_agent_name: None,
+            raw_json: RawCredential::Value(Arc::new(serde_json::Value::Null)),
+            alias: Some("first-vtc".into()),
+            issuer: "did:example:vtc".into(),
+            issuer_agent_name: None,
+            subject: "did:example:me".into(),
+            subject_agent_name: None,
+            valid_from: "2026-10-03T13:29:25Z".into(),
+            valid_until: None,
+            kind: Some(kind.into()),
+            subject_is_self: true,
+            subject_label: Some(persona.into()),
+            post_quantum,
+            validity: "3 Oct 2026 → 2 Nov 2026 · 29 days left".into(),
+            status: "valid".into(),
+            note: None,
+            facts: Vec::new(),
+        }
+    }
+
+    fn text(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Two memberships of one community are told apart by what they are and
+    /// whose they are, and a post-quantum signature is marked and explained.
+    #[test]
+    fn a_row_says_what_it_is_whose_it_is_and_how_it_is_signed() {
+        let state = CredentialsState {
+            selected_tab: CredentialTab::Membership,
+            membership: vec![
+                row("Membership", "alice", true),
+                row("Role: vetter", "bob", false),
+            ]
+            .into(),
+            ..CredentialsState::default()
+        };
+        let shown = text(&render_list(&state));
+        let line = |needle: &str| {
+            shown
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} not shown:\n{shown}"))
+                .to_string()
+        };
+        // "Membership" alone also names the tab; the selected row is marked.
+        let membership = line("▸ Membership");
+        assert!(membership.contains("to alice"), "{membership}");
+        assert!(membership.contains("29 days left"), "{membership}");
+        assert!(membership.contains("PQC-SIGNED"), "{membership}");
+        let role = line("Role: vetter");
+        assert!(
+            role.contains("to bob") && !role.contains("PQC-SIGNED"),
+            "{role}"
+        );
+        // The legend, once.
+        assert_eq!(shown.matches(badges::PQC_MEANING).count(), 1, "{shown}");
+    }
 }

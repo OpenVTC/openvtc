@@ -289,6 +289,61 @@ fn verify_one(
         })
 }
 
+/// Whether `cryptosuite` is a post-quantum one: the ML-DSA and SLH-DSA
+/// families of W3C Quantum-Resistant Cryptosuites, by name.
+fn is_post_quantum_suite(cryptosuite: &str) -> bool {
+    cryptosuite.starts_with("mldsa") || cryptosuite.starts_with("slhdsa")
+}
+
+/// Whether `doc` carries a post-quantum signature: a proof, alone or in a
+/// proof set, whose cryptosuite is ML-DSA or SLH-DSA.
+///
+/// Read from the document as held. It says which suites the signer used, not
+/// that they verified: every caller shows it on a credential that was checked
+/// with [`verify_signed`] when it arrived, and that check fails a set if
+/// *any* proof in it does — so a held credential's post-quantum proof is one
+/// that verified.
+#[must_use]
+pub fn signed_post_quantum(doc: &Value) -> bool {
+    proof_values(doc).is_ok_and(|proofs| {
+        proofs.iter().any(|p| {
+            p.get("cryptosuite")
+                .and_then(Value::as_str)
+                .is_some_and(is_post_quantum_suite)
+        })
+    })
+}
+
+/// Whether `doc` publishes a post-quantum signing key: an ML-DSA-44 method
+/// listed for `assertionMethod`, which is what a signer that holds one signs
+/// credentials with beside its classical key.
+///
+/// For a party whose credentials we do not hold yet — a community before
+/// joining — this is the evidence there is. A revoked method does not count.
+#[must_use]
+pub fn publishes_post_quantum_key(doc: &Document) -> bool {
+    Purpose::AssertionMethod
+        .relationship(doc)
+        .iter()
+        .filter_map(|r| match r {
+            VerificationRelationship::VerificationMethod(m) => Some(m.as_ref()),
+            // Referenced by absolute id, or relatively (`#key-1`), as webvh
+            // documents often do.
+            _ => {
+                let id = r.get_id();
+                let absolute = format!("{}{id}", doc.id.as_str());
+                doc.verification_method.iter().find(|m| {
+                    m.id.as_str() == id || (id.starts_with('#') && m.id.as_str() == absolute)
+                })
+            }
+        })
+        .filter(|m| m.revoked.is_none())
+        .any(|m| {
+            m.decode_public_key()
+                .is_ok_and(|(codec, _)| codec == ML_DSA_44_PUB)
+        })
+}
+
 /// Fixtures for tests that need real proofs over real-shaped DID documents.
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -404,6 +459,36 @@ mod tests {
         let signed = sign(statement(), &[&ed, &pq]).await;
         assert!(signed["proof"].is_array());
         assert_eq!(verify_proofs(&signed, SIGNER, &doc, ASSERT), Ok(()));
+    }
+
+    /// A proof set that includes ML-DSA reads as post-quantum; a classical
+    /// proof alone, or no proof, does not.
+    #[tokio::test]
+    async fn a_post_quantum_proof_is_recognised_in_a_set() {
+        let ed = ed_key(SIGNER, "key-0", 1);
+        let pq = pq_key(SIGNER, "key-pq", 2);
+        assert!(signed_post_quantum(&sign(statement(), &[&ed, &pq]).await));
+        assert!(!signed_post_quantum(&sign(statement(), &[&ed]).await));
+        assert!(!signed_post_quantum(&statement()));
+    }
+
+    /// A community before joining is judged by its DID document: an ML-DSA
+    /// key listed for signing counts, one published only for authentication
+    /// does not.
+    #[test]
+    fn a_post_quantum_signing_key_is_recognised_in_a_document() {
+        let ed = ed_key(SIGNER, "key-0", 1);
+        let pq = pq_key(SIGNER, "key-pq", 2);
+        assert!(publishes_post_quantum_key(&document(
+            SIGNER,
+            &[("key-0", &ed), ("key-pq", &pq)],
+            &[]
+        )));
+        assert!(!publishes_post_quantum_key(&document(
+            SIGNER,
+            &[("key-0", &ed)],
+            &[("key-pq", &pq)]
+        )));
     }
 
     #[tokio::test]

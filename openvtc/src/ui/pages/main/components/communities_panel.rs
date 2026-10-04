@@ -103,14 +103,27 @@ pub fn render(
         // membership is a selectable sub-row labelled by its presented persona.
         let new_group = i == 0 || state.items[i - 1].vtc_did != c.vtc_did;
         if new_group {
-            lines.push(Line::from(vec![
+            let mut header = vec![
                 Span::raw("  "),
                 super::vetting_panel::accent_swatch(c.accent),
                 Span::styled(
                     c.display_name.clone(),
                     Style::new().fg(COLOR_TEXT_DEFAULT).bold(),
                 ),
-            ]));
+            ];
+            // On the community's own line, where they are read as properties
+            // of the community rather than of one membership. Any membership's
+            // credential is evidence of how the community signs.
+            let group = state.items.iter().filter(|m| m.vtc_did == c.vtc_did);
+            if group.clone().any(|m| m.post_quantum) {
+                header.push(Span::raw("  "));
+                header.push(crate::ui::badges::pqc());
+            }
+            if group.clone().any(|m| m.pcs_zkp) {
+                header.push(Span::raw("  "));
+                header.push(crate::ui::badges::pcs_zkp());
+            }
+            lines.push(Line::from(header));
         }
 
         let row_style = if is_selected {
@@ -302,6 +315,29 @@ pub fn render(
                     lines.push(kv("Record:", disp.clone()));
                 }
             }
+        }
+    }
+
+    // Each badge is a claim about cryptography, so the page says once what it
+    // means — only for the badges actually drawn above.
+    for (shown, badge, meaning) in [
+        (
+            state.items.iter().any(|c| c.post_quantum),
+            crate::ui::badges::pqc(),
+            crate::ui::badges::PQC_MEANING,
+        ),
+        (
+            state.items.iter().any(|c| c.pcs_zkp),
+            crate::ui::badges::pcs_zkp(),
+            crate::ui::badges::PCS_ZKP_MEANING,
+        ),
+    ] {
+        if shown {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                badge,
+                Span::styled(format!(" {meaning}"), Style::new().fg(COLOR_DARK_GRAY)),
+            ]));
         }
     }
 
@@ -743,6 +779,8 @@ mod key_hint_tests {
     fn row(is_active: bool, is_inactive: bool, is_pending: bool) -> CommunitySummary {
         CommunitySummary {
             display_name: "acme".to_string(),
+            post_quantum: false,
+            pcs_zkp: false,
             status_label: String::new(),
             persona_label: String::new(),
             member_since: String::new(),

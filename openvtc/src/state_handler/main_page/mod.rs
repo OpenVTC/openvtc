@@ -389,22 +389,30 @@ impl MainPageState {
             .collect();
 
         // Sync credentials (scoped to the working community's persona)
-        self.content_panel.credentials.received = collect_vrcs(
-            &config.private.vrcs_received,
+        self.content_panel.credentials.received = finish_credential_rows(
             config,
-            active_persona,
-            persona_count,
+            collect_vrcs(
+                &config.private.vrcs_received,
+                config,
+                active_persona,
+                persona_count,
+            ),
         )
         .into();
-        self.content_panel.credentials.issued = collect_vrcs(
-            &config.private.vrcs_issued,
+        self.content_panel.credentials.issued = finish_credential_rows(
             config,
-            active_persona,
-            persona_count,
+            collect_vrcs(
+                &config.private.vrcs_issued,
+                config,
+                active_persona,
+                persona_count,
+            ),
         )
         .into();
-        self.content_panel.credentials.membership = collect_membership_creds(config).into();
-        self.content_panel.credentials.vetting = collect_vetting_statements(config).into();
+        self.content_panel.credentials.membership =
+            finish_credential_rows(config, collect_membership_creds(config)).into();
+        self.content_panel.credentials.vetting =
+            finish_credential_rows(config, collect_vetting_statements(config)).into();
         self.content_panel.credentials.retired_vrcs = config.private.vrcs_received.retired()
             + config.private.vrcs_issued.retired()
             + config
@@ -614,6 +622,11 @@ impl MainPageState {
             };
             let branding = config.private.vetting.branding(&c.vtc_did);
             community_items.push(content::CommunitySummary {
+                post_quantum: c
+                    .credentials
+                    .values()
+                    .any(openvtc_core::proof_check::signed_post_quantum),
+                pcs_zkp: config.private.vetting.hidden_vetting(&c.vtc_did),
                 // The name the community publishes in its branding comes after
                 // the membership's own and a verified agent name: it is what
                 // the community says about itself.
@@ -933,6 +946,8 @@ fn collect_vrcs(
                     // credential's own `type` is visible in the raw JSON.
                     kind: None,
                     subject_is_self: config.is_persona_did(vrc.subject()),
+                    subject_label: None,
+                    post_quantum: false,
                     valid_from: vrc.valid_from().format("%Y-%m-%d").to_string(),
                     valid_until: vrc.valid_until().map(|d| d.format("%Y-%m-%d").to_string()),
                     note: None,
@@ -952,6 +967,25 @@ fn collect_vrcs(
 /// one credential in the exchange this client could not show — it was signed,
 /// sent, and dropped. Reuses [`VrcSummary`]: `alias` carries "`<community>` —
 /// Membership/Role/Acknowledgement" and `remote_p_did` the VTC.
+/// What every credential row needs that its collector does not compute: the
+/// persona it was issued to, by name, and whether it is post-quantum signed.
+/// One pass here rather than in each collector, so no list can miss it.
+fn finish_credential_rows(config: &Config, mut rows: Vec<VrcSummary>) -> Vec<VrcSummary> {
+    for row in &mut rows {
+        row.post_quantum = row.raw_json.signed_post_quantum();
+        if row.subject_is_self {
+            row.subject_label = config
+                .account
+                .personas
+                .values()
+                .find(|p| p.did == row.subject)
+                .and_then(|p| p.label.as_deref())
+                .map(|l| sanitize_display(l, 64));
+        }
+    }
+    rows
+}
+
 fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
     let mut result = Vec::new();
     for c in config.account.memberships() {
@@ -1021,6 +1055,8 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
                 // "Role: vetter", or for a statement its predicate.
                 kind: Some(sanitize_display(&openvtc_core::dtg::describe(vc), 128)),
                 subject_is_self: config.is_persona_did(&subject),
+                subject_label: None,
+                post_quantum: false,
                 valid_from,
                 valid_until,
                 note: None,
@@ -1117,6 +1153,8 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
                     .to_string(),
                 ),
                 subject_is_self: false,
+                subject_label: None,
+                post_quantum: false,
                 valid_from,
                 valid_until,
                 note: None,
@@ -1207,6 +1245,8 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
             status,
             kind: Some("Vetter".to_string()),
             subject_is_self: config.is_persona_did(&subject),
+            subject_label: None,
+            post_quantum: false,
             valid_from,
             valid_until,
             note: None,
@@ -1302,6 +1342,8 @@ fn collect_vetting_statements(config: &Config) -> Vec<VrcSummary> {
                 status,
                 kind: Some("Vetting statement".to_string()),
                 subject_is_self: config.is_persona_did(&app.join_did),
+                subject_label: None,
+                post_quantum: false,
                 valid_from: statement.valid_from.format("%Y-%m-%d").to_string(),
                 valid_until: Some(statement.valid_until.format("%Y-%m-%d").to_string()),
                 note: Some(format!("{method} · {community}")),

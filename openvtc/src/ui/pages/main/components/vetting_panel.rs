@@ -884,6 +884,12 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                     dim()
                 },
             ),
+            Span::raw(if app.pcs_zkp { "  " } else { "" }),
+            if app.pcs_zkp {
+                crate::ui::badges::pcs_zkp()
+            } else {
+                Span::raw("")
+            },
         ]));
     }
     let Some(app) = v.applications.get(v.selected) else {
@@ -899,6 +905,31 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             value(),
         ),
     ]));
+    // Said where the applicant reads what is required, because it changes
+    // what being vetted costs the vetters: with it, the community never learns
+    // who they were.
+    // Before the requirements arrive the mode is unknown too, and "named"
+    // would be a guess.
+    lines.push(Line::from(if app.requirements.is_none() {
+        vec![
+            Span::styled("Vetters      ", label()),
+            Span::styled("named or hidden — known with the requirements", dim()),
+        ]
+    } else if app.pcs_zkp {
+        vec![
+            Span::styled("Vetters      ", label()),
+            crate::ui::badges::pcs_zkp(),
+            Span::styled(format!("  {}", crate::ui::badges::PCS_ZKP_MEANING), value()),
+        ]
+    } else {
+        vec![
+            Span::styled("Vetters      ", label()),
+            Span::styled(
+                "named — the community sees which vetters vouched for you",
+                dim(),
+            ),
+        ]
+    }));
     lines.push(Line::from(vec![
         Span::styled("Requires     ", label()),
         match &app.requirements {
@@ -1542,6 +1573,12 @@ fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 style,
             ),
             Span::styled(format!("  {}", row.state), dim()),
+            Span::raw(if row.pcs_zkp { "  " } else { "" }),
+            if row.pcs_zkp {
+                crate::ui::badges::pcs_zkp()
+            } else {
+                Span::raw("")
+            },
         ]));
     }
     let Some(row) = v.desk.get(v.selected) else {
@@ -1552,6 +1589,27 @@ fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         Span::styled("Community    ", label()),
         Span::styled(row.community.clone(), value()),
     ]));
+    // What signing costs the vetter differs: named, the community keeps their
+    // DID against this applicant; hidden, it never learns it.
+    lines.push(Line::from(if row.pcs_zkp {
+        vec![
+            Span::styled("You are      ", label()),
+            crate::ui::badges::pcs_zkp(),
+            Span::styled(
+                "  hidden — your attestation is counted in a zero-knowledge proof; the \
+                 community never learns it was you",
+                value(),
+            ),
+        ]
+    } else {
+        vec![
+            Span::styled("You are      ", label()),
+            Span::styled(
+                "named — your signed statement, with your DID, goes to the community",
+                dim(),
+            ),
+        ]
+    }));
     if let Some(message) = &row.message {
         lines.push(Line::from(vec![
             Span::styled("Their note   ", label()),
@@ -1915,6 +1973,7 @@ mod desk_tests {
                 applicant: "did:example:applicant".into(),
                 applicant_name: None,
                 community: "did:example:community".into(),
+                pcs_zkp: false,
                 state: "accepted".into(),
                 stage: DeskStage::Accepted,
                 method: None,

@@ -433,6 +433,8 @@ pub(crate) fn vetting_view(
         name,
         accent: book.branding(vtc_did).and_then(|b| b.accent_rgb()),
         phase: VettingPhase::Known(Box::new(KnownVetting {
+            pcs_zkp: book.hidden_vetting(vtc_did),
+            post_quantum: book.post_quantum_key(vtc_did),
             requirements: describe_requirements(&criterion.requirements)
                 .iter()
                 .map(|line| sanitize_display(line, 300))
@@ -568,6 +570,12 @@ async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Resul
 
     let book = &mut config.private.vetting;
     book.learn_manifest_in(vtc_did, &manifest, Some(protocol), &meta, Utc::now());
+    // The document is in hand already, so how the community signs is free to
+    // learn — and before joining it is the only evidence there is.
+    book.note_post_quantum_key(
+        vtc_did,
+        openvtc_core::proof_check::publishes_post_quantum_key(&resolved.doc),
+    );
     for application in book
         .applications
         .iter_mut()
