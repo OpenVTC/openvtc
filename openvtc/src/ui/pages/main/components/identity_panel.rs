@@ -1504,6 +1504,23 @@ fn render_profile_form(state: &IdentityState, form: &ProfileForm) -> Vec<Line<'s
         }
     }
 
+    // Said before the save rather than discovered after it: the face changes
+    // in a way the tick-list cannot show, because the rows are gone.
+    if form.dropped > 0 {
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(format!(
+                "   {} attribute{} this face showed {} no longer in your pool — saving \
+                 removes {} from the face",
+                form.dropped,
+                if form.dropped == 1 { "" } else { "s" },
+                if form.dropped == 1 { "is" } else { "are" },
+                if form.dropped == 1 { "it" } else { "them" },
+            ))
+            .fg(COLOR_ORANGE),
+        );
+    }
+
     // The entries this editor does not own, counted so a holder can see that
     // saving will not lose them.
     if !form.preserved.is_empty() {

@@ -1075,6 +1075,14 @@ pub struct ProfileForm {
     /// first time a holder renamed it, and the deletion would be invisible —
     /// the profile would still resolve, just to less than it did.
     pub preserved: Vec<vta_sdk::protocols::persona::ProfileEntry>,
+    /// References the face held to attributes the pool no longer has, left out
+    /// of `ticked` when the editor opened.
+    ///
+    /// The VTA refuses a face that references a missing attribute, so carrying
+    /// them would make every save fail — and they have no row to untick, so the
+    /// holder could not fix it from here. Counted so the editor can say that
+    /// saving drops them, rather than doing so silently.
+    pub dropped: usize,
     pub error: Option<String>,
     pub working: bool,
 }
