@@ -1337,9 +1337,7 @@ fn send_card(
         ));
         lines.push(hint("have seen it and pressed Enter again."));
         lines.push(Line::from(""));
-        lines.push(hint(
-            "Enter: preview  Esc: not now (f on the application changes the face)",
-        ));
+        lines.push(hint("Enter: preview  f: choose the face  Esc: not now"));
         return;
     };
     lines.push(Line::from(" The card will show").fg(COLOR_SUCCESS));

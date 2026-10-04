@@ -2060,6 +2060,13 @@ pub struct VettingState {
     /// The face each application wears, by application id, once read or
     /// chosen this run.
     pub worn_faces: std::collections::HashMap<String, String>,
+    /// The card (application id, session id) a face is being chosen for.
+    ///
+    /// Set when `f` is pressed on the card page, because a missing or wrong
+    /// face is what that page reports. Choosing, making, or backing out of the
+    /// face then returns to that card rather than to the list, which would
+    /// leave the holder to find the application and the open session again.
+    pub card_after_face: Option<(String, String)>,
     /// Communities whose vetter directory can be searched: those applied to,
     /// then those joined.
     pub directory_communities: Arc<[DirectoryCommunity]>,
