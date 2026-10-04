@@ -372,9 +372,10 @@ pub fn vetter_journey(entry: &DeskEntry) -> (Vec<JourneyStep<VetterStep>>, Optio
                 step,
                 state,
                 detail: match (&entry.state, step) {
-                    (DeskState::Session { session } | DeskState::CardReceived { session, .. }, V::Code) => {
-                        Some(session.match_code.clone())
-                    }
+                    (
+                        DeskState::Session { session } | DeskState::CardReceived { session, .. },
+                        V::Code,
+                    ) => Some(session.match_code.clone()),
                     _ => None,
                 },
             }

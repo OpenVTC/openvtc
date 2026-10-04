@@ -21,6 +21,7 @@ use tokio_stream::StreamExt;
 
 pub mod badges;
 pub mod component;
+pub mod journey;
 pub mod pages;
 
 pub struct UiManager {
