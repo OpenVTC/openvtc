@@ -211,6 +211,26 @@ are marked wherever they apply. The detailed entries follow the summary below.
   `mediator_did()` are removed from `openvtc-core`, along with the
   `OPENVTC_ORG_DID` entry in its README.
 
+- **Vetting: the face step asks for what the community needs, and takes it
+  right there.** Making a face for an application used to stop dead when you
+  had no attributes yet. It told you three different ways to add one under My
+  Identity, then refused because nothing was ticked, though there was nothing
+  to tick. The form is now built from the community's card requirements. There
+  is one row per claim type asked for ("✓ Legal name — Alice Example", or "✗
+  Legal name — needed"). A required one you don't have yet gets an input on
+  its row ("Your legal name (name.legal), exactly as on your documents:").
+  Enter saves it as a real self-asserted attribute, written the same way My
+  Identity writes one and validated by the same check, and ticks it in the
+  face. You never type the type key and never leave the page. What the
+  community requires starts ticked. Optional claims a vetter asked for, and
+  your other attributes, are offered but stay unticked. When you hold several
+  of one type, ←/→ or Space picks which. The face name starts filled in: the
+  community's agent name once it is verified, otherwise "Vetting". A single
+  status line says what Enter does next ("1 of 1 required attribute ready —
+  Enter: make the face and wear it"). Enter makes the face only once every
+  required claim is ticked. The face picker and the card page now say the
+  same, rather than sending you to My Identity.
+
 - **Readable in macOS Terminal.app and other terminals without 24-bit colour.**
   The TUI sent 24-bit colours to every terminal; one that cannot draw them
   guessed, and Terminal.app's guess washed everything out to near-white. The

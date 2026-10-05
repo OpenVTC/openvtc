@@ -18,7 +18,9 @@ use openvtc_core::config::account::PersonaId;
 use openvtc_core::config::community_context::{self, ContextKind, ContextOption};
 use openvtc_core::config::context_path::parse_sub_context_id;
 use openvtc_core::didcomm::Messaging;
+use openvtc_core::persona::claim_types::Registry;
 use openvtc_core::persona::disclosure::{self, PresentError};
+use openvtc_core::persona::pool::PoolAttribute;
 use openvtc_core::persona::{binding, pool, profile};
 use openvtc_core::vetting::VettingBook;
 use openvtc_core::vetting::applicant::{
@@ -61,8 +63,8 @@ use crate::state_handler::main_page::content::{
     DIRECTORY_FIELDS, DIRECTORY_LABELS, DIRECTORY_METHODS, DeskRow, DeskStage, DeskView,
     DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS, EventForm, EventOffer,
     FaceChoice, HiddenVettingRow, IssuedRow, JourneySteps, JourneyTarget, JourneyView, LineTone,
-    ListedVetterRow, NewFaceFocus, NewFaceForm, PROFILE_FIELDS, PROFILE_LABELS, PoolRow,
-    RequestRow, TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
+    ListedVetterRow, NewFaceForm, NewFaceStep, PROFILE_FIELDS, PROFILE_LABELS, PoolRow, RequestRow,
+    TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
     VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VetterStandingRow, VettingMembership,
     VettingMode, VettingPersona, VettingState, VettingTab, decline_reason_words, method_label,
     row_of,
@@ -1211,7 +1213,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             refresh_application_contexts(ctx);
         }
         VettingAction::Toggle => match &mut page(ctx).mode {
-            VettingMode::NewFace(form) if form.focus == NewFaceFocus::Attributes => form.toggle(),
+            VettingMode::NewFace(form) => form.toggle(),
             VettingMode::Attest { form, .. } => match form.field {
                 3 => form.liveness_confirmed = !form.liveness_confirmed,
                 4 => form.attested = !form.attested,
@@ -1545,20 +1547,7 @@ fn move_field(v: &mut VettingState, forward: bool) {
         // One past the faces is "make a new one" — a row, not a key, so that
         // every way out of this screen is in the list the eye is already on.
         VettingMode::ChooseFace { faces, index, .. } => step(index, faces.len() + 1),
-        VettingMode::NewFace(form) => match form.focus {
-            NewFaceFocus::Name => form.focus = NewFaceFocus::Attributes,
-            NewFaceFocus::Attributes => {
-                let rows = form.pool.len();
-                if rows == 0 {
-                    form.focus = NewFaceFocus::Name;
-                } else if form.cursor + 1 < rows {
-                    form.cursor += 1;
-                } else {
-                    form.focus = NewFaceFocus::Name;
-                    form.cursor = 0;
-                }
-            }
-        },
+        VettingMode::NewFace(form) => form.move_focus(forward),
         VettingMode::Attest { form, .. } => step(&mut form.field, AttestForm::FIELDS),
         VettingMode::ConfirmDecline { field, .. } => step(field, 2),
         _ => {}
@@ -1626,6 +1615,8 @@ fn cycle(v: &mut VettingState, forward: bool) {
             ..
         } => turn(reason_index, DECLINE_REASONS.len()),
         VettingMode::ChooseFace { faces, index, .. } => turn(index, faces.len() + 1),
+        // Which of several attributes of one claim type the face shows.
+        VettingMode::NewFace(form) => form.pick(forward),
         _ => {}
     }
 }
@@ -2681,12 +2672,13 @@ fn preview_refusal(error: &str, application_id: &str, config: &Config) -> String
     );
     if wanted.is_empty() {
         return format!(
-            "{face} holds none of the claims this vetter asked for. Press f to wear a face that does, or add them under My Identity."
+            "{face} holds none of the claims this vetter asked for. Press f to wear a face that \
+             does — making a new one there asks for anything you have not added."
         );
     }
     format!(
         "{face} holds none of {}, which this community's card must carry. Press f to wear a \
-         face that has them, or add them to this one under My Identity.",
+         face that has them — making a new one there asks for anything you have not added.",
         wanted.join(", ")
     )
 }
@@ -2708,33 +2700,36 @@ fn open_new_face(ctx: &mut ActionCtx<'_>, application_id: &str, required: Vec<St
         client,
         application_id: application_id.to_string(),
         required,
+        registry: ctx
+            .state
+            .main_page
+            .content_panel
+            .identity
+            .claim_types
+            .clone(),
     };
     spawn_job(ctx, job.run());
 }
 
-/// Create the face the form describes, and wear it.
+/// Enter on the make-a-face form: save a value typed in place, or create the
+/// face and wear it.
 ///
-/// One step, not two. A face made here exists only to be worn by this
-/// application — leaving it created but unworn would put the holder back on the
-/// picker to do the thing they had just asked for.
+/// What Enter does is decided by [`NewFaceForm::enter`], which the form's
+/// status line describes — so a refusal is never a second message contradicting
+/// the first, it is the form moving to the row the status line names.
+///
+/// Making the face is one step, not two. A face made here exists only to be
+/// worn by this application — leaving it created but unworn would put the
+/// holder back on the picker to do the thing they had just asked for.
 fn create_face(ctx: &mut ActionCtx<'_>, mut form: NewFaceForm) {
-    let name = form.name.trim().to_string();
-    if name.is_empty() {
-        form.error = Some("Give the face a name — it is how you will recognise it later.".into());
-        form.focus = NewFaceFocus::Name;
-        page(ctx).mode = VettingMode::NewFace(Box::new(form));
-        return;
-    }
-    if form.ticked.is_empty() {
-        form.error = Some(
-            "Tick at least one attribute with space — a face that shows nothing cannot make a \
-             card."
-                .into(),
-        );
-        form.focus = NewFaceFocus::Attributes;
-        page(ctx).mode = VettingMode::NewFace(Box::new(form));
-        return;
-    }
+    let (name, live_refs) = match form.enter() {
+        NewFaceStep::Wait => {
+            page(ctx).mode = VettingMode::NewFace(Box::new(form));
+            return;
+        }
+        NewFaceStep::Save(draft) => return save_attribute(ctx, form, draft),
+        NewFaceStep::Make { name, live_refs } => (name, live_refs),
+    };
     let Some(client) = admin_client(ctx) else {
         return;
     };
@@ -2755,9 +2750,92 @@ fn create_face(ctx: &mut ActionCtx<'_>, mut form: NewFaceForm) {
         persona_did,
         application_id,
         name,
-        live_refs: form.ticked.clone(),
+        live_refs,
     };
     spawn_job(ctx, job.run());
+}
+
+/// Save a value typed on the make-a-face form as an attribute of its own.
+///
+/// The same write My Identity makes (`pool::put`, self-asserted), so the value
+/// lands in the pool as a real attribute that page lists and edits like any
+/// other. The form stays open and waiting: when the write returns, the new
+/// attribute is ticked and the holder is one Enter from the face.
+fn save_attribute(
+    ctx: &mut ActionCtx<'_>,
+    mut form: NewFaceForm,
+    draft: openvtc_core::persona::pool::AttributeDraft,
+) {
+    let client = admin_client(ctx);
+    let started = client.is_some() && begin(ctx);
+    if !started {
+        // Not sent, so not saving: the form must not sit waiting on a write
+        // that never left.
+        form.saving = None;
+    }
+    let application_id = form.application_id.clone();
+    page(ctx).mode = VettingMode::NewFace(Box::new(form));
+    let Some(client) = client.filter(|_| started) else {
+        return;
+    };
+    let job = FaceJob::AddAttribute {
+        client,
+        application_id,
+        draft,
+        registry: ctx
+            .state
+            .main_page
+            .content_panel
+            .identity
+            .claim_types
+            .clone(),
+    };
+    spawn_job(ctx, job.run());
+}
+
+/// The claim types any open session names as optional, for the make-a-face
+/// form to offer — never to pre-tick.
+fn optional_claim_types(app: &Application) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for request in &app.requests {
+        if let RequestState::Session { session, .. } = &request.state {
+            for claim in &session.optional_claims {
+                if !out.contains(claim) {
+                    out.push(claim.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What a face made for `community` is called until the holder renames it.
+///
+/// The community's agent name only once it has been verified (the cached
+/// round-trip), never one read straight from a document: a face's name is
+/// something the holder recognises it by, and an unverified name could put a
+/// name of anyone's choosing there. Otherwise a plain word, so the field is
+/// never blank and Enter is never refused for want of a name.
+fn default_face_name(config: &Config, community: &str) -> String {
+    config
+        .agent_name_for(community)
+        .map(|name| sanitize_display(name, 64))
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "Vetting".to_string())
+}
+
+/// A pool attribute as a row on the make-a-face form, its value painted the way
+/// the Identity page paints it.
+fn pool_row(attribute: &PoolAttribute, registry: &Registry) -> PoolRow {
+    PoolRow {
+        label: sanitize_display(attribute.display_name(), 128),
+        claim_type: attribute.claim_type.clone(),
+        attribute_id: attribute.attribute_id.clone(),
+        value: attribute
+            .value
+            .as_ref()
+            .map(|_| sanitize_display(&attribute.display_value(registry, true), 128)),
+    }
 }
 
 /// The claim types a card for this community must carry.
@@ -4024,6 +4102,16 @@ pub(crate) enum FaceJob {
         client: VtaClient,
         application_id: String,
         required: Vec<String>,
+        /// The agent's claim-type table, so a value is masked here exactly as
+        /// the Identity page masks it.
+        registry: Registry,
+    },
+    /// Save a value typed on the make-a-face form as a new attribute.
+    AddAttribute {
+        client: VtaClient,
+        application_id: String,
+        draft: openvtc_core::persona::pool::AttributeDraft,
+        registry: Registry,
     },
     /// Create a face and wear it, in one step.
     Create {
@@ -4125,26 +4213,57 @@ impl FaceJob {
                 client,
                 application_id,
                 required,
+                registry,
             } => {
-                // Metadata only. The form arranges which attributes a face
-                // shows; it never reads or writes their values, so there is
-                // nothing here to decrypt.
-                let result = pool::list(&client, false, false)
+                // Values, but not sensitive ones. The holder is choosing which
+                // of their values a vetter will read, and the value is the
+                // check they can make — two attributes both labelled
+                // `name.legal` are told apart by what they say. A
+                // `sensitivity: high` value stays in the agent
+                // (`include_sensitive: false`), as on the Identity page's own
+                // listing, and a masked type is painted masked.
+                let result = pool::list(&client, true, false)
                     .await
                     .map(|attributes| {
                         attributes
-                            .into_iter()
-                            .map(|a| PoolRow {
-                                label: sanitize_display(a.display_name(), 128),
-                                claim_type: a.claim_type,
-                                attribute_id: a.attribute_id,
-                            })
+                            .iter()
+                            .map(|a| pool_row(a, &registry))
                             .collect::<Vec<_>>()
                     })
                     .map_err(|e| e.to_string());
                 VettingOutcome::Pool {
                     application_id,
                     required,
+                    result,
+                }
+            }
+            FaceJob::AddAttribute {
+                client,
+                application_id,
+                draft,
+                registry,
+            } => {
+                let claim_type = draft.claim_type.clone();
+                let written = PoolAttribute {
+                    claim_type: draft.claim_type.clone(),
+                    label: draft.label.clone(),
+                    value: Some(draft.value.clone()),
+                    ..PoolAttribute::default()
+                };
+                let result = match pool::put(&client, draft).await {
+                    Ok(pool::AttributeEdit::Written(attribute_id)) => Ok(pool_row(
+                        &PoolAttribute {
+                            attribute_id,
+                            ..written
+                        },
+                        &registry,
+                    )),
+                    Ok(pool::AttributeEdit::Refused(why)) => Err(why.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                VettingOutcome::AttributeSaved {
+                    application_id,
+                    claim_type,
                     result,
                 }
             }
@@ -4420,6 +4539,12 @@ pub(crate) enum VettingOutcome {
         required: Vec<String>,
         result: Result<Vec<PoolRow>, String>,
     },
+    /// A value typed on the make-a-face form is an attribute now, or is not.
+    AttributeSaved {
+        application_id: String,
+        claim_type: String,
+        result: Result<PoolRow, String>,
+    },
     /// A face is worn, or is not.
     FaceWorn {
         application_id: String,
@@ -4479,7 +4604,8 @@ impl VettingOutcome {
                     }
                 }
                 let message = if faces.is_empty() {
-                    "You have no faces yet — make one here from the attributes you have."
+                    "You have no faces yet — Enter makes one, and asks for anything this \
+                     community needs that you have not added."
                 } else {
                     "Choose the face you show vetters."
                 };
@@ -4523,36 +4649,74 @@ impl VettingOutcome {
                 // community has said what the card needs, so leaving the
                 // holder to work that out from a list of thirty attributes
                 // would be withholding the one thing that makes this inline.
-                let ticked: Vec<String> = required
+                // What is still missing is the form's own status line to say;
+                // this message only says the read is done, so the two never
+                // disagree or repeat each other.
+                let app = config
+                    .private
+                    .vetting
+                    .applications
                     .iter()
-                    .filter_map(|want| {
-                        pool.iter()
-                            .find(|a| &a.claim_type == want)
-                            .map(|a| a.attribute_id.clone())
-                    })
-                    .collect();
-                let form = NewFaceForm {
-                    application_id,
-                    required,
-                    pool,
-                    name: String::new(),
-                    ticked,
-                    cursor: 0,
-                    focus: NewFaceFocus::Name,
-                    error: None,
-                };
-                let short = form.uncoverable();
-                let message = if short.is_empty() {
-                    "Name the face. What this community needs is already ticked.".to_string()
-                } else {
-                    format!(
-                        "You have no {} attribute — add one under My Identity, or make the face \
-                         now and add it after.",
-                        short.join(" or ")
-                    )
-                };
+                    .find(|a| a.id == application_id);
+                let optional = app.map(optional_claim_types).unwrap_or_default();
+                let name = app.map_or_else(
+                    || "Vetting".to_string(),
+                    |a| default_face_name(config, &a.community),
+                );
+                let form = NewFaceForm::open(application_id, required, optional, pool, name);
                 v.mode = VettingMode::NewFace(Box::new(form));
-                (message, true)
+                (
+                    "Your attributes are read. What this community's card needs is below."
+                        .to_string(),
+                    true,
+                )
+            }
+            VettingOutcome::AttributeSaved {
+                application_id,
+                claim_type,
+                result,
+            } => {
+                let words = openvtc_core::vetting::guide::claim_words(&claim_type);
+                match result {
+                    Ok(row) => {
+                        // My Identity's listing no longer has everything in the
+                        // pool. Re-read once the domain is free, as after its
+                        // own writes.
+                        state.main_page.content_panel.identity.refresh_queued = true;
+                        match &mut v.mode {
+                            VettingMode::NewFace(form) if form.application_id == application_id => {
+                                form.saved(row);
+                                (
+                                    format!(
+                                        "Saved your {words} to My Identity, and ticked it for \
+                                         this face."
+                                    ),
+                                    true,
+                                )
+                            }
+                            _ => (format!("Saved your {words} to My Identity."), true),
+                        }
+                    }
+                    // The pool sits above every context, so the write meets the
+                    // same holder refusal as the read, with the same answer.
+                    Err(e) if crate::holder_grant::needs_holder_grant(&e) => {
+                        v.mode = VettingMode::HolderGrant {
+                            credential_did: agent_credential_did(config).map(str::to_string),
+                        };
+                        (format!("Could not save your {words}."), true)
+                    }
+                    Err(e) => match &mut v.mode {
+                        // The reason goes on the form, beside the value the
+                        // holder typed and can now retry; the status line only
+                        // says that it failed.
+                        VettingMode::NewFace(form) if form.application_id == application_id => {
+                            form.saving = None;
+                            form.error = Some(format!("Could not save it: {e}"));
+                            (format!("Could not save your {words}."), true)
+                        }
+                        _ => (format!("Could not save your {words}: {e}"), true),
+                    },
+                }
             }
             VettingOutcome::Pool { result: Err(e), .. } => {
                 // The same refusal the faces read has, for the same reason:
@@ -5292,6 +5456,7 @@ pub(crate) fn focus_application(
 mod tests {
     use super::*;
     use crate::state_handler::dispatch_util::test_config;
+    use crate::state_handler::main_page::content::NewFaceFocus;
     use openvtc_core::vetting::applicant::Application;
     use vta_sdk::protocols::vetting::VETTING_VETTER_RESEND_ERR_NOT_GRANTED;
 
@@ -5868,71 +6033,241 @@ mod tests {
         assert_eq!(v.worn_faces.get("a").map(String::as_str), Some("WORK"));
     }
 
-    fn pool_row(id: &str, claim_type: &str) -> PoolRow {
+    fn held(id: &str, claim_type: &str, value: &str) -> PoolRow {
         PoolRow {
             attribute_id: id.into(),
             claim_type: claim_type.into(),
             label: claim_type.to_uppercase(),
+            value: Some(value.into()),
+        }
+    }
+
+    /// Open the make-a-face form over `pool`, as the pool read does.
+    fn open_form(config: &mut Config, application_id: &str, pool: Vec<PoolRow>) -> State {
+        let mut state = State::default();
+        let mut save = SaveScheduler::new("test");
+        VettingOutcome::Pool {
+            application_id: application_id.into(),
+            required: vec!["name.legal".into()],
+            result: Ok(pool),
+        }
+        .apply(&mut state, config, &mut save);
+        state
+    }
+
+    fn form_of(state: &mut State) -> &mut NewFaceForm {
+        match &mut state.main_page.content_panel.vetting.mode {
+            VettingMode::NewFace(form) => form,
+            _ => panic!("the form did not open"),
         }
     }
 
     /// The whole point of making the face *here*: the community has already
     /// said what its card needs, so the holder should not have to work that out
-    /// again from a list of attributes.
+    /// again from a list of attributes. What it did not ask for stays unticked:
+    /// a face shows what it holds, and showing more is the holder's choice.
     #[test]
-    fn the_new_face_form_opens_with_the_required_claims_ticked() {
-        let mut state = State::default();
+    fn the_new_face_form_opens_with_only_the_required_claims_ticked() {
         let mut config = test_config();
-        let mut save = SaveScheduler::new("test");
-
-        VettingOutcome::Pool {
-            application_id: "a".into(),
-            required: vec!["name.legal".into()],
-            result: Ok(vec![
-                pool_row("attr-email", "email.work"),
-                pool_row("attr-name", "name.legal"),
-            ]),
-        }
-        .apply(&mut state, &mut config, &mut save);
-
-        let VettingMode::NewFace(form) = &state.main_page.content_panel.vetting.mode else {
-            panic!("the form did not open");
-        };
-        assert_eq!(form.ticked, vec!["attr-name".to_string()]);
-        assert!(
-            form.still_missing().is_empty(),
-            "the required claim is covered by the opening selection"
+        let mut state = open_form(
+            &mut config,
+            "a",
+            vec![
+                held("attr-email", "email.work", "a@work.example"),
+                held("attr-name", "name.legal", "Alice Example"),
+            ],
         );
+        let form = form_of(&mut state);
+        assert_eq!(form.ticked, vec!["attr-name".to_string()]);
+        assert!(form.still_missing().is_empty());
+        assert_eq!(form.extras().len(), 1, "the email is offered, unticked");
         // Unticking it is said against the selection, not the pool, so the
-        // warning appears at the moment the choice is made.
-        let mut form = (**form).clone();
-        form.cursor = 1;
+        // status line changes at the moment the choice is made.
+        form.focus = NewFaceFocus::Asked(0);
         form.toggle();
         assert_eq!(form.still_missing(), vec!["name.legal"]);
+        assert!(
+            form.status().contains("choose your legal name"),
+            "{}",
+            form.status()
+        );
     }
 
-    /// A claim type no attribute can supply is a different problem from one
-    /// that is merely unticked, and the form must not conflate them: ticking
-    /// harder will not fix it.
+    /// A requirement already held needs nothing from the holder: the name is
+    /// filled in and the claim ticked, so the first Enter makes the face.
     #[test]
-    fn a_claim_the_pool_cannot_cover_is_named_as_such() {
-        let mut state = State::default();
+    fn a_held_requirement_makes_the_face_on_the_first_enter() {
         let mut config = test_config();
-        let mut save = SaveScheduler::new("test");
+        let mut state = open_form(
+            &mut config,
+            "a",
+            vec![held("attr-name", "name.legal", "Alice Example")],
+        );
+        let form = form_of(&mut state);
+        assert!(form.ready(), "{}", form.status());
+        assert_eq!(
+            form.status(),
+            "1 of 1 required attribute ready — Enter: make the face and wear it"
+        );
+        match form.enter() {
+            NewFaceStep::Make { name, live_refs } => {
+                assert_eq!(name, "Vetting");
+                assert_eq!(live_refs, vec!["attr-name".to_string()]);
+            }
+            other => panic!("expected the face to be made, got {other:?}"),
+        }
+    }
 
-        VettingOutcome::Pool {
+    /// The case that stranded people: nothing in the pool. The form asks for
+    /// the value on the row that needs it, Enter saves it as a real attribute
+    /// under the right type key, and the saved attribute comes back ticked —
+    /// one more Enter makes the face. The holder never types `name.legal`.
+    #[test]
+    fn with_no_attributes_the_value_is_typed_saved_and_ticked_in_place() {
+        let mut config = test_config();
+        let mut state = open_form(&mut config, "a", Vec::new());
+        let mut save = SaveScheduler::new("test");
+        {
+            let form = form_of(&mut state);
+            assert_eq!(
+                form.focus,
+                NewFaceFocus::Asked(0),
+                "opens on what is needed"
+            );
+            assert!(form.needs_input("name.legal"));
+            assert!(
+                form.status().contains("type your legal name below"),
+                "{}",
+                form.status()
+            );
+            // Enter with nothing typed sends nothing, and adds no second voice.
+            assert!(matches!(form.enter(), NewFaceStep::Wait));
+            assert!(form.error.is_none());
+        }
+        // Typed through the page's own input path, spaces and all.
+        input(
+            &mut state.main_page.content_panel.vetting.mode,
+            "Alice Example".into(),
+        );
+        let draft = match form_of(&mut state).enter() {
+            NewFaceStep::Save(draft) => draft,
+            other => panic!("expected a save, got {other:?}"),
+        };
+        assert_eq!(draft.claim_type, "name.legal");
+        assert_eq!(draft.value, serde_json::json!("Alice Example"));
+        assert!(draft.attribute_id.is_none(), "a create, not an update");
+        assert!(
+            form_of(&mut state)
+                .status()
+                .starts_with("Saving your legal name"),
+            "{}",
+            form_of(&mut state).status()
+        );
+        // A second Enter while the write is out sends nothing.
+        assert!(matches!(form_of(&mut state).enter(), NewFaceStep::Wait));
+
+        VettingOutcome::AttributeSaved {
             application_id: "a".into(),
-            required: vec!["name.legal".into()],
-            result: Ok(vec![pool_row("attr-email", "email.work")]),
+            claim_type: "name.legal".into(),
+            result: Ok(held("attr-new", "name.legal", "Alice Example")),
         }
         .apply(&mut state, &mut config, &mut save);
 
-        let VettingMode::NewFace(form) = &state.main_page.content_panel.vetting.mode else {
+        assert!(
+            state.main_page.content_panel.identity.refresh_queued,
+            "My Identity re-reads the pool it no longer matches"
+        );
+        let form = form_of(&mut state);
+        assert_eq!(form.ticked, vec!["attr-new".to_string()]);
+        assert!(form.saving.is_none());
+        assert!(form.draft("name.legal").is_empty());
+        assert!(form.ready(), "{}", form.status());
+        assert!(matches!(
+            form.enter(),
+            NewFaceStep::Make { live_refs, .. } if live_refs == vec!["attr-new".to_string()]
+        ));
+    }
+
+    /// A save the agent refuses leaves the typed value where it was, with the
+    /// reason beside it, and the form ready to try again.
+    #[test]
+    fn a_refused_save_keeps_the_value_and_says_why() {
+        let mut config = test_config();
+        let mut state = open_form(&mut config, "a", Vec::new());
+        let mut save = SaveScheduler::new("test");
+        input(
+            &mut state.main_page.content_panel.vetting.mode,
+            "Alice Example".into(),
+        );
+        assert!(matches!(form_of(&mut state).enter(), NewFaceStep::Save(_)));
+        VettingOutcome::AttributeSaved {
+            application_id: "a".into(),
+            claim_type: "name.legal".into(),
+            result: Err("persona attribute write failed: timed out".into()),
+        }
+        .apply(&mut state, &mut config, &mut save);
+        let form = form_of(&mut state);
+        assert!(form.saving.is_none());
+        assert_eq!(form.draft("name.legal"), "Alice Example");
+        assert!(
+            form.error
+                .as_deref()
+                .is_some_and(|e| e.contains("timed out")),
+            "{:?}",
+            form.error
+        );
+        assert!(matches!(form.enter(), NewFaceStep::Save(_)), "retryable");
+    }
+
+    /// Two legal names: one is pre-ticked, and ←/→ or Space swaps which —
+    /// never both, and never neither.
+    #[test]
+    fn several_attributes_of_a_required_type_are_chosen_between() {
+        let mut config = test_config();
+        let mut state = open_form(
+            &mut config,
+            "a",
+            vec![
+                held("attr-1", "name.legal", "Alice Example"),
+                held("attr-2", "name.legal", "Alice B. Example"),
+            ],
+        );
+        let v = &mut state.main_page.content_panel.vetting;
+        let VettingMode::NewFace(form) = &mut v.mode else {
             panic!("the form did not open");
         };
-        assert!(form.ticked.is_empty(), "nothing in the pool matches");
-        assert_eq!(form.uncoverable(), vec!["name.legal"]);
-        assert_eq!(form.still_missing(), vec!["name.legal"]);
+        assert_eq!(form.ticked, vec!["attr-1".to_string()]);
+        form.focus = NewFaceFocus::Asked(0);
+        cycle(v, true);
+        let VettingMode::NewFace(form) = &mut v.mode else {
+            unreachable!()
+        };
+        assert_eq!(form.ticked, vec!["attr-2".to_string()]);
+        form.toggle();
+        assert_eq!(form.ticked, vec!["attr-1".to_string()], "Space steps too");
+        form.pick(false);
+        assert_eq!(form.ticked, vec!["attr-2".to_string()]);
+        assert!(form.ready());
+    }
+
+    /// The face's name is the community's agent name only once that name has
+    /// been verified; with none verified it is a plain word, never a name read
+    /// from the community's own document.
+    #[test]
+    fn the_face_is_named_after_the_community_only_by_a_verified_name() {
+        let community = "did:webvh:QmScid:club.example";
+        let mut config = test_config();
+        let app = Application::new(community, PersonaId::new(), "did:key:zJoin", Utc::now())
+            .expect("application");
+        let id = app.id.clone();
+        config.private.vetting.applications.push(app);
+
+        let mut state = open_form(&mut config, &id, Vec::new());
+        assert_eq!(form_of(&mut state).name, "Vetting");
+
+        config.set_cached_agent_name(community, Some("club.example/@club".into()), Utc::now());
+        let mut state = open_form(&mut config, &id, Vec::new());
+        assert_eq!(form_of(&mut state).name, "club.example/@club");
     }
 
     /// The pool is what a face is built over, so it meets the same refusal the
