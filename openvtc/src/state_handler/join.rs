@@ -616,6 +616,10 @@ pub struct AvailableVic {
 /// Transient state for the join flow.
 #[derive(Clone, Debug, Default)]
 pub struct JoinState {
+    /// Counts fresh entries into the flow. The community-DID input lives on the
+    /// page component, not here, so a reset of this state alone left the last
+    /// join's DID in the box; the page clears its input when this moves.
+    pub entry: u64,
     /// Active page within the join flow.
     pub page: JoinPage,
     /// What the community asks the applicant to tell it, and how they answer.
@@ -773,7 +777,9 @@ pub struct JoinState {
 impl JoinState {
     /// Reset to a fresh `EnterDid` page (called when the flow opens).
     pub fn reset(&mut self) {
+        let entry = self.entry.wrapping_add(1);
         *self = JoinState::default();
+        self.entry = entry;
     }
 
     /// The index of the "mint a new identity" row (one past the reuse options).
