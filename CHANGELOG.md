@@ -172,6 +172,15 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **A join refused over its zero-knowledge proof's challenge ends, and says
+  why, instead of staying "Pending".** A community that hides its vetters
+  refuses the whole submission when the challenge the proof is bound to has
+  expired, was already used, was never issued, or does not match — and keeps no
+  request open. OpenVTC left such a join Pending, waiting for a decision nobody
+  was taking. It now ends with the reason (the community's own sentence, or
+  OpenVTC's when it gives none), and joining again asks for a fresh challenge
+  on its own. Needs `vta-sdk` 0.63.2, which names the four codes.
+
 - **Making a persona during a join no longer holds the page.** The new
   persona is brought online in the background, so Esc and F10 answer at once;
   the submit still waits, bounded, for it to be live. A listener is now

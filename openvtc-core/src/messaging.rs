@@ -725,6 +725,36 @@ fn is_join_denial_code(code: &str) -> bool {
 /// taking.
 fn join_refusal_reason(code: &str) -> Option<&'static str> {
     use trust_tasks_rs::specs::vtc::join_requests::submit::v0_3::error_codes;
+    use vta_sdk::protocols::join_requests as jr;
+    // A hidden-vetting submission is bound to a single-use challenge, and the
+    // community refuses the whole submission when that binding fails — no
+    // request stays open. Each says what went wrong; joining again asks for a
+    // fresh challenge on its own, so that is the remedy for all four.
+    if code == jr::JOIN_REQUEST_SUBMIT_ERR_CHALLENGE_EXPIRED {
+        return Some(
+            "the community's challenge for your zero-knowledge proof had expired before the \
+             request arrived — join again; a fresh challenge is asked for automatically",
+        );
+    }
+    if code == jr::JOIN_REQUEST_SUBMIT_ERR_CHALLENGE_ALREADY_USED {
+        return Some(
+            "the challenge your zero-knowledge proof was bound to had already been used by an \
+             earlier submission — join again for a fresh one",
+        );
+    }
+    if code == jr::JOIN_REQUEST_SUBMIT_ERR_CHALLENGE_NOT_ISSUED {
+        return Some(
+            "the community holds no challenge for this identity — it was never issued, or it \
+             lapsed and was cleared — join again for a fresh one",
+        );
+    }
+    if code == jr::JOIN_REQUEST_SUBMIT_ERR_CHALLENGE_MISMATCH {
+        return Some(
+            "your zero-knowledge proof was bound to a different challenge from the one the \
+             community issued — likely an OpenVTC fault, not yours; join again, and report it if \
+             it repeats",
+        );
+    }
     if code == error_codes::NOT_ACCEPTING.code {
         Some("the community is not accepting applications right now")
     } else if code == error_codes::CRITERION_UNKNOWN.code {
@@ -2708,17 +2738,33 @@ mod tests {
         assert!(matches!(only(&acct, vtc).status, CommunityStatus::Rejected));
     }
 
-    /// `submit/0.3`'s two refusals end the join — neither leaves a request open
-    /// at the community — and say why when the community gave no message.
+    /// `submit/0.3`'s refusals end the join — none leaves a request open at the
+    /// community — and say why when the community gave no message. That
+    /// includes the four ways a hidden-vetting challenge is refused: left
+    /// `Pending`, such a join waited for a decision nobody was taking.
     #[test]
     fn a_v0_3_submit_refusal_ends_the_join_with_a_reason() {
         use trust_tasks_rs::specs::vtc::join_requests::submit::v0_3::error_codes;
+        use vta_sdk::protocols::join_requests as jr;
         for (code, says) in [
             (
                 error_codes::NOT_ACCEPTING.code,
                 "not accepting applications",
             ),
             (error_codes::CRITERION_UNKNOWN.code, "join again"),
+            (jr::JOIN_REQUEST_SUBMIT_ERR_CHALLENGE_EXPIRED, "had expired"),
+            (
+                jr::JOIN_REQUEST_SUBMIT_ERR_CHALLENGE_ALREADY_USED,
+                "already been used",
+            ),
+            (
+                jr::JOIN_REQUEST_SUBMIT_ERR_CHALLENGE_NOT_ISSUED,
+                "holds no challenge",
+            ),
+            (
+                jr::JOIN_REQUEST_SUBMIT_ERR_CHALLENGE_MISMATCH,
+                "likely an OpenVTC fault",
+            ),
         ] {
             let vtc = "did:webvh:example:vtc";
             let rid = Uuid::new_v4();
