@@ -2191,6 +2191,9 @@ impl StateHandler {
                 },
                 _ = hidden_vetting_tick.tick() => {
                     let now = chrono::Utc::now();
+                    // A question left unanswered since the last pass is retried on its
+                    // backoff, not at the next scheduled pass (R1.4).
+                    hidden_vetting_pacer.pull_forward(&config.private.vetting, now);
                     if hidden_vetting_pacer.due(now) {
                         let mut ctx = runtime_actions::ActionCtx {
                             state: &mut state,

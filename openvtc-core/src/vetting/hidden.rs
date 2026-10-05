@@ -187,6 +187,19 @@ pub enum HiddenError {
     /// A suite this build does not implement, in our own namespace.
     #[error("this community uses the `{0}` proof suite, which this version does not implement")]
     UnsupportedSuite(String),
+    /// This vetter holds no class credential under a label the community still accepts: it has
+    /// not been enrolled for this community's hidden vetting yet (or the answer was lost). Not a
+    /// fault in what the community publishes — the parameters were read.
+    #[error(
+        "you are not enrolled for this community's PCS ZKP vetting yet, so there is no \
+         credential to attest under"
+    )]
+    NotEnrolled,
+    /// This vetter holds no attestation token. The community issues them on its schedule (the
+    /// drip); attesting has to wait for the next one. Not a fault in what the community
+    /// publishes — the parameters were read.
+    #[error("you hold no vetting token for this community yet — it issues them on a schedule")]
+    NoToken,
 }
 
 /// What a criterion asks of this client.
@@ -405,7 +418,9 @@ pub fn prove<R: rand::RngCore + rand::CryptoRng>(
 /// The vetter's half: attest for `applicant_id` after the human check, spending one token.
 ///
 /// # Errors
-/// [`HiddenError::Unreadable`] if the vetter holds no live credential or no free token.
+/// [`HiddenError::NotEnrolled`] if the vetter holds no credential under a live class label,
+/// [`HiddenError::NoToken`] if it holds no free token, and [`HiddenError::Unreadable`] if the
+/// published parameters, the stored engine or the applicant's identifier cannot be read.
 pub fn attest<R: rand::RngCore + rand::CryptoRng>(
     community_did: &str,
     params: &HiddenParams,
@@ -419,18 +434,39 @@ pub fn attest<R: rand::RngCore + rand::CryptoRng>(
         .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
     let id = openvtc_vetting_pcs::scheme::point_from_text(applicant_id)
         .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    let reservation = engine
-        .accept(None, 0)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    // Enrolment first: a vetter that holds no credential holds no token either, and "no token"
+    // would send it to wait for a drip it cannot draw.
+    let enrolled = params.vetter_labels.iter().any(|l| {
+        state
+            .credentials
+            .contains_key(l.trim_start_matches("vetter/"))
+    });
+    if !enrolled {
+        return Err(HiddenError::NotEnrolled);
+    }
+    // The tick the engine names in its refusal is not ours to give — the schedule knows when
+    // the next drip is due, and the caller says so — so it is not read here.
+    let reservation = engine.accept(None, 0).map_err(attest_refusal)?;
     let attestation = engine
         .attest(&community, &reservation, &id, meta, rng)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+        .map_err(attest_refusal)?;
     *state = engine
         .snapshot()
         .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
     let held = openvtc_vetting_pcs::snapshot::HeldAttestation::of(&attestation)
         .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
     serde_json::to_value(&held).map_err(|e| HiddenError::Unreadable(e.to_string()))
+}
+
+/// What the engine's refusal to attest means for the vetter. Capacity and a missing credential
+/// are states the vetter waits out, not unreadable parameters, and are said as such.
+fn attest_refusal(e: openvtc_vetting_pcs::ProtoError) -> HiddenError {
+    use openvtc_vetting_pcs::ProtoError;
+    match e {
+        ProtoError::AtCapacity { .. } => HiddenError::NoToken,
+        ProtoError::NoLiveCredential => HiddenError::NotEnrolled,
+        other => HiddenError::Unreadable(other.to_string()),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

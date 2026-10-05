@@ -2230,6 +2230,86 @@ mod tests {
         assert!(status(&config, &vtc).is_active(), "activated once verified");
     }
 
+    /// A community's answer to a hidden-vetting question — here a vetter's enrolment, in the
+    /// binding envelope the VTC replies in — reaches the vetting router and takes the question
+    /// it threads on. It used to be dropped before the router saw it, so the question waited
+    /// out its 30 seconds as "no answer" and the vetter never held a token to attest with.
+    #[tokio::test]
+    async fn a_hidden_vetting_answer_reaches_the_question_it_answers() {
+        use openvtc_core::vetting::queries::{CommunityQuery, QueryKind};
+        use openvtc_core::vetting::wire::pcs;
+
+        let (vtc, _key) = community_key();
+        let tdk = test_tdk().await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service = openvtc_core::didcomm::start_empty_service(
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let mut seen = SeenMessages::new();
+        let mut config = pending_config(&vtc);
+        let persona = *config.account.personas.keys().next().unwrap();
+
+        for (kind, task, payload) in [
+            (
+                QueryKind::PcsRoot,
+                pcs::ROOT_TYPE,
+                serde_json::json!({ "label": "vetter/2026-10", "preCredential": "z1" }),
+            ),
+            (
+                QueryKind::PcsTokens,
+                pcs::TOKENS_TYPE,
+                serde_json::json!({ "label": "token/2026-10", "tick": 0, "preCredentials": [] }),
+            ),
+        ] {
+            let asked = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+            config.private.vetting.ask(CommunityQuery {
+                document_id: asked.clone(),
+                community: vtc.clone(),
+                persona,
+                kind,
+                sent_at: chrono::Utc::now(),
+            });
+            let answer = Message::build(
+                uuid::Uuid::new_v4().to_string(),
+                openvtc_core::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
+                serde_json::json!({
+                    "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+                    "type": pcs::response_of(task),
+                    "threadId": asked,
+                    "issuer": vtc,
+                    "recipient": PERSONA,
+                    "payload": payload,
+                }),
+            )
+            .from(vtc.clone())
+            .to(PERSONA.to_string())
+            .created_time(chrono::Utc::now().timestamp() as u64)
+            .finalize();
+            let mut effects = InboundEffects::default();
+            process_inbound_message(
+                &mut config,
+                &tdk,
+                &service,
+                &mut seen,
+                &answer,
+                &mut effects,
+                Arrival::FRESH,
+            )
+            .await
+            .unwrap();
+            assert!(
+                !config
+                    .private
+                    .vetting
+                    .queries
+                    .iter()
+                    .any(|q| q.document_id == asked),
+                "the {kind:?} answer was heard, so its question no longer waits to time out"
+            );
+        }
+    }
+
     /// A result is taken only for the credential it was produced for.
     #[tokio::test]
     async fn a_check_result_for_another_credential_is_not_taken() {
