@@ -135,6 +135,21 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **Quitting from a join page no longer freezes the app.** F10 on a join page
+  (the vetting page "Choose how to join" among them) stopped the app's
+  background side but never told the screen, which only closes when told: it
+  stayed up, every key — Esc and F10 included — went unanswered, and only
+  killing the process ended it. That exit now closes the screen like every
+  other, and the session closes the screen itself whenever the background side
+  stops, however it stopped, so a missed exit cannot freeze the app again.
+  **Ctrl-C now always quits**, from any page: the terminal turns it into a
+  key, and nothing used to read it. If shutting down then stalls on a service
+  that does not answer, the app exits after ten seconds and says so instead of
+  waiting for ever. Bringing a persona's mediator session up now gives up
+  after 30 seconds and closes the half-opened session, rather than waiting on
+  a mediator that never answers. That wait sits on the join page's key path
+  when a persona is made from it, and Ctrl-C now interrupts it.
+
 - **A join reads the community's current requirements every time.** Once a
   community's manifest had been read, the join page used the stored copy for
   good — so a community that turned on PCS ZKP vetting, changed what it asks,

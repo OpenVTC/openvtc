@@ -1,5 +1,5 @@
 use crate::{
-    Interrupted,
+    Interrupted, Terminator,
     state_handler::{actions::Action, main_page::content::SettingsMode, state::State},
     theme::{self, live},
     ui::{
@@ -9,7 +9,10 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream},
+    event::{
+        DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
+        KeyEventKind, KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -28,16 +31,23 @@ pub struct UiManager {
     action_tx: mpsc::UnboundedSender<Action>,
     /// Follows the theme in use, so a change to it is drawn without a restart.
     theme_watcher: live::Watcher,
+    /// Fired directly by Ctrl-C, so quitting never depends on the state
+    /// handler reading its action queue (see [`is_hard_quit`]).
+    terminator: Terminator,
 }
 
 impl UiManager {
-    pub fn new(theme_watcher: live::Watcher) -> (Self, UnboundedReceiver<Action>) {
+    pub fn new(
+        theme_watcher: live::Watcher,
+        terminator: Terminator,
+    ) -> (Self, UnboundedReceiver<Action>) {
         let (action_tx, action_rx) = mpsc::unbounded_channel();
 
         (
             Self {
                 action_tx,
                 theme_watcher,
+                terminator,
             },
             action_rx,
         )
@@ -51,6 +61,7 @@ impl UiManager {
         let Self {
             action_tx,
             mut theme_watcher,
+            mut terminator,
         } = self;
         let mut terminal = setup_terminal()?;
 
@@ -96,7 +107,14 @@ impl UiManager {
                 // _ = ticker.tick() => (),
                 // Catch and handle crossterm events
                maybe_event = crossterm_events.next() => match maybe_event {
-                    Some(Ok(Event::Key(key)))  => {
+                    Some(Ok(Event::Key(key))) if is_hard_quit(&key) => {
+                        // Straight to the interrupt, not through the action
+                        // queue: every loop of the state handler hears it, and
+                        // `run_session` bounds a handler that does not.
+                        redraw = false;
+                        terminator.ensure_terminated(Interrupted::UserInt);
+                    },
+                    Some(Ok(Event::Key(key))) => {
                         app_router.handle_key_event(key);
                     },
                     Some(Ok(Event::Paste(text))) => {
@@ -157,6 +175,20 @@ impl UiManager {
     }
 }
 
+/// Whether `key` is Ctrl-C, which always quits.
+///
+/// The terminal is in raw mode, so Ctrl-C reaches us as a key rather than as
+/// SIGINT, and no page bound it: the "Ctrl-C stays live" the join and setup
+/// sequences race the interrupt for was never reachable from the keyboard. It
+/// is handled here, before any page, and fires the terminator itself. F10 and
+/// Esc go through the state handler, so a handler that has stopped reading its
+/// actions cannot act on them; Ctrl-C does not ask it.
+fn is_hard_quit(key: &KeyEvent) -> bool {
+    key.kind == KeyEventKind::Press
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c' | 'C'))
+}
+
 /// Whether the theme picker is open, previewing themes.
 fn theme_picker_open(state: &State) -> bool {
     matches!(
@@ -202,4 +234,33 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow
     )?;
 
     Ok(terminal.show_cursor()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_c_is_a_hard_quit_and_nothing_else_is() {
+        let press = |code, modifiers| KeyEvent::new(code, modifiers);
+        assert!(is_hard_quit(&press(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_hard_quit(&press(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+        // A plain `c` is a page's key (clone, compose, copy …).
+        assert!(!is_hard_quit(&press(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE
+        )));
+        // F10 and Esc stay the pages' own: they go through the state handler.
+        assert!(!is_hard_quit(&press(KeyCode::F(10), KeyModifiers::NONE)));
+        assert!(!is_hard_quit(&press(KeyCode::Esc, KeyModifiers::NONE)));
+        let mut release = press(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        release.kind = KeyEventKind::Release;
+        assert!(!is_hard_quit(&release));
+    }
 }

@@ -2372,7 +2372,17 @@ impl StateHandler {
                     Ok(join_flow::JoinExit::AwaitChallenge(awaiting)) => {
                         awaiting_challenge = Some(awaiting);
                     }
-                    Ok(join_flow::JoinExit::Exit(interrupted)) => break interrupted,
+                    // F10 on a join page lands here. Like every other exit it
+                    // must tell the UI to stop: the UI leaves its loop only on
+                    // an interrupt, so breaking without one stopped this loop
+                    // and left the screen up reading keys nobody acted on —
+                    // the "join page freezes, even F10 and Esc" report.
+                    Ok(join_flow::JoinExit::Exit(interrupted)) => {
+                        if let Err(e) = terminator.terminate(interrupted.clone()) {
+                            debug!("Failed to send terminate signal: {e}");
+                        }
+                        break interrupted;
+                    }
                     Err(e) => {
                         state.main_page.log_error("Join flow failed", &e);
                         state.active_page = state::ActivePage::Main;
