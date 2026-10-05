@@ -1,6 +1,25 @@
-//! Online VTA provisioning — step 2: show the operator the `pnm` command they
-//! need to run to grant the ephemeral admin DID access to a context, and wait
-//! for them to confirm it has been done.
+//! Online VTA provisioning — **step 1 of 2: run the PNM command.** Show the
+//! operator the `pnm` command that grants the ephemeral setup DID access to a
+//! context, and wait for them to say they have run it.
+//!
+//! # Why this is its own step, said that loudly
+//!
+//! This page used to read as information: a DID, some commands, and "`[ENTER]
+//! once authorised`" at the end of a long block. People pressed Enter without
+//! running anything, step 2 failed with `forbidden: DID not in ACL`, and
+//! nothing on either screen connected that refusal to the command they had
+//! skipped. So the page now leads with what to *do* — three numbered actions,
+//! including what PNM prints when it worked — and Enter means "I've run it".
+//!
+//! When step 2 fails and the cause is fixed in PNM, the wizard comes back here
+//! with [`VtaAclInstructions::retry_reason`] set and the page opens with a
+//! banner that says what went wrong and which command fixes it
+//! ([`provision_failure`](crate::state_handler::setup_sequence::provision_failure)
+//! decides which). The setup DID and the context id are the ones the operator
+//! already has: the key is minted once per wizard run and is never replaced
+//! on the way back, so every command on the page stays valid.
+//!
+//! # The commands
 //!
 //! The page owns an editable `Input` for the context id so the operator can
 //! pick something other than the default `openvtc`. The displayed pnm commands
@@ -11,10 +30,12 @@
 //!
 //! - **New context** — `pnm contexts create … --admin-did`, which creates the
 //!   context and the setup entry in one step.
-//! - **Existing context, or a retry** — `pnm acl create`. `contexts create`
-//!   refuses a context that already exists, and a retry after a refused
-//!   rollover needs the setup DID's entry re-created, since the hand-off flag
-//!   is fixed when an entry is created (VTI-ACL-054).
+//! - **Existing context, or a re-grant** — `pnm acl create`. `contexts create`
+//!   refuses a context that already exists (and exits cleanly, printing that
+//!   the `--admin-did` was *not* added — the page names that output, because it
+//!   is the easiest way to believe the grant ran when it did not), and a
+//!   re-grant after an expired or spent entry needs the entry deleted first,
+//!   since the hand-off flag is fixed when an entry is created (VTI-ACL-054).
 //!
 //! Both must carry the same grant: a 1h expiry, the one-time hand-off and the
 //! `persona-holder` capability. The flags are spelled differently on the two
@@ -40,12 +61,24 @@ use ratatui::{
 use tui_input::{Input, backend::crossterm::EventHandler};
 
 use crate::{
-    state_handler::{actions::Action, setup_sequence::SetupState},
+    state_handler::{
+        actions::Action,
+        setup_sequence::{
+            MessageType, SetupState,
+            provision_failure::{GrantProblem, ProvisionFailure},
+        },
+    },
     ui::pages::setup_flow::{SetupFlow, render_setup_header},
 };
 
 /// Default value seeded into the context-id input.
 const DEFAULT_CONTEXT_ID: &str = "openvtc";
+
+/// What PNM prints when the grant landed. `pnm contexts create` prints
+/// `Admin ACL entry created:` after `Context created:`; `pnm acl create` prints
+/// `ACL entry created:` (`vta-cli-common`'s `commands::{contexts,acl}`). The
+/// shorter phrase is in both, so it is the one to look for.
+const PNM_SUCCESS: &str = "ACL entry created";
 
 #[derive(Clone, Debug)]
 pub struct VtaAclInstructions {
@@ -53,6 +86,30 @@ pub struct VtaAclInstructions {
     /// One-shot status from the last clipboard copy attempt; cleared on the
     /// next keystroke so it doesn't linger as the operator continues typing.
     pub copy_status: Option<CopyStatus>,
+    /// Why the wizard came back here from step 2, when it did. Drives the
+    /// banner at the top of the page; cleared when the operator presses Enter
+    /// to try again, so a stale reason never sits over a fresh attempt.
+    pub retry_reason: Option<RetryReason>,
+}
+
+/// A failed step 2, as carried back to step 1.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetryReason {
+    pub failure: ProvisionFailure,
+    /// The first error the attempt reported, verbatim. Shown only for
+    /// [`ProvisionFailure::Other`], where the error itself is the hint.
+    pub detail: Option<String>,
+}
+
+impl RetryReason {
+    /// Capture why the attempt on `state` failed.
+    pub fn from_state(failure: ProvisionFailure, state: &SetupState) -> Self {
+        let detail = state.vta.messages.iter().find_map(|m| match m {
+            MessageType::Error(e) => Some(e.clone()),
+            MessageType::Info(_) => None,
+        });
+        Self { failure, detail }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -68,11 +125,24 @@ impl Default for VtaAclInstructions {
         Self {
             context_id: Input::new(DEFAULT_CONTEXT_ID.to_string()),
             copy_status: None,
+            retry_reason: None,
         }
     }
 }
 
 impl VtaAclInstructions {
+    /// The context id to provision into: the input, trimmed, or the default
+    /// when it is blank. Step 2's retry uses this too, so a retry provisions
+    /// into exactly the context the commands on this page name.
+    pub fn chosen_context_id(&self) -> String {
+        let raw = self.context_id.value().trim();
+        if raw.is_empty() {
+            DEFAULT_CONTEXT_ID.to_string()
+        } else {
+            raw.to_string()
+        }
+    }
+
     pub fn handle_key_event(state: &mut SetupFlow, key: KeyEvent) {
         // Any keystroke clears a stale "copied!" indicator so it doesn't
         // hang around while the operator is typing the context id.
@@ -83,15 +153,15 @@ impl VtaAclInstructions {
             KeyCode::F(10) => {
                 let _ = state.action_tx.send(Action::Exit);
             }
-            KeyCode::F(n @ (2 | 3)) => {
+            KeyCode::F(n @ (2..=4)) => {
                 let commands = PnmCommands::build(
                     &state.props.state,
                     state.vta_acl_instructions.context_id.value(),
                 );
-                let cmd = if n == 2 {
-                    commands.create_context
-                } else {
-                    commands.grant_existing
+                let cmd = match n {
+                    2 => commands.create_context,
+                    3 => commands.grant_existing,
+                    _ => commands.delete_existing,
                 };
                 state.vta_acl_instructions.copy_status =
                     Some(match crate::clipboard::copy_to_clipboard(&cmd) {
@@ -100,17 +170,10 @@ impl VtaAclInstructions {
                     });
             }
             KeyCode::Enter => {
-                let raw = state
-                    .vta_acl_instructions
-                    .context_id
-                    .value()
-                    .trim()
-                    .to_string();
-                let context_id = if raw.is_empty() {
-                    DEFAULT_CONTEXT_ID.to_string()
-                } else {
-                    raw
-                };
+                // "I've run it." Whatever went wrong last time is about to be
+                // re-decided by a fresh attempt.
+                state.vta_acl_instructions.retry_reason = None;
+                let context_id = state.vta_acl_instructions.chosen_context_id();
                 let _ = state.action_tx.send(Action::VtaStartProvision(context_id));
             }
             KeyCode::Esc => {
@@ -135,7 +198,7 @@ impl VtaAclInstructions {
             Block::bordered()
                 .fg(COLOR_BORDER)
                 .padding(Padding::proportional(1))
-                .title(" Authorise the setup DID via PNM "),
+                .title(" Step 1 of 2 — Run the PNM command "),
             middle,
         );
 
@@ -148,25 +211,52 @@ impl VtaAclInstructions {
 
         let commands = PnmCommands::build(state, self.context_id.value());
 
+        let area = middle.inner(Margin::new(3, 2));
+        let banner = self
+            .retry_reason
+            .as_ref()
+            .map(banner_lines)
+            .unwrap_or_default();
+        // The banner wraps, so its height is estimated from the width rather
+        // than its line count; one spare row absorbs word-wrap's raggedness and
+        // separates it from the intro.
+        let banner_height = if banner.is_empty() {
+            0
+        } else {
+            wrapped_height(&banner, area.width) + 1
+        };
+
         // Vertical sections within the bordered block:
-        //   intro       — prose + setup DID + new-each-run note (6 lines + 1 spacer = 7)
+        //   banner      — why we are back here, when we are
+        //   intro       — what this step is + setup DID + new-each-run note
         //   ctx_label   — "Context id" label
         //   ctx_input   — "> " + editable input on the same row
-        //   cmd_header  — spacer + "Run this command:" header
-        //   rest        — pnm command + footer prose
-        let area = middle.inner(Margin::new(3, 2));
-        let [intro, ctx_label, ctx_input, cmd_header, rest] =
-            Layout::vertical([Length(7), Length(1), Length(1), Length(2), Min(0)]).areas(area);
+        //   rest        — the three actions, then the commands
+        let [banner_area, intro, ctx_label, ctx_input, rest] = Layout::vertical([
+            Length(banner_height),
+            Length(6),
+            Length(1),
+            Length(1),
+            Min(0),
+        ])
+        .areas(area);
+
+        if !banner.is_empty() {
+            frame.render_widget(
+                Paragraph::new(banner).wrap(Wrap { trim: false }),
+                banner_area,
+            );
+        }
 
         frame.render_widget(
             Paragraph::new(vec![
                 Line::styled(
-                    "OpenVTC has minted a temporary admin DID for this setup session.",
-                    Style::new().fg(COLOR_DARK_GRAY),
+                    "The VTA will refuse OpenVTC's temporary setup DID until you grant it",
+                    Style::new().fg(COLOR_TEXT_DEFAULT),
                 ),
                 Line::styled(
-                    "Authorise it on the VTA via your Personal Network Manager (PNM):",
-                    Style::new().fg(COLOR_DARK_GRAY),
+                    "from your Personal Network Manager (PNM). This step is required.",
+                    Style::new().fg(COLOR_TEXT_DEFAULT),
                 ),
                 Line::default(),
                 Line::styled("Setup DID", Style::new().fg(COLOR_BORDER).bold()),
@@ -200,86 +290,223 @@ impl VtaAclInstructions {
         );
         render_input(&self.context_id, frame, input_col);
 
+        let regrant = self
+            .retry_reason
+            .as_ref()
+            .is_some_and(|r| matches!(r.failure, ProvisionFailure::GrantSpent(_)));
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::default(),
-                Line::styled(
-                    "New context — run this in your PNM session:",
-                    Style::new().fg(COLOR_BORDER).bold(),
-                ),
-            ]),
-            cmd_header,
+            Paragraph::new(self.body_lines(&commands, regrant)).wrap(Wrap { trim: false }),
+            rest,
         );
 
-        let command_style = Style::new().fg(COLOR_ORANGE).bold();
-        let mut footer = vec![Line::default()];
-        footer.extend(command_lines(&commands.create_context, command_style));
-        footer.extend([
-            Line::default(),
-            Line::styled(
-                "Context already exists, or retrying — grant the setup DID instead:",
-                Style::new().fg(COLOR_BORDER).bold(),
-            ),
-            Line::styled(
-                "(run the delete first only if this DID already has an entry; the hand-off",
-                Style::new().fg(COLOR_DARK_GRAY),
-            ),
-            Line::styled(
-                " is fixed when an entry is created, so a retry must re-create it)",
-                Style::new().fg(COLOR_DARK_GRAY),
-            ),
-            Line::default(),
-            Line::from(Span::styled(commands.delete_existing, command_style)),
-        ]);
-        footer.extend(command_lines(&commands.grant_existing, command_style));
-        footer.push(Line::default());
-        match &self.copy_status {
-            Some(CopyStatus::Copied(method)) => {
-                footer.push(Line::styled(
-                    format!("✓ Copied via {method}."),
-                    Style::new().fg(COLOR_SUCCESS).bold(),
-                ));
-                footer.push(Line::default());
-            }
-            Some(CopyStatus::Failed(reason)) => {
-                footer.push(Line::styled(
-                    format!("Could not copy to clipboard: {reason}"),
-                    Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
-                ));
-                footer.push(Line::default());
-            }
-            None => {}
-        }
-        footer.push(Line::styled(
-            "The admin grant is short-lived (1h). Once it's in place, press [ENTER]",
-            Style::new().fg(COLOR_DARK_GRAY),
-        ));
-        footer.push(Line::styled(
-            "and OpenVTC will connect to the VTA and bootstrap itself.",
-            Style::new().fg(COLOR_DARK_GRAY),
-        ));
-        frame.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), rest);
-
+        let key = |k: &'static str| Span::styled(k, Style::new().fg(COLOR_BORDER).bold());
+        let text = |t: &'static str| Span::styled(t, Style::new().fg(COLOR_TEXT_DEFAULT));
         let bottom_line = Line::from(vec![
-            Span::styled("[F2]", Style::new().fg(COLOR_BORDER).bold()),
-            Span::styled(
-                " copy new-context  |  ",
-                Style::new().fg(COLOR_TEXT_DEFAULT),
-            ),
-            Span::styled("[F3]", Style::new().fg(COLOR_BORDER).bold()),
-            Span::styled(" copy acl create  |  ", Style::new().fg(COLOR_TEXT_DEFAULT)),
-            Span::styled("[ESC]", Style::new().fg(COLOR_BORDER).bold()),
-            Span::styled(" reset context  |  ", Style::new().fg(COLOR_TEXT_DEFAULT)),
-            Span::styled("[ENTER]", Style::new().fg(COLOR_BORDER).bold()),
-            Span::styled(" once authorised  |  ", Style::new().fg(COLOR_TEXT_DEFAULT)),
-            Span::styled("[F10]", Style::new().fg(COLOR_BORDER).bold()),
-            Span::styled(" to quit", Style::new().fg(COLOR_TEXT_DEFAULT)),
+            key("[F2-F4]"),
+            text(" copy  |  "),
+            key("[ESC]"),
+            text(" reset context  |  "),
+            key("[ENTER]"),
+            text(" I've run it  |  "),
+            key("[F10]"),
+            text(" quit"),
         ]);
         frame.render_widget(
             Paragraph::new(bottom_line).block(Block::new().padding(Padding::new(2, 0, 1, 0))),
             bottom,
         );
     }
+
+    /// The numbered actions, then the commands they refer to.
+    ///
+    /// Actions first, on purpose: on a short terminal it is the commands'
+    /// tail that gets cut, and the commands are also one keypress away on the
+    /// clipboard. Losing "press Enter only once PNM says it worked" would
+    /// bring back the failure this page exists to prevent.
+    fn body_lines(&self, commands: &PnmCommands, regrant: bool) -> Vec<Line<'static>> {
+        let heading = Style::new().fg(COLOR_BORDER).bold();
+        let prose = Style::new().fg(COLOR_TEXT_DEFAULT);
+        let quiet = Style::new().fg(COLOR_DARK_GRAY);
+        let key = Style::new().fg(COLOR_ORANGE).bold();
+        let command_style = Style::new().fg(COLOR_ORANGE).bold();
+
+        let mut lines = vec![
+            Line::default(),
+            Line::styled("Do this now, in order:", heading),
+            Line::from(vec![
+                Span::styled("  1. Copy ", prose),
+                Span::styled(
+                    if regrant {
+                        "[F4] then [F3]"
+                    } else {
+                        "the command for your case"
+                    },
+                    key,
+                ),
+                Span::styled(
+                    if regrant {
+                        " — delete the old entry, then re-create it."
+                    } else {
+                        " — [F2], [F3] or [F4] below."
+                    },
+                    prose,
+                ),
+            ]),
+            Line::styled(
+                "  2. Run it in your PNM session, in another terminal.",
+                prose,
+            ),
+            Line::from(vec![
+                Span::styled("  3. When PNM prints ", prose),
+                Span::styled(format!("\"{PNM_SUCCESS}\""), Style::new().fg(COLOR_SUCCESS)),
+                Span::styled(", press ", prose),
+                Span::styled("[ENTER]", key),
+                Span::styled(" to connect.", prose),
+            ]),
+            Line::styled(
+                "     \"already exists … NOT added\" means it did not work: use [F3].",
+                quiet,
+            ),
+            Line::styled(
+                "The grant lasts 1 hour, and the setup DID can use it once.",
+                quiet,
+            ),
+        ];
+
+        // Under a re-grant the delete-then-create pair is the fix, so it is the
+        // pair that is marked; a first grant leaves the choice to the operator.
+        let marker = |on: bool| if on { "▶ " } else { "  " };
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled(marker(false), key),
+            Span::styled("[F2] ", key),
+            Span::styled("New context:", heading),
+        ]));
+        lines.extend(command_lines(
+            &commands.create_context,
+            command_style,
+            "     ",
+        ));
+        lines.push(Line::from(vec![
+            Span::styled(marker(regrant), key),
+            Span::styled("[F3] ", key),
+            Span::styled("Context already exists, or re-granting:", heading),
+        ]));
+        lines.extend(command_lines(
+            &commands.grant_existing,
+            command_style,
+            "     ",
+        ));
+        lines.push(Line::from(vec![
+            Span::styled(marker(regrant), key),
+            Span::styled("[F4] ", key),
+            Span::styled(
+                "Re-granting? Delete the old entry first, then run [F3]:",
+                heading,
+            ),
+        ]));
+        lines.extend(command_lines(
+            &commands.delete_existing,
+            command_style,
+            "     ",
+        ));
+
+        match &self.copy_status {
+            Some(CopyStatus::Copied(method)) => {
+                lines.push(Line::default());
+                lines.push(Line::styled(
+                    format!("✓ Copied via {method}. Now run it in your PNM session."),
+                    Style::new().fg(COLOR_SUCCESS).bold(),
+                ));
+            }
+            Some(CopyStatus::Failed(reason)) => {
+                lines.push(Line::default());
+                lines.push(Line::styled(
+                    format!("Could not copy to clipboard: {reason}"),
+                    Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+                ));
+            }
+            None => {}
+        }
+        lines
+    }
+}
+
+/// The banner shown when step 2 sent the operator back, saying what failed
+/// and what fixes it. Each arm is one [`ProvisionFailure`] class, and none of
+/// them reuses another's advice — that is R6.4's whole point.
+fn banner_lines(reason: &RetryReason) -> Vec<Line<'static>> {
+    let alarm = Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED).bold();
+    let caution = Style::new().fg(COLOR_ORANGE).bold();
+    let prose = Style::new().fg(COLOR_TEXT_DEFAULT);
+    let regrant = "Re-grant it: copy [F4] and run it, then [F3] and run that, then press [ENTER].";
+    match reason.failure {
+        ProvisionFailure::NotAuthorised => vec![
+            Line::styled("✗ The VTA didn't accept the setup DID.", alarm),
+            Line::styled(
+                "The PNM command below probably hasn't been run yet — or it ran against \
+                 another VTA or context, or its 1-hour grant expired. Run it, then press \
+                 [ENTER]. The setup DID and context are unchanged, so these commands still \
+                 apply.",
+                prose,
+            ),
+        ],
+        ProvisionFailure::GrantSpent(problem) => {
+            let (headline, why) = match problem {
+                GrantProblem::Expired => (
+                    "✗ The setup DID's grant has expired.",
+                    "It lasts 1 hour from when PNM created it.",
+                ),
+                GrantProblem::AlreadyUsed => (
+                    "✗ The setup DID's one-time grant was already used.",
+                    "Usually an earlier attempt that got through but whose answer was lost.",
+                ),
+                GrantProblem::NoHandoff => (
+                    "✗ The setup DID's entry was created without the one-time hand-off.",
+                    "The hand-off is fixed when an entry is created, so it must be re-created.",
+                ),
+                GrantProblem::UsedByThisAttempt => (
+                    "✗ The last attempt used the setup DID's one-time grant, then failed.",
+                    "The context exists now, so [F2] would not add the grant.",
+                ),
+            };
+            vec![
+                Line::styled(headline, alarm),
+                Line::styled(format!("{why} {regrant}"), prose),
+            ]
+        }
+        ProvisionFailure::Unreachable => vec![
+            Line::styled("! The VTA could not be reached last time.", caution),
+            Line::styled(
+                "That was the network or the VTA's host, not the PNM step: a grant you \
+                 already ran still stands until it expires. Press [ENTER] to try again.",
+                prose,
+            ),
+        ],
+        ProvisionFailure::Other => {
+            let mut lines = vec![Line::styled(
+                "! The last attempt failed for a reason other than the grant:",
+                caution,
+            )];
+            if let Some(detail) = &reason.detail {
+                lines.push(Line::styled(detail.clone(), prose));
+            }
+            lines.push(Line::styled(
+                "If it names the setup DID or its entry, re-check the command below; \
+                 otherwise the VTA's log has the cause. Press [ENTER] to try again.",
+                prose,
+            ));
+            lines
+        }
+    }
+}
+
+/// Rows `lines` take when wrapped to `width`: each line's character count over
+/// the width, rounded up. Word wrap can need one more; the caller pads.
+fn wrapped_height(lines: &[Line<'_>], width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    let rows: usize = lines.iter().map(|l| l.width().div_ceil(width).max(1)).sum();
+    u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
 /// The `pnm` commands that authorise the setup DID, for both paths.
@@ -351,9 +578,12 @@ impl PnmCommands {
 
 /// A line-continued command as one `Line` per physical line, so the break
 /// lands where the `\\` says rather than wherever the panel wraps it.
-fn command_lines(cmd: &str, style: Style) -> Vec<Line<'static>> {
+///
+/// `indent` sets the command under its label. It is display only: the
+/// clipboard gets the command itself, never the rendered lines.
+fn command_lines(cmd: &str, style: Style, indent: &str) -> Vec<Line<'static>> {
     cmd.lines()
-        .map(|l| Line::from(Span::styled(l.to_string(), style)))
+        .map(|l| Line::from(Span::styled(format!("{indent}{l}"), style)))
         .collect()
 }
 
@@ -490,5 +720,202 @@ mod tests {
             "{}",
             cmds.grant_existing
         );
+    }
+
+    // ── The page as the operator sees it ─────────────────────────────────
+    //
+    // Rendered for real and read back: the fix this page carries is entirely
+    // in what it says, and in what is still on screen when the terminal is
+    // short.
+
+    use crate::state_handler::{setup_sequence::SetupPage, state::State};
+    use crate::ui::component::Component;
+    use crossterm::event::{KeyEventKind, KeyEventState, KeyModifiers};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    /// The panel's side border as a blank, so a sentence that wraps reads
+    /// back as one sentence.
+    fn unbordered(symbol: &str) -> &str {
+        if symbol == "│" { " " } else { symbol }
+    }
+
+    fn rows(page: &VtaAclInstructions, width: u16, height: u16) -> Vec<String> {
+        let mut state = SetupState {
+            active_page: SetupPage::VtaAclInstructions,
+            ..Default::default()
+        };
+        let key =
+            vta_sdk::provision_client::EphemeralSetupKey::generate().expect("generate a setup key");
+        state.vta.setup_key = Some(std::sync::Arc::new(key));
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| page.render(&state, frame))
+            .expect("render");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|c| unbordered(c.symbol()))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn flat(page: &VtaAclInstructions) -> String {
+        rows(page, 100, 50)
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn back_with(failure: ProvisionFailure, detail: Option<&str>) -> VtaAclInstructions {
+        VtaAclInstructions {
+            retry_reason: Some(RetryReason {
+                failure,
+                detail: detail.map(str::to_string),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Step 1 reads as something to do: numbered, with what success looks
+    /// like in PNM's output, and Enter meaning "I've run it".
+    #[test]
+    fn the_page_is_a_numbered_action_with_a_visible_success_signal() {
+        let text = flat(&VtaAclInstructions::default());
+        assert!(text.contains("Step 1 of 2"), "{text}");
+        assert!(text.contains("This step is required"), "{text}");
+        assert!(text.contains("1. Copy"), "{text}");
+        assert!(text.contains("2. Run it in your PNM session"), "{text}");
+        assert!(
+            text.contains("3. When PNM prints \"ACL entry created\""),
+            "{text}"
+        );
+        assert!(text.contains("1 hour"), "{text}");
+        assert!(text.contains("I've run it"), "{text}");
+        assert!(
+            !text.contains("didn't accept"),
+            "no banner on a first visit: {text}"
+        );
+    }
+
+    /// Back from a refusal: the banner says the command probably was not run,
+    /// and that the commands shown still apply.
+    #[test]
+    fn a_refused_attempt_opens_with_a_banner_naming_the_missed_step() {
+        let text = flat(&back_with(ProvisionFailure::NotAuthorised, None));
+        assert!(
+            text.contains("The VTA didn't accept the setup DID"),
+            "{text}"
+        );
+        assert!(text.contains("probably hasn't been run yet"), "{text}");
+        assert!(text.contains("these commands still apply"), "{text}");
+    }
+
+    /// A spent grant asks for the re-grant pair, and marks it.
+    #[test]
+    fn a_spent_grant_asks_for_delete_then_create() {
+        for problem in [
+            GrantProblem::Expired,
+            GrantProblem::AlreadyUsed,
+            GrantProblem::NoHandoff,
+            GrantProblem::UsedByThisAttempt,
+        ] {
+            let text = flat(&back_with(ProvisionFailure::GrantSpent(problem), None));
+            assert!(text.contains("copy [F4] and run it, then [F3]"), "{text}");
+            assert!(text.contains("1. Copy [F4] then [F3]"), "{text}");
+            assert!(text.contains("▶ [F3]"), "{text}");
+            assert!(text.contains("▶ [F4]"), "{text}");
+        }
+        let used = flat(&back_with(
+            ProvisionFailure::GrantSpent(GrantProblem::UsedByThisAttempt),
+            None,
+        ));
+        assert!(used.contains("[F2] would not add the grant"), "{used}");
+    }
+
+    /// R6.4 on the way back too: an unreachable VTA is not the PNM step.
+    #[test]
+    fn an_unreachable_vta_is_not_blamed_on_the_command() {
+        let text = flat(&back_with(ProvisionFailure::Unreachable, None));
+        assert!(text.contains("could not be reached"), "{text}");
+        assert!(text.contains("not the PNM step"), "{text}");
+        assert!(!text.contains("hasn't been run"), "{text}");
+    }
+
+    /// Anything else is repeated verbatim — the error is the hint.
+    #[test]
+    fn another_failure_is_repeated_verbatim() {
+        let text = flat(&back_with(
+            ProvisionFailure::Other,
+            Some("server error (500): the keystore is sealed"),
+        ));
+        assert!(
+            text.contains("server error (500): the keystore is sealed"),
+            "{text}"
+        );
+        assert!(!text.contains("hasn't been run"), "{text}");
+    }
+
+    /// On an ordinary terminal, banner and all, the instruction to press Enter
+    /// only once PNM says it worked is still on screen, and nothing overflows.
+    #[test]
+    fn the_steps_survive_an_80_column_terminal() {
+        let page = back_with(ProvisionFailure::NotAuthorised, None);
+        let rows = rows(&page, 80, 45);
+        for row in &rows {
+            assert!(row.chars().count() <= 80, "row overflows: {row:?}");
+        }
+        let text = rows.join(" ");
+        assert!(text.contains("didn't accept"), "{text}");
+        assert!(text.contains("3. When PNM prints"), "{text}");
+    }
+
+    fn press(flow: &mut SetupFlow, code: KeyCode) {
+        VtaAclInstructions::handle_key_event(
+            flow,
+            KeyEvent {
+                code,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            },
+        );
+    }
+
+    /// Enter is "I've run it": it starts step 2 with the typed context and
+    /// drops the old banner, which a fresh attempt is about to re-decide.
+    #[test]
+    fn enter_starts_step_two_and_clears_the_banner() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut flow = SetupFlow::new(&State::default(), tx);
+        flow.vta_acl_instructions = back_with(ProvisionFailure::NotAuthorised, None);
+        flow.vta_acl_instructions.context_id = Input::new("  my-ctx ".to_string());
+
+        press(&mut flow, KeyCode::Enter);
+
+        assert!(flow.vta_acl_instructions.retry_reason.is_none());
+        match rx.try_recv() {
+            Ok(Action::VtaStartProvision(ctx)) => assert_eq!(ctx, "my-ctx"),
+            _ => panic!("Enter should start provisioning"),
+        }
+    }
+
+    /// Typing a context id is not "I've run it": the banner stays until Enter.
+    #[test]
+    fn typing_keeps_the_banner() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut flow = SetupFlow::new(&State::default(), tx);
+        flow.vta_acl_instructions = back_with(ProvisionFailure::NotAuthorised, None);
+        press(&mut flow, KeyCode::Char('x'));
+        assert!(flow.vta_acl_instructions.retry_reason.is_some());
+        assert!(rx.try_recv().is_err());
     }
 }

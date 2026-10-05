@@ -17,6 +17,7 @@ use vta_sdk::provision_client::{AdminCredentialReply, DiagEntry, EphemeralSetupK
 pub mod config;
 #[cfg(feature = "openpgp-card")]
 pub mod openpgp_card;
+pub mod provision_failure;
 pub mod vta;
 
 /// Setup flow has many pages, they are listed here
