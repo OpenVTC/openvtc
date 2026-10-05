@@ -3455,8 +3455,6 @@ pub struct SettingsState {
     pub friendly_name: String,
     /// Current mediator DID
     pub mediator_did: String,
-    /// Current organization DID
-    pub org_did: String,
     /// Persona DID (read-only display)
     pub persona_did: String,
     /// Verified agent name for the persona DID, if cached.
@@ -3526,8 +3524,6 @@ pub enum SettingsMode {
     View,
     /// Editing the friendly name
     EditFriendlyName { input: String },
-    /// Editing the org DID
-    EditOrgDid { input: String },
     /// Export config form (path + passphrase length for masked display)
     ExportConfig {
         path_input: String,

@@ -274,8 +274,7 @@ impl Component for MainPage {
             }
             MainMenu::Settings => {
                 match &self.props.main_page.content_panel.settings.mode {
-                    SettingsMode::EditFriendlyName { input }
-                    | SettingsMode::EditOrgDid { input } => {
+                    SettingsMode::EditFriendlyName { input } => {
                         let updated = format!("{}{}", input, trimmed);
                         let _ = self
                             .action_tx
@@ -2327,7 +2326,7 @@ impl MainPage {
         let settings = &self.props.main_page.content_panel.settings;
 
         match &settings.mode {
-            SettingsMode::EditFriendlyName { input } | SettingsMode::EditOrgDid { input } => {
+            SettingsMode::EditFriendlyName { input } => {
                 let current = input.clone();
                 match key.code {
                     KeyCode::Esc => {
@@ -2522,17 +2521,9 @@ impl MainPage {
                 })
             }
             SettingsMode::View => {
+                use crate::ui::pages::main::components::settings_panel as rows;
                 let selected = settings.selected_index;
-                // 0=name, 1=mediator, 2=org, 3=persona(ro), 4=protection, 5=export,
-                // 6=import, 7=theme, [8=token w/ openpgp-card,] last=wipe.
-                let theme_index = crate::ui::pages::main::components::settings_panel::THEME_ROW;
-                #[cfg(feature = "openpgp-card")]
-                let token_index: usize = 8;
-                #[cfg(feature = "openpgp-card")]
-                let wipe_index: usize = 9;
-                #[cfg(not(feature = "openpgp-card"))]
-                let wipe_index: usize = 8;
-                let max_index = wipe_index;
+                let max_index = rows::WIPE_ROW;
 
                 match key.code {
                     KeyCode::Up if selected > 0 => {
@@ -2548,37 +2539,31 @@ impl MainPage {
                         true
                     }
                     KeyCode::Enter => {
-                        if selected <= 2 {
+                        // Friendly name, export and import each open a form;
+                        // `settings_actions::handle_start_edit` picks which.
+                        if selected == rows::FRIENDLY_NAME_ROW
+                            || selected == rows::EXPORT_ROW
+                            || selected == rows::IMPORT_ROW
+                        {
                             let _ = self
                                 .action_tx
                                 .send(Action::Settings(SettingsAction::StartEdit));
-                        } else if selected == 4 {
-                            // Change protection
+                        } else if selected == rows::PROTECTION_ROW {
                             let _ = self
                                 .action_tx
                                 .send(Action::Settings(SettingsAction::ChangeProtection));
-                        } else if selected == 5 {
-                            // Export
-                            let _ = self
-                                .action_tx
-                                .send(Action::Settings(SettingsAction::StartEdit));
-                        } else if selected == 6 {
-                            // Import
-                            let _ = self
-                                .action_tx
-                                .send(Action::Settings(SettingsAction::StartEdit));
-                        } else if selected == theme_index {
+                        } else if selected == rows::THEME_ROW {
                             let _ = self
                                 .action_tx
                                 .send(Action::Settings(SettingsAction::ThemeOpen));
                         }
                         #[cfg(feature = "openpgp-card")]
-                        if selected == token_index {
+                        if selected == rows::TOKEN_ROW {
                             let _ = self
                                 .action_tx
                                 .send(Action::Settings(SettingsAction::TokenManagement));
                         }
-                        if selected == wipe_index {
+                        if selected == rows::WIPE_ROW {
                             let _ = self
                                 .action_tx
                                 .send(Action::Settings(SettingsAction::WipeProfileStart));
@@ -3184,7 +3169,6 @@ fn view_id(page: &MainPageState) -> String {
         MainMenu::Settings => match &page.content_panel.settings.mode {
             SettingsMode::View => "view",
             SettingsMode::EditFriendlyName { .. } => "edit-name",
-            SettingsMode::EditOrgDid { .. } => "edit-org",
             SettingsMode::ExportConfig { .. } => "export",
             SettingsMode::ImportConfig { .. } => "import",
             SettingsMode::ChangeProtection { .. } => "protect",

@@ -6,7 +6,6 @@ use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek_bip32::ExtendedSigningKey;
 use openvtc_core::{
-    LF_ORG_DID, LF_PUBLIC_MEDIATOR_DID,
     config::{
         Config, ConfigProtectionType, ExportedConfig, KeyBackend, KeyTypes,
         account::{Account, KeyRef, PersonaId, PersonaRecord},
@@ -87,6 +86,38 @@ pub trait ConfigExtension {
 fn operator_chosen_name(username: &str) -> Option<&str> {
     let name = username.trim();
     (!name.is_empty()).then_some(name)
+}
+
+/// What to tell the operator when a persona cannot be minted because the
+/// account's VTA connection carries no DIDComm mediator.
+///
+/// A persona's mediator is published in its DID document — it is where everyone
+/// else delivers to it — so it has to be one the operator's own infrastructure
+/// stands behind. There used to be a fallback here: a built-in "public"
+/// mediator that was really one operator's own deployment, quietly written into
+/// every persona minted against a VTA that advertised none. There is no
+/// fallback now, and the message says what is actually missing (R6.4) instead
+/// of minting a persona whose inbound mail goes somewhere nobody chose.
+pub(crate) const NO_VTA_MEDIATOR: &str = "Your VTA did not advertise a DIDComm mediator \
+     when this account connected to it, so a new persona cannot be given one — a persona's \
+     DID document publishes the mediator others reach it through, and OpenVTC has no \
+     built-in one to fall back on. Ask the VTA's operator to \
+     configure a DIDComm mediator for it, then reconnect this account to the VTA.";
+
+/// The mediator a new persona is given: the account's VTA mediator, the one the
+/// VTA advertised at connect time (`KeyBackend::Vta { mediator_did }`).
+///
+/// `None` when there is none — a non-VTA backend, or a VTA reached without a
+/// DIDComm mediator. Callers check this *before* minting anything at the VTA,
+/// so a refusal leaves no half-made persona behind; [`NO_VTA_MEDIATOR`] says
+/// why.
+pub(crate) fn vta_mediator(config: &Config) -> Option<String> {
+    match &config.key_backend {
+        KeyBackend::Vta { mediator_did, .. } => {
+            mediator_did.clone().filter(|did| !did.trim().is_empty())
+        }
+        _ => None,
+    }
 }
 
 impl ConfigExtension for Config {
@@ -254,11 +285,14 @@ impl ConfigExtension for Config {
         tdk: &TDK,
         profile: &str,
     ) -> Result<PersonaId> {
-        let mediator_did = if let Some(mediator) = &state.custom_mediator {
-            mediator.to_string()
-        } else {
-            LF_PUBLIC_MEDIATOR_DID.to_string()
-        };
+        // The callers have already refused a mint with no VTA mediator before
+        // touching the VTA; this is the backstop for any path that forgets, so
+        // a persona can never be persisted with a mediator nobody chose.
+        let mediator_did = state
+            .custom_mediator
+            .clone()
+            .filter(|did| !did.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!(NO_VTA_MEDIATOR))?;
 
         // Build key info from the persona keys created during this mint.
         let mut key_info = HashMap::new();
@@ -446,14 +480,12 @@ fn build_state_a_config(state: &SetupState) -> Result<Config> {
             let mut account = outcome.account.account.clone();
             account.vta_did = state.vta.vta_did.clone();
             account.vta_url = state.vta.vta_url.clone();
-            account.org_did = LF_ORG_DID.to_string();
             account
         }
         None => Account {
             vta_did: state.vta.vta_did.clone(),
             vta_url: state.vta.vta_url.clone(),
             top_context_id: state.vta.context_id.clone().unwrap_or_default(),
-            org_did: LF_ORG_DID.to_string(),
             ..Account::default()
         },
     };
@@ -515,6 +547,44 @@ mod tests {
     fn no_name_leaves_both_fields_alone() {
         assert_eq!(operator_chosen_name(""), None);
         assert_eq!(operator_chosen_name("   "), None);
+    }
+
+    // --- persona mediator ---
+
+    /// A persona's mediator is the VTA's, when it advertised one — and only
+    /// then. With none there is nothing to give the persona: no built-in
+    /// mediator stands in, so every mint path refuses.
+    #[test]
+    fn a_persona_mediator_comes_only_from_the_vta() {
+        let mut config = crate::state_handler::dispatch_util::test_config();
+        assert_eq!(vta_mediator(&config), None, "a non-VTA backend has none");
+
+        let vta = |mediator_did: Option<&str>| KeyBackend::Vta {
+            credential_bundle: SecretString::new("".into()),
+            credential_did: String::new(),
+            credential_private_key: SecretString::new("".into()),
+            vta_did: "did:webvh:zVTASCID:vta.example.com".to_string(),
+            vta_url: String::new(),
+            mediator_did: mediator_did.map(str::to_string),
+            encryption_seed: SecretBox::new(Box::new(vec![0u8; 32])),
+        };
+        config.key_backend = vta(Some("did:webvh:QmM:mediator.example.com"));
+        assert_eq!(
+            vta_mediator(&config).as_deref(),
+            Some("did:webvh:QmM:mediator.example.com")
+        );
+        config.key_backend = vta(None);
+        assert_eq!(vta_mediator(&config), None);
+        config.key_backend = vta(Some("  "));
+        assert_eq!(vta_mediator(&config), None, "a blank DID is not a mediator");
+    }
+
+    /// The refusal says what is missing and who can fix it (R6.4), rather than
+    /// a generic failure.
+    #[test]
+    fn the_no_mediator_refusal_names_the_cause_and_the_fix() {
+        assert!(NO_VTA_MEDIATOR.contains("did not advertise a DIDComm mediator"));
+        assert!(NO_VTA_MEDIATOR.contains("VTA's operator"));
     }
 
     /// A `SetupState` carrying just the VTA bootstrap output an account needs:

@@ -57,8 +57,6 @@ requests, trust pings, VRC issuance, and maintainer list exchange.
 | Variable | Purpose |
 |----------|---------|
 | `OPENVTC_MEDIATOR_DID` | Not read by this crate. The `openvtc` binary honours it only when built with the `dev-overrides` feature (runtime-only, never saved); release builds ignore it. |
-| `OPENVTC_ORG_DID` | Override the default Linux Foundation organisation DID. |
-
 ## License
 
 Licensed under [Apache-2.0](../LICENSE).

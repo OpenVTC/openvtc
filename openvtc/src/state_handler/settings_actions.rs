@@ -37,17 +37,12 @@ pub fn update_friendly_name(config: &mut Config, name: &str) {
 // `dev-overrides` builds and calls `Config::set_active_mediator_did_runtime`,
 // which never touches the persisted account record.
 
-/// Update the organization DID.
-///
-/// R11: mutates + logs only (see [`update_friendly_name`]).
-pub fn update_org_did(config: &mut Config, did: &str) {
-    config.account.org_did = did.to_string();
-    config
-        .public
-        .logs
-        .insert(LogFamily::Config, format!("Org DID changed to '{}'", did));
-    info!(did = %did, "org DID updated");
-}
+// There is likewise no `update_org_did`. Settings used to carry an "Org DID"
+// row, seeded at setup with one operator's own deployment and read by nothing:
+// no protocol, trust check or message ever consulted it. A reference CLI has no
+// business asserting an organisation on anyone's behalf, so the row and the
+// account field are gone; an existing config's `org_did` key now rides in
+// `Account::extra`, carried untouched.
 
 /// Set a passphrase to encrypt the config in the keyring.
 ///
@@ -148,6 +143,7 @@ use crate::state_handler::{
     save_coalesce::SaveScheduler,
     state::{self, State},
 };
+use crate::ui::pages::main::components::settings_panel as rows;
 use tokio::sync::watch;
 
 fn handle_select(state: &mut State, index: usize) {
@@ -169,20 +165,17 @@ fn handle_start_edit(state: &mut State) {
     let idx = state.main_page.content_panel.settings.selected_index;
     let s = &state.main_page.content_panel.settings;
     state.main_page.content_panel.settings.mode = match idx {
-        0 => SettingsMode::EditFriendlyName {
+        rows::FRIENDLY_NAME_ROW => SettingsMode::EditFriendlyName {
             input: s.friendly_name.clone(),
         },
-        // `MEDIATOR_ROW` (1) is deliberately absent: the mediator is read-only,
-        // so Enter on it falls through to `View` like any other unedittable row.
-        2 => SettingsMode::EditOrgDid {
-            input: s.org_did.clone(),
-        },
-        5 => SettingsMode::ExportConfig {
+        // `MEDIATOR_ROW` is deliberately absent: the mediator is read-only, so
+        // Enter on it falls through to `View` like any other unedittable row.
+        rows::EXPORT_ROW => SettingsMode::ExportConfig {
             path_input: "openvtc-export.enc".to_string(),
             passphrase_len: 0,
             active_field: 0,
         },
-        6 => SettingsMode::ImportConfig {
+        rows::IMPORT_ROW => SettingsMode::ImportConfig {
             path_input: "openvtc-export.enc".to_string(),
             passphrase_len: 0,
             active_field: 0,
@@ -192,11 +185,10 @@ fn handle_start_edit(state: &mut State) {
 }
 
 fn handle_field_update(state: &mut State, value: String) {
-    match &mut state.main_page.content_panel.settings.mode {
-        SettingsMode::EditFriendlyName { input } | SettingsMode::EditOrgDid { input } => {
-            *input = value;
-        }
-        _ => {}
+    if let SettingsMode::EditFriendlyName { input } =
+        &mut state.main_page.content_panel.settings.mode
+    {
+        *input = value;
     }
 }
 
@@ -293,14 +285,11 @@ fn handle_submit_edit(
     value: &str,
 ) {
     let idx = state.main_page.content_panel.settings.selected_index;
-    match idx {
-        0 => update_friendly_name(config, value),
-        2 => update_org_did(config, value),
-        _ => {}
-    }
     let setting_name = match idx {
-        0 => "Friendly name",
-        2 => "Organization DID",
+        rows::FRIENDLY_NAME_ROW => {
+            update_friendly_name(config, value);
+            "Friendly name"
+        }
         _ => "Setting",
     };
     state.main_page.content_panel.settings.mode = SettingsMode::View;
@@ -1120,8 +1109,7 @@ mod tests {
     fn mediator_row_does_not_open_an_edit_mode() {
         let mut state = State::default();
         state.main_page.content_panel.settings.mediator_did = "did:webvh:example:mediator".into();
-        state.main_page.content_panel.settings.selected_index =
-            crate::ui::pages::main::components::settings_panel::MEDIATOR_ROW;
+        state.main_page.content_panel.settings.selected_index = rows::MEDIATOR_ROW;
 
         handle_start_edit(&mut state);
 
@@ -1141,7 +1129,11 @@ mod tests {
         let mut save = crate::state_handler::save_coalesce::SaveScheduler::new("test");
         let (state_tx, _rx) = watch::channel(State::default());
 
-        for idx in [0usize, 1, 2] {
+        for idx in [
+            rows::FRIENDLY_NAME_ROW,
+            rows::MEDIATOR_ROW,
+            rows::PERSONA_ROW,
+        ] {
             state.main_page.content_panel.settings.selected_index = idx;
             let outcome = dispatch(
                 SettingsAction::SubmitEdit {
@@ -1170,7 +1162,7 @@ mod tests {
         let mut config = Box::new(crate::state_handler::dispatch_util::test_config());
         let mut state = State::default();
         let mut save = crate::state_handler::save_coalesce::SaveScheduler::new("test");
-        state.main_page.content_panel.settings.selected_index = 0;
+        state.main_page.content_panel.settings.selected_index = rows::FRIENDLY_NAME_ROW;
 
         handle_submit_edit(&mut config, &mut state, &mut save, "Alice");
 
@@ -1208,33 +1200,30 @@ mod tests {
     fn start_edit_maps_index_to_mode() {
         // Closures returning a representative mode for the discriminant check.
         let cases: &[(usize, ModeFn)] = &[
-            (0, || SettingsMode::EditFriendlyName {
+            (rows::FRIENDLY_NAME_ROW, || SettingsMode::EditFriendlyName {
                 input: String::new(),
             }),
-            // Row 1 is the read-only Mediator DID: it falls through to `View`
-            // like any other unedittable row.
-            (1, || SettingsMode::View),
-            (2, || SettingsMode::EditOrgDid {
-                input: String::new(),
-            }),
-            (5, || SettingsMode::ExportConfig {
+            // The read-only Mediator DID falls through to `View` like any
+            // other unedittable row.
+            (rows::MEDIATOR_ROW, || SettingsMode::View),
+            (rows::EXPORT_ROW, || SettingsMode::ExportConfig {
                 path_input: String::new(),
                 passphrase_len: 0,
                 active_field: 0,
             }),
-            (6, || SettingsMode::ImportConfig {
+            (rows::IMPORT_ROW, || SettingsMode::ImportConfig {
                 path_input: String::new(),
                 passphrase_len: 0,
                 active_field: 0,
             }),
-            (3, || SettingsMode::View),
+            (rows::PERSONA_ROW, || SettingsMode::View),
+            (rows::PROTECTION_ROW, || SettingsMode::View),
             (99, || SettingsMode::View),
         ];
         for (idx, expected) in cases {
             let mut state = State::default();
             state.main_page.content_panel.settings.friendly_name = "Alice".to_string();
             state.main_page.content_panel.settings.mediator_did = "did:med".to_string();
-            state.main_page.content_panel.settings.org_did = "did:org".to_string();
             state.main_page.content_panel.settings.selected_index = *idx;
             handle_start_edit(&mut state);
             assert_eq!(
@@ -1246,7 +1235,7 @@ mod tests {
         // The edit modes seed `input` from the current value.
         let mut state = State::default();
         state.main_page.content_panel.settings.friendly_name = "Alice".to_string();
-        state.main_page.content_panel.settings.selected_index = 0;
+        state.main_page.content_panel.settings.selected_index = rows::FRIENDLY_NAME_ROW;
         handle_start_edit(&mut state);
         assert!(matches!(
             settings(&state),
@@ -1254,30 +1243,19 @@ mod tests {
         ));
     }
 
-    /// `handle_field_update` writes the single-line input for the two remaining
-    /// edit modes and is a no-op elsewhere.
+    /// `handle_field_update` writes the single-line input for the one remaining
+    /// edit mode and is a no-op elsewhere.
     #[test]
     fn field_update_writes_edit_input() {
-        let edit_modes: &[ModeFn] = &[
-            || SettingsMode::EditFriendlyName {
-                input: String::new(),
-            },
-            || SettingsMode::EditOrgDid {
-                input: String::new(),
-            },
-        ];
-        for make in edit_modes {
-            let mut state = State::default();
-            state.main_page.content_panel.settings.mode = make();
-            handle_field_update(&mut state, "new-value".to_string());
-            let input = match settings(&state) {
-                SettingsMode::EditFriendlyName { input } | SettingsMode::EditOrgDid { input } => {
-                    input.clone()
-                }
-                other => panic!("unexpected mode {other:?}"),
-            };
-            assert_eq!(input, "new-value");
-        }
+        let mut state = State::default();
+        state.main_page.content_panel.settings.mode = SettingsMode::EditFriendlyName {
+            input: String::new(),
+        };
+        handle_field_update(&mut state, "new-value".to_string());
+        assert!(matches!(
+            settings(&state),
+            SettingsMode::EditFriendlyName { input } if input == "new-value"
+        ));
         // No-op in View.
         let mut state = State::default();
         handle_field_update(&mut state, "ignored".to_string());
@@ -1426,7 +1404,10 @@ mod tests {
     #[test]
     fn select_updates_index() {
         let mut state = State::default();
-        handle_select(&mut state, 4);
-        assert_eq!(state.main_page.content_panel.settings.selected_index, 4);
+        handle_select(&mut state, rows::PROTECTION_ROW);
+        assert_eq!(
+            state.main_page.content_panel.settings.selected_index,
+            rows::PROTECTION_ROW
+        );
     }
 }

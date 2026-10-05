@@ -69,56 +69,6 @@ pub mod tsp_store;
 pub mod vetting;
 pub mod vrc;
 
-/// Primary Linux Foundation Mediator DID.
-pub const LF_PUBLIC_MEDIATOR_DID: &str =
-    "did:webvh:QmetnhxzJXTJ9pyXR1BbZ2h6DomY6SB1ZbzFPrjYyaEq9V:fpp.storm.ws:public-mediator";
-
-/// Primary Linux Foundation Organisation DID.
-/// Can be overridden via the `OPENVTC_ORG_DID` environment variable.
-pub const LF_ORG_DID: &str =
-    "did:webvh:QmXkYcFCbvFFcYZf2q5gNk8Vp4b4vMbVKWbbc7oivcdZHK:fpp.storm.ws";
-
-/// Resolves the mediator DID from an optional caller-supplied override.
-///
-/// Callers pass any override explicitly; core never reads process env itself.
-/// (The `openvtc` binary does not feed `OPENVTC_MEDIATOR_DID` in here: it
-/// honours that variable only in `dev-overrides` builds, as a runtime-only
-/// change to the active persona.) If `override_did` is `Some` and starts with
-/// `"did:"`, it is returned; otherwise a warning is logged and the default
-/// [`LF_PUBLIC_MEDIATOR_DID`] is returned instead.
-pub fn mediator_did(override_did: Option<&str>) -> String {
-    if let Some(did) = override_did {
-        if did.starts_with("did:") {
-            return did.to_string();
-        }
-        tracing::warn!(
-            "mediator DID override '{}' is not a valid DID (must start with 'did:'), using default",
-            did
-        );
-    }
-    LF_PUBLIC_MEDIATOR_DID.to_string()
-}
-
-/// Resolves the organisation DID from an optional caller-supplied override.
-///
-/// The binary is the single boundary that reads the `OPENVTC_ORG_DID`
-/// environment variable and passes its value (if any) in here; core never
-/// reads process env itself. If `override_did` is `Some` and starts with
-/// `"did:"`, it is returned; otherwise a warning is logged and the default
-/// [`LF_ORG_DID`] is returned instead.
-pub fn org_did(override_did: Option<&str>) -> String {
-    if let Some(did) = override_did {
-        if did.starts_with("did:") {
-            return did.to_string();
-        }
-        tracing::warn!(
-            "org DID override '{}' is not a valid DID (must start with 'did:'), using default",
-            did
-        );
-    }
-    LF_ORG_DID.to_string()
-}
-
 /// Packs a DIDComm message with authenticated encryption and forwards it
 /// through the mediator to the recipient.
 ///
@@ -631,58 +581,6 @@ mod tests {
         for (ty, want) in cases {
             assert_eq!(ty.friendly_name(), want);
         }
-    }
-
-    #[test]
-    fn test_mediator_did_default() {
-        let did = mediator_did(None);
-        assert_eq!(did, LF_PUBLIC_MEDIATOR_DID);
-        assert!(
-            did.starts_with("did:webvh:"),
-            "Mediator DID should start with did:webvh:"
-        );
-    }
-
-    #[test]
-    fn test_org_did_default() {
-        let did = org_did(None);
-        assert_eq!(did, LF_ORG_DID);
-        assert!(
-            did.starts_with("did:webvh:"),
-            "Org DID should start with did:webvh:"
-        );
-    }
-
-    #[test]
-    fn test_mediator_did_valid_override() {
-        let custom = "did:web:example.com:mediator";
-        let did = mediator_did(Some(custom));
-        assert_eq!(did, custom);
-    }
-
-    #[test]
-    fn test_mediator_did_invalid_override_falls_back() {
-        let did = mediator_did(Some("not-a-did"));
-        assert_eq!(
-            did, LF_PUBLIC_MEDIATOR_DID,
-            "Invalid override value should fall back to default"
-        );
-    }
-
-    #[test]
-    fn test_org_did_valid_override() {
-        let custom = "did:web:example.com:org";
-        let did = org_did(Some(custom));
-        assert_eq!(did, custom);
-    }
-
-    #[test]
-    fn test_org_did_invalid_override_falls_back() {
-        let did = org_did(Some("bogus-value"));
-        assert_eq!(
-            did, LF_ORG_DID,
-            "Invalid override value should fall back to default"
-        );
     }
 
     #[test]

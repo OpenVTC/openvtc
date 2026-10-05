@@ -442,7 +442,6 @@ impl MainPageState {
         // Sync settings
         self.content_panel.settings.friendly_name = config.public.friendly_name.clone();
         self.content_panel.settings.mediator_did = config.mediator_did().to_string();
-        self.content_panel.settings.org_did = config.account.org_did.clone();
         self.content_panel.settings.persona_did = config.persona_did().to_string();
         self.content_panel.settings.persona_agent_name = config
             .agent_name_for(config.persona_did())

@@ -1100,10 +1100,10 @@ pub struct Account {
     pub vta_url: String,
     /// The top-level context this account administers.
     pub top_context_id: String,
-    /// Organisation DID this account is affiliated with (the former
-    /// `public.lk_did` singleton). Account-level, not persona-scoped.
-    #[serde(default)]
-    pub org_did: String,
+    // There is no `org_did` any more. Setup used to stamp one operator's own
+    // organisation DID into every account, and nothing but a Settings row ever
+    // read it. A config written before its removal still loads: the key lands
+    // in `extra` below and is carried verbatim, so a downgrade still finds it.
     /// Account personas, keyed by stable id.
     #[serde(default)]
     pub personas: HashMap<PersonaId, PersonaRecord>,
@@ -2568,5 +2568,33 @@ mod forward_compat_tests {
             Some(&serde_json::json!(["did:key:zA", "did:key:zB"])),
             "{back}"
         );
+    }
+
+    /// Every account written before the Org DID was dropped carries an
+    /// `org_did`. It must still load, and must come back out unchanged — an
+    /// older build reading the file again finds what it wrote.
+    #[test]
+    fn a_legacy_org_did_still_loads_and_is_carried() {
+        let json = serde_json::json!({
+            "vta_did": "did:webvh:Qm:vta.example.com:agent",
+            "vta_url": "",
+            "top_context_id": "top",
+            "org_did": "did:webvh:QmOrg:org.example.com"
+        });
+        let account: Account = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(account.top_context_id, "top");
+        let back = serde_json::to_value(&account).expect("serialize");
+        assert_eq!(
+            back.get("org_did"),
+            Some(&serde_json::json!("did:webvh:QmOrg:org.example.com")),
+            "{back}"
+        );
+    }
+
+    /// A new account no longer writes an `org_did` at all.
+    #[test]
+    fn a_new_account_writes_no_org_did() {
+        let back = serde_json::to_value(Account::default()).expect("serialize");
+        assert!(back.get("org_did").is_none(), "{back}");
     }
 }
