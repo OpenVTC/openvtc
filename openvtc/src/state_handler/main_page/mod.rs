@@ -749,11 +749,14 @@ impl MainPageState {
                 decision: community_decision_summary(c),
             });
         }
-        let community_count = community_items.len();
+        let joining = joining_summaries(config, now);
+        let row_count = community_items.len() + joining.len();
         self.content_panel.communities.actions_required = config.account.actions_required_count();
         self.content_panel.communities.items = community_items.into();
-        if self.content_panel.communities.selected_index >= community_count {
-            self.content_panel.communities.selected_index = community_count.saturating_sub(1);
+        self.content_panel.communities.joining = joining.into();
+        // One cursor over both sections (see `CommunitiesState::selected_index`).
+        if self.content_panel.communities.selected_index >= row_count {
+            self.content_panel.communities.selected_index = row_count.saturating_sub(1);
         }
 
         // The persona pane's Communities tab: one row per membership, not per
@@ -1272,6 +1275,69 @@ fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
         });
     }
     result
+}
+
+/// The Communities panel's "Joining" rows: every vetting application that is
+/// still on its way to becoming a membership.
+///
+/// Two filters, each for a reason:
+///
+/// - **The persona must still be held.** An application is made as one of the
+///   account's personas; with that persona deleted it can never be submitted,
+///   so listing it as a join in progress would be a promise nothing can keep.
+/// - **No membership record for the same community *and* persona.** Once the
+///   join is submitted the membership row exists (Pending, then Active) and says
+///   everything this row would, so listing both would show one join twice.
+///   Applications keep their statements after the join, so the application
+///   outlives that moment — and a record in a terminal state (left, rejected,
+///   withdrawn) still means this application was used: re-joining starts from
+///   the membership row and `j`, not from a row claiming the holder is joining
+///   a community they have just left. An application for the *same* community
+///   under a *different* persona is a distinct join and is listed: it is a
+///   second membership in the making, which the existing row says nothing about.
+fn joining_summaries(
+    config: &Config,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<content::JoiningSummary> {
+    config
+        .private
+        .vetting
+        .applications
+        .iter()
+        .filter(|app| {
+            !config
+                .account
+                .memberships()
+                .any(|m| m.vtc_did == app.community && m.persona_ref == app.persona)
+        })
+        .filter_map(|app| {
+            let persona = config.account.personas.get(&app.persona)?;
+            // The membership rows' precedence: the holder's own label, then a
+            // verified agent name, then the shortened DID.
+            let persona_label = persona
+                .label
+                .clone()
+                .or_else(|| config.agent_name_for(&persona.did).map(str::to_owned))
+                .unwrap_or_else(|| shorten_did(&persona.did, 24));
+            let (standing, ready) =
+                crate::state_handler::vetting_actions::joining_standing(app, now);
+            Some(content::JoiningSummary {
+                application_id: app.id.clone(),
+                community_name: crate::state_handler::vetting_actions::community_display(
+                    config,
+                    &app.community,
+                ),
+                accent: config
+                    .private
+                    .vetting
+                    .branding(&app.community)
+                    .and_then(|b| b.accent_rgb()),
+                persona_label,
+                standing,
+                ready,
+            })
+        })
+        .collect()
 }
 
 /// Build display summaries for the vetting statements we hold, across every
@@ -1847,6 +1913,175 @@ mod tests {
         assert_eq!(fact("Declared"), Some("we work together in the community"));
         assert_eq!(fact("Relied on"), Some("passport"));
         assert_eq!(fact("Verified"), Some("name.legal"));
+    }
+
+    // ─── Communities: joins in progress ─────────────────────────────────
+
+    const JOIN_VTC: &str = "did:webvh:QmScidCommunityBBBBBBBBBBBBBBBBBB:example.com:community";
+    const JOIN_PERSONA: &str = "did:webvh:QmScidPersonaAAAAAAAAAAAAAAAAAAA:example.com:persona";
+
+    /// A config with one persona labelled `Work` and no membership at all —
+    /// the account of an applicant still being vetted.
+    fn applicant_config() -> (Config, PersonaId) {
+        let mut config = config_with_membership(JOIN_PERSONA, Some("Work"), JOIN_VTC, None);
+        config.account.communities.clear();
+        let persona = *config.account.personas.keys().next().unwrap();
+        (config, persona)
+    }
+
+    fn one_statement_required() -> vta_sdk::protocols::vetting::VettingRequirements {
+        serde_json::from_value(serde_json::json!({
+            "version": "0.1",
+            "statementType": vta_sdk::protocols::vetting::VETTED_PREDICATE,
+            "minStatements": 1,
+            "acceptedMethods": ["inPerson"],
+            "eligibleVetters": { "role": "vetter" }
+        }))
+        .unwrap()
+    }
+
+    /// The reported bug: an applicant with an application in progress and no
+    /// membership saw an empty Communities panel. The application is a
+    /// "Joining" row naming the community, the persona and where it stands.
+    #[test]
+    fn an_application_without_a_membership_is_listed_as_joining() {
+        let (mut config, persona) = applicant_config();
+        let id = {
+            let app = config
+                .private
+                .vetting
+                .start_application(JOIN_VTC, persona, JOIN_PERSONA, chrono::Utc::now())
+                .unwrap();
+            app.requirements = Some(one_statement_required());
+            app.id.clone()
+        };
+
+        let mut page = MainPageState::default();
+        page.sync_from_config(&config);
+        let communities = &page.content_panel.communities;
+        assert!(communities.items.is_empty(), "no membership exists yet");
+        let [row] = &*communities.joining else {
+            panic!("one join in progress, got {}", communities.joining.len());
+        };
+        assert_eq!(row.application_id, id);
+        assert_eq!(row.community_name, shorten_did(JOIN_VTC, 48));
+        assert_eq!(row.persona_label, "Work");
+        assert_eq!(
+            row.standing,
+            "0 of 1 statement — choose the face vetters see, then ask a vetter"
+        );
+        assert!(!row.ready);
+    }
+
+    /// Requirements met: the row says the holder can join now.
+    #[test]
+    fn a_satisfied_application_reads_ready_to_join() {
+        use openvtc_core::vetting::applicant::HeldStatement;
+        use vta_sdk::protocols::vetting::{VettingMethod, VettingRelationship};
+
+        let (mut config, persona) = applicant_config();
+        let now = chrono::Utc::now();
+        let app = config
+            .private
+            .vetting
+            .start_application(JOIN_VTC, persona, JOIN_PERSONA, now)
+            .unwrap();
+        app.requirements = Some(one_statement_required());
+        app.statements.push(HeldStatement {
+            id: "urn:uuid:statement-1".into(),
+            vetter: "did:webvh:scid:example.com:carol".into(),
+            method: VettingMethod::InPerson,
+            declared_relationship: VettingRelationship::None,
+            document_classes: vec![],
+            claims_verified: vec![],
+            identity_commitment: "zCommitment".into(),
+            valid_from: now - chrono::Duration::days(1),
+            valid_until: now + chrono::Duration::days(120),
+            received_at: now,
+            credential: serde_json::json!({ "id": "urn:uuid:statement-1" }),
+        });
+
+        let mut page = MainPageState::default();
+        page.sync_from_config(&config);
+        let row = &page.content_panel.communities.joining[0];
+        assert_eq!(row.standing, "1 of 1 statement — ready to join");
+        assert!(row.ready);
+    }
+
+    /// Once the join is submitted the membership row says everything the
+    /// application row would, so the community is listed once — but an
+    /// application under a *different* persona is a second join in the making
+    /// and is still listed.
+    #[test]
+    fn a_submitted_join_is_not_listed_twice() {
+        let mut config = config_with_membership(JOIN_PERSONA, Some("Work"), JOIN_VTC, None);
+        let member = *config.account.personas.keys().next().unwrap();
+        config
+            .private
+            .vetting
+            .start_application(JOIN_VTC, member, JOIN_PERSONA, chrono::Utc::now())
+            .unwrap();
+
+        let mut page = MainPageState::default();
+        page.sync_from_config(&config);
+        assert_eq!(page.content_panel.communities.items.len(), 1);
+        assert!(
+            page.content_panel.communities.joining.is_empty(),
+            "the membership row already covers this join"
+        );
+
+        let other = PersonaId::new();
+        let mut record = config.account.personas[&member].clone();
+        record.persona_id = other;
+        record.did = "did:webvh:QmScidOther:example.com:other".into();
+        record.label = Some("Home".into());
+        config.account.personas.insert(other, record);
+        config
+            .private
+            .vetting
+            .start_application(
+                JOIN_VTC,
+                other,
+                "did:webvh:QmScidOther:example.com:other",
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        page.sync_from_config(&config);
+        let joining = &page.content_panel.communities.joining;
+        assert_eq!(joining.len(), 1);
+        assert_eq!(joining[0].persona_label, "Home");
+    }
+
+    /// An application whose persona has been deleted can never be submitted,
+    /// so it is not shown as a join in progress.
+    #[test]
+    fn an_application_for_a_deleted_persona_is_not_listed() {
+        let (mut config, _) = applicant_config();
+        config
+            .private
+            .vetting
+            .start_application(JOIN_VTC, PersonaId::new(), JOIN_PERSONA, chrono::Utc::now())
+            .unwrap();
+        let mut page = MainPageState::default();
+        page.sync_from_config(&config);
+        assert!(page.content_panel.communities.joining.is_empty());
+    }
+
+    /// The cursor walks memberships and joining rows as one list, and a sync
+    /// keeps it on a joining row rather than clamping it back to the
+    /// memberships.
+    #[test]
+    fn the_selection_may_rest_on_a_joining_row() {
+        let (mut config, persona) = applicant_config();
+        config
+            .private
+            .vetting
+            .start_application(JOIN_VTC, persona, JOIN_PERSONA, chrono::Utc::now())
+            .unwrap();
+        let mut page = MainPageState::default();
+        page.content_panel.communities.selected_index = 5;
+        page.sync_from_config(&config);
+        assert_eq!(page.content_panel.communities.selected_index, 0);
     }
 
     /// Statements are listed for every application, and an application with

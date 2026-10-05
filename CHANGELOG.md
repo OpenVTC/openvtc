@@ -169,6 +169,22 @@ are marked wherever they apply. The detailed entries follow the summary below.
   and attesting for a community that hides its vetters before enrolment is
   refused with what is happening, and starts the enrolment.
 
+- **Communities shows a join that is still being vetted.** An applicant with a
+  vetting application under way, and no membership yet, opened Communities to
+  "You haven't joined any communities yet" — as though nothing were happening.
+  The panel now says "Not a member of any community yet — you are applying to
+  …" and lists each application in a *Joining* section: the community, the
+  persona it joins as, and where it stands ("1 of 1 statement — ready to
+  join"). Enter opens the application's journey on the Vetting page. Once the
+  join is submitted the membership row takes over, so a community is not listed
+  twice; an application under a different persona is still listed.
+
+- **The top bar no longer says "Connecting..." when there is nothing to connect
+  to.** An account with no community membership — an applicant still being
+  vetted, whose persona listener was up — sat on "Connecting..." for the life of
+  the process. With no community session the indicator now reads "No active
+  community", and goes to "Connecting..." / "Connected" once a join creates one.
+
 - **A join reads the community's current requirements every time.** Once a
   community's manifest had been read, the join page used the stored copy for
   good — so a community that turned on PCS ZKP vetting, changed what it asks,

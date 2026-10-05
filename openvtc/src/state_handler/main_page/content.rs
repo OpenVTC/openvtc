@@ -220,7 +220,15 @@ pub struct CommunitiesState {
     /// pointer bump rather than a deep copy; rebuilt wholesale in
     /// `sync_from_config`.
     pub items: Arc<[CommunitySummary]>,
-    /// Currently selected index in the list.
+    /// Joins still being gathered for — vetting applications that have not
+    /// become a membership yet — listed under the memberships in a "Joining"
+    /// section. See [`JoiningSummary`] for what qualifies.
+    pub joining: Arc<[JoiningSummary]>,
+    /// Currently selected row. Indexes [`Self::items`] first and then
+    /// [`Self::joining`], so `items.len() + i` is joining row `i`: one cursor
+    /// walks the whole panel, and every membership key — which acts on an
+    /// index into `items` — finds no membership under a joining row and stays
+    /// inert there, rather than each key needing its own section check.
     pub selected_index: usize,
     /// Number of communities raising the actions-required indicator (R-C-3).
     pub actions_required: usize,
@@ -587,6 +595,33 @@ pub struct DecisionSummary {
     pub decided_at: Option<String>,
     /// How our published record was handled on removal; `None` for a rejection.
     pub disposition: Option<String>,
+}
+
+/// A join in progress, for the Communities panel's "Joining" section: a
+/// vetting application this account is gathering statements for, before any
+/// membership exists to show it.
+///
+/// Without it an applicant opened Communities to an empty page claiming they
+/// had joined nothing — true, but it read as though nothing were happening
+/// while they were part-way through being vetted for one. The application
+/// itself lives on the Vetting page; this row says where it stands and takes
+/// the holder there.
+#[derive(Clone, Debug)]
+pub struct JoiningSummary {
+    /// The application's local handle — what Enter opens.
+    pub application_id: String,
+    /// The community's name, or its shortened DID.
+    pub community_name: String,
+    /// The accent colour the community publishes in its manifest's branding.
+    pub accent: Option<(u8, u8, u8)>,
+    /// The persona the application joins as, labelled as the membership rows
+    /// label theirs.
+    pub persona_label: String,
+    /// Where the application stands, in words: statements counted against
+    /// what the community requires, and what happens next.
+    pub standing: String,
+    /// The published requirements are met — the holder can submit the join.
+    pub ready: bool,
 }
 
 /// Lightweight display summary of a community membership (no Arc/Mutex).

@@ -332,6 +332,10 @@ pub enum VettingAction {
     RefreshVetterSide,
     /// Open the highlighted application or desk request as a journey.
     OpenJourney,
+    /// Open this application's journey on the Vetting page — from somewhere
+    /// other than the Vetting page itself, such as the Communities panel's
+    /// "Joining" section, where the selection is not the Vetting list's.
+    OpenApplication(String),
     /// Close the journey, back to the list it was opened from.
     CloseJourney,
     /// Show the next tab.
