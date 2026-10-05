@@ -767,6 +767,43 @@ fn persist(ctx: &mut ActionCtx<'_>, message: impl Into<String>) {
     );
 }
 
+/// Keep this account's vetter side current with the communities it vets for:
+/// read each one's requirements again, and run whatever its hidden-vetting
+/// schedule owes — enrolment the first time, a tick of the token drip after.
+///
+/// A community that turns on PCS ZKP vetting says so only in its manifest, and
+/// a vetter that never re-reads it keeps signing named statements an applicant
+/// under the new mode cannot use. So this runs on its own — at start-up, hourly,
+/// and when a session is about to open — not only when someone presses `m`.
+async fn refresh_vetter_side(ctx: &mut ActionCtx<'_>) {
+    // A vetter has no application, so nothing else would ever fetch the manifest of a
+    // community it vets for — and the manifest is where a community says it hides its
+    // vetters. Asking here is what lets a vetter-only member reach the mode at all.
+    refresh_vetter_communities(ctx).await;
+    // And whatever each community's vetter schedule owes us — enrolment or a tick of
+    // the drip. On a schedule, never in response to a balance (design §5.1).
+    //
+    // Over the communities that publish the mode as well as those we already hold an
+    // engine for: the first pass through has no engine yet, and `hidden_vetting_tick`
+    // is what makes one.
+    let mut communities: Vec<String> = ctx
+        .config
+        .private
+        .vetting
+        .hidden_vetter
+        .iter()
+        .map(|h| h.community.clone())
+        .collect();
+    for community in ctx.config.private.vetting.hidden_published.keys() {
+        if !communities.contains(community) {
+            communities.push(community.clone());
+        }
+    }
+    for community in communities {
+        hidden_vetting_tick(ctx, &community).await;
+    }
+}
+
 /// Handle one Vetting-page action.
 pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
     match action {
@@ -976,33 +1013,9 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 // is free: the community keeps one per applicant, and asking again replaces it.
                 ask_for_challenge(ctx, &row.id).await;
             }
-            // A vetter has no application, so nothing else would ever fetch the manifest of a
-            // community it vets for — and the manifest is where a community says it hides its
-            // vetters. Asking here is what lets a vetter-only member reach the mode at all.
-            refresh_vetter_communities(ctx).await;
-            // And whatever each community's vetter schedule owes us — enrolment or a tick of
-            // the drip. On a schedule, never in response to a balance (design §5.1).
-            //
-            // Over the communities that publish the mode as well as those we already hold an
-            // engine for: the first pass through has no engine yet, and `hidden_vetting_tick`
-            // is what makes one.
-            let mut communities: Vec<String> = ctx
-                .config
-                .private
-                .vetting
-                .hidden_vetter
-                .iter()
-                .map(|h| h.community.clone())
-                .collect();
-            for community in ctx.config.private.vetting.hidden_published.keys() {
-                if !communities.contains(community) {
-                    communities.push(community.clone());
-                }
-            }
-            for community in communities {
-                hidden_vetting_tick(ctx, &community).await;
-            }
+            refresh_vetter_side(ctx).await;
         }
+        VettingAction::RefreshVetterSide => refresh_vetter_side(ctx).await,
         VettingAction::ReviewCard => {
             let v = page(ctx);
             let Some(row) = v.applications.get(v.selected).cloned() else {
@@ -3270,6 +3283,23 @@ async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
         .is_some()
     {
         return attest_hidden(ctx, request_id, &entry, &vetter_did, attestation, now).await;
+    }
+    // The community hides its vetters but this vetter is not enrolled yet:
+    // signing now would make a named statement — one the applicant's
+    // hidden-vetting application cannot use, carrying this vetter's DID to a
+    // community that promised not to need it. Enrol first.
+    let book = &ctx.config.private.vetting;
+    if book.hidden_vetting(&entry.community) || book.hidden_published.contains_key(&entry.community)
+    {
+        page(ctx).mode = VettingMode::List;
+        status(
+            ctx,
+            "This community proves vetting with a PCS zero-knowledge proof, and you are not \
+             enrolled for it yet, so nothing was signed. Enrolling now — attest again in a \
+             moment.",
+        );
+        refresh_vetter_side(ctx).await;
+        return;
     }
 
     let draft =
