@@ -74,15 +74,14 @@ colours, and keeps the roles apart with text attributes instead:
 
 | Role | Drawn as |
 |------|----------|
-| accent | **bold** |
+| accent, success, warning | **bold** |
 | danger | **bold**, underlined |
-| warning | underlined |
-| success (and selected rows) | reversed |
-| highlight | *italic* |
 | muted | dim |
-| text | plain |
+| text, highlight | plain |
 
-Anything drawn on a role's colour as a background is reversed too. The
+Anything drawn on a role's colour as a background — a badge, a selection bar —
+is reversed. The marking is deliberately sparse: monochrome is for reading,
+so only emphasis, errors and secondary text are set apart. The
 command-line output printed before the TUI starts, and the prompts, are
 uncoloured as well.
 
