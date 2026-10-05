@@ -647,6 +647,7 @@ mod tests {
                     persona,
                     persona_label: "alice".into(),
                     statements: 2,
+                    attestations: 0,
                     progress: None,
                     next_step: "join — Enter on \"Present your vetting statements as alice\""
                         .into(),
