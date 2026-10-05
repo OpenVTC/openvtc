@@ -43,6 +43,15 @@ fn bound_to_display(vic: &PresentedInvitation, subject: &str) -> String {
     display_identifier(vic.subject_agent_name.as_deref(), subject, BOUND_TO_WIDTH).into_owned()
 }
 
+/// The success page's `Registry:` row for the `registryConsent` that was sent.
+fn registry_row(consent: bool) -> &'static str {
+    if consent {
+        "Publication consented  ·  the community may list this membership publicly"
+    } else {
+        "Not consented  ·  the community will not publish this membership"
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JoinProgress;
 
@@ -174,6 +183,15 @@ impl JoinProgress {
                                 ),
                             ]));
                         }
+                    }
+                    // What the request said about trust-registry publication, so
+                    // the person sees the answer that was actually sent — the
+                    // one they will not be able to change from here later.
+                    if let Some(consent) = state.registry_consent_sent {
+                        lines.push(Line::from(vec![
+                            Span::styled("  Registry:      ", Style::new().fg(COLOR_SUCCESS)),
+                            Span::styled(registry_row(consent), Style::new().fg(COLOR_SOFT_PURPLE)),
+                        ]));
                     }
                 }
                 lines.push(Line::default());

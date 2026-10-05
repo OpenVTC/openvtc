@@ -672,6 +672,13 @@ pub enum Action {
     /// Answers page: answer with the highlighted face, as shown, and go on.
     JoinAnswersChoose,
 
+    /// Registry page: tick or untick "publish my membership in this
+    /// community's trust registry".
+    JoinRegistryToggle,
+
+    /// Registry page: answer with the box as it stands, and go on.
+    JoinRegistryConfirm,
+
     /// Vetting page: take the highlighted way in. A route the page drew as
     /// blocked answers with why instead.
     JoinVettingTake,

@@ -85,7 +85,9 @@ with live status, on a Communities overview page.
   - **VTC join protocol** — `vta_sdk::protocols::join_requests`:
     `JOIN_REQUEST_SUBMIT_TYPE`, a submit receipt with `status` (e.g.
     `"pending"`), and `MEMBER_SELF_REMOVE`. Submit body carries a Verifiable
-    Presentation (`vp`) + `registry_consent`.
+    Presentation (`vp`) + `registry_consent` (`registryConsent` on the wire:
+    the applicant's consent to trust-registry publication, asked by R-B-6a and
+    carried on `JoinPresentation::registry_consent`).
 
 ---
 
@@ -196,6 +198,18 @@ IDs are referenced by the task breakdown.
   `join-requests/submit` with a **stubbed/placeholder VP** (see §8), receive a
   receipt, persist the community with status from the receipt
   (`Pending{request_id}` or `Active`), and record `requested_at`.
+- **R-B-6a** **Trust-registry consent:** before the submit, ask whether the
+  community may publish the membership in its trust registry — a public record
+  that this identity is a member — and send the answer as `registryConsent`.
+  The VTC copies it onto the member record; its registry sync publishes only
+  members who consented, and approval does not consent on the applicant's
+  behalf. It is the applicant's privacy decision, so it is asked on every join
+  (the `RegistryConsent` page, after any requested-attribute answers), the box
+  starts unticked, nothing pre-fills or infers it, and an answer is used for
+  one submit to the community it was given for. Every path that has not asked
+  sends `false`. Changing it after joining needs a member-signed Trust Task the
+  VTC does not have yet (`vtc/members/update` is administrator-only); until
+  then, leaving and re-joining with a different answer is the only route.
 - **R-B-7** A `Pending` community whose request is unanswered for **7 days**
   transitions client-side to `Expired` (D16) and raises actions-required. (The
   VTC enforces its own server-side policy independently.)

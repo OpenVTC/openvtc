@@ -48,7 +48,7 @@ use crate::{
         join::{
             ApplyAs, AvailableVic, FirstStepKind, IdentityPick, JoinAnswers, JoinApplication,
             JoinPage, JoinRoute, JoinState, JoinVettingView, KnownVetting, PersonaOption,
-            PresentedInvitation, RouteOption, RouteState, VettingPhase,
+            PresentedInvitation, RegistryChoice, RouteOption, RouteState, VettingPhase,
         },
         main_page::content::{VicLifecycle, VicSummary},
         main_page::{sanitize_display, shorten_did},
@@ -1255,6 +1255,41 @@ impl StateHandler {
                                 return Ok(JoinExit::Exit(interrupted));
                             }
                         }
+                        Action::JoinRegistryToggle => {
+                            if let Some(registry) = state.join.registry.as_mut() {
+                                registry.publish = !registry.publish;
+                            }
+                        }
+                        Action::JoinRegistryConfirm => {
+                            // Either answer is an answer. What is sent is the box
+                            // as it stands now — read again by the sequence via
+                            // `RegistryChoice::consent_for`, never cached apart
+                            // from the page that showed it.
+                            let Some(registry) = state.join.registry.as_mut() else {
+                                continue;
+                            };
+                            registry.confirmed = true;
+                            let Some((pick, vtc_did, context_id)) = registry.parked.take() else {
+                                continue;
+                            };
+                            if let Some(interrupted) = self
+                                .launch_join_sequence(
+                                    pick,
+                                    vtc_did,
+                                    context_id,
+                                    interrupt_rx,
+                                    state,
+                                    tdk,
+                                    config,
+                                    admin_vta,
+                                    profile,
+                                    messaging,
+                                )
+                                .await
+                            {
+                                return Ok(JoinExit::Exit(interrupted));
+                            }
+                        }
                         Action::JoinContextSelect(i) => {
                             let last = state.join.context_options.len().saturating_sub(1);
                             state.join.context_selected = i.min(last);
@@ -1948,6 +1983,23 @@ impl StateHandler {
             return None;
         }
 
+        // Then the trust-registry question, last, so it is the final thing the
+        // person sees before the request goes out — and on every join, because
+        // there is no right answer to assume. Every launch passes through here
+        // (identity, invitation, context, vetting and answers all end in this
+        // function), so no path can submit without the person having answered.
+        let registry_answered = state
+            .join
+            .registry
+            .as_ref()
+            .is_some_and(|r| r.answered_for(&vtc_did));
+        if !registry_answered {
+            let community_name = config.agent_name_for(&vtc_did).map(str::to_string);
+            open_registry_choice(state, community_name, (choice, vtc_did, context_id));
+            let _ = self.state_tx.send(state.clone());
+            return None;
+        }
+
         // Move to the progress page and lock input.
         state.join.page = JoinPage::Progress;
         state.join.processing = true;
@@ -2626,6 +2678,15 @@ async fn run_join_sequence(
     // Idempotency (R-B-9) was already enforced at submit, before the identity
     // choice — no re-check here.
 
+    // The person's trust-registry answer, consumed by this one submit. Taken,
+    // not read: a later join from the same open flow — another community, or a
+    // retry after a failure — asks again rather than inheriting it.
+    let registry_consent = state
+        .join
+        .registry
+        .take()
+        .is_some_and(|r| r.consent_for(&vtc_did));
+
     // The mint + join sequence needs the admin VTA session.
     let Some(admin_vta) = admin_vta else {
         state
@@ -3173,6 +3234,7 @@ async fn run_join_sequence(
                 protocol,
                 // The vetting criterion this application was made under.
                 criterion: application.requirements_digest.clone(),
+                registry_consent,
             }
         }
         // No application: the community decides under the first criterion this
@@ -3181,6 +3243,7 @@ async fn run_join_sequence(
         _ => openvtc_core::join::JoinPresentation {
             attributes,
             protocol,
+            registry_consent,
             ..vp.into()
         },
     };
@@ -3350,6 +3413,7 @@ async fn run_join_sequence(
     ));
     state.join.created_community = Some(record);
     state.join.created_persona_did = Some(persona_did.clone());
+    state.join.registry_consent_sent = Some(registry_consent);
     state.join.completed = Completion::CompletedOK;
     state.join.info(format!(
         "Join request sent over {submit_transport}. Waiting for the community to acknowledge it — \
@@ -3600,6 +3664,29 @@ async fn open_answers(
     state.join.processing = false;
 }
 
+/// Open the trust-registry page for the parked launch, with the box unticked.
+///
+/// A fresh [`RegistryChoice`] every time — never one carried over from an
+/// earlier question — because consent given for one community, or on one
+/// attempt, is not consent to the next. `community_name` is display only, and
+/// only ever a verified agent name (the cached, round-tripped one), so the page
+/// never puts an unverified claim beside a privacy decision.
+fn open_registry_choice(
+    state: &mut State,
+    community_name: Option<String>,
+    parked: (IdentityPick, String, String),
+) {
+    state.join.registry = Some(RegistryChoice {
+        publish: false,
+        community: parked.1.clone(),
+        community_name,
+        confirmed: false,
+        parked: Some(parked),
+    });
+    state.join.page = JoinPage::RegistryConsent;
+    state.join.processing = false;
+}
+
 /// Read what the highlighted face would answer. A holder-scoped resolved read
 /// — the values a disclosure from it would carry.
 async fn load_shown(answers: &mut JoinAnswers, client: &VtaClient) {
@@ -3736,6 +3823,87 @@ mod tests {
                 .is_some_and(|e| e.contains("not connected"))
         );
         assert_eq!(answers.unanswered(), vec!["name.display".to_string()]);
+    }
+
+    /// Every join stops on the trust-registry page before anything is sent,
+    /// with the box unticked and the launch parked for Enter to resume.
+    #[test]
+    fn the_registry_question_opens_unticked_and_parks_the_launch() {
+        use crate::state_handler::State;
+        use crate::state_handler::join::{IdentityPick, JoinPage};
+        let mut state = State::default();
+        let parked = (
+            IdentityPick::Mint,
+            "did:web:vtc.example".to_string(),
+            "acct/co-op".to_string(),
+        );
+        super::open_registry_choice(&mut state, None, parked.clone());
+        assert_eq!(state.join.page, JoinPage::RegistryConsent);
+        assert!(!state.join.processing, "the page must take keys");
+        let registry = state.join.registry.expect("registry state");
+        assert!(!registry.publish, "never pre-ticked");
+        assert!(!registry.confirmed, "opening the page answers nothing");
+        assert_eq!(registry.parked, Some(parked));
+        assert!(
+            !registry.answered_for("did:web:vtc.example"),
+            "the launch must wait for an answer"
+        );
+    }
+
+    /// A re-opened page starts unticked again, even when the last answer for
+    /// the same community was yes: consent is given per request, not
+    /// remembered.
+    #[test]
+    fn a_previous_yes_does_not_pre_tick_the_next_question() {
+        use crate::state_handler::State;
+        use crate::state_handler::join::IdentityPick;
+        let mut state = State::default();
+        let parked = (
+            IdentityPick::Mint,
+            "did:web:vtc.example".to_string(),
+            "acct".to_string(),
+        );
+        super::open_registry_choice(&mut state, None, parked.clone());
+        let r = state.join.registry.as_mut().unwrap();
+        r.publish = true;
+        r.confirmed = true;
+        super::open_registry_choice(&mut state, None, parked);
+        assert!(!state.join.registry.unwrap().publish);
+    }
+
+    /// What is sent as `registryConsent`: yes only for an answered, ticked
+    /// question about this very community.
+    #[test]
+    fn consent_is_sent_only_when_given_for_this_community() {
+        use crate::state_handler::join::RegistryChoice;
+        let vtc = "did:web:vtc.example";
+        let base = RegistryChoice {
+            community: vtc.to_string(),
+            ..RegistryChoice::default()
+        };
+        // Not answered: unticked or ticked, nothing is consented.
+        assert!(!base.consent_for(vtc));
+        let ticked_unanswered = RegistryChoice {
+            publish: true,
+            ..base.clone()
+        };
+        assert!(!ticked_unanswered.consent_for(vtc));
+        // Answered no.
+        let declined = RegistryChoice {
+            confirmed: true,
+            ..base.clone()
+        };
+        assert!(declined.answered_for(vtc));
+        assert!(!declined.consent_for(vtc));
+        // Answered yes — for this community only.
+        let given = RegistryChoice {
+            publish: true,
+            confirmed: true,
+            ..base
+        };
+        assert!(given.consent_for(vtc));
+        assert!(!given.consent_for("did:web:another.example"));
+        assert!(!given.answered_for("did:web:another.example"));
     }
     use super::{
         build_pending_record, is_duplicate_membership, joined_session, load_pasted_vic,
