@@ -240,7 +240,7 @@ pub fn explicit_path_mode(typed: &str) -> Result<WebvhPathMode, String> {
 /// also added to the document.
 ///
 /// # Parameters
-/// - `raw_url`: The WebVH server URL where the DID log will be hosted (e.g. `https://fpp.storm.ws`).
+/// - `raw_url`: The WebVH server URL where the DID log will be hosted (e.g. `https://webvh.example.com`).
 /// - `keys`: Mutable persona keys whose secret IDs are updated to match the created DID.
 /// - `mediator_did`: The DID of the mediator used as the DIDComm service endpoint.
 /// - `update_secret`: The Ed25519 secret used to authorize this initial DID log entry.

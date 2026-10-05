@@ -30,7 +30,6 @@ impl Panel for SettingsPanel {
 pub fn render(state: &SettingsState) -> Vec<Line<'static>> {
     match &state.mode {
         SettingsMode::EditFriendlyName { input } => render_edit("Friendly Name", input),
-        SettingsMode::EditOrgDid { input } => render_edit("Org DID", input),
         SettingsMode::ExportConfig {
             path_input,
             passphrase_len,
@@ -64,8 +63,32 @@ pub fn render(state: &SettingsState) -> Vec<Line<'static>> {
     }
 }
 
+// Row indices of the settings list. The renderer, the key handler
+// (`ui::pages::main`) and the edit dispatch (`settings_actions`) all address
+// rows by position, so they share these names: a row added or removed is then
+// one edit here, not a hunt for every literal that assumed the old layout.
+
+/// Index of the Friendly Name row — the only editable text row.
+pub(crate) const FRIENDLY_NAME_ROW: usize = 0;
+/// Index of the Persona row (read-only).
+pub(crate) const PERSONA_ROW: usize = 2;
+/// Index of the Protection row.
+pub(crate) const PROTECTION_ROW: usize = 3;
+/// Index of the Export Config row.
+pub(crate) const EXPORT_ROW: usize = 4;
+/// Index of the Import Config row.
+pub(crate) const IMPORT_ROW: usize = 5;
 /// Index of the Theme row in the settings list.
-pub(crate) const THEME_ROW: usize = 7;
+pub(crate) const THEME_ROW: usize = 6;
+/// Index of the Hardware Token Management row (only with `openpgp-card`).
+#[cfg(feature = "openpgp-card")]
+pub(crate) const TOKEN_ROW: usize = 7;
+/// Index of the Wipe profile row — always the last.
+#[cfg(feature = "openpgp-card")]
+pub(crate) const WIPE_ROW: usize = 8;
+/// Index of the Wipe profile row — always the last.
+#[cfg(not(feature = "openpgp-card"))]
+pub(crate) const WIPE_ROW: usize = 7;
 
 /// The theme picker. The whole screen is the preview: moving through the list
 /// draws everything in the highlighted theme.
@@ -243,12 +266,16 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
     } else {
         state.mediator_did.clone()
     };
+    // Indexed by `FRIENDLY_NAME_ROW`, `MEDIATOR_ROW` and `PERSONA_ROW`.
     let settings = [
         ("Friendly Name", state.friendly_name.clone(), true),
         ("Mediator DID", mediator, false),
-        ("Org DID", state.org_did.clone(), true),
         ("Persona", persona, false),
     ];
+    // The rows below continue the numbering, so this list must end exactly
+    // where `PROTECTION_ROW` begins.
+    debug_assert_eq!(settings.len(), PERSONA_ROW + 1);
+    debug_assert_eq!(PROTECTION_ROW, PERSONA_ROW + 1);
 
     let mut lines = vec![Line::from("")];
 
@@ -280,9 +307,9 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
             Span::styled(
                 // `&value[..47]` sliced by *bytes* — it panics when the cut
                 // lands inside a multi-byte character, which a friendly name or
-                // an agent name may well contain. Two of these four rows are
-                // DIDs, so the cut takes the middle: a mediator and an org DID
-                // that share a host are told apart by their tails.
+                // an agent name may well contain. The mediator row is a DID, so
+                // the cut takes the middle: two mediators that share a host are
+                // told apart by their tails.
                 openvtc_core::display::shorten_for_display(value, VALUE_WIDTH).into_owned(),
                 Style::new().fg(COLOR_SOFT_PURPLE),
             ),
@@ -303,8 +330,7 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
 
-    // Protection type display (index 4)
-    let prot_selected = state.selected_index == 4;
+    let prot_selected = state.selected_index == PROTECTION_ROW;
     let prot_style = if prot_selected {
         Style::new().fg(COLOR_SUCCESS).bold()
     } else {
@@ -335,8 +361,7 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
         }
     }
 
-    // Export option (index 5)
-    let export_selected = state.selected_index == 5;
+    let export_selected = state.selected_index == EXPORT_ROW;
     let export_style = if export_selected {
         Style::new().fg(COLOR_SUCCESS).bold()
     } else {
@@ -347,8 +372,7 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
         Span::styled("Export Config", export_style),
     ]));
 
-    // Import option (index 6)
-    let import_selected = state.selected_index == 6;
+    let import_selected = state.selected_index == IMPORT_ROW;
     let import_style = if import_selected {
         Style::new().fg(COLOR_SUCCESS).bold()
     } else {
@@ -359,7 +383,6 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
         Span::styled("Import Config", import_style),
     ]));
 
-    // Theme (index 7)
     let theme_selected = state.selected_index == THEME_ROW;
     let theme_style = if theme_selected {
         Style::new().fg(COLOR_SUCCESS).bold()
@@ -384,10 +407,9 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
         ),
     ]));
 
-    // Token management option (index 8, only with openpgp-card)
     #[cfg(feature = "openpgp-card")]
     {
-        let token_selected = state.selected_index == 8;
+        let token_selected = state.selected_index == TOKEN_ROW;
         let token_style = if token_selected {
             Style::new().fg(COLOR_SUCCESS).bold()
         } else {
@@ -399,12 +421,7 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
         ]));
     }
 
-    // Wipe profile (index 8 without openpgp-card, 9 with).
-    #[cfg(feature = "openpgp-card")]
-    let wipe_index: usize = 9;
-    #[cfg(not(feature = "openpgp-card"))]
-    let wipe_index: usize = 8;
-    let wipe_selected = state.selected_index == wipe_index;
+    let wipe_selected = state.selected_index == WIPE_ROW;
     let wipe_style = if wipe_selected {
         Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED).bold()
     } else {

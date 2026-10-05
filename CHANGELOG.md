@@ -191,6 +191,19 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **No built-in organisation or mediator; a persona's mediator comes from your
+  VTA.** Setup wrote a fixed organisation DID on `fpp.storm.ws` — one
+  operator's own deployment — into every account, and Settings showed it as
+  *Org DID*. Nothing used it, so the row is gone and new accounts no longer
+  carry one; an existing config still loads and keeps the old value untouched.
+  A persona minted against a VTA that advertised no DIDComm mediator was
+  quietly given a built-in "public" mediator on the same host. Creating a
+  persona, or joining a community with a new one, now stops before anything is
+  minted and says the VTA advertised no mediator and its operator needs to
+  configure one. `LF_ORG_DID`, `LF_PUBLIC_MEDIATOR_DID`, `org_did()` and
+  `mediator_did()` are removed from `openvtc-core`, along with the
+  `OPENVTC_ORG_DID` entry in its README.
+
 - **Readable in macOS Terminal.app and other terminals without 24-bit colour.**
   The TUI sent 24-bit colours to every terminal; one that cannot draw them
   guessed, and Terminal.app's guess washed everything out to near-white. The

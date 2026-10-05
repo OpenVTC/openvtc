@@ -53,7 +53,11 @@ use crate::{
         },
         main_page::content::{VicLifecycle, VicSummary},
         main_page::{sanitize_display, shorten_did},
-        setup_sequence::{Completion, MessageType, config::ConfigExtension, vta},
+        setup_sequence::{
+            Completion, MessageType,
+            config::{self as setup_config, ConfigExtension},
+            vta,
+        },
         state::{ActivePage, State},
         vetting_actions,
     },
@@ -3217,6 +3221,19 @@ async fn run_join_sequence(
             }
         },
         IdentityPick::Mint => {
+            // The persona's mediator is the account's VTA mediator: the DID minted via
+            // the VTA's webvh server advertises that mediator in its DIDComm service, so
+            // the persona listener must use the same one. Hardcoding `None` (the public
+            // default) left the persona with no usable mediator — the listener then
+            // failed with "No Mediator is configured" and retried forever. A VTA that
+            // advertised no mediator refuses the mint here, before any key or DID is
+            // created at the VTA: there is no built-in mediator to fall back on.
+            let Some(mediator) = setup_config::vta_mediator(config) else {
+                state.join.fail(setup_config::NO_VTA_MEDIATOR);
+                return;
+            };
+            state.setup.custom_mediator = Some(mediator);
+
             // 5. Mint a fresh persona into `state.setup` (reusing the setup
             // helpers), with every key and the DID in the community's context.
             state
@@ -3305,15 +3322,6 @@ async fn run_join_sequence(
                 }
             }
 
-            // The persona's mediator is the account's VTA mediator: the DID minted via
-            // the VTA's webvh server advertises that mediator in its DIDComm service, so
-            // the persona listener must use the same one. Hardcoding `None` (the public
-            // default) left the persona with no usable mediator — the listener then
-            // failed with "No Mediator is configured" and retried forever.
-            state.setup.custom_mediator = match &config.key_backend {
-                openvtc_core::config::KeyBackend::Vta { mediator_did, .. } => mediator_did.clone(),
-                _ => None,
-            };
             // A join mints the persona *unlabelled*. `display_name` here is the
             // COMMUNITY's name — naming the persona after it (or, with no
             // verified name, after a DID-derived rendering of the VTC DID) put a

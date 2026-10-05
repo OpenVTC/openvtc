@@ -183,7 +183,7 @@ credential DIDs — `Config::agent_name_refresh_targets` never resolves those, s
 a name for them could not appear without also extending the refresh sweep.
 
 Input support covers the join VTC-DID entry and the new relationship request;
-the setup-time entries (VTA DID, webvh import, custom mediator, org DID) still
+the setup-time entries (VTA DID, webvh import, custom mediator) still
 take a DID only — apply the same `looks_like_agent_name` + `resolve_identifier`
 pattern, threading a resolver into those setup handlers.
 

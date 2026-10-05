@@ -22,14 +22,18 @@ use anyhow::Result;
 use vta_sdk::{client::VtaClient, protocols::did_management::create::WebvhPathMode};
 
 use openvtc_core::config::{
-    Config, KeyBackend,
+    Config,
     account::PersonaId,
     community_context::{self},
 };
 use openvtc_core::errors::OpenVTCError;
 
 use crate::state_handler::join_flow;
-use crate::state_handler::setup_sequence::{SetupState, config::ConfigExtension, vta};
+use crate::state_handler::setup_sequence::{
+    SetupState,
+    config::{ConfigExtension, NO_VTA_MEDIATOR, vta_mediator},
+    vta,
+};
 
 /// What a new sub-context is called when the label has nothing a path segment
 /// can hold.
@@ -85,6 +89,12 @@ pub(crate) async fn mint_standalone_persona(
     } = inputs;
     if top_context_id.is_empty() {
         anyhow::bail!("No account context yet — finish setup before creating a persona.");
+    }
+    // Refuse before anything is minted: a persona without a mediator would
+    // publish a DID document nobody can deliver to, and there is no built-in
+    // mediator to give it instead.
+    if custom_mediator.is_none() {
+        anyhow::bail!(NO_VTA_MEDIATOR);
     }
 
     // The persona's keys and DID live in exactly one context, so it exists
@@ -171,7 +181,9 @@ pub(crate) struct MintInputs {
     pub(crate) context_id: String,
     /// The persona's mediator is the account's VTA mediator: the DID minted via
     /// the VTA's webvh server advertises that mediator, so the persona listener
-    /// must use the same one (mirrors the join flow).
+    /// must use the same one (mirrors the join flow). `None` — the VTA
+    /// advertised no DIDComm mediator — refuses the mint before it starts;
+    /// there is no built-in mediator to substitute.
     pub(crate) custom_mediator: Option<String>,
     /// Where the DID sits on the hosting server: a path the server allocates
     /// (the default, a fresh mnemonic) or one the operator typed. Already
@@ -190,10 +202,7 @@ impl MintInputs {
         Self {
             top_context_id: config.account.top_context_id.clone(),
             context_id,
-            custom_mediator: match &config.key_backend {
-                KeyBackend::Vta { mediator_did, .. } => mediator_did.clone(),
-                _ => None,
-            },
+            custom_mediator: vta_mediator(config),
             path_mode,
         }
     }

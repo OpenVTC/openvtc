@@ -308,10 +308,9 @@ pub struct Config {
     /// Config v2 multi-community account model (personas + communities).
     ///
     /// The persisted source of truth for the account's personas and community
-    /// memberships (stored encrypted in [`ProtectedConfig`]). The persona DID,
-    /// mediator DID, and org DID that used to live as `public.*` singletons are
-    /// now read from here via [`Config::persona_did`], [`Config::mediator_did`],
-    /// and `account.org_did`.
+    /// memberships (stored encrypted in [`ProtectedConfig`]). The persona DID
+    /// and mediator DID that used to live as `public.*` singletons are now read
+    /// from here via [`Config::persona_did`] and [`Config::mediator_did`].
     pub account: account::Account,
 
     /// Random key that encrypts [`ProtectedConfig`], carried from
