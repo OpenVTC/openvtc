@@ -512,7 +512,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
             openvtc_core::vetting::book::VettedOutcome::Signed { .. } => None,
         }))
         .collect();
-    declined.sort_by(|a, b| b.0.cmp(&a.0));
+    declined.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
     vetting.declined = declined
         .into_iter()
         .map(|(at, community)| {

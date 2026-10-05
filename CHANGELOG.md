@@ -127,6 +127,18 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **A finished vetting request leaves the desk and forgets the person.**
+  Signed or declined requests used to stay among the open ones with the
+  applicant's card beside them — and the card, legal name included, was never
+  forgotten, because the sweep that should have done it never ran. The card's
+  values now go when the request closes (the default retention is 0; the
+  statement still commits to the card by its digest), the sweep runs at start-up,
+  hourly and after every vetting outcome, and a closed request moves after a
+  short grace to a record holding only the community, the date and the outcome.
+  The desk's *Issued* view is now *History*: what you signed, with the
+  applicant's DID so you can withdraw it, and your declines as dates and
+  communities only.
+
 - **A hidden-vetting join with no proof stops instead of submitting nothing.**
   If the proof could not be built, the join used to go out carrying no vetting
   at all; it now fails with what to do, and cleans up.

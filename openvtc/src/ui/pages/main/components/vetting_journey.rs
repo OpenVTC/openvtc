@@ -389,6 +389,9 @@ mod tests {
                 message: None,
             }]
             .into(),
+            journey_target: Some(
+                crate::state_handler::main_page::content::JourneyTarget::Desk("r1".into()),
+            ),
             ..VettingState::default()
         };
         let j = JourneyView {
