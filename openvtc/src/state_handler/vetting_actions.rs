@@ -55,13 +55,14 @@ use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOu
 use crate::state_handler::dispatch_util::{self, Persist, SyncLog};
 use crate::state_handler::join_flow;
 use crate::state_handler::main_page::content::{
-    ApplicationRow, AttestForm, CardPreview, DIRECTORY_FIELDS, DIRECTORY_LABELS, DIRECTORY_METHODS,
-    DeskRow, DeskStage, DeskView, DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS,
-    EventForm, EventOffer, FaceChoice, IssuedRow, JourneySteps, JourneyTarget, JourneyView,
-    LineTone, ListedVetterRow, NewFaceFocus, NewFaceForm, PROFILE_FIELDS, PROFILE_LABELS, PoolRow,
-    RequestRow, TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
-    VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VetterStandingRow, VettingMembership,
-    VettingMode, VettingPersona, VettingState, VettingTab, method_label, row_of,
+    ApplicationRow, AttestForm, CardPreview, DECLINE_MESSAGE_MAX, DECLINE_REASONS,
+    DIRECTORY_FIELDS, DIRECTORY_LABELS, DIRECTORY_METHODS, DeskRow, DeskStage, DeskView,
+    DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS, EventForm, EventOffer,
+    FaceChoice, IssuedRow, JourneySteps, JourneyTarget, JourneyView, LineTone, ListedVetterRow,
+    NewFaceFocus, NewFaceForm, PROFILE_FIELDS, PROFILE_LABELS, PoolRow, RequestRow, TicketRow,
+    VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS,
+    VetterProfileForm, VetterStandingRow, VettingMembership, VettingMode, VettingPersona,
+    VettingState, VettingTab, decline_reason_words, method_label, row_of,
 };
 use crate::state_handler::main_page::menu::MainMenu;
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
@@ -337,7 +338,23 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                             RequestState::Attested { .. } => {
                                 ("statement received".to_string(), None, None)
                             }
-                            RequestState::Declined { .. } => ("declined".to_string(), None, None),
+                            // The vetter's reason and note, when they gave
+                            // them. A decline with neither says only that, and
+                            // owes the applicant nothing more.
+                            RequestState::Declined { code, message } => {
+                                let mut said = "declined".to_string();
+                                if let Some(code) = code {
+                                    said.push_str(" — ");
+                                    said.push_str(decline_reason_words(*code));
+                                }
+                                if let Some(note) = message {
+                                    said.push_str(&format!(
+                                        " · they wrote: \"{}\"",
+                                        sanitize_display(note, 500)
+                                    ));
+                                }
+                                (said, None, None)
+                            }
                             RequestState::Refused { code, .. } => (
                                 format!("refused ({})", sanitize_display(code, 80)),
                                 None,
@@ -1025,6 +1042,9 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 Some(row) if row.stage != DeskStage::Closed => {
                     v.mode = VettingMode::ConfirmDecline {
                         request_id: row.request_id,
+                        reason_index: 0,
+                        message: String::new(),
+                        field: 0,
                     };
                 }
                 Some(_) => status(ctx, "That request is already closed."),
@@ -1172,6 +1192,7 @@ fn move_field(v: &mut VettingState, forward: bool) {
             }
         },
         VettingMode::Attest { form, .. } => step(&mut form.field, AttestForm::FIELDS),
+        VettingMode::ConfirmDecline { field, .. } => step(field, 2),
         _ => {}
     }
 }
@@ -1229,6 +1250,11 @@ fn cycle(v: &mut VettingState, forward: bool) {
         VettingMode::Withdraw { reason_index, .. } => {
             turn(reason_index, VETTING_WITHDRAWAL_REASONS.len());
         }
+        VettingMode::ConfirmDecline {
+            reason_index,
+            field: 0,
+            ..
+        } => turn(reason_index, DECLINE_REASONS.len()),
         VettingMode::ChooseFace { faces, index, .. } => turn(index, faces.len() + 1),
         _ => {}
     }
@@ -1300,7 +1326,27 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             method_index,
         } => open_session(ctx, &request_id, method_index).await,
         VettingMode::Attest { request_id, form } => attest(ctx, &request_id, &form).await,
-        VettingMode::ConfirmDecline { request_id } => decline(ctx, &request_id).await,
+        VettingMode::ConfirmDecline {
+            request_id,
+            reason_index,
+            message,
+            ..
+        } => {
+            let code = DECLINE_REASONS.get(reason_index).and_then(|(c, _)| *c);
+            let message = message.trim();
+            if message.chars().count() > DECLINE_MESSAGE_MAX {
+                return status(
+                    ctx,
+                    format!(
+                        "The note is {} characters; a decline carries at most \
+                         {DECLINE_MESSAGE_MAX}.",
+                        message.chars().count()
+                    ),
+                );
+            }
+            let message = (!message.is_empty()).then(|| message.to_string());
+            decline(ctx, &request_id, code, message).await
+        }
         VettingMode::Withdraw {
             statement_id,
             reason_index,
@@ -3234,7 +3280,14 @@ async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
     spawn_send(ctx, message, &vetter_did, &entry.applicant, sent);
 }
 
-async fn decline(ctx: &mut ActionCtx<'_>, request_id: &str) {
+/// Decline a desk request, with the reason and note the vetter chose — both
+/// optional, and sent to the applicant only, never the community.
+async fn decline(
+    ctx: &mut ActionCtx<'_>,
+    request_id: &str,
+    code: Option<vta_sdk::protocols::vetting::decline::v0_1::PayloadCode>,
+    message: Option<String>,
+) {
     let Some(entry) = ctx.config.private.vetting.desk_entry(request_id).cloned() else {
         return;
     };
@@ -3251,7 +3304,7 @@ async fn decline(ctx: &mut ActionCtx<'_>, request_id: &str) {
         .config
         .private
         .vetting
-        .decline(request_id, None, None, Utc::now())
+        .decline(request_id, code, message, Utc::now())
     {
         Ok(body) => body,
         Err(e) => return abandon(ctx, "Could not decline", e),

@@ -2152,3 +2152,41 @@ async fn the_journeys_follow_the_exchange() {
         .unwrap();
     assert_ne!(sessions.state, StepState::Todo, "{journey:?}");
 }
+
+/// A reason and a note sent with a decline reach the applicant's own record
+/// of the request — which is what its page shows them — and go nowhere else.
+#[tokio::test]
+async fn a_declines_reason_and_note_reach_the_applicant() {
+    let (mut applicant, mut vetter, _) = ready().await;
+    let (request_id, _) = in_session(&mut applicant, &mut vetter).await;
+    let body = vetter
+        .book
+        .decline(
+            &request_id,
+            Some(decline::v0_1::PayloadCode::DocumentMismatch),
+            Some("The name on your passport was spelled differently.".into()),
+            Utc::now(),
+        )
+        .unwrap();
+    let doc = wire::document(
+        VETTING_DECLINE_TYPE,
+        &vetter.did,
+        &applicant.did,
+        wire::new_id(),
+        &body,
+    )
+    .unwrap();
+    let message = signed(doc, &vetter.secret).await;
+    applicant.receive(&message, &vetter.did).await;
+    let request = applicant.application().requests.last().unwrap().clone();
+    match request.state {
+        RequestState::Declined { code, message } => {
+            assert_eq!(code, Some(decline::v0_1::PayloadCode::DocumentMismatch));
+            assert_eq!(
+                message.as_deref(),
+                Some("The name on your passport was spelled differently.")
+            );
+        }
+        other => panic!("declined, with its reason: {other:?}"),
+    }
+}

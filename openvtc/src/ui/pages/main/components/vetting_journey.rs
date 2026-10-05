@@ -279,7 +279,7 @@ fn vetter_part(
         if ending.is_some() {
             "Esc: back to your desk"
         } else {
-            "Esc: back to your desk (nothing is lost)   x: decline (no reason is sent)"
+            "Esc: back to your desk (nothing is lost)   x: decline (a reason is optional)"
         },
         dim(),
     )));

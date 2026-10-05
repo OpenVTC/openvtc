@@ -685,7 +685,12 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             lines.push(hint("Enter: open  Esc: cancel"));
         }
         VettingMode::Attest { request_id, form } => attest(lines, v, request_id, form),
-        VettingMode::ConfirmDecline { request_id } => {
+        VettingMode::ConfirmDecline {
+            request_id,
+            reason_index,
+            message,
+            field: focused,
+        } => {
             lines.push(heading("Decline this request?"));
             lines.push(Line::from(""));
             if let Some(row) = v.desk.iter().find(|d| &d.request_id == request_id) {
@@ -700,13 +705,32 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             }
             lines.push(Line::from(""));
             lines.push(hint(
-                "You never have to give a reason, and the community is not told.",
+                "You never have to give a reason. Whatever you choose goes to the applicant only —",
+            ));
+            lines.push(hint("the community is not told you declined, or why."));
+            lines.push(Line::from(""));
+            use crate::state_handler::main_page::content::DECLINE_REASONS;
+            let (_, words) = DECLINE_REASONS[(*reason_index).min(DECLINE_REASONS.len() - 1)];
+            lines.push(field("Reason", words.to_string(), *focused == 0, false));
+            lines.push(field(
+                "Note",
+                if message.is_empty() && *focused != 1 {
+                    "optional — a word for them, at most 500 characters".to_string()
+                } else {
+                    message.clone()
+                },
+                *focused == 1,
+                true,
             ));
             lines.push(Line::from(""));
             lines.push(
-                Line::from("y: decline    n: keep it")
-                    .fg(COLOR_ORANGE)
-                    .bold(),
+                Line::from(if *focused == 1 {
+                    "Enter: decline    ↑/↓: field    Esc: keep it"
+                } else {
+                    "y or Enter: decline    n or Esc: keep it    ↑/↓: field"
+                })
+                .fg(COLOR_ORANGE)
+                .bold(),
             );
         }
         VettingMode::ConfirmAbandon { application_id } => {
