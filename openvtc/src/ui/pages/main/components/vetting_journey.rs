@@ -385,6 +385,8 @@ mod tests {
                 applicant_name: None,
                 community: "did:example:community".into(),
                 pcs_zkp: false,
+                pcs_tokens: None,
+                pcs_events: false,
                 state: "session open".into(),
                 stage: DeskStage::Session,
                 method: Some("in person".into()),

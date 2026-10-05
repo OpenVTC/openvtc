@@ -1560,6 +1560,22 @@ fn standing(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         // applicant cannot find a vetter the community will not list.
         spans.push(Span::styled(format!("   {}", row.profile), dim()));
         lines.push(Line::from(spans));
+        // Under PCS ZKP an attestation spends a token: what this vetter holds there, and when
+        // that changes, is part of whether it can vet at all.
+        if let Some(tokens) = &row.tokens {
+            lines.push(Line::from(vec![
+                Span::styled("             ", label()),
+                crate::ui::badges::pcs_zkp(),
+                Span::styled(
+                    format!("  {tokens}"),
+                    if row.tokens_warn {
+                        Style::new().fg(COLOR_ORANGE)
+                    } else {
+                        dim()
+                    },
+                ),
+            ]));
+        }
     }
     lines.push(Line::from(""));
 }
@@ -1767,10 +1783,15 @@ fn hidden_vetting(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize
     }
     if let Some(owed) = &row.enrolment_owed {
         lines.push(
-            Line::from(format!(
-                "  {:<20}{owed} — enrolling on the next pass",
-                "Owed"
-            ))
+            Line::from(if row.enrolment_lost {
+                format!(
+                    "  {:<20}{owed} — the community enrolled you, but its answer was lost; it \
+                     issues one credential per label, so this label is not asked for again",
+                    "Owed"
+                )
+            } else {
+                format!("  {:<20}{owed} — enrolling on the next pass", "Owed")
+            })
             .fg(COLOR_ORANGE),
         );
     }
@@ -1816,9 +1837,16 @@ fn hidden_vetting(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize
             .unwrap_or_else(|| "waiting for this month's labels".into()),
     ));
     if let Some(until) = &row.waiting_until {
-        lines.push(hint(
-            "  The community's clock is behind this one: the tick asked for had not begun there.",
-        ));
+        lines.push(hint(if row.unanswered > 0 {
+            format!(
+                "  The community has not answered {} question{} in a row; each wait is longer.",
+                row.unanswered,
+                if row.unanswered == 1 { "" } else { "s" }
+            )
+        } else {
+            "  The community's clock is behind this one: the tick asked for had not begun there."
+                .to_string()
+        }));
         lines.push(hint(format!("  Asking again after {until}.")));
     }
     lines.push(hint(
@@ -1956,6 +1984,19 @@ fn attest(lines: &mut Vec<Line<'static>>, v: &VettingState, request_id: &str, fo
             ),
         ]
     }));
+    // Attesting under PCS ZKP spends a token; whether there is one is said before Enter, not
+    // after it.
+    if let Some(tokens) = &row.pcs_tokens {
+        lines.push(Line::from(vec![
+            Span::styled("  Tokens       ", label()),
+            Span::styled(tokens.clone(), value()),
+        ]));
+        if row.pcs_events {
+            lines.push(hint(
+                "  More tokens: e on the desk asks to vet at one of this community's events.",
+            ));
+        }
+    }
     lines.push(field(
         "I attest",
         format!("{}  sign this statement as me", tick(form.attested)),
@@ -2125,6 +2166,8 @@ mod desk_tests {
             grant: grant.to_string(),
             grant_warns: warns,
             profile: profile.to_string(),
+            tokens: None,
+            tokens_warn: false,
         }
     }
 
@@ -2270,6 +2313,8 @@ mod desk_tests {
                 applicant_name: None,
                 community: "did:example:community".into(),
                 pcs_zkp: false,
+                pcs_tokens: None,
+                pcs_events: false,
                 state: "accepted".into(),
                 stage: DeskStage::Accepted,
                 method: None,
@@ -2310,6 +2355,8 @@ mod desk_tests {
                     applicant_name: None,
                     community: "did:example:community".into(),
                     pcs_zkp,
+                    pcs_tokens: None,
+                    pcs_events: false,
                     state: "card verified".into(),
                     stage: DeskStage::Card,
                     method: Some("in person".into()),
@@ -2332,6 +2379,59 @@ mod desk_tests {
         assert!(hidden.contains("PCS ZKP"), "{hidden}");
         assert!(hidden.contains("never learns it was you"), "{hidden}");
         assert!(!hidden.contains("VETTERS NAMED"), "{hidden}");
+    }
+
+    /// Under PCS ZKP the desk header and the attest form say how many tokens the vetter holds
+    /// and when that changes, and the form says how to get more where the community runs
+    /// events.
+    #[test]
+    fn the_token_balance_is_shown_on_the_desk_and_the_attest_form() {
+        use crate::state_handler::main_page::content::{AttestForm, DeskStage, VettingMode};
+        let header = drawn(&VettingState {
+            tab: VettingTab::Desk,
+            standing: vec![VetterStandingRow {
+                tokens: Some("0 tokens — next drip due Wed 07 Oct 00:00 UTC".into()),
+                tokens_warn: true,
+                ..standing_row("first-vtc", "until 2027-01-18", false, "listed")
+            }]
+            .into(),
+            ..VettingState::default()
+        });
+        assert!(
+            header.contains("0 tokens — next drip due Wed 07 Oct 00:00 UTC"),
+            "{header}"
+        );
+        let form = drawn(&VettingState {
+            tab: VettingTab::Desk,
+            mode: VettingMode::Attest {
+                request_id: "r1".into(),
+                form: AttestForm::default(),
+            },
+            desk: vec![DeskRow {
+                request_id: "r1".into(),
+                applicant: "did:example:applicant".into(),
+                applicant_name: None,
+                community: "first-vtc".into(),
+                pcs_zkp: true,
+                pcs_tokens: Some("3 tokens — next drip due Wed 07 Oct 00:00 UTC".into()),
+                pcs_events: true,
+                state: "card verified".into(),
+                stage: DeskStage::Card,
+                method: Some("in person".into()),
+                match_code: Some("ABCD-EFGH".into()),
+                claims: Vec::new(),
+                required_claims: Vec::new(),
+                message: None,
+            }]
+            .into(),
+            ..VettingState::default()
+        });
+        assert!(form.contains("Tokens"), "{form}");
+        assert!(form.contains("3 tokens — next drip due"), "{form}");
+        assert!(
+            form.contains("e on the desk asks to vet at one of"),
+            "{form}"
+        );
     }
 
     /// History holds what you signed (to withdraw) and the declines as dates

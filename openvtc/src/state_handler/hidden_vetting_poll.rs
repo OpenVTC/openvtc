@@ -53,6 +53,29 @@ impl HiddenVettingPacer {
         self.next.is_none_or(|next| now >= next)
     }
 
+    /// Bring the next pass forward to a retry set since it was scheduled.
+    ///
+    /// A question the community left unanswered sets [`HiddenVetterState::retry_at`] between
+    /// passes, when the scheduled pass may be an hour away; without this the backoff would be
+    /// the hour, whatever it said. Only a retry still to come counts, so a retry that has
+    /// passed — and was acted on — never makes every check due again.
+    ///
+    /// [`HiddenVetterState::retry_at`]: openvtc_core::vetting::book::HiddenVetterState::retry_at
+    pub(crate) fn pull_forward(&mut self, book: &VettingBook, now: DateTime<Utc>) {
+        let Some(next) = self.next else {
+            return;
+        };
+        if let Some(retry) = book
+            .hidden_vetter
+            .iter()
+            .filter_map(|h| h.retry_at)
+            .filter(|t| *t > now && *t < next)
+            .min()
+        {
+            self.next = Some(retry);
+        }
+    }
+
     /// Set the next pass from what `book` holds now. Returns it.
     pub(crate) fn schedule<R: Rng>(
         &mut self,
@@ -197,6 +220,36 @@ mod tests {
         let now = at(20, 9, 30);
         book.hidden_vetter[0].rekeyed_at = Some(now);
         assert_eq!(next_pass(&book, now, |_| Duration::zero()), now + MAX_GAP);
+    }
+
+    /// A silence noticed between passes brings the next pass forward to its retry, and a
+    /// retry that has already passed does not keep the pacer due.
+    #[test]
+    fn an_unanswered_question_brings_the_next_pass_forward() {
+        let mut book = book(None);
+        let now = at(20, 9, 0);
+        let mut pacer = HiddenVettingPacer::default();
+        let next = pacer.schedule(&book, now, &mut rand::thread_rng());
+        assert!(
+            next > now + Duration::minutes(2),
+            "an hour away, or the next window"
+        );
+
+        let later = now + Duration::seconds(30);
+        let retry = book.hidden_vetter[0].unanswered_at(later);
+        assert_eq!(retry, later + Duration::minutes(1), "the first backoff");
+        pacer.pull_forward(&book, later);
+        assert!(!pacer.due(later));
+        assert!(
+            pacer.due(retry),
+            "due at the retry, not at the scheduled pass"
+        );
+
+        // The pass ran and rescheduled; the past retry pulls nothing.
+        let after = retry + Duration::seconds(1);
+        pacer.schedule(&book, after, &mut rand::thread_rng());
+        pacer.pull_forward(&book, after);
+        assert!(!pacer.due(after));
     }
 
     #[test]

@@ -179,6 +179,33 @@ pub struct VetterGrant {
     pub credential: serde_json::Value,
 }
 
+/// The most enrolment requests whose blinding state is kept for a late answer.
+pub const MAX_PENDING_ENROLMENTS: usize = 8;
+
+/// An enrolment request on its way, with what opens its answer. Memory only.
+#[derive(Clone)]
+pub struct PendingEnrolment {
+    /// The request's document id — what the answer threads on.
+    pub document_id: String,
+    /// The community asked.
+    pub community: String,
+    /// The persona that asked.
+    pub persona: PersonaId,
+    /// The blinding state that unblinds the answer.
+    pub blinding: std::sync::Arc<openvtc_vetting_pcs::vetter::EnrolmentBlinding>,
+}
+
+impl std::fmt::Debug for PendingEnrolment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The blinding state is a secret of the round trip; it is never printed.
+        f.debug_struct("PendingEnrolment")
+            .field("document_id", &self.document_id)
+            .field("community", &self.community)
+            .field("persona", &self.persona)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Our hidden-vetting engine for one community and persona.
 ///
 /// A vetter holds one of these per community that runs hidden vetting: the key its identifier
@@ -245,10 +272,67 @@ pub struct HiddenVetterState {
     /// vetter is told, once, and decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rekeyed_at: Option<DateTime<Utc>>,
+    /// Questions of ours (enrolment or a draw) in a row that the community did not answer within
+    /// the reply window. Drives the backoff of [`Self::retry_at`] (R1.4) and how the desk says
+    /// it; any answer from the community — served or refused — resets it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unanswered: u32,
+    /// A class period (`2026-10`) the community enrolled us under whose answer this client could
+    /// not open — it arrived after a restart, or was lost. The community issues one credential
+    /// per member per label and refuses a second (`alreadyEnrolled`), so asking again under the
+    /// same label only collects refusals: the schedule stops asking until the label moves on, and
+    /// the desk says why. Cleared by an enrolment that is opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lost_enrolment: Option<String>,
 }
 
 fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+/// The first wait after a hidden-vetting question goes unanswered. Doubled for each silence in
+/// a row, up to [`HIDDEN_RETRY_CAP`].
+pub const HIDDEN_RETRY_FIRST: chrono::Duration = chrono::Duration::minutes(1);
+
+/// The longest a vetter waits between asks of a community that does not answer — the same hour
+/// the schedule re-reads every community on anyway.
+pub const HIDDEN_RETRY_CAP: chrono::Duration = chrono::Duration::hours(1);
+
+/// How long to wait after the `n`th unanswered question in a row (`n` ≥ 1): 1, 2, 4, … minutes,
+/// capped at [`HIDDEN_RETRY_CAP`].
+#[must_use]
+pub fn hidden_retry_after(n: u32) -> chrono::Duration {
+    let doublings = n.saturating_sub(1).min(16);
+    (HIDDEN_RETRY_FIRST * 2_i32.pow(doublings)).min(HIDDEN_RETRY_CAP)
+}
+
+/// Where a vetter stands for attesting under one community's hidden vetting, in the terms the
+/// desk, the attest form and the ticket gate all say it: what it holds, and when that changes.
+///
+/// Read from the engine and the book as they are — nothing here is estimated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenOutlook {
+    /// Tokens held under a label the community still accepts — what an attestation can spend.
+    pub usable: usize,
+    /// Whether we hold a credential under the community's current class label.
+    pub enrolled: bool,
+    /// The community enrolled us under the current label and the answer could not be opened
+    /// ([`HiddenVetterState::lost_enrolment`]).
+    pub enrolment_lost: bool,
+    /// An enrolment or a draw is on its way and not yet answered.
+    pub asking: bool,
+    /// Questions in a row the community did not answer.
+    pub unanswered: u32,
+    /// Not before this does the schedule ask again (`tickNotYet`, or a silence's backoff).
+    pub retry_at: Option<DateTime<Utc>>,
+    /// When the next tick window this vetter draws under opens.
+    pub next_window: Option<DateTime<Utc>>,
+    /// The community publishes keys other than the ones we enrolled under; drawing stopped.
+    pub rekeyed: bool,
+    /// The community runs events a vetter can ask to vet at, for more tokens (`e`).
+    pub events_offered: bool,
+    /// The community's last refusal, until something succeeds.
+    pub last_refusal: Option<HiddenRefusal>,
 }
 
 /// One served tick of the drip.
@@ -325,6 +409,40 @@ impl HiddenVetterState {
             last_refusal: None,
             retry_at: None,
             rekeyed_at: None,
+            unanswered: 0,
+            lost_enrolment: None,
+        }
+    }
+
+    /// The period this vetter owes an enrolment under now, if any: the community's current class
+    /// label, when no credential under it is held.
+    #[must_use]
+    pub fn enrolment_owed(&self) -> Option<String> {
+        let period = self
+            .params
+            .vetter_labels
+            .first()?
+            .trim_start_matches("vetter/")
+            .to_string();
+        (!self.snapshot.credentials.contains_key(&period)).then_some(period)
+    }
+
+    /// The community did not answer a question of ours in time: wait before asking again, a
+    /// little longer each time it stays silent (R1.4), and never longer than
+    /// [`HIDDEN_RETRY_CAP`]. Returns when the next ask is due.
+    pub fn unanswered_at(&mut self, now: DateTime<Utc>) -> DateTime<Utc> {
+        self.unanswered = self.unanswered.saturating_add(1);
+        let retry = now + hidden_retry_after(self.unanswered);
+        self.retry_at = Some(retry);
+        retry
+    }
+
+    /// The community answered a question of ours, served or refused: it is there, so the next
+    /// silence starts the backoff again from the bottom.
+    pub fn answered(&mut self) {
+        if self.unanswered > 0 {
+            self.unanswered = 0;
+            self.retry_at = None;
         }
     }
 
@@ -397,6 +515,9 @@ impl HiddenVetterState {
             match due(&self.params, Some(&self.snapshot), &ticks, &events, now) {
                 Due::Nothing => break,
                 // Enrolment blocks every draw behind it, so it is the whole plan.
+                // Except under a label whose answer we lost: the community enrolled us and
+                // refuses a second credential under it, so asking again collects only refusals.
+                Due::Enrol { period } if self.lost_enrolment.as_deref() == Some(&period) => break,
                 enrol @ Due::Enrol { .. } => {
                     plan.owed.push(enrol);
                     break;
@@ -811,8 +932,13 @@ pub struct VettingBook {
     /// useless without the community's answer and dangerous to keep past it, so an answer that
     /// arrives after a restart is dropped and the vetter asks again. That costs nothing — a
     /// request whose answer was never unblinded issued no credential anyone will count.
+    ///
+    /// Kept per request, and **past the reply window**: a community that answers late has still
+    /// enrolled us, and refuses every second request under the same label, so an answer dropped
+    /// because the question timed out locks the vetter out until the label moves on. Bounded to
+    /// [`MAX_PENDING_ENROLMENTS`]; the oldest goes first.
     #[serde(skip)]
-    pub pending_enrolment: Option<std::sync::Arc<openvtc_vetting_pcs::vetter::EnrolmentBlinding>>,
+    pub pending_enrolments: Vec<PendingEnrolment>,
     /// The drip ticks asked for and not yet answered, by request document id: `(label, tick)`.
     ///
     /// Memory only, like [`Self::queries`]: it is how a refusal, which names neither, finds the
@@ -905,6 +1031,58 @@ impl VettingBook {
             .find(|h| h.community == community && h.persona == persona)
     }
 
+    /// Keep the blinding state of an enrolment request until its answer arrives — even late.
+    pub fn remember_enrolment(&mut self, pending: PendingEnrolment) {
+        self.pending_enrolments
+            .retain(|p| p.document_id != pending.document_id);
+        self.pending_enrolments.push(pending);
+        let excess = self
+            .pending_enrolments
+            .len()
+            .saturating_sub(MAX_PENDING_ENROLMENTS);
+        self.pending_enrolments.drain(..excess);
+    }
+
+    /// The enrolment request `thread` names, sent to `community`, with what opens its answer.
+    pub fn take_enrolment(&mut self, community: &str, thread: &str) -> Option<PendingEnrolment> {
+        let i = self
+            .pending_enrolments
+            .iter()
+            .position(|p| p.document_id == thread && p.community == community)?;
+        Some(self.pending_enrolments.remove(i))
+    }
+
+    /// Where `persona` stands for attesting under `community`'s hidden vetting, or `None` when
+    /// it holds no engine there.
+    #[must_use]
+    pub fn hidden_outlook(
+        &self,
+        community: &str,
+        persona: PersonaId,
+        now: DateTime<Utc>,
+    ) -> Option<HiddenOutlook> {
+        use super::queries::QueryKind;
+        let held = self.hidden_vetter(community, persona)?;
+        let owed = held.enrolment_owed();
+        let events = held.event_draws(now.date_naive());
+        Some(HiddenOutlook {
+            usable: held.tokens().1,
+            enrolled: owed.is_none(),
+            enrolment_lost: owed.is_some() && owed == held.lost_enrolment,
+            asking: self.queries.iter().any(|q| {
+                q.community == community
+                    && q.persona == persona
+                    && matches!(q.kind, QueryKind::PcsRoot | QueryKind::PcsTokens)
+            }),
+            unanswered: held.unanswered,
+            retry_at: held.retry_at.filter(|t| *t > now),
+            next_window: super::hidden::next_window(&held.params, &events, now),
+            rekeyed: held.rekeyed_at.is_some(),
+            events_offered: !held.params.events.is_empty(),
+            last_refusal: held.last_refusal.clone(),
+        })
+    }
+
     /// The same, to write.
     pub fn hidden_vetter_mut(
         &mut self,
@@ -988,11 +1166,7 @@ impl VettingBook {
 
         let state = self
             .hidden_vetter_mut(&entry.community, entry.persona)
-            .ok_or_else(|| {
-                VetterError::Hidden(super::hidden::HiddenError::Unreadable(
-                    "this persona holds no hidden-vetting credential for the community".into(),
-                ))
-            })?;
+            .ok_or(VetterError::Hidden(super::hidden::HiddenError::NotEnrolled))?;
         let params = state.params.clone();
         let wire = super::hidden::attest(
             &entry.community,

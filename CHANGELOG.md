@@ -66,11 +66,27 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Breaking
 
+- **`openvtc_core::vetting::VettingBook::pending_enrolment` is now
+  `pending_enrolments`** (one per request, see `remember_enrolment` /
+  `take_enrolment`). `hidden::HiddenError` has `NotEnrolled` and `NoToken`;
+  `inbound::Notice` has `HiddenEnrolmentLost`; `HiddenVetterState` has
+  `unanswered` and `lost_enrolment`.
+
 - **`openvtc_core::join::JoinPresentation` has a `registry_consent` field.**
   A struct literal must now set it; `JoinPresentation::from(vp)` sets it to
   `false`, which is what every join sent before.
 
 ### Added
+
+- **Your PCS ZKP token balance, where you vet.** The desk header shows, for each
+  community that hides its vetters, the tokens you hold and when the next drip
+  is due — or that a request is on its way, unanswered, or refused — and warns
+  when your live tickets admit more requests than you can attest. The attest
+  form shows it beside the PCS ZKP line, with `e` (vet at an event) where the
+  community runs events.
+- **No ticket you cannot honour.** A new ticket for a community that hides its
+  vetters is refused while you hold no token (or no credential) there, with when
+  that changes: it would only bring requests you could not attest.
 
 - **Named vetting is marked as a disclosure, PCS ZKP as protected — for both
   sides.** A community whose statements name their vetters now shows an orange
@@ -181,6 +197,35 @@ are marked wherever they apply. The detailed entries follow the summary below.
   community session but a persona listener connected — an applicant being
   vetted — the top bar reads "No community yet · persona online" rather than
   "No active community", so it is clear their vetters' messages get through.
+
+- **A vetter hears the community's answers to hidden vetting — and can attest.**
+  Every answer to enrolment, the token drip, event mode and the submission
+  challenge (`trusttasks.org/spec/vtc/vetting/…#response`) was dropped before
+  the vetting router saw it: the router only claimed `spec/vetting/…`. So the
+  community enrolled the vetter, the client reported "No answer … about your
+  hidden-vetting credential within 30 seconds", and every later attempt was
+  refused `alreadyEnrolled` — one credential per member per label — leaving the
+  vetter with no credential and no token for the rest of the month. Those
+  answers now reach their handlers.
+- **A late enrolment or draw answer is still taken.** The blinding state of an
+  enrolment request is kept (in memory) past the 30-second reply window, and a
+  draw's answer is taken while the wallet still holds its serials, so a slow
+  community no longer costs the vetter its one credential for the label, or a
+  tick's tokens. A freshly enrolled vetter draws the ticks already owed at once,
+  not at the next hourly pass.
+- **An unanswered enrolment or draw is asked again, backed off.** 1, 2, 4 …
+  minutes, never more than an hour, and the line says when ("Asking again at
+  15:31 UTC") instead of "Try again later" with nothing scheduled.
+- **A lost enrolment stops the asking.** When the community has enrolled a
+  vetter under a label and this client cannot open the answer (a restart in
+  between), or it refuses `alreadyEnrolled`, the vetter is told it can attest
+  from the community's next label, and the schedule stops collecting the same
+  refusal every pass.
+- **"Cannot attest" says why, and how long.** Having no vetting token, or no
+  credential, was reported as "this community's `org.openvtc.hidden-vetting`
+  parameters could not be read: vetter is at capacity; next free token from
+  tick 0". It now says which, and when that changes ("0 tokens — next drip due
+  Wed 07 Oct 00:00 UTC"), and that the request stays open.
 
 - **A join refused over its zero-knowledge proof's challenge ends, and says
   why, instead of staying "Pending".** A community that hides its vetters

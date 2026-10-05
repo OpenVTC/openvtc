@@ -25,7 +25,9 @@ use openvtc_core::vetting::applicant::{
     Application, ChosenFace, GrantStatus, NextStep, RequestDraft, RequestState, SentCard,
     VetterEligibility,
 };
-use openvtc_core::vetting::book::{Adopted, FALLBACK_REQUIRED_CLAIMS, HiddenVetterState};
+use openvtc_core::vetting::book::{
+    Adopted, FALLBACK_REQUIRED_CLAIMS, HiddenOutlook, HiddenVetterState,
+};
 use openvtc_core::vetting::queries::{
     CommunityAnswer, CommunityQuery, QUERY_TIMEOUT, QueryKind, refusal_words, request_refusal_words,
 };
@@ -119,6 +121,127 @@ fn profile_standing(state: Option<&openvtc_core::vetting::registry::ProfileState
     }
 }
 
+/// A moment in words, as near as the reader needs it: the time alone today, the day and time
+/// otherwise. UTC, as every hidden-vetting time on the page is.
+pub(crate) fn when_words(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    if at.date_naive() == now.date_naive() {
+        at.format("%H:%M UTC").to_string()
+    } else {
+        at.format("%a %d %b %H:%M UTC").to_string()
+    }
+}
+
+/// Where a vetter stands for PCS ZKP attesting at one community, in one line: the tokens it
+/// holds and when that changes — "3 tokens — next drip due Wed 07 Oct 00:00 UTC", "0 tokens —
+/// the community has not answered; asking again at 15:31 UTC". From the engine and the book as
+/// they are; nothing is estimated.
+pub(crate) fn outlook_words(o: &HiddenOutlook, now: DateTime<Utc>) -> String {
+    let tokens = |n: usize| format!("{n} token{}", if n == 1 { "" } else { "s" });
+    if o.rekeyed {
+        return format!(
+            "{} — drawing stopped: the community publishes new keys (h for details)",
+            tokens(o.usable)
+        );
+    }
+    if !o.enrolled {
+        return if o.enrolment_lost {
+            "not enrolled — the community enrolled you this month but the answer was lost; it \
+             issues one credential per label, so you can attest from its next label (an admin \
+             can publish one)"
+                .to_string()
+        } else if o.asking {
+            "not enrolled yet — asking the community now".to_string()
+        } else if let Some(at) = o.retry_at.filter(|_| o.unanswered > 0) {
+            format!(
+                "not enrolled yet — the community has not answered; asking again at {}",
+                when_words(at, now)
+            )
+        } else if let Some(r) = &o.last_refusal {
+            format!(
+                "not enrolled — refused: {}",
+                openvtc_core::vetting::hidden::refusal_words(&sanitize_display(&r.code, 120))
+            )
+        } else {
+            "not enrolled yet — enrolling on the next pass".to_string()
+        };
+    }
+    let next = if o.asking {
+        "drawing now".to_string()
+    } else if let Some(at) = o.retry_at {
+        if o.unanswered > 0 {
+            format!(
+                "the community has not answered; asking again at {}",
+                when_words(at, now)
+            )
+        } else {
+            format!("asking again at {}", when_words(at, now))
+        }
+    } else if let Some(at) = o.next_window {
+        format!("next drip due {}", when_words(at, now))
+    } else {
+        "no drip scheduled — the community publishes no label for this month yet".to_string()
+    };
+    format!("{} — {next}", tokens(o.usable))
+}
+
+/// Whether `community` hides its vetters, as far as this book knows: a criterion that says so,
+/// parameters it publishes, or an engine we already hold for it.
+pub(crate) fn hides_vetters(book: &VettingBook, community: &str) -> bool {
+    book.hidden_vetting(community)
+        || book.hidden_published.contains_key(community)
+        || book.hidden_vetter.iter().any(|h| h.community == community)
+}
+
+/// Where `persona` stands for PCS ZKP attesting at `community`, in words, and whether that
+/// means it cannot attest there now. `None` when the community names its vetters.
+pub(crate) fn pcs_tokens_line(
+    book: &VettingBook,
+    community: &str,
+    persona: PersonaId,
+    now: DateTime<Utc>,
+) -> Option<(String, bool)> {
+    if !hides_vetters(book, community) {
+        return None;
+    }
+    Some(match book.hidden_outlook(community, persona, now) {
+        Some(o) => (outlook_words(&o, now), !o.enrolled || o.usable == 0),
+        // The community hides its vetters and we hold no engine yet: the next pass makes one
+        // and enrols.
+        None => (
+            "not enrolled yet — enrolling on the next pass".to_string(),
+            true,
+        ),
+    })
+}
+
+/// The desk header's token line: [`pcs_tokens_line`], and a warning when the live tickets out
+/// for this community admit more requests than the tokens held can attest.
+fn standing_tokens(
+    book: &VettingBook,
+    community: &str,
+    persona: PersonaId,
+    now: DateTime<Utc>,
+) -> Option<(String, bool)> {
+    let (mut line, mut warn) = pcs_tokens_line(book, community, persona, now)?;
+    let admits: u32 = book
+        .tickets
+        .iter()
+        .filter(|t| t.community == community && t.persona == persona && t.is_live(now))
+        .map(|t| t.uses_left)
+        .sum();
+    let usable = book
+        .hidden_outlook(community, persona, now)
+        .map_or(0, |o| o.usable);
+    if admits as usize > usable {
+        line.push_str(&format!(
+            " — your live tickets admit {admits} request{}, more than you can attest now",
+            if admits == 1 { "" } else { "s" }
+        ));
+        warn = true;
+    }
+    Some((line, warn))
+}
+
 /// A tick length in words: "3 days", "12 hours", "1 day 6 hours".
 fn tick_length_words(length: chrono::Duration) -> String {
     let days = length.num_days();
@@ -183,6 +306,12 @@ fn hidden_row(
         community,
         accent,
         enrolled,
+        enrolment_lost: enrolment_owed
+            .as_deref()
+            .map(|l| l.trim_start_matches("vetter/"))
+            == held.lost_enrolment.as_deref()
+            && held.lost_enrolment.is_some(),
+        unanswered: held.unanswered,
         enrolment_owed,
         tokens_held,
         tokens_free,
@@ -331,6 +460,9 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
             grant: grant_standing(&s, now),
             grant_warns: !s.live || s.expiring,
             profile: profile_standing(s.profile.as_ref()),
+            tokens: standing_tokens(book, &s.community, s.persona, now).map(|(l, _)| l),
+            tokens_warn: standing_tokens(book, &s.community, s.persona, now)
+                .is_some_and(|(_, warn)| warn),
         })
         .collect();
 
@@ -569,6 +701,11 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                 applicant_name: name(&entry.applicant),
                 community: entry.community.clone(),
                 pcs_zkp: book.hidden_vetting(&entry.community),
+                pcs_tokens: pcs_tokens_line(book, &entry.community, entry.persona, now)
+                    .map(|(line, _)| line),
+                pcs_events: book
+                    .hidden_vetter(&entry.community, entry.persona)
+                    .is_some_and(|h| !h.params.events.is_empty()),
                 state: state.to_string(),
                 stage,
                 method: session.map(|s| method_label(s.method).to_string()),
@@ -2870,11 +3007,38 @@ async fn send_card(
     spawn_job(ctx, job.run());
 }
 
+/// Why no ticket should be issued for `membership` now, if there is a reason: the community
+/// proves vetting with a PCS zero-knowledge proof, and this vetter cannot attest there yet — no
+/// credential, or no token. A ticket brings requests, and every one would end at "cannot
+/// attest".
+fn ticket_refusal(
+    book: &VettingBook,
+    membership: &VettingMembership,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let (line, true) = pcs_tokens_line(book, &membership.community, membership.persona, now)?
+    else {
+        return None;
+    };
+    Some(format!(
+        "No ticket issued: {} proves vetting with a PCS zero-knowledge proof and you cannot \
+         attest there yet — {line}. A ticket now would bring requests you could not attest.",
+        membership.name
+    ))
+}
+
 fn issue_ticket(ctx: &mut ActionCtx<'_>, membership_index: usize, uses_index: usize) {
     let Some(membership) = page(ctx).memberships.get(membership_index).cloned() else {
         return;
     };
     let uses = VETTING_TICKET_USES[uses_index.min(VETTING_TICKET_USES.len() - 1)];
+    // A ticket brings requests. Under PCS ZKP each attestation spends a token, so a vetter
+    // that holds none would hand out a way to reach it that it cannot honour — every request
+    // would end at "cannot attest". Refused here, with when that changes.
+    if let Some(refusal) = ticket_refusal(&ctx.config.private.vetting, &membership, Utc::now()) {
+        page(ctx).mode = VettingMode::List;
+        return status(ctx, refusal);
+    }
     let ticket = Ticket::issue(
         &membership.community,
         membership.persona,
@@ -3336,10 +3500,17 @@ async fn hidden_vetting_send(
                 Ok(d) => d,
                 Err(e) => return abandon(ctx, "Could not ask to enrol", e),
             };
-            // Held for this round trip only: an answer that arrives after a restart finds no
-            // blinding state and the client asks again, which costs nothing.
-            ctx.config.private.vetting.pending_enrolment = Some(std::sync::Arc::new(blinding));
+            // Held in memory, and past the reply window: a late answer is still this vetter's
+            // one credential under the label (`VettingBook::pending_enrolments`).
             let document_id = document.id.clone();
+            ctx.config.private.vetting.remember_enrolment(
+                openvtc_core::vetting::book::PendingEnrolment {
+                    document_id: document_id.clone(),
+                    community: community.to_string(),
+                    persona: state.persona,
+                    blinding: std::sync::Arc::new(blinding),
+                },
+            );
             ctx.config.private.vetting.ask(CommunityQuery {
                 document_id: document_id.clone(),
                 community: community.to_string(),
@@ -3439,7 +3610,38 @@ async fn attest_hidden(
             &mut rng,
         ) {
             Ok(wire) => wire,
-            Err(e) => return status(ctx, format!("Cannot attest: {e}")),
+            Err(e) => {
+                // No credential or no token is a state the vetter waits out: say how long,
+                // from the schedule, rather than the engine's bare refusal.
+                use openvtc_core::vetting::{hidden::HiddenError, vetter::VetterError};
+                let waiting = matches!(
+                    e,
+                    VetterError::Hidden(HiddenError::NoToken | HiddenError::NotEnrolled)
+                );
+                let outlook = ctx
+                    .config
+                    .private
+                    .vetting
+                    .hidden_outlook(&entry.community, entry.persona, now)
+                    .filter(|_| waiting);
+                return status(
+                    ctx,
+                    match outlook {
+                        Some(o) => format!(
+                            "Cannot attest yet: {e}. Nothing was sent; the request stays open. \
+                             {}: {}.{}",
+                            community_display(ctx.config, &entry.community),
+                            outlook_words(&o, now),
+                            if o.events_offered {
+                                " Vetting at one of its events (e) draws more."
+                            } else {
+                                ""
+                            }
+                        ),
+                        None => format!("Cannot attest: {e}"),
+                    },
+                );
+            }
         }
     };
 
@@ -4891,12 +5093,33 @@ pub(crate) fn expire_queries(state: &mut State, config: &mut Config, now: chrono
             continue;
         }
         let name = community_display(config, &query.community);
-        let words = format!(
-            "No answer from {name} about {} within {} seconds — its service may be offline. Try \
-             again later.",
-            query.kind.describe(),
-            QUERY_TIMEOUT.num_seconds()
-        );
+        // Enrolment and the drip are asked again on their own, backed off (R1.4), so the line
+        // says when rather than sending the vetter to try something they never started. An
+        // answer that arrives late is still taken.
+        let retry = matches!(query.kind, QueryKind::PcsRoot | QueryKind::PcsTokens)
+            .then(|| {
+                config
+                    .private
+                    .vetting
+                    .hidden_vetter_mut(&query.community, query.persona)
+                    .map(|held| held.unanswered_at(now))
+            })
+            .flatten();
+        let words = match retry {
+            Some(at) => format!(
+                "No answer from {name} about {} within {} seconds — its service may be offline \
+                 or slow. Asking again at {}; an answer that arrives before then is still taken.",
+                query.kind.describe(),
+                QUERY_TIMEOUT.num_seconds(),
+                when_words(at, now)
+            ),
+            None => format!(
+                "No answer from {name} about {} within {} seconds — its service may be offline. \
+                 Try again later.",
+                query.kind.describe(),
+                QUERY_TIMEOUT.num_seconds()
+            ),
+        };
         let v = &mut state.main_page.content_panel.vetting;
         directory_failed(v, &query.document_id, &words);
         v.status_message = Some(words.clone());
@@ -5478,6 +5701,130 @@ mod tests {
     /// An application made as a persona this account no longer holds is never
     /// offered as the one to search a community's directory as: it cannot sign
     /// the request, and offering it made every search fail.
+    fn hidden_vetter_book(tokens: usize, enrolled: bool) -> (VettingBook, PersonaId) {
+        use openvtc_core::vetting::hidden::HiddenParams;
+        let persona = PersonaId::new();
+        let params = HiddenParams {
+            suite: openvtc_core::vetting::hidden::SUITE.into(),
+            helper_key: "zHelper".into(),
+            token_key: "zToken".into(),
+            vetter_labels: vec!["vetter/2026-10".into()],
+            token_labels: vec!["token/2026-10".into()],
+            drip_per_tick: 10,
+            events: Vec::new(),
+            tick_length: None,
+        };
+        let mut held = HiddenVetterState::new(
+            "did:web:first-vtc.example",
+            persona,
+            params,
+            serde_json::from_value(serde_json::json!({ "member": "m", "usk": "", "id": "" }))
+                .unwrap(),
+        );
+        let snapshot = &mut held.snapshot;
+        if enrolled {
+            snapshot
+                .credentials
+                .insert("2026-10".into(), "zOctober".into());
+        }
+        for i in 0..tokens {
+            snapshot.tokens.push(
+                serde_json::from_value(serde_json::json!({
+                    "label": "token/2026-10",
+                    "serial": format!("z{i}"),
+                    "mintedTick": 0,
+                    "credential": "z"
+                }))
+                .unwrap(),
+            );
+        }
+        let mut book = VettingBook::default();
+        book.hidden_vetter.push(held);
+        (book, persona)
+    }
+
+    /// The token line says what is held and when that changes, in time — never a raw tick.
+    #[test]
+    fn the_token_line_says_what_is_held_and_when_it_changes() {
+        let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, 15, 14, 0).unwrap();
+        let community = "did:web:first-vtc.example";
+        let (mut book, persona) = hidden_vetter_book(0, true);
+        let (line, warn) = pcs_tokens_line(&book, community, persona, now).unwrap();
+        assert!(warn);
+        assert_eq!(line, "0 tokens — next drip due Wed 07 Oct 00:00 UTC");
+
+        book.hidden_vetter[0].unanswered_at(now);
+        let (line, _) = pcs_tokens_line(&book, community, persona, now).unwrap();
+        assert_eq!(
+            line,
+            "0 tokens — the community has not answered; asking again at 15:15 UTC"
+        );
+
+        let (book, persona) = hidden_vetter_book(3, true);
+        let (line, warn) = pcs_tokens_line(&book, community, persona, now).unwrap();
+        assert!(!warn);
+        assert!(line.starts_with("3 tokens — next drip due"), "{line}");
+
+        let (book, persona) = hidden_vetter_book(0, false);
+        let (line, warn) = pcs_tokens_line(&book, community, persona, now).unwrap();
+        assert!(warn);
+        assert_eq!(line, "not enrolled yet — enrolling on the next pass");
+
+        // A community that names its vetters has no token line at all.
+        assert!(pcs_tokens_line(&book, "did:web:other.example", persona, now).is_none());
+    }
+
+    /// A vetter that cannot attest under PCS ZKP is not given a ticket that would bring requests
+    /// it cannot honour; one with tokens is.
+    #[test]
+    fn no_ticket_is_issued_for_requests_that_cannot_be_attested() {
+        let now = Utc::now();
+        let membership = |persona| VettingMembership {
+            community: "did:web:first-vtc.example".into(),
+            name: "first-vtc".into(),
+            persona,
+            accent: None,
+        };
+        let (book, persona) = hidden_vetter_book(0, true);
+        let refusal = ticket_refusal(&book, &membership(persona), now).expect("refused");
+        assert!(refusal.contains("first-vtc"), "{refusal}");
+        assert!(refusal.contains("0 tokens — next drip due"), "{refusal}");
+        let (book, persona) = hidden_vetter_book(0, false);
+        assert!(ticket_refusal(&book, &membership(persona), now).is_some());
+        let (book, persona) = hidden_vetter_book(2, true);
+        assert!(ticket_refusal(&book, &membership(persona), now).is_none());
+        // A named community is never gated on tokens.
+        let named = VettingMembership {
+            community: "did:web:named.example".into(),
+            ..membership(persona)
+        };
+        assert!(ticket_refusal(&book, &named, now).is_none());
+    }
+
+    /// The desk header warns when the live tickets out admit more requests than the tokens held.
+    #[test]
+    fn the_desk_header_warns_of_tickets_beyond_the_tokens_held() {
+        let now = Utc::now();
+        let (mut book, persona) = hidden_vetter_book(2, true);
+        let community = "did:web:first-vtc.example";
+        let (line, warn) = standing_tokens(&book, community, persona, now).unwrap();
+        assert!(!warn, "{line}");
+        book.tickets.push(Ticket::issue(
+            community,
+            persona,
+            vec![],
+            5,
+            DEFAULT_VALIDITY,
+            now,
+        ));
+        let (line, warn) = standing_tokens(&book, community, persona, now).unwrap();
+        assert!(warn);
+        assert!(
+            line.contains("your live tickets admit 5 requests"),
+            "{line}"
+        );
+    }
+
     #[test]
     fn the_directory_never_searches_as_a_persona_that_is_gone() {
         let mut config = test_config();

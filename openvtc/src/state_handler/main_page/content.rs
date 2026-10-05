@@ -2210,6 +2210,12 @@ pub struct HiddenVettingRow {
     /// The class label the community enrols under now, when we hold no
     /// credential under it yet.
     pub enrolment_owed: Option<String>,
+    /// The community enrolled us under the owed label and the answer could not be opened; it
+    /// issues one credential per label, so the schedule does not ask again under it.
+    pub enrolment_lost: bool,
+    /// Questions in a row the community left unanswered; `waiting_until` is then the backoff,
+    /// not a `tickNotYet` wait.
+    pub unanswered: u32,
     /// Tokens held.
     pub tokens_held: usize,
     /// Of those, the ones under a label the community still accepts.
@@ -2293,6 +2299,12 @@ pub struct VetterStandingRow {
     /// What the community holds of our profile — "listed", "not listed",
     /// "sent, no answer yet", "refused: notEligible", or that we sent none.
     pub profile: String,
+    /// Where we stand for PCS ZKP attesting there, when the community hides its vetters: the
+    /// tokens held and when that changes ("3 tokens — next drip due …"). `None` for a community
+    /// that names its vetters.
+    pub tokens: Option<String>,
+    /// Whether [`tokens`](Self::tokens) means this vetter cannot attest there now.
+    pub tokens_warn: bool,
 }
 
 /// One of the holder's pool attributes, as a row to tick.
@@ -2905,6 +2917,11 @@ pub struct DeskRow {
     /// The community proves vetting with a PCS zero-knowledge proof, so an
     /// attestation for it is counted without naming this vetter.
     pub pcs_zkp: bool,
+    /// For a PCS ZKP community, where this vetter stands for attesting there: the tokens held
+    /// and when that changes. Shown on the attest form beside the PCS ZKP line.
+    pub pcs_tokens: Option<String>,
+    /// The community runs events a vetter can ask to vet at for more tokens (`e`).
+    pub pcs_events: bool,
     pub state: String,
     pub stage: DeskStage,
     pub method: Option<String>,
