@@ -327,6 +327,9 @@ pub enum PersonaAction {
 /// Forms are driven generically — the focused field takes text, cycles through
 /// choices, or ticks — so the page needs no variant per field.
 pub enum VettingAction {
+    /// Re-read the requirements of every community we vet for, and run the
+    /// hidden-vetting schedule (enrol, drip). Run on a timer as well as by key.
+    RefreshVetterSide,
     /// Open the highlighted application or desk request as a journey.
     OpenJourney,
     /// Close the journey, back to the list it was opened from.

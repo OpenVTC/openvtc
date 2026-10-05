@@ -159,6 +159,16 @@ are marked wherever they apply. The detailed entries follow the summary below.
   applications (their DID is gone); and applications left behind by earlier
   deletions are cleared at start-up.
 
+- **A vetter learns that a community turned on PCS ZKP vetting, and never signs
+  a named statement for it.** The vetter's client re-read a community's
+  requirements — and enrolled in its hidden vetting — only when someone pressed
+  `m` on an application, which a vetter-only member never has. So after a
+  community turned PCS ZKP on, its vetters still showed "VETTERS NAMED" and
+  would have signed named statements the applicant's hidden-vetting
+  application cannot use. The vetter side now refreshes at start-up and hourly,
+  and attesting for a community that hides its vetters before enrolment is
+  refused with what is happening, and starts the enrolment.
+
 - **A join reads the community's current requirements every time.** Once a
   community's manifest had been read, the join page used the stored copy for
   good — so a community that turned on PCS ZKP vetting, changed what it asks,

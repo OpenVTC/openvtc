@@ -1975,6 +1975,32 @@ impl StateHandler {
                         save.mark_dirty();
                         state.main_page.sync_from_config(&config);
                     }
+                    // The vetter side, on the same clock: re-read what each
+                    // community we vet for requires, and enrol in or drip its
+                    // hidden vetting. A community that turns PCS ZKP on says so
+                    // only in its manifest, and a vetter who never re-reads it
+                    // would go on signing named statements.
+                    {
+                        let mut ctx = runtime_actions::ActionCtx {
+                            state: &mut state,
+                            config: &mut config,
+                            save: &mut save,
+                            in_flight: &mut in_flight,
+                            dispatch_tx: &dispatch_tx,
+                            tdk: &tdk,
+                            admin_vta: admin_vta.as_ref(),
+                            didcomm_service: &didcomm_service,
+                            session_manager: &mut session_manager,
+                            ping_sent_at: &mut ping_sent_at,
+                            state_tx: &self.state_tx,
+                            profile: self.profile.as_str(),
+                        };
+                        vetting_actions::dispatch(
+                            &mut ctx,
+                            actions::VettingAction::RefreshVetterSide,
+                        )
+                        .await;
+                    }
                     // R-B-7: expire Pending joins unanswered for 7 days — or for
                     // the `decisionSla` a vetting community publishes — raising
                     // actions-required, and tear down each one's now-dead session
