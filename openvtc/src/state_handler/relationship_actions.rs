@@ -1085,6 +1085,22 @@ impl DidDeleteOutcome {
         for kid in &self.key_ids {
             config.key_info.remove(kid);
         }
+        // Its vetting applications go with it. Each names the DID that was just
+        // deleted — every card is signed by it, every statement vouches for it —
+        // so none can be carried on, presented, or searched from again. Left
+        // behind, they were still offered as the persona to search a community's
+        // vetter directory as, which then failed for want of that persona.
+        let applications = &mut config.private.vetting.applications;
+        let before = applications.len();
+        applications.retain(|a| a.persona != self.persona_id);
+        let dropped = before - applications.len();
+        if dropped > 0 {
+            state.main_page.log(format!(
+                "Dropped {dropped} vetting application{} made as that identity — its DID is gone, \
+                 so they could not be used again.",
+                if dropped == 1 { "" } else { "s" }
+            ));
+        }
         // R11: coalesced save (was inline `save_config`). Persisted by the
         // debounce arm, or by the Exit force-flush if the user quits first.
         save.mark_dirty();

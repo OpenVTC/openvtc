@@ -221,25 +221,45 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
         })
         .collect();
 
-    // The directory is searched as a persona the community knows of: the
-    // application's join DID first, else the membership's.
+    // The directory is searched as a persona the community knows of: each
+    // application's own persona, then each membership's for a community with
+    // no application. One entry per application rather than per community, so
+    // a search started from an application goes out as that application's
+    // persona — not as whichever other application to the same community
+    // happened to be listed first. A persona this account no longer holds
+    // cannot sign the request, so it is never offered.
+    let available = |persona: &PersonaId| config.identities.contains_key(persona);
     let mut directory: Vec<DirectoryCommunity> = Vec::new();
-    for app in &book.applications {
-        if !directory.iter().any(|d| d.community == app.community) {
-            directory.push(DirectoryCommunity {
-                community: app.community.clone(),
-                name: community_name(&app.community)
-                    .unwrap_or_else(|| shorten_did(&app.community, 48)),
-                accent: accent(&app.community),
-                persona: app.persona,
-                application_id: Some(app.id.clone()),
-            });
-        }
+    let several = |community: &str| {
+        book.applications
+            .iter()
+            .filter(|a| a.community == community && available(&a.persona))
+            .count()
+            > 1
+    };
+    for app in book.applications.iter().filter(|a| available(&a.persona)) {
+        let community =
+            community_name(&app.community).unwrap_or_else(|| shorten_did(&app.community, 48));
+        directory.push(DirectoryCommunity {
+            // Two applications to one community are told apart by who asks.
+            name: if several(&app.community) {
+                format!(
+                    "{community} — as {}",
+                    sanitize_display(&config.persona_profile_label_for(app.persona), 48)
+                )
+            } else {
+                community
+            },
+            community: app.community.clone(),
+            accent: accent(&app.community),
+            persona: app.persona,
+            application_id: Some(app.id.clone()),
+        });
     }
     for m in config
         .account
         .memberships()
-        .filter(|m| m.status.is_active())
+        .filter(|m| m.status.is_active() && available(&m.persona_ref))
     {
         if !directory.iter().any(|d| d.community == m.vtc_did) {
             directory.push(DirectoryCommunity {
@@ -1743,15 +1763,23 @@ fn open_directory(ctx: &mut ActionCtx<'_>) {
              community first.",
         );
     }
+    // Opened from an application — the list, or its journey — the search
+    // starts as that application, by id: two applications to one community
+    // are two different personas asking.
     let from_application = (v.tab == VettingTab::Applications)
         .then(|| v.applications.get(v.selected))
         .flatten()
-        .map(|a| a.community.clone());
+        .map(|a| (a.id.clone(), a.community.clone()));
     let community_index = from_application
-        .and_then(|c| {
+        .and_then(|(id, community)| {
             v.directory_communities
                 .iter()
-                .position(|d| d.community == c)
+                .position(|d| d.application_id.as_deref() == Some(id.as_str()))
+                .or_else(|| {
+                    v.directory_communities
+                        .iter()
+                        .position(|d| d.community == community)
+                })
         })
         .unwrap_or(0);
     v.mode = VettingMode::Directory(Box::new(DirectoryView {
@@ -5161,6 +5189,29 @@ mod tests {
         );
     }
 
+    /// An application made as a persona this account no longer holds is never
+    /// offered as the one to search a community's directory as: it cannot sign
+    /// the request, and offering it made every search fail.
+    #[test]
+    fn the_directory_never_searches_as_a_persona_that_is_gone() {
+        let mut config = test_config();
+        let app = Application::new(
+            "did:web:vtc.example",
+            PersonaId::new(),
+            "did:key:zGone",
+            Utc::now(),
+        )
+        .unwrap();
+        config.private.vetting.applications.push(app);
+        let mut v = VettingState::default();
+        sync(&mut v, &config);
+        assert!(
+            v.directory_communities.is_empty(),
+            "a deleted persona's application is not a searcher: {:?}",
+            v.directory_communities
+        );
+    }
+
     /// The picker opens on the face already worn, and the page remembers it.
     #[test]
     fn the_face_picker_opens_on_the_worn_face() {
@@ -5424,8 +5475,27 @@ mod tests {
     /// The page lists what the book holds.
     #[test]
     fn sync_lists_applications_and_tickets() {
+        use affinidi_tdk::messaging::profiles::{ATMProfile, ATMProfileInner};
         let mut config = test_config();
         let persona = PersonaId::new();
+        // A persona this account holds: only one of those can sign a search.
+        config.identities.insert(
+            persona,
+            openvtc_core::identity::IdentityContext {
+                persona_id: persona,
+                did: "did:key:zA".to_string(),
+                document: serde_json::from_value(serde_json::json!({ "id": "did:key:zA" }))
+                    .expect("minimal DID document"),
+                profile: std::sync::Arc::new(ATMProfile {
+                    inner: std::sync::Arc::new(ATMProfileInner {
+                        did: "did:key:zA".to_string(),
+                        alias: "did:key:zA".to_string(),
+                        mediator: std::sync::Arc::new(None),
+                    }),
+                }),
+                mediator_did: None,
+            },
+        );
         config
             .private
             .vetting
