@@ -135,6 +135,12 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **A finished join leaves the Applications list.** An application stayed
+  listed after its persona was admitted, beside the joins still under way. It
+  now leaves the list once its persona is an active member, comes back if that
+  membership ends (so a rejoin as the same persona presents its statements),
+  and is cleared once nothing in it could be presented again.
+
 - **Quitting from a join page no longer freezes the app.** F10 on a join page
   (the vetting page "Choose how to join" among them) stopped the app's
   background side but never told the screen, which only closes when told: it

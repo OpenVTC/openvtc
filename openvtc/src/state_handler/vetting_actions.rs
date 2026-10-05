@@ -281,9 +281,19 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
         .chain(std::iter::once(documentation::NONE.to_string()))
         .collect();
 
+    // A join that is done is not an application in progress: the list is the
+    // joins still under way. A finished one stays in the book — leaving and
+    // rejoining as that persona presents its statements again — and reappears
+    // here if the membership ends.
+    let joined = |app: &&openvtc_core::vetting::applicant::Application| {
+        config.account.memberships().any(|m| {
+            m.status.is_active() && m.vtc_did == app.community && m.persona_ref == app.persona
+        })
+    };
     vetting.applications = book
         .applications
         .iter()
+        .filter(|app| !joined(app))
         .map(|app| {
             let required = required_claim_types(app);
             let identity = required

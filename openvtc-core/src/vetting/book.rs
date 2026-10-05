@@ -1302,6 +1302,29 @@ impl VettingBook {
         Ok(self.applications.last_mut().expect("just pushed"))
     }
 
+    /// Drop the applications whose join is done and that have nothing left to
+    /// present: `joined` says the application's persona is an active member of
+    /// its community, and nothing it holds could be presented again — every
+    /// named statement past its `validUntil`, and no hidden-vetting attestation
+    /// held. Returns how many went.
+    ///
+    /// Kept until then on purpose. Leaving and rejoining as the same persona
+    /// presents the statements it still holds (one vetting, not two), so an
+    /// application is only noise once that can no longer happen.
+    pub fn retire_joined(
+        &mut self,
+        joined: impl Fn(&Application) -> bool,
+        now: DateTime<Utc>,
+    ) -> usize {
+        let before = self.applications.len();
+        self.applications.retain(|a| {
+            !(joined(a)
+                && a.presentable_statements(now).is_empty()
+                && !a.holds_hidden_attestation())
+        });
+        before - self.applications.len()
+    }
+
     /// Abandon an application, returning it.
     ///
     /// Vetting is client-side until the join is submitted: nothing was sent to
@@ -1435,6 +1458,55 @@ impl DeskState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A finished join keeps its application while a rejoin could still use
+    /// it, and lets it go once nothing in it could be presented again.
+    #[test]
+    fn a_joined_application_goes_once_nothing_in_it_could_be_presented() {
+        use super::super::applicant::HeldStatement;
+        use vta_sdk::protocols::vetting::{VettingMethod, VettingRelationship};
+        let now = Utc::now();
+        let statement = |valid_until| HeldStatement {
+            id: "s1".into(),
+            vetter: "did:key:zVetter".into(),
+            method: VettingMethod::InPerson,
+            declared_relationship: VettingRelationship::None,
+            document_classes: vec![],
+            claims_verified: vec!["name.legal".into()],
+            identity_commitment: "c".into(),
+            valid_from: now - Duration::days(1),
+            valid_until,
+            received_at: now - Duration::days(1),
+            credential: serde_json::json!({}),
+        };
+        let mut book = VettingBook::default();
+        let joined = PersonaId::new();
+        let other = PersonaId::new();
+        book.start_application("did:web:a", joined, "did:key:zA", now)
+            .unwrap();
+        book.start_application("did:web:b", joined, "did:key:zA", now)
+            .unwrap()
+            .statements
+            .push(statement(now + Duration::days(30)));
+        book.start_application("did:web:c", other, "did:key:zB", now)
+            .unwrap();
+        let member = |a: &Application| a.persona == joined;
+
+        // `a`: joined, nothing to present — goes. `b`: joined but its
+        // statement is still valid — a rejoin could use it, so it stays. `c`:
+        // not joined — an application in progress, untouched.
+        assert_eq!(book.retire_joined(member, now), 1);
+        let left: Vec<&str> = book
+            .applications
+            .iter()
+            .map(|a| a.community.as_str())
+            .collect();
+        assert_eq!(left, ["did:web:b", "did:web:c"]);
+
+        // Once `b`'s statement has expired, it goes too.
+        assert_eq!(book.retire_joined(member, now + Duration::days(31)), 1);
+        assert_eq!(book.applications.len(), 1);
+    }
 
     #[test]
     fn an_empty_book_is_not_written() {

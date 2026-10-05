@@ -1978,6 +1978,27 @@ impl StateHandler {
                             if orphaned == 1 { "" } else { "s" }
                         ));
                     }
+                    // Applications whose join is done and that hold nothing a
+                    // rejoin could present again (see `retire_joined`).
+                    let members: std::collections::HashSet<(String, openvtc_core::config::account::PersonaId)> =
+                        config
+                            .account
+                            .memberships()
+                            .filter(|m| m.status.is_active())
+                            .map(|m| (m.vtc_did.clone(), m.persona_ref))
+                            .collect();
+                    let retired = config.private.vetting.retire_joined(
+                        |a| members.contains(&(a.community.clone(), a.persona)),
+                        chrono::Utc::now(),
+                    );
+                    if retired > 0 {
+                        vetting_changed = true;
+                        state.main_page.log(format!(
+                            "Cleared {retired} finished vetting application{} — joined, and its \
+                             statements have expired.",
+                            if retired == 1 { "" } else { "s" }
+                        ));
+                    }
                     if vetting_changed {
                         save.mark_dirty();
                         state.main_page.sync_from_config(&config);
