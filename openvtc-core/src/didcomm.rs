@@ -219,6 +219,15 @@ const REBUILD_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs
 /// a rate that neither hammers the mediator nor gives up on it.
 const REBUILD_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The longest [`add_listener`] spends bringing one listener's mediator session
+/// up — resolve, authenticate, websocket — before giving up (R1.2). Comfortably
+/// above the SDK's own 10 s websocket-ready wait, so that wait reports its own
+/// error first; this catches whatever around it does not answer at all.
+const LISTENER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a timed-out connect gets to close the session it half-opened.
+const LISTENER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How often the supervisor evaluates transports.
 const SUPERVISOR_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -995,18 +1004,39 @@ pub async fn add_listener(service: &Messaging, spec: &ListenerSpec) -> Result<()
     )
     .await
     .map_err(|e| fail(format!("ATM init: {e}")))?;
-    let atm_profile = ATMProfile::from_tdk_profile(&atm, &tdk_profile)
-        .await
-        .map_err(|e| fail(format!("profile: {e}")))?;
-    let profile = atm
-        .profile_add(&atm_profile, true)
-        .await
-        .map_err(|e| fail(format!("mediator connect: {e}")))?;
-    let transport: Arc<dyn MessageTransport> = Arc::new(
-        DidCommTransport::new(atm.clone(), profile.clone())
+    // The network leg — resolving the mediator, authenticating, opening the
+    // websocket — is bounded here as a whole (R1.2). The SDK bounds its own
+    // websocket-ready wait, but not everything around it, and a caller such as
+    // the join flow awaits this on the path its keys are read from.
+    let connect = async {
+        let atm_profile = ATMProfile::from_tdk_profile(&atm, &tdk_profile)
             .await
-            .map_err(|e| fail(format!("transport bind: {e}")))?,
-    );
+            .map_err(|e| fail(format!("profile: {e}")))?;
+        let profile = atm
+            .profile_add(&atm_profile, true)
+            .await
+            .map_err(|e| fail(format!("mediator connect: {e}")))?;
+        let transport: Arc<dyn MessageTransport> = Arc::new(
+            DidCommTransport::new(atm.clone(), profile.clone())
+                .await
+                .map_err(|e| fail(format!("transport bind: {e}")))?,
+        );
+        Ok::<_, MessagingError>((profile, transport))
+    };
+    let (profile, transport) = match tokio::time::timeout(LISTENER_CONNECT_TIMEOUT, connect).await {
+        Ok(connected) => connected?,
+        Err(_) => {
+            // Abandoning the future is not enough: the ATM has no `Drop`, and a
+            // half-opened session reconnects on its own and holds the mediator's
+            // one-socket-per-DID slot (see `quiesce_wire`). Shut it down, bounded
+            // like everything else, before saying it timed out.
+            let _ = tokio::time::timeout(LISTENER_SHUTDOWN_TIMEOUT, atm.graceful_shutdown()).await;
+            return Err(fail(format!(
+                "mediator connect timed out after {}s — the mediator did not answer",
+                LISTENER_CONNECT_TIMEOUT.as_secs()
+            )));
+        }
+    };
 
     service
         .inner

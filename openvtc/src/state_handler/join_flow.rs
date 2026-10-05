@@ -2224,8 +2224,20 @@ impl StateHandler {
                     // no-op in State A, which has no service to install into —
                     // that loop restarts into the full pipeline after a join
                     // and brings it up there.
-                    start_persona_listener(self, state, messaging, config, tdk, persona_id, &did)
-                        .await;
+                    //
+                    // This loop reads no keys while it waits, so the wait is
+                    // bounded (`add_listener` gives up on a mediator that does
+                    // not answer) and raced against the interrupt, which Ctrl-C
+                    // reaches without going through this loop (R1.2, R15). The
+                    // overlay is drawn first, so the wait shows as one.
+                    let _ = self.state_tx.send(state.clone());
+                    let online = start_persona_listener(
+                        self, state, messaging, config, tdk, persona_id, &did,
+                    );
+                    tokio::select! {
+                        _ = online => {}
+                        Ok(interrupted) = interrupt_rx.recv() => return Some(interrupted),
+                    }
                 }
                 Err(e) => {
                     // The DID exists at the VTA but is not in the config. Say so

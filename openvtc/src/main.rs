@@ -18,6 +18,11 @@ use openvtc_core::{
 #[cfg(feature = "openpgp-card")]
 use secrecy::SecretString;
 use std::env;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 #[cfg(unix)]
 use tokio::signal::unix::signal;
 use tokio::sync::broadcast;
@@ -679,12 +684,15 @@ async fn main() -> Result<()> {
     let (terminator, mut interrupt_rx) = create_termination();
     let (mut state, state_rx) = StateHandler::new(&profile, starting_mode);
     state.set_invitation_credential(invitation_credential);
-    let (ui_manager, action_rx) = UiManager::new(theme_watcher);
+    let (ui_manager, action_rx) = UiManager::new(theme_watcher, terminator.clone());
 
-    tokio::try_join!(
-        state.main_loop(terminator, action_rx, interrupt_rx.resubscribe()),
+    run_session(
+        state.main_loop(terminator.clone(), action_rx, interrupt_rx.resubscribe()),
         ui_manager.main_loop(state_rx, interrupt_rx.resubscribe()),
-    )?;
+        terminator,
+        SHUTDOWN_GRACE,
+    )
+    .await?;
 
     match interrupt_rx.recv().await {
         Ok(reason) => match reason {
@@ -720,18 +728,103 @@ pub enum Interrupted {
 #[derive(Debug, Clone)]
 pub struct Terminator {
     interrupt_tx: broadcast::Sender<Interrupted>,
+    /// Whether any clone has asked the application to stop. Shared, so
+    /// [`Terminator::ensure_terminated`] can tell a session that already said
+    /// why it ended from one that just stopped.
+    fired: Arc<AtomicBool>,
 }
 
 impl Terminator {
     pub fn new(interrupt_tx: broadcast::Sender<Interrupted>) -> Self {
-        Self { interrupt_tx }
+        Self {
+            interrupt_tx,
+            fired: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn terminate(&mut self, interrupted: Interrupted) -> anyhow::Result<()> {
+        self.fired.store(true, Ordering::SeqCst);
         self.interrupt_tx.send(interrupted)?;
 
         Ok(())
     }
+
+    /// Ask the application to stop with `interrupted`, unless something already
+    /// has. Used where a part of the session has ended on its own and everything
+    /// else must follow it down, without overwriting the reason the first stop
+    /// gave (the interrupt channel holds one message).
+    pub fn ensure_terminated(&mut self, interrupted: Interrupted) {
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            let _ = self.interrupt_tx.send(interrupted);
+        }
+    }
+}
+
+/// How long the state handler has to finish its own shutdown — the final config
+/// save, closing the messaging runtime and the VTA session — once the screen
+/// has closed. Past this the process exits without it (R1.2): a shutdown that
+/// waits on a service that never answers must not leave someone at a blank
+/// terminal with only `kill` left.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// Run the state handler and the UI together until both have stopped.
+///
+/// The UI only leaves its loop on an interrupt, and every key it reads is
+/// handed to the state handler. So once the handler has stopped, a UI still
+/// running is a screen that reads keys nobody acts on — F10, Esc, everything —
+/// and only `kill` ends it. The handler's own exits are each meant to fire the
+/// terminator first, but one that forgot (the join flow's F10 did) froze the
+/// whole application. Rather than rely on every exit path remembering, the
+/// session fires the terminator itself whenever the handler stops, however it
+/// stopped.
+///
+/// The other direction is bounded too: once the UI has gone (an interrupt, a
+/// Ctrl-C), the handler gets `grace` to finish, and the session ends with an
+/// error naming the stall rather than waiting on it forever.
+async fn run_session<H, U>(
+    handler: H,
+    ui: U,
+    mut terminator: Terminator,
+    grace: Duration,
+) -> Result<()>
+where
+    H: Future<Output = Result<Interrupted>>,
+    U: Future<Output = Result<Interrupted>>,
+{
+    let handler = async move {
+        let result = handler.await;
+        terminator.ensure_terminated(match &result {
+            Ok(interrupted) => interrupted.clone(),
+            Err(e) => Interrupted::SystemError(format!("{e:#}")),
+        });
+        result
+    };
+    tokio::pin!(handler);
+    tokio::pin!(ui);
+
+    let mut handler_result = None;
+    let ui_result = tokio::select! {
+        result = &mut ui => result,
+        result = &mut handler => {
+            handler_result = Some(result);
+            (&mut ui).await
+        }
+    };
+    let handler_result = match handler_result {
+        Some(result) => result,
+        None => match tokio::time::timeout(grace, &mut handler).await {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "the screen closed but the session did not finish shutting down within {}s \
+                 (it may be waiting on the VTA or the mediator); exiting without it — the \
+                 last configuration change may not have been saved",
+                grace.as_secs()
+            )),
+        },
+    };
+    ui_result?;
+    handler_result?;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -873,6 +966,110 @@ fn load_fast(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in for `UiManager::main_loop`: like it, it leaves only on an
+    /// interrupt.
+    async fn ui_until_interrupted(
+        mut interrupt_rx: broadcast::Receiver<Interrupted>,
+    ) -> Result<Interrupted> {
+        loop {
+            match interrupt_rx.recv().await {
+                Ok(interrupted) => return Ok(interrupted),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => {
+                    anyhow::bail!("interrupt channel closed")
+                }
+            }
+        }
+    }
+
+    fn termination() -> (Terminator, broadcast::Receiver<Interrupted>) {
+        let (tx, rx) = broadcast::channel(1);
+        (Terminator::new(tx), rx)
+    }
+
+    /// The join-page freeze: the state handler stopped (F10 on a join page)
+    /// without firing the terminator, and the UI — which only stops on an
+    /// interrupt — stayed up forever reading keys nobody acted on. With the
+    /// handler and UI joined by `try_join!` this never finished.
+    #[tokio::test]
+    async fn the_screen_never_outlives_a_handler_that_stopped_without_saying_so() {
+        let (terminator, rx) = termination();
+        let ui = ui_until_interrupted(rx.resubscribe());
+        // Returns as the join flow's F10 did: an outcome, but no interrupt.
+        let handler = async { Ok(Interrupted::UserInt) };
+
+        let session = run_session(handler, ui, terminator, Duration::from_secs(5));
+        tokio::time::timeout(Duration::from_secs(2), session)
+            .await
+            .expect("the session ends once the handler has stopped")
+            .expect("a clean stop is not an error");
+    }
+
+    /// A handler that failed takes the screen down with it (restoring the
+    /// terminal) instead of leaving it up, and the failure is what the session
+    /// reports.
+    #[tokio::test]
+    async fn a_failed_handler_closes_the_screen_and_reports_why() {
+        let (terminator, mut rx) = termination();
+        let ui = ui_until_interrupted(rx.resubscribe());
+        let handler = async { Err(anyhow::anyhow!("the TDK would not start")) };
+
+        let session = run_session(handler, ui, terminator, Duration::from_secs(5));
+        let result = tokio::time::timeout(Duration::from_secs(2), session)
+            .await
+            .expect("the session ends");
+        assert!(result.is_err(), "the handler's failure is reported");
+        match rx.recv().await {
+            Ok(Interrupted::SystemError(reason)) => {
+                assert!(reason.contains("TDK"), "{reason}");
+            }
+            other => panic!("the screen was told why it closed, got {other:?}"),
+        }
+    }
+
+    /// A handler that already said why it stopped keeps its reason: the
+    /// session does not overwrite it (the channel holds one message).
+    #[tokio::test]
+    async fn a_reason_already_given_is_not_overwritten() {
+        let (terminator, mut rx) = termination();
+        let ui = ui_until_interrupted(rx.resubscribe());
+        let mut inner = terminator.clone();
+        let handler = async move {
+            inner.terminate(Interrupted::OsSigInt)?;
+            Ok(Interrupted::OsSigInt)
+        };
+
+        run_session(handler, ui, terminator, Duration::from_secs(5))
+            .await
+            .expect("a clean stop");
+        assert!(matches!(rx.recv().await, Ok(Interrupted::OsSigInt)));
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing was sent after the handler's own reason"
+        );
+    }
+
+    /// The other direction: the screen closed (Ctrl-C) but the handler is
+    /// stuck on something that never answers. The session gives up after the
+    /// grace period, with an error that says so, rather than hanging.
+    #[tokio::test]
+    async fn a_stuck_handler_cannot_hold_the_process_after_the_screen_closed() {
+        let (mut terminator, rx) = termination();
+        let ui = ui_until_interrupted(rx.resubscribe());
+        let handler = std::future::pending::<Result<Interrupted>>();
+        terminator.ensure_terminated(Interrupted::UserInt);
+
+        let session = run_session(handler, ui, terminator, Duration::from_millis(100));
+        let result = tokio::time::timeout(Duration::from_secs(2), session)
+            .await
+            .expect("the grace period bounds the wait");
+        let error = result.expect_err("a handler that never finished is an error");
+        assert!(
+            error.to_string().contains("did not finish shutting down"),
+            "{error}"
+        );
+    }
 
     /// A private directory under the system temp dir, following the convention
     /// the rest of this crate's tests use.
