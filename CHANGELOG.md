@@ -196,6 +196,14 @@ are marked wherever they apply. The detailed entries follow the summary below.
   though the new join were already aimed somewhere. Each fresh entry now
   clears it; an invitation brought into the new join still fills it.
 
+- **A wrapped invitation paste is mended, not refused.** An invitation copied
+  out of a terminal that wrapped it carried a line break — with indentation or a
+  panel border — wherever the wrap fell, and a break inside a DID or proof value
+  failed the paste as "not valid JSON". The breaks inside strings are now taken
+  back out (with and without a space where the wrap fell) and borders stripped;
+  the mended invitation must still pass its proof, so a wrong guess is refused
+  rather than accepted.
+
 - **A ticket follows how the community vets now, not how it once did.** A
   community can turn PCS ZKP vetting on and off, but the client treated it as
   PCS ZKP forever once it held a hidden-vetting engine there, so a vetter at a

@@ -2844,41 +2844,86 @@ async fn load_pasted_vic(
     text: &str,
     vtc_did: Option<&str>,
 ) {
-    let Some(vic) = parse_pasted_vic(state, text) else {
-        return;
+    let candidates = match pasted_vic_candidates(text) {
+        Ok(candidates) => candidates,
+        Err(why) => {
+            state.join.messages.push(MessageType::Error(why));
+            return;
+        }
     };
     // Verified before anything is read out of it: the issuer it names is
     // shown as the community and prefills the DID input, and anyone can write
-    // an invitation naming any community.
-    if let Err(why) =
-        openvtc_core::join::verify_invitation_credential(&vic, resolver, Utc::now()).await
-    {
+    // an invitation naming any community. A paste mended from a wrapped
+    // terminal is held to the same proof — the mending is only a guess at
+    // what was copied, and the proof is what says whether it guessed right.
+    let mut first_failure = None;
+    for (mended, vic) in candidates {
+        match openvtc_core::join::verify_invitation_credential(&vic, resolver, Utc::now()).await {
+            Ok(()) => {
+                if mended {
+                    state.join.messages.push(MessageType::Info(
+                        "The pasted invitation had been broken across lines; it was \
+                         joined back together and its proof verified."
+                            .to_string(),
+                    ));
+                }
+                stash_verified_vic(state, vic, vtc_did);
+                return;
+            }
+            Err(why) => {
+                first_failure.get_or_insert(why);
+            }
+        }
+    }
+    if let Some(why) = first_failure {
         state.join.messages.push(MessageType::Error(format!(
             "Pasted invitation is not usable: {why}"
         )));
-        return;
     }
-    stash_verified_vic(state, vic, vtc_did);
+}
+
+/// Every reading of the pasted text that is a well-formed invitation, as given
+/// first and then mended from terminal line-wrapping
+/// ([`openvtc_core::join::pasted_json_readings`]), each flagged with whether it
+/// was mended. `Err` carries the reason for the reading as given when none is.
+fn pasted_vic_candidates(text: &str) -> Result<Vec<(bool, serde_json::Value)>, String> {
+    let mut candidates = Vec::new();
+    let mut first_error = None;
+    for (i, reading) in openvtc_core::join::pasted_json_readings(text)
+        .into_iter()
+        .enumerate()
+    {
+        let checked = serde_json::from_str::<serde_json::Value>(&reading)
+            .map_err(|e| format!("Pasted text is not valid JSON: {e}"))
+            .and_then(|vic| {
+                openvtc_core::join::validate_invitation_credential(&vic)
+                    .map(|()| vic)
+                    .map_err(|why| format!("Pasted invitation is not usable: {why}"))
+            });
+        match checked {
+            Ok(vic) => candidates.push((i > 0, vic)),
+            Err(why) => {
+                first_error.get_or_insert(why);
+            }
+        }
+    }
+    if candidates.is_empty() {
+        Err(first_error.unwrap_or_else(|| "Nothing was pasted.".to_string()))
+    } else {
+        Ok(candidates)
+    }
 }
 
 /// The pasted text as a complete invitation, or `None` with the reason pushed.
+#[cfg(test)]
 fn parse_pasted_vic(state: &mut State, text: &str) -> Option<serde_json::Value> {
-    let vic = match serde_json::from_str::<serde_json::Value>(text.trim()) {
-        Ok(v) => v,
-        Err(e) => {
-            state.join.messages.push(MessageType::Error(format!(
-                "Pasted text is not valid JSON: {e}"
-            )));
-            return None;
+    match pasted_vic_candidates(text) {
+        Ok(mut candidates) => Some(candidates.remove(0).1),
+        Err(why) => {
+            state.join.messages.push(MessageType::Error(why));
+            None
         }
-    };
-    if let Err(why) = openvtc_core::join::validate_invitation_credential(&vic) {
-        state.join.messages.push(MessageType::Error(format!(
-            "Pasted invitation is not usable: {why}"
-        )));
-        return None;
     }
-    Some(vic)
 }
 
 /// Keep an invitation whose proof has **already verified**
@@ -4962,6 +5007,22 @@ mod tests {
         if let Some(vic) = parse_pasted_vic(state, text) {
             stash_verified_vic(state, vic, vtc_did);
         }
+    }
+
+    /// An invitation copied out of a wrapped terminal — broken mid-string, with
+    /// panel borders — is mended back into one that parses and shape-checks.
+    #[test]
+    fn a_wrapped_invitation_paste_is_mended() {
+        let vic = serde_json::to_string(&pasteable_vic("urn:uuid:wrapped")).unwrap();
+        let wrapped: String = vic
+            .as_bytes()
+            .chunks(37)
+            .map(|c| format!("│ {} │\n", std::str::from_utf8(c).unwrap()))
+            .collect();
+        let mut state = State::default();
+        let got = parse_pasted_vic(&mut state, &wrapped);
+        assert!(state.join.messages.is_empty(), "{:?}", state.join.messages);
+        assert_eq!(got, Some(pasteable_vic("urn:uuid:wrapped")));
     }
 
     /// A paste whose proof does not verify is refused, and leaves no issuer
