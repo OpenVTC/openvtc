@@ -691,11 +691,10 @@ pub enum Action {
     JoinVettingJoin,
     /// Vetting page: ask the community for its requirements again.
     JoinVettingAskAgain,
-    /// Vetting page: move the highlight down the rows (`true` = next).
+    /// Vetting page: move the highlight down the rows (`true` = next). Every
+    /// row is a complete choice — way in and persona — so there is nothing to
+    /// cycle within one.
     JoinVettingRow(bool),
-    /// Vetting page: cycle the focused "applying as" choice (`true` =
-    /// forwards). Inert while the highlight is on a route.
-    JoinVettingCycle(bool),
 
     /// Issue this Active membership's reciprocal VMC (member → community) and
     /// send it to the community's VTC over DIDComm (`members/vmc/1.0`). Indexed

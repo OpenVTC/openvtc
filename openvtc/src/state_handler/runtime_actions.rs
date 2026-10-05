@@ -1280,7 +1280,6 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::JoinVettingJoin
         | Action::JoinVettingAskAgain
         | Action::JoinVettingRow(..)
-        | Action::JoinVettingCycle(..)
         | Action::JoinCancel
         | Action::JoinPasteVic(..)
         | Action::JoinClipboardFailed(..)
