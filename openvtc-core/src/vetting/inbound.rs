@@ -741,6 +741,7 @@ async fn take_request(
     let throttled = book.throttle != throttle;
     match intake {
         Intake::Accepted(body) => {
+            book.vetter_refresh_due = true;
             let request_id = body.request_id.as_str().to_string();
             let eligibility = grant.map(|g| EligibilityPresentation {
                 credentials: vec![g.credential],
@@ -1743,6 +1744,9 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
             if book.hidden_published.get(sender) != Some(&params) {
                 book.hidden_published.insert(sender.to_string(), params);
                 handled.changed = true;
+                // Enrol now rather than at the next sweep: until enrolled, a
+                // vetter for this community can only refuse to attest.
+                book.vetter_refresh_due = true;
             }
         }
         // It stopped publishing them, so stop believing it does. An engine we already hold is

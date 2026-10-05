@@ -404,6 +404,14 @@ struct MessagingInner {
     /// Listener ids with a pickup currently running, so a flapping socket
     /// cannot stack overlapping drains of the same mailbox.
     pickup_in_flight: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// One lock per listener id, held for the whole of an
+    /// [`add_listener`] connect. A listener is registered in `identities` only
+    /// once it has connected, so without this two callers adding the same
+    /// persona — a page that brings a new persona up in the background, then a
+    /// submit that wants it live — would each open a socket, and the mediator
+    /// allows one per DID. The second caller waits for the first instead, and
+    /// finds the listener already there.
+    connect_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The runtime's own long-lived tasks — dispatcher, connection poller,
     /// transport supervisor, pickup collector — aborted on
     /// [`Messaging::shutdown`].
@@ -454,6 +462,7 @@ impl Messaging {
             identities: tokio::sync::RwLock::new(HashMap::new()),
             event_tx: event_tx.clone(),
             pickup_in_flight: std::sync::Mutex::new(std::collections::HashSet::new()),
+            connect_locks: std::sync::Mutex::new(HashMap::new()),
             tasks: std::sync::Mutex::new(Vec::new()),
             tsp_store: crate::tsp_store::TspStoreHandle::new(),
             stranded: std::sync::Mutex::new(HashMap::new()),
@@ -974,6 +983,22 @@ pub async fn add_listener(service: &Messaging, spec: &ListenerSpec) -> Result<()
         listener_id: spec.id.clone(),
         reason,
     };
+
+    // One connect per listener at a time (see `MessagingInner::connect_locks`).
+    // A caller that waited here behind another for the same id finds it
+    // registered and is done: that is the outcome it asked for.
+    let lock = {
+        let mut locks = service
+            .inner
+            .connect_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(locks.entry(spec.id.clone()).or_default())
+    };
+    let _connecting = lock.lock().await;
+    if service.has_listener(&spec.id).await {
+        return Ok(());
+    }
 
     let tdk_profile = make_profile(
         &spec.did,

@@ -3232,8 +3232,20 @@ async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>) {
         let sent = Sent::Manifest {
             community: community.clone(),
         };
-        if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
-            tracing::warn!(community = %community, error = %e, "could not ask a community what it requires");
+        match sign_and_send(ctx, persona, document, sent).await {
+            Ok(()) => ctx.config.private.vetting.vetter_refresh_failures = 0,
+            Err(e) => {
+                tracing::warn!(community = %community, error = %e, "could not ask a community what it requires");
+                // Usually the listener is not up yet (start-up). Ask again on
+                // the five-second sweep, a bounded number of times.
+                let book = &mut ctx.config.private.vetting;
+                if book.vetter_refresh_failures
+                    < openvtc_core::vetting::book::VETTER_REFRESH_RETRIES
+                {
+                    book.vetter_refresh_failures += 1;
+                    book.vetter_refresh_due = true;
+                }
+            }
         }
     }
 }
@@ -4689,9 +4701,17 @@ fn sent_result(sent: Sent, error: Option<String>, config: &mut Config) -> (Strin
                 }
                 (format!("Could not send the withdrawal: {e}"), true)
             }
-            (Sent::Manifest { .. } | Sent::Session { .. }, Some(e)) => {
-                (format!("Could not send — try again: {e}"), false)
-            }
+            // Asked in the background (start-up, the hourly sweep, a request
+            // arriving), and asked again on its own — so the line says that,
+            // rather than "try again" to someone who never asked.
+            (Sent::Manifest { community }, Some(e)) => (
+                format!(
+                    "Could not yet ask {} what it requires ({e}) — asking again shortly.",
+                    shorten_did(&community, 48)
+                ),
+                false,
+            ),
+            (Sent::Session { .. }, Some(e)) => (format!("Could not send — try again: {e}"), false),
         }
     }
 }
