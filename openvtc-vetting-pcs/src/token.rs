@@ -375,6 +375,26 @@ struct Pending {
     rho: Fr,
 }
 
+/// One blinded serial asked for and not yet answered, as storage keeps it.
+///
+/// **SECRET.** The serial and its blinding factor are what unblind the community's answer into
+/// a token; a copy of them is a copy of the token the answer will make. They belong exactly
+/// where [`HeldToken`] belongs.
+///
+/// Kept per `(label, tick)` because a vetter can have several draws in flight at once — a
+/// catch-up after time away, or the ordinary label beside an event's — and an answer has to
+/// find the serials of its own request and no other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PendingToken {
+    pub label: String,
+    pub tick: u32,
+    /// SECRET.
+    pub serial: String,
+    /// SECRET.
+    pub rho: String,
+}
+
 /// One token the vetter holds, unspent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -433,6 +453,10 @@ impl TokenWallet {
     }
 
     /// Draw `r` serials for one tick and commit to them.
+    ///
+    /// Replaces whatever was in flight for the same `(label, tick)` — asking again is a new
+    /// request, and the old one's answer would not unblind under these serials — and leaves every
+    /// other draw in flight alone.
     pub fn prepare<R: RngCore + CryptoRng>(
         &mut self,
         tvk: &PSVerificationKey<E>,
@@ -442,7 +466,7 @@ impl TokenWallet {
         r: usize,
         rng: &mut R,
     ) -> Result<Vec<TokenRequest>, ProtoError> {
-        self.pending.clear();
+        self.forget(label, tick);
         let mut out = Vec::with_capacity(r);
         for i in 0..r {
             let (serial, rho) = (Fr::rand(rng), Fr::rand(rng));
@@ -464,13 +488,22 @@ impl TokenWallet {
         Ok(out)
     }
 
-    /// Unblind the answers and keep them, failing closed on any that does not verify.
+    /// Unblind the answers to the draw for `(label, tick)` and keep them, failing closed on any
+    /// that does not verify.
+    ///
+    /// The draw's serials are consumed whatever the outcome: an answer that does not unblind
+    /// will not unblind on a second try either.
     pub fn receive(
         &mut self,
         tvk: &PSVerificationKey<E>,
+        label: &str,
+        tick: u32,
         pres: &[PSPreCredential<E>],
     ) -> Result<(), ProtoError> {
-        let pending = std::mem::take(&mut self.pending);
+        let (pending, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending)
+            .into_iter()
+            .partition(|p| p.label == label && p.tick == tick);
+        self.pending = rest;
         if pending.len() != pres.len() {
             return Err(ProtoError::CountMismatch {
                 statements: pending.len(),
@@ -497,8 +530,59 @@ impl TokenWallet {
     }
 
     /// Tokens whose label is no longer live are gone (the FIFO of §5.1).
+    ///
+    /// So is any draw still in flight under one: its answer would make a token nobody accepts.
     pub fn expire(&mut self, live: &BTreeSet<String>) {
         self.held.retain(|h| live.contains(&h.label));
+        self.pending.retain(|p| live.contains(&p.label));
+    }
+
+    /// Drop the draw in flight for `(label, tick)`, if there is one: the community refused it,
+    /// or it is being asked again.
+    pub fn forget(&mut self, label: &str, tick: u32) {
+        self.pending
+            .retain(|p| !(p.label == label && p.tick == tick));
+    }
+
+    /// The draws in flight, as `(label, tick)`, in the order they were asked for.
+    #[must_use]
+    pub fn in_flight(&self) -> Vec<(String, u32)> {
+        let mut out: Vec<(String, u32)> = Vec::new();
+        for p in &self.pending {
+            if !out.iter().any(|(l, t)| *l == p.label && *t == p.tick) {
+                out.push((p.label.clone(), p.tick));
+            }
+        }
+        out
+    }
+
+    /// The draws in flight, for storage.
+    pub fn pending_snapshot(&self) -> Result<Vec<PendingToken>, ProtoError> {
+        self.pending
+            .iter()
+            .map(|p| {
+                Ok(PendingToken {
+                    label: p.label.clone(),
+                    tick: p.tick,
+                    serial: enc(&p.serial)?,
+                    rho: enc(&p.rho)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Put stored draws back in flight, so an answer that arrives after the engine was stored
+    /// and restored — which in openvtc is every answer — still unblinds.
+    pub fn restore_pending(&mut self, pending: &[PendingToken]) -> Result<(), ProtoError> {
+        for p in pending {
+            self.pending.push(Pending {
+                label: p.label.clone(),
+                tick: p.tick,
+                serial: dec::<Fr>(&p.serial)?,
+                rho: dec::<Fr>(&p.rho)?,
+            });
+        }
+        Ok(())
     }
 
     /// The unspent tokens, for storage. A reserved token stores as unreserved: a reservation

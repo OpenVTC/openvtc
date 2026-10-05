@@ -2864,6 +2864,7 @@ impl MainPage {
                 &vetting.mode,
                 VettingMode::Profile(form) if form.event.is_none() && form.event_index().is_some()
             );
+            let on_hidden = matches!(vetting.mode, VettingMode::HiddenVetting { .. });
             // Ctrl+V on the one field whose whole content is something pasted.
             // Ahead of the text handler, which would otherwise type a literal
             // `v` into the ticket link. Bracketed paste still works and is the
@@ -2905,6 +2906,7 @@ impl MainPage {
                     None if on_event && matches!(code, KeyCode::Char('x') | KeyCode::Delete) => {
                         Some(V::RemoveEvent)
                     }
+                    None if on_hidden && code == KeyCode::Char('d') => Some(V::DrawNow),
                     None if code == KeyCode::Char(' ') => Some(V::Toggle),
                     None => None,
                 },
@@ -3043,6 +3045,7 @@ impl MainPage {
             (VettingTab::Desk, KeyCode::Char('p')) => V::EditProfile,
             (VettingTab::Desk, KeyCode::Char('g')) => V::AskResend,
             (VettingTab::Desk, KeyCode::Char('e')) => V::AskEventMode,
+            (VettingTab::Desk, KeyCode::Char('h')) => V::OpenHiddenVetting,
             (VettingTab::Desk, KeyCode::Char('o')) if view == DeskView::Requests => V::OpenSession,
             (VettingTab::Desk, KeyCode::Enter) if view == DeskView::Requests => V::OpenJourney,
             (VettingTab::Desk, KeyCode::Char('a')) if view == DeskView::Requests => V::StartAttest,
@@ -4423,6 +4426,27 @@ mod key_handler_tests {
         assert!(matches!(vetting_action(&mut rx), V::RefreshRequirements));
         page.handle_key_event(press(KeyCode::Esc));
         assert!(matches!(vetting_action(&mut rx), V::CloseJourney));
+    }
+
+    /// `h` on the desk opens the hidden-vetting view, and `d` there draws now.
+    #[test]
+    fn vetting_desk_opens_hidden_vetting_on_h_and_draws_on_d() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::{VettingMode, VettingTab};
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s: &mut State| {
+            s.main_page.content_panel.vetting.tab = VettingTab::Desk;
+        });
+        page.handle_key_event(press(KeyCode::Char('h')));
+        assert!(matches!(vetting_action(&mut rx), V::OpenHiddenVetting));
+
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s: &mut State| {
+            s.main_page.content_panel.vetting.tab = VettingTab::Desk;
+            s.main_page.content_panel.vetting.mode = VettingMode::HiddenVetting { index: 0 };
+        });
+        page.handle_key_event(press(KeyCode::Char('d')));
+        assert!(matches!(vetting_action(&mut rx), V::DrawNow));
+        page.handle_key_event(press(KeyCode::Esc));
+        assert!(matches!(vetting_action(&mut rx), V::Back));
     }
 
     /// The card page is where a missing face shows up, so `f` chooses one    /// The card page is where a missing face shows up, so `f` chooses one

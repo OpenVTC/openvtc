@@ -642,15 +642,12 @@ async fn main() {
         // same statement draft the named path would sign, and then does not sign it: what comes
         // back carries a tag where an issuer would be.
         desk.hidden_vetter
-            .push(openvtc_core::vetting::book::HiddenVetterState {
-                community: community.clone(),
+            .push(openvtc_core::vetting::book::HiddenVetterState::new(
+                community.clone(),
                 persona,
-                params: params.clone(),
-                snapshot: engines[index].clone(),
-                last_ticks: std::collections::BTreeMap::new(),
-                last_drawn_at: None,
-                events: Vec::new(),
-            });
+                params.clone(),
+                engines[index].clone(),
+            ));
 
         // The statement the vetter would sign on the named path. Here it is the source of the
         // facts the attestation carries: the commitment and card digest are the ceremony's.

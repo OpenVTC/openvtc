@@ -49,6 +49,20 @@ pub enum QueryKind {
 }
 
 impl QueryKind {
+    /// Whether a refusal of this question with `code` is something to tell anyone about.
+    ///
+    /// Two drip refusals are not: `tickNotYet` says to wait for the window, and the schedule
+    /// does, and `alreadyServed` says the tick is done. Saying either in the status line would
+    /// read as a fault on every pass that raced a window.
+    #[must_use]
+    pub fn refusal_is_news(self, code: &str) -> bool {
+        !(self == QueryKind::PcsTokens
+            && matches!(
+                code,
+                super::hidden::TOKENS_TICK_NOT_YET | super::hidden::TOKENS_ALREADY_SERVED
+            ))
+    }
+
     /// What was asked for, as the end of "no answer about …".
     #[must_use]
     pub fn describe(self) -> &'static str {
@@ -210,6 +224,21 @@ pub fn request_refusal_words(code: &str) -> &'static str {
 /// "something broke there" call for different next steps (R6.4).
 #[must_use]
 pub fn refusal_words(kind: QueryKind, community: &str, code: &str) -> String {
+    if matches!(
+        kind,
+        QueryKind::PcsRoot
+            | QueryKind::PcsTokens
+            | QueryKind::PcsEventMode
+            | QueryKind::PcsChallenge
+    ) && !code.ends_with("permissionDenied")
+        && !code.ends_with("malformedRequest")
+    {
+        return format!(
+            "{community} refused {}: {}",
+            kind.describe(),
+            super::hidden::refusal_words(code)
+        );
+    }
     match code {
         VETTING_VETTER_PROFILE_ERR_NOT_ELIGIBLE => format!(
             "{community} did not accept your profile: it does not count you as an active member \

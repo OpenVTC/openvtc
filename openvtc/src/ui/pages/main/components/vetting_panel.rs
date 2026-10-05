@@ -73,6 +73,7 @@ pub fn mode_id(state: &VettingState) -> &'static str {
         (VettingMode::Profile(_), _) => "profile",
         (VettingMode::Resend { .. }, _) => "resend",
         (VettingMode::EventMode { .. }, _) => "event-mode",
+        (VettingMode::HiddenVetting { .. }, _) => "hidden-vetting",
         (VettingMode::SendCard { .. }, _) => "card",
         (VettingMode::NewTicket { .. }, _) => "new-ticket",
         (VettingMode::ShowTicket { .. }, _) => "show-ticket",
@@ -550,6 +551,7 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             lines.push(Line::from(""));
             lines.push(hint("Enter: ask  ←/→: choose  Esc: cancel"));
         }
+        VettingMode::HiddenVetting { index } => hidden_vetting(lines, v, *index),
         VettingMode::EventMode { index } => {
             lines.push(heading("Vet at an event"));
             lines.push(Line::from(""));
@@ -1694,8 +1696,159 @@ fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
 /// at an event belong to the whole desk — and `←/→` is how the views are
 /// reached at all.
 const DESK_KEYS: &str = "p: your vetter profile  g: ask for your vetter credential again  \
-                         e: vet at an event  \
+                         e: vet at an event  h: hidden vetting  \
                          ←/→: Requests · Tickets · Issued  Tab: Applications";
+
+/// The hidden-vetting view: one community at a time, everything the schedule
+/// is doing for it.
+///
+/// Every number here is the vetter's own. The community sees an enrolment
+/// and a draw on every tick, never how many tokens are held or were spent —
+/// which is why those are worth showing here and nowhere else.
+fn hidden_vetting(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize) {
+    lines.push(heading("Hidden vetting"));
+    lines.push(Line::from(""));
+    let Some(row) = v.hidden.get(index) else {
+        lines.push(hint("No community you vet for hides its vetters."));
+        lines.push(Line::from(""));
+        lines.push(hint("Esc: back"));
+        return;
+    };
+    let item = |name: &str, shown: String| {
+        Line::from(vec![
+            Span::styled(format!("  {name:<20}"), label()),
+            Span::styled(shown, value()),
+        ])
+    };
+    let mut title = vec![
+        Span::styled(format!("  {:<20}", "Community"), label()),
+        accent_swatch(row.accent),
+        Span::styled(row.community.clone(), value()),
+    ];
+    if v.hidden.len() > 1 {
+        title.push(Span::styled(
+            format!("   {} of {}  ←/→", index + 1, v.hidden.len()),
+            dim(),
+        ));
+    }
+    lines.push(Line::from(title));
+    if let Some(at) = &row.rekeyed {
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(format!(
+                "  ⚠ Since {at} this community publishes keys other than the ones you enrolled"
+            ))
+            .fg(COLOR_WARNING_ACCESSIBLE_RED),
+        );
+        lines.push(
+            Line::from(
+                "    under. What you hold counts for nothing under them, so drawing has stopped.",
+            )
+            .fg(COLOR_WARNING_ACCESSIBLE_RED),
+        );
+        lines.push(hint(
+            "    Ask its admins whether it re-keyed. Drawing resumes if its keys come back.",
+        ));
+    }
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(" Enrolment").fg(COLOR_SUCCESS));
+    if row.enrolled.is_empty() {
+        lines.push(item("Enrolled", "not yet".into()));
+    }
+    for (i, (label_text, when)) in row.enrolled.iter().enumerate() {
+        lines.push(item(
+            if i == 0 { "Enrolled" } else { "" },
+            match when {
+                Some(day) => format!("{label_text}, on {day}"),
+                None => label_text.clone(),
+            },
+        ));
+    }
+    if let Some(owed) = &row.enrolment_owed {
+        lines.push(
+            Line::from(format!(
+                "  {:<20}{owed} — enrolling on the next pass",
+                "Owed"
+            ))
+            .fg(COLOR_ORANGE),
+        );
+    }
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(" Tokens").fg(COLOR_SUCCESS));
+    lines.push(item(
+        "Held",
+        format!(
+            "{} — {} usable under a live label",
+            row.tokens_held, row.tokens_free
+        ),
+    ));
+    lines.push(item("Spent", row.tokens_spent.to_string()));
+    lines.push(item(
+        "Live token labels",
+        if row.token_labels.is_empty() {
+            "none".into()
+        } else {
+            row.token_labels.join(", ")
+        },
+    ));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(" The drip").fg(COLOR_SUCCESS));
+    lines.push(item(
+        "Rate",
+        format!(
+            "{} token{} every {}",
+            row.drip_per_tick,
+            if row.drip_per_tick == 1 { "" } else { "s" },
+            row.tick_length
+        ),
+    ));
+    lines.push(item(
+        "Last draw",
+        row.last_draw.clone().unwrap_or_else(|| "none yet".into()),
+    ));
+    lines.push(item(
+        "Next window",
+        row.next_window
+            .clone()
+            .unwrap_or_else(|| "waiting for this month's labels".into()),
+    ));
+    if let Some(until) = &row.waiting_until {
+        lines.push(hint(
+            "  The community's clock is behind this one: the tick asked for had not begun there.",
+        ));
+        lines.push(hint(format!("  Asking again after {until}.")));
+    }
+    lines.push(hint(
+        "  Drawn on this schedule whether or not you vetted anyone — a draw that followed",
+    ));
+    lines.push(hint(
+        "  your vetting would tell the community how much of it you do.",
+    ));
+
+    if !row.events.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(" Events").fg(COLOR_SUCCESS));
+        for (event, state, size, floor) in &row.events {
+            lines.push(item(
+                event,
+                format!("{state} — {size} of {floor} vetters needed"),
+            ));
+        }
+    }
+    if let Some(refusal) = &row.last_refusal {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("  Last refusal  {refusal}")).fg(COLOR_ORANGE));
+    }
+    lines.push(Line::from(""));
+    lines.push(hint(if v.hidden.len() > 1 {
+        "d or Enter: draw now  ←/→: community  Esc: back"
+    } else {
+        "d or Enter: draw now  Esc: back"
+    }));
+}
 
 fn attest(lines: &mut Vec<Line<'static>>, v: &VettingState, request_id: &str, form: &AttestForm) {
     lines.push(heading("Check the person, then attest"));
@@ -2010,6 +2163,65 @@ mod desk_tests {
             text.contains("p: your vetter profile"),
             "the profile is reachable from the desk itself: {text}"
         );
+    }
+
+    /// The hidden-vetting view says what the schedule is doing: enrolment,
+    /// tokens held and spent, the live labels, the rate and tick length, the last
+    /// draw, the next window, events, and the last refusal in words.
+    #[test]
+    fn the_hidden_vetting_view_shows_the_drip_and_the_wallet() {
+        use crate::state_handler::main_page::content::HiddenVettingRow;
+        let row = HiddenVettingRow {
+            community: "Kernel Developers".into(),
+            enrolled: vec![("vetter/2026-10".into(), Some("2026-10-01".into()))],
+            tokens_held: 7,
+            tokens_free: 6,
+            tokens_spent: 2,
+            token_labels: vec!["token/2026-10".into(), "token/2026-09".into()],
+            tick_length: "3 days".into(),
+            drip_per_tick: 3,
+            last_draw: Some("token/2026-10 tick 1 — 3 tokens at 2026-10-04 00:07 UTC".into()),
+            next_window: Some("2026-10-07 00:00 UTC".into()),
+            events: vec![("summit".into(), "pending".into(), 2, 3)],
+            last_refusal: Some("it is not running that event.".into()),
+            ..HiddenVettingRow::default()
+        };
+        let v = VettingState {
+            tab: VettingTab::Desk,
+            mode: VettingMode::HiddenVetting { index: 0 },
+            hidden: vec![row.clone()].into(),
+            ..VettingState::default()
+        };
+        let text = drawn(&v);
+        for expected in [
+            "Kernel Developers",
+            "vetter/2026-10, on 2026-10-01",
+            "7 — 6 usable",
+            "Spent",
+            "token/2026-10, token/2026-09",
+            "3 tokens every 3 days",
+            "token/2026-10 tick 1",
+            "2026-10-07 00:00 UTC",
+            "pending — 2 of 3 vetters needed",
+            "it is not running that event.",
+            "d or Enter: draw now",
+        ] {
+            assert!(
+                text.contains(expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+
+        // Re-keyed: said, in red, before anything else about the drip.
+        let v = VettingState {
+            hidden: vec![HiddenVettingRow {
+                rekeyed: Some("2026-10-04 09:00 UTC".into()),
+                ..row
+            }]
+            .into(),
+            ..v
+        };
+        assert!(drawn(&v).contains("drawing has stopped"));
     }
 
     /// A community known only by its DID is shortened to 48 characters, wider

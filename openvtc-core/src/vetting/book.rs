@@ -186,11 +186,16 @@ pub struct HiddenVetterState {
     pub community: String,
     /// Our persona there — the member the community enrolled.
     pub persona: PersonaId,
-    /// The community's published parameters, as they stood when we enrolled.
+    /// The community's published parameters: its keys as they stood when we enrolled, and its
+    /// labels, rates and tick length as it last published them.
     ///
     /// Kept beside the engine rather than looked up per attestation, because a parsed criterion
     /// drops `ext` — the manifest's own extension point is where these live, and a
     /// `VettingRequirements` that has been through serde no longer carries them.
+    ///
+    /// The keys are pinned and the rest follows the manifest ([`Self::adopt_published`]): a new
+    /// month is new labels under the same keys, and drawing on last month's labels would only be
+    /// refused. New keys are a different matter — see [`Self::rekeyed_at`].
     pub params: super::hidden::HiddenParams,
     /// The engine, as [`openvtc_vetting_pcs::snapshot::VetterSnapshot`] stores it.
     pub snapshot: openvtc_vetting_pcs::snapshot::VetterSnapshot,
@@ -208,14 +213,225 @@ pub struct HiddenVetterState {
     /// Events we have asked to vet at, with where each request stands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<HiddenEventState>,
+    /// When the community enrolled us under each class label, by period (`2026-10`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub enrolled_at: std::collections::BTreeMap<String, DateTime<Utc>>,
+    /// How many tokens we have spent on attestations here. A count of our own, shown to us and
+    /// sent nowhere: the drip never depends on it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tokens_spent: u32,
+    /// The last tick we were served.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_draw: Option<HiddenDraw>,
+    /// The community's last refusal of a hidden-vetting request of ours, until something it
+    /// asked for succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_refusal: Option<HiddenRefusal>,
+    /// Not before this: the community said a tick we asked for had not begun there yet
+    /// (`tickNotYet`), so the next pass waits for its window rather than asking again now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<DateTime<Utc>>,
+    /// When we noticed the community publishing keys other than the ones we enrolled under.
+    ///
+    /// The drip stops here. A credential and every token we hold were issued under the old
+    /// keys, so under the new ones they count for nothing, and drawing on would only be
+    /// refused; re-enrolling silently under keys we were not told about would be worse. The
+    /// vetter is told, once, and decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rekeyed_at: Option<DateTime<Utc>>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// One served tick of the drip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HiddenDraw {
+    /// The token label.
+    pub label: String,
+    /// The tick.
+    pub tick: u32,
+    /// How many tokens it added.
+    pub taken: usize,
+    /// When it arrived.
+    pub at: DateTime<Utc>,
+}
+
+/// A community's refusal of a hidden-vetting request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HiddenRefusal {
+    /// What was asked for, in a few words.
+    pub what: String,
+    /// The declared code.
+    pub code: String,
+    /// When.
+    pub at: DateTime<Utc>,
+}
+
+/// One pass of a community's hidden-vetting schedule, from [`HiddenVetterState::plan`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenPlan {
+    /// What taking the published parameters found.
+    pub adopted: Adopted,
+    /// Whether stored ticks were dropped as meaningless ([`super::hidden::settle_ticks`]).
+    pub settled: bool,
+    /// What to ask for, in order: one enrolment, or draws oldest first.
+    pub owed: Vec<super::hidden::Due>,
+}
+
+/// What [`HiddenVetterState::adopt_published`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Adopted {
+    /// Nothing new.
+    Unchanged,
+    /// New labels, rates or tick length, under the keys we enrolled under — taken.
+    Updated,
+    /// The community publishes keys other than ours. Nothing was taken, and the drip stops.
+    Rekeyed {
+        /// Whether this is the first pass to notice, so the vetter is told once.
+        first: bool,
+    },
 }
 
 impl HiddenVetterState {
+    /// A freshly minted engine for `community`, enrolled under nothing yet.
+    #[must_use]
+    pub fn new(
+        community: impl Into<String>,
+        persona: PersonaId,
+        params: super::hidden::HiddenParams,
+        snapshot: openvtc_vetting_pcs::snapshot::VetterSnapshot,
+    ) -> Self {
+        Self {
+            community: community.into(),
+            persona,
+            params,
+            snapshot,
+            last_ticks: std::collections::BTreeMap::new(),
+            last_drawn_at: None,
+            events: Vec::new(),
+            enrolled_at: std::collections::BTreeMap::new(),
+            tokens_spent: 0,
+            last_draw: None,
+            last_refusal: None,
+            retry_at: None,
+            rekeyed_at: None,
+        }
+    }
+
+    /// Take what the community publishes now, keeping the keys we enrolled under.
+    ///
+    /// Labels, rates, events and the tick length follow the manifest: a month rolls over to new
+    /// labels under the same keys, and a vetter fed the labels it enrolled under would never
+    /// re-enrol and never draw under the new month. Keys do not follow: if the published ones
+    /// differ from ours, nothing is taken and [`Self::rekeyed_at`] is set.
+    pub fn adopt_published(
+        &mut self,
+        live: &super::hidden::HiddenParams,
+        now: DateTime<Utc>,
+    ) -> Adopted {
+        if !self.params.same_keys(live) {
+            let first = self.rekeyed_at.is_none();
+            self.rekeyed_at.get_or_insert(now);
+            return Adopted::Rekeyed { first };
+        }
+        let mut changed = self.rekeyed_at.take().is_some();
+        if self.params != *live {
+            self.params = live.clone();
+            changed = true;
+        }
+        if changed {
+            Adopted::Updated
+        } else {
+            Adopted::Unchanged
+        }
+    }
+
+    /// Plan one pass of this community's schedule: everything owed now, in the order to ask.
+    ///
+    /// Takes `live` — the parameters the community publishes now — first, so a new month's
+    /// labels are what is drawn under and enrolled for. Owes nothing while the community
+    /// publishes keys other than ours ([`Self::rekeyed_at`]) or while a `tickNotYet` wait
+    /// ([`Self::retry_at`]) has not run out. `in_flight` is the draws already asked for whose
+    /// answers are on their way: asking for one of those again would replace the serials its
+    /// answer unblinds under.
+    pub fn plan(
+        &mut self,
+        live: Option<&super::hidden::HiddenParams>,
+        in_flight: &[(String, u32)],
+        now: DateTime<Utc>,
+    ) -> HiddenPlan {
+        use super::hidden::{Due, MAX_DRAWS_PER_PASS, due, settle_ticks};
+        let adopted = live.map_or(Adopted::Unchanged, |live| self.adopt_published(live, now));
+        let mut plan = HiddenPlan {
+            adopted,
+            settled: false,
+            owed: Vec::new(),
+        };
+        if self.rekeyed_at.is_some() {
+            return plan;
+        }
+        let events = self.event_draws(now.date_naive());
+        plan.settled = settle_ticks(&mut self.last_ticks, &self.params, &events, now);
+        if self.retry_at.is_some_and(|t| t > now) {
+            return plan;
+        }
+        // `last_ticks` advances only when the community answers, so a working copy — with the
+        // draws already on their way counted as asked — is what stops one pass asking for the
+        // same tick over and over.
+        let mut ticks = self.last_ticks.clone();
+        for (label, tick) in in_flight {
+            let entry = ticks.entry(label.clone()).or_insert(*tick);
+            *entry = (*entry).max(*tick);
+        }
+        while plan.owed.len() < MAX_DRAWS_PER_PASS {
+            match due(&self.params, Some(&self.snapshot), &ticks, &events, now) {
+                Due::Nothing => break,
+                // Enrolment blocks every draw behind it, so it is the whole plan.
+                enrol @ Due::Enrol { .. } => {
+                    plan.owed.push(enrol);
+                    break;
+                }
+                Due::Draw { label, tick, rate } => {
+                    ticks.insert(label.clone(), tick);
+                    plan.owed.push(Due::Draw { label, tick, rate });
+                }
+            }
+        }
+        plan
+    }
+
+    /// Record a served tick: the highest served per label, whatever order the answers arrive
+    /// in, so a catch-up answered out of order never asks for a tick twice.
+    pub fn record_served(&mut self, label: &str, tick: u32) {
+        let entry = self.last_ticks.entry(label.to_string()).or_insert(tick);
+        *entry = (*entry).max(tick);
+    }
+
+    /// Tokens held here, and how many of them are under a label the community still accepts.
+    #[must_use]
+    pub fn tokens(&self) -> (usize, usize) {
+        let held = self.snapshot.tokens.len();
+        let usable = self
+            .snapshot
+            .tokens
+            .iter()
+            .filter(|t| self.params.token_labels.contains(&t.label))
+            .count();
+        (held, usable)
+    }
+
     /// The event labels this vetter may draw under today, with the rate each yields.
     ///
     /// Only the approved ones, and only while their label is still accepted. A label the
     /// community publishes says an event exists; it never says we are in its group, and drawing
     /// under one we were not approved for would be refused — and would announce that we tried.
+    ///
+    /// An approved event the community no longer publishes is not drawn under either: its first
+    /// day is where its ticks are counted from, and without it there is no tick to ask for.
     #[must_use]
     pub fn event_draws(&self, today: chrono::NaiveDate) -> Vec<super::hidden::EventDraw> {
         self.events
@@ -224,9 +440,16 @@ impl HiddenVetterState {
             .filter_map(|e| {
                 let label = e.label.clone()?;
                 let closes_after = e.closes_after?;
+                let opens_on = self
+                    .params
+                    .events
+                    .iter()
+                    .find(|o| o.event_id == e.event_id)?
+                    .start_date;
                 (today <= closes_after).then_some(super::hidden::EventDraw {
                     label,
                     rate: e.drip_per_tick.unwrap_or(self.params.drip_per_tick),
+                    opens_on,
                     closes_after,
                 })
             })
@@ -552,8 +775,9 @@ pub struct VettingBook {
     ///
     /// Kept whether or not we vet for that community, and separately from
     /// [`HiddenVetterState::params`], because the two answer different questions: this is *what
-    /// the community publishes*, refreshed every time a manifest arrives, and that is *what we
-    /// enrolled under*, which must not move beneath a credential we already hold.
+    /// the community publishes*, refreshed every time a manifest arrives, and that is *what our
+    /// engine runs under* — this, adopted on each pass of the schedule, as long as its keys are
+    /// the ones we enrolled under ([`HiddenVetterState::adopt_published`]).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub hidden_published: std::collections::BTreeMap<String, super::hidden::HiddenParams>,
     /// What [`Self::retire_nonconformant`] set aside, one sentence each, for the
@@ -571,6 +795,14 @@ pub struct VettingBook {
     /// request whose answer was never unblinded issued no credential anyone will count.
     #[serde(skip)]
     pub pending_enrolment: Option<std::sync::Arc<openvtc_vetting_pcs::vetter::EnrolmentBlinding>>,
+    /// The drip ticks asked for and not yet answered, by request document id: `(label, tick)`.
+    ///
+    /// Memory only, like [`Self::queries`]: it is how a refusal, which names neither, finds the
+    /// draw it refuses — and how a pass knows not to ask again for a tick whose answer is still
+    /// on its way, which would replace the serials that answer unblinds under. After a restart
+    /// nothing is on its way, and a tick asked for again replaces its stale serials.
+    #[serde(skip)]
+    pub draws_in_flight: std::collections::HashMap<String, (String, u32)>,
     /// Fields written by a newer build, preserved verbatim (D19).
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -753,6 +985,7 @@ impl VettingBook {
             rng,
         )
         .map_err(VetterError::Hidden)?;
+        state.tokens_spent = state.tokens_spent.saturating_add(1);
 
         let entry = self
             .desk_entry_mut(request_id)

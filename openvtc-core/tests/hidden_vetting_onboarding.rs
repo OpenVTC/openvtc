@@ -287,15 +287,12 @@ fn a_vetter_attests_through_the_desk_without_signing_a_statement() {
 
     let persona = PersonaId::new();
     let mut desk = VettingBook::default();
-    desk.hidden_vetter.push(HiddenVetterState {
-        community: COMMUNITY.into(),
+    desk.hidden_vetter.push(HiddenVetterState::new(
+        COMMUNITY,
         persona,
-        params: params.clone(),
-        snapshot: engine.snapshot().unwrap(),
-        last_ticks: std::collections::BTreeMap::new(),
-        last_drawn_at: None,
-        events: Vec::new(),
-    });
+        params.clone(),
+        engine.snapshot().unwrap(),
+    ));
 
     // The applicant's side: an application, and the request that carries its identifier.
     let mut book = VettingBook::default();

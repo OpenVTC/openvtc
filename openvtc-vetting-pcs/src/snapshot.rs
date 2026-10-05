@@ -21,7 +21,7 @@ use predicate_credential_system::{
 };
 use serde::{Deserialize, Serialize};
 
-pub use crate::token::HeldToken;
+pub use crate::token::{HeldToken, PendingToken};
 
 use crate::{
     ProtoError,
@@ -115,6 +115,11 @@ pub struct VetterSnapshot {
     pub credentials: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tokens: Vec<HeldToken>,
+    /// Draws asked for and not yet answered, so an answer still unblinds after the engine has
+    /// been stored and restored — which, in openvtc, happens between every request and its
+    /// answer. SECRET, as `tokens` is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<PendingToken>,
     /// A limit below the community's drip, kept locally and never sent anywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub personal_limit: Option<usize>,
@@ -137,6 +142,7 @@ impl VetterSnapshot {
             id: String::new(),
             credentials: BTreeMap::new(),
             tokens: Vec::new(),
+            pending: Vec::new(),
             personal_limit: None,
             log: Vec::new(),
         }
@@ -149,6 +155,7 @@ impl VetterSnapshot {
             id: enc(id)?,
             credentials: BTreeMap::new(),
             tokens: Vec::new(),
+            pending: Vec::new(),
             personal_limit: None,
             log: Vec::new(),
         })

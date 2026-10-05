@@ -966,7 +966,8 @@ arrives after a restart is dropped and the client asks again.
 community from the labels and the time, and is not given a balance to consult: a client that drew
 when it ran low would publish, in the timing of its own requests, how much vetting it had done. A
 vetter back after a week asks for the current tick and not the seven it missed — the same answer
-an idle vetter gets, which is the property worth having. Four tests hold it.
+an idle vetter gets, which is the property worth having. Four tests hold it. *(Superseded by
+§19.7: a tick is now a window of time, and missed ticks of the current label are caught up.)*
 
 **The screens say what is happening.** The applicant's requirements line ends "their names never
 reach this community"; its checklist counts held attestations rather than reporting zero while it
@@ -1078,6 +1079,43 @@ CLAUDE.md states as *a re-export makes the re-exported crate's version part of y
 So the queue is five crates long and none of it is ours. Until it moves, the schema pins in
 `vtc-service/src/vetting/schemas/` are what holds the hand-written types to the specification,
 and they hold it at the same place a generated type would: the wire shape, checked by a test.
+
+### 19.7 Ticks are windows of time (2026-10)
+
+`pcs-tokens/0.1` now defines the tick (`dtgwg-trust-tasks-tf#734`, VTI #1960). Tick `t` of a
+label is `[labelStart + t·tickLength, labelStart + (t+1)·tickLength)`: `labelStart` is midnight
+UTC on the 1st for `token/YYYY-MM`, and midnight UTC on the event's `startDate` for
+`token/event/<id>`. The community publishes `tickLength` beside `dripPerTick` (ISO 8601 days and
+hours, at least an hour, `P3D` when absent) and refuses a tick that has not begun (`tickNotYet`,
+retryable) as well as one already served (`alreadyServed`). The client used to send whole days
+since 1970, which a community on the new rule refuses on every draw; a community on the old rule
+accepted any counter, so the new ticks work against both.
+
+- **The schedule.** `hidden::due` computes the tick per label from the published tick length, and
+  owes every tick of the current label that has begun and was not served, oldest first — never one
+  ahead of the clock. A stored tick later than its label's current one (an old days-since-1970
+  value) is read as nothing served and dropped (`settle_ticks`). A malformed `tickLength` is drawn
+  on the default, with a warning, rather than costing the criterion.
+- **Unconditional, timed fetches.** The vetter side runs on its own timer
+  (`openvtc/src/state_handler/hidden_vetting_poll.rs`): shortly after each window opens, at a
+  random moment within its first eighth (at most twenty minutes), and at least hourly. `m`, and `d`
+  in the hidden-vetting view, still run it by hand. Nothing the vetter does at the desk moves it.
+- **Live labels, pinned keys.** Each pass re-reads the manifest of every community the vetter vets
+  for and runs on what it publishes now — so a new month re-enrols and draws under the new token
+  label — while keeping the keys it enrolled under. If the published helper or token key changes,
+  the drip stops and the vetter is told once (`HiddenVetterState::rekeyed_at`).
+- **Several draws in flight.** A catch-up sends several draws at once, so the wallet keeps pending
+  serials per `(label, tick)` and the snapshot stores them (`VetterSnapshot::pending`). Before
+  this, pending serials were not stored at all, and since openvtc restores the engine between every
+  request and its answer, no served batch could be unblinded.
+- **Refusals.** `tickNotYet` waits five minutes for the community's clock, with no notice;
+  `alreadyServed` is recorded as served. Every other declared `pcs-root` / `pcs-tokens` /
+  `event-mode` / `pcs-challenge` code is said in words (`hidden::refusal_words`) and kept for the
+  view.
+- **The view.** `h` on the desk opens *Hidden vetting*, per community: enrolled labels and when,
+  tokens held, usable and spent (a local count, sent nowhere), live token labels, rate and tick
+  length, the last draw, the next window, event requests with group size against the floor, the
+  last refusal, and `d` to draw now.
 
 ## 20. The protocol on its own
 

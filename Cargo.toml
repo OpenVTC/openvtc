@@ -400,7 +400,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # decide / personhood / renew / rotate responses, the vetting specs carry
 # `vetted/1` statements and role VACs, and `vtc/endorsements/issue` gains
 # `predicateNotIssuable`.
-trust-tasks-rs = { version = "0.27.4", features = ["git-ns"] }
+#
+# **0.27.7**: `vtc/vetting/vetters/pcs-tokens/0.1` ticks are windows of time
+# (trustoverip/dtgwg-trust-tasks-tf#734), with `tickNotYet` declared — the
+# hidden-vetting schedule reads its codes from here.
+trust-tasks-rs = { version = "0.27.7", features = ["git-ns"] }
 trust-tasks-capability-client = "0.27.4"
 tui-input = "0.15"
 url = "2.5"

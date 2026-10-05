@@ -2185,9 +2185,55 @@ pub struct VettingState {
     /// than naming one, so that what they asked for is not itself a
     /// distinguishing detail.
     pub event_offers: Arc<[EventOffer]>,
+    /// Hidden vetting, one row per community we hold an engine for — the
+    /// hidden-vetting view (`h` on the desk).
+    pub hidden: Arc<[HiddenVettingRow]>,
     /// Stored vetting credentials set aside on load because they pre-date DTG
     /// Credentials v1 (`VettingBook::retired`), one sentence each.
     pub retired: Arc<[String]>,
+}
+
+/// One community's hidden vetting, as the vetter's own view shows it.
+///
+/// Every value here is the vetter's own and stays on this device: what the
+/// community knows of us is that we enrolled and that we draw on schedule,
+/// never how many tokens we hold or have spent.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct HiddenVettingRow {
+    /// The community, named as the rest of the page names it.
+    pub community: String,
+    /// Its accent swatch, if it publishes one.
+    pub accent: Option<(u8, u8, u8)>,
+    /// The class labels we hold a credential under, with when each was
+    /// enrolled, newest first: `("vetter/2026-10", Some("2026-10-01"))`.
+    pub enrolled: Vec<(String, Option<String>)>,
+    /// The class label the community enrols under now, when we hold no
+    /// credential under it yet.
+    pub enrolment_owed: Option<String>,
+    /// Tokens held.
+    pub tokens_held: usize,
+    /// Of those, the ones under a label the community still accepts.
+    pub tokens_free: usize,
+    /// Tokens spent on attestations here.
+    pub tokens_spent: u32,
+    /// The token labels the community issues under now.
+    pub token_labels: Vec<String>,
+    /// The tick length, in words ("3 days", "12 hours").
+    pub tick_length: String,
+    /// Tokens a tick under the ordinary label.
+    pub drip_per_tick: usize,
+    /// The last tick served, in words.
+    pub last_draw: Option<String>,
+    /// When the next tick window opens.
+    pub next_window: Option<String>,
+    /// Event requests: (event, state, group size, floor).
+    pub events: Vec<(String, String, usize, usize)>,
+    /// The last refusal, in words.
+    pub last_refusal: Option<String>,
+    /// Waiting for the community's clock (`tickNotYet`), until this time.
+    pub waiting_until: Option<String>,
+    /// The community publishes keys other than ours; the drip has stopped.
+    pub rekeyed: Option<String>,
 }
 
 /// One (event, tier) a community we vet for is offering.
@@ -2412,6 +2458,9 @@ pub enum VettingMode {
     /// Ask to vet at one of a community's published events, at one of its
     /// published tiers.
     EventMode { index: usize },
+    /// Hidden vetting, one community at a time: what we are enrolled under,
+    /// the tokens we hold, and the drip.
+    HiddenVetting { index: usize },
     /// Read the match code with the vetter, preview what the face shows, then
     /// send the card.
     SendCard {

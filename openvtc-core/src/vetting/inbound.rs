@@ -408,7 +408,10 @@ impl Notice {
                 community,
                 what,
                 code,
-            } => format!("{community} refused {what} ({code})."),
+            } => format!(
+                "{community} refused {what}: {}",
+                super::hidden::refusal_words(code)
+            ),
             Notice::AttestationReceived { held, .. } => format!(
                 "An attestation arrived and verified. You now hold {held} for this application."
             ),
@@ -1120,6 +1123,11 @@ fn enrolled(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
         Ok(()) => {
             if let Some(state) = book.hidden_vetter_mut(sender, query.persona) {
                 state.snapshot = snapshot;
+                state.enrolled_at.insert(
+                    body.label.trim_start_matches("vetter/").to_string(),
+                    ctx.now,
+                );
+                state.last_refusal = None;
             }
             Handled {
                 changed: true,
@@ -1132,7 +1140,6 @@ fn enrolled(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
         }
         Err(e) => {
             warn!(community = %sender, error = %e, "enrolment answer did not unblind");
-            let _ = ctx;
             Handled::default()
         }
     }
@@ -1159,6 +1166,7 @@ fn tokens_served(
             };
         }
     };
+    book.draws_in_flight.remove(&query.document_id);
     let Some(state) = book.hidden_vetter_mut(sender, query.persona) else {
         return Handled::default();
     };
@@ -1168,8 +1176,16 @@ fn tokens_served(
         Ok(taken) => {
             if let Some(state) = book.hidden_vetter_mut(sender, query.persona) {
                 state.snapshot = snapshot;
-                state.last_ticks.insert(body.label.clone(), body.tick);
+                state.record_served(&body.label, body.tick);
                 state.last_drawn_at = Some(ctx.now);
+                state.last_draw = Some(super::book::HiddenDraw {
+                    label: body.label.clone(),
+                    tick: body.tick,
+                    taken,
+                    at: ctx.now,
+                });
+                state.retry_at = None;
+                state.last_refusal = None;
             }
             Handled {
                 changed: true,
@@ -1537,14 +1553,7 @@ fn refusal_of(
             QueryKind::PcsRoot
             | QueryKind::PcsTokens
             | QueryKind::PcsEventMode
-            | QueryKind::PcsChallenge => (
-                false,
-                Some(Notice::HiddenVettingRefused {
-                    community: sender.to_string(),
-                    what: query.kind.describe(),
-                    code: code.clone(),
-                }),
-            ),
+            | QueryKind::PcsChallenge => hidden_refused(book, ctx, &query, sender, &code),
             QueryKind::Manifest | QueryKind::VetterList => (false, None),
         };
         return Some(Handled {
@@ -1576,6 +1585,77 @@ fn refusal_of(
         notice: Some(Notice::WithdrawalRefused { statement_id, code }),
         ..Handled::default()
     })
+}
+
+/// How long to wait before asking again for a tick the community said has not begun. Its
+/// window has opened by our clock — that is why it was asked for — so the community's clock is
+/// behind ours, and a few minutes is the size of that disagreement.
+pub const TICK_NOT_YET_RETRY: chrono::Duration = chrono::Duration::minutes(5);
+
+/// A community refused a hidden-vetting request of ours. Returns whether the book changed, and
+/// what to tell the vetter.
+///
+/// Two drip refusals are not failures and say nothing: `tickNotYet` is "not yet" — the draw is
+/// asked for again once the community's clock has caught up — and `alreadyServed` is "done",
+/// recorded as served so it is never asked for again. Every other refusal is kept on the engine
+/// for the desk to show, and said in words ([`super::hidden::refusal_words`]).
+fn hidden_refused(
+    book: &mut VettingBook,
+    ctx: &Context<'_>,
+    query: &super::queries::CommunityQuery,
+    sender: &str,
+    code: &str,
+) -> (bool, Option<Notice>) {
+    let draw = if query.kind == QueryKind::PcsTokens {
+        book.draws_in_flight.remove(&query.document_id)
+    } else {
+        None
+    };
+    let Some(state) = book.hidden_vetter_mut(sender, query.persona) else {
+        // An applicant's challenge, or a vetter that has since dropped its engine.
+        return (
+            false,
+            Some(Notice::HiddenVettingRefused {
+                community: sender.to_string(),
+                what: query.kind.describe(),
+                code: code.to_string(),
+            }),
+        );
+    };
+    // The serials of a refused draw will never be answered.
+    if let Some((label, tick)) = &draw
+        && let Err(e) = super::hidden::forget_draw(sender, &mut state.snapshot, label, *tick)
+    {
+        warn!(community = %sender, error = %e, "could not drop a refused draw's serials");
+    }
+    match code {
+        super::hidden::TOKENS_TICK_NOT_YET => {
+            info!(community = %sender, ?draw, "tick not begun at the community yet; waiting for its window");
+            state.retry_at = Some(ctx.now + TICK_NOT_YET_RETRY);
+            (true, None)
+        }
+        super::hidden::TOKENS_ALREADY_SERVED => {
+            if let Some((label, tick)) = &draw {
+                state.record_served(label, *tick);
+            }
+            (true, None)
+        }
+        _ => {
+            state.last_refusal = Some(super::book::HiddenRefusal {
+                what: query.kind.describe().to_string(),
+                code: code.to_string(),
+                at: ctx.now,
+            });
+            (
+                true,
+                Some(Notice::HiddenVettingRefused {
+                    community: sender.to_string(),
+                    what: query.kind.describe(),
+                    code: code.to_string(),
+                }),
+            )
+        }
+    }
 }
 
 fn withdrawal_recorded(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
