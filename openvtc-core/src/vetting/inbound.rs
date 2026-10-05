@@ -1670,7 +1670,16 @@ fn refusal_of(
             | QueryKind::PcsTokens
             | QueryKind::PcsEventMode
             | QueryKind::PcsChallenge => hidden_refused(book, ctx, &query, sender, &code),
-            QueryKind::Manifest | QueryKind::VetterList => (false, None),
+            // Its mode could not be read now; the last reading stands, marked as such.
+            QueryKind::Manifest => {
+                book.mode_failed(
+                    sender,
+                    super::mode::ModeFailure::Refused(code.clone()),
+                    ctx.now,
+                );
+                (false, None)
+            }
+            QueryKind::VetterList => (false, None),
         };
         return Some(Handled {
             changed,
@@ -1828,6 +1837,12 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
         Ok(read) => read,
         Err(detail) => {
             warn!(typ = %message.typ, error = %detail, "malformed community reply");
+            // Its mode cannot be read from this either; the last reading stands, marked as such.
+            book.mode_failed(
+                sender,
+                super::mode::ModeFailure::Unreadable(detail.clone()),
+                ctx.now,
+            );
             // Whoever is waiting on this manifest hears why, now.
             let answer = book
                 .take_manifest_queries(sender, thread.as_deref())
@@ -1849,42 +1864,16 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
     // name, and `vetting.ext` is one of them until this workspace takes a `trust-tasks-rs`
     // release carrying it, so the mode is read from these bytes (`vetting::hidden`).
     let raw = message.body.get("payload").cloned().unwrap_or(Value::Null);
+    // The mode as known before this manifest, so a switch can be said (`vetting::mode`).
+    let before = book.vetter_mode(sender).mode();
     let mut handled = Handled {
         changed: book.learn_manifest_in(sender, &body, Some(protocol), &meta, ctx.now),
         ..Handled::default()
     };
-    // What this community publishes about hidden vetting, kept whether or not we have an
-    // application here — a vetter has no application, and this is how its client learns the
-    // community runs the mode at all. The first criterion that publishes parameters wins: a
-    // community running two hidden criteria under different keys is not a shape this build
-    // serves, and picking one silently is better than picking one silently *and* saying so.
-    let published = raw
-        .get("criteria")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find_map(|c| match super::hidden::read_mode(c) {
-            Ok(super::hidden::Mode::Hidden(p)) => Some(*p),
-            _ => None,
-        });
-    match published {
-        Some(params) => {
-            if book.hidden_published.get(sender) != Some(&params) {
-                book.hidden_published.insert(sender.to_string(), params);
-                handled.changed = true;
-                // Enrol now rather than at the next sweep: until enrolled, a
-                // vetter for this community can only refuse to attest.
-                book.vetter_refresh_due = true;
-            }
-        }
-        // It stopped publishing them, so stop believing it does. An engine we already hold is
-        // left alone: a credential does not become worthless because the advertisement moved.
-        None => {
-            if book.hidden_published.remove(sender).is_some() {
-                handled.changed = true;
-            }
-        }
-    }
+    // What this community publishes about hidden vetting — its mode now, and the parameters —
+    // kept whether or not we have an application here: a vetter has no application, and this is
+    // how its client learns the community runs the mode at all, and when it stops.
+    handled.changed |= book.learn_mode(sender, &raw, before, ctx.now);
     for application in book
         .applications
         .iter_mut()

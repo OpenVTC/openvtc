@@ -756,8 +756,9 @@ pub fn refusal_words(code: &str) -> String {
              the current one."
         }
         ("pcs-root", "alreadyEnrolled") => {
-            "it already enrolled you under this month's label, but this client lost the answer \
-             before it could be opened. You can draw again from next month's label."
+            "it already enrolled you under its current label, but this client lost the answer \
+             before it could be opened, and it issues one credential per label. You can attest \
+             there again once it publishes a new label."
         }
         ("pcs-root", "identifierRebound") => {
             "it has you enrolled under a different hidden-vetting key. This install's key is not \

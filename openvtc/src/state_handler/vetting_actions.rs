@@ -30,6 +30,7 @@ use openvtc_core::vetting::applicant::{
 use openvtc_core::vetting::book::{
     Adopted, FALLBACK_REQUIRED_CLAIMS, HiddenOutlook, HiddenVetterState,
 };
+use openvtc_core::vetting::mode::{ModeFailure, VetterMode, age_words};
 use openvtc_core::vetting::queries::{
     CommunityAnswer, CommunityQuery, QUERY_TIMEOUT, QueryKind, refusal_words, request_refusal_words,
 };
@@ -63,8 +64,8 @@ use crate::state_handler::main_page::content::{
     DIRECTORY_FIELDS, DIRECTORY_LABELS, DIRECTORY_METHODS, DeskRow, DeskStage, DeskView,
     DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS, EventForm, EventOffer,
     FaceChoice, HiddenVettingRow, IssuedRow, JourneySteps, JourneyTarget, JourneyView, LineTone,
-    ListedVetterRow, NewFaceForm, NewFaceStep, PROFILE_FIELDS, PROFILE_LABELS, PoolRow, RequestRow,
-    TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
+    ListedVetterRow, NewFaceForm, NewFaceStep, PROFILE_FIELDS, PROFILE_LABELS, PendingTicket,
+    PoolRow, RequestRow, TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
     VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VetterStandingRow, VettingMembership,
     VettingMode, VettingPersona, VettingState, VettingTab, decline_reason_words, method_label,
     row_of,
@@ -146,10 +147,10 @@ pub(crate) fn outlook_words(o: &HiddenOutlook, now: DateTime<Utc>) -> String {
         );
     }
     if !o.enrolled {
+        // A short status: this line sits in the desk header and on the attest form, and the
+        // full story is told once — where it is acted on ([`outlook_detail`]).
         return if o.enrolment_lost {
-            "not enrolled — the community enrolled you this month but the answer was lost; it \
-             issues one credential per label, so you can attest from its next label (an admin \
-             can publish one)"
+            "not enrolled — the community's answer to your enrolment was lost (h for details)"
                 .to_string()
         } else if o.asking {
             "not enrolled yet — asking the community now".to_string()
@@ -158,11 +159,8 @@ pub(crate) fn outlook_words(o: &HiddenOutlook, now: DateTime<Utc>) -> String {
                 "not enrolled yet — the community has not answered; asking again at {}",
                 when_words(at, now)
             )
-        } else if let Some(r) = &o.last_refusal {
-            format!(
-                "not enrolled — refused: {}",
-                openvtc_core::vetting::hidden::refusal_words(&sanitize_display(&r.code, 120))
-            )
+        } else if o.last_refusal.is_some() {
+            "not enrolled — the community refused your enrolment (h for details)".to_string()
         } else {
             "not enrolled yet — enrolling on the next pass".to_string()
         };
@@ -186,12 +184,65 @@ pub(crate) fn outlook_words(o: &HiddenOutlook, now: DateTime<Utc>) -> String {
     format!("{} — {next}", tokens(o.usable))
 }
 
-/// Whether `community` hides its vetters, as far as this book knows: a criterion that says so,
-/// parameters it publishes, or an engine we already hold for it.
+/// The whole of why a vetter that is not enrolled cannot attest, when the short line
+/// ([`outlook_words`]) leaves out something it can act on: an enrolment whose answer was lost,
+/// or one the community refused. `name` is the community's display name.
+pub(crate) fn outlook_detail(o: &HiddenOutlook, name: &str, now: DateTime<Utc>) -> Option<String> {
+    if o.enrolled {
+        return None;
+    }
+    if o.enrolment_lost {
+        return Some(lost_enrolment_words(name, o.owed.as_deref(), now));
+    }
+    o.last_refusal.as_ref().map(|r| {
+        format!(
+            "{name} refused your enrolment: {}",
+            openvtc_core::vetting::hidden::refusal_words(&sanitize_display(&r.code, 120))
+        )
+    })
+}
+
+/// An enrolment the community made and this client could not open, in full: why it cannot be
+/// recovered, when the vetter can attest again, and what to do until then.
+///
+/// Not recoverable from here: the blinding that opens the answer is held in memory for the
+/// round trip and never stored, and the community records only *that* it enrolled us under the
+/// label — it keeps no copy of the answer to send again, and refuses a second enrolment under
+/// the same label (`alreadyEnrolled`). The community's labels do not roll over by themselves
+/// either; its admins publish each one, so the date is the soonest the next can start.
+pub(crate) fn lost_enrolment_words(name: &str, period: Option<&str>, now: DateTime<Utc>) -> String {
+    let label = period.map_or_else(
+        || "its current label".to_string(),
+        |p| format!("vetter/{p}"),
+    );
+    let next = match period.and_then(openvtc_core::vetting::mode::next_monthly_label) {
+        Some((next, starts)) if starts > now.date_naive() => format!(
+            "the next monthly one, vetter/{next}, can start on {} at the earliest, and only once \
+             its admins publish it",
+            starts.format("%a %d %b %Y")
+        ),
+        _ => "its admins have not published the next one yet".to_string(),
+    };
+    format!(
+        "{name} already enrolled you under {label}, but this client lost the answer before it \
+         could be opened, and {name} issues one credential per label and keeps no copy to send \
+         again. You can attest there once it enrols you under a new label: {next}; this client \
+         enrols under it on its next pass. Meanwhile, ask its admins to publish a new label now, \
+         or vet for communities that name their vetters"
+    )
+}
+
+/// `text` as a clause to continue a sentence: without the full stop it may end with, so a
+/// composed message never reads "label.. A ticket".
+fn clause(text: &str) -> &str {
+    text.trim_end().trim_end_matches('.')
+}
+
+/// Whether `community` hides its vetters now, as its last-read manifest says
+/// ([`VettingBook::vetter_mode`]). An engine we hold for it is not evidence: it says we enrolled
+/// once, not that the community still counts proofs.
 pub(crate) fn hides_vetters(book: &VettingBook, community: &str) -> bool {
-    book.hidden_vetting(community)
-        || book.hidden_published.contains_key(community)
-        || book.hidden_vetter.iter().any(|h| h.community == community)
+    book.pcs_zkp(community)
 }
 
 /// Where `persona` stands for PCS ZKP attesting at `community`, in words, and whether that
@@ -213,6 +264,33 @@ pub(crate) fn pcs_tokens_line(
             "not enrolled yet — enrolling on the next pass".to_string(),
             true,
         ),
+    })
+}
+
+/// How `community` vets, for the desk header, when that is not current knowledge: why the last
+/// read failed (R6.4 — which kind of failure, beside what was last known), or how old a stale
+/// reading is. `None` while the reading is fresh — the badge then says it all.
+fn mode_note(book: &VettingBook, community: &str, now: DateTime<Utc>) -> Option<String> {
+    let reading = book.vetter_mode(community);
+    if let Some((failure, at)) = &reading.failed
+        && reading.read.is_none_or(|r| *at >= r.read_at)
+    {
+        return Some(format!(
+            "could not read how it vets now: {} — last known: {}",
+            clause(&failure.words()),
+            reading.last_known_words(now)
+        ));
+    }
+    if !reading.is_stale(now) {
+        return None;
+    }
+    Some(match reading.read {
+        Some(r) => format!(
+            "{} as of {} — reading it again",
+            r.mode.words(),
+            age_words(now - r.read_at)
+        ),
+        None => "how it vets is not known yet — asking".to_string(),
     })
 }
 
@@ -465,6 +543,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
             tokens: standing_tokens(book, &s.community, s.persona, now).map(|(l, _)| l),
             tokens_warn: standing_tokens(book, &s.community, s.persona, now)
                 .is_some_and(|(_, warn)| warn),
+            mode_note: mode_note(book, &s.community, now),
         })
         .collect();
 
@@ -702,7 +781,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                 applicant: entry.applicant.clone(),
                 applicant_name: name(&entry.applicant),
                 community: entry.community.clone(),
-                pcs_zkp: book.hidden_vetting(&entry.community),
+                pcs_zkp: book.pcs_zkp(&entry.community),
                 pcs_tokens: pcs_tokens_line(book, &entry.community, entry.persona, now)
                     .map(|(line, _)| line),
                 pcs_events: book
@@ -751,6 +830,16 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
             // A ticket whose link the published URI cannot carry simply has no
             // link; its code still reads aloud.
             uri: persona_did(config, t.persona).and_then(|did| t.uri(&did).ok()),
+            // Issued under a mode the community no longer runs: its requests are answered
+            // under the one it runs now, which is worth knowing before handing it on.
+            mode_note: t
+                .mode
+                .filter(|issued| {
+                    book.vetter_mode(&t.community)
+                        .mode()
+                        .is_some_and(|current| current != *issued)
+                })
+                .map(|issued| format!("issued under {}", issued.words())),
         })
         .collect();
 
@@ -855,7 +944,7 @@ pub(crate) fn sync_journey(vetting: &mut VettingState, config: &Config, now: Dat
                     ),
                     community_display(config, &entry.community)
                 ),
-                pcs_zkp: book.hidden_vetting(&entry.community),
+                pcs_zkp: book.pcs_zkp(&entry.community),
                 steps: JourneySteps::Vetter(steps, ending),
             }
         }),
@@ -1126,6 +1215,11 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             v.selected = 0;
             v.mode = VettingMode::List;
             v.status_message = None;
+            // Opening the desk: how each community vets is read again where the last reading
+            // is stale, so the badges and the ticket gate are not shown from an old answer.
+            if v.tab == VettingTab::Desk {
+                refresh_stale_modes(ctx).await;
+            }
         }
         VettingAction::ShowTicket => {
             let v = page(ctx);
@@ -1689,7 +1783,7 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             membership_index,
             uses_index,
             ..
-        } => issue_ticket(ctx, membership_index, uses_index),
+        } => issue_ticket(ctx, membership_index, uses_index).await,
         VettingMode::OpenSession {
             request_id,
             method_index,
@@ -3088,7 +3182,8 @@ async fn send_card(
 /// Why no ticket should be issued for `membership` now, if there is a reason: the community
 /// proves vetting with a PCS zero-knowledge proof, and this vetter cannot attest there yet — no
 /// credential, or no token. A ticket brings requests, and every one would end at "cannot
-/// attest".
+/// attest". Asked only once the community's mode has just been read as PCS ZKP
+/// ([`ticket_check`]).
 fn ticket_refusal(
     book: &VettingBook,
     membership: &VettingMembership,
@@ -3098,54 +3193,253 @@ fn ticket_refusal(
     else {
         return None;
     };
+    // The full story once, here, where it is acted on; the desk header keeps the short line.
+    let why = book
+        .hidden_outlook(&membership.community, membership.persona, now)
+        .and_then(|o| outlook_detail(&o, &membership.name, now))
+        .unwrap_or(line);
     Some(format!(
-        "No ticket issued: {} proves vetting with a PCS zero-knowledge proof and you cannot \
-         attest there yet — {line}. A ticket now would bring requests you could not attest.",
-        membership.name
+        "No ticket issued: {} vets by PCS ZKP now, and you cannot attest there yet — {}. A \
+         ticket now would bring requests you could not attest.",
+        membership.name,
+        clause(&why)
     ))
 }
 
-fn issue_ticket(ctx: &mut ActionCtx<'_>, membership_index: usize, uses_index: usize) {
+/// The longest a ticket waits on its community's answer about how it vets. The question's own
+/// reply window ([`QUERY_TIMEOUT`]) normally ends it first, as "no answer"; this is the bound
+/// that holds even if that never fires (R1.2).
+fn ticket_check_wait() -> chrono::Duration {
+    QUERY_TIMEOUT + chrono::Duration::seconds(5)
+}
+
+/// Where a pending ticket stands.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TicketCheck {
+    /// No answer about the community's mode since it was asked, and still within the wait.
+    Waiting,
+    /// The community answered: issue the ticket, under this mode.
+    Issue(VetterMode),
+    /// Not issued, and why.
+    Refused(String),
+}
+
+/// Decide a pending ticket, on an answer about its community's mode that arrived **after** the
+/// ticket was asked for — never on the remembered mode. Named vetting issues with no gate (it
+/// does not matter that the community used to run PCS ZKP); PCS ZKP keeps the enrolment and
+/// token gate ([`ticket_refusal`]); a failed read refuses, saying how it failed and what was
+/// last known, rather than guessing either way.
+pub(crate) fn ticket_check(
+    book: &VettingBook,
+    pending: &PendingTicket,
+    now: DateTime<Utc>,
+) -> TicketCheck {
+    let reading = book.vetter_mode(&pending.membership.community);
+    match reading.read_since(pending.asked_at) {
+        Some(VetterMode::Named) => TicketCheck::Issue(VetterMode::Named),
+        Some(VetterMode::PcsZkp) => match ticket_refusal(book, &pending.membership, now) {
+            Some(refusal) => TicketCheck::Refused(refusal),
+            None => TicketCheck::Issue(VetterMode::PcsZkp),
+        },
+        None => {
+            let failure = reading.failed_since(pending.asked_at).cloned().or_else(|| {
+                (now - pending.asked_at >= ticket_check_wait()).then_some(ModeFailure::Unanswered)
+            });
+            match failure {
+                Some(failure) => TicketCheck::Refused(ticket_unconfirmed(
+                    &pending.membership.name,
+                    &failure,
+                    &reading,
+                    now,
+                )),
+                None => TicketCheck::Waiting,
+            }
+        }
+    }
+}
+
+/// No ticket, because how the community vets now could not be read.
+fn ticket_unconfirmed(
+    name: &str,
+    failure: &ModeFailure,
+    reading: &openvtc_core::vetting::mode::ModeReading,
+    now: DateTime<Utc>,
+) -> String {
+    format!(
+        "No ticket issued: could not confirm how {name} vets now — {}. Last known: {}. A ticket \
+         is issued only on a fresh answer, since it brings requests answered under that mode; \
+         press t to try again.",
+        clause(&failure.words()),
+        reading.last_known_words(now)
+    )
+}
+
+/// `t` on the Tickets view, confirmed: ask the community how it vets **now**, and issue the
+/// ticket when it answers ([`settle_pending_tickets`]). Never decided here, from what the client
+/// remembers — a community can switch between named vetting and PCS ZKP at any time, and the
+/// ticket follows the mode it runs when it is handed out.
+async fn issue_ticket(ctx: &mut ActionCtx<'_>, membership_index: usize, uses_index: usize) {
     let Some(membership) = page(ctx).memberships.get(membership_index).cloned() else {
         return;
     };
     let uses = VETTING_TICKET_USES[uses_index.min(VETTING_TICKET_USES.len() - 1)];
-    // A ticket brings requests. Under PCS ZKP each attestation spends a token, so a vetter
-    // that holds none would hand out a way to reach it that it cannot honour — every request
-    // would end at "cannot attest". Refused here, with when that changes.
-    if let Some(refusal) = ticket_refusal(&ctx.config.private.vetting, &membership, Utc::now()) {
-        page(ctx).mode = VettingMode::List;
-        return status(ctx, refusal);
+    page(ctx).mode = VettingMode::List;
+    if let Some(waiting) = &page(ctx).pending_ticket {
+        let name = waiting.membership.name.clone();
+        return status(
+            ctx,
+            format!("Still asking {name} how it vets, for the last ticket — a moment."),
+        );
     }
-    let ticket = Ticket::issue(
+    let Some(did) = persona_did(ctx.config, membership.persona) else {
+        return status(
+            ctx,
+            "No ticket issued: the persona you vet for that community as is not available.",
+        );
+    };
+    if !begin(ctx) {
+        return;
+    }
+    let now = Utc::now();
+    let community = membership.community.clone();
+    let protocol = ctx.config.private.vetting.protocol_for(&community);
+    let document = match wire::manifest_request(&did, &community, protocol) {
+        Ok(d) => d,
+        Err(e) => return abandon(ctx, "No ticket issued: could not build the question", e),
+    };
+    ctx.config.private.vetting.mode_asked(&community, now);
+    let sent = Sent::Manifest {
+        community: community.clone(),
+    };
+    if let Err(e) = sign_and_send(ctx, membership.persona, document, sent).await {
+        let failure = ModeFailure::Unsent(e);
+        ctx.config
+            .private
+            .vetting
+            .mode_failed(&community, failure.clone(), now);
+        let reading = ctx.config.private.vetting.vetter_mode(&community);
+        let words = ticket_unconfirmed(&membership.name, &failure, &reading, now);
+        ctx.in_flight.finish(DispatchDomain::Vetting);
+        ctx.state.main_page.log(words.clone());
+        return status(ctx, words);
+    }
+    let name = membership.name.clone();
+    page(ctx).pending_ticket = Some(PendingTicket {
+        membership,
+        uses,
+        asked_at: now,
+    });
+    status(
+        ctx,
+        format!(
+            "Asking {name} how it vets now — named vetting or PCS ZKP — before issuing the \
+             ticket…"
+        ),
+    );
+}
+
+/// Issue `pending` under `mode`, and show it. `lead` goes first: a switch of mode to say.
+fn mint_ticket(
+    state: &mut State,
+    config: &mut Config,
+    save: &mut SaveScheduler,
+    pending: &PendingTicket,
+    mode: VetterMode,
+    lead: Option<&str>,
+    now: DateTime<Utc>,
+) {
+    let membership = &pending.membership;
+    let mut ticket = Ticket::issue(
         &membership.community,
         membership.persona,
         vec![],
-        uses,
+        pending.uses,
         DEFAULT_VALIDITY,
-        Utc::now(),
+        now,
     );
+    ticket.mode = Some(mode);
     let code = ticket.code.clone();
-    ctx.config.private.vetting.tickets.push(ticket);
+    config.private.vetting.tickets.push(ticket);
     {
-        let v = page(ctx);
+        let v = &mut state.main_page.content_panel.vetting;
         v.mode = VettingMode::List;
         // The new ticket's own view: the message below names `y`, which is a
         // key of that view.
         v.tab = VettingTab::Desk;
         v.desk_view = DeskView::Tickets;
     }
-    persist(
-        ctx,
-        format!(
-            "Ticket {code} for {} — press ⏎ to show its QR code, or u to copy its link. It \
-             admits {uses} request{} for 14 days.",
-            membership.name,
-            if uses == 1 { "" } else { "s" }
-        ),
+    let uses = pending.uses;
+    let message = format!(
+        "{}Ticket {code} for {}, under {} — press ⏎ to show its QR code, or u to copy its link. \
+         It admits {uses} request{} for 14 days.",
+        lead.map(|l| format!("{l} ")).unwrap_or_default(),
+        membership.name,
+        mode.words(),
+        if uses == 1 { "" } else { "s" }
     );
-    let last = page(ctx).tickets.len().saturating_sub(1);
-    page(ctx).selected = last;
+    dispatch_util::save_and_sync(
+        &mut state.main_page,
+        config,
+        save,
+        Persist::SaveAndSync,
+        |mp| &mut mp.content_panel.vetting.status_message,
+        message.clone(),
+        SyncLog::Plain(message),
+    );
+    let v = &mut state.main_page.content_panel.vetting;
+    v.selected = v.tickets.len().saturating_sub(1);
+}
+
+/// Say each community seen switching mode since last asked, and decide the pending ticket if
+/// its answer is in. Run after community answers arrive, and on the loop's sweep — which is
+/// what ends a ticket whose question was never answered.
+pub(crate) fn settle_pending_tickets(
+    state: &mut State,
+    config: &mut Config,
+    save: &mut SaveScheduler,
+    now: DateTime<Utc>,
+) {
+    let switches = config.private.vetting.take_mode_switches();
+    let said: Vec<String> = switches
+        .iter()
+        .map(|s| s.words(&community_display(config, &s.community)))
+        .collect();
+    for words in &said {
+        state.main_page.log(words.clone());
+    }
+    let pending = state.main_page.content_panel.vetting.pending_ticket.clone();
+    let check = pending
+        .as_ref()
+        .map(|p| ticket_check(&config.private.vetting, p, now));
+    // The switch behind a pending ticket's answer leads its message, named as the ticket is.
+    let lead = pending.as_ref().and_then(|p| {
+        switches
+            .iter()
+            .rev()
+            .find(|s| s.community == p.membership.community)
+            .map(|s| s.words(&p.membership.name))
+    });
+    match (pending, check) {
+        (Some(pending), Some(TicketCheck::Issue(mode))) => {
+            state.main_page.content_panel.vetting.pending_ticket = None;
+            mint_ticket(state, config, save, &pending, mode, lead.as_deref(), now);
+        }
+        (Some(_), Some(TicketCheck::Refused(why))) => {
+            let words = match lead {
+                Some(lead) => format!("{lead} {why}"),
+                None => why,
+            };
+            let v = &mut state.main_page.content_panel.vetting;
+            v.pending_ticket = None;
+            v.status_message = Some(words.clone());
+            state.main_page.log(words);
+        }
+        _ => {
+            if !said.is_empty() {
+                state.main_page.content_panel.vetting.status_message = Some(said.join(" "));
+            }
+        }
+    }
 }
 
 async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, method_index: usize) {
@@ -3420,7 +3714,7 @@ pub(crate) async fn refresh_vetter_side(ctx: &mut ActionCtx<'_>) {
     // A vetter has no application, so nothing else would ever fetch the manifest of a
     // community it vets for — and the manifest is where a community says it hides its
     // vetters, and which labels are live this month.
-    refresh_vetter_communities(ctx).await;
+    refresh_vetter_communities(ctx, false).await;
     // And whatever each community's vetter schedule owes us — enrolment or the ticks of the
     // drip. On a schedule, never in response to a balance (design §5.1).
     //
@@ -3439,9 +3733,28 @@ pub(crate) async fn refresh_vetter_side(ctx: &mut ActionCtx<'_>) {
             communities.push(community.clone());
         }
     }
+    // Not a community that has switched to named vetting: the engine is kept — a credential
+    // does not become worthless because the advertisement moved — but drawing tokens it no
+    // longer counts would only collect refusals.
+    communities
+        .retain(|c| ctx.config.private.vetting.vetter_mode(c).mode() != Some(VetterMode::Named));
     for community in communities {
         hidden_vetting_tick(ctx, &community).await;
     }
+}
+
+/// Read again how each community we vet for vets, where the last reading is stale — on opening
+/// the desk, and while it stays open. Bounded: a community is asked at most once per
+/// [`MODE_REASK_AFTER`](openvtc_core::vetting::mode::MODE_REASK_AFTER), answered or not (R1.4).
+pub(crate) async fn refresh_stale_modes(ctx: &mut ActionCtx<'_>) {
+    refresh_vetter_communities(ctx, true).await;
+}
+
+/// Whether the vetter desk is what the operator is looking at — the one place a stale mode is
+/// worth reading again outside the schedule.
+pub(crate) fn desk_open(state: &State) -> bool {
+    state.main_page.menu_panel.selected_menu == MainMenu::Vetting
+        && state.main_page.content_panel.vetting.tab == VettingTab::Desk
 }
 
 /// Ask every community that has named us a vetter what it requires.
@@ -3454,12 +3767,18 @@ pub(crate) async fn refresh_vetter_side(ctx: &mut ActionCtx<'_>) {
 /// labels appear, and an engine that never re-read it never moved past the month it enrolled
 /// in. What changes there reaches the engine through [`HiddenVetterState::plan`], which keeps the
 /// keys we enrolled under.
-async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>) {
+///
+/// `only_stale` asks only where how the community vets is older than
+/// [`MODE_TTL`](openvtc_core::vetting::mode::MODE_TTL) and was not asked lately
+/// ([`VettingBook::mode_refresh_due`]) — what opening the desk, and keeping it open, need.
+async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>, only_stale: bool) {
     let standing: Vec<(String, PersonaId)> = {
         let book = &ctx.config.private.vetting;
-        book.vetter_standing(Utc::now())
+        let now = Utc::now();
+        book.vetter_standing(now)
             .into_iter()
             .filter(|s| s.live)
+            .filter(|s| !only_stale || book.mode_refresh_due(&s.community, now))
             .map(|s| (s.community, s.persona))
             .collect()
     };
@@ -3474,10 +3793,17 @@ async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>) {
         let sent = Sent::Manifest {
             community: community.clone(),
         };
+        let now = Utc::now();
+        ctx.config.private.vetting.mode_asked(&community, now);
         match sign_and_send(ctx, persona, document, sent).await {
             Ok(()) => ctx.config.private.vetting.vetter_refresh_failures = 0,
             Err(e) => {
                 tracing::warn!(community = %community, error = %e, "could not ask a community what it requires");
+                ctx.config.private.vetting.mode_failed(
+                    &community,
+                    ModeFailure::Unsent(e.clone()),
+                    now,
+                );
                 // Usually the listener is not up yet (start-up). Ask again on
                 // the five-second sweep, a bounded number of times.
                 let book = &mut ctx.config.private.vetting;
@@ -3802,12 +4128,14 @@ async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
     // Hidden vetting: this community counts a proof, not a signature. The desk builds the same
     // draft from the same checklist and then does not sign it — what goes to the applicant
     // carries a tag where an issuer would be, and nothing on the way names this persona.
-    if ctx
-        .config
-        .private
-        .vetting
-        .hidden_vetter(&entry.community, entry.persona)
-        .is_some()
+    //
+    // Only while the community runs PCS ZKP now: an engine says we enrolled once, and a
+    // community that has switched back to named vetting counts signed statements, not proofs.
+    let book = &ctx.config.private.vetting;
+    if hides_vetters(book, &entry.community)
+        && book
+            .hidden_vetter(&entry.community, entry.persona)
+            .is_some()
     {
         return attest_hidden(ctx, request_id, &entry, &vetter_did, attestation, now).await;
     }
@@ -3816,8 +4144,7 @@ async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
     // hidden-vetting application cannot use, carrying this vetter's DID to a
     // community that promised not to need it. Enrol first.
     let book = &ctx.config.private.vetting;
-    if book.hidden_vetting(&entry.community) || book.hidden_published.contains_key(&entry.community)
-    {
+    if hides_vetters(book, &entry.community) {
         page(ctx).mode = VettingMode::List;
         status(
             ctx,
@@ -5071,10 +5398,13 @@ fn sent_result(sent: Sent, error: Option<String>, config: &mut Config) -> (Strin
             // arriving), and asked again on its own — so the line says that,
             // rather than "try again" to someone who never asked.
             (Sent::Manifest { community }, Some(e)) => (
-                format!(
-                    "Could not yet ask {} what it requires ({e}) — asking again shortly.",
-                    shorten_did(&community, 48)
-                ),
+                {
+                    book.mode_failed(&community, ModeFailure::Unsent(e.clone()), Utc::now());
+                    format!(
+                        "Could not yet ask {} what it requires ({e}) — asking again shortly.",
+                        shorten_did(&community, 48)
+                    )
+                },
                 false,
             ),
             (Sent::Session { .. }, Some(e)) => (format!("Could not send — try again: {e}"), false),
@@ -5254,6 +5584,18 @@ pub(crate) fn expire_queries(state: &mut State, config: &mut Config, now: chrono
     let expired = config.private.vetting.expire_queries(now, QUERY_TIMEOUT);
     for query in expired {
         if query.kind == QueryKind::Manifest {
+            // Nothing is said here — a waiting ticket or the desk header says it, where it
+            // matters — but how the community vets now is unknown, not what it last was. A
+            // failure already recorded since the question went (it could not be sent) is the
+            // truer story, and stays.
+            let book = &mut config.private.vetting;
+            if book
+                .vetter_mode(&query.community)
+                .failed_since(query.sent_at)
+                .is_none()
+            {
+                book.mode_failed(&query.community, ModeFailure::Unanswered, now);
+            }
             continue;
         }
         let name = community_display(config, &query.community);
@@ -5905,7 +6247,333 @@ mod tests {
         }
         let mut book = VettingBook::default();
         book.hidden_vetter.push(held);
+        read_as(
+            &mut book,
+            "did:web:first-vtc.example",
+            VetterMode::PcsZkp,
+            Utc::now(),
+        );
         (book, persona)
+    }
+
+    /// Record that `community`'s manifest, read at `at`, said `mode`.
+    fn read_as(book: &mut VettingBook, community: &str, mode: VetterMode, at: DateTime<Utc>) {
+        use openvtc_core::vetting::book::KnownCommunity;
+        use openvtc_core::vetting::mode::ModeRead;
+        let read = Some(ModeRead { mode, read_at: at });
+        match book
+            .communities
+            .iter_mut()
+            .find(|c| c.community == community)
+        {
+            Some(known) => known.vetter_mode = read,
+            None => book.communities.push(KnownCommunity {
+                community: community.into(),
+                branding: Default::default(),
+                requested: Vec::new(),
+                fetched_at: at,
+                protocol: None,
+                routes: Vec::new(),
+                post_quantum_key: None,
+                vetter_mode: read,
+            }),
+        }
+    }
+
+    /// A manifest payload whose one criterion names its vetters (`false`) or publishes
+    /// hidden-vetting parameters (`true`).
+    fn manifest_payload(pcs: bool) -> Value {
+        let mut vetting = serde_json::json!({});
+        if pcs {
+            vetting["ext"] = serde_json::json!({
+                openvtc_core::vetting::hidden::HIDDEN_VETTING_NS: {
+                    "suite": openvtc_core::vetting::hidden::SUITE,
+                    "helperKey": "zHelper",
+                    "tokenKey": "zToken",
+                    "vetterLabels": ["vetter/2026-10"],
+                    "tokenLabels": ["token/2026-10"],
+                }
+            });
+        }
+        serde_json::json!({ "criteria": [ { "id": "c1", "vetting": vetting } ] })
+    }
+
+    fn pending_for(persona: PersonaId, asked_at: DateTime<Utc>) -> PendingTicket {
+        PendingTicket {
+            membership: VettingMembership {
+                community: "did:web:first-vtc.example".into(),
+                name: "first-vtc".into(),
+                persona,
+                accent: None,
+            },
+            uses: 1,
+            asked_at,
+        }
+    }
+
+    /// The desk shows how a community vets from a reading, and a fresh reading replaces a stale
+    /// one — an engine held from an earlier month is not taken for PCS ZKP.
+    #[test]
+    fn a_fresh_mode_reading_replaces_a_stale_one() {
+        let community = "did:web:first-vtc.example";
+        let now = Utc::now();
+        let (mut book, persona) = hidden_vetter_book(0, false);
+        read_as(
+            &mut book,
+            community,
+            VetterMode::PcsZkp,
+            now - chrono::Duration::hours(5),
+        );
+        assert!(hides_vetters(&book, community));
+        let note = mode_note(&book, community, now).expect("five hours is stale");
+        assert!(note.contains("PCS ZKP as of 5 h ago"), "{note}");
+
+        book.learn_mode(
+            community,
+            &manifest_payload(false),
+            Some(VetterMode::PcsZkp),
+            now,
+        );
+        assert!(
+            !hides_vetters(&book, community),
+            "the engine we still hold is not evidence of PCS ZKP"
+        );
+        assert!(mode_note(&book, community, now).is_none(), "fresh");
+        assert!(
+            pcs_tokens_line(&book, community, persona, now).is_none(),
+            "no token line for a community that names its vetters"
+        );
+    }
+
+    /// A community that switched from PCS ZKP to named vetting gets a named ticket, with no
+    /// enrolment gate — even though this vetter's PCS ZKP enrolment would have refused one — and
+    /// the switch is said.
+    #[test]
+    fn a_switch_to_named_vetting_issues_a_named_ticket_with_no_gate() {
+        let community = "did:web:first-vtc.example";
+        let now = Utc::now();
+        let asked = now - chrono::Duration::seconds(2);
+        let (mut book, persona) = hidden_vetter_book(0, false);
+        read_as(
+            &mut book,
+            community,
+            VetterMode::PcsZkp,
+            now - chrono::Duration::days(3),
+        );
+        let pending = pending_for(persona, asked);
+        assert_eq!(
+            ticket_check(&book, &pending, now),
+            TicketCheck::Waiting,
+            "the three-day-old reading decides nothing"
+        );
+        book.learn_mode(
+            community,
+            &manifest_payload(false),
+            Some(VetterMode::PcsZkp),
+            now,
+        );
+        assert_eq!(
+            ticket_check(&book, &pending, now),
+            TicketCheck::Issue(VetterMode::Named)
+        );
+
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+        config.private.vetting = book;
+        state.main_page.content_panel.vetting.pending_ticket = Some(pending);
+        settle_pending_tickets(&mut state, &mut config, &mut save, now);
+        let tickets = &config.private.vetting.tickets;
+        assert_eq!(tickets.len(), 1);
+        assert_eq!(tickets[0].mode, Some(VetterMode::Named));
+        let v = &state.main_page.content_panel.vetting;
+        assert!(v.pending_ticket.is_none());
+        let said = v.status_message.as_deref().unwrap_or_default();
+        assert!(
+            said.starts_with("first-vtc switched from PCS ZKP to named vetting."),
+            "{said}"
+        );
+        assert!(said.contains("under named vetting"), "{said}");
+    }
+
+    /// A community that switched from named vetting to PCS ZKP gates the ticket on enrolment.
+    #[test]
+    fn a_switch_to_pcs_zkp_gates_the_ticket() {
+        let community = "did:web:first-vtc.example";
+        let now = Utc::now();
+        let (mut book, persona) = hidden_vetter_book(0, false);
+        book.hidden_vetter.clear();
+        read_as(
+            &mut book,
+            community,
+            VetterMode::Named,
+            now - chrono::Duration::days(1),
+        );
+        let pending = pending_for(persona, now - chrono::Duration::seconds(1));
+        book.learn_mode(
+            community,
+            &manifest_payload(true),
+            Some(VetterMode::Named),
+            now,
+        );
+        let TicketCheck::Refused(why) = ticket_check(&book, &pending, now) else {
+            panic!("a vetter not enrolled under PCS ZKP is not given a ticket");
+        };
+        assert!(why.contains("first-vtc vets by PCS ZKP now"), "{why}");
+        assert!(!why.contains(".."), "{why}");
+        let switches = book.take_mode_switches();
+        assert_eq!(switches.len(), 1);
+        assert_eq!(switches[0].from, VetterMode::Named);
+        assert_eq!(switches[0].to, VetterMode::PcsZkp);
+    }
+
+    /// A read that fails is said — which kind of failure, and what was last known — and no ticket
+    /// is issued on the remembered mode either way.
+    #[test]
+    fn a_failed_mode_read_is_said_not_assumed() {
+        let community = "did:web:first-vtc.example";
+        let now = Utc::now();
+        let asked = now - chrono::Duration::seconds(31);
+        let (mut book, persona) = hidden_vetter_book(3, true);
+        read_as(
+            &mut book,
+            community,
+            VetterMode::PcsZkp,
+            now - chrono::Duration::hours(2),
+        );
+        let pending = pending_for(persona, asked);
+        book.mode_failed(community, ModeFailure::Unanswered, now);
+        let TicketCheck::Refused(why) = ticket_check(&book, &pending, now) else {
+            panic!("a ticket is not issued on a remembered mode");
+        };
+        assert!(
+            why.contains("could not confirm how first-vtc vets now"),
+            "{why}"
+        );
+        assert!(why.contains("no answer within 30 seconds"), "{why}");
+        assert!(why.contains("Last known: PCS ZKP, read 2 h ago"), "{why}");
+        assert!(!why.contains(".."), "{why}");
+
+        // The desk header says the same of the community.
+        let note = mode_note(&book, community, now).expect("a failure is shown");
+        assert!(note.contains("could not read how it vets now"), "{note}");
+
+        // A contract mismatch reads differently from silence (R6.4).
+        book.mode_failed(
+            community,
+            ModeFailure::Unreadable("missing field `criteria`".into()),
+            now,
+        );
+        let TicketCheck::Refused(why) = ticket_check(&book, &pending, now) else {
+            panic!("refused");
+        };
+        assert!(why.contains("cannot read"), "{why}");
+
+        // And with nothing recorded at all, the wait is still bounded (R1.2).
+        let (mut book, persona) = hidden_vetter_book(3, true);
+        read_as(
+            &mut book,
+            community,
+            VetterMode::PcsZkp,
+            now - chrono::Duration::hours(2),
+        );
+        let pending = pending_for(persona, now - chrono::Duration::seconds(10));
+        assert_eq!(ticket_check(&book, &pending, now), TicketCheck::Waiting);
+        let pending = pending_for(persona, now - chrono::Duration::seconds(60));
+        assert!(matches!(
+            ticket_check(&book, &pending, now),
+            TicketCheck::Refused(_)
+        ));
+    }
+
+    /// The enrolment whose answer was lost: the desk header says so briefly, the refusal says it
+    /// once in full — with the date the next label can start and what to do meanwhile — and no
+    /// sentence ends twice.
+    #[test]
+    fn a_lost_enrolment_is_said_once_in_full_with_the_next_label_date() {
+        let community = "did:web:first-vtc.example";
+        let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, 15, 14, 0).unwrap();
+        let membership = |persona| VettingMembership {
+            community: community.into(),
+            name: "first-vtc".into(),
+            persona,
+            accent: None,
+        };
+        // As recorded now, and as an older record has it: only the refusal, no lost label.
+        for recorded in [true, false] {
+            let (mut book, persona) = hidden_vetter_book(0, false);
+            let held = &mut book.hidden_vetter[0];
+            if recorded {
+                held.lost_enrolment = Some("2026-10".into());
+            }
+            held.last_refusal = Some(openvtc_core::vetting::book::HiddenRefusal {
+                what: "your hidden-vetting credential".into(),
+                code: "vtc/vetting/vetters/pcs-root:alreadyEnrolled".into(),
+                at: now,
+            });
+            let (short, warn) = standing_tokens(&book, community, persona, now).unwrap();
+            assert!(warn);
+            assert!(
+                short.contains("answer to your enrolment was lost"),
+                "{short}"
+            );
+            assert!(
+                !short.contains("already enrolled you"),
+                "the header keeps it short: {short}"
+            );
+            let refusal = ticket_refusal(&book, &membership(persona), now).expect("refused");
+            assert!(!refusal.contains(".."), "{refusal}");
+            assert!(refusal.contains("vetter/2026-11"), "{refusal}");
+            assert!(refusal.contains("Sun 01 Nov 2026"), "{refusal}");
+            assert!(refusal.contains("Meanwhile"), "{refusal}");
+            assert_eq!(
+                refusal.matches("already enrolled you").count(),
+                1,
+                "said once: {refusal}"
+            );
+            assert!(
+                !refusal.contains(&short),
+                "the short line is not repeated: {refusal}"
+            );
+        }
+    }
+
+    /// A ticket issued under one mode is marked once the community runs the other.
+    #[test]
+    fn a_ticket_from_another_mode_is_marked() {
+        let community = "did:web:first-vtc.example";
+        let now = Utc::now();
+        let mut config = test_config();
+        let mut ticket = Ticket::issue(
+            community,
+            PersonaId::new(),
+            vec![],
+            1,
+            DEFAULT_VALIDITY,
+            now,
+        );
+        ticket.mode = Some(VetterMode::PcsZkp);
+        config.private.vetting.tickets.push(ticket);
+        read_as(
+            &mut config.private.vetting,
+            community,
+            VetterMode::Named,
+            now,
+        );
+        let mut v = VettingState::default();
+        sync(&mut v, &config);
+        assert_eq!(
+            v.tickets[0].mode_note.as_deref(),
+            Some("issued under PCS ZKP")
+        );
+        read_as(
+            &mut config.private.vetting,
+            community,
+            VetterMode::PcsZkp,
+            now,
+        );
+        sync(&mut v, &config);
+        assert_eq!(v.tickets[0].mode_note, None);
     }
 
     /// The token line says what is held and when that changes, in time — never a raw tick.

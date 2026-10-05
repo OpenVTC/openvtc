@@ -191,6 +191,27 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **A ticket follows how the community vets now, not how it once did.** A
+  community can turn PCS ZKP vetting on and off, but the client treated it as
+  PCS ZKP forever once it held a hidden-vetting engine there, so a vetter at a
+  community back on named vetting was refused tickets over an enrolment it no
+  longer needed. How a community vets is now a reading of its join manifest,
+  kept with when it was read: `t` asks the community afresh and issues the
+  ticket only on that answer — a named ticket with no enrolment gate under
+  named vetting, the enrolment and token gate under PCS ZKP. A switch is said
+  ("first-vtc switched from PCS ZKP to named vetting") and every badge follows
+  it. Opening the desk, and keeping it open, re-reads a reading older than ten
+  minutes; the desk says when one is stale, and when a read failed says whether
+  it could not be sent, went unanswered, was refused or could not be read,
+  beside what was last known. A failed read issues no ticket rather than
+  guessing. Attesting and the token drip follow the same reading, and a ticket
+  issued under the other mode is marked.
+- **A lost enrolment answer says when you can vet again.** The message names
+  the label, the date the next monthly label can start, and what to do
+  meanwhile (ask the community's admins to publish a new label). It is said
+  once in full where a ticket is refused; the desk header keeps a short status.
+  A doubled full stop in the refusal is gone.
+
 - **Monochrome is calmer.** With `--monochrome` or `NO_COLOR`, every
   success-green heading and tick was drawn in reverse video, every caution
   underlined and every value in italics — a page busier than the coloured one.

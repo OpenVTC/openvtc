@@ -643,7 +643,7 @@ impl MainPageState {
                     .credentials
                     .values()
                     .any(openvtc_core::proof_check::signed_post_quantum),
-                pcs_zkp: config.private.vetting.hidden_vetting(&c.vtc_did),
+                pcs_zkp: config.private.vetting.pcs_zkp(&c.vtc_did),
                 // The name the community publishes in its branding comes after
                 // the membership's own and a verified agent name: it is what
                 // the community says about itself.

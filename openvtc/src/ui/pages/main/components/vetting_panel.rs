@@ -1644,6 +1644,14 @@ fn standing(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 ),
             ]));
         }
+        // How the community vets is a reading, not a fact: said when it is stale, or when the
+        // last read failed, so the badge above is not taken for current.
+        if let Some(note) = &row.mode_note {
+            lines.push(Line::from(vec![
+                Span::styled("             ", label()),
+                Span::styled(note.clone(), Style::new().fg(COLOR_ORANGE)),
+            ]));
+        }
     }
     lines.push(Line::from(""));
 }
@@ -2113,6 +2121,14 @@ fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 },
                 dim(),
             ),
+            // Issued under a mode the community no longer runs.
+            Span::styled(
+                row.mode_note
+                    .as_ref()
+                    .map(|note| format!(" — {note}"))
+                    .unwrap_or_default(),
+                Style::new().fg(COLOR_ORANGE),
+            ),
         ]));
     }
     if let Some(row) = v.tickets.get(v.selected)
@@ -2236,6 +2252,7 @@ mod desk_tests {
             profile: profile.to_string(),
             tokens: None,
             tokens_warn: false,
+            mode_note: None,
         }
     }
 
@@ -2625,6 +2642,7 @@ mod desk_tests {
             expires: "2026-09-29".into(),
             live: true,
             uri: Some(LINK.to_string()),
+            mode_note: None,
         };
         let base = VettingState {
             tab: VettingTab::Desk,
