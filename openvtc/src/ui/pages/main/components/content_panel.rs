@@ -291,6 +291,13 @@ fn render_status_help(
             Span::styled("  Connection:   ", label_style),
             Span::styled("No active community", Style::new().fg(COLOR_DARK_GRAY)),
         ]),
+        MediatorStatus::PersonaOnline => Line::from(vec![
+            Span::styled("  Connection:   ", label_style),
+            Span::styled(
+                "No community yet · persona online",
+                Style::new().fg(COLOR_SUCCESS),
+            ),
+        ]),
     };
     lines.push(conn_line);
 

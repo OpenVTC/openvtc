@@ -477,7 +477,9 @@ impl LoadingScreen {
                 ("Connecting to the mediator…".to_string(), COLOR_SOFT_PURPLE)
             }
             MediatorStatus::Connected => ("Connected".to_string(), COLOR_SUCCESS),
-            MediatorStatus::NoActiveCommunity => ("Ready".to_string(), COLOR_SUCCESS),
+            MediatorStatus::NoActiveCommunity | MediatorStatus::PersonaOnline => {
+                ("Ready".to_string(), COLOR_SUCCESS)
+            }
             MediatorStatus::Failed(_) => {
                 ("Startup failed".to_string(), COLOR_WARNING_ACCESSIBLE_RED)
             }

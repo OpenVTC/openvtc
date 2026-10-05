@@ -1304,13 +1304,21 @@ fn joining_summaries(
         .vetting
         .applications
         .iter()
-        .filter(|app| {
-            !config
+        .filter_map(|app| {
+            // A live membership (Pending or Active) is the join itself, shown
+            // as its own row — listing the application too would show one join
+            // twice. One that has ended (rejected, withdrawn, left) is not: the
+            // application is still how this persona applies again here, so it
+            // is listed, saying how the last attempt ended.
+            let ended = match config
                 .account
                 .memberships()
-                .any(|m| m.vtc_did == app.community && m.persona_ref == app.persona)
-        })
-        .filter_map(|app| {
+                .find(|m| m.vtc_did == app.community && m.persona_ref == app.persona)
+            {
+                Some(m) if m.is_live() => return None,
+                Some(m) => Some(community_status_label(&m.status)),
+                None => None,
+            };
             let persona = config.account.personas.get(&app.persona)?;
             // The membership rows' precedence: the holder's own label, then a
             // verified agent name, then the shortened DID.
@@ -1321,6 +1329,13 @@ fn joining_summaries(
                 .unwrap_or_else(|| shorten_did(&persona.did, 24));
             let (standing, ready) =
                 crate::state_handler::vetting_actions::joining_standing(app, now);
+            let standing = match ended {
+                Some(how) => format!(
+                    "{} last time — apply again · {standing}",
+                    how.to_lowercase()
+                ),
+                None => standing,
+            };
             Some(content::JoiningSummary {
                 application_id: app.id.clone(),
                 community_name: crate::state_handler::vetting_actions::community_display(
@@ -2050,6 +2065,34 @@ mod tests {
         let joining = &page.content_panel.communities.joining;
         assert_eq!(joining.len(), 1);
         assert_eq!(joining[0].persona_label, "Home");
+    }
+
+    /// A join that ended — rejected, withdrawn, left — leaves the application as
+    /// the way to apply again, so it is listed, saying how the last attempt
+    /// ended; a live membership still covers the join on its own.
+    #[test]
+    fn an_application_whose_join_ended_is_listed_to_apply_again() {
+        use openvtc_core::config::account::CommunityStatus;
+        let mut config = config_with_membership(JOIN_PERSONA, Some("Work"), JOIN_VTC, None);
+        let member = *config.account.personas.keys().next().unwrap();
+        config
+            .private
+            .vetting
+            .start_application(JOIN_VTC, member, JOIN_PERSONA, chrono::Utc::now())
+            .unwrap();
+        for record in config.account.communities.values_mut().flatten() {
+            record.status = CommunityStatus::Rejected;
+        }
+        let mut page = MainPageState::default();
+        page.sync_from_config(&config);
+        let [row] = &*page.content_panel.communities.joining else {
+            panic!("the ended join's application is listed");
+        };
+        assert!(
+            row.standing.starts_with("rejected last time — apply again"),
+            "{}",
+            row.standing
+        );
     }
 
     /// An application whose persona has been deleted can never be submitted,
