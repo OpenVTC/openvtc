@@ -953,14 +953,18 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         vec![
             Span::styled("Vetters      ", label()),
             crate::ui::badges::pcs_zkp(),
-            Span::styled(format!("  {}", crate::ui::badges::PCS_ZKP_MEANING), value()),
+            Span::styled(
+                format!("  {}", crate::ui::badges::PCS_ZKP_MEANING),
+                crate::ui::badges::protected(),
+            ),
         ]
     } else {
         vec![
             Span::styled("Vetters      ", label()),
+            crate::ui::badges::vetters_named(),
             Span::styled(
-                "named — the community sees which vetters vouched for you",
-                dim(),
+                format!("  {}", crate::ui::badges::NAMED_FOR_APPLICANT),
+                crate::ui::badges::caution(),
             ),
         ]
     }));
@@ -1628,17 +1632,17 @@ fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             Span::styled("You are      ", label()),
             crate::ui::badges::pcs_zkp(),
             Span::styled(
-                "  hidden — your attestation is counted in a zero-knowledge proof; the \
-                 community never learns it was you",
-                value(),
+                format!("  protected — {}", crate::ui::badges::ZKP_FOR_VETTER),
+                crate::ui::badges::protected(),
             ),
         ]
     } else {
         vec![
             Span::styled("You are      ", label()),
+            crate::ui::badges::vetters_named(),
             Span::styled(
-                "named — your signed statement, with your DID, goes to the community",
-                dim(),
+                format!("  {}", crate::ui::badges::NAMED_FOR_VETTER),
+                crate::ui::badges::caution(),
             ),
         ]
     }));
@@ -1778,6 +1782,27 @@ fn attest(lines: &mut Vec<Line<'static>>, v: &VettingState, request_id: &str, fo
         "  this statement is attributable to me within {}.\"",
         row.community
     )));
+    // Said where the vetter signs, because this is the moment it matters:
+    // named, the community will hold this vetter's DID against this person;
+    // under a PCS zero-knowledge proof it never learns who vouched.
+    lines.push(Line::from(""));
+    lines.push(Line::from(if row.pcs_zkp {
+        vec![
+            crate::ui::badges::pcs_zkp(),
+            Span::styled(
+                format!("  {}", crate::ui::badges::ZKP_FOR_VETTER),
+                crate::ui::badges::protected(),
+            ),
+        ]
+    } else {
+        vec![
+            crate::ui::badges::vetters_named(),
+            Span::styled(
+                format!("  {}", crate::ui::badges::NAMED_FOR_VETTER),
+                crate::ui::badges::caution(),
+            ),
+        ]
+    }));
     lines.push(field(
         "I attest",
         format!("{}  sign this statement as me", tick(form.attested)),
@@ -2052,6 +2077,49 @@ mod desk_tests {
             "{text}"
         );
         assert!(!text.contains("decline  p:"), "{text}");
+    }
+
+    /// Where the vetter signs, the page says what signing discloses: named
+    /// statements carry their DID to the community; a PCS ZKP attestation does
+    /// not.
+    #[test]
+    fn the_attest_form_says_whether_the_vetter_is_named() {
+        use crate::state_handler::main_page::content::{AttestForm, DeskStage, VettingMode};
+        let attesting = |pcs_zkp| {
+            drawn(&VettingState {
+                tab: VettingTab::Desk,
+                mode: VettingMode::Attest {
+                    request_id: "r1".into(),
+                    form: AttestForm::default(),
+                },
+                desk: vec![DeskRow {
+                    request_id: "r1".into(),
+                    applicant: "did:example:applicant".into(),
+                    applicant_name: None,
+                    community: "did:example:community".into(),
+                    pcs_zkp,
+                    state: "card verified".into(),
+                    stage: DeskStage::Card,
+                    method: Some("in person".into()),
+                    match_code: Some("ABCD-EFGH".into()),
+                    claims: Vec::new(),
+                    required_claims: Vec::new(),
+                    message: None,
+                }]
+                .into(),
+                ..VettingState::default()
+            })
+        };
+        let named = attesting(false);
+        assert!(named.contains("VETTERS NAMED"), "{named}");
+        assert!(
+            named.contains("it will know you vouched for this person"),
+            "{named}"
+        );
+        let hidden = attesting(true);
+        assert!(hidden.contains("PCS ZKP"), "{hidden}");
+        assert!(hidden.contains("never learns it was you"), "{hidden}");
+        assert!(!hidden.contains("VETTERS NAMED"), "{hidden}");
     }
 
     /// History holds what you signed (to withdraw) and the declines as dates

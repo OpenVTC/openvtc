@@ -308,14 +308,17 @@ fn protection_lines(known: &KnownVetting) -> Vec<Line<'static>> {
             "Vetters",
             Some(badges::pcs_zkp()),
             badges::PCS_ZKP_MEANING.to_string(),
-            Style::new().fg(COLOR_SOFT_PURPLE),
+            badges::protected(),
         )
     } else {
+        // A disclosure, said in the caution colour: the person deciding
+        // whether to ask a friend to vet them should not have to read grey
+        // text to learn that friend's DID goes to the community.
         row(
             "Vetters",
-            None,
-            "named — the community sees which vetters vouched for you".to_string(),
-            dim(),
+            Some(badges::vetters_named()),
+            badges::NAMED_FOR_APPLICANT.to_string(),
+            badges::caution(),
         )
     });
     lines.push(match known.post_quantum {
@@ -898,8 +901,10 @@ mod tests {
         assert!(protected.contains("PQC-SIGNED"), "{protected}");
 
         let plain = with(false, Some(false));
+        // Named vetting is a disclosure, and is badged as one.
+        assert!(plain.contains("VETTERS NAMED"), "{plain}");
         assert!(
-            plain.contains("named — the community sees which vetters"),
+            plain.contains("the community will see which vetters vouched for you"),
             "{plain}"
         );
         assert!(plain.contains("classical keys only"), "{plain}");

@@ -1944,15 +1944,39 @@ impl StateHandler {
         // What the book already knows decides at once. Otherwise the community
         // is asked, and the wait happens in the caller's loop — the one that
         // hears the answer — which enters this flow again.
-        let knowledge = match config.private.vetting.knowledge(&vtc_did) {
+        let known = |config: &Config| match config.private.vetting.knowledge(&vtc_did) {
             Knowledge::Vetting(_) => Some(true),
             Knowledge::NoVetting => Some(false),
             Knowledge::Unknown => None,
         };
+        let mut knowledge = known(config);
+        // Known before is not known now. A community changes what it asks —
+        // turns on hidden vetting, raises a count, starts vetting at all — and
+        // a join decided on the last visit's copy shows the person a community
+        // that no longer exists: vetters "named" where they are now hidden, or
+        // no vetting where it is now required. So the manifest is read again on
+        // every join, over the endpoint that needs nothing of us (bounded, R1.2),
+        // which also carries the change into any application already under way.
+        // Only when the community cannot be reached does the stored copy stand
+        // in, and the log says the page is showing an older answer.
+        if knowledge.is_some() {
+            match learn_over_http(config, tdk, &vtc_did).await {
+                Ok(()) => knowledge = known(config),
+                Err(why) => {
+                    debug!(community = %vtc_did, reason = %why.reason(), "manifest not re-read");
+                    state.main_page.log(format!(
+                        "Could not read {}'s current requirements ({}); showing what it said \
+                         last time.",
+                        vetting_actions::community_display(config, &vtc_did),
+                        why.reason()
+                    ));
+                }
+            }
+        }
         match knowledge {
             Some(true) => {
-                // Known from an earlier visit or a DIDComm answer, neither of
-                // which read the DID document; the page says how it signs.
+                // The re-read above records how it signs; if it could not be
+                // made, the DID document may still resolve on its own.
                 learn_signing(config, tdk, &vtc_did).await;
                 show_vetting(state, config, &vtc_did);
                 None

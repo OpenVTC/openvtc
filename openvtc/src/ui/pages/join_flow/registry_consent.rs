@@ -134,18 +134,22 @@ fn review_lines(community: &str, review: &JoinReview) -> Vec<Line<'static>> {
                 label(""),
                 Span::styled(
                     "it learns that enough vetters vouched for you — not who they were",
-                    Style::new().fg(COLOR_SOFT_PURPLE),
+                    badges::protected(),
                 ),
             ]));
         }
         ReviewVetting::Named(statements) => {
             lines.push(Line::from(vec![
                 label("Vetting"),
-                value(format!(
-                    "{} named statement{} — it sees who vouched for you",
-                    statements.len(),
-                    if statements.len() == 1 { "" } else { "s" }
-                )),
+                badges::vetters_named(),
+                Span::styled(
+                    format!(
+                        "  {} named statement{} — it sees who vouched for you",
+                        statements.len(),
+                        if statements.len() == 1 { "" } else { "s" }
+                    ),
+                    badges::caution(),
+                ),
             ]));
             for statement in statements {
                 lines.push(Line::from(vec![

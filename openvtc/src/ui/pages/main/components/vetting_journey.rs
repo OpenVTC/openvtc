@@ -45,10 +45,15 @@ pub fn render(
         j.title.clone(),
         Style::new().fg(COLOR_TEXT_DEFAULT).bold(),
     )];
-    if j.pcs_zkp {
-        title.push(Span::raw("   "));
-        title.push(badges::pcs_zkp());
-    }
+    // Either way, on the title: which kind of vetting this is decides what
+    // the community learns about the vetters, and both sides should know it
+    // from the first line of the page.
+    title.push(Span::raw("   "));
+    title.push(if j.pcs_zkp {
+        badges::pcs_zkp()
+    } else {
+        badges::vetters_named()
+    });
     lines.push(Line::from(title));
     lines.push(Line::from(""));
 

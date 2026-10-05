@@ -35,6 +35,14 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Added
 
+- **Named vetting is marked as a disclosure, PCS ZKP as protected — for both
+  sides.** A community whose statements name their vetters now shows an orange
+  *⚠ VETTERS NAMED* badge with what it means ("the community will see which
+  vetters vouched for you"; to a vetter, "it will know you vouched for this
+  person"), and PCS ZKP vetting a green *✓ PCS ZKP* badge. Shown on the join
+  page, the review before sending, the application, the vetting desk, both
+  journey titles, and on the attest form where the vetter signs.
+
 - **Vetting journeys for both sides.** Enter on an application, or on a request
   on the vetting desk, opens it as a journey that takes the whole width of the
   screen. A strip across the top shows every step — done, yours now, waiting on
@@ -126,6 +134,15 @@ are marked wherever they apply. The detailed entries follow the summary below.
   verifiable-git-infrastructure `main`.
 
 ### Fixed
+
+- **A join reads the community's current requirements every time.** Once a
+  community's manifest had been read, the join page used the stored copy for
+  good — so a community that turned on PCS ZKP vetting, changed what it asks,
+  or started vetting at all still showed what it said before (vetters "named"
+  where they were now hidden). The page now re-reads the manifest on every
+  join, carrying any change into an application under way, and falls back to
+  the stored copy only when the community cannot be reached, saying so in the
+  log.
 
 - **A finished vetting request leaves the desk and forgets the person.**
   Signed or declined requests used to stay among the open ones with the
