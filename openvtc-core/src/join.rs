@@ -809,8 +809,129 @@ pub async fn verify_invitation_credential(
         .map_err(|e| format!("the invitation did not verify: {e}"))
 }
 
+/// The ways a pasted invitation could be read, best first: the text as given,
+/// then with the damage of copying it out of a terminal undone.
+///
+/// A VIC is one long line of JSON, and a terminal wraps it. Copying the wrapped
+/// text back out puts a hard line break — often with the indentation or a
+/// panel border (`│`) around it — wherever the wrap fell. Between JSON tokens
+/// that is harmless whitespace, but inside a string (a DID, a proof value) it
+/// is a raw newline, which JSON forbids, and the paste failed as "not valid
+/// JSON" with nothing the holder could do but find another way to copy it.
+///
+/// Inside a string a wrap is taken out together with the spaces around it.
+/// Whether the wrap fell *on* a space cannot be known from the text, so a
+/// second reading keeps one space there. Which one is right is for the
+/// invitation's proof to say: a wrongly mended credential does not verify, so
+/// guessing here can reject a paste but never accept a tampered one. Readings
+/// that come out identical are given once.
+#[must_use]
+pub fn pasted_json_readings(text: &str) -> Vec<String> {
+    let given = text.trim().to_string();
+    let lines: Vec<&str> = text.lines().map(strip_border).collect();
+    let joined = lines.join("\n");
+    let mut readings = vec![given];
+    for at_wrap in ["", " "] {
+        let mended = mend_wraps_in_strings(joined.trim(), at_wrap);
+        if !readings.contains(&mended) {
+            readings.push(mended);
+        }
+    }
+    readings
+}
+
+/// One copied line without the panel border a TUI drew around it.
+fn strip_border(line: &str) -> &str {
+    const BORDERS: &[char] = &['│', '┃', '║', '\u{200B}', '\u{FEFF}'];
+    line.trim_end_matches(['\r'])
+        .trim()
+        .trim_start_matches(BORDERS)
+        .trim_end_matches(BORDERS)
+}
+
+/// Take each line break inside a JSON string out, with the spaces around it,
+/// leaving `at_wrap` in its place. Breaks between tokens are left alone.
+fn mend_wraps_in_strings(text: &str, at_wrap: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut in_string, mut escaped) = (false, false);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_string && c == '\n' {
+            while out.ends_with([' ', '\t']) {
+                out.pop();
+            }
+            while chars.peek().is_some_and(|n| *n == ' ' || *n == '\t') {
+                chars.next();
+            }
+            out.push_str(at_wrap);
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if c == '"' {
+            in_string = true;
+        }
+        out.push(match c {
+            '\u{00A0}' if !in_string => ' ',
+            other => other,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    /// A VIC copied out of a wrapped terminal: breaks inside strings, panel
+    /// borders and indentation, all mended back to the one-line original.
+    #[test]
+    fn a_wrapped_paste_is_mended() {
+        let original =
+            r#"{"issuer":"did:webvh:QmAbc:example.com","proof":{"proofValue":"z3FXQabcdef"}}"#;
+        let wrapped = "│ {\"issuer\":\"did:webvh:Qm │\n│   Abc:example.com\",\"proof\":{\"proofV │\n│ alue\":\"z3FXQ │\n│ abcdef\"}} │";
+        let readings = pasted_json_readings(wrapped);
+        assert!(readings.iter().any(|r| r == original), "{readings:#?}");
+        for r in &readings[1..] {
+            serde_json::from_str::<Value>(r).expect("each mended reading parses");
+        }
+    }
+
+    /// A wrap that fell on a space inside a string: the second reading keeps it.
+    #[test]
+    fn a_wrap_on_a_space_keeps_one_reading_with_the_space() {
+        let readings = pasted_json_readings("{\"name\":\"Open\n VTC\"}");
+        assert!(readings.contains(&r#"{"name":"OpenVTC"}"#.to_string()));
+        assert!(readings.contains(&r#"{"name":"Open VTC"}"#.to_string()));
+    }
+
+    /// Pretty-printed JSON is valid already: breaks between tokens stay, and
+    /// the text as given comes first.
+    #[test]
+    fn breaks_between_tokens_are_left_alone() {
+        let pretty = "{\n  \"a\": \"b\",\n  \"c\": [1, 2]\n}";
+        let readings = pasted_json_readings(pretty);
+        assert_eq!(readings[0], pretty);
+        for r in &readings {
+            let v: Value = serde_json::from_str(r).expect("every reading parses");
+            assert_eq!(v["a"], "b", "and says the same thing");
+        }
+    }
+
+    /// An escaped quote does not end the string, so a break after it is mended.
+    #[test]
+    fn an_escaped_quote_does_not_end_the_string() {
+        let readings = pasted_json_readings("{\"a\":\"x\\\"y\n z\"}");
+        assert!(
+            readings.contains(&r#"{"a":"x\"yz"}"#.to_string()),
+            "{readings:#?}"
+        );
+    }
+
     use super::*;
     use serde_json::json;
 

@@ -158,7 +158,9 @@ impl JoinFlow {
     /// it parse as JSON" would report a mangled VIC as a malformed DID.
     pub fn apply_entry_paste(&mut self, text: &str) {
         let trimmed = text.trim();
-        if trimmed.starts_with('{') {
+        // Copied out of a panel, the text can open with its border.
+        let opening = trimmed.trim_start_matches(['│', '┃', '║']).trim_start();
+        if opening.starts_with('{') {
             // Re-arm the prefill: a paste is a deliberate act, so pasting the
             // same VIC again after clearing the input fills it back in rather
             // than being a no-op.
