@@ -2518,6 +2518,219 @@ fn the_engine_follows_the_published_labels_and_stops_at_new_keys() {
     assert!(state.plan(Some(&live), &[], november).owed.is_empty());
 }
 
+/// A manifest carrying `params` on its one criterion, as a community serves it.
+fn manifest_publishing(params: &Value) -> Value {
+    json!({
+        "criteria": [{
+            "id": "c1",
+            "vetting": {
+                "minStatements": 1,
+                "ext": { super::hidden::HIDDEN_VETTING_NS: params }
+            }
+        }]
+    })
+}
+
+/// A vetter enrolled under October at `COMMUNITY`, holding `rate` tokens a tick as the rate.
+fn vetter_drawing_at(rate: usize) -> (VettingBook, Value) {
+    let mut published = hidden_params();
+    published["dripPerTick"] = json!(rate);
+    let params: super::hidden::HiddenParams = serde_json::from_value(published.clone()).unwrap();
+    let mut snapshot = openvtc_vetting_pcs::snapshot::VetterSnapshot::without_keys("member-1");
+    snapshot
+        .credentials
+        .insert("2026-10".into(), "zOctober".into());
+    let mut book = VettingBook::default();
+    book.hidden_vetter.push(super::book::HiddenVetterState::new(
+        COMMUNITY,
+        PersonaId::new(),
+        params,
+        snapshot,
+    ));
+    (book, published)
+}
+
+/// Every manifest read moves the rate a vetter's engine draws at — at the read, not at its next
+/// pass — and dates it. The community went from 100 tokens a tick to 20; the next draw asks
+/// for 20.
+#[test]
+fn a_manifest_read_moves_the_rate_the_next_draw_asks_for() {
+    use super::hidden::Due;
+    let (mut book, mut published) = vetter_drawing_at(100);
+    let october = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, 21, 16, 0).unwrap();
+    assert!(
+        book.hidden_vetter[0].draw_hold(false, october).is_some(),
+        "never read from the community: no draw yet"
+    );
+
+    published["dripPerTick"] = json!(20);
+    book.learn_mode(COMMUNITY, &manifest_publishing(&published), None, october);
+    let held = &mut book.hidden_vetter[0];
+    assert_eq!(held.params.drip_per_tick, 20, "taken at the read");
+    assert_eq!(held.params_read_at, Some(october));
+    assert_eq!(held.draw_hold(false, october), None);
+    let plan = held.plan(book.hidden_published.get(COMMUNITY), &[], october);
+    assert!(!plan.owed.is_empty());
+    for owed in &plan.owed {
+        assert!(
+            matches!(owed, Due::Draw { rate: 20, .. }),
+            "drawn at the rate read: {owed:?}"
+        );
+    }
+    // A read that is open holds the draw, and one older than the TTL is not enough.
+    assert_eq!(
+        held.draw_hold(true, october),
+        Some(super::book::DrawHold::Reading)
+    );
+    assert_eq!(
+        held.draw_hold(
+            false,
+            october + super::book::PARAMS_FRESH_FOR + Duration::seconds(1)
+        ),
+        Some(super::book::DrawHold::Unread)
+    );
+}
+
+/// A pass that held its draws for a read is run again when the read lands.
+#[test]
+fn a_read_a_pass_waited_for_runs_the_schedule_again() {
+    let (mut book, published) = vetter_drawing_at(20);
+    book.hidden_vetter[0].awaiting_read = true;
+    book.vetter_refresh_due = false;
+    book.learn_mode(
+        COMMUNITY,
+        &manifest_publishing(&published),
+        None,
+        Utc::now(),
+    );
+    assert!(book.vetter_refresh_due);
+    assert!(!book.hidden_vetter[0].awaiting_read);
+}
+
+/// `overQuota` is the community saying the rate this client holds is not the one it serves.
+/// Nothing is drawn until its manifest has been read again — asked for at once — and then at
+/// the rate it says: the published one if it moved, or the one the refusal named.
+#[tokio::test]
+async fn an_over_quota_refusal_rereads_the_rate_before_drawing_again() {
+    use super::book::DrawHold;
+    use super::hidden::Due;
+    let label = "token/2026-10";
+    let october = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, 21, 16, 0).unwrap();
+    let refusal = |request: &TrustTask<Value>, detail: &str| {
+        wire::to_message(
+            &wire::refusal(request, super::hidden::TOKENS_OVER_QUOTA, Some(detail)).unwrap(),
+        )
+        .unwrap()
+    };
+    let setup = || {
+        let (mut vetter, request) = vetter_with_a_draw_in_flight(label, 1);
+        let held = &mut vetter.book.hidden_vetter[0];
+        held.params.drip_per_tick = 100;
+        held.params_read_at = Some(Utc::now() - Duration::minutes(1));
+        held.snapshot
+            .credentials
+            .insert("2026-10".into(), "zOctober".into());
+        vetter.book.vetter_refresh_due = false;
+        vetter
+            .book
+            .mode_asked(COMMUNITY, Utc::now() - Duration::minutes(1));
+        (vetter, request)
+    };
+
+    // The refusal names the rate: held, re-read at once, and then drawn at 20.
+    let (mut vetter, request) = setup();
+    let handled = vetter
+        .receive(
+            &refusal(
+                &request,
+                "drip refused: asked for 100 tokens; this community drips 20 a tick",
+            ),
+            COMMUNITY,
+        )
+        .await;
+    let said = handled.notice.expect("news").describe();
+    assert!(said.contains("being read again"), "{said}");
+    assert!(
+        !said.contains("next pass asks for the published rate"),
+        "{said}"
+    );
+    assert!(vetter.book.vetter_refresh_due, "the re-read is asked now");
+    assert!(
+        vetter.book.params_reread_owed(COMMUNITY),
+        "owed despite a read a minute ago"
+    );
+    let now = Utc::now();
+    let held = &vetter.book.hidden_vetter[0];
+    assert_eq!(held.draw_hold(false, now), Some(DrawHold::Unread));
+    let q = held.over_quota.clone().expect("kept");
+    assert_eq!((q.asked, q.allowed), (100, Some(20)));
+    // Asked: no second ask is owed for the same refusal.
+    vetter.book.mode_asked(COMMUNITY, now);
+    assert!(!vetter.book.params_reread_owed(COMMUNITY));
+    // The community still publishes 100: drawn at the 20 it serves.
+    let published = serde_json::to_value(&vetter.book.hidden_vetter[0].params).unwrap();
+    let later = now + Duration::seconds(2);
+    vetter
+        .book
+        .learn_mode(COMMUNITY, &manifest_publishing(&published), None, later);
+    let held = &mut vetter.book.hidden_vetter[0];
+    assert_eq!(held.draw_hold(false, later), None);
+    let plan = held.plan(None, &[], october);
+    assert!(!plan.owed.is_empty());
+    assert!(
+        plan.owed
+            .iter()
+            .all(|d| matches!(d, Due::Draw { rate: 20, .. })),
+        "{:?}",
+        plan.owed
+    );
+
+    // The refusal does not name the rate, and the community still publishes 100: nothing is
+    // drawn again — it would only be refused — until it publishes another.
+    let (mut vetter, request) = setup();
+    vetter
+        .receive(&refusal(&request, "because"), COMMUNITY)
+        .await;
+    let mut published = serde_json::to_value(&vetter.book.hidden_vetter[0].params).unwrap();
+    let later = Utc::now() + Duration::seconds(2);
+    vetter
+        .book
+        .learn_mode(COMMUNITY, &manifest_publishing(&published), None, later);
+    assert!(matches!(
+        vetter.book.hidden_vetter[0].draw_hold(false, later),
+        Some(DrawHold::Disagrees {
+            asked: 100,
+            published: 100,
+            ..
+        })
+    ));
+    // It publishes 20: the hold ends, and the next draw asks for 20.
+    published["dripPerTick"] = json!(20);
+    let later = later + Duration::seconds(1);
+    vetter
+        .book
+        .learn_mode(COMMUNITY, &manifest_publishing(&published), None, later);
+    let held = &mut vetter.book.hidden_vetter[0];
+    assert_eq!(held.draw_hold(false, later), None);
+    assert!(held.over_quota.is_none());
+    assert!(
+        held.plan(None, &[], october)
+            .owed
+            .iter()
+            .all(|d| matches!(d, Due::Draw { rate: 20, .. }))
+    );
+}
+
+/// The numbers an `overQuota` refusal gives, when it gives them.
+#[test]
+fn an_over_quota_refusal_is_read_for_its_numbers() {
+    use super::book::{over_quota_allowed, over_quota_asked};
+    let text = "drip refused: asked for 100 tokens; this community drips 20 a tick";
+    assert_eq!(over_quota_asked(text), Some(100));
+    assert_eq!(over_quota_allowed(text), Some(20));
+    assert_eq!(over_quota_allowed("because"), None);
+}
+
 /// A pass over a community fed only what we enrolled under — the bug this replaced — never
 /// moves to the new month; fed what the community publishes now, it re-enrols.
 #[test]

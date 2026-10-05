@@ -762,6 +762,12 @@ pub const TOKENS_ALREADY_SERVED: &str =
     trust_tasks_rs::specs::vtc::vetting::vetters::pcs_tokens::v0_1::error_codes::ALREADY_SERVED
         .code;
 
+/// The `pcs-tokens` refusal that means "more than this community issues a tick": the rate this
+/// client holds is not the one the community enforces, so its manifest is read again before
+/// anything more is drawn.
+pub const TOKENS_OVER_QUOTA: &str =
+    trust_tasks_rs::specs::vtc::vetting::vetters::pcs_tokens::v0_1::error_codes::OVER_QUOTA.code;
+
 /// A hidden-vetting refusal in words a vetter can act on.
 ///
 /// Each declared code of `pcs-root`, `pcs-tokens`, `event-mode` and `pcs-challenge` gets its own
@@ -807,8 +813,9 @@ pub fn refusal_words(code: &str) -> String {
              window opens."
         }
         ("pcs-tokens", "overQuota") => {
-            "the request asked for more tokens than its published rate. Nothing was signed; the \
-             next pass asks for the published rate."
+            "the request asked for more tokens than it issues a tick — this client's copy of \
+             its rate was out of date. Nothing was signed. Its rate is being read again now, and \
+             nothing more is drawn until the rate it publishes has been taken."
         }
         ("pcs-tokens", "eventRefused") => {
             "you are not in the approved group for that event, so it will not issue its tokens \

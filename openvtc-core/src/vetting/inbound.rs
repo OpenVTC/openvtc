@@ -1704,7 +1704,9 @@ fn refusal_of(
             QueryKind::PcsRoot
             | QueryKind::PcsTokens
             | QueryKind::PcsEventMode
-            | QueryKind::PcsChallenge => hidden_refused(book, ctx, &query, sender, &code),
+            | QueryKind::PcsChallenge => {
+                hidden_refused(book, ctx, &query, sender, &code, detail.as_deref())
+            }
             // Its mode could not be read now; the last reading stands, marked as such.
             QueryKind::Manifest => {
                 book.mode_failed(
@@ -1765,6 +1767,7 @@ fn hidden_refused(
     query: &super::queries::CommunityQuery,
     sender: &str,
     code: &str,
+    detail: Option<&str>,
 ) -> (bool, Option<Notice>) {
     let draw = if query.kind == QueryKind::PcsTokens {
         book.draws_in_flight.remove(&query.document_id)
@@ -1822,6 +1825,33 @@ fn hidden_refused(
             (true, None)
         }
         _ => {
+            // More than the community issues a tick: the rate this engine holds is not the one
+            // it enforces. Nothing is drawn again until its manifest has been read afresh — at
+            // once, not at the next pass — and the rate it says (or the refusal said) taken.
+            if query.kind == QueryKind::PcsTokens
+                && code == super::hidden::TOKENS_OVER_QUOTA
+                && let Some((label, _)) = &draw
+            {
+                info!(community = %sender, ?draw, ?detail, "draw refused as over the community's rate; reading its parameters again");
+                state.refused_over_quota(label, detail, ctx.now);
+                book.vetter_refresh_due = true;
+                let Some(state) = book.hidden_vetter_mut(sender, query.persona) else {
+                    return (true, None);
+                };
+                state.last_refusal = Some(super::book::HiddenRefusal {
+                    what: query.kind.describe().to_string(),
+                    code: code.to_string(),
+                    at: ctx.now,
+                });
+                return (
+                    true,
+                    Some(Notice::HiddenVettingRefused {
+                        community: sender.to_string(),
+                        what: query.kind.describe(),
+                        code: code.to_string(),
+                    }),
+                );
+            }
             state.last_refusal = Some(super::book::HiddenRefusal {
                 what: query.kind.describe().to_string(),
                 code: code.to_string(),

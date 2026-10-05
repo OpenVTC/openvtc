@@ -28,7 +28,7 @@ use openvtc_core::vetting::applicant::{
     VetterEligibility,
 };
 use openvtc_core::vetting::book::{
-    Adopted, FALLBACK_REQUIRED_CLAIMS, HiddenOutlook, HiddenVetterState,
+    Adopted, DrawHold, FALLBACK_REQUIRED_CLAIMS, HiddenOutlook, HiddenVetterState,
 };
 use openvtc_core::vetting::mode::{ModeFailure, VetterMode, age_words};
 use openvtc_core::vetting::queries::{
@@ -313,6 +313,17 @@ pub(crate) fn get_tokens_words(
     if o.asking {
         return format!("a draw is on its way ({} usable now)", tokens(o.usable));
     }
+    if let Some(DrawHold::Disagrees {
+        asked, published, ..
+    }) = held.draw_hold(false, now)
+    {
+        return format!(
+            "{name} refused {asked} tokens a tick as more than it issues, yet still publishes \
+             {published}, so drawing has stopped until it publishes a rate it serves ({} usable \
+             now) — ask its operator",
+            tokens(o.usable)
+        );
+    }
     if let Some(at) = o.retry_at {
         return format!(
             "{name} has not answered; asking again at {} ({} usable now)",
@@ -449,6 +460,19 @@ fn tick_length_words(length: chrono::Duration) -> String {
     }
 }
 
+/// When a community's hidden-vetting parameters were last read from it, as the desk says it
+/// after the rate: "read 21:16 UTC" today, "read 2026-10-04 21:16 UTC" before, or "not read
+/// from the community yet".
+fn params_read_words(read_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+    match read_at {
+        Some(at) if at.date_naive() == now.date_naive() => {
+            format!("read {}", at.format("%H:%M UTC"))
+        }
+        Some(at) => format!("read {}", at.format("%Y-%m-%d %H:%M UTC")),
+        None => "not read from the community yet".to_string(),
+    }
+}
+
 /// One community's hidden vetting, for the vetter's own view.
 fn hidden_row(
     held: &HiddenVetterState,
@@ -497,6 +521,21 @@ fn hidden_row(
         )
     });
     let next_window = hidden::next_window(&held.params, &events, now).map(when);
+    let params_hold = match held.draw_hold(false, now) {
+        Some(DrawHold::Disagrees {
+            asked, published, ..
+        }) => Some(format!(
+            "The community refused {asked} tokens a tick as more than it issues, and still \
+             publishes {published}. Nothing more is drawn until it publishes a rate it will \
+             serve — ask its operator to check its dripPerTick."
+        )),
+        _ if held.reread_owed() => Some(
+            "A draw was refused as over the community's rate; its parameters are being read \
+             again, and nothing is drawn until they are."
+                .to_string(),
+        ),
+        _ => None,
+    };
     HiddenVettingRow {
         community,
         accent,
@@ -520,6 +559,16 @@ fn hidden_row(
             .collect(),
         tick_length: tick_length_words(held.params.tick_length()),
         drip_per_tick: held.params.drip_per_tick,
+        drawn_per_tick: held
+            .params
+            .token_labels
+            .iter()
+            .find(|l| hidden::month_of_label(l).is_some())
+            .map_or(held.params.drip_per_tick, |l| {
+                held.rate_for(l, now.date_naive())
+            }),
+        params_read: params_read_words(held.params_read_at, now),
+        params_hold,
         last_draw,
         next_window,
         events: held
@@ -3851,7 +3900,25 @@ pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str
     for id in stale {
         book.draws_in_flight.remove(&id);
     }
-    let plan = book.hidden_vetter[index].plan(live.as_ref(), &in_flight, now);
+    let mut plan = book.hidden_vetter[index].plan(live.as_ref(), &in_flight, now);
+    // Never a draw on a rate the community may have moved off: only on parameters read from it
+    // lately, and not before a read that followed an `overQuota` refusal. The read this pass
+    // asked for (`refresh_vetter_communities`) runs the schedule again when it lands.
+    let reading = book.waiting_on(community, QueryKind::Manifest).is_some();
+    if let Some(hold) = book.hidden_vetter[index].draw_hold(reading, now) {
+        let drops = plan
+            .owed
+            .iter()
+            .any(|d| matches!(d, openvtc_core::vetting::hidden::Due::Draw { .. }));
+        if drops {
+            tracing::info!(community = %community, ?hold, "draws held for a fresh read of the community's parameters");
+            plan.owed
+                .retain(|d| !matches!(d, openvtc_core::vetting::hidden::Due::Draw { .. }));
+            if !matches!(hold, DrawHold::Disagrees { .. }) {
+                book.hidden_vetter[index].awaiting_read = true;
+            }
+        }
+    }
     let state = book.hidden_vetter[index].clone();
     let changed = plan.settled || plan.adopted != Adopted::Unchanged;
     if let Adopted::Rekeyed { first } = plan.adopted {
@@ -3956,8 +4023,9 @@ pub(crate) fn desk_open(state: &State) -> bool {
 ///
 /// Including the communities we already hold an engine for: the manifest is where a new month's
 /// labels appear, and an engine that never re-read it never moved past the month it enrolled
-/// in. What changes there reaches the engine through [`HiddenVetterState::plan`], which keeps the
-/// keys we enrolled under.
+/// in. What changes there reaches the engine as the answer lands
+/// ([`VettingBook::learn_mode`] → [`HiddenVetterState::take_reading`]), keeping the keys we
+/// enrolled under.
 ///
 /// `only_stale` asks only where how the community vets is older than
 /// [`MODE_TTL`](openvtc_core::vetting::mode::MODE_TTL) and was not asked lately
@@ -3971,18 +4039,20 @@ async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>, only_stale: bool) {
             .filter(|s| s.live)
             .filter(|s| !only_stale || book.mode_refresh_due(&s.community, now))
             // Not again within seconds of the last ask or answer: `d` pressed three times, or a
-            // pass chained on an answer, used to fetch the same manifest each time (R1.4).
-            .filter(|s| !book.manifest_recently_asked(&s.community, now))
+            // pass chained on an answer, used to fetch the same manifest each time (R1.4). Unless
+            // a draw was refused as over the community's rate since: that read is owed now, once.
+            .filter(|s| {
+                !book.manifest_recently_asked(&s.community, now)
+                    || book.params_reread_owed(&s.community)
+            })
             .map(|s| (s.community, s.persona))
             .collect()
     };
     for (community, persona) in standing {
         // A community we vet for as two personas is one manifest, asked once.
-        if ctx
-            .config
-            .private
-            .vetting
-            .manifest_recently_asked(&community, Utc::now())
+        let book = &ctx.config.private.vetting;
+        if book.manifest_recently_asked(&community, Utc::now())
+            && !book.params_reread_owed(&community)
         {
             continue;
         }
@@ -4063,14 +4133,19 @@ fn ensure_hidden_vetter(ctx: &mut ActionCtx<'_>, community: &str) {
             }
         }
     };
-    ctx.config.private.vetting.hidden_vetter.push(
-        openvtc_core::vetting::book::HiddenVetterState::new(
-            community,
-            standing.persona,
-            params,
-            snapshot,
-        ),
+    let mut held = openvtc_core::vetting::book::HiddenVetterState::new(
+        community,
+        standing.persona,
+        params,
+        snapshot,
     );
+    // The parameters are the last manifest's; dated by it, so the first draw follows a read.
+    let reading = ctx.config.private.vetting.vetter_mode(community);
+    held.params_read_at = reading
+        .read
+        .filter(|_| !reading.inferred)
+        .map(|r| r.read_at);
+    ctx.config.private.vetting.hidden_vetter.push(held);
     // The engine's key is what the community binds this vetter to at enrolment; one that was
     // never saved would be replaced by a fresh one after a restart, which the community refuses
     // (`identifierRebound`).
@@ -6584,6 +6659,42 @@ mod tests {
             });
         }
         serde_json::json!({ "criteria": [ { "id": "c1", "vetting": vetting } ] })
+    }
+
+    /// The hidden-vetting view shows the rate the community publishes now, and when it was
+    /// read from it: a read that moved the drip from 100 to 20 a tick is on the desk at once.
+    #[test]
+    fn the_hidden_view_shows_the_rate_read_and_when() {
+        use chrono::TimeZone;
+        let community = "did:web:first-vtc.example";
+        let (mut book, _) = hidden_vetter_book(0, true);
+        book.hidden_vetter[0].params.drip_per_tick = 100;
+        let read = Utc.with_ymd_and_hms(2026, 10, 5, 21, 16, 0).unwrap();
+        let row = hidden_row(&book.hidden_vetter[0], "first-vtc".into(), None, read);
+        assert_eq!(row.params_read, "not read from the community yet");
+
+        let mut payload = manifest_payload(true);
+        payload["criteria"][0]["vetting"]["ext"]
+            [openvtc_core::vetting::hidden::HIDDEN_VETTING_NS]["dripPerTick"] =
+            serde_json::json!(20);
+        book.learn_mode(community, &payload, None, read);
+        let row = hidden_row(
+            &book.hidden_vetter[0],
+            "first-vtc".into(),
+            None,
+            read + chrono::Duration::minutes(3),
+        );
+        assert_eq!(row.drip_per_tick, 20);
+        assert_eq!(row.drawn_per_tick, 20);
+        assert_eq!(row.params_read, "read 21:16 UTC");
+        assert!(row.params_hold.is_none());
+        let next_day = hidden_row(
+            &book.hidden_vetter[0],
+            "first-vtc".into(),
+            None,
+            read + chrono::Duration::days(1),
+        );
+        assert_eq!(next_day.params_read, "read 2026-10-05 21:16 UTC");
     }
 
     fn pending_for(persona: PersonaId, asked_at: DateTime<Utc>) -> PendingTicket {

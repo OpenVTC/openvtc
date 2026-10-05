@@ -303,6 +303,79 @@ pub struct HiddenVetterState {
     /// dropped once an answer to it is opened or refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enrolments_asked: Vec<AskedEnrolment>,
+    /// When [`Self::params`] were last taken from a manifest the community served — the age of
+    /// the rate, tick length and labels this engine draws under. `None` until the first read
+    /// after this was kept. No draw is asked for on parameters older than
+    /// [`PARAMS_FRESH_FOR`] ([`Self::draw_hold`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params_read_at: Option<DateTime<Utc>>,
+    /// The community refused a draw as more than it issues a tick (`overQuota`). Until a
+    /// manifest read after it is taken, nothing is drawn; after, the rate drawn under its label
+    /// is held to what the refusal said, until the published parameters change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over_quota: Option<OverQuota>,
+    /// A pass held its draws for a manifest read ([`Self::draw_hold`]): the read's answer runs
+    /// the schedule again, so the draws go out on what it says. Memory only.
+    #[serde(skip)]
+    pub awaiting_read: bool,
+}
+
+/// How old [`HiddenVetterState::params`] may be when a draw is asked for under them. A pass
+/// reads the manifest before it draws; this is how long that read counts.
+pub const PARAMS_FRESH_FOR: chrono::Duration = super::mode::MODE_TTL;
+
+/// A draw the community refused as over its rate, as [`HiddenVetterState::over_quota`] keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OverQuota {
+    /// The token label the refused draw was under.
+    pub label: String,
+    /// How many tokens it asked for.
+    pub asked: usize,
+    /// How many a tick the community said it issues, when its refusal said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed: Option<usize>,
+    /// When it was refused.
+    pub at: DateTime<Utc>,
+}
+
+/// Why a pass sends no draw now, from [`HiddenVetterState::draw_hold`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrawHold {
+    /// The community's manifest is being read; its answer runs the schedule again.
+    Reading,
+    /// The parameters held were not read lately enough, or not since a refusal said they were
+    /// wrong: the manifest has to be read first.
+    Unread,
+    /// Read since the refusal, and the community still publishes a rate it refused: drawing
+    /// again would only be refused again. Waits for its parameters to change.
+    Disagrees {
+        /// The label.
+        label: String,
+        /// The rate refused.
+        asked: usize,
+        /// The rate it publishes.
+        published: usize,
+    },
+}
+
+/// The number of tokens a tick an `overQuota` refusal's text says the community issues —
+/// "asked for 100 tokens; this community drips 20 a tick" → 20. `None` when it does not say.
+#[must_use]
+pub fn over_quota_allowed(detail: &str) -> Option<usize> {
+    number_after(detail, "drips ")
+}
+
+/// The number of tokens an `overQuota` refusal's text says was asked for → 100.
+#[must_use]
+pub fn over_quota_asked(detail: &str) -> Option<usize> {
+    number_after(detail, "asked for ")
+}
+
+fn number_after(text: &str, marker: &str) -> Option<usize> {
+    let rest = &text[text.find(marker)? + marker.len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }
 
 /// One enrolment request in flight, as [`HiddenVetterState::enrolments_asked`] keeps it.
@@ -448,7 +521,116 @@ impl HiddenVetterState {
             lost_enrolment: None,
             lost_reasked: false,
             enrolments_asked: Vec::new(),
+            params_read_at: None,
+            over_quota: None,
+            awaiting_read: false,
         }
+    }
+
+    /// Take a manifest the community served at `now`: its parameters, under the keys we
+    /// enrolled with ([`Self::adopt_published`]), and when they were read. A change of rate,
+    /// tick length or labels ends an `overQuota` hold — the next draw asks for what it says now.
+    ///
+    /// Keys that differ are left to [`Self::plan`], which stops the drip and says so once.
+    pub fn take_reading(
+        &mut self,
+        live: &super::hidden::HiddenParams,
+        now: DateTime<Utc>,
+    ) -> Adopted {
+        if !self.params.same_keys(live) {
+            return Adopted::Unchanged;
+        }
+        let adopted = self.adopt_published(live, now);
+        self.params_read_at = Some(now);
+        if adopted == Adopted::Updated {
+            self.over_quota = None;
+        }
+        adopted
+    }
+
+    /// The rate the schedule asks for under `label` today: the published one — the ordinary
+    /// drip, or an approved event's tier — held to what an `overQuota` refusal under the label
+    /// said the community issues.
+    #[must_use]
+    pub fn rate_for(&self, label: &str, today: chrono::NaiveDate) -> usize {
+        let published = self.published_rate(label, today);
+        match &self.over_quota {
+            Some(q) if q.label == label => q.allowed.map_or(published, |m| published.min(m)),
+            _ => published,
+        }
+    }
+
+    fn published_rate(&self, label: &str, today: chrono::NaiveDate) -> usize {
+        self.event_draws(today)
+            .into_iter()
+            .find(|e| e.label == label)
+            .map_or(self.params.drip_per_tick, |e| e.rate)
+    }
+
+    /// The community refused a draw under `label` as more than it issues a tick. `detail` is
+    /// the refusal's text, read for the numbers when it gives them.
+    ///
+    /// A refusal of a draw asked for at a rate since corrected — one of a batch already in
+    /// flight when the first came back — changes nothing: the read it calls for has happened.
+    pub fn refused_over_quota(&mut self, label: &str, detail: Option<&str>, now: DateTime<Utc>) {
+        let current = self.rate_for(label, now.date_naive());
+        let asked = detail.and_then(over_quota_asked).unwrap_or(current);
+        let allowed = detail.and_then(over_quota_allowed);
+        let reread_owed = self.reread_owed();
+        if let Some(q) = &mut self.over_quota
+            && q.label == label
+            && reread_owed
+        {
+            // Still waiting on the read the first refusal asked for.
+            q.allowed = allowed.or(q.allowed);
+            return;
+        }
+        if asked != current {
+            // Asked for at a rate this engine has since moved off.
+            return;
+        }
+        self.over_quota = Some(OverQuota {
+            label: label.to_string(),
+            asked,
+            allowed,
+            at: now,
+        });
+        self.awaiting_read = true;
+    }
+
+    /// Whether the community's manifest must be read again before any draw: an `overQuota`
+    /// refusal came after the last read.
+    #[must_use]
+    pub fn reread_owed(&self) -> bool {
+        self.over_quota
+            .as_ref()
+            .is_some_and(|q| self.params_read_at.is_none_or(|r| r <= q.at))
+    }
+
+    /// Why a pass should send no draw now, or `None` to draw. `reading` is whether a manifest
+    /// question to the community is open.
+    ///
+    /// A draw is asked for only on parameters read from the community within
+    /// [`PARAMS_FRESH_FOR`], and not before a read that followed an `overQuota` refusal: the
+    /// rate is the community's to change, and a draw at one it has moved off is refused.
+    #[must_use]
+    pub fn draw_hold(&self, reading: bool, now: DateTime<Utc>) -> Option<DrawHold> {
+        if reading {
+            return Some(DrawHold::Reading);
+        }
+        let fresh = self
+            .params_read_at
+            .is_some_and(|r| now - r <= PARAMS_FRESH_FOR);
+        if !fresh || self.reread_owed() {
+            return Some(DrawHold::Unread);
+        }
+        let q = self.over_quota.as_ref()?;
+        let rate = self.rate_for(&q.label, now.date_naive());
+        (rate >= q.asked).then(|| DrawHold::Disagrees {
+            label: q.label.clone(),
+            asked: q.asked,
+            published: self.published_rate(&q.label, now.date_naive()),
+        })
     }
 
     /// Keep the blinding of an enrolment about to be asked for, bounded: the oldest goes first.
@@ -589,6 +771,11 @@ impl HiddenVetterState {
                 }
                 Due::Draw { label, tick, rate } => {
                     ticks.insert(label.clone(), tick);
+                    // Held to what an `overQuota` refusal said the community issues.
+                    let rate = match &self.over_quota {
+                        Some(q) if q.label == label => q.allowed.map_or(rate, |m| rate.min(m)),
+                        _ => rate,
+                    };
                     plan.owed.push(Due::Draw { label, tick, rate });
                 }
             }
