@@ -727,6 +727,12 @@ pub struct JoinState {
     /// the loop that can hear the answer. The flow takes it the moment it is
     /// set, so it never outlives the pass that asked.
     pub challenge_wait: Option<crate::state_handler::join_flow::AwaitingChallenge>,
+    /// The join is waiting on a community's challenge — parked in the loop
+    /// that hears the answer. Unlike [`challenge_wait`](Self::challenge_wait)
+    /// it stays set for the whole wait, so the progress page can offer Esc:
+    /// nothing has been sent yet, and a bounded wait is still a wait the
+    /// person must be able to walk away from.
+    pub waiting_on_challenge: bool,
     /// The application's stored challenge was issued for the launch now
     /// resuming. Taken by that launch, so one challenge serves one submit.
     pub challenge_fresh: bool,

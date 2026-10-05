@@ -1311,6 +1311,11 @@ impl StateHandler {
                             config.private.vetting.forget_query(&awaiting.document_id);
                         }
                         state.join.processing = false;
+                        state.join.waiting_on_challenge = false;
+                        state.main_page.log(
+                            "Stopped waiting for the community's challenge. Nothing was sent — \
+                             join again when you are ready.",
+                        );
                         state.active_page = state::ActivePage::Main;
                     },
                     // Everything else acts on state and the resources below,
