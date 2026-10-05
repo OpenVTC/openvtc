@@ -150,6 +150,15 @@ are marked wherever they apply. The detailed entries follow the summary below.
   a mediator that never answers. That wait sits on the join page's key path
   when a persona is made from it, and Ctrl-C now interrupts it.
 
+- **Searching a community's vetter directory works after deleting a persona.**
+  The search went out as the first application to that community, which could
+  belong to a persona since deleted — every search then failed with "the
+  persona the directory would be searched as is not available". The directory
+  is now searched as the application you are looking at, never as a persona
+  this account no longer holds; deleting a persona drops its vetting
+  applications (their DID is gone); and applications left behind by earlier
+  deletions are cleared at start-up.
+
 - **A join reads the community's current requirements every time.** Once a
   community's manifest had been read, the join page used the stored copy for
   good — so a community that turned on PCS ZKP vetting, changed what it asks,

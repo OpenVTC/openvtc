@@ -1952,7 +1952,26 @@ impl StateHandler {
                     // who we vetted, close sessions nobody answered. Fires at
                     // start-up too, so a card from a previous run does not wait
                     // an hour to go.
-                    if config.private.vetting.prune(chrono::Utc::now()) {
+                    let mut vetting_changed = config.private.vetting.prune(chrono::Utc::now());
+                    // Applications whose persona this account no longer holds:
+                    // left by a deletion before deletions took them along, and
+                    // unusable — their DID is gone. Judged by the persona
+                    // record, not the loaded identity, which can be missing for
+                    // a run without the persona being gone.
+                    let personas = &config.account.personas;
+                    let applications = &mut config.private.vetting.applications;
+                    let before = applications.len();
+                    applications.retain(|a| personas.contains_key(&a.persona));
+                    let orphaned = before - applications.len();
+                    if orphaned > 0 {
+                        vetting_changed = true;
+                        state.main_page.log(format!(
+                            "Dropped {orphaned} vetting application{} made as an identity that no \
+                             longer exists.",
+                            if orphaned == 1 { "" } else { "s" }
+                        ));
+                    }
+                    if vetting_changed {
                         save.mark_dirty();
                         state.main_page.sync_from_config(&config);
                     }
