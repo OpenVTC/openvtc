@@ -1859,11 +1859,14 @@ fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
 }
 
 fn issued(lines: &mut Vec<Line<'static>>, v: &VettingState) {
-    if v.issued.is_empty() {
-        lines.push(hint("You have not signed any vetting statements."));
+    if v.issued.is_empty() && v.declined.is_empty() {
+        lines.push(hint("You have not finished vetting anyone yet."));
         lines.push(Line::from(""));
         lines.push(hint(DESK_KEYS));
         return;
+    }
+    if !v.issued.is_empty() {
+        lines.push(Line::from(Span::styled("Signed", value())));
     }
     for (i, row) in v.issued.iter().enumerate() {
         let selected = i == v.selected;
@@ -1890,6 +1893,22 @@ fn issued(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             },
         ]));
     }
+    // Declines, as a record that you vetted someone and no more: the card and
+    // every identifier went when the request closed.
+    if !v.declined.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Declined", value())));
+        for (community, date) in v.declined.iter() {
+            lines.push(Line::from(Span::styled(
+                format!("    {date} · {community}"),
+                dim(),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(hint(
+        "Kept: who you signed for, so you can withdraw. Not kept: anyone's card or document.",
+    ));
     lines.push(Line::from(""));
     // What `w` does for the highlighted statement: nothing once recorded, and
     // a resend while a withdrawal is still unconfirmed.
@@ -2033,6 +2052,26 @@ mod desk_tests {
             "{text}"
         );
         assert!(!text.contains("decline  p:"), "{text}");
+    }
+
+    /// History holds what you signed (to withdraw) and the declines as dates
+    /// and communities only, and says what is and is not kept.
+    #[test]
+    fn history_keeps_signed_and_declined_without_cards() {
+        use crate::state_handler::main_page::content::DeskView;
+        let text = drawn(&VettingState {
+            tab: VettingTab::Desk,
+            desk_view: DeskView::Issued,
+            declined: vec![("first-vtc".to_string(), "2026-10-05".to_string())].into(),
+            ..VettingState::default()
+        });
+        assert!(text.contains("History (0)"), "{text}");
+        assert!(text.contains("Declined"), "{text}");
+        assert!(text.contains("2026-10-05 · first-vtc"), "{text}");
+        assert!(
+            text.contains("Not kept: anyone's card or document"),
+            "{text}"
+        );
     }
 
     /// A withdrawal the community has not recorded — refused, or never heard —

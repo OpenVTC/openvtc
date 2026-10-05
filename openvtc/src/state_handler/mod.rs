@@ -1947,6 +1947,15 @@ impl StateHandler {
                     }
                 }
                 _ = pending_expiry_tick.tick() => {
+                    // The vetting book's own clock: forget cards past their
+                    // retention, move finished desk requests to the record of
+                    // who we vetted, close sessions nobody answered. Fires at
+                    // start-up too, so a card from a previous run does not wait
+                    // an hour to go.
+                    if config.private.vetting.prune(chrono::Utc::now()) {
+                        save.mark_dirty();
+                        state.main_page.sync_from_config(&config);
+                    }
                     // R-B-7: expire Pending joins unanswered for 7 days — or for
                     // the `decisionSla` a vetting community publishes — raising
                     // actions-required, and tear down each one's now-dead session

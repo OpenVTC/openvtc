@@ -34,6 +34,11 @@ pub struct VetterPolicy {
     pub statement_validity_days: i64,
     /// Days a received card is kept after the statement is issued or the
     /// request declined; afterwards only its digest remains.
+    ///
+    /// Default 0: the card's values — a legal name, at least — are forgotten
+    /// at the first prune after the request closes. They are only ever needed
+    /// to make the decision, and the signed statement already commits to the
+    /// card by its digest, which is kept.
     pub card_retention_days: i64,
     /// The documentation this vetter accepts (D16), offered to applicants.
     pub accepts_documentation: Vec<String>,
@@ -45,7 +50,7 @@ impl Default for VetterPolicy {
             max_open_requests: 10,
             session_minutes: 15,
             statement_validity_days: 180,
-            card_retention_days: 7,
+            card_retention_days: 0,
             accepts_documentation: vec![
                 documentation::PASSPORT.into(),
                 documentation::NATIONAL_ID.into(),
@@ -119,6 +124,33 @@ impl KnownCriterion {
         })
     }
 }
+
+/// A request we finished as a vetter, kept as a record that we vetted
+/// someone and nothing more.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VettedRecord {
+    /// The community it was for.
+    pub community: String,
+    /// When it closed.
+    pub closed_at: DateTime<Utc>,
+    /// How it ended.
+    pub outcome: VettedOutcome,
+}
+
+/// How a finished request ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VettedOutcome {
+    /// We signed a statement — its id, to find it in [`VettingBook::issued`].
+    Signed { statement_id: String },
+    /// We declined.
+    Declined,
+}
+
+/// How long a closed request stays on the desk before it moves to
+/// [`VettingBook::vetted`]. Long enough for the send that closed it to report
+/// back — a failed send restores the request, and must find it still there.
+pub const CLOSED_GRACE: Duration = Duration::minutes(10);
 
 /// A community naming one of our personas a vetter: the role credential it
 /// issued through `vtc/vetting/vetters/grant` (design §10.3). Presented to
@@ -467,6 +499,12 @@ pub struct VettingBook {
     /// Statements we have signed, kept so we can withdraw them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issued: Vec<IssuedStatement>,
+    /// Requests we finished, as a note that we vetted someone — moved here
+    /// from [`desk`](Self::desk) once closed, and holding nothing about the
+    /// person: no card, no claims, no DID. A signed statement's applicant is
+    /// still in [`issued`](Self::issued), where withdrawing needs it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vetted: Vec<VettedRecord>,
     /// Recent wrong ticket codes.
     #[serde(default, skip_serializing_if = "GuessThrottle::is_empty")]
     pub throttle: GuessThrottle,
@@ -1306,8 +1344,9 @@ impl VettingBook {
     }
 
     /// Let time pass: close sessions nobody answered, forget cards past their
-    /// retention, and drop tickets that can admit nothing. Returns whether
-    /// anything changed.
+    /// retention, move finished requests off the desk into
+    /// [`vetted`](Self::vetted), and drop tickets that can admit nothing.
+    /// Returns whether anything changed.
     pub fn prune(&mut self, now: DateTime<Utc>) -> bool {
         let mut changed = false;
 
@@ -1321,6 +1360,43 @@ impl VettingBook {
             changed |= entry.expire_session(now);
             changed |= entry.forget_card_after(retention, now);
         }
+
+        // A finished request is noise on a desk of requests waiting on us. It
+        // leaves once the grace is up and its card is forgotten, so a request
+        // with a longer retention keeps its card until that has run too.
+        let mut kept = Vec::with_capacity(self.desk.len());
+        for entry in std::mem::take(&mut self.desk) {
+            let closed = match &entry.state {
+                DeskState::Attested {
+                    statement_id,
+                    issued_at,
+                    card,
+                } if card.card.is_none() => Some((
+                    *issued_at,
+                    VettedOutcome::Signed {
+                        statement_id: statement_id.clone(),
+                    },
+                )),
+                DeskState::Declined { at, card, .. }
+                    if card.as_ref().is_none_or(|c| c.card.is_none()) =>
+                {
+                    Some((*at, VettedOutcome::Declined))
+                }
+                _ => None,
+            };
+            match closed {
+                Some((closed_at, outcome)) if now - closed_at >= CLOSED_GRACE => {
+                    self.vetted.push(VettedRecord {
+                        community: entry.community,
+                        closed_at,
+                        outcome,
+                    });
+                    changed = true;
+                }
+                _ => kept.push(entry),
+            }
+        }
+        self.desk = kept;
 
         for application in &mut self.applications {
             for request in &mut application.requests {

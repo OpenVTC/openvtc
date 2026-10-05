@@ -212,8 +212,14 @@ fn vetter_part(
     focus: Option<VetterStep>,
     ending: Option<VetterEnding>,
 ) {
-    let Some(row) = v.desk.get(v.selected) else {
-        return;
+    // By id: a finished request leaves the desk list, so the highlight no
+    // longer points at it — and pointing at the next row would show someone
+    // else's card under this journey.
+    let row = match &v.journey_target {
+        Some(crate::state_handler::main_page::content::JourneyTarget::Desk(id)) => {
+            v.desk.iter().find(|r| &r.request_id == id)
+        }
+        _ => None,
     };
     lines.push(Line::from(Span::styled(
         "Your part now",
@@ -235,7 +241,7 @@ fn vetter_part(
             )));
         }
         (None, Some(VetterStep::Code)) => {
-            let code = row.match_code.clone().unwrap_or_default();
+            let code = row.and_then(|r| r.match_code.clone()).unwrap_or_default();
             lines.push(Line::from(vec![
                 Span::styled("  Read ", Style::new().fg(COLOR_TEXT_DEFAULT)),
                 Span::styled(code, Style::new().fg(COLOR_SUCCESS).bold()),
@@ -261,7 +267,7 @@ fn vetter_part(
             Style::new().fg(COLOR_ORANGE),
         ))),
     }
-    if !row.claims.is_empty() {
+    if let Some(row) = row.filter(|r| !r.claims.is_empty()) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Their card",
@@ -383,6 +389,9 @@ mod tests {
                 message: None,
             }]
             .into(),
+            journey_target: Some(
+                crate::state_handler::main_page::content::JourneyTarget::Desk("r1".into()),
+            ),
             ..VettingState::default()
         };
         let j = JourneyView {
