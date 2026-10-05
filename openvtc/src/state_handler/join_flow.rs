@@ -275,7 +275,9 @@ fn challenge_step(
     let Some(application) = application.filter(|a| a.hidden.is_some()) else {
         return ChallengeStep::Proceed;
     };
-    if fresh || !hears_replies || !application.holds_hidden_attestation() {
+    // An attestation the community will refuse is nothing to prove either, and the refusal
+    // that follows says why — asking for a challenge first would only spend it.
+    if fresh || !hears_replies || !application.holds_current_hidden_attestation() {
         return ChallengeStep::Proceed;
     }
     ChallengeStep::Ask
@@ -4104,6 +4106,14 @@ fn hidden_proof_refusal(
     if application.hidden.is_some() && !application.holds_hidden_attestation() {
         return Some(NO_ATTESTATION.to_string());
     }
+    // Every attestation held is one the community will refuse. A proof built from them
+    // verifies, and counts nothing: the join would come back "needs more vetting" while this
+    // client called it satisfied. Said here, with what to do, instead.
+    if application.hidden.is_some() && !application.holds_current_hidden_attestation() {
+        return Some(stale_attestations_refusal(
+            &application.stale_hidden_attestations(),
+        ));
+    }
     // The challenge is the COMMUNITY's, asked for over `vtc/vetting/pcs-challenge/0.1` and
     // recorded on the application when it arrives. A proof over one we minted ourselves
     // verifies and is refused, which is the whole point of the exchange: the community
@@ -4133,6 +4143,25 @@ fn hidden_proof_refusal(
              — joining without it would present no vetting at all."
         )),
     }
+}
+
+/// Why a hidden-vetting join stops when every attestation held is one the community refuses.
+fn stale_attestations_refusal(
+    stale: &[openvtc_core::vetting::applicant::StaleAttestation],
+) -> String {
+    let mut why: Vec<String> = stale.iter().map(ToString::to_string).collect();
+    why.dedup();
+    let why = if why.is_empty() {
+        "it no longer matches what the community publishes".to_string()
+    } else {
+        why.join("; ")
+    };
+    format!(
+        "The community would not count your PCS ZKP proof: the vetter attestation you hold \
+         cannot count there any more — {why}. Nothing was sent. Ask your vetter to attest \
+         again under the community's current criterion (send them a new vetting request), then \
+         join again."
+    )
 }
 
 /// Why a hidden-vetting join stops when no vetter has attested yet.
@@ -5343,6 +5372,48 @@ mod vetting_tests {
             .unwrap(),
         );
         app
+    }
+
+    /// An attestation made before the community changed its published
+    /// hidden-vetting parameters cannot count there: the criterion's digest
+    /// moved, or the token's label is no longer live. The join stops before it
+    /// spends a challenge, and says so — not "needs more vetting" from the
+    /// community with no reason, after this client called the join satisfied.
+    #[test]
+    fn a_hidden_join_holding_only_stale_attestations_stops_and_says_why() {
+        // Current: asks for its challenge as before.
+        let mut app = hidden_application(true);
+        app.requirements_digest = Some(DIGEST.to_string());
+        assert!(app.holds_current_hidden_attestation());
+        assert_eq!(challenge_step(Some(&app), true, false), ChallengeStep::Ask);
+
+        // The criterion moved on (its drip rate changed, say): the digest the
+        // attestation binds is not the one the join will cite.
+        app.requirements_digest = Some("zQmTheCriterionSinceItChanged".to_string());
+        assert!(!app.holds_current_hidden_attestation());
+        assert_eq!(
+            challenge_step(Some(&app), true, false),
+            ChallengeStep::Proceed,
+            "no challenge is spent on a proof that cannot count"
+        );
+        app.hidden_challenge = Some("nonce".into());
+        let mut join = JoinState::default();
+        let refusal = hidden_proof_refusal(&mut app, &mut join).expect("refused");
+        assert!(refusal.contains("PCS ZKP proof"), "{refusal}");
+        assert!(refusal.contains("earlier version"), "{refusal}");
+        assert!(refusal.contains("attest again"), "{refusal}");
+        assert!(refusal.contains("Nothing was sent"), "{refusal}");
+
+        // The month rolled over: the token's label is no longer published.
+        let mut app = hidden_application(true);
+        app.requirements_digest = Some(DIGEST.to_string());
+        if let Some(params) = app.hidden.as_mut() {
+            params.token_labels = vec!["token/2026-11".into()];
+        }
+        app.hidden_challenge = Some("nonce".into());
+        let refusal = hidden_proof_refusal(&mut app, &mut join).expect("refused");
+        assert!(refusal.contains("token/2026-10"), "{refusal}");
+        assert!(refusal.contains("no longer accepts"), "{refusal}");
     }
 
     /// With nothing to prove, that is what the join says — not that a
