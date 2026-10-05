@@ -541,6 +541,12 @@ pub struct JoinApplication {
     pub persona_label: String,
     /// Statements that would be presented now.
     pub statements: usize,
+    /// Hidden-vetting (PCS ZKP) attestations held, from which the join proves
+    /// it was vetted. Zero on the named path. Counted apart from `statements`:
+    /// under hidden vetting there are no named statements to present, and
+    /// counting only those told an applicant holding a full proof that it had
+    /// nothing ready.
+    pub attestations: usize,
     /// Progress against the published requirements.
     pub progress: Option<String>,
     /// What to do next, worded for the join page: the row to press Enter on,
@@ -864,6 +870,7 @@ mod tests {
             persona,
             persona_label: "p".to_string(),
             statements: usize::from(satisfied),
+            attestations: 0,
             progress: None,
             next_step: String::new(),
             satisfied,

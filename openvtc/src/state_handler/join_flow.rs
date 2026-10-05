@@ -573,6 +573,16 @@ fn vetting_row_words(
     };
     let who = openvtc_core::display::shorten_for_display(persona, ROW_PERSONA_WIDTH);
     match application {
+        // Hidden vetting presents a proof, not statements: what it shows the
+        // community is that enough vetters vetted you, never who.
+        Some(app) if app.satisfied && app.attestations > 0 => (
+            format!("Present your PCS ZKP proof as {who}"),
+            format!(
+                "ready — proves {} vetter{} vetted you, without naming them",
+                app.attestations,
+                if app.attestations == 1 { "" } else { "s" }
+            ),
+        ),
         Some(app) if app.satisfied => (
             format!("Present your vetting statements as {who}"),
             format!(
@@ -726,6 +736,7 @@ pub(crate) fn vetting_view(
                 persona: app.persona,
                 persona_label: label(app.persona),
                 statements: app.presentable_statements(now).len(),
+                attestations: app.hidden_held(),
                 progress: if stale {
                     Some(
                         "made for an earlier DID of this persona — its statements cannot be \
@@ -5754,6 +5765,7 @@ mod vetting_tests {
             persona: PersonaId::new(),
             persona_label: "alice".into(),
             statements: 0,
+            attestations: 0,
             progress: Some("0 of 2".into()),
             next_step: String::new(),
             satisfied: false,
@@ -5764,12 +5776,28 @@ mod vetting_tests {
 
         let ready = JoinApplication {
             statements: 2,
+            attestations: 0,
             satisfied: true,
             ..under_way
         };
         let (label, detail) = vetting_row_words(Some("alice"), Some(&ready));
         assert_eq!(label, "Present your vetting statements as alice");
         assert_eq!(detail, "2 statements ready to present");
+
+        // Hidden vetting: no named statements, and a proof ready all the same.
+        let proof = JoinApplication {
+            statements: 0,
+            attestations: 2,
+            satisfied: true,
+            ..ready.clone()
+        };
+        let (label, detail) = vetting_row_words(Some("alice"), Some(&proof));
+        assert_eq!(label, "Present your PCS ZKP proof as alice");
+        assert_eq!(
+            detail,
+            "ready — proves 2 vetters vetted you, without naming them"
+        );
+        assert!(!detail.contains("0 statements"));
 
         let (label, detail) = vetting_row_words(None, None);
         assert_eq!(label, "Apply for vetting as a new persona");
@@ -5860,6 +5888,7 @@ mod vetting_tests {
             persona,
             persona_label: "make-barrel".into(),
             statements: usize::from(satisfied),
+            attestations: 0,
             progress: Some(if satisfied { "1 of 1" } else { "0 of 1" }.into()),
             next_step: String::new(),
             satisfied,
@@ -6189,6 +6218,7 @@ mod vetting_tests {
             persona: alice.persona,
             persona_label: "alice".into(),
             statements: 2,
+            attestations: 0,
             progress: Some("2 counted".into()),
             next_step: "join".into(),
             satisfied: true,

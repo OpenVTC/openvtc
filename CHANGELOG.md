@@ -191,6 +191,13 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **The join page shows a PCS ZKP proof as ready.** Joining a community that
+  hides its vetters, with enough vetter attestations gathered, the row read
+  "Present your vetting statements … 0 statements ready to present" — it
+  counted only named statements, and hidden vetting has none. The row now reads
+  "Present your PCS ZKP proof as …" and says how many vetters the proof shows
+  vetted you, without naming them.
+
 - **A lost hidden-vetting enrolment is asked for once more.** A vetter whose
   enrolment answer was lost (refused `alreadyEnrolled` under a label it holds
   no credential for) was given up on until the community's next label. A
