@@ -1132,13 +1132,20 @@ impl StateHandler {
         // coming. Without this seed the session sits `Connecting` for the life of
         // the process over a perfectly live socket, which is the "Inbox:
         // Connecting…" that only a restart appeared to fix.
-        state.connection.status = state::MediatorStatus::Connecting;
-        state.connection.messaging_active = false;
+        //
+        // Applied unconditionally rather than only when the reconcile changed
+        // something: an account with no community session (an applicant whose
+        // join is still being vetted) has nothing to change, and must still
+        // land on `NoActiveCommunity` rather than the `Connecting` shown while
+        // the page came up — no session will ever send the edge that moves it.
         reconcile_sessions(&mut session_manager, &didcomm_service, &mut state);
-        if matches!(state.connection.status, state::MediatorStatus::Connected) {
-            state.main_page.log("Connected to the mediator.");
-        } else {
-            state.main_page.log("Connecting to the mediator…");
+        apply_session_aggregate(&session_manager, &mut state);
+        match state.connection.status {
+            state::MediatorStatus::Connected => state.main_page.log("Connected to the mediator."),
+            state::MediatorStatus::NoActiveCommunity => state
+                .main_page
+                .log("No community membership yet — no community session to connect."),
+            _ => state.main_page.log("Connecting to the mediator…"),
         }
         let _ = self.state_tx.send(state.clone());
 
@@ -4422,15 +4429,33 @@ fn reconcile_sessions(
 }
 
 /// Drive the global connection indicator from the aggregate of all
-/// persona-sessions. A `NoActiveCommunity` state is left untouched when no
-/// session exists — "no community" is not "not connected".
+/// persona-sessions.
+///
+/// The indicator speaks for **community sessions** — the ones the session
+/// manager tracks — so with none registered it reads `NoActiveCommunity`, never
+/// `Connecting`: "no community" is not "not connected", and with nothing to
+/// connect *to* no connection attempt is in progress. This is the state of an
+/// applicant still being vetted: their persona listener is up (the activity
+/// log says so), but they hold no membership yet. The startup seed used to
+/// leave such an account on `Connecting` for the life of the process, because
+/// no session would ever produce the edge that moved it.
 fn apply_session_aggregate(session_manager: &session_manager::SessionManager, state: &mut State) {
+    state.connection.status = aggregate_status(session_manager);
+    state.connection.messaging_active =
+        matches!(state.connection.status, state::MediatorStatus::Connected);
+}
+
+/// The indicator rule behind [`apply_session_aggregate`], pure for testing:
+/// any session up → `Connected`; sessions registered but none up →
+/// `Connecting` (the SDK is retrying them); no session at all →
+/// `NoActiveCommunity`.
+fn aggregate_status(session_manager: &session_manager::SessionManager) -> state::MediatorStatus {
     if session_manager.any_connected() {
-        state.connection.status = state::MediatorStatus::Connected;
-        state.connection.messaging_active = true;
+        state::MediatorStatus::Connected
     } else if session_manager.session_count() > 0 {
-        state.connection.status = state::MediatorStatus::Connecting;
-        state.connection.messaging_active = false;
+        state::MediatorStatus::Connecting
+    } else {
+        state::MediatorStatus::NoActiveCommunity
     }
 }
 
@@ -5101,6 +5126,54 @@ mod tests {
     #[test]
     fn no_context_never_hands_off() {
         assert!(!must_hand_off(true, true, false));
+    }
+
+    /// The reported bug: an applicant with no membership — a persona listener
+    /// up, no community session — sat on "Connecting..." for the life of the
+    /// process. With no session there is nothing being connected to, and the
+    /// indicator says so; applying the aggregate also clears a `Connecting`
+    /// left over from startup.
+    #[test]
+    fn no_community_session_reads_no_active_community_not_connecting() {
+        let manager = session_manager::SessionManager::default();
+        assert!(matches!(
+            aggregate_status(&manager),
+            state::MediatorStatus::NoActiveCommunity
+        ));
+
+        let mut state = State::default();
+        state.connection.status = state::MediatorStatus::Connecting;
+        apply_session_aggregate(&manager, &mut state);
+        assert!(matches!(
+            state.connection.status,
+            state::MediatorStatus::NoActiveCommunity
+        ));
+        assert!(!state.connection.messaging_active);
+    }
+
+    /// With community sessions the rule is unchanged: any one up is
+    /// `Connected`; registered but none up is `Connecting` (being retried).
+    #[test]
+    fn community_sessions_drive_connecting_then_connected() {
+        let mut manager = session_manager::SessionManager::default();
+        manager.register(
+            openvtc_core::config::account::PersonaId::new(),
+            "lid-a",
+            "did:webvh:QmV:example.com:vtc".into(),
+        );
+        assert!(matches!(
+            aggregate_status(&manager),
+            state::MediatorStatus::Connecting
+        ));
+
+        manager.mark_connected("lid-a");
+        let mut state = State::default();
+        apply_session_aggregate(&manager, &mut state);
+        assert!(matches!(
+            state.connection.status,
+            state::MediatorStatus::Connected
+        ));
+        assert!(state.connection.messaging_active);
     }
 
     /// Lifecycle log lines name the listener by its verified agent name — and

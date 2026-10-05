@@ -687,6 +687,42 @@ pub(crate) fn next_step_words(step: &NextStep) -> String {
     .to_string()
 }
 
+/// Where an application stands, for the Communities panel's "Joining" row, and
+/// whether its published requirements are met.
+///
+/// Deliberately key-free, unlike [`next_step_words`]: those keys are the
+/// Vetting page's, and on the Communities panel `j` starts a fresh join and `c`
+/// opens capabilities — advertising them there would send the holder somewhere
+/// else. The row's one action is opening the application's journey, where the
+/// keys are.
+pub(crate) fn joining_standing(app: &Application, now: DateTime<Utc>) -> (String, bool) {
+    // "n of m statements" when the community's requirements are known: it is
+    // the measure the community will apply, so it is the one to read here.
+    let count = app.checklist(now).and_then(|evaluation| {
+        app.requirements.as_ref().map(|r| {
+            let m = r.min_statements.get();
+            format!(
+                "{} of {m} statement{}",
+                evaluation.counted.len(),
+                if m == 1 { "" } else { "s" }
+            )
+        })
+    });
+    let (next, ready) = match app.next_step(now) {
+        NextStep::SendCard { .. } => ("a vetter is waiting for your card", false),
+        NextStep::LearnRequirements => ("the community's requirements are not read yet", false),
+        NextStep::Join => ("ready to join", true),
+        NextStep::ChooseFace => ("choose the face vetters see, then ask a vetter", false),
+        NextStep::AskVetter => ("ask a vetter for a statement", false),
+        NextStep::WaitForVetters => ("waiting for your vetters", false),
+    };
+    let standing = match count {
+        Some(count) => format!("{count} — {next}"),
+        None => next.to_string(),
+    };
+    (standing, ready)
+}
+
 /// A community's name for messages: the membership's, then the one it
 /// publishes, then a verified agent name, then its DID.
 pub(crate) fn community_display(config: &Config, did: &str) -> String {
@@ -839,6 +875,28 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                     ctx.config,
                     Utc::now(),
                 );
+            }
+        }
+        VettingAction::OpenApplication(application_id) => {
+            if ctx
+                .config
+                .private
+                .vetting
+                .applications
+                .iter()
+                .any(|a| a.id == application_id)
+            {
+                focus_application(
+                    ctx.state,
+                    ctx.config,
+                    &application_id,
+                    "Where your application stands, and what happens next.".to_string(),
+                );
+            } else {
+                // Finished or abandoned between the panel drawing it and the
+                // key arriving: say so where the holder is looking.
+                ctx.state.main_page.content_panel.communities.status_message =
+                    Some("That application is no longer in progress.".to_string());
             }
         }
         VettingAction::CloseJourney => {

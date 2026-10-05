@@ -66,12 +66,26 @@ pub fn render(
 
     push_personhood_challenge(&mut lines, state);
 
-    if state.items.is_empty() {
+    if state.items.is_empty() && state.joining.is_empty() {
         return render_empty(lines);
     }
 
-    // Header with actions-required count (R-C-3).
-    if state.actions_required > 0 {
+    // Header with actions-required count (R-C-3). With no membership yet but a
+    // join under way, the header says both halves: not a member, and applying.
+    // "You haven't joined any communities yet" alone was true and still read
+    // as though nothing were happening.
+    if state.items.is_empty() {
+        let applying = match state.joining.as_ref() {
+            [only] => only.community_name.clone(),
+            many => format!("{} communities", many.len()),
+        };
+        lines.push(
+            Line::from(format!(
+                " Not a member of any community yet — you are applying to {applying}"
+            ))
+            .fg(COLOR_TEXT_DEFAULT),
+        );
+    } else if state.actions_required > 0 {
         lines.push(
             Line::from(format!(
                 " ● {} communit{} need your attention",
@@ -341,6 +355,8 @@ pub fn render(
         }
     }
 
+    push_joining(&mut lines, state);
+
     lines.push(Line::from(""));
     let confirm_name = |idx: usize| {
         state
@@ -382,6 +398,52 @@ pub fn render(
     }
 
     lines
+}
+
+/// The "Joining" section: vetting applications not yet submitted as a join,
+/// below the memberships.
+///
+/// Below rather than among them because a membership is something the
+/// community has a record of and an application is not — the community learns
+/// of it only when the join goes in. Each row names the community, the persona
+/// the application joins as, and where it stands; Enter opens its journey on
+/// the Vetting page, which is where every step of it is taken.
+fn push_joining(lines: &mut Vec<Line<'static>>, state: &CommunitiesState) {
+    if state.joining.is_empty() {
+        return;
+    }
+    if !state.items.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(" Joining").fg(COLOR_DARK_GRAY).bold());
+    for (i, j) in state.joining.iter().enumerate() {
+        let is_selected = state.selected_index == state.items.len() + i;
+        let row_style = if is_selected {
+            Style::new().fg(COLOR_SUCCESS).bold()
+        } else {
+            Style::new().fg(COLOR_TEXT_DEFAULT)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if is_selected { "  ▸ " } else { "    " }, row_style),
+            super::vetting_panel::accent_swatch(j.accent),
+            Span::styled(j.community_name.clone(), row_style),
+            Span::styled(
+                format!("  as {}", j.persona_label),
+                Style::new().fg(COLOR_DARK_GRAY),
+            ),
+        ]));
+        let standing_style = if j.ready {
+            Style::new().fg(COLOR_SUCCESS)
+        } else if is_selected {
+            Style::new().fg(COLOR_SOFT_PURPLE)
+        } else {
+            Style::new().fg(COLOR_DARK_GRAY)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("        {}", j.standing),
+            standing_style,
+        )));
+    }
 }
 
 /// The detail block's device-access rows for a membership's own context.
@@ -722,6 +784,10 @@ fn key_hints(state: &CommunitiesState) -> String {
                 hints.push("D: delete context".to_string());
             }
         }
+    } else if joining_selected(state).is_some() {
+        // A join in progress has no membership for any of the keys above to act
+        // on; its one action is the journey, where its own keys are.
+        hints.push("⏎ open application".to_string());
     }
 
     // Gated on the challenge, not on the row — matching the key handler,
@@ -748,8 +814,23 @@ fn key_hints(state: &CommunitiesState) -> String {
     hints.join("   ")
 }
 
+/// The "Joining" row under the cursor, if the cursor is past the memberships —
+/// see [`CommunitiesState::selected_index`].
+pub(crate) fn joining_selected(
+    state: &CommunitiesState,
+) -> Option<&crate::state_handler::main_page::content::JoiningSummary> {
+    state
+        .selected_index
+        .checked_sub(state.items.len())
+        .and_then(|i| state.joining.get(i))
+}
+
 /// Empty state (R-C-5): a welcoming nudge to go find a community, not a dry
 /// "no items" message.
+///
+/// Only for an account with no membership *and* no join in progress: it says
+/// nothing is under way, which an applicant part-way through vetting would
+/// read as their application having been lost.
 fn render_empty(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     lines.push(
         Line::from("Your account is ready. 🎉")
@@ -1281,5 +1362,105 @@ mod key_hint_tests {
         let finished = text(&render_for_test(&state));
         assert!(!finished.contains("n: add a device"), "{finished}");
         assert!(finished.contains("membership is over"), "{finished}");
+    }
+
+    // ─── joins in progress ───────────────────────────────────────────────
+
+    use crate::state_handler::main_page::content::JoiningSummary;
+
+    fn joining(community: &str, ready: bool) -> JoiningSummary {
+        JoiningSummary {
+            application_id: format!("app-{community}"),
+            community_name: community.to_string(),
+            accent: None,
+            persona_label: "Work".to_string(),
+            standing: if ready {
+                "1 of 1 statement — ready to join".to_string()
+            } else {
+                "0 of 1 statement — waiting for your vetters".to_string()
+            },
+            ready,
+        }
+    }
+
+    /// The reported bug: an applicant part-way through vetting opened
+    /// Communities to "You haven't joined any communities yet". With a join
+    /// under way the panel says what is true — no membership yet, and the
+    /// application — and lists it.
+    #[test]
+    fn a_join_in_progress_replaces_the_empty_state() {
+        let state = CommunitiesState {
+            joining: Arc::from(vec![joining("Acme", true)]),
+            ..CommunitiesState::default()
+        };
+        let shown = text(&render_for_test(&state));
+        assert!(!shown.contains("haven't joined"), "{shown}");
+        assert!(
+            shown.contains("Not a member of any community yet — you are applying to Acme"),
+            "{shown}"
+        );
+        assert!(shown.contains("Joining"), "{shown}");
+        assert!(
+            shown.contains("▸ Acme  as Work"),
+            "selected by default:\n{shown}"
+        );
+        assert!(
+            shown.contains("1 of 1 statement — ready to join"),
+            "{shown}"
+        );
+        assert!(shown.contains("⏎ open application"), "{shown}");
+    }
+
+    /// Several joins under way are counted in the header, not named one by one.
+    #[test]
+    fn several_joins_in_progress_are_counted() {
+        let state = CommunitiesState {
+            joining: Arc::from(vec![joining("Acme", false), joining("Globex", false)]),
+            ..CommunitiesState::default()
+        };
+        let shown = text(&render_for_test(&state));
+        assert!(
+            shown.contains("you are applying to 2 communities"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("Acme") && shown.contains("Globex"),
+            "{shown}"
+        );
+    }
+
+    /// Nothing under way: the welcome is still the welcome.
+    #[test]
+    fn the_empty_state_is_kept_when_nothing_is_under_way() {
+        let shown = text(&render_for_test(&CommunitiesState::default()));
+        assert!(
+            shown.contains("haven't joined any communities yet"),
+            "{shown}"
+        );
+        assert!(!shown.contains("Joining"), "{shown}");
+    }
+
+    /// Memberships first, then the Joining section; a cursor on a joining row
+    /// offers only what acts on it, never a membership key.
+    #[test]
+    fn joining_rows_follow_the_memberships_and_take_the_cursor() {
+        let state = CommunitiesState {
+            items: Arc::from(vec![row(true, false, false)]),
+            joining: Arc::from(vec![joining("Globex", false)]),
+            selected_index: 1,
+            ..CommunitiesState::default()
+        };
+        let shown = text(&render_for_test(&state));
+        assert!(shown.contains(" 1 community"), "{shown}");
+        let membership = shown.find("as acme").or_else(|| shown.find("acme"));
+        let section = shown.find("Joining").expect("section shown");
+        assert!(membership.is_some_and(|m| m < section), "{shown}");
+        assert!(shown.contains("▸ Globex  as Work"), "{shown}");
+
+        let hints = key_hints(&state);
+        assert!(hints.contains("⏎ open application"), "{hints}");
+        assert!(!hints.contains("f: ★"), "{hints}");
+        assert!(!hints.contains("l: leave"), "{hints}");
+        assert!(hints.contains("j: join"), "{hints}");
     }
 }
