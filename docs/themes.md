@@ -21,6 +21,10 @@ see [Changes while the TUI runs](#changes-while-the-tui-runs).
 
 ### Following your terminal: `auto`
 
+`auto` is the default: until you choose a theme, OpenVTC follows your
+terminal's background. A terminal that does not answer the question is taken
+as dark.
+
 ```sh
 openvtc theme set auto                                   # openvtc when dark, catppuccin-latte when light
 openvtc theme set auto --dark nord --light high-contrast-light
@@ -53,9 +57,18 @@ without changing `tui.toml`. An id that cannot be loaded is reported, and the
 chosen theme used instead. Choosing a theme while that session runs — in its
 picker, or with `openvtc theme set` — still takes effect.
 
-### Without colour: `NO_COLOR`
+### Terminals without 24-bit colour
 
-When `NO_COLOR` is set to anything but an empty string
+Themes are written in 24-bit colour. When the terminal does not declare it —
+`COLORTERM` is not `truecolor` or `24bit`, as in macOS's Terminal.app — OpenVTC
+draws each colour as the nearest of the 256 indexed colours, which such
+terminals render faithfully. A terminal left to guess at 24-bit colours washes
+them out. If yours does declare 24-bit colour and still looks wrong, set
+`COLORTERM=truecolor` or use `--monochrome`.
+
+### Without colour: `--monochrome` or `NO_COLOR`
+
+With `--monochrome`, or when `NO_COLOR` is set to anything but an empty string
 ([no-color.org](https://no-color.org)), OpenVTC draws in your terminal's own
 colours, and keeps the roles apart with text attributes instead:
 

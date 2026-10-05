@@ -482,6 +482,10 @@ async fn main() -> Result<()> {
     // the unlock-code passed into `load_fast`). Unknown subcommands and
     // `--help`/`--version` are handled here by clap (process exits).
     let matches = cli().get_matches();
+    // Before anything is printed or drawn: every colour decision reads it.
+    if matches.get_flag("monochrome") {
+        theme::force_monochrome();
+    }
     // Which configuration profile to use? Resolved before the theme so the theme
     // choice can be scoped to it: the choice used to live in a single shared
     // `tui.toml`, so a theme change under one profile repainted every other. Its

@@ -95,8 +95,13 @@ pub struct Choice {
 
 impl Default for Choice {
     fn default() -> Self {
+        // `auto`, not the dark default: a person who never chose a theme
+        // should get one that suits their terminal. The dark one on a light
+        // terminal drew near-white text on white — macOS Terminal.app's default
+        // profile, unreadable. A terminal that does not answer the background
+        // question is taken as dark, which is what the default always was.
         Choice {
-            theme: builtin::DEFAULT_ID.to_string(),
+            theme: AUTO_ID.to_string(),
             auto_dark: builtin::DEFAULT_ID.to_string(),
             auto_light: AUTO_LIGHT_DEFAULT.to_string(),
         }
