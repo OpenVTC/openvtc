@@ -667,3 +667,54 @@ fn engine_state_survives_a_restart() {
     assert!(d.evaluation.satisfied(), "{:?}", d.evaluation);
     assert_eq!(d.evaluation.distinct_vetters(), 2);
 }
+
+/// A catch-up asks for several ticks in one pass, and openvtc stores the engine between every
+/// request and its answer. Each answer has to find its own serials after that, whatever order
+/// the answers arrive in — before draws in flight were stored, every answer met an empty wallet
+/// and was dropped as a count mismatch.
+#[test]
+fn several_draws_in_flight_survive_a_snapshot_and_answer_in_any_order() {
+    use openvtc_vetting_pcs::{issuer::TokenBatchWire, scheme::enc};
+
+    let mut w = world(31, 1);
+    let label = w.vtc.current_token_label().to_string();
+    let params = w.vtc.params().unwrap();
+    let held_before = w.vetters[0].tokens_held();
+
+    let mut asked = Vec::new();
+    for tick in [2u32, 3, 4] {
+        asked.push(
+            w.vetters[0]
+                .drip_request(&params, tick, &label, R, &mut w.rng)
+                .unwrap(),
+        );
+    }
+    // Stored and restored, as openvtc does between the send and the answer.
+    let snapshot = w.vetters[0].snapshot().unwrap();
+    assert_eq!(snapshot.pending.len(), 3 * R);
+    let mut restored = VetterEngine::restore(&snapshot, COMMUNITY).unwrap();
+    assert_eq!(restored.draws_in_flight().len(), 3);
+
+    // The community answers ticks 4 and 2; tick 3 it refuses, and its serials are dropped.
+    for batch in [&asked[2], &asked[0]] {
+        let reqs: Vec<_> = batch
+            .requests
+            .iter()
+            .map(|r| r.to_request().unwrap())
+            .collect();
+        let pres = w
+            .vtc
+            .drip("member-0", batch.tick, &label, &reqs, &mut w.rng)
+            .unwrap();
+        let served = TokenBatchWire {
+            label: label.clone(),
+            tick: batch.tick,
+            pre_credentials: pres.iter().map(|p| enc(p).unwrap()).collect(),
+        };
+        assert_eq!(restored.accept_drip(&params, &served).unwrap(), R);
+    }
+    restored.forget_draw(&label, 3);
+    assert!(restored.draws_in_flight().is_empty());
+    assert_eq!(restored.tokens_held(), held_before + 2 * R);
+    assert!(restored.snapshot().unwrap().pending.is_empty());
+}

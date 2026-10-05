@@ -358,7 +358,8 @@ fn hidden_params() -> Value {
         "helperKey": key_text(vtc.hvk()).unwrap(),
         "tokenKey": key_text(vtc.tvk()).unwrap(),
         "vetterLabels": ["vetter/2026-10"],
-        "tokenLabels": [vtc.current_token_label()]
+        "tokenLabels": [vtc.current_token_label()],
+        "tickLength": "P3D"
     })
 }
 
@@ -2329,4 +2330,220 @@ async fn a_finished_request_forgets_the_person_and_leaves_the_desk() {
     assert_eq!(record.community, COMMUNITY);
     let stored = serde_json::to_string(&vetter.book.vetted).unwrap();
     assert!(!stored.contains(&applicant.did), "no identifier: {stored}");
+}
+
+/// A vetter whose engine is enrolled with `COMMUNITY`, and one draw of the drip asked for and
+/// in flight — what `hidden_vetting_send` leaves behind.
+fn vetter_with_a_draw_in_flight(label: &str, tick: u32) -> (Party, TrustTask<Value>) {
+    use rand::SeedableRng;
+    let mut vetter = Party::new(7).member_of(COMMUNITY);
+    let params: super::hidden::HiddenParams = serde_json::from_value(hidden_params()).unwrap();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x71C);
+    let mut snapshot =
+        super::hidden::vetter_start(COMMUNITY, &params, &vetter.did, &mut rng).unwrap();
+    let body =
+        super::hidden::drip_request(COMMUNITY, &params, &mut snapshot, tick, label, 3, &mut rng)
+            .unwrap();
+    assert_eq!(
+        snapshot.pending.len(),
+        3,
+        "the serials are kept for the answer"
+    );
+    vetter
+        .book
+        .hidden_vetter
+        .push(super::book::HiddenVetterState::new(
+            COMMUNITY,
+            vetter.persona,
+            params,
+            snapshot,
+        ));
+    let request = wire::pcs_tokens_request(&vetter.did, COMMUNITY, &body).unwrap();
+    vetter
+        .book
+        .ask(asked(&request, vetter.persona, QueryKind::PcsTokens));
+    vetter
+        .book
+        .draws_in_flight
+        .insert(request.id.clone(), (label.to_string(), tick));
+    (vetter, request)
+}
+
+/// `tickNotYet` is "not yet": no notice, nothing recorded as served, the serials dropped and the
+/// next pass held back until the community's clock has caught up. `alreadyServed` is "done":
+/// recorded as served, so the tick is never asked for again. Neither is news.
+#[tokio::test]
+async fn a_tick_not_begun_is_waited_for_and_a_served_one_is_done() {
+    let label = "token/2026-10";
+    let (mut vetter, request) = vetter_with_a_draw_in_flight(label, 4);
+    let handled = vetter
+        .receive(
+            &community_refusal(&request, super::hidden::TOKENS_TICK_NOT_YET),
+            COMMUNITY,
+        )
+        .await;
+    assert!(handled.notice.is_none(), "{:?}", handled.notice);
+    assert!(matches!(
+        &handled.answer,
+        Some(CommunityAnswer::Refused { kind, code, .. }) if !kind.refusal_is_news(code)
+    ));
+    let state = &vetter.book.hidden_vetter[0];
+    assert!(state.retry_at.is_some_and(|t| t > Utc::now()));
+    assert!(state.last_ticks.is_empty(), "not served");
+    assert!(state.last_refusal.is_none(), "not a failure");
+    assert!(
+        state.snapshot.pending.is_empty(),
+        "the refused draw's serials are dropped"
+    );
+    assert!(vetter.book.draws_in_flight.is_empty());
+
+    let (mut vetter, request) = vetter_with_a_draw_in_flight(label, 4);
+    let handled = vetter
+        .receive(
+            &community_refusal(&request, super::hidden::TOKENS_ALREADY_SERVED),
+            COMMUNITY,
+        )
+        .await;
+    assert!(handled.notice.is_none());
+    assert_eq!(vetter.book.hidden_vetter[0].last_ticks.get(label), Some(&4));
+}
+
+/// Every other refusal is said in words and kept for the desk to show.
+#[tokio::test]
+async fn any_other_drip_refusal_is_said_in_words_and_kept() {
+    let (mut vetter, request) = vetter_with_a_draw_in_flight("token/2026-10", 4);
+    let handled = vetter
+        .receive(
+            &community_refusal(&request, "vtc/vetting/vetters/pcs-tokens:labelNotLive"),
+            COMMUNITY,
+        )
+        .await;
+    let notice = handled.notice.expect("a refusal that is news");
+    assert!(
+        notice
+            .describe()
+            .contains("not issuing tokens under that label"),
+        "{}",
+        notice.describe()
+    );
+    let refusal = vetter.book.hidden_vetter[0]
+        .last_refusal
+        .clone()
+        .expect("kept for the desk");
+    assert_eq!(refusal.code, "vtc/vetting/vetters/pcs-tokens:labelNotLive");
+    assert!(vetter.book.hidden_vetter[0].last_ticks.is_empty());
+}
+
+/// The rollover and the re-key, on the engine's own state. A new month is new labels under the
+/// same keys, and they are taken; new keys are not, and the drip stops until the vetter decides.
+#[test]
+fn the_engine_follows_the_published_labels_and_stops_at_new_keys() {
+    use super::book::{Adopted, HiddenVetterState};
+    use super::hidden::{Due, HiddenParams, due};
+    let enrolled: HiddenParams = serde_json::from_value(hidden_params()).unwrap();
+    let mut snapshot = openvtc_vetting_pcs::snapshot::VetterSnapshot::without_keys("member-1");
+    snapshot
+        .credentials
+        .insert("2026-10".into(), "zOctober".into());
+    snapshot
+        .credentials
+        .insert("2026-11".into(), "zNovember".into());
+    let mut state = HiddenVetterState::new(COMMUNITY, PersonaId::new(), enrolled.clone(), snapshot);
+    let november = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 11, 2, 9, 0, 0).unwrap();
+
+    // What the community publishes in November: the same keys, the next month's labels.
+    let live = HiddenParams {
+        vetter_labels: vec!["vetter/2026-11".into(), "vetter/2026-10".into()],
+        token_labels: vec!["token/2026-11".into(), "token/2026-10".into()],
+        tick_length: Some("P1D".into()),
+        ..enrolled.clone()
+    };
+    assert_eq!(state.adopt_published(&live, november), Adopted::Updated);
+    assert_eq!(state.adopt_published(&live, november), Adopted::Unchanged);
+    assert_eq!(
+        due(
+            &state.params,
+            Some(&state.snapshot),
+            &state.last_ticks,
+            &[],
+            november
+        ),
+        Due::Draw {
+            label: "token/2026-11".into(),
+            tick: 0,
+            rate: state.params.drip_per_tick,
+        },
+        "drawn under the live label, oldest tick first"
+    );
+
+    // The community re-keys: nothing is taken, and it is noticed once.
+    let rekeyed = HiddenParams {
+        token_key: "zSomeOtherTokenKey".into(),
+        ..live.clone()
+    };
+    assert_eq!(
+        state.adopt_published(&rekeyed, november),
+        Adopted::Rekeyed { first: true }
+    );
+    assert_eq!(
+        state.adopt_published(&rekeyed, november),
+        Adopted::Rekeyed { first: false }
+    );
+    assert_eq!(state.params, live, "the keys we enrolled under stay");
+    assert!(state.rekeyed_at.is_some());
+    let plan = state.plan(Some(&rekeyed), &[], november);
+    assert!(plan.owed.is_empty(), "the drip stops: {:?}", plan.owed);
+    // Back to our keys, and the drip resumes.
+    let plan = state.plan(Some(&live), &[], november);
+    assert_eq!(plan.adopted, Adopted::Updated);
+    assert!(state.rekeyed_at.is_none());
+    assert_eq!(
+        plan.owed.len(),
+        2,
+        "ticks 0 and 1 of November: {:?}",
+        plan.owed
+    );
+    // A draw already on its way is not asked for again.
+    let plan = state.plan(Some(&live), &[("token/2026-11".into(), 0)], november);
+    assert_eq!(
+        plan.owed,
+        [Due::Draw {
+            label: "token/2026-11".into(),
+            tick: 1,
+            rate: state.params.drip_per_tick,
+        }]
+    );
+    // And a `tickNotYet` wait holds the whole pass back.
+    state.retry_at = Some(november + Duration::minutes(5));
+    assert!(state.plan(Some(&live), &[], november).owed.is_empty());
+}
+
+/// A pass over a community fed only what we enrolled under — the bug this replaced — never
+/// moves to the new month; fed what the community publishes now, it re-enrols.
+#[test]
+fn a_pass_reenrols_when_a_new_vetter_label_is_live() {
+    use super::book::HiddenVetterState;
+    use super::hidden::{Due, HiddenParams};
+    let enrolled: HiddenParams = serde_json::from_value(hidden_params()).unwrap();
+    let mut snapshot = openvtc_vetting_pcs::snapshot::VetterSnapshot::without_keys("member-1");
+    snapshot
+        .credentials
+        .insert("2026-10".into(), "zOctober".into());
+    let mut state = HiddenVetterState::new(COMMUNITY, PersonaId::new(), enrolled.clone(), snapshot);
+    let november = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 11, 2, 9, 0, 0).unwrap();
+    assert!(
+        state.plan(None, &[], november).owed.is_empty(),
+        "October's labels in November owe nothing"
+    );
+    let live = HiddenParams {
+        vetter_labels: vec!["vetter/2026-11".into(), "vetter/2026-10".into()],
+        token_labels: vec!["token/2026-11".into(), "token/2026-10".into()],
+        ..enrolled
+    };
+    assert_eq!(
+        state.plan(Some(&live), &[], november).owed,
+        [Due::Enrol {
+            period: "2026-11".into()
+        }]
+    );
 }

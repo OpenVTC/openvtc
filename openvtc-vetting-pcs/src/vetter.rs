@@ -117,6 +117,7 @@ impl VetterEngine {
             snap.put_credential(period, cred)?;
         }
         snap.tokens = self.wallet.snapshot()?;
+        snap.pending = self.wallet.pending_snapshot()?;
         snap.personal_limit = self.personal_limit;
         for (id, meta) in &self.log {
             snap.record(id, meta)?;
@@ -140,12 +141,14 @@ impl VetterEngine {
             )?;
             log.push((id, meta.clone()));
         }
+        let mut wallet = TokenWallet::restore(community, &snap.tokens)?;
+        wallet.restore_pending(&snap.pending)?;
         Ok(Self {
             member: snap.member.clone(),
             usk,
             id,
             creds,
-            wallet: TokenWallet::restore(community, &snap.tokens)?,
+            wallet,
             personal_limit: snap.personal_limit,
             attested: 0,
             log,
@@ -249,7 +252,8 @@ impl VetterEngine {
             .iter()
             .map(|p| crate::scheme::dec(p))
             .collect::<Result<Vec<_>, _>>()?;
-        self.wallet.receive(params.tokens().tvk(), &pres)?;
+        self.wallet
+            .receive(params.tokens().tvk(), &served.label, served.tick, &pres)?;
         self.wallet.expire(params.tokens().live_labels());
         Ok(pres.len())
     }
@@ -320,6 +324,17 @@ impl VetterEngine {
 
     pub fn tokens_free(&self) -> usize {
         self.wallet.free()
+    }
+
+    /// Drop the draw in flight for `(label, tick)`: the community refused it.
+    pub fn forget_draw(&mut self, label: &str, tick: u32) {
+        self.wallet.forget(label, tick);
+    }
+
+    /// The draws asked for and not yet answered, as `(label, tick)`.
+    #[must_use]
+    pub fn draws_in_flight(&self) -> Vec<(String, u32)> {
+        self.wallet.in_flight()
     }
 
     /// Accepting a `vetting/request` reserves a token (§5.2), or declines `atCapacity`.

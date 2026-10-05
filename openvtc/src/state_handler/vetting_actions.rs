@@ -25,7 +25,7 @@ use openvtc_core::vetting::applicant::{
     Application, ChosenFace, GrantStatus, NextStep, RequestDraft, RequestState, SentCard,
     VetterEligibility,
 };
-use openvtc_core::vetting::book::FALLBACK_REQUIRED_CLAIMS;
+use openvtc_core::vetting::book::{Adopted, FALLBACK_REQUIRED_CLAIMS, HiddenVetterState};
 use openvtc_core::vetting::queries::{
     CommunityAnswer, CommunityQuery, QUERY_TIMEOUT, QueryKind, refusal_words, request_refusal_words,
 };
@@ -58,11 +58,12 @@ use crate::state_handler::main_page::content::{
     ApplicationRow, AttestForm, CardPreview, DECLINE_MESSAGE_MAX, DECLINE_REASONS,
     DIRECTORY_FIELDS, DIRECTORY_LABELS, DIRECTORY_METHODS, DeskRow, DeskStage, DeskView,
     DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS, EventForm, EventOffer,
-    FaceChoice, IssuedRow, JourneySteps, JourneyTarget, JourneyView, LineTone, ListedVetterRow,
-    NewFaceFocus, NewFaceForm, PROFILE_FIELDS, PROFILE_LABELS, PoolRow, RequestRow, TicketRow,
-    VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS,
-    VetterProfileForm, VetterStandingRow, VettingMembership, VettingMode, VettingPersona,
-    VettingState, VettingTab, decline_reason_words, method_label, row_of,
+    FaceChoice, HiddenVettingRow, IssuedRow, JourneySteps, JourneyTarget, JourneyView, LineTone,
+    ListedVetterRow, NewFaceFocus, NewFaceForm, PROFILE_FIELDS, PROFILE_LABELS, PoolRow,
+    RequestRow, TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
+    VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VetterStandingRow, VettingMembership,
+    VettingMode, VettingPersona, VettingState, VettingTab, decline_reason_words, method_label,
+    row_of,
 };
 use crate::state_handler::main_page::menu::MainMenu;
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
@@ -115,6 +116,109 @@ fn profile_standing(state: Option<&openvtc_core::vetting::registry::ProfileState
         Some(ProfileState::Stored { listed: true, .. }) => "listed in the directory".to_string(),
         Some(ProfileState::Stored { listed: false, .. }) => "kept, not listed".to_string(),
         Some(ProfileState::Refused { code, .. }) => format!("refused: {code}"),
+    }
+}
+
+/// A tick length in words: "3 days", "12 hours", "1 day 6 hours".
+fn tick_length_words(length: chrono::Duration) -> String {
+    let days = length.num_days();
+    let hours = length.num_hours() - days * 24;
+    let unit = |n: i64, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+    match (days, hours) {
+        (0, h) => unit(h, "hour"),
+        (d, 0) => unit(d, "day"),
+        (d, h) => format!("{} {}", unit(d, "day"), unit(h, "hour")),
+    }
+}
+
+/// One community's hidden vetting, for the vetter's own view.
+fn hidden_row(
+    held: &HiddenVetterState,
+    community: String,
+    accent: Option<(u8, u8, u8)>,
+    now: DateTime<Utc>,
+) -> HiddenVettingRow {
+    use openvtc_core::vetting::hidden;
+    let when = |t: DateTime<Utc>| t.format("%Y-%m-%d %H:%M UTC").to_string();
+    let events = held.event_draws(now.date_naive());
+    let mut enrolled: Vec<(String, Option<String>)> = held
+        .snapshot
+        .credentials
+        .keys()
+        .rev()
+        .map(|period| {
+            (
+                format!("vetter/{period}"),
+                held.enrolled_at
+                    .get(period)
+                    .map(|t| t.format("%Y-%m-%d").to_string()),
+            )
+        })
+        .collect();
+    enrolled.truncate(4);
+    let enrolment_owed = held
+        .params
+        .vetter_labels
+        .first()
+        .filter(|l| {
+            !held
+                .snapshot
+                .credentials
+                .contains_key(l.trim_start_matches("vetter/"))
+        })
+        .cloned();
+    let (tokens_held, tokens_free) = held.tokens();
+    let last_draw = held.last_draw.as_ref().map(|d| {
+        format!(
+            "{} tick {} — {} token{} at {}",
+            d.label,
+            d.tick,
+            d.taken,
+            if d.taken == 1 { "" } else { "s" },
+            when(d.at)
+        )
+    });
+    let next_window = hidden::next_window(&held.params, &events, now).map(when);
+    HiddenVettingRow {
+        community,
+        accent,
+        enrolled,
+        enrolment_owed,
+        tokens_held,
+        tokens_free,
+        tokens_spent: held.tokens_spent,
+        token_labels: held
+            .params
+            .token_labels
+            .iter()
+            .map(|l| sanitize_display(l, 128))
+            .collect(),
+        tick_length: tick_length_words(held.params.tick_length()),
+        drip_per_tick: held.params.drip_per_tick,
+        last_draw,
+        next_window,
+        events: held
+            .events
+            .iter()
+            .map(|e| {
+                (
+                    sanitize_display(&e.event_id, 128),
+                    sanitize_display(&e.state, 32),
+                    e.group_size,
+                    e.group_floor,
+                )
+            })
+            .collect(),
+        last_refusal: held.last_refusal.as_ref().map(|r| {
+            format!(
+                "{} — {}: {}",
+                when(r.at),
+                r.what,
+                hidden::refusal_words(&sanitize_display(&r.code, 120))
+            )
+        }),
+        waiting_until: held.retry_at.filter(|t| *t > now).map(when),
+        rekeyed: held.rekeyed_at.map(when),
     }
 }
 
@@ -199,6 +303,15 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
         }
     }
     vetting.event_offers = offers.into();
+    vetting.hidden = book
+        .hidden_vetter
+        .iter()
+        .map(|held| {
+            let name =
+                community_name(&held.community).unwrap_or_else(|| shorten_did(&held.community, 48));
+            hidden_row(held, name, accent(&held.community), now)
+        })
+        .collect();
     vetting.retired = book
         .retired
         .iter()
@@ -813,43 +926,6 @@ fn persist(ctx: &mut ActionCtx<'_>, message: impl Into<String>) {
     );
 }
 
-/// Keep this account's vetter side current with the communities it vets for:
-/// read each one's requirements again, and run whatever its hidden-vetting
-/// schedule owes — enrolment the first time, a tick of the token drip after.
-///
-/// A community that turns on PCS ZKP vetting says so only in its manifest, and
-/// a vetter that never re-reads it keeps signing named statements an applicant
-/// under the new mode cannot use. So this runs on its own — at start-up, hourly,
-/// and when a session is about to open — not only when someone presses `m`.
-async fn refresh_vetter_side(ctx: &mut ActionCtx<'_>) {
-    // A vetter has no application, so nothing else would ever fetch the manifest of a
-    // community it vets for — and the manifest is where a community says it hides its
-    // vetters. Asking here is what lets a vetter-only member reach the mode at all.
-    refresh_vetter_communities(ctx).await;
-    // And whatever each community's vetter schedule owes us — enrolment or a tick of
-    // the drip. On a schedule, never in response to a balance (design §5.1).
-    //
-    // Over the communities that publish the mode as well as those we already hold an
-    // engine for: the first pass through has no engine yet, and `hidden_vetting_tick`
-    // is what makes one.
-    let mut communities: Vec<String> = ctx
-        .config
-        .private
-        .vetting
-        .hidden_vetter
-        .iter()
-        .map(|h| h.community.clone())
-        .collect();
-    for community in ctx.config.private.vetting.hidden_published.keys() {
-        if !communities.contains(community) {
-            communities.push(community.clone());
-        }
-    }
-    for community in communities {
-        hidden_vetting_tick(ctx, &community).await;
-    }
-}
-
 /// Handle one Vetting-page action.
 pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
     match action {
@@ -1081,9 +1157,30 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 // is free: the community keeps one per applicant, and asking again replaces it.
                 ask_for_challenge(ctx, &row.id).await;
             }
+            // A vetter has no application, so nothing else would ever fetch the manifest of a
+            // community it vets for — and the manifest is where a community says it hides its
+            // vetters. Asking here is what lets a vetter-only member reach the mode at all.
             refresh_vetter_side(ctx).await;
         }
         VettingAction::RefreshVetterSide => refresh_vetter_side(ctx).await,
+        VettingAction::OpenHiddenVetting => {
+            if page(ctx).hidden.is_empty() {
+                status(
+                    ctx,
+                    "None of the communities you vet for hides its vetters, so there is no \
+                     hidden vetting to show.",
+                );
+            } else {
+                page(ctx).mode = VettingMode::HiddenVetting { index: 0 };
+            }
+        }
+        VettingAction::DrawNow => {
+            status(
+                ctx,
+                "Reading each community's requirements again and drawing what the schedule owes…",
+            );
+            refresh_vetter_side(ctx).await;
+        }
         VettingAction::ReviewCard => {
             let v = page(ctx);
             let Some(row) = v.applications.get(v.selected).cloned() else {
@@ -1346,7 +1443,9 @@ fn cycle(v: &mut VettingState, forward: bool) {
         (v.personas.len(), v.memberships.len(), v.documentation.len());
     let (communities, resend) = (v.directory_communities.len(), v.resend_candidates.len());
     let offers = v.event_offers.len();
+    let hidden = v.hidden.len();
     match &mut v.mode {
+        VettingMode::HiddenVetting { index } => turn(index, hidden),
         VettingMode::Directory(view) => match view.field {
             0 => turn(&mut view.community_index, communities),
             5 => turn(&mut view.method_index, DIRECTORY_METHODS.len()),
@@ -1445,6 +1544,14 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
         VettingMode::Profile(form) => profile_submit(ctx, *form).await,
         VettingMode::Resend { index } => ask_resend(ctx, index).await,
         VettingMode::EventMode { index } => ask_event_mode(ctx, index).await,
+        // Enter is "draw now", as `d` is: the view's one verb.
+        VettingMode::HiddenVetting { .. } => {
+            status(
+                ctx,
+                "Reading each community's requirements again and drawing what the schedule owes…",
+            );
+            refresh_vetter_side(ctx).await;
+        }
         VettingMode::SendCard {
             application_id,
             session_id,
@@ -2978,66 +3085,120 @@ pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &
 }
 
 /// Do whatever this community's hidden-vetting schedule owes it now: enrol under the current
-/// class label, or draw this tick of the drip — under every label it owes one for.
+/// class label, or draw every tick of the drip that has begun and not been served — under every
+/// label it owes one for.
 ///
 /// Driven by the clock and never by the wallet. A client that drew when it was running low
 /// would publish, in the timing of its own requests, how much vetting it had been doing — which
-/// is the one thing the whole exchange is built to withhold. So this runs on a tick whether the
-/// vetter has attested to nobody or to three people, and asks for the same number either way.
+/// is the one thing the whole exchange is built to withhold. So this runs on a schedule whether
+/// the vetter has attested to nobody or to three people, and asks for the same number either way.
 ///
-/// A vetter in event mode owes two draws a tick, and the loop below is why the ordinary one is
+/// It runs on what the community publishes **now** (`hidden_published`, refreshed from its
+/// manifest on the same schedule), under the keys we enrolled with. A month rolling over is new
+/// labels under the same keys, and the engine follows them — re-enrolling, then drawing under the
+/// new month. New keys stop the drip instead, and the vetter is told once.
+///
+/// A vetter in event mode owes draws under two labels, and the plan is why the ordinary one is
 /// still among them: dropping the monthly draw for the three days of a conference would say, in
 /// the timing of the requests alone, that those three days were a conference.
 pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str) {
     let now = Utc::now();
     ensure_hidden_vetter(ctx, community);
-    let Some(state) = ctx
+    let book = &mut ctx.config.private.vetting;
+    let Some(index) = book
+        .hidden_vetter
+        .iter()
+        .position(|h| h.community == community)
+    else {
+        return;
+    };
+    let live = book.hidden_published.get(community).cloned();
+    // The draws whose answers are still on their way: the question is still open. One whose
+    // question has gone (answered, refused, or timed out) is no longer in flight.
+    let open: std::collections::HashSet<&str> = book
+        .queries
+        .iter()
+        .filter(|q| q.community == community && q.kind == QueryKind::PcsTokens)
+        .map(|q| q.document_id.as_str())
+        .collect();
+    let stale: Vec<String> = book
+        .draws_in_flight
+        .keys()
+        .filter(|id| !open.contains(id.as_str()))
+        .cloned()
+        .collect();
+    let in_flight: Vec<(String, u32)> = book
+        .draws_in_flight
+        .iter()
+        .filter(|(id, _)| open.contains(id.as_str()))
+        .map(|(_, draw)| draw.clone())
+        .collect();
+    for id in stale {
+        book.draws_in_flight.remove(&id);
+    }
+    let plan = book.hidden_vetter[index].plan(live.as_ref(), &in_flight, now);
+    let state = book.hidden_vetter[index].clone();
+    let changed = plan.settled || plan.adopted != Adopted::Unchanged;
+    if let Adopted::Rekeyed { first } = plan.adopted {
+        if first {
+            let name = community_display(ctx.config, community);
+            persist(
+                ctx,
+                format!(
+                    "{name} now publishes different hidden-vetting keys from the ones you \
+                     enrolled under. The tokens and credential you hold there count for nothing \
+                     under the new keys, so drawing has stopped. Ask the community whether it \
+                     re-keyed; see the Hidden vetting view (h on the desk)."
+                ),
+            );
+            tracing::warn!(community = %community, "hidden-vetting keys changed since enrolment; the drip has stopped");
+        }
+        return;
+    }
+    if changed {
+        ctx.save.mark_dirty();
+        ctx.state.main_page.sync_from_config(ctx.config);
+    }
+    let Some(did) = persona_did(ctx.config, state.persona) else {
+        return;
+    };
+    for owed in plan.owed {
+        hidden_vetting_send(ctx, community, &state, &did, owed, now).await;
+    }
+}
+
+/// Keep this account's vetter side current with the communities it vets for: read each one's
+/// requirements again, and run whatever its hidden-vetting schedule owes — enrolment the first
+/// time, the ticks of the token drip after.
+///
+/// A community that turns on PCS ZKP vetting says so only in its manifest, and a month's new
+/// labels are published there too, so this re-reads it every time. Run by the schedule
+/// (`hidden_vetting_poll`) at each tick window and at least hourly, and by `m` / `d` by hand.
+pub(crate) async fn refresh_vetter_side(ctx: &mut ActionCtx<'_>) {
+    // A vetter has no application, so nothing else would ever fetch the manifest of a
+    // community it vets for — and the manifest is where a community says it hides its
+    // vetters, and which labels are live this month.
+    refresh_vetter_communities(ctx).await;
+    // And whatever each community's vetter schedule owes us — enrolment or the ticks of the
+    // drip. On a schedule, never in response to a balance (design §5.1).
+    //
+    // Over the communities that publish the mode as well as those we already hold an engine
+    // for: the first pass through has no engine yet, and `hidden_vetting_tick` is what makes one.
+    let mut communities: Vec<String> = ctx
         .config
         .private
         .vetting
         .hidden_vetter
         .iter()
-        .find(|h| h.community == community)
-        .cloned()
-    else {
-        return;
-    };
-    let Some(did) = persona_did(ctx.config, state.persona) else {
-        return;
-    };
-    // Only the events this community has approved us for, and only while their labels are still
-    // accepted. A label the community publishes says an event exists, never that we are in it.
-    let events = state.event_draws(now.date_naive());
-
-    // Plan first, then send. `last_ticks` only advances when the community answers, so a
-    // working copy is what stops one pass asking for the same label over and over; the bound is
-    // there so that a schedule which somehow never settles cannot spin.
-    let mut ticks = state.last_ticks.clone();
-    let mut plan = Vec::new();
-    for _ in 0..8 {
-        match openvtc_core::vetting::hidden::due(
-            &state.params,
-            Some(&state.snapshot),
-            &ticks,
-            &events,
-            now,
-        ) {
-            openvtc_core::vetting::hidden::Due::Nothing => break,
-            // Enrolment blocks every draw behind it, so it is the whole plan.
-            enrol @ openvtc_core::vetting::hidden::Due::Enrol { .. } => {
-                plan.push(enrol);
-                break;
-            }
-            draw @ openvtc_core::vetting::hidden::Due::Draw { .. } => {
-                if let openvtc_core::vetting::hidden::Due::Draw { label, tick, .. } = &draw {
-                    ticks.insert(label.clone(), *tick);
-                }
-                plan.push(draw);
-            }
+        .map(|h| h.community.clone())
+        .collect();
+    for community in ctx.config.private.vetting.hidden_published.keys() {
+        if !communities.contains(community) {
+            communities.push(community.clone());
         }
     }
-    for owed in plan {
-        hidden_vetting_send(ctx, community, &state, &did, owed, now).await;
+    for community in communities {
+        hidden_vetting_tick(ctx, &community).await;
     }
 }
 
@@ -3047,21 +3208,16 @@ pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str
 /// without this nothing ever asks — and a community that hides its vetters says so in its
 /// manifest and nowhere else. The answer is what [`ensure_hidden_vetter`] acts on.
 ///
-/// Skips a community we already hold an engine for: the parameters we enrolled under are the
-/// ones that matter, and re-reading them changes nothing until a rotation, which the schedule
-/// notices on its own.
+/// Including the communities we already hold an engine for: the manifest is where a new month's
+/// labels appear, and an engine that never re-read it never moved past the month it enrolled
+/// in. What changes there reaches the engine through [`HiddenVetterState::plan`], which keeps the
+/// keys we enrolled under.
 async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>) {
     let standing: Vec<(String, PersonaId)> = {
         let book = &ctx.config.private.vetting;
         book.vetter_standing(Utc::now())
             .into_iter()
             .filter(|s| s.live)
-            .filter(|s| {
-                !book
-                    .hidden_vetter
-                    .iter()
-                    .any(|h| h.community == s.community)
-            })
             .map(|s| (s.community, s.persona))
             .collect()
     };
@@ -3124,19 +3280,14 @@ fn ensure_hidden_vetter(ctx: &mut ActionCtx<'_>, community: &str) {
             }
         }
     };
-    ctx.config
-        .private
-        .vetting
-        .hidden_vetter
-        .push(openvtc_core::vetting::book::HiddenVetterState {
-            community: community.to_string(),
-            persona: standing.persona,
+    ctx.config.private.vetting.hidden_vetter.push(
+        openvtc_core::vetting::book::HiddenVetterState::new(
+            community,
+            standing.persona,
             params,
             snapshot,
-            last_ticks: std::collections::BTreeMap::new(),
-            last_drawn_at: None,
-            events: Vec::new(),
-        });
+        ),
+    );
     status(
         ctx,
         format!(
@@ -3196,7 +3347,18 @@ async fn hidden_vetting_send(
         }
         openvtc_core::vetting::hidden::Due::Draw { label, tick, rate } => {
             let mut rng = rand::thread_rng();
-            let mut snapshot = state.snapshot.clone();
+            // The engine as it stands now, not as it stood when the pass was planned: each draw
+            // of a catch-up adds its serials to it, and starting from the planned copy would drop
+            // the previous draw's.
+            let Some(mut snapshot) = ctx
+                .config
+                .private
+                .vetting
+                .hidden_vetter(community, state.persona)
+                .map(|h| h.snapshot.clone())
+            else {
+                return;
+            };
             let body = match openvtc_core::vetting::hidden::drip_request(
                 community,
                 &state.params,
@@ -3229,6 +3391,11 @@ async fn hidden_vetting_send(
                 kind: QueryKind::PcsTokens,
                 sent_at: now,
             });
+            ctx.config
+                .private
+                .vetting
+                .draws_in_flight
+                .insert(document_id.clone(), (label.clone(), tick));
             let sent = Sent::Query {
                 document_id,
                 community: community.to_string(),
@@ -4579,6 +4746,7 @@ pub(crate) fn apply_answers(state: &mut State, config: &Config, answers: Vec<Com
                  Tickets when it arrives.",
                 valid_until.format("%Y-%m-%d")
             )),
+            CommunityAnswer::Refused { kind, code, .. } if !kind.refusal_is_news(&code) => None,
             CommunityAnswer::Refused {
                 query,
                 kind,

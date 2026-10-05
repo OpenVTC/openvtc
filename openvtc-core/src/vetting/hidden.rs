@@ -55,6 +55,82 @@ pub struct HiddenParams {
     /// answer to [`crate::vetting::wire::pcs::EventModeRequest`], never this list.
     #[serde(default)]
     pub events: Vec<HiddenEventOffer>,
+    /// How long one tick of the drip lasts, as the community publishes it: an ISO 8601 duration
+    /// of days and hours (`P3D`, `PT12H`, `P1DT6H`), at least an hour. Absent means three days.
+    ///
+    /// Kept as the text that arrived, and read through [`HiddenParams::tick_length`], so a
+    /// malformed value costs this community its own rate rather than costing the client the
+    /// whole criterion: a community whose tick length cannot be read is drawn from on the
+    /// default, and the log says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_length: Option<String>,
+}
+
+impl HiddenParams {
+    /// How long one tick of this community's drip lasts. [`DEFAULT_TICK_LENGTH`] when it
+    /// publishes none, or one this build cannot read.
+    #[must_use]
+    pub fn tick_length(&self) -> chrono::Duration {
+        match self.tick_length.as_deref() {
+            None => DEFAULT_TICK_LENGTH,
+            Some(text) => parse_tick_length(text).unwrap_or(DEFAULT_TICK_LENGTH),
+        }
+    }
+
+    /// Whether `other` was published under the same keys as this. A community whose keys move
+    /// has re-keyed: every credential and token held under the old ones is worthless there, and
+    /// drawing on would only be refused.
+    #[must_use]
+    pub fn same_keys(&self, other: &HiddenParams) -> bool {
+        self.suite == other.suite
+            && self.helper_key == other.helper_key
+            && self.token_key == other.token_key
+    }
+}
+
+/// The tick length a community that publishes none is taken to mean.
+pub const DEFAULT_TICK_LENGTH: chrono::Duration = chrono::Duration::days(3);
+
+/// The shortest tick length a community may publish. Shorter is malformed.
+pub const MIN_TICK_LENGTH: chrono::Duration = chrono::Duration::hours(1);
+
+/// Read a published tick length: an ISO 8601 duration of days and hours, at least
+/// [`MIN_TICK_LENGTH`]. `None` for anything else — weeks, months, minutes, fractions, an empty
+/// duration — which the caller treats as the default.
+#[must_use]
+pub fn parse_tick_length(text: &str) -> Option<chrono::Duration> {
+    let rest = text.strip_prefix('P')?;
+    let (date, time) = match rest.split_once('T') {
+        Some((date, time)) => {
+            if time.is_empty() {
+                return None;
+            }
+            (date, Some(time))
+        }
+        None => (rest, None),
+    };
+    // One `<digits><unit>` component, or nothing.
+    fn component(part: &str, unit: char) -> Option<Option<i64>> {
+        if part.is_empty() {
+            return Some(None);
+        }
+        let digits = part.strip_suffix(unit)?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse::<i64>().ok().map(Some)
+    }
+    let days = component(date, 'D')?;
+    let hours = match time {
+        Some(time) => component(time, 'H')?,
+        None => None,
+    };
+    if days.is_none() && hours.is_none() {
+        return None;
+    }
+    let total = chrono::Duration::try_days(days.unwrap_or(0))?
+        .checked_add(&chrono::Duration::try_hours(hours.unwrap_or(0))?)?;
+    (total >= MIN_TICK_LENGTH).then_some(total)
 }
 
 /// One event a community is running, as it publishes it.
@@ -174,6 +250,16 @@ pub fn read_mode(raw: &Value) -> Result<Mode, HiddenError> {
         } else {
             Ok(Mode::Named)
         };
+    }
+    if let Some(text) = params.tick_length.as_deref()
+        && parse_tick_length(text).is_none()
+    {
+        tracing::warn!(
+            tick_length = %text,
+            default = "P3D",
+            "a community publishes a hidden-vetting tick length this build cannot read; \
+             drawing on the default"
+        );
     }
     Ok(Mode::Hidden(Box::new(params)))
 }
@@ -578,18 +664,121 @@ pub fn accept_drip(
     Ok(taken)
 }
 
+/// Drop the serials of a draw the community refused, so they do not wait in the snapshot for an
+/// answer that is never coming.
+///
+/// # Errors
+///
+/// [`HiddenError::Unreadable`] if the snapshot cannot be restored or stored again.
+pub fn forget_draw(
+    community_did: &str,
+    snapshot: &mut VetterSnapshot,
+    label: &str,
+    tick: u32,
+) -> Result<(), HiddenError> {
+    let mut engine = VetterEngine::restore(snapshot, community_did)
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    engine.forget_draw(label, tick);
+    *snapshot = engine
+        .snapshot()
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    Ok(())
+}
+
+/// The `pcs-tokens` refusal that means "not yet": the tick asked for has not begun at the
+/// community. Retryable, and not a failure — the client's clock ran ahead of the community's, or
+/// a pass raced the window opening.
+pub const TOKENS_TICK_NOT_YET: &str =
+    trust_tasks_rs::specs::vtc::vetting::vetters::pcs_tokens::v0_1::error_codes::TICK_NOT_YET.code;
+
+/// The `pcs-tokens` refusal that means "done": this tick was already served. An answer we lost,
+/// or a second client of the same vetter that asked first.
+pub const TOKENS_ALREADY_SERVED: &str =
+    trust_tasks_rs::specs::vtc::vetting::vetters::pcs_tokens::v0_1::error_codes::ALREADY_SERVED
+        .code;
+
+/// A hidden-vetting refusal in words a vetter can act on.
+///
+/// Each declared code of `pcs-root`, `pcs-tokens`, `event-mode` and `pcs-challenge` gets its own
+/// sentence, because each has a different answer — a grant to ask for, a client to update, a
+/// community that has stopped. A code this build does not know is said plainly as one, with the
+/// code, rather than guessed at (R6.4).
+#[must_use]
+pub fn refusal_words(code: &str) -> String {
+    let local = code.rsplit_once(':').map_or(code, |(_, local)| local);
+    let task = code
+        .split_once(':')
+        .map(|(task, _)| task.rsplit('/').next().unwrap_or(task))
+        .unwrap_or("");
+    let words = match (task, local) {
+        (_, "notAVetter") => {
+            "the community holds no live vetter grant for you. Ask its admins to name you a \
+             vetter again, or for your vetter credential (g on the desk)."
+        }
+        ("pcs-root", "wrongLabel") => {
+            "it is not enrolling under that month's label any more. The next pass enrols under \
+             the current one."
+        }
+        ("pcs-root", "alreadyEnrolled") => {
+            "it already enrolled you under this month's label, but this client lost the answer \
+             before it could be opened. You can draw again from next month's label."
+        }
+        ("pcs-root", "identifierRebound") => {
+            "it has you enrolled under a different hidden-vetting key. This install's key is not \
+             the one the community knows — vet from the install that enrolled first."
+        }
+        ("pcs-root", "badRequest") | ("pcs-tokens", "badOpeningProof") => {
+            "it could not verify the request this client built. Update OpenVTC; if that does \
+             not help, the community and this client disagree about the scheme."
+        }
+        ("pcs-tokens", "labelNotLive") => {
+            "it is not issuing tokens under that label any more. The next pass draws under the \
+             label the community publishes now."
+        }
+        ("pcs-tokens", "alreadyServed") => "that tick was already served.",
+        ("pcs-tokens", "tickNotYet") => {
+            "that tick has not begun at the community yet. It is asked for again when its \
+             window opens."
+        }
+        ("pcs-tokens", "overQuota") => {
+            "the request asked for more tokens than its published rate. Nothing was signed; the \
+             next pass asks for the published rate."
+        }
+        ("pcs-tokens", "eventRefused") => {
+            "you are not in the approved group for that event, so it will not issue its tokens \
+             to you. Your ordinary tokens are unaffected."
+        }
+        ("event-mode", "unknownEvent") => "it is not running that event.",
+        ("event-mode", "unknownTier") => "it does not offer that rate for the event.",
+        ("event-mode", "badWindow") => "the days asked for are not the event's own.",
+        ("event-mode", "alreadyRequested") => {
+            "you have already asked to vet at that event; its answer stands."
+        }
+        ("event-mode", "eventClosed") => "that event has closed.",
+        ("pcs-challenge", "notHiddenVetting") => {
+            "it no longer counts vetting from a zero-knowledge proof for this criterion."
+        }
+        _ => return format!("it refused, with a code this client does not know ({code})."),
+    };
+    words.to_string()
+}
+
 // ---------------------------------------------------------------------------------------------
 // The schedule
 // ---------------------------------------------------------------------------------------------
 
-/// How long a drip tick lasts. A day: long enough that a client which is off for an evening
-/// loses nothing, short enough that a vetter who runs out is not stuck for a week.
-pub const TICK: chrono::Duration = chrono::Duration::days(1);
+/// The most draws one pass of the schedule sends to one community.
+///
+/// A vetter back after time away owes every tick of the current label it was not served, and
+/// they are asked for oldest first. The bound only keeps one pass from becoming a flood; what is
+/// left is asked for on the next pass, and the label itself bounds the whole — a month holds at
+/// most a month of ticks.
+pub const MAX_DRAWS_PER_PASS: usize = 16;
 
 /// What a vetter's client should do for one community, now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Due {
-    /// Nothing: enrolled for the current label and already served this tick.
+    /// Nothing: enrolled for the current label, and every tick that has begun is served.
     Nothing,
     /// Ask to enrol under this class label.
     Enrol {
@@ -600,7 +789,7 @@ pub enum Due {
     Draw {
         /// The token label to draw under.
         label: String,
-        /// The tick to ask for.
+        /// The tick to ask for — one that has begun and has not been served.
         tick: u32,
         /// How many to ask for — the community's published rate.
         rate: usize,
@@ -619,35 +808,131 @@ pub struct EventDraw {
     pub label: String,
     /// The rate of the tier this vetter asked for — not the community's ordinary drip.
     pub rate: usize,
+    /// The event's first day. Its label's ticks are counted from midnight UTC on it.
+    pub opens_on: chrono::NaiveDate,
     /// The last day this label is issued or accepted.
     pub closes_after: chrono::NaiveDate,
 }
 
+/// Midnight UTC on `day`.
+fn midnight(day: chrono::NaiveDate) -> chrono::DateTime<chrono::Utc> {
+    day.and_time(chrono::NaiveTime::MIN).and_utc()
+}
+
+/// The month a `token/YYYY-MM` label covers, as `[start, end)`: midnight UTC on its first day
+/// to midnight UTC on the next month's. `None` for any other label.
+#[must_use]
+pub fn month_of_label(
+    label: &str,
+) -> Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+    let period = label.strip_prefix("token/")?;
+    let (year, month) = period.split_once('-')?;
+    if year.len() != 4 || month.len() != 2 {
+        return None;
+    }
+    let year: i32 = year.parse().ok()?;
+    let month: u32 = month.parse().ok()?;
+    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1)?;
+    let next = first.checked_add_months(chrono::Months::new(1))?;
+    Some((midnight(first), midnight(next)))
+}
+
+/// The tick of a label whose ticks start at `start`, at `now`: tick `t` is the window
+/// `[start + t·length, start + (t+1)·length)`. `None` before the label has begun.
+///
+/// Derived from the clock and the label rather than counted locally, so two clients of the same
+/// vetter — or one client that lost its state — agree about which tick they are in, and the
+/// community can refuse a tick that has not begun (`tickNotYet`) as well as one it has served.
+#[must_use]
+pub fn tick_of(
+    start: chrono::DateTime<chrono::Utc>,
+    length: chrono::Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<u32> {
+    if now < start || length <= chrono::Duration::zero() {
+        return None;
+    }
+    let elapsed = (now - start).num_seconds();
+    u32::try_from(elapsed / length.num_seconds()).ok()
+}
+
+/// When tick `tick` of a label starting at `start` opens.
+#[must_use]
+pub fn tick_start(
+    start: chrono::DateTime<chrono::Utc>,
+    length: chrono::Duration,
+    tick: u32,
+) -> chrono::DateTime<chrono::Utc> {
+    start + length * i32::try_from(tick).unwrap_or(i32::MAX)
+}
+
+/// The community's current monthly label: the published `token/YYYY-MM` label whose month
+/// `now` falls in, with that month's bounds.
+///
+/// `None` when no published label covers `now` — the manifest we hold is from last month. That
+/// is not a reason to draw under last month's label: the community stopped issuing under it when
+/// its month ended, and a vetter asking anyway would only be refused. The schedule waits for the
+/// manifest to catch up instead.
+#[must_use]
+pub fn current_month_label(
+    params: &HiddenParams,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<(
+    &str,
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+)> {
+    params.token_labels.iter().find_map(|label| {
+        let (start, end) = month_of_label(label)?;
+        (start <= now && now < end).then_some((label.as_str(), start, end))
+    })
+}
+
+/// The next tick of a label to ask for: the one after the last served, or the first, if it has
+/// begun.
+///
+/// A recorded tick later than the current one is not a tick of this label at all. Before ticks
+/// were windows of time, a client counted days since 1970 (≈ 20 000), and a value like that
+/// would otherwise stand in front of every real tick of the label for decades. It is read as
+/// nothing served.
+fn next_tick(
+    start: chrono::DateTime<chrono::Utc>,
+    length: chrono::Duration,
+    last: Option<u32>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<u32> {
+    let current = tick_of(start, length, now)?;
+    let next = last
+        .filter(|t| *t <= current)
+        .map_or(0, |t| t.saturating_add(1));
+    (next <= current).then_some(next)
+}
+
 /// Decide what a vetter's client owes this community now.
 ///
-/// Two rules, and the second is the one that matters:
+/// Three rules, and the second is the one that matters:
 ///
 /// - Enrol when we hold no credential under the current class label. A rotation is an
 ///   enrolment, so this covers both the first time and every month after.
-/// - **Draw on the schedule, not on demand.** The tick is derived from the clock, never from
-///   how many tokens are left: a client that drew when it ran low would turn its token balance
-///   into a public signal of how much vetting it had done, which is the one thing this whole
-///   exchange exists to hide. A vetter with a full wallet still asks.
-///
-/// A client that has been offline does **not** get to claim the ticks it missed: `tick` is the
-/// current one, and the community serves each at most once. The tokens for a week away are
-/// simply not minted — which is the same answer a vetter who was present but idle gets, and
-/// that symmetry is the point.
+/// - **Draw on the schedule, not on demand.** Which ticks are owed is derived from the clock
+///   and the label, never from how many tokens are left: a client that drew when it ran low
+///   would turn its token balance into a public signal of how much vetting it had done, which
+///   is the one thing this whole exchange exists to hide. A vetter with a full wallet still
+///   asks.
+/// - **Never ahead of the clock.** A tick is a window of time (`tickLength`, published by the
+///   community), and one that has not begun is refused. A tick that has begun and was not served
+///   — the client was off — is still owed, and is asked for oldest first. That says when the
+///   vetter was offline, never when they vetted.
 ///
 /// # One label at a time, and the event's is not the exception
 ///
-/// A vetter in event mode owes this community **two** draws a tick: the event's, and the
+/// A vetter in event mode owes this community draws under **two** labels: the event's, and the
 /// ordinary monthly one. Skipping the monthly draw for the three days of a conference would say,
 /// in the timing of the requests alone, that those three days were a conference — so the
 /// ordinary label is drawn throughout, exactly as it would be in an ordinary week.
 ///
-/// `last_ticks` is therefore per label, and this answers the first outstanding one. A caller
-/// with more than one owing calls again, recording each label as it goes.
+/// `last_ticks` is therefore per label, and this answers the first outstanding draw. A caller
+/// with more than one owing calls again, recording each tick as it goes.
 #[must_use]
 pub fn due(
     params: &HiddenParams,
@@ -669,23 +954,30 @@ pub fn due(
     if !snapshot.credentials.contains_key(&period) {
         return Due::Enrol { period };
     }
-    let tick = tick_of(now);
+    let length = params.tick_length();
     let today = now.date_naive();
-    let outstanding = |label: &str| last_ticks.get(label).is_none_or(|&t| tick > t);
 
     // The ordinary label first: it is the one that must never be skipped.
-    if let Some(label) = params.token_labels.first()
-        && outstanding(label)
+    if let Some((label, start, _)) = current_month_label(params, now)
+        && let Some(tick) = next_tick(start, length, last_ticks.get(label).copied(), now)
     {
         return Due::Draw {
-            label: label.clone(),
+            label: label.to_string(),
             tick,
             rate: params.drip_per_tick,
         };
     }
     // Then each event this vetter was approved for, while its label is still accepted.
     for event in events {
-        if today <= event.closes_after && outstanding(&event.label) {
+        if today > event.closes_after {
+            continue;
+        }
+        if let Some(tick) = next_tick(
+            midnight(event.opens_on),
+            length,
+            last_ticks.get(&event.label).copied(),
+            now,
+        ) {
             return Due::Draw {
                 label: event.label.clone(),
                 tick,
@@ -696,14 +988,90 @@ pub fn due(
     Due::Nothing
 }
 
-/// The tick `now` falls in: whole days since the epoch.
+/// When the next tick window this vetter draws under opens, after `now`.
 ///
-/// Derived from the clock rather than counted locally, so two clients of the same vetter — or
-/// one client that lost its state — agree about which tick they are in, and the community's
-/// once-per-tick rule stays enforceable rather than becoming a race.
+/// The earliest of: the ordinary label's next tick, the end of its month (when the next month's
+/// label takes over), and each approved event's next tick — or its first, if it has not begun.
+/// `None` when nothing is scheduled at all, such as a manifest from last month.
 #[must_use]
-pub fn tick_of(now: chrono::DateTime<chrono::Utc>) -> u32 {
-    u32::try_from(now.timestamp().max(0) / TICK.num_seconds()).unwrap_or(u32::MAX)
+pub fn next_window(
+    params: &HiddenParams,
+    events: &[EventDraw],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let length = params.tick_length();
+    let today = now.date_naive();
+    let next_of = |start: chrono::DateTime<chrono::Utc>| match tick_of(start, length, now) {
+        None => start,
+        Some(t) => tick_start(start, length, t.saturating_add(1)),
+    };
+    let mut candidates = Vec::new();
+    if let Some((_, start, end)) = current_month_label(params, now) {
+        candidates.push(next_of(start).min(end));
+    }
+    for event in events.iter().filter(|e| today <= e.closes_after) {
+        candidates.push(next_of(midnight(event.opens_on)));
+    }
+    candidates.into_iter().min()
+}
+
+/// The window the current tick of `label` covers, as `(tick, opened, closes)`, if it has begun.
+#[must_use]
+pub fn current_window(
+    params: &HiddenParams,
+    label: &str,
+    events: &[EventDraw],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<(
+    u32,
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+)> {
+    let start = label_start(label, events)?;
+    let length = params.tick_length();
+    let tick = tick_of(start, length, now)?;
+    Some((
+        tick,
+        tick_start(start, length, tick),
+        tick_start(start, length, tick.saturating_add(1)),
+    ))
+}
+
+/// Where `label`'s ticks are counted from: the first instant of its month, or of its event's
+/// first day. `None` for a label that is neither, or an event we were not approved for.
+#[must_use]
+pub fn label_start(label: &str, events: &[EventDraw]) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Some((start, _)) = month_of_label(label) {
+        return Some(start);
+    }
+    events
+        .iter()
+        .find(|e| e.label == label)
+        .map(|e| midnight(e.opens_on))
+}
+
+/// Make `last_ticks` mean what [`due`] reads it as, and say whether anything changed.
+///
+/// Drops each entry for a label this vetter no longer draws under, and each one later than its
+/// label's current tick — which, for a label that is drawn at all, is only ever a count of days
+/// since 1970 left by a client from before ticks were windows of time. Kept, a value like that
+/// would read as "served" for every real tick of the label.
+pub fn settle_ticks(
+    last_ticks: &mut std::collections::BTreeMap<String, u32>,
+    params: &HiddenParams,
+    events: &[EventDraw],
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let length = params.tick_length();
+    let before = last_ticks.len();
+    last_ticks.retain(|label, tick| {
+        let live = params.token_labels.iter().any(|l| l == label)
+            || events.iter().any(|e| &e.label == label);
+        live && label_start(label, events)
+            .and_then(|start| tick_of(start, length, now))
+            .is_some_and(|current| *tick <= current)
+    });
+    last_ticks.len() != before
 }
 
 #[cfg(test)]
@@ -768,6 +1136,7 @@ mod tests {
                         "vetterLabels": ["vetter/2026-09"],
                         "tokenLabels": ["token/2026-09", "token/event/kernel-summit-2026"],
                         "dripPerTick": 3,
+                        "tickLength": "PT12H",
                         "events": [{
                             "eventId": "kernel-summit-2026",
                             "startDate": "2026-10-12",
@@ -813,6 +1182,7 @@ mod tests {
         assert_eq!(params.suite, SUITE);
         assert_eq!(params.vetter_labels, ["vetter/2026-09"]);
         assert_eq!(params.drip_per_tick, 3);
+        assert_eq!(params.tick_length(), chrono::Duration::hours(12));
         assert_eq!(params.token_labels.len(), 2);
 
         // The menu a vetter picks an event tier from.
@@ -945,6 +1315,10 @@ mod schedule_tests {
         BTreeMap::from([(label.to_string(), tick)])
     }
 
+    fn at(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32) -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, min, s).unwrap()
+    }
+
     fn params(drip: usize) -> HiddenParams {
         HiddenParams {
             suite: SUITE.into(),
@@ -954,32 +1328,201 @@ mod schedule_tests {
             token_labels: vec!["token/2026-09".into()],
             drip_per_tick: drip,
             events: Vec::new(),
+            tick_length: None,
         }
+    }
+
+    fn with_tick_length(text: &str) -> HiddenParams {
+        HiddenParams {
+            tick_length: Some(text.into()),
+            ..params(3)
+        }
+    }
+
+    /// Enrolled under 2026-09.
+    fn enrolled() -> VetterSnapshot {
+        let mut snapshot = VetterSnapshot::without_keys("member-1");
+        snapshot
+            .credentials
+            .insert("2026-09".into(), "zCredential".into());
+        snapshot
+    }
+
+    fn summit() -> EventDraw {
+        EventDraw {
+            label: "token/event/summit".into(),
+            rate: 20,
+            opens_on: NaiveDate::from_ymd_opt(2026, 9, 18).unwrap(),
+            closes_after: NaiveDate::from_ymd_opt(2026, 10, 4).unwrap(),
+        }
+    }
+
+    /// Every draw `due` owes now, recording each as served — what one pass of the schedule asks
+    /// for, in order.
+    fn plan(
+        params: &HiddenParams,
+        mut ticks: BTreeMap<String, u32>,
+        events: &[EventDraw],
+        now: chrono::DateTime<Utc>,
+    ) -> Vec<(String, u32)> {
+        let snapshot = enrolled();
+        let mut out = Vec::new();
+        for _ in 0..100 {
+            match due(params, Some(&snapshot), &ticks, events, now) {
+                Due::Draw { label, tick, .. } => {
+                    ticks.insert(label.clone(), tick);
+                    out.push((label, tick));
+                }
+                Due::Nothing => return out,
+                Due::Enrol { .. } => panic!("enrolled"),
+            }
+        }
+        panic!("the plan never settles: {out:?}")
+    }
+
+    #[test]
+    fn tick_lengths_are_days_and_hours_and_at_least_an_hour() {
+        assert_eq!(parse_tick_length("P3D"), Some(chrono::Duration::days(3)));
+        assert_eq!(
+            parse_tick_length("PT12H"),
+            Some(chrono::Duration::hours(12))
+        );
+        assert_eq!(
+            parse_tick_length("P1DT6H"),
+            Some(chrono::Duration::hours(30))
+        );
+        assert_eq!(parse_tick_length("PT1H"), Some(chrono::Duration::hours(1)));
+        for bad in [
+            "", "P", "PT", "P3", "3D", "P1W", "P1M", "PT30M", "PT0H", "P0D", "P-1D", "P1.5D",
+            "P1DT", "p3d",
+        ] {
+            assert_eq!(parse_tick_length(bad), None, "{bad:?} is malformed");
+        }
+    }
+
+    /// Absent means three days; unreadable is treated the same way rather than refusing the
+    /// community — the drip is not where a typo in a manifest should stop a vetter.
+    #[test]
+    fn a_missing_or_malformed_tick_length_is_three_days() {
+        assert_eq!(params(3).tick_length(), chrono::Duration::days(3));
+        assert_eq!(with_tick_length("PT30M").tick_length(), DEFAULT_TICK_LENGTH);
+        assert_eq!(
+            with_tick_length("weekly").tick_length(),
+            DEFAULT_TICK_LENGTH
+        );
+        assert_eq!(
+            with_tick_length("PT12H").tick_length(),
+            chrono::Duration::hours(12)
+        );
+    }
+
+    /// A malformed tick length is read, not refused: the criterion still parses, as hidden.
+    #[test]
+    fn a_malformed_tick_length_does_not_cost_the_criterion() {
+        let raw = serde_json::json!({
+            "id": "c",
+            "vetting": {
+                "ext": { HIDDEN_VETTING_NS: {
+                    "suite": SUITE,
+                    "helperKey": "zH",
+                    "tokenKey": "zT",
+                    "vetterLabels": ["vetter/2026-09"],
+                    "tokenLabels": ["token/2026-09"],
+                    "tickLength": "fortnightly"
+                }},
+                "extCritical": [HIDDEN_VETTING_NS]
+            }
+        });
+        let Mode::Hidden(p) = read_mode(&raw).expect("readable") else {
+            panic!("hidden");
+        };
+        assert_eq!(p.tick_length(), DEFAULT_TICK_LENGTH);
+    }
+
+    /// Tick `t` of a month label is the window `t` tick lengths after midnight UTC on the 1st.
+    #[test]
+    fn a_month_labels_ticks_are_windows_from_the_first_of_the_month() {
+        let (start, end) = month_of_label("token/2026-09").unwrap();
+        assert_eq!(start, at(2026, 9, 1, 0, 0, 0));
+        assert_eq!(end, at(2026, 10, 1, 0, 0, 0));
+        let len = chrono::Duration::days(3);
+        assert_eq!(tick_of(start, len, at(2026, 8, 31, 23, 59, 59)), None);
+        assert_eq!(tick_of(start, len, at(2026, 9, 1, 0, 0, 0)), Some(0));
+        assert_eq!(tick_of(start, len, at(2026, 9, 3, 23, 59, 59)), Some(0));
+        assert_eq!(tick_of(start, len, at(2026, 9, 4, 0, 0, 0)), Some(1));
+        assert_eq!(tick_of(start, len, at(2026, 9, 20, 9, 0, 0)), Some(6));
+        assert_eq!(tick_start(start, len, 6), at(2026, 9, 19, 0, 0, 0));
+
+        // December rolls into the next year.
+        let (_, end) = month_of_label("token/2026-12").unwrap();
+        assert_eq!(end, at(2027, 1, 1, 0, 0, 0));
+        // Not month labels.
+        for label in [
+            "token/event/summit",
+            "token/2026-9",
+            "token/2026-13",
+            "vetter/2026-09",
+        ] {
+            assert_eq!(month_of_label(label), None, "{label}");
+        }
+    }
+
+    /// An event label's ticks start at midnight UTC on the event's first day.
+    #[test]
+    fn an_event_labels_ticks_start_on_its_first_day() {
+        let events = [summit()];
+        let start = label_start("token/event/summit", &events).unwrap();
+        assert_eq!(start, at(2026, 9, 18, 0, 0, 0));
+        let p = params(3);
+        assert_eq!(
+            current_window(&p, "token/event/summit", &events, at(2026, 9, 21, 0, 0, 0)),
+            Some((1, at(2026, 9, 21, 0, 0, 0), at(2026, 9, 24, 0, 0, 0)))
+        );
+        assert_eq!(
+            current_window(&p, "token/event/summit", &events, at(2026, 9, 17, 23, 0, 0)),
+            None,
+            "not begun"
+        );
+        // An event we were not approved for has no start at all.
+        assert_eq!(label_start("token/event/other", &events), None);
+    }
+
+    #[test]
+    fn a_twelve_hour_tick_length_is_two_ticks_a_day() {
+        let p = with_tick_length("PT12H");
+        let (start, _) = month_of_label("token/2026-09").unwrap();
+        assert_eq!(
+            tick_of(start, p.tick_length(), at(2026, 9, 1, 11, 59, 59)),
+            Some(0)
+        );
+        assert_eq!(
+            tick_of(start, p.tick_length(), at(2026, 9, 1, 12, 0, 0)),
+            Some(1)
+        );
+        assert_eq!(
+            tick_of(start, p.tick_length(), at(2026, 9, 2, 0, 0, 0)),
+            Some(2)
+        );
+        assert_eq!(
+            plan(&p, drawn("token/2026-09", 0), &[], at(2026, 9, 2, 1, 0, 0)),
+            [
+                ("token/2026-09".to_string(), 1),
+                ("token/2026-09".to_string(), 2)
+            ]
+        );
     }
 
     /// A vetter with no engine enrols; a vetter with no credential under the *current* label
     /// enrols again, which is what a rotation is.
     #[test]
     fn enrolment_is_owed_before_the_first_credential_and_after_every_rotation() {
-        let now = Utc.with_ymd_and_hms(2026, 9, 20, 9, 0, 0).unwrap();
+        let now = at(2026, 9, 20, 9, 0, 0);
         assert_eq!(
             due(&params(3), None, &fresh(), &[], now),
             Due::Enrol {
                 period: "2026-09".into()
             }
         );
-    }
-
-    /// The tick comes from the clock, not from a local counter: two clients of one vetter, or
-    /// one client that lost its state, agree about which tick they are in — so the community's
-    /// once-per-tick rule stays a rule rather than a race.
-    #[test]
-    fn the_tick_is_derived_from_the_clock() {
-        let a = Utc.with_ymd_and_hms(2026, 9, 20, 0, 0, 1).unwrap();
-        let b = Utc.with_ymd_and_hms(2026, 9, 20, 23, 59, 59).unwrap();
-        let c = Utc.with_ymd_and_hms(2026, 9, 21, 0, 0, 1).unwrap();
-        assert_eq!(tick_of(a), tick_of(b), "one day is one tick");
-        assert_eq!(tick_of(c), tick_of(a) + 1, "the next day is the next tick");
     }
 
     /// The property the whole drip rests on: a vetter asks on the schedule whether or not it
@@ -990,19 +1533,15 @@ mod schedule_tests {
     /// never sees.
     #[test]
     fn the_draw_is_owed_by_the_clock_and_not_by_the_balance() {
-        let now = Utc.with_ymd_and_hms(2026, 9, 20, 9, 0, 0).unwrap();
-        let tick = tick_of(now);
-        let mut snapshot = VetterSnapshot::without_keys("member-1");
-        snapshot
-            .credentials
-            .insert("2026-09".into(), "zCredential".into());
+        let now = at(2026, 9, 20, 9, 0, 0); // tick 6 of September at three days
+        let snapshot = enrolled();
 
         // Served this tick already: nothing owed, however empty the wallet is.
         assert_eq!(
             due(
                 &params(3),
                 Some(&snapshot),
-                &drawn("token/2026-09", tick),
+                &drawn("token/2026-09", 6),
                 &[],
                 now
             ),
@@ -1014,78 +1553,118 @@ mod schedule_tests {
             due(
                 &params(3),
                 Some(&snapshot),
-                &drawn("token/2026-09", tick - 1),
+                &drawn("token/2026-09", 5),
                 &[],
                 now
             ),
             Due::Draw {
                 label: "token/2026-09".into(),
-                tick,
+                tick: 6,
                 rate: 3,
             }
         );
     }
 
-    /// A vetter that has been away does not get to claim the ticks it missed — it asks for the
-    /// current one. The tokens for a week away are simply not minted, which is the same answer
-    /// a vetter who was present and idle gets.
+    /// A vetter that has been away is owed the ticks it missed, and asks for them oldest first
+    /// — but never for one that has not begun. The community refuses a tick ahead of the clock,
+    /// and asking for one would be the client deciding its own rate.
     #[test]
-    fn a_vetter_who_was_offline_asks_for_this_tick_not_the_missed_ones() {
-        let now = Utc.with_ymd_and_hms(2026, 9, 20, 9, 0, 0).unwrap();
-        let mut snapshot = VetterSnapshot::without_keys("member-1");
-        snapshot
-            .credentials
-            .insert("2026-09".into(), "zCredential".into());
-        let Due::Draw { tick, .. } = due(
-            &params(3),
-            Some(&snapshot),
-            &drawn("token/2026-09", tick_of(now) - 7),
-            &[],
-            now,
-        ) else {
-            panic!("a draw is owed");
-        };
-        assert_eq!(tick, tick_of(now), "this tick, not the seven behind it");
+    fn a_vetter_who_was_offline_catches_up_oldest_first_and_never_ahead() {
+        let now = at(2026, 9, 20, 9, 0, 0); // tick 6
+        let owed = plan(&params(3), drawn("token/2026-09", 2), &[], now);
+        assert_eq!(
+            owed,
+            (3..=6)
+                .map(|t| ("token/2026-09".to_string(), t))
+                .collect::<Vec<_>>()
+        );
+
+        // One second before tick 7 opens, tick 7 is still not owed.
+        let edge = at(2026, 9, 21, 23, 59, 59);
+        assert_eq!(plan(&params(3), drawn("token/2026-09", 6), &[], edge), []);
+        // And at the second it opens, it is.
+        assert_eq!(
+            plan(
+                &params(3),
+                drawn("token/2026-09", 6),
+                &[],
+                at(2026, 9, 22, 0, 0, 0)
+            ),
+            [("token/2026-09".to_string(), 7)]
+        );
+
+        // The first of the month: tick 0, and only tick 0.
+        assert_eq!(
+            plan(&params(3), fresh(), &[], at(2026, 9, 1, 9, 0, 0)),
+            [("token/2026-09".to_string(), 0)]
+        );
     }
 
-    /// A vetter in event mode owes two draws a tick, and the **ordinary** one is not the one
-    /// that gives. Skipping the monthly draw for the three days of a conference would say, in
-    /// the timing of the requests alone, that those three days were a conference.
+    /// Before ticks were windows of time, a client counted days since 1970 and stored that. Such
+    /// a value is later than any real tick of the label, so it is read as nothing served — never
+    /// as "served until the year 2081".
+    #[test]
+    fn an_old_epoch_day_tick_does_not_block_the_new_ones() {
+        let now = at(2026, 9, 1, 9, 0, 0);
+        let old = drawn("token/2026-09", 20_697);
+        assert_eq!(
+            due(&params(3), Some(&enrolled()), &old, &[], now),
+            Due::Draw {
+                label: "token/2026-09".into(),
+                tick: 0,
+                rate: 3,
+            }
+        );
+
+        // And settling the stored ticks drops it, while keeping a real one.
+        let mut stored = BTreeMap::from([
+            ("token/2026-09".to_string(), 20_697),
+            ("token/event/summit".to_string(), 20_697),
+            ("token/2026-08".to_string(), 3),
+        ]);
+        assert!(settle_ticks(&mut stored, &params(3), &[summit()], now));
+        assert!(stored.is_empty(), "{stored:?}");
+        let mut real = drawn("token/2026-09", 0);
+        assert!(!settle_ticks(&mut real, &params(3), &[], now));
+        assert_eq!(real, drawn("token/2026-09", 0));
+    }
+
+    /// A vetter in event mode owes draws under two labels, and the **ordinary** one is not the
+    /// one that gives. Skipping the monthly draw for the three days of a conference would say,
+    /// in the timing of the requests alone, that those three days were a conference.
     #[test]
     fn an_event_draw_is_owed_beside_the_ordinary_one_and_never_instead_of_it() {
-        let now = Utc.with_ymd_and_hms(2026, 9, 20, 9, 0, 0).unwrap();
-        let tick = tick_of(now);
-        let mut snapshot = VetterSnapshot::without_keys("member-1");
-        snapshot
-            .credentials
-            .insert("2026-09".into(), "zCredential".into());
-        let summit = [EventDraw {
-            label: "token/event/summit".into(),
-            rate: 20,
-            closes_after: NaiveDate::from_ymd_opt(2026, 10, 4).unwrap(),
-        }];
+        let now = at(2026, 9, 20, 9, 0, 0); // September tick 6; summit tick 0 (opened the 18th)
+        let summit = [summit()];
 
         // Both outstanding: the ordinary label is answered first.
         assert_eq!(
-            due(&params(3), Some(&snapshot), &fresh(), &summit, now),
+            due(
+                &params(3),
+                Some(&enrolled()),
+                &drawn("token/2026-09", 5),
+                &summit,
+                now
+            ),
             Due::Draw {
                 label: "token/2026-09".into(),
-                tick,
+                tick: 6,
                 rate: 3,
             }
         );
-        // Once it is recorded, the event's — at the tier's rate, not the community's.
+        // Once it is recorded, the event's — at the tier's rate, not the community's — counted
+        // from the event's own first day.
         assert_eq!(
             due(
                 &params(3),
-                Some(&snapshot),
-                &drawn("token/2026-09", tick),
+                Some(&enrolled()),
+                &drawn("token/2026-09", 6),
                 &summit,
                 now
             ),
             Due::Draw {
                 label: "token/event/summit".into(),
-                tick,
+                tick: 0,
                 rate: 20,
             }
         );
@@ -1095,26 +1674,105 @@ mod schedule_tests {
     /// the tokens would be refused, and asking would announce that we tried.
     #[test]
     fn a_closed_event_is_no_longer_drawn_under() {
-        let now = Utc.with_ymd_and_hms(2026, 10, 5, 9, 0, 0).unwrap();
-        let tick = tick_of(now);
-        let mut snapshot = VetterSnapshot::without_keys("member-1");
-        snapshot
-            .credentials
-            .insert("2026-09".into(), "zCredential".into());
+        let now = at(2026, 9, 25, 9, 0, 0);
+        let p = HiddenParams {
+            token_labels: vec!["token/2026-09".into()],
+            ..params(3)
+        };
         let closed = [EventDraw {
-            label: "token/event/summit".into(),
-            rate: 20,
-            closes_after: NaiveDate::from_ymd_opt(2026, 10, 4).unwrap(),
+            closes_after: NaiveDate::from_ymd_opt(2026, 9, 24).unwrap(),
+            ..summit()
         }];
+        assert_eq!(plan(&p, drawn("token/2026-09", 8), &closed, now), []);
+    }
+
+    /// The rollover. The month's label is last month's once the month is over, and a vetter fed
+    /// those labels draws nothing rather than asking under a label the community stopped
+    /// issuing. Fed the labels the community publishes now, it enrols under the new class label
+    /// and then draws under the new month's token label from tick 0.
+    #[test]
+    fn a_new_month_is_drawn_under_the_labels_published_now() {
+        let october = at(2026, 10, 1, 8, 0, 0);
+        let stale = params(3);
         assert_eq!(
             due(
-                &params(3),
-                Some(&snapshot),
-                &drawn("token/2026-09", tick),
-                &closed,
-                now
+                &stale,
+                Some(&enrolled()),
+                &drawn("token/2026-09", 9),
+                &[],
+                october
             ),
-            Due::Nothing
+            Due::Nothing,
+            "never last month's label"
+        );
+        assert_eq!(next_window(&stale, &[], october), None);
+
+        let live = HiddenParams {
+            vetter_labels: vec!["vetter/2026-10".into(), "vetter/2026-09".into()],
+            token_labels: vec!["token/2026-10".into(), "token/2026-09".into()],
+            ..params(3)
+        };
+        assert_eq!(
+            due(
+                &live,
+                Some(&enrolled()),
+                &drawn("token/2026-09", 9),
+                &[],
+                october
+            ),
+            Due::Enrol {
+                period: "2026-10".into()
+            }
+        );
+        let mut both = enrolled();
+        both.credentials.insert("2026-10".into(), "zOctober".into());
+        assert_eq!(
+            due(&live, Some(&both), &drawn("token/2026-09", 9), &[], october),
+            Due::Draw {
+                label: "token/2026-10".into(),
+                tick: 0,
+                rate: 3,
+            }
+        );
+    }
+
+    /// The next pass is scheduled for the next window that opens: the next tick, or the end of
+    /// the month when that comes first, or an approved event's first day.
+    #[test]
+    fn the_next_window_is_the_next_tick_or_the_months_end() {
+        let p = params(3);
+        assert_eq!(
+            next_window(&p, &[], at(2026, 9, 20, 9, 0, 0)),
+            Some(at(2026, 9, 22, 0, 0, 0))
+        );
+        // Tick 9 runs from the 28th; tick 10 would start on 1 October, which is the month's end.
+        assert_eq!(
+            next_window(&p, &[], at(2026, 9, 29, 12, 0, 0)),
+            Some(at(2026, 10, 1, 0, 0, 0))
+        );
+        // An event that has not begun opens first.
+        let soon = [EventDraw {
+            opens_on: NaiveDate::from_ymd_opt(2026, 9, 21).unwrap(),
+            ..summit()
+        }];
+        assert_eq!(
+            next_window(&p, &soon, at(2026, 9, 20, 9, 0, 0)),
+            Some(at(2026, 9, 21, 0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn the_declared_refusals_are_said_in_words() {
+        assert!(refusal_words(TOKENS_TICK_NOT_YET).contains("has not begun"));
+        assert!(
+            refusal_words("vtc/vetting/vetters/pcs-tokens:labelNotLive")
+                .contains("not issuing tokens under that label")
+        );
+        assert!(refusal_words("vtc/vetting/vetters/pcs-root:notAVetter").contains("vetter grant"));
+        assert!(refusal_words("vtc/vetting/vetters/event-mode:eventClosed").contains("has closed"));
+        assert!(
+            refusal_words("vtc/vetting/vetters/pcs-tokens:somethingNew")
+                .contains("(vtc/vetting/vetters/pcs-tokens:somethingNew)")
         );
     }
 }

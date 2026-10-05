@@ -392,6 +392,11 @@ pub enum VettingAction {
     AskResend,
     /// Ask a community to let us vet at one of its published events.
     AskEventMode,
+    /// Open the hidden-vetting view: enrolment, tokens and the drip, per
+    /// community that hides its vetters.
+    OpenHiddenVetting,
+    /// Run the hidden-vetting schedule now, from its view.
+    DrawNow,
     /// Arm the confirmation for abandoning the highlighted application.
     ///
     /// Confirming is `Enter`, which the open mode already routes — the same

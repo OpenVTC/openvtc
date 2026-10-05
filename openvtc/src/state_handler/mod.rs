@@ -275,6 +275,7 @@ pub use openvtc_core::didcomm;
 mod community_profile_poll;
 mod device_presence;
 mod dispatch_util;
+mod hidden_vetting_poll;
 mod inbox_actions;
 pub mod join;
 mod join_flow;
@@ -1219,6 +1220,15 @@ impl StateHandler {
         let mut community_profile_tick = tokio::time::interval(std::time::Duration::from_secs(60));
         let mut community_profile_pacer = community_profile_poll::ProfilePacer::default();
 
+        // The vetter side of hidden vetting: re-read each community we vet for,
+        // enrol, and draw the token drip — on the communities' tick windows and
+        // at least hourly, never on demand (`hidden_vetting_poll`). The interval
+        // only checks the pacer; the first check is at launch, which is when a
+        // client that was off catches up the ticks it missed.
+        let mut hidden_vetting_tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        hidden_vetting_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut hidden_vetting_pacer = hidden_vetting_poll::HiddenVettingPacer::default();
+
         // Network-bound checks on inbound messages (a DID resolve, a status
         // list fetch) run off this loop, one at a time, so a slow community
         // never freezes the UI. A message waiting on its check is not applied
@@ -2003,32 +2013,8 @@ impl StateHandler {
                         save.mark_dirty();
                         state.main_page.sync_from_config(&config);
                     }
-                    // The vetter side, on the same clock: re-read what each
-                    // community we vet for requires, and enrol in or drip its
-                    // hidden vetting. A community that turns PCS ZKP on says so
-                    // only in its manifest, and a vetter who never re-reads it
-                    // would go on signing named statements.
-                    {
-                        let mut ctx = runtime_actions::ActionCtx {
-                            state: &mut state,
-                            config: &mut config,
-                            save: &mut save,
-                            in_flight: &mut in_flight,
-                            dispatch_tx: &dispatch_tx,
-                            tdk: &tdk,
-                            admin_vta: admin_vta.as_ref(),
-                            didcomm_service: &didcomm_service,
-                            session_manager: &mut session_manager,
-                            ping_sent_at: &mut ping_sent_at,
-                            state_tx: &self.state_tx,
-                            profile: self.profile.as_str(),
-                        };
-                        vetting_actions::dispatch(
-                            &mut ctx,
-                            actions::VettingAction::RefreshVetterSide,
-                        )
-                        .await;
-                    }
+                    // The vetter side runs on its own schedule — the
+                    // hidden-vetting tick below, at least hourly.
                     // R-B-7: expire Pending joins unanswered for 7 days — or for
                     // the `decisionSla` a vetting community publishes — raising
                     // actions-required, and tear down each one's now-dead session
@@ -2160,6 +2146,36 @@ impl StateHandler {
                         if !polls.is_empty() {
                             tokio::spawn(join_status_poll::send_all(atm, polls));
                         }
+                    }
+                },
+                _ = hidden_vetting_tick.tick() => {
+                    let now = chrono::Utc::now();
+                    if hidden_vetting_pacer.due(now) {
+                        let mut ctx = runtime_actions::ActionCtx {
+                            state: &mut state,
+                            config: &mut config,
+                            save: &mut save,
+                            in_flight: &mut in_flight,
+                            dispatch_tx: &dispatch_tx,
+                            tdk: &tdk,
+                            admin_vta: admin_vta.as_ref(),
+                            didcomm_service: &didcomm_service,
+                            session_manager: &mut session_manager,
+                            ping_sent_at: &mut ping_sent_at,
+                            state_tx: &self.state_tx,
+                            profile: self.profile.as_str(),
+                        };
+                        vetting_actions::dispatch(
+                            &mut ctx,
+                            actions::VettingAction::RefreshVetterSide,
+                        )
+                        .await;
+                        let next = hidden_vetting_pacer.schedule(
+                            &config.private.vetting,
+                            chrono::Utc::now(),
+                            &mut rand::thread_rng(),
+                        );
+                        debug!(%next, "next hidden-vetting pass");
                     }
                 },
                 _ = community_profile_tick.tick() => {

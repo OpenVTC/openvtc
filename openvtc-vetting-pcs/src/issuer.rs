@@ -284,9 +284,14 @@ impl TokenRequestWire {
     }
 }
 
-/// One tick of the drip, asked for. The tick is the vetter's own schedule counter: it is what
-/// makes "once per tick" a rule the community can enforce without knowing whether the vetter
-/// has been busy.
+/// One tick of the drip, asked for.
+///
+/// The tick names a window of time, not a counter of the vetter's own: tick `t` of a label is
+/// `[labelStart + t·tickLength, labelStart + (t+1)·tickLength)`, where `labelStart` is the first
+/// instant of the label's month (`token/YYYY-MM`) or of its event's first day
+/// (`token/event/<id>`), and `tickLength` is what the community publishes. That is what makes
+/// "once per tick" a rule the community can enforce, and "not before it has begun" one it can
+/// check, without knowing whether the vetter has been busy.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TokenBatchRequestWire {
@@ -387,7 +392,7 @@ mod tests {
             .expect("three is within the drip rate");
         assert_eq!(pres.len(), 3);
         wallet
-            .receive(issuer.tvk(), &pres)
+            .receive(issuer.tvk(), LABEL, 2, &pres)
             .expect("the tokens unblind under the published key");
         assert_eq!(wallet.free(), 3);
     }
