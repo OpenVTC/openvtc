@@ -162,7 +162,7 @@ pub(crate) fn outlook_words(o: &HiddenOutlook, now: DateTime<Utc>) -> String {
         } else if o.last_refusal.is_some() {
             "not enrolled — the community refused your enrolment (h for details)".to_string()
         } else {
-            "not enrolled yet — enrolling on the next pass".to_string()
+            "not enrolled yet — enrolling now (k to get tokens)".to_string()
         };
     }
     let next = if o.asking {
@@ -226,10 +226,125 @@ pub(crate) fn lost_enrolment_words(name: &str, period: Option<&str>, now: DateTi
     format!(
         "{name} already enrolled you under {label}, but this client lost the answer before it \
          could be opened, and {name} issues one credential per label and keeps no copy to send \
-         again. You can attest there once it enrols you under a new label: {next}; this client \
-         enrols under it on its next pass. Meanwhile, ask its admins to publish a new label now, \
-         or vet for communities that name their vetters"
+         again. You can attest there once it enrols you under a new label: {next}. To unblock \
+         you today, ask its operator to publish hidden vetting again with a new live period \
+         first in livePeriods (for example {}) — then press k on the desk to enrol and draw at once. \
+         Meanwhile you can still vet for communities that name their vetters",
+        period.map_or_else(|| "a new period".to_string(), |p| format!("{p}b"))
     )
+}
+
+/// Whether running the schedule now would bring tokens nearer: an enrolment to ask for, or a
+/// window that has begun and is not drawn. Not when the enrolment was lost, the keys changed,
+/// or this window is drawn already — then [`get_tokens_words`] says until when.
+pub(crate) fn tokens_obtainable_now(
+    book: &VettingBook,
+    community: &str,
+    persona: PersonaId,
+    now: DateTime<Utc>,
+) -> bool {
+    let (Some(held), Some(o)) = (
+        book.hidden_vetter(community, persona),
+        book.hidden_outlook(community, persona, now),
+    ) else {
+        return true;
+    };
+    if o.rekeyed || o.enrolment_lost {
+        return false;
+    }
+    !o.enrolled
+        || held
+            .clone()
+            .plan(book.hidden_published.get(community), &[], now)
+            .owed
+            .iter()
+            .any(|d| matches!(d, openvtc_core::vetting::hidden::Due::Draw { .. }))
+}
+
+/// Where getting tokens at one community stands, as the end of a sentence: what the schedule
+/// will do now — enrol, draw the ticks that have begun — or exactly what blocks it and until
+/// when. Said by `k` (get tokens) and by `t` when it cannot issue a ticket.
+///
+/// It never promises a draw ahead of the schedule: a tick is a window of time the community
+/// publishes, served once, and every tick that has begun is drawable at once — a new vetter's
+/// first allocation is the current window's, as soon as it is enrolled.
+pub(crate) fn get_tokens_words(
+    book: &VettingBook,
+    community: &str,
+    persona: PersonaId,
+    name: &str,
+    now: DateTime<Utc>,
+) -> String {
+    let (Some(held), Some(o)) = (
+        book.hidden_vetter(community, persona),
+        book.hidden_outlook(community, persona, now),
+    ) else {
+        return "enrolling you now; your first tokens are drawn the moment it answers".to_string();
+    };
+    let tokens = |n: usize| format!("{n} token{}", if n == 1 { "" } else { "s" });
+    if o.rekeyed {
+        return format!(
+            "{name} now publishes different hidden-vetting keys, so drawing has stopped — ask \
+             it whether it re-keyed (h for details)"
+        );
+    }
+    if !o.enrolled {
+        if o.enrolment_lost {
+            return lost_enrolment_words(name, o.owed.as_deref(), now);
+        }
+        if o.asking {
+            return "your enrolment is on its way; your first tokens are drawn the moment it is \
+                    answered"
+                .to_string();
+        }
+        if let Some(at) = o.retry_at {
+            return format!(
+                "{name} has not answered your enrolment; asking again at {}, and drawing straight \
+                 after",
+                when_words(at, now)
+            );
+        }
+        // Refused last time, for a reason the vetter may have to act on: said in its words.
+        if let Some(refused) = outlook_detail(&o, name, now) {
+            return format!("{}; asking again now", clause(&refused));
+        }
+        return "enrolling you now; your first tokens are drawn the moment it answers".to_string();
+    }
+    if o.asking {
+        return format!("a draw is on its way ({} usable now)", tokens(o.usable));
+    }
+    if let Some(at) = o.retry_at {
+        return format!(
+            "{name} has not answered; asking again at {} ({} usable now)",
+            when_words(at, now),
+            tokens(o.usable)
+        );
+    }
+    let owed = held
+        .clone()
+        .plan(book.hidden_published.get(community), &[], now)
+        .owed
+        .iter()
+        .filter(|d| matches!(d, openvtc_core::vetting::hidden::Due::Draw { .. }))
+        .count();
+    if owed > 0 {
+        return format!(
+            "drawing {owed} window{} of tokens now ({} usable already)",
+            if owed == 1 { "" } else { "s" },
+            tokens(o.usable)
+        );
+    }
+    match o.next_window {
+        Some(at) => format!(
+            "this window's tokens are already drawn ({} usable); the next window opens {}",
+            tokens(o.usable),
+            when_words(at, now)
+        ),
+        None => format!(
+            "{} usable, and {name} publishes no token label to draw under yet",
+            tokens(o.usable)
+        ),
+    }
 }
 
 /// `text` as a clause to continue a sentence: without the full stop it may end with, so a
@@ -261,7 +376,7 @@ pub(crate) fn pcs_tokens_line(
         // The community hides its vetters and we hold no engine yet: the next pass makes one
         // and enrols.
         None => (
-            "not enrolled yet — enrolling on the next pass".to_string(),
+            "not enrolled yet — enrolling now (k to get tokens)".to_string(),
             true,
         ),
     })
@@ -1408,11 +1523,34 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             }
         }
         VettingAction::DrawNow => {
+            // Get tokens, in one key: whatever the schedule owes, in order — enrol where not
+            // enrolled, then draw every window that has begun — and, per community, exactly
+            // what is happening or what blocks it and until when. Said from the book as it was
+            // before the pass, which is what the pass acts on.
+            let now = Utc::now();
+            let words: Vec<String> = {
+                let book = &ctx.config.private.vetting;
+                book.vetter_standing(now)
+                    .into_iter()
+                    .filter(|s| s.live && hides_vetters(book, &s.community))
+                    .map(|s| {
+                        let name = community_display(ctx.config, &s.community);
+                        let why = get_tokens_words(book, &s.community, s.persona, &name, now);
+                        format!("{name}: {}.", clause(&why))
+                    })
+                    .collect()
+            };
+            refresh_vetter_side(ctx).await;
             status(
                 ctx,
-                "Reading each community's requirements again and drawing what the schedule owes…",
+                if words.is_empty() {
+                    "None of the communities you vet for proves vetting with PCS ZKP, so there \
+                     are no tokens to get — hand out tickets with t."
+                        .to_string()
+                } else {
+                    format!("Getting tokens — {}", words.join(" "))
+                },
             );
-            refresh_vetter_side(ctx).await;
         }
         VettingAction::ReviewCard => {
             let v = page(ctx);
@@ -3189,15 +3327,18 @@ fn ticket_refusal(
     membership: &VettingMembership,
     now: DateTime<Utc>,
 ) -> Option<String> {
-    let (line, true) = pcs_tokens_line(book, &membership.community, membership.persona, now)?
-    else {
+    let (_, true) = pcs_tokens_line(book, &membership.community, membership.persona, now)? else {
         return None;
     };
-    // The full story once, here, where it is acted on; the desk header keeps the short line.
-    let why = book
-        .hidden_outlook(&membership.community, membership.persona, now)
-        .and_then(|o| outlook_detail(&o, &membership.name, now))
-        .unwrap_or(line);
+    // The full story once, here, where it is acted on — what getting tokens takes now, or what
+    // blocks it and until when; the desk header keeps the short line.
+    let why = get_tokens_words(
+        book,
+        &membership.community,
+        membership.persona,
+        &membership.name,
+        now,
+    );
     Some(format!(
         "No ticket issued: {} vets by PCS ZKP now, and you cannot attest there yet — {}. A \
          ticket now would bring requests you could not attest.",
@@ -3220,6 +3361,10 @@ pub(crate) enum TicketCheck {
     Waiting,
     /// The community answered: issue the ticket, under this mode.
     Issue(VetterMode),
+    /// Not issued: the community runs PCS ZKP and this vetter holds no token to attest with.
+    /// What getting tokens takes — or what blocks it, and until when — is said, and the
+    /// schedule is run at once so they come without a second key.
+    Gated(String),
     /// Not issued, and why.
     Refused(String),
 }
@@ -3238,7 +3383,7 @@ pub(crate) fn ticket_check(
     match reading.read_since(pending.asked_at) {
         Some(VetterMode::Named) => TicketCheck::Issue(VetterMode::Named),
         Some(VetterMode::PcsZkp) => match ticket_refusal(book, &pending.membership, now) {
-            Some(refusal) => TicketCheck::Refused(refusal),
+            Some(refusal) => TicketCheck::Gated(refusal),
             None => TicketCheck::Issue(VetterMode::PcsZkp),
         },
         None => {
@@ -3423,6 +3568,34 @@ pub(crate) fn settle_pending_tickets(
         (Some(pending), Some(TicketCheck::Issue(mode))) => {
             state.main_page.content_panel.vetting.pending_ticket = None;
             mint_ticket(state, config, save, &pending, mode, lead.as_deref(), now);
+        }
+        (Some(pending), Some(TicketCheck::Gated(why))) => {
+            let membership = &pending.membership;
+            let obtainable = tokens_obtainable_now(
+                &config.private.vetting,
+                &membership.community,
+                membership.persona,
+                now,
+            );
+            // The one action that gets tokens, run now rather than offered: enrol if needed,
+            // then draw every window that has begun (the loop takes the flag within seconds).
+            // Nothing is drawn ahead of the schedule, so this says no more about the vetter's
+            // activity than the schedule does. When there is nothing to run — a lost enrolment,
+            // or this window drawn already — the words above say until when, and what to do.
+            let then = if !obtainable {
+                ""
+            } else {
+                config.private.vetting.vetter_refresh_due = true;
+                " Getting them now — press t again once they arrive (k does this by hand)."
+            };
+            let words = match lead {
+                Some(lead) => format!("{lead} {why}{then}"),
+                None => format!("{why}{then}"),
+            };
+            let v = &mut state.main_page.content_panel.vetting;
+            v.pending_ticket = None;
+            v.status_message = Some(words.clone());
+            state.main_page.log(words);
         }
         (Some(_), Some(TicketCheck::Refused(why))) => {
             let words = match lead {
@@ -3698,7 +3871,19 @@ pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str
     let Some(did) = persona_did(ctx.config, state.persona) else {
         return;
     };
+    // Never a second enrolment while one is unanswered: the community answers the first and
+    // refuses the second (`alreadyEnrolled`), and that refusal is what used to read as a lost
+    // answer. The first's answer is taken whenever it lands — its blinding is stored.
+    let enrolling = ctx
+        .config
+        .private
+        .vetting
+        .waiting_on(community, QueryKind::PcsRoot)
+        .is_some();
     for owed in plan.owed {
+        if enrolling && matches!(owed, openvtc_core::vetting::hidden::Due::Enrol { .. }) {
+            continue;
+        }
         hidden_vetting_send(ctx, community, &state, &did, owed, now).await;
     }
 }
@@ -3779,10 +3964,22 @@ async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>, only_stale: bool) {
             .into_iter()
             .filter(|s| s.live)
             .filter(|s| !only_stale || book.mode_refresh_due(&s.community, now))
+            // Not again within seconds of the last ask or answer: `d` pressed three times, or a
+            // pass chained on an answer, used to fetch the same manifest each time (R1.4).
+            .filter(|s| !book.manifest_recently_asked(&s.community, now))
             .map(|s| (s.community, s.persona))
             .collect()
     };
     for (community, persona) in standing {
+        // A community we vet for as two personas is one manifest, asked once.
+        if ctx
+            .config
+            .private
+            .vetting
+            .manifest_recently_asked(&community, Utc::now())
+        {
+            continue;
+        }
         let Some(did) = persona_did(ctx.config, persona) else {
             continue;
         };
@@ -3868,6 +4065,10 @@ fn ensure_hidden_vetter(ctx: &mut ActionCtx<'_>, community: &str) {
             snapshot,
         ),
     );
+    // The engine's key is what the community binds this vetter to at enrolment; one that was
+    // never saved would be replaced by a fresh one after a restart, which the community refuses
+    // (`identifierRebound`).
+    ctx.save.mark_dirty();
     status(
         ctx,
         format!(
@@ -3875,6 +4076,40 @@ fn ensure_hidden_vetter(ctx: &mut ActionCtx<'_>, community: &str) {
             community_display(ctx.config, community)
         ),
     );
+}
+
+/// How long a save that must land before a send may take (R1.2). A config save is a local
+/// encrypt-and-write; this only bounds a stuck keyring or disk.
+const SAVE_BEFORE_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Write the config now, and wait for it — for state that must be on disk before the request
+/// that depends on it leaves (an enrolment's blinding). Refused while a coalesced save is
+/// already running, so two saves never race; the caller asks again shortly.
+async fn save_before_send(ctx: &mut ActionCtx<'_>) -> Result<(), String> {
+    if ctx.save.in_flight() {
+        return Err("another save is still being written".into());
+    }
+    let pending = ctx
+        .save
+        .snapshot_now(ctx.config)
+        .map_err(|e| e.to_string())?;
+    match tokio::time::timeout(
+        SAVE_BEFORE_SEND_TIMEOUT,
+        tokio::task::spawn_blocking(move || pending.run()),
+    )
+    .await
+    {
+        Ok(Ok(Ok(()))) => {
+            ctx.save.clear_after_external_save();
+            Ok(())
+        }
+        Ok(Ok(Err(e))) => Err(format!("the save failed: {e}")),
+        Ok(Err(e)) => Err(format!("the save did not finish: {e}")),
+        Err(_) => Err(format!(
+            "the save did not finish within {} seconds",
+            SAVE_BEFORE_SEND_TIMEOUT.as_secs()
+        )),
+    }
 }
 
 /// Send one thing the schedule owes.
@@ -3907,6 +4142,53 @@ async fn hidden_vetting_send(
             // Held in memory, and past the reply window: a late answer is still this vetter's
             // one credential under the label (`VettingBook::pending_enrolments`).
             let document_id = document.id.clone();
+            // And on disk, before anything is sent: the community answers once per label and
+            // keeps no copy, so an answer that lands after a restart must still be openable
+            // (`HiddenVetterState::enrolments_asked`). A save that cannot be made now means no
+            // ask now — the schedule asks again shortly, rather than risk a lost answer.
+            let stored = match openvtc_core::vetting::hidden::blinding_text(&blinding) {
+                Ok(text) => text,
+                Err(e) => return status(ctx, format!("Could not ask to enrol: {e}")),
+            };
+            if let Some(held) = ctx
+                .config
+                .private
+                .vetting
+                .hidden_vetter_mut(community, state.persona)
+            {
+                held.remember_asked(openvtc_core::vetting::book::AskedEnrolment {
+                    document_id: document_id.clone(),
+                    period: period.clone(),
+                    blinding: stored,
+                    asked_at: now,
+                });
+            }
+            if let Err(e) = save_before_send(ctx).await {
+                if let Some(held) = ctx
+                    .config
+                    .private
+                    .vetting
+                    .hidden_vetter_mut(community, state.persona)
+                {
+                    held.take_asked(&document_id);
+                }
+                // Again on the sweep, a bounded number of times (R1.4); the schedule's own
+                // pass after that.
+                let book = &mut ctx.config.private.vetting;
+                if book.vetter_refresh_failures
+                    < openvtc_core::vetting::book::VETTER_REFRESH_RETRIES
+                {
+                    book.vetter_refresh_failures += 1;
+                    book.vetter_refresh_due = true;
+                }
+                return status(
+                    ctx,
+                    format!(
+                        "Not asking to enrol yet: what opens the community's answer could not be \
+                         saved first ({e}). Trying again shortly."
+                    ),
+                );
+            }
             ctx.config.private.vetting.remember_enrolment(
                 openvtc_core::vetting::book::PendingEnrolment {
                     document_id: document_id.clone(),
@@ -6416,10 +6698,11 @@ mod tests {
             Some(VetterMode::Named),
             now,
         );
-        let TicketCheck::Refused(why) = ticket_check(&book, &pending, now) else {
+        let TicketCheck::Gated(why) = ticket_check(&book, &pending, now) else {
             panic!("a vetter not enrolled under PCS ZKP is not given a ticket");
         };
         assert!(why.contains("first-vtc vets by PCS ZKP now"), "{why}");
+        assert!(why.contains("enrolling you now"), "{why}");
         assert!(!why.contains(".."), "{why}");
         let switches = book.take_mode_switches();
         assert_eq!(switches.len(), 1);
@@ -6576,6 +6859,109 @@ mod tests {
         assert_eq!(v.tickets[0].mode_note, None);
     }
 
+    /// Settle a gated ticket for `book` at `now`: the status said, and whether the vetter side
+    /// was set to run.
+    fn settle_gated(book: VettingBook, persona: PersonaId, now: DateTime<Utc>) -> (String, bool) {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+        config.private.vetting = book;
+        let pending = pending_for(persona, now - chrono::Duration::seconds(1));
+        read_as(
+            &mut config.private.vetting,
+            "did:web:first-vtc.example",
+            VetterMode::PcsZkp,
+            now,
+        );
+        assert!(matches!(
+            ticket_check(&config.private.vetting, &pending, now),
+            TicketCheck::Gated(_)
+        ));
+        state.main_page.content_panel.vetting.pending_ticket = Some(pending);
+        settle_pending_tickets(&mut state, &mut config, &mut save, now);
+        assert!(config.private.vetting.tickets.is_empty(), "no ticket");
+        (
+            state
+                .main_page
+                .content_panel
+                .vetting
+                .status_message
+                .clone()
+                .unwrap_or_default(),
+            config.private.vetting.vetter_refresh_due,
+        )
+    }
+
+    /// `t` with nothing to attest with does not just refuse: a vetter not enrolled yet is
+    /// enrolled and drawn for at once — one key, no hunting for the hidden-vetting view.
+    #[test]
+    fn t_without_tokens_gets_them_when_it_can() {
+        let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, 15, 14, 0).unwrap();
+        let community = "did:web:first-vtc.example";
+        let (book, persona) = hidden_vetter_book(0, false);
+        assert!(tokens_obtainable_now(&book, community, persona, now));
+        let (said, runs) = settle_gated(book, persona, now);
+        assert!(said.contains("enrolling you now"), "{said}");
+        assert!(said.contains("Getting them now"), "{said}");
+        assert!(runs, "the schedule runs at once: enrol, then draw");
+
+        // Enrolled, and a window has begun undrawn: it is drawn now.
+        let (book, persona) = hidden_vetter_book(0, true);
+        let words = get_tokens_words(&book, community, persona, "first-vtc", now);
+        assert!(
+            words.starts_with("drawing 2 windows of tokens now"),
+            "{words}"
+        );
+        assert!(tokens_obtainable_now(&book, community, persona, now));
+    }
+
+    /// Enrolled, with this window drawn already: nothing to run, and the vetter is told exactly
+    /// when the next window opens rather than being sent to press something that cannot help.
+    #[test]
+    fn t_after_this_windows_draw_says_when_the_next_opens() {
+        let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, 15, 14, 0).unwrap();
+        let community = "did:web:first-vtc.example";
+        let (mut book, persona) = hidden_vetter_book(0, true);
+        book.hidden_vetter[0]
+            .last_ticks
+            .insert("token/2026-10".into(), 1);
+        assert!(!tokens_obtainable_now(&book, community, persona, now));
+        let words = get_tokens_words(&book, community, persona, "first-vtc", now);
+        assert_eq!(
+            words,
+            "this window's tokens are already drawn (0 tokens usable); the next window opens \
+             Wed 07 Oct 00:00 UTC"
+        );
+        let (said, runs) = settle_gated(book, persona, now);
+        assert!(
+            said.contains("the next window opens Wed 07 Oct 00:00 UTC"),
+            "{said}"
+        );
+        assert!(!said.contains("Getting them now"), "{said}");
+        assert!(!runs);
+    }
+
+    /// A lost enrolment answer: nothing to run until the community publishes a new label, so
+    /// the words give the dates and what its operator can do today.
+    #[test]
+    fn t_after_a_lost_enrolment_says_what_unblocks_it() {
+        let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, 15, 14, 0).unwrap();
+        let community = "did:web:first-vtc.example";
+        let (mut book, persona) = hidden_vetter_book(0, false);
+        book.hidden_vetter[0].lost_enrolment = Some("2026-10".into());
+        assert!(!tokens_obtainable_now(&book, community, persona, now));
+        let (said, runs) = settle_gated(book, persona, now);
+        assert!(said.contains("Sun 01 Nov 2026"), "{said}");
+        assert!(
+            said.contains("livePeriods (for example 2026-10b)"),
+            "{said}"
+        );
+        assert!(said.contains("press k on the desk"), "{said}");
+        assert!(!said.contains("Getting them now"), "{said}");
+        assert!(!said.contains(".."), "{said}");
+        assert!(!runs);
+    }
+
     /// The token line says what is held and when that changes, in time — never a raw tick.
     #[test]
     fn the_token_line_says_what_is_held_and_when_it_changes() {
@@ -6601,7 +6987,7 @@ mod tests {
         let (book, persona) = hidden_vetter_book(0, false);
         let (line, warn) = pcs_tokens_line(&book, community, persona, now).unwrap();
         assert!(warn);
-        assert_eq!(line, "not enrolled yet — enrolling on the next pass");
+        assert_eq!(line, "not enrolled yet — enrolling now (k to get tokens)");
 
         // A community that names its vetters has no token line at all.
         assert!(pcs_tokens_line(&book, "did:web:other.example", persona, now).is_none());
@@ -6621,7 +7007,10 @@ mod tests {
         let (book, persona) = hidden_vetter_book(0, true);
         let refusal = ticket_refusal(&book, &membership(persona), now).expect("refused");
         assert!(refusal.contains("first-vtc"), "{refusal}");
-        assert!(refusal.contains("0 tokens — next drip due"), "{refusal}");
+        assert!(
+            refusal.contains("drawing 2 windows of tokens now (0 tokens usable already)"),
+            "{refusal}"
+        );
         let (book, persona) = hidden_vetter_book(0, false);
         assert!(ticket_refusal(&book, &membership(persona), now).is_some());
         let (book, persona) = hidden_vetter_book(2, true);

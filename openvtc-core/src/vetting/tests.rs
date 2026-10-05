@@ -2554,7 +2554,8 @@ fn a_pass_reenrols_when_a_new_vetter_label_is_live() {
 #[tokio::test]
 async fn a_request_on_the_desk_makes_the_vetter_side_due_a_refresh() {
     let (mut applicant, mut vetter, _) = ready().await;
-    assert!(!vetter.book.vetter_refresh_due);
+    // Becoming a vetter asked for one already (`a_new_vetter_enrols_now…`); the loop took it.
+    vetter.book.vetter_refresh_due = false;
     in_session(&mut applicant, &mut vetter).await;
     assert!(
         vetter.book.vetter_refresh_due,
@@ -2888,4 +2889,94 @@ async fn a_draw_answered_after_its_question_timed_out_is_still_taken() {
     let held = &vetter.book.hidden_vetter[0];
     assert_eq!(held.tokens().1, 3);
     assert_eq!(held.last_ticks.get(label), Some(&1));
+}
+
+/// A new vetter does not wait for the schedule's next pass, which can be an hour away: the
+/// grant arriving asks the loop to read the community and enrol now — and the enrolment's answer
+/// asks it to draw the first tokens straight after.
+#[tokio::test]
+async fn a_new_vetter_enrols_now_rather_than_at_the_next_pass() {
+    let mut vetter = Party::new(2).member_of(COMMUNITY);
+    assert!(!vetter.book.vetter_refresh_due);
+    vetter.named_vetter().await;
+    assert!(
+        vetter.book.vetter_refresh_due,
+        "the grant asks for the vetter side to run at once"
+    );
+}
+
+/// The blinding of an enrolment is stored with the engine before the request goes, so an answer
+/// that arrives after a restart — the in-memory copy gone — is still opened, rather than locking
+/// the vetter out until the community publishes a new label.
+#[tokio::test]
+async fn an_enrolment_answer_after_a_restart_is_opened_with_the_stored_blinding() {
+    let (mut vetter, request, answer) = vetter_asking_to_enrol().await;
+    let pending = vetter.book.pending_enrolments.remove(0);
+    let stored = super::hidden::blinding_text(&pending.blinding).unwrap();
+    vetter.book.hidden_vetter[0].remember_asked(super::book::AskedEnrolment {
+        document_id: request.id.clone(),
+        period: "2026-10".into(),
+        blinding: stored,
+        asked_at: Utc::now(),
+    });
+    // The restart: the book as saved and loaded again, and every question forgotten.
+    let saved = serde_json::to_value(&vetter.book).unwrap();
+    vetter.book = serde_json::from_value(saved).unwrap();
+    assert!(vetter.book.pending_enrolments.is_empty());
+    assert!(vetter.book.queries.is_empty());
+
+    let handled = vetter.receive(&answer, COMMUNITY).await;
+    assert!(
+        matches!(handled.notice, Some(Notice::HiddenVetterEnrolled { .. })),
+        "{:?}",
+        handled.notice
+    );
+    let held = &vetter.book.hidden_vetter[0];
+    assert!(held.snapshot.credentials.contains_key("2026-10"));
+    assert!(held.lost_enrolment.is_none());
+    assert!(held.enrolments_asked.is_empty(), "spent once opened");
+    assert!(vetter.book.vetter_refresh_due, "and the first draw follows");
+}
+
+/// A refused enrolment drops its stored blinding: nothing will ever need it.
+#[tokio::test]
+async fn a_refused_enrolment_drops_its_stored_blinding() {
+    let (mut vetter, request, _) = vetter_asking_to_enrol().await;
+    let stored = super::hidden::blinding_text(&vetter.book.pending_enrolments[0].blinding).unwrap();
+    vetter.book.hidden_vetter[0].remember_asked(super::book::AskedEnrolment {
+        document_id: request.id.clone(),
+        period: "2026-10".into(),
+        blinding: stored,
+        asked_at: Utc::now(),
+    });
+    vetter
+        .receive(
+            &community_refusal(&request, "vtc/vetting/vetters/pcs-root:notAVetter"),
+            COMMUNITY,
+        )
+        .await;
+    assert!(vetter.book.hidden_vetter[0].enrolments_asked.is_empty());
+}
+
+/// A manifest is not fetched again within seconds of the last ask or answer, nor while a
+/// question for it is open — `d` pressed three times fetched it three times (R1.4).
+#[test]
+fn a_manifest_is_not_asked_for_again_within_seconds() {
+    let now = Utc::now();
+    let mut book = VettingBook::default();
+    assert!(!book.manifest_recently_asked(COMMUNITY, now));
+    book.mode_asked(COMMUNITY, now);
+    assert!(book.manifest_recently_asked(COMMUNITY, now + Duration::seconds(5)));
+    assert!(!book.manifest_recently_asked(COMMUNITY, now + super::mode::MANIFEST_MIN_GAP));
+    book.ask(super::queries::CommunityQuery {
+        document_id: "m1".into(),
+        community: COMMUNITY.into(),
+        persona: PersonaId::new(),
+        kind: QueryKind::Manifest,
+        sent_at: now,
+    });
+    assert!(
+        book.manifest_recently_asked(COMMUNITY, now + Duration::minutes(5)),
+        "an open question is answered once, for everyone"
+    );
 }

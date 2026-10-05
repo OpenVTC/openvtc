@@ -35,6 +35,10 @@ pub const MODE_TTL: Duration = Duration::minutes(10);
 /// the desk is open (R1.4). A ticket always asks; it does not wait on this.
 pub const MODE_REASK_AFTER: Duration = Duration::minutes(2);
 
+/// The least time between two re-reads of one community's manifest that are not a ticket's own
+/// ([`VettingBook::manifest_recently_asked`]).
+pub const MANIFEST_MIN_GAP: Duration = Duration::seconds(30);
+
 /// How a community's vetters vet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -377,6 +381,28 @@ impl VettingBook {
                 .get(community)
                 .and_then(|c| c.asked_at)
                 .is_none_or(|at| now - at >= MODE_REASK_AFTER)
+    }
+
+    /// Whether `community`'s manifest was asked for, or arrived, within [`MANIFEST_MIN_GAP`],
+    /// or a question for it is still open — so asking again now would only fetch the same
+    /// answer. Every background or by-hand re-read checks this (R1.4): a key held down, or a
+    /// chain of passes each due another, otherwise asked several times in seconds. A ticket's
+    /// own read does not — it must be answered after it was asked.
+    #[must_use]
+    pub fn manifest_recently_asked(&self, community: &str, now: DateTime<Utc>) -> bool {
+        let recent = |at: DateTime<Utc>| now - at < MANIFEST_MIN_GAP;
+        self.waiting_on(community, QueryKind::Manifest).is_some()
+            || self
+                .mode_checks
+                .get(community)
+                .and_then(|c| c.asked_at)
+                .is_some_and(recent)
+            || self
+                .communities
+                .iter()
+                .find(|c| c.community == community)
+                .and_then(|c| c.vetter_mode)
+                .is_some_and(|r| recent(r.read_at))
     }
 
     /// The switches seen since this was last called, oldest first.

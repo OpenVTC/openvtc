@@ -1788,7 +1788,7 @@ fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
 /// at an event belong to the whole desk — and `←/→` is how the views are
 /// reached at all.
 const DESK_KEYS: &str = "p: your vetter profile  g: ask for your vetter credential again  \
-                         e: vet at an event  h: hidden vetting  \
+                         e: vet at an event  h: hidden vetting  k: get tokens  \
                          ←/→: Requests · Tickets · Issued  Tab: Applications";
 
 /// The hidden-vetting view: one community at a time, everything the schedule
@@ -1862,11 +1862,12 @@ fn hidden_vetting(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize
             Line::from(if row.enrolment_lost {
                 format!(
                     "  {:<20}{owed} — the community enrolled you, but its answer was lost; it \
-                     issues one credential per label, so this label is not asked for again",
+                     issues one credential per label, so this label is not asked for again. Ask \
+                     its operator to publish a new live period, then press d",
                     "Owed"
                 )
             } else {
-                format!("  {:<20}{owed} — enrolling on the next pass", "Owed")
+                format!("  {:<20}{owed} — enrolling now", "Owed")
             })
             .fg(COLOR_ORANGE),
         );

@@ -1143,16 +1143,36 @@ fn enrolled(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
     };
     let query = book.take_query(sender, &thread, Some(QueryKind::PcsRoot));
     let pending = book.take_enrolment(sender, &thread);
-    let persona = match (&query, &pending) {
-        (Some(q), _) => q.persona,
-        (None, Some(p)) => {
+    // The blinding as stored before the request went: what opens an answer that arrives after
+    // a restart, when the in-memory copy is gone.
+    let stored = book
+        .hidden_vetter
+        .iter_mut()
+        .filter(|h| h.community == sender)
+        .find_map(|h| h.take_asked(&thread).map(|asked| (h.persona, asked)));
+    let persona = match (&query, &pending, &stored) {
+        (Some(q), _, _) => q.persona,
+        (None, Some(p), _) => {
             info!(community = %sender, "an enrolment answer arrived after its question timed out — taking it");
             p.persona
         }
-        (None, None) => {
+        (None, None, Some((persona, _))) => {
+            info!(community = %sender, "an enrolment answer arrived after a restart — opening it with the stored blinding");
+            *persona
+        }
+        (None, None, None) => {
             debug!(typ = %message.typ, %sender, "community answer to nothing we asked — ignored");
             return Handled::default();
         }
+    };
+    let blinding: Option<std::sync::Arc<super::hidden::Blinding>> = match pending {
+        Some(p) => Some(p.blinding),
+        None => stored.and_then(|(_, asked)| {
+            super::hidden::blinding_from_text(&asked.blinding)
+                .map_err(|e| warn!(community = %sender, error = %e, "stored enrolment blinding unreadable"))
+                .ok()
+                .map(std::sync::Arc::new)
+        }),
     };
     if let Some(state) = book.hidden_vetter_mut(sender, persona) {
         state.answered();
@@ -1174,7 +1194,7 @@ fn enrolled(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
         }
     };
     let period = body.label.trim_start_matches("vetter/").to_string();
-    let Some(pending) = pending else {
+    let Some(blinding) = blinding else {
         warn!(community = %sender, label = %body.label, "enrolled, but the blinding state is gone — this label's credential cannot be opened");
         if let Some(state) = book.hidden_vetter_mut(sender, persona) {
             state.lost_enrolment = Some(period);
@@ -1193,11 +1213,12 @@ fn enrolled(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
     };
     let params = state.params.clone();
     let mut snapshot = state.snapshot.clone();
-    match super::hidden::accept_enrolment(sender, &params, &mut snapshot, &body, &pending.blinding)
-    {
+    match super::hidden::accept_enrolment(sender, &params, &mut snapshot, &body, &blinding) {
         Ok(()) => {
             if let Some(state) = book.hidden_vetter_mut(sender, persona) {
                 state.snapshot = snapshot;
+                // Opened: no other request under this label will be answered with a credential.
+                state.enrolments_asked.retain(|a| a.period != period);
                 state.enrolled_at.insert(period, ctx.now);
                 state.last_refusal = None;
                 state.lost_enrolment = None;
@@ -1506,6 +1527,13 @@ fn vetter_grant(
         received_at: ctx.now,
         credential: credential.clone(),
     });
+    // A new vetter enrols now — and draws its first tokens as soon as that is answered — rather
+    // than at the schedule's next pass, which can be an hour away: until then `t` could only
+    // refuse. The loop takes this flag on its next sweep (seconds), reads the community's
+    // manifest, and runs what the hidden-vetting schedule owes.
+    if changed {
+        book.vetter_refresh_due = true;
+    }
     Handled {
         changed,
         notice: changed.then_some(Notice::VetterGranted {
@@ -1739,6 +1767,9 @@ fn hidden_refused(
     // A refused enrolment issued nothing, so nothing will ever need its blinding state.
     if query.kind == QueryKind::PcsRoot {
         book.take_enrolment(sender, &query.document_id);
+        if let Some(held) = book.hidden_vetter_mut(sender, query.persona) {
+            held.take_asked(&query.document_id);
+        }
     }
     let Some(state) = book.hidden_vetter_mut(sender, query.persona) else {
         // An applicant's challenge, or a vetter that has since dropped its engine.

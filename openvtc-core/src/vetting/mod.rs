@@ -63,7 +63,6 @@ pub mod guide;
 pub mod hidden;
 pub mod inbound;
 pub mod journey;
-/// How a community's vetters vet now, and how old that knowledge is.
 pub mod mode;
 pub mod protocol;
 pub mod queries;

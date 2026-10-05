@@ -211,6 +211,25 @@ are marked wherever they apply. The detailed entries follow the summary below.
   meanwhile (ask the community's admins to publish a new label). It is said
   once in full where a ticket is refused; the desk header keeps a short status.
   A doubled full stop in the refusal is gone.
+- **An enrolment answer is no longer lost to a restart.** What opens the
+  community's answer was held only in memory, and the community issues one
+  credential per label and keeps no copy, so an answer that landed after a
+  restart locked the vetter out until a new label. It is now saved to the
+  protected config before the request is sent, and a late answer still opens.
+  A second enrolment is never asked for while one is unanswered — its
+  `alreadyEnrolled` refusal is what read as a lost answer.
+- **Getting tokens is one key.** `k` on the vetting desk enrols where needed
+  and draws every window that has begun, and says per community what it is
+  doing or exactly what blocks it and until when (the next window's time, the
+  next label's date, what the community's operator can publish today). `t`
+  with no tokens runs the same thing instead of only refusing.
+- **A new vetter enrols at once.** Receiving the vetter credential starts
+  enrolment within seconds and draws the current window's tokens as soon as it
+  is answered, instead of waiting up to an hour for the schedule's next pass.
+- **The manifest is not fetched again within seconds.** A by-hand draw pressed
+  repeatedly, or passes chained on each other's answers, fetched the same
+  manifest several times in a few seconds; a re-read now waits at least 30
+  seconds after the last ask or answer, and never runs while one is open.
 
 - **Monochrome is calmer.** With `--monochrome` or `NO_COLOR`, every
   success-green heading and tick was drawn in reverse video, every caution

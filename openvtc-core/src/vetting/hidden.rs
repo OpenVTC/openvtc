@@ -593,9 +593,38 @@ pub fn enrolment_request<R: rand::RngCore + rand::CryptoRng>(
 
 /// The blinding state of an enrolment in flight, as this module hands it back.
 ///
-/// Deliberately not serialisable: it belongs to one round trip, and an answer that arrives after
-/// a restart is re-asked rather than kept.
+/// Stored ([`blinding_text`]) before the request goes, in the protected config beside the
+/// engine's `usk` and as secret: an answer that arrives after a restart must still open, because
+/// asking again under the same label is refused (`alreadyEnrolled`) and the community keeps no
+/// copy of its answer to send again.
 pub type Blinding = openvtc_vetting_pcs::vetter::EnrolmentBlinding;
+
+/// `blinding` in its storable form: base64url (no padding) over the scheme's own canonical
+/// encoding.
+///
+/// # Errors
+/// [`HiddenError::Unreadable`] if it cannot be encoded.
+pub fn blinding_text(blinding: &Blinding) -> Result<String, HiddenError> {
+    use base64::Engine;
+    let bytes = blinding
+        .to_bytes()
+        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes.as_slice()))
+}
+
+/// The blinding [`blinding_text`] stored.
+///
+/// # Errors
+/// [`HiddenError::Unreadable`] if `text` is not one.
+pub fn blinding_from_text(text: &str) -> Result<Blinding, HiddenError> {
+    use base64::Engine;
+    let bytes = zeroize::Zeroizing::new(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(text)
+            .map_err(|e| HiddenError::Unreadable(e.to_string()))?,
+    );
+    Blinding::from_bytes(&bytes).map_err(|e| HiddenError::Unreadable(e.to_string()))
+}
 
 /// Take the community's answer into the engine.
 ///

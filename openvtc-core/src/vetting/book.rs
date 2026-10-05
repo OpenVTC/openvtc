@@ -284,6 +284,32 @@ pub struct HiddenVetterState {
     /// the desk says why. Cleared by an enrolment that is opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lost_enrolment: Option<String>,
+    /// Enrolments asked for whose answers have not been opened yet, each with the blinding that
+    /// opens it — **written to the protected config before the request is sent**.
+    ///
+    /// The community issues one credential per member per label and keeps no copy of its
+    /// answer, so an answer that arrives when the blinding is gone (a restart between the ask
+    /// and the answer) can never be opened, and asking again is refused (`alreadyEnrolled`) —
+    /// a lock-out until the community publishes a new label. Kept here, the blinding outlives a
+    /// restart, and a late answer is still this vetter's credential. As secret as the
+    /// snapshot's `usk`, and kept in the same place. Bounded to [`MAX_PENDING_ENROLMENTS`];
+    /// dropped once an answer to it is opened or refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enrolments_asked: Vec<AskedEnrolment>,
+}
+
+/// One enrolment request in flight, as [`HiddenVetterState::enrolments_asked`] keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AskedEnrolment {
+    /// The request's document id — what the answer threads on.
+    pub document_id: String,
+    /// The class period asked for (`2026-10`).
+    pub period: String,
+    /// SECRET: the blinding that opens the answer ([`super::hidden::blinding_text`]).
+    pub blinding: String,
+    /// When it was asked.
+    pub asked_at: DateTime<Utc>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -413,7 +439,29 @@ impl HiddenVetterState {
             rekeyed_at: None,
             unanswered: 0,
             lost_enrolment: None,
+            enrolments_asked: Vec::new(),
         }
+    }
+
+    /// Keep the blinding of an enrolment about to be asked for, bounded: the oldest goes first.
+    pub fn remember_asked(&mut self, asked: AskedEnrolment) {
+        self.enrolments_asked
+            .retain(|a| a.document_id != asked.document_id);
+        self.enrolments_asked.push(asked);
+        let excess = self
+            .enrolments_asked
+            .len()
+            .saturating_sub(MAX_PENDING_ENROLMENTS);
+        self.enrolments_asked.drain(..excess);
+    }
+
+    /// Take the stored enrolment `thread` answers, if it is one of ours.
+    pub fn take_asked(&mut self, thread: &str) -> Option<AskedEnrolment> {
+        let i = self
+            .enrolments_asked
+            .iter()
+            .position(|a| a.document_id == thread)?;
+        Some(self.enrolments_asked.remove(i))
     }
 
     /// The period this vetter owes an enrolment under now, if any: the community's current class
