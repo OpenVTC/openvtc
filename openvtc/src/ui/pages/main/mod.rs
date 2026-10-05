@@ -4122,14 +4122,30 @@ mod key_handler_tests {
         page.handle_key_event(press(KeyCode::Enter));
         assert!(matches!(vetting_action(&mut rx), V::Submit));
 
-        // A decline is confirmed with y, and n keeps the request.
-        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
-            s.main_page.content_panel.vetting.mode = VettingMode::ConfirmDecline {
-                request_id: "r1".into(),
-            };
-        });
+        // A decline is confirmed with y, and n keeps the request — while the
+        // reason has focus. On the note, both are letters of what is typed.
+        let declining = |field: usize| {
+            move |s: &mut State| {
+                s.main_page.content_panel.vetting.mode = VettingMode::ConfirmDecline {
+                    request_id: "r1".into(),
+                    reason_index: 0,
+                    message: String::new(),
+                    field,
+                };
+            }
+        };
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, declining(0));
         page.handle_key_event(press(KeyCode::Char('n')));
         assert!(matches!(vetting_action(&mut rx), V::Back));
+        page.handle_key_event(press(KeyCode::Right));
+        assert!(matches!(vetting_action(&mut rx), V::Cycle(true)));
+
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, declining(1));
+        page.handle_key_event(press(KeyCode::Char('n')));
+        assert!(
+            matches!(vetting_action(&mut rx), V::Input(text) if text == "n"),
+            "typed into the note, not taken as `keep it`"
+        );
     }
 
     #[test]

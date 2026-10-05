@@ -8,7 +8,9 @@ use openvtc_core::config::community_context::{
     ContextDeletion, ContextDeletionPreview, ContextOption, PersonaTakenAlong,
 };
 use openvtc_core::vetting::registry::{DirectoryFilter, EventDraft, ProfileDraft};
-use vta_sdk::protocols::vetting::{VettingMethod, VettingRelationship, request, revoke_statement};
+use vta_sdk::protocols::vetting::{
+    VettingMethod, VettingRelationship, decline, request, revoke_statement,
+};
 
 /// Lazily-rendered raw credential JSON for credential detail views.
 ///
@@ -1856,6 +1858,43 @@ pub const VETTING_WITHDRAWAL_REASONS: [revoke_statement::v0_1::PayloadReason; 4]
     revoke_statement::v0_1::PayloadReason::Other,
 ];
 
+/// The reasons a vetter can give for declining, in the order the page cycles
+/// through them, each with what it tells the applicant. The first is no reason
+/// at all, and is where the choice starts: the protocol makes the code
+/// optional because a vetter never owes one.
+pub const DECLINE_REASONS: [(Option<decline::v0_1::PayloadCode>, &str); 6] = [
+    (None, "no reason given"),
+    (
+        Some(decline::v0_1::PayloadCode::CouldNotVerify),
+        "could not establish who you are",
+    ),
+    (
+        Some(decline::v0_1::PayloadCode::DocumentMismatch),
+        "your document did not match your card or you",
+    ),
+    (
+        Some(decline::v0_1::PayloadCode::LivenessFailed),
+        "the match code could not be confirmed with you",
+    ),
+    (
+        Some(decline::v0_1::PayloadCode::NotComfortable),
+        "the vetter prefers not to vouch for you",
+    ),
+    (Some(decline::v0_1::PayloadCode::Other), "another reason"),
+];
+
+/// The longest note a decline can carry (`vetting/decline/0.1` `message`).
+pub const DECLINE_MESSAGE_MAX: usize = 500;
+
+/// What a decline `code` tells the applicant, in words.
+#[must_use]
+pub fn decline_reason_words(code: decline::v0_1::PayloadCode) -> &'static str {
+    DECLINE_REASONS
+        .iter()
+        .find(|(c, _)| *c == Some(code))
+        .map_or("another reason", |(_, words)| words)
+}
+
 /// How many requests a new ticket admits: one person, or a conference desk.
 pub const VETTING_TICKET_USES: [u32; 4] = [1, 5, 10, 25];
 
@@ -2373,7 +2412,17 @@ pub enum VettingMode {
         form: AttestForm,
     },
     /// Confirm declining a request.
-    ConfirmDecline { request_id: String },
+    ConfirmDecline {
+        request_id: String,
+        /// Index into [`DECLINE_REASONS`]: 0 gives no reason, the default — a
+        /// vetter never has to justify declining.
+        reason_index: usize,
+        /// An optional note for the applicant, at most
+        /// [`DECLINE_MESSAGE_MAX`] characters. Empty sends none.
+        message: String,
+        /// 0 the reason, 1 the note.
+        field: usize,
+    },
     /// Withdraw a statement we signed.
     Withdraw {
         statement_id: String,
@@ -2402,6 +2451,9 @@ impl VettingMode {
                 ..
             } => Some(community),
             VettingMode::RequestVetter { entry, .. } => Some(entry),
+            VettingMode::ConfirmDecline {
+                message, field: 1, ..
+            } => Some(message),
             VettingMode::Directory(view) => view.text().map(String::as_str),
             VettingMode::Profile(form) => match &form.event {
                 Some(event) => event.text().map(String::as_str),
@@ -2423,6 +2475,9 @@ impl VettingMode {
                 ..
             } => Some(community),
             VettingMode::RequestVetter { entry, .. } => Some(entry),
+            VettingMode::ConfirmDecline {
+                message, field: 1, ..
+            } => Some(message),
             VettingMode::Directory(view) => view.text_mut(),
             VettingMode::Profile(form) => form.focused_text_mut(),
             VettingMode::NewFace(form) if form.focus == NewFaceFocus::Name => Some(&mut form.name),
