@@ -1097,6 +1097,9 @@ impl StateHandler {
         // Enter the flow on a fresh EnterDid page — unless this is a launch
         // coming back with its challenge, which must find everything the person
         // chose on the way to it exactly as they left it.
+        // Whichever way a parked wait ends, it has ended: Esc is no longer
+        // the cheap way out once the launch carries on.
+        state.join.waiting_on_challenge = false;
         if !matches!(entry, JoinEntry::Challenge { .. }) {
             state.join.reset();
             // Surface the launch-supplied invitation on the entry page (reset
@@ -2290,9 +2293,12 @@ impl StateHandler {
                     // (`CHALLENGE_WAIT`), and nothing on this page can usefully
                     // be done in the meantime.
                     state.join.processing = true;
+                    state.join.waiting_on_challenge = true;
                     state.join.info(format!(
                         "This community hides its vetters. Asking {name} for a fresh challenge \
-                         to bind your proof to…"
+                         to bind your proof to — this gives up after {} seconds. Nothing has \
+                         been sent yet; Esc stops waiting.",
+                        CHALLENGE_WAIT.as_secs()
                     ));
                     state.join.challenge_wait = Some(AwaitingChallenge {
                         vtc_did,

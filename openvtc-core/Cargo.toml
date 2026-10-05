@@ -31,7 +31,7 @@ arbitrary = ["dep:arbitrary", "chrono/arbitrary"]
 did-git-sign = "0.15.1"
 # Hidden-vetter admission (ZKP). Published from this workspace before this
 # crate; its version moves with the workspace version.
-openvtc-vetting-pcs = { version = "0.4.0", path = "../openvtc-vetting-pcs" }
+openvtc-vetting-pcs = { version = "0.5.0", path = "../openvtc-vetting-pcs" }
 
 aes-gcm.workspace = true
 anyhow.workspace = true

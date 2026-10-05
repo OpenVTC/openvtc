@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-05
+
+The guided-vetting release. Applying to a community that vets, and vetting
+someone, are now each a journey you can see whole: every step, where you are,
+what each step is for, and the one thing to do now. Joining shows what the
+community will receive before anything is sent, and asks whether it may
+publish your membership. Post-quantum signing and PCS zero-knowledge vetting
+are marked wherever they apply. The detailed entries follow the summary below.
+
+### Major changes
+
+- **Applicant and vetter journeys.** A full-width page per application and per
+  desk request, with a step strip, a plain-language explanation of each step,
+  and only the current step's keys.
+- **Review before sending a join**, then an explicit, unticked-by-default
+  choice to be published in the community's trust registry.
+- **PQC-SIGNED and PCS ZKP badges** on credentials, communities, applications,
+  the vetting desk and the join page.
+- **Hidden-vetting joins fetch their own challenge**, and never submit without
+  the proof.
+
 ### Breaking
 
 - **`openvtc_core::join::JoinPresentation` has a `registry_consent` field.**
@@ -13,6 +34,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `false`, which is what every join sent before.
 
 ### Added
+
+- **Vetting journeys for both sides.** Enter on an application, or on a request
+  on the vetting desk, opens it as a journey that takes the whole width of the
+  screen. A strip across the top shows every step — done, yours now, waiting on
+  someone else, to come — and a *What's happening* box explains the step: why a
+  face, why the match code is read aloud, what the community learns. Only the
+  keys of steps already reached work, Esc goes back with nothing lost, and the
+  journey moves on by itself when a session opens or a statement arrives.
+  Starting an application from the join page and opening a vetting Inbox entry
+  both land on it. Applicant: Requirements → Face → Vetters → Sessions →
+  Statements → Join. Vetter: Request → Session → Match code → Card → Check →
+  Sign.
+- **Review and send.** The last page before a join request goes out lists what
+  the community will receive: the DID it admits, the invitation and any proof
+  linking it, the vetting (each named statement — who vouched, how, what they
+  checked — or a PCS ZKP proof that names no vetter), what your face sends,
+  and how the community decides.
+- **PQC-SIGNED and PCS ZKP badges.** A credential, or a community's signing,
+  that carries a post-quantum (ML-DSA) signature is marked PQC-SIGNED; a
+  community that proves vetting with a PCS zero-knowledge proof is marked
+  PCS ZKP. Each page explains the badge once, and the join page says both
+  either way ("named — the community sees which vetters vouched for you").
+- **The credentials list says what each credential is** — Membership, Role:
+  vetter, a statement — which of your personas holds it, and a readable
+  validity, instead of the issuer beside two timestamps.
+- **A vetter can give an optional reason and note when declining**; the
+  applicant's request row shows them. Neither is ever required, and neither
+  reaches the community.
+- **A hidden-vetting join asks the community for its challenge itself** and
+  waits for it (up to 15 seconds), instead of failing until you pressed `m`.
+  Esc stops the wait; nothing has been sent by then.
 
 - **Choosing to be published in a community's trust registry when you join.**
   Every join now asks, as the last step before the request goes out, whether
@@ -74,6 +126,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   verifiable-git-infrastructure `main`.
 
 ### Fixed
+
+- **A hidden-vetting join with no proof stops instead of submitting nothing.**
+  If the proof could not be built, the join used to go out carrying no vetting
+  at all; it now fails with what to do, and cleans up.
+- **The vetting join page keeps its selection marker on "Send an open
+  request".** The nested "Apply as" row shifted the rows under the cursor.
+- **A face whose attribute was deleted can be saved again**, and **a face worn
+  by a persona outside your communities can be deleted** — the page asks again,
+  naming how many personas wear it.
+- **`s` shows one attribute's value while values are hidden.**
+- **A card with no face says so, and `f` chooses one from the card page**,
+  returning to the card once it is worn.
+- **Vetting Inbox entries open where their step is taken**, instead of an
+  "Unknown" task that could only be dismissed.
+- **Making a persona during a join carries on as that persona**, not another.
+- **The attest form opens on the session's method**, and **a withdrawal the
+  community has not recorded can be sent again**.
+- **The invitation page no longer promises a manual review to someone holding
+  vetting** — their statements go with the request either way.
 
 - **A fast reply is no longer lost to the send that asked for it.** The
   Capabilities and Repos panels started waiting for a reply only once the send
