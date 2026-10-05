@@ -1874,7 +1874,18 @@ impl StateHandler {
                         // or clean drop is "not connected" until the next connect.
                         // Events for R-DID listeners (not persona sessions) match
                         // nothing and are ignored.
-                        let changed = match ev {
+                        // Every listener's state, session or not, for the
+                        // indicator's no-community reading.
+                        let online = &mut state.connection.online_listeners;
+                        let listener_changed = match &ev {
+                            didcomm::ListenerStatus::Connected { listener_id } => {
+                                online.insert(listener_id.clone())
+                            }
+                            didcomm::ListenerStatus::Disconnected { listener_id, .. } => {
+                                online.remove(listener_id)
+                            }
+                        };
+                        let changed = listener_changed | match ev {
                             didcomm::ListenerStatus::Connected { listener_id } => {
                                 session_manager.mark_connected(&listener_id)
                             }
@@ -4486,7 +4497,10 @@ fn reconcile_sessions(
 /// leave such an account on `Connecting` for the life of the process, because
 /// no session would ever produce the edge that moved it.
 fn apply_session_aggregate(session_manager: &session_manager::SessionManager, state: &mut State) {
-    state.connection.status = aggregate_status(session_manager);
+    state.connection.status = aggregate_status(
+        session_manager,
+        !state.connection.online_listeners.is_empty(),
+    );
     state.connection.messaging_active =
         matches!(state.connection.status, state::MediatorStatus::Connected);
 }
@@ -4495,11 +4509,18 @@ fn apply_session_aggregate(session_manager: &session_manager::SessionManager, st
 /// any session up → `Connected`; sessions registered but none up →
 /// `Connecting` (the SDK is retrying them); no session at all →
 /// `NoActiveCommunity`.
-fn aggregate_status(session_manager: &session_manager::SessionManager) -> state::MediatorStatus {
+fn aggregate_status(
+    session_manager: &session_manager::SessionManager,
+    persona_online: bool,
+) -> state::MediatorStatus {
     if session_manager.any_connected() {
         state::MediatorStatus::Connected
     } else if session_manager.session_count() > 0 {
         state::MediatorStatus::Connecting
+    } else if persona_online {
+        // No community yet, but a persona is reachable — what an applicant
+        // being vetted needs to know (their vetter's answers get through).
+        state::MediatorStatus::PersonaOnline
     } else {
         state::MediatorStatus::NoActiveCommunity
     }
@@ -5183,7 +5204,7 @@ mod tests {
     fn no_community_session_reads_no_active_community_not_connecting() {
         let manager = session_manager::SessionManager::default();
         assert!(matches!(
-            aggregate_status(&manager),
+            aggregate_status(&manager, false),
             state::MediatorStatus::NoActiveCommunity
         ));
 
@@ -5195,6 +5216,22 @@ mod tests {
             state::MediatorStatus::NoActiveCommunity
         ));
         assert!(!state.connection.messaging_active);
+
+        // A persona listener up with no community session: reachable, and
+        // said so, rather than "No active community" alone.
+        assert!(matches!(
+            aggregate_status(&manager, true),
+            state::MediatorStatus::PersonaOnline
+        ));
+        state
+            .connection
+            .online_listeners
+            .insert("did:webvh:scid:example.com:applicant".into());
+        apply_session_aggregate(&manager, &mut state);
+        assert!(matches!(
+            state.connection.status,
+            state::MediatorStatus::PersonaOnline
+        ));
     }
 
     /// With community sessions the rule is unchanged: any one up is
@@ -5208,7 +5245,7 @@ mod tests {
             "did:webvh:QmV:example.com:vtc".into(),
         );
         assert!(matches!(
-            aggregate_status(&manager),
+            aggregate_status(&manager, false),
             state::MediatorStatus::Connecting
         ));
 

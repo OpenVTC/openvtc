@@ -309,6 +309,10 @@ pub struct ConnectionState {
     pub status: MediatorStatus,
     /// Whether the DIDComm message loop is actively running.
     pub messaging_active: bool,
+    /// Persona listeners whose mediator socket is up right now, by listener id
+    /// — community sessions or not. With no community session, this is what
+    /// says whether messages can reach the account at all.
+    pub online_listeners: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -328,6 +332,10 @@ pub enum MediatorStatus {
     /// there is no DID to open a DIDComm session for. The app runs without
     /// messaging until the user joins a community.
     NoActiveCommunity,
+    /// No community session, but a persona's listener is connected: messages to
+    /// that persona — a vetter's answer, a session, a statement — get through.
+    /// The state of an applicant being vetted before they are a member.
+    PersonaOnline,
 }
 
 #[cfg(test)]

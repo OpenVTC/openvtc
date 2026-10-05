@@ -3302,6 +3302,12 @@ impl ComponentRender<()> for MainPage {
                 "No active community",
                 ratatui::style::Style::default().fg(COLOR_ORANGE),
             )),
+            // Not a membership yet, but reachable: an applicant being vetted
+            // sees that their vetters' answers can get through.
+            MediatorStatus::PersonaOnline => Line::from(Span::styled(
+                "No community yet · persona online",
+                ratatui::style::Style::default().fg(COLOR_SUCCESS),
+            )),
         };
         frame.render_widget(
             Paragraph::new(connection_line).alignment(Alignment::Center),

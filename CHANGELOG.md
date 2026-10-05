@@ -172,6 +172,16 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **A join that ended can be applied for again from Communities.** An
+  application whose join was rejected, withdrawn or left is listed under
+  *Joining* again, saying how the last attempt ended ("rejected last time —
+  apply again"), with Enter opening it. A live (pending or active) membership
+  still covers the join on its own.
+- **The status says when a persona is online before any membership.** With no
+  community session but a persona listener connected — an applicant being
+  vetted — the top bar reads "No community yet · persona online" rather than
+  "No active community", so it is clear their vetters' messages get through.
+
 - **A join refused over its zero-knowledge proof's challenge ends, and says
   why, instead of staying "Pending".** A community that hides its vetters
   refuses the whole submission when the challenge the proof is bound to has
