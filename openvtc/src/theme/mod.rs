@@ -37,6 +37,7 @@ pub mod live;
 pub mod nvim;
 pub mod terminal;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, PoisonError, RwLock};
 
 use ratatui::buffer::Buffer;
@@ -304,12 +305,23 @@ pub fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
-/// Whether to draw without colour: `NO_COLOR` is set and not empty
-/// (<https://no-color.org>). Read once; it cannot change under a running TUI.
+/// Set by `--monochrome`: draw without colour for this run, as `NO_COLOR` does.
+static MONOCHROME: AtomicBool = AtomicBool::new(false);
+
+/// Draw without colour from now on — the `--monochrome` flag. For a terminal
+/// whose colours wash out or clash, and for anyone who simply wants none.
+pub fn force_monochrome() {
+    MONOCHROME.store(true, Ordering::Relaxed);
+}
+
+/// Whether to draw without colour: `--monochrome` was given, or `NO_COLOR` is
+/// set and not empty (<https://no-color.org>). The environment is read once; it
+/// cannot change under a running TUI.
 #[must_use]
 pub fn no_color() -> bool {
     static NO_COLOR: OnceLock<bool> = OnceLock::new();
-    *NO_COLOR.get_or_init(|| std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()))
+    MONOCHROME.load(Ordering::Relaxed)
+        || *NO_COLOR.get_or_init(|| std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()))
 }
 
 /// The theme being drawn with, as a name and a palette.
@@ -428,6 +440,29 @@ pub fn paint(buffer: &mut Buffer) {
         paint_without_colour(buffer);
     } else {
         paint_with(buffer, &active_palette());
+        if !terminal::truecolor() {
+            to_256_colours(buffer);
+        }
+    }
+}
+
+/// Swap every 24-bit colour in the frame for the nearest of the 256 indexed
+/// ones, for a terminal that does not declare 24-bit colour.
+///
+/// The panels and themes are written in RGB. A terminal that cannot draw it —
+/// macOS's Terminal.app is the common one — does not refuse the escape: it
+/// guesses, and the guess washed every colour out to near-white on its light
+/// background, leaving the TUI unreadable. The indexed palette is one it draws
+/// faithfully. The same rule the CLI's own output already followed
+/// ([`crate::colors::Themed`]): 24-bit when `COLORTERM` says so, else 256.
+pub fn to_256_colours(buffer: &mut Buffer) {
+    let downgrade = |color: Color| match color {
+        Color::Rgb(r, g, b) => Color::Indexed(crate::colors::nearest_256((r, g, b))),
+        other => other,
+    };
+    for cell in &mut buffer.content {
+        cell.fg = downgrade(cell.fg);
+        cell.bg = downgrade(cell.bg);
     }
 }
 
@@ -485,6 +520,26 @@ mod tests {
             highlight: Color::Rgb(7, 7, 7),
             background: Some(Color::Rgb(9, 9, 9)),
         }
+    }
+
+    /// A terminal without 24-bit colour gets the nearest indexed colour for
+    /// every RGB one; named and indexed colours are left as they are.
+    #[test]
+    fn rgb_becomes_the_nearest_of_256_colours() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buffer.set_string(0, 0, "a", Style::new().fg(Color::Rgb(255, 0, 0)));
+        buffer.set_string(1, 0, "b", Style::new().fg(Color::Indexed(42)));
+        buffer.set_string(
+            2,
+            0,
+            "c",
+            Style::new().fg(Color::Red).bg(Color::Rgb(0, 0, 0)),
+        );
+        to_256_colours(&mut buffer);
+        assert_eq!(buffer.content[0].fg, Color::Indexed(196), "pure red is 196");
+        assert_eq!(buffer.content[1].fg, Color::Indexed(42));
+        assert_eq!(buffer.content[2].fg, Color::Red);
+        assert_eq!(buffer.content[2].bg, Color::Indexed(16), "black is 16");
     }
 
     /// Every role is swapped for the theme's colour; anything that is not a

@@ -78,6 +78,9 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Added
 
+- **`--monochrome`** draws without colour, keeping roles apart with bold,
+  underline and reverse — the same as setting `NO_COLOR`, as a flag.
+
 - **Your PCS ZKP token balance, where you vet.** The desk header shows, for each
   community that hides its vetters, the tokens you hold and when the next drip
   is due — or that a request is on its way, unanswered, or refused — and warns
@@ -187,6 +190,14 @@ are marked wherever they apply. The detailed entries follow the summary below.
   verifiable-git-infrastructure `main`.
 
 ### Fixed
+
+- **Readable in macOS Terminal.app and other terminals without 24-bit colour.**
+  The TUI sent 24-bit colours to every terminal; one that cannot draw them
+  guessed, and Terminal.app's guess washed everything out to near-white. The
+  TUI now draws the nearest of the 256 indexed colours unless `COLORTERM`
+  declares 24-bit colour — the rule its command-line output already followed.
+  The default theme is now `auto`, so a light terminal gets a light theme
+  instead of near-white text on white.
 
 - **A join that ended can be applied for again from Communities.** An
   application whose join was rejected, withdrawn or left is listed under

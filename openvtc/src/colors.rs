@@ -47,7 +47,7 @@ impl<D> Themed for StyledObject<D> {
 
 /// The xterm 256-colour index nearest `rgb`: from the 6×6×6 colour cube or the
 /// grey ramp, whichever is closer.
-fn nearest_256((r, g, b): (u8, u8, u8)) -> u8 {
+pub(crate) fn nearest_256((r, g, b): (u8, u8, u8)) -> u8 {
     const LEVELS: [i32; 6] = [0, 95, 135, 175, 215, 255];
     let step = |v: u8| -> usize {
         match v {

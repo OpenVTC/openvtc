@@ -39,6 +39,15 @@ pub fn cli() -> Command {
                 .long("profile")
                 .help("Config profile to use")
                 .default_value("default"),
+            Arg::new("monochrome")
+                .long("monochrome")
+                .global(true)
+                .action(clap::ArgAction::SetTrue)
+                .help(
+                    "Draw without colour, keeping roles apart with bold and underline — \
+                     for terminals whose colours wash out or clash. Same as setting \
+                     NO_COLOR.",
+                ),
             Arg::new("invitation")
                 .long("invitation")
                 .value_name("FILE")
@@ -157,6 +166,28 @@ pub fn get_user_pin() -> anyhow::Result<SecretString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--monochrome` is a global switch: accepted before or after a
+    /// subcommand, and off unless given.
+    #[test]
+    fn monochrome_is_a_global_switch() {
+        assert!(
+            !super::cli()
+                .try_get_matches_from(["openvtc"])
+                .unwrap()
+                .get_flag("monochrome")
+        );
+        assert!(
+            super::cli()
+                .try_get_matches_from(["openvtc", "--monochrome"])
+                .unwrap()
+                .get_flag("monochrome")
+        );
+        let m = super::cli()
+            .try_get_matches_from(["openvtc", "setup", "--monochrome"])
+            .unwrap();
+        assert!(m.get_flag("monochrome"));
+    }
 
     #[test]
     fn cli_definition_is_valid() {
