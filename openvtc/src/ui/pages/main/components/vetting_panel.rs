@@ -23,9 +23,10 @@ use crate::state_handler::{
     main_page::content::{
         AttestForm, CardPreview, ContentPanelState, DIRECTORY_FIELDS, DIRECTORY_LABELS,
         DIRECTORY_METHODS, DeskStage, DeskView, DirectoryView, EVENT_LABELS, EventForm, LineTone,
-        NewFaceFocus, PROFILE_FIELDS, PROFILE_LABELS, VETTING_METHODS, VETTING_RELATIONSHIPS,
-        VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VettingMode,
-        VettingState, VettingTab, method_label, reason_label, relationship_label,
+        NewFaceFocus, NewFaceForm, PROFILE_FIELDS, PROFILE_LABELS, PoolRow, VETTING_METHODS,
+        VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm,
+        VettingMode, VettingState, VettingTab, claim_heading, method_label, reason_label,
+        relationship_label,
     },
     state::ConnectionState,
 };
@@ -197,6 +198,164 @@ pub fn render(v: &VettingState) -> Vec<Line<'static>> {
     lines
 }
 
+/// The make-a-face form, driven by what the community asked for.
+///
+/// One row per claim type asked for, each saying whether it is ready. A
+/// required one the holder has nothing for is a field right there, under a
+/// sentence saying what to type — the holder never has to learn its type key,
+/// or leave for My Identity and come back. Exactly one status line says what
+/// Enter does next; the form never adds a second voice repeating or
+/// contradicting it.
+fn new_face(lines: &mut Vec<Line<'static>>, form: &NewFaceForm) {
+    let good = || Style::new().fg(COLOR_SUCCESS);
+    let bad = || Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED);
+    let marker = |focused: bool| {
+        if focused {
+            Span::styled("▸ ", good().bold())
+        } else {
+            Span::raw("  ")
+        }
+    };
+    // What a held attribute shows: its value when we have one, else the
+    // holder's label for it.
+    let shown = |row: &PoolRow| row.value.clone().unwrap_or_else(|| row.label.clone());
+
+    lines.push(heading("Make a face for this community"));
+    lines.push(Line::from(""));
+    lines.push(hint(
+        "A face is the selection of your attributes a vetter's card is read from. Only what is",
+    ));
+    lines.push(hint(
+        "ticked is shown, and its values must match your documents exactly.",
+    ));
+    lines.push(Line::from(""));
+    lines.push(field(
+        "Name",
+        form.name.clone(),
+        form.focus == NewFaceFocus::Name,
+        true,
+    ));
+
+    let asked = form.asked();
+    if !asked.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " What this community asks for",
+            label(),
+        )));
+    }
+    for (i, (claim_type, required)) in asked.iter().enumerate() {
+        let focused = form.focus == NewFaceFocus::Asked(i);
+        let candidates = form.candidates(claim_type);
+        let chosen = form.chosen(claim_type);
+        let heading_style = if focused { good().bold() } else { label() };
+        let mut spans = vec![marker(focused)];
+        match (chosen, *required) {
+            (Some(_), true) => spans.push(Span::styled("✓ ", good())),
+            (None, true) => spans.push(Span::styled("✗ ", bad())),
+            (Some(_), false) => spans.push(Span::styled("[x] ", heading_style)),
+            (None, false) => spans.push(Span::styled("[ ] ", heading_style)),
+        }
+        spans.push(Span::styled(
+            format!("{:<18}", claim_heading(claim_type)),
+            heading_style,
+        ));
+        match chosen {
+            Some(row) => spans.push(Span::styled(shown(row), value())),
+            None if form.needs_input(claim_type) => {
+                spans.push(Span::styled("needed", bad()));
+            }
+            None if candidates.is_empty() => {
+                spans.push(Span::styled("optional — you have none", dim()));
+            }
+            None if *required => spans.push(Span::styled("not ticked", bad())),
+            None => spans.push(Span::styled("optional — not shown unless ticked", dim())),
+        }
+        spans.push(Span::styled(format!("  {claim_type}"), dim()));
+        // Several of one type: say which this is, and how to change it.
+        if candidates.len() > 1 {
+            let at = chosen
+                .and_then(|c| {
+                    candidates
+                        .iter()
+                        .position(|a| a.attribute_id == c.attribute_id)
+                })
+                .map_or(0, |i| i + 1);
+            spans.push(Span::styled(
+                format!("  ←/→ {at} of {}", candidates.len()),
+                dim(),
+            ));
+        }
+        lines.push(Line::from(spans));
+        if form.needs_input(claim_type) {
+            let words = openvtc_core::vetting::guide::claim_words(claim_type);
+            lines.push(Line::from(Span::styled(
+                format!("      Your {words} ({claim_type}), exactly as on your documents:"),
+                dim(),
+            )));
+            let draft = form.draft(claim_type).to_string();
+            let mut input = vec![
+                Span::raw("      "),
+                Span::styled(
+                    if draft.is_empty() && !focused {
+                        "—".to_string()
+                    } else {
+                        draft
+                    },
+                    value(),
+                ),
+            ];
+            if form.saving.as_deref() == Some(*claim_type) {
+                input.push(Span::styled("  saving…", dim()));
+            } else if focused {
+                input.push(Span::styled("▎", good()));
+            }
+            lines.push(Line::from(input));
+        }
+    }
+
+    let extras = form.extras();
+    if !extras.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Your other attributes — not shown unless you tick them",
+            label(),
+        )));
+    }
+    for (i, row) in extras.iter().enumerate() {
+        let focused = form.focus == NewFaceFocus::Extra(i);
+        let style = if focused { good().bold() } else { label() };
+        let ticked = form.ticked.contains(&row.attribute_id);
+        let mut spans = vec![
+            marker(focused),
+            Span::styled(if ticked { "[x] " } else { "[ ] " }, style),
+            Span::styled(row.label.clone(), style),
+            Span::styled(format!("  {}", row.claim_type), dim()),
+        ];
+        if let Some(v) = &row.value {
+            spans.push(Span::styled(format!("  {v}"), value()));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(" {}", form.status()),
+        if form.ready() {
+            good().bold()
+        } else {
+            Style::new().fg(COLOR_ORANGE)
+        },
+    )));
+    if let Some(error) = &form.error {
+        lines.push(Line::from(Span::styled(format!(" {error}"), bad())));
+    }
+    lines.push(Line::from(""));
+    lines.push(hint(
+        "Tab/↑/↓: move  ←/→ or Space: choose  Enter: continue  Esc: cancel",
+    ));
+}
+
 /// What the page draws for its current mode — the list, or whichever form or
 /// view is open. A journey page draws the same views under its step strip, so
 /// a face chosen or a card sent from a journey is the same screen as anywhere.
@@ -276,101 +435,7 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             // unbound — including the `f` the line above asks for.
             lines.push(hint("f: try again   Esc: back"));
         }
-        VettingMode::NewFace(form) => {
-            lines.push(heading("Make a face for this community"));
-            lines.push(Line::from(""));
-            lines.push(hint(
-                "A face is a selection of your attributes. Making one here does not copy them —",
-            ));
-            lines.push(hint(
-                "the same attribute can appear in as many faces as you like.",
-            ));
-            lines.push(Line::from(""));
-            lines.push(field(
-                "Name",
-                if form.name.is_empty() {
-                    "—".to_string()
-                } else {
-                    form.name.clone()
-                },
-                form.focus == NewFaceFocus::Name,
-                false,
-            ));
-            lines.push(Line::from(""));
-            if !form.required.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::styled(" This community's card needs  ", label()),
-                    Span::styled(form.required.join(", "), value()),
-                ]));
-                lines.push(Line::from(""));
-            }
-            if form.pool.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  You have no attributes yet. Add them under My Identity, then press f again.",
-                    dim(),
-                )));
-            }
-            for (i, attribute) in form.pool.iter().enumerate() {
-                let on_row = form.focus == NewFaceFocus::Attributes && i == form.cursor;
-                let ticked = form.ticked.contains(&attribute.attribute_id);
-                // A required claim type is marked wherever it appears, ticked
-                // or not: the holder is choosing against a list the community
-                // set, and that list should be visible on the rows it governs.
-                let wanted = form.required.contains(&attribute.claim_type);
-                let style = if on_row {
-                    Style::new().fg(COLOR_SUCCESS).bold()
-                } else {
-                    label()
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(if on_row { "▸ " } else { "  " }, style),
-                    Span::styled(if ticked { "[x] " } else { "[ ] " }, style),
-                    Span::styled(attribute.label.clone(), style),
-                    Span::styled(format!("  {}", attribute.claim_type), dim()),
-                    Span::styled(
-                        if wanted { "  needed here" } else { "" },
-                        Style::new().fg(COLOR_SUCCESS),
-                    ),
-                ]));
-            }
-            // Said against the current selection, not against the pool, so
-            // unticking something required says so at once rather than at the
-            // card preview.
-            let short = form.still_missing();
-            if !short.is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled("  missing   ", dim()),
-                    Span::styled(
-                        short.join(", "),
-                        Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
-                    ),
-                    Span::styled(" — this face could not make the card", dim()),
-                ]));
-                let uncoverable = form.uncoverable();
-                if !uncoverable.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "            no attribute of yours is {} — add one under My Identity",
-                            uncoverable.join(" or ")
-                        ),
-                        dim(),
-                    )));
-                }
-            }
-            if let Some(error) = &form.error {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    format!(" {error}"),
-                    Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
-                )));
-            }
-            lines.push(Line::from(""));
-            lines.push(hint(
-                "Tab: name / attributes  ↑/↓: move  Space: tick  Enter: make it and wear it  \
-                 Esc: cancel",
-            ));
-        }
+        VettingMode::NewFace(form) => new_face(lines, form),
         VettingMode::ChooseFace {
             faces,
             index,
@@ -480,7 +545,10 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                         label()
                     },
                 ),
-                Span::styled("  from attributes you already have", dim()),
+                Span::styled(
+                    "  asks for anything it needs that you have not added",
+                    dim(),
+                ),
             ]));
             lines.push(Line::from(""));
             lines.push(hint("↑/↓: choose  Enter: wear it  Esc: cancel"));
@@ -1423,7 +1491,7 @@ fn send_card(
         lines.push(Line::from(problem.clone()).fg(COLOR_WARNING_ACCESSIBLE_RED));
         lines.push(Line::from(""));
         lines.push(hint(
-            "Esc, fix the face under My Identity (or choose another with f), then preview again.",
+            "f: choose another face, or make one — it asks for anything missing. Then preview again.",
         ));
         return;
     }
@@ -2678,5 +2746,125 @@ mod persona_guidance_tests {
         let out = text(&v);
         assert!(out.contains("n: new application"), "{out}");
         assert!(!out.contains("no persona yet"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod new_face_tests {
+    use super::*;
+
+    fn drawn(form: NewFaceForm) -> String {
+        let v = VettingState {
+            mode: VettingMode::NewFace(Box::new(form)),
+            ..VettingState::default()
+        };
+        render(&v)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn held(id: &str, value: &str) -> PoolRow {
+        PoolRow {
+            attribute_id: id.into(),
+            claim_type: "name.legal".into(),
+            label: "name.legal".into(),
+            value: Some(value.into()),
+        }
+    }
+
+    fn form(pool: Vec<PoolRow>) -> NewFaceForm {
+        NewFaceForm::open(
+            "a".into(),
+            vec!["name.legal".into()],
+            Vec::new(),
+            pool,
+            "Vetting".into(),
+        )
+    }
+
+    /// With nothing in the pool, the form asks for the value on the row that
+    /// needs it, in words — and says it once. The old form said "add it under
+    /// My Identity" three ways and then refused for want of a tick there was
+    /// nothing to tick.
+    #[test]
+    fn with_no_attributes_the_form_asks_for_the_value_once() {
+        let out = drawn(form(Vec::new()));
+        assert!(out.contains("✗ Legal name"), "{out}");
+        assert!(
+            out.contains("Your legal name (name.legal), exactly as on your documents:"),
+            "{out}"
+        );
+        assert!(
+            out.contains("0 of 1 required attribute ready — type your legal name below"),
+            "{out}"
+        );
+        for gone in [
+            "My Identity",
+            "press f again",
+            "Tick at least one",
+            "could not make the card",
+            "no attribute of yours",
+        ] {
+            assert!(!out.contains(gone), "{gone:?} is back: {out}");
+        }
+        assert_eq!(
+            out.matches("legal name").count(),
+            2,
+            "the prompt and the status line, nothing else: {out}"
+        );
+    }
+
+    /// A typed value is shown in its field, and the status line moves on to
+    /// saving it.
+    #[test]
+    fn a_typed_value_is_shown_and_enter_saves_it() {
+        let mut f = form(Vec::new());
+        f.drafts.insert("name.legal".into(), "Alice Example".into());
+        let out = drawn(f);
+        assert!(out.contains("      Alice Example▎"), "{out}");
+        assert!(out.contains("Enter: save your legal name"), "{out}");
+    }
+
+    /// A held requirement is ticked, with its value, and Enter is ready.
+    #[test]
+    fn a_held_requirement_is_shown_ticked_with_its_value() {
+        let out = drawn(form(vec![held("attr-1", "Alice Example")]));
+        assert!(out.contains("✓ Legal name"), "{out}");
+        assert!(out.contains("Alice Example"), "{out}");
+        assert!(
+            out.contains("1 of 1 required attribute ready — Enter: make the face and wear it"),
+            "{out}"
+        );
+        assert!(!out.contains("exactly as on your documents:"), "{out}");
+    }
+
+    /// Two of one type say which is shown and how to change it; what was not
+    /// asked for is offered, unticked.
+    #[test]
+    fn several_candidates_say_which_and_extras_stay_unticked() {
+        let pool = vec![
+            held("attr-1", "Alice Example"),
+            held("attr-2", "Alice B. Example"),
+            PoolRow {
+                attribute_id: "attr-email".into(),
+                claim_type: "email.work".into(),
+                label: "Work".into(),
+                value: Some("alice@work.example".into()),
+            },
+        ];
+        let out = drawn(form(pool));
+        assert!(out.contains("←/→ 1 of 2"), "{out}");
+        assert!(
+            out.contains("Your other attributes — not shown unless you tick them"),
+            "{out}"
+        );
+        assert!(out.contains("[ ] Work  email.work"), "{out}");
     }
 }

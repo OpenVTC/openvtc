@@ -2314,59 +2314,193 @@ pub struct PoolRow {
     pub claim_type: String,
     /// What to call it on screen — the holder's label, else the claim type.
     pub label: String,
+    /// The value as the Identity page paints it — masked where the claim
+    /// type's registry entry says so — or `None` when the store sent none. A
+    /// face is chosen for what it will show a vetter, so the value is the check
+    /// the holder actually makes; a label alone cannot tell two legal names
+    /// apart.
+    pub value: Option<String>,
 }
 
-/// Which half of the new-face form has the keyboard.
+/// Which row of the new-face form has the keyboard.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NewFaceFocus {
     #[default]
     Name,
-    Attributes,
+    /// The n-th of [`NewFaceForm::asked`]: a claim type the community (or a
+    /// vetter's session) asked for.
+    Asked(usize),
+    /// The n-th of [`NewFaceForm::extras`]: something held but not asked for.
+    Extra(usize),
+}
+
+/// What Enter on the new-face form does next.
+#[derive(Clone, Debug)]
+pub enum NewFaceStep {
+    /// Nothing to send. The focus has moved to what is missing, and the form's
+    /// status line says what it is.
+    Wait,
+    /// Save this typed value as a new attribute, then tick it.
+    Save(openvtc_core::persona::pool::AttributeDraft),
+    /// Make the face from these attributes, in this order, and wear it.
+    Make {
+        name: String,
+        live_refs: Vec<String>,
+    },
+}
+
+/// A claim type as a heading: `name.legal` is "Legal name".
+///
+/// From [`claim_words`](openvtc_core::vetting::guide::claim_words), the table
+/// the join page already speaks with, so a requirement reads the same on every
+/// page that names it; an unknown type falls back to its own words.
+#[must_use]
+pub fn claim_heading(claim_type: &str) -> String {
+    let words = openvtc_core::vetting::guide::claim_words(claim_type);
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => claim_type.to_string(),
+    }
 }
 
 /// Making a face without leaving the vetting flow.
 ///
 /// The general face editor lives on the Identity page and is the right place to
 /// build a face for its own sake. This is the narrow case: a community has
-/// already said which claim types its card must carry, so the form knows what
-/// the face is *for* and can open with those attributes already ticked.
+/// already said which claim types its card must carry, so the form is driven by
+/// that list — one row per claim type asked for, each either ready or not.
 ///
-/// Composed from attributes the pool already holds — it never creates one.
-/// Supplying a value for, say, a legal name is a different act from arranging
-/// which attributes a face shows, and it belongs with the editor that knows
-/// about value types, sensitivity and masking. What this form owes the holder
-/// when the pool is short is to say exactly which claim type is missing, rather
-/// than to offer a face that cannot make the card.
+/// A required claim type the pool has nothing for is filled in right here. The
+/// holder used to be sent to My Identity to add it under a type key they had no
+/// reason to know, and back again to press `f`; most stopped at that point.
+/// The value is saved through the same write My Identity makes
+/// ([`pool::draft_from_text`](openvtc_core::persona::pool::draft_from_text),
+/// then [`pool::put`](openvtc_core::persona::pool::put)), so it is a real,
+/// self-asserted attribute that page lists and edits like any other.
+///
+/// Only what is asked for is ticked. Optional claim types and the rest of the
+/// pool are offered, never pre-ticked: a face shows what it holds, and showing
+/// more than the community asked is the holder's choice to make, not ours.
 #[derive(Clone, Debug, Default)]
 pub struct NewFaceForm {
     pub application_id: String,
-    /// The claim types this community's card must carry, so the list can mark
-    /// them and the form can warn when the pool cannot cover them.
+    /// The claim types this community's card must carry.
     pub required: Vec<String>,
-    /// Every attribute the holder has, metadata only.
+    /// Claim types a vetter's session named as optional.
+    pub optional: Vec<String>,
+    /// Every attribute the holder has.
     pub pool: Vec<PoolRow>,
     pub name: String,
     /// Attribute ids ticked, in the order they were ticked — which is the
     /// order the face will present them in.
     pub ticked: Vec<String>,
-    pub cursor: usize,
+    /// What has been typed for each required claim type the pool cannot
+    /// supply, by claim type.
+    pub drafts: HashMap<String, String>,
     pub focus: NewFaceFocus,
+    /// The claim type whose new attribute is being saved. The form waits on it
+    /// rather than closing, because ticking it is the next thing that happens.
+    pub saving: Option<String>,
+    /// A refusal to show: a value that did not parse, or a save that failed.
+    /// Never a restatement of the status line.
     pub error: Option<String>,
 }
 
 impl NewFaceForm {
-    /// Required claim types no attribute in the pool can supply.
+    /// Open the form on what the community asked for.
     ///
-    /// Not a refusal: a holder may be building a face now and adding the
-    /// attribute afterwards. It is named so the reason the card will be
-    /// refused is on screen *before* a vetter is waiting on it.
+    /// Each required claim type starts ticked with the first attribute that
+    /// carries it, and the focus starts on the first one that still needs a
+    /// value — which is the one thing a holder with an empty pool has to do.
     #[must_use]
-    pub fn uncoverable(&self) -> Vec<&str> {
-        self.required
+    pub fn open(
+        application_id: String,
+        required: Vec<String>,
+        optional: Vec<String>,
+        pool: Vec<PoolRow>,
+        name: String,
+    ) -> Self {
+        let ticked: Vec<String> = required
             .iter()
-            .filter(|r| !self.pool.iter().any(|a| &&a.claim_type == r))
-            .map(String::as_str)
+            .filter_map(|want| {
+                pool.iter()
+                    .find(|a| &a.claim_type == want)
+                    .map(|a| a.attribute_id.clone())
+            })
+            .collect();
+        let mut form = Self {
+            application_id,
+            required,
+            optional,
+            pool,
+            name,
+            ticked,
+            ..Self::default()
+        };
+        form.focus = form.first_unfilled().unwrap_or(NewFaceFocus::Name);
+        form
+    }
+
+    /// The claim types asked for, required first, each with whether it is
+    /// required. An optional type the community also requires is listed once,
+    /// as required.
+    #[must_use]
+    pub fn asked(&self) -> Vec<(&str, bool)> {
+        let mut out: Vec<(&str, bool)> = Vec::new();
+        for (claim_type, required) in self
+            .required
+            .iter()
+            .map(|c| (c, true))
+            .chain(self.optional.iter().map(|c| (c, false)))
+        {
+            if !out.iter().any(|(seen, _)| *seen == claim_type.as_str()) {
+                out.push((claim_type.as_str(), required));
+            }
+        }
+        out
+    }
+
+    /// Attributes that carry `claim_type`.
+    #[must_use]
+    pub fn candidates(&self, claim_type: &str) -> Vec<&PoolRow> {
+        self.pool
+            .iter()
+            .filter(|a| a.claim_type == claim_type)
             .collect()
+    }
+
+    /// The attribute ticked for `claim_type`, if any.
+    #[must_use]
+    pub fn chosen(&self, claim_type: &str) -> Option<&PoolRow> {
+        self.ticked.iter().find_map(|id| {
+            self.pool
+                .iter()
+                .find(|a| &a.attribute_id == id && a.claim_type == claim_type)
+        })
+    }
+
+    /// Attributes held but not asked for, offered unticked.
+    #[must_use]
+    pub fn extras(&self) -> Vec<&PoolRow> {
+        let asked = self.asked();
+        self.pool
+            .iter()
+            .filter(|a| !asked.iter().any(|(c, _)| *c == a.claim_type))
+            .collect()
+    }
+
+    /// Whether `claim_type`'s row is a field to type into: it is required and
+    /// nothing in the pool carries it.
+    #[must_use]
+    pub fn needs_input(&self, claim_type: &str) -> bool {
+        self.required.iter().any(|r| r == claim_type) && self.candidates(claim_type).is_empty()
+    }
+
+    /// What has been typed for `claim_type`.
+    #[must_use]
+    pub fn draft(&self, claim_type: &str) -> &str {
+        self.drafts.get(claim_type).map_or("", String::as_str)
     }
 
     /// The claim types the ticked attributes would disclose.
@@ -2390,18 +2524,280 @@ impl NewFaceForm {
             .collect()
     }
 
-    /// Tick or untick the attribute under the cursor.
-    pub fn toggle(&mut self) {
-        let Some(row) = self.pool.get(self.cursor) else {
+    /// Whether Enter would make the face now.
+    #[must_use]
+    pub fn ready(&self) -> bool {
+        self.saving.is_none()
+            && self.still_missing().is_empty()
+            && !self.name.trim().is_empty()
+            && !self.ticked.is_empty()
+    }
+
+    /// The rows, in the order the keyboard moves through them.
+    fn rows(&self) -> Vec<NewFaceFocus> {
+        std::iter::once(NewFaceFocus::Name)
+            .chain((0..self.asked().len()).map(NewFaceFocus::Asked))
+            .chain((0..self.extras().len()).map(NewFaceFocus::Extra))
+            .collect()
+    }
+
+    /// Move to the next (or previous) row, wrapping.
+    pub fn move_focus(&mut self, forward: bool) {
+        let rows = self.rows();
+        let at = rows.iter().position(|r| *r == self.focus).unwrap_or(0);
+        let n = rows.len();
+        self.focus = rows[if forward {
+            (at + 1) % n
+        } else {
+            (at + n - 1) % n
+        }];
+    }
+
+    /// The required row the holder should be looking at: the first claim type
+    /// the selection does not carry yet.
+    fn first_unfilled(&self) -> Option<NewFaceFocus> {
+        let missing = self.still_missing();
+        let first = missing.first()?;
+        self.asked()
+            .iter()
+            .position(|(c, _)| c == first)
+            .map(NewFaceFocus::Asked)
+    }
+
+    /// The claim type under the focus, when the focus is on an asked row.
+    fn focused_claim(&self) -> Option<(String, bool)> {
+        match self.focus {
+            NewFaceFocus::Asked(i) => self
+                .asked()
+                .get(i)
+                .map(|(c, required)| ((*c).to_string(), *required)),
+            _ => None,
+        }
+    }
+
+    /// Choose the next (or previous) attribute for the focused claim type.
+    ///
+    /// ←/→ and, for a required type with several, Space. The chosen one takes
+    /// the place of the one it replaces in the tick order, so changing which
+    /// legal name is shown does not reorder the card.
+    pub fn pick(&mut self, forward: bool) {
+        let Some((claim_type, _)) = self.focused_claim() else {
             return;
         };
-        match self.ticked.iter().position(|id| id == &row.attribute_id) {
+        let ids: Vec<String> = self
+            .candidates(&claim_type)
+            .iter()
+            .map(|a| a.attribute_id.clone())
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let current = self
+            .chosen(&claim_type)
+            .and_then(|c| ids.iter().position(|id| *id == c.attribute_id));
+        let next = match current {
+            None => 0,
+            Some(i) if forward => (i + 1) % ids.len(),
+            Some(i) => (i + ids.len() - 1) % ids.len(),
+        };
+        let slot = self
+            .ticked
+            .iter()
+            .position(|id| ids.contains(id))
+            .unwrap_or(self.ticked.len());
+        self.ticked.retain(|id| !ids.contains(id));
+        self.ticked
+            .insert(slot.min(self.ticked.len()), ids[next].clone());
+        self.error = None;
+    }
+
+    /// Space on the focused row.
+    ///
+    /// A required claim type with several attributes steps to the next, since
+    /// one of them has to be shown; anything else ticks or unticks.
+    pub fn toggle(&mut self) {
+        let id = match self.focus {
+            NewFaceFocus::Name => return,
+            NewFaceFocus::Asked(_) => {
+                let Some((claim_type, required)) = self.focused_claim() else {
+                    return;
+                };
+                let candidates = self.candidates(&claim_type);
+                if candidates.is_empty() {
+                    return;
+                }
+                if required && candidates.len() > 1 {
+                    return self.pick(true);
+                }
+                match self.chosen(&claim_type) {
+                    Some(c) => c.attribute_id.clone(),
+                    None => candidates[0].attribute_id.clone(),
+                }
+            }
+            NewFaceFocus::Extra(i) => match self.extras().get(i) {
+                Some(row) => row.attribute_id.clone(),
+                None => return,
+            },
+        };
+        match self.ticked.iter().position(|t| *t == id) {
             Some(i) => {
                 self.ticked.remove(i);
             }
-            None => self.ticked.push(row.attribute_id.clone()),
+            None => self.ticked.push(id),
         }
         self.error = None;
+    }
+
+    /// The focused text field: the name, or a required value being typed.
+    #[must_use]
+    pub fn text(&self) -> Option<&String> {
+        match self.focus {
+            NewFaceFocus::Name => Some(&self.name),
+            NewFaceFocus::Asked(_) => {
+                let (claim_type, _) = self.focused_claim()?;
+                if !self.needs_input(&claim_type) {
+                    return None;
+                }
+                static EMPTY: String = String::new();
+                Some(self.drafts.get(&claim_type).unwrap_or(&EMPTY))
+            }
+            NewFaceFocus::Extra(_) => None,
+        }
+    }
+
+    /// The focused text field, to edit.
+    pub fn text_mut(&mut self) -> Option<&mut String> {
+        match self.focus {
+            NewFaceFocus::Name => Some(&mut self.name),
+            NewFaceFocus::Asked(_) => {
+                let (claim_type, _) = self.focused_claim()?;
+                if !self.needs_input(&claim_type) || self.saving.is_some() {
+                    return None;
+                }
+                self.error = None;
+                Some(self.drafts.entry(claim_type).or_default())
+            }
+            NewFaceFocus::Extra(_) => None,
+        }
+    }
+
+    /// Enter: save a typed value, or make the face, or point at what is
+    /// missing — whichever comes first.
+    ///
+    /// A typed value goes first wherever the focus is: having typed a legal
+    /// name and tabbed to the face's name, Enter should not answer "your legal
+    /// name is missing".
+    pub fn enter(&mut self) -> NewFaceStep {
+        if self.saving.is_some() {
+            return NewFaceStep::Wait;
+        }
+        let focused = self
+            .focused_claim()
+            .map(|(c, _)| c)
+            .filter(|c| self.needs_input(c) && !self.draft(c).trim().is_empty());
+        let typed = focused.or_else(|| {
+            self.required
+                .iter()
+                .find(|c| self.needs_input(c) && !self.draft(c).trim().is_empty())
+                .cloned()
+        });
+        if let Some(claim_type) = typed {
+            return match openvtc_core::persona::pool::draft_from_text(
+                &claim_type,
+                self.draft(&claim_type),
+                vta_sdk::protocols::persona::ValueType::String,
+                None,
+            ) {
+                Ok(draft) => {
+                    self.saving = Some(claim_type);
+                    self.error = None;
+                    NewFaceStep::Save(draft)
+                }
+                Err(why) => {
+                    self.error = Some(why);
+                    NewFaceStep::Wait
+                }
+            };
+        }
+        if let Some(row) = self.first_unfilled() {
+            self.focus = row;
+            return NewFaceStep::Wait;
+        }
+        let name = self.name.trim().to_string();
+        if name.is_empty() {
+            self.focus = NewFaceFocus::Name;
+            return NewFaceStep::Wait;
+        }
+        if self.ticked.is_empty() {
+            if !self.extras().is_empty() {
+                self.focus = NewFaceFocus::Extra(0);
+            }
+            return NewFaceStep::Wait;
+        }
+        NewFaceStep::Make {
+            name,
+            live_refs: self.ticked.clone(),
+        }
+    }
+
+    /// A value typed here is now an attribute: add it, tick it in place of
+    /// anything else of its type, and move on to the next thing missing.
+    pub fn saved(&mut self, row: PoolRow) {
+        self.drafts.remove(&row.claim_type);
+        if self.saving.as_deref() == Some(row.claim_type.as_str()) {
+            self.saving = None;
+        }
+        let same: Vec<String> = self
+            .candidates(&row.claim_type)
+            .iter()
+            .map(|a| a.attribute_id.clone())
+            .collect();
+        self.ticked.retain(|id| !same.contains(id));
+        self.ticked.push(row.attribute_id.clone());
+        self.pool.push(row);
+        self.error = None;
+        self.focus = self.first_unfilled().unwrap_or(NewFaceFocus::Name);
+    }
+
+    /// The form's one status line: how many required claims are ready, and the
+    /// single next thing to do. Enter does exactly what it says.
+    #[must_use]
+    pub fn status(&self) -> String {
+        if let Some(claim_type) = &self.saving {
+            return format!(
+                "Saving your {}…",
+                openvtc_core::vetting::guide::claim_words(claim_type)
+            );
+        }
+        let total = self.required.len();
+        let have = total - self.still_missing().len();
+        let head = if total == 0 {
+            "This community names no attributes".to_string()
+        } else {
+            format!(
+                "{have} of {total} required attribute{} ready",
+                if total == 1 { "" } else { "s" }
+            )
+        };
+        let next = match self.still_missing().first() {
+            Some(claim_type) => {
+                let words = openvtc_core::vetting::guide::claim_words(claim_type);
+                if !self.needs_input(claim_type) {
+                    format!("choose your {words} with ←/→ or Space")
+                } else if self.draft(claim_type).trim().is_empty() {
+                    format!("type your {words} below")
+                } else {
+                    format!("Enter: save your {words}")
+                }
+            }
+            None if self.name.trim().is_empty() => "name the face, then Enter".to_string(),
+            None if self.ticked.is_empty() && self.pool.is_empty() => {
+                "you have no attributes to show yet".to_string()
+            }
+            None if self.ticked.is_empty() => "tick what the face shows with Space".to_string(),
+            None => "Enter: make the face and wear it".to_string(),
+        };
+        format!("{head} — {next}")
     }
 }
 
@@ -2558,9 +2954,10 @@ impl VettingMode {
                 Some(event) => event.text().map(String::as_str),
                 None => form.text().map(String::as_str),
             },
-            // Only while the name has focus: on the tick list, space has to
-            // reach `Toggle` rather than being typed into a field.
-            VettingMode::NewFace(form) if form.focus == NewFaceFocus::Name => Some(&form.name),
+            // Only while a field has focus — the name, or a required value
+            // being typed: on a row to choose or tick, space has to reach
+            // `Toggle` rather than being typed into a field.
+            VettingMode::NewFace(form) => form.text().map(String::as_str),
             _ => None,
         }
     }
@@ -2579,7 +2976,7 @@ impl VettingMode {
             } => Some(message),
             VettingMode::Directory(view) => view.text_mut(),
             VettingMode::Profile(form) => form.focused_text_mut(),
-            VettingMode::NewFace(form) if form.focus == NewFaceFocus::Name => Some(&mut form.name),
+            VettingMode::NewFace(form) => form.text_mut(),
             _ => None,
         }
     }

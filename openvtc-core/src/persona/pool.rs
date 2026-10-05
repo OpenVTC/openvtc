@@ -557,6 +557,41 @@ pub fn parse_typed_value(text: &str, value_type: ValueType) -> Result<Value, Str
     }
 }
 
+/// A new self-asserted attribute from what a holder typed.
+///
+/// The one check every editor that writes the pool makes — My Identity's
+/// attribute form and the vetting page's make-a-face form both come through
+/// here — so a value typed on either page is refused or accepted for the same
+/// reasons, and a fix to one is a fix to both. The type is required because it
+/// is what a verifier matches on; the value must parse as `value_type`.
+///
+/// # Errors
+///
+/// The reason to show next to the field: no type, or a value that does not
+/// parse.
+pub fn draft_from_text(
+    claim_type: &str,
+    text: &str,
+    value_type: ValueType,
+    label: Option<&str>,
+) -> Result<AttributeDraft, String> {
+    let claim_type = claim_type.trim();
+    if claim_type.is_empty() {
+        return Err("A type is required — e.g. email.work.".to_string());
+    }
+    let value = parse_typed_value(text, value_type)?;
+    Ok(AttributeDraft {
+        claim_type: claim_type.to_string(),
+        label: label
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string),
+        value,
+        value_type,
+        ..AttributeDraft::default()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::persona::claim_types::Registry;
@@ -569,6 +604,26 @@ mod tests {
     }
 
     use super::*;
+
+    /// Both editors that write the pool go through one check: a type is
+    /// required, the value must parse, and an empty label is no label.
+    #[test]
+    fn a_typed_attribute_is_checked_once_for_every_editor() {
+        let draft = draft_from_text(
+            " name.legal ",
+            " Alice Example ",
+            ValueType::String,
+            Some("  "),
+        )
+        .expect("a string always parses");
+        assert_eq!(draft.claim_type, "name.legal");
+        assert_eq!(draft.value, Value::String("Alice Example".into()));
+        assert!(draft.label.is_none());
+        assert!(draft.attribute_id.is_none(), "a create");
+
+        assert!(draft_from_text("  ", "x", ValueType::String, None).is_err());
+        assert!(draft_from_text("age", "twelve", ValueType::Number, None).is_err());
+    }
 
     fn wire(provenance: &str) -> Value {
         serde_json::json!({

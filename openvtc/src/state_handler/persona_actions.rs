@@ -1234,32 +1234,28 @@ fn form_submit(state: &mut State) -> PersonaEffect {
             PersonaEffect::None
         }
         PersonaMode::Attribute(form) => {
-            let claim_type = form.claim_type.value().trim().to_string();
-            if claim_type.is_empty() {
-                // Named rather than generic: the type is the one field with no
-                // sensible default, because it is what a verifier matches on.
-                form.error = Some("A type is required — e.g. email.work.".to_string());
-                return PersonaEffect::None;
-            }
+            // The same check the vetting page's make-a-face form makes when it
+            // saves a value in place, so the two cannot drift apart.
             let value_type = pool::value_type_from_str(VALUE_TYPES[form.value_type]);
-            let value = match pool::parse_typed_value(form.value.value(), value_type) {
-                Ok(value) => value,
+            let draft = match pool::draft_from_text(
+                form.claim_type.value(),
+                form.value.value(),
+                value_type,
+                Some(form.label.value()),
+            ) {
+                Ok(draft) => draft,
                 Err(why) => {
                     form.error = Some(why);
                     return PersonaEffect::None;
                 }
             };
-            let label = form.label.value().trim();
             form.error = None;
             form.working = true;
             PersonaEffect::Job(PersonaJob::AttributePut(AttributeDraft {
                 attribute_id: form.attribute_id.clone(),
                 expected_version: form.expected_version,
-                claim_type,
-                label: (!label.is_empty()).then(|| label.to_string()),
-                value,
-                value_type,
                 endorsements: form.endorsements.clone(),
+                ..draft
             }))
         }
         PersonaMode::Profile(form) => {

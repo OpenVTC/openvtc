@@ -4099,6 +4099,94 @@ mod key_handler_tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// The make-a-face form, as a holder with no attributes meets it: the row
+    /// that needs a value takes typing (spaces too — it is a name), and once
+    /// the value is an attribute the same row's Space and ←/→ choose instead.
+    #[test]
+    fn the_new_face_form_types_into_a_needed_value_and_chooses_a_held_one() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::{
+            NewFaceFocus, NewFaceForm, PoolRow, VettingMode,
+        };
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let open = |pool: Vec<PoolRow>| {
+            let form = NewFaceForm::open(
+                "a1".into(),
+                vec!["name.legal".into()],
+                Vec::new(),
+                pool,
+                "Vetting".into(),
+            );
+            page_for(MainMenu::Vetting, move |s| {
+                s.main_page.content_panel.vetting.mode = VettingMode::NewFace(Box::new(form));
+            })
+        };
+
+        let (mut page, mut rx) = open(Vec::new());
+        assert_eq!(
+            match &page.props.main_page.content_panel.vetting.mode {
+                VettingMode::NewFace(form) => form.focus,
+                _ => unreachable!(),
+            },
+            NewFaceFocus::Asked(0),
+            "the form opens on what is missing"
+        );
+        page.handle_key_event(press(KeyCode::Char('A')));
+        assert!(matches!(vetting_action(&mut rx), V::Input(text) if text == "A"));
+        page.handle_key_event(press(KeyCode::Char(' ')));
+        assert!(
+            matches!(vetting_action(&mut rx), V::Input(text) if text == " "),
+            "a space is part of a name, not a tick"
+        );
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(vetting_action(&mut rx), V::Submit));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| page.render(frame, ()))
+            .expect("render");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(
+            screen.contains("Make a face for this community"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Your legal name (name.legal), exactly as on your documents:"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("0 of 1 required attribute ready — type your legal name below"),
+            "{screen}"
+        );
+        assert!(!screen.contains("Tick at least one"), "{screen}");
+        assert!(!screen.contains("under My Identity"), "{screen}");
+
+        let held = |id: &str| PoolRow {
+            attribute_id: id.into(),
+            claim_type: "name.legal".into(),
+            label: "name.legal".into(),
+            value: Some("Alice Example".into()),
+        };
+        let (mut page, mut rx) = open(vec![held("one"), held("two")]);
+        // Opened ready, so the focus is on the name; move to the claim row.
+        page.handle_key_event(press(KeyCode::Down));
+        assert!(matches!(vetting_action(&mut rx), V::NextField));
+        page.handle_key_event(press(KeyCode::Right));
+        assert!(matches!(vetting_action(&mut rx), V::Cycle(true)));
+        if let VettingMode::NewFace(form) = &mut page.props.main_page.content_panel.vetting.mode {
+            form.focus = NewFaceFocus::Asked(0);
+        }
+        page.handle_key_event(press(KeyCode::Char(' ')));
+        assert!(matches!(vetting_action(&mut rx), V::Toggle));
+    }
+
     #[test]
     fn vetting_forms_take_text_cycle_and_tick() {
         use crate::state_handler::actions::VettingAction as V;
