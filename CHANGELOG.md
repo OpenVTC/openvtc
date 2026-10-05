@@ -191,6 +191,13 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **Monochrome is calmer.** With `--monochrome` or `NO_COLOR`, every
+  success-green heading and tick was drawn in reverse video, every caution
+  underlined and every value in italics — a page busier than the coloured one.
+  Emphasis, successes and cautions are now simply bold, errors bold and
+  underlined, secondary text dim and values plain; reverse video is kept for
+  badges and selection bars.
+
 - **No built-in organisation or mediator; a persona's mediator comes from your
   VTA.** Setup wrote a fixed organisation DID on `fpp.storm.ws` — one
   operator's own deployment — into every account, and Settings showed it as

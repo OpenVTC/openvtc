@@ -124,18 +124,23 @@ impl Role {
         .find_map(|(own, role)| (own == color).then_some(role))
     }
 
-    /// How the role stands apart when drawn without colour. Success is what
-    /// selected rows are drawn in, so it is reversed, as a selection bar.
+    /// How the role stands apart when drawn without colour.
+    ///
+    /// Deliberately sparse. Colour carries far more than four text attributes
+    /// can, and spending one on every role drew a page of inverse-video blocks
+    /// (every success-green heading and tick), underlined sentences (every
+    /// caution) and italic DIDs — busier than the coloured view it stands in
+    /// for. So only what must still be seen is marked: emphasis is bold, an
+    /// error is bold and underlined, secondary text is dim, and values are
+    /// plain. Reverse video is kept for things drawn *on* a role's colour —
+    /// badges and selection bars — in [`paint_without_colour`].
     #[must_use]
     fn without_colour(self) -> Modifier {
         match self {
-            Role::Accent => Modifier::BOLD,
-            Role::Success => Modifier::REVERSED,
-            Role::Warning => Modifier::UNDERLINED,
+            Role::Accent | Role::Success | Role::Warning => Modifier::BOLD,
             Role::Danger => Modifier::BOLD | Modifier::UNDERLINED,
-            Role::Text => Modifier::empty(),
+            Role::Text | Role::Highlight => Modifier::empty(),
             Role::Muted => Modifier::DIM,
-            Role::Highlight => Modifier::ITALIC,
         }
     }
 }
@@ -614,7 +619,11 @@ mod tests {
             Modifier::BOLD | Modifier::UNDERLINED
         );
         assert_eq!(buffer[(2, 0)].modifier, Modifier::DIM);
-        assert_eq!(buffer[(3, 0)].modifier, Modifier::REVERSED, "a selection");
+        assert_eq!(
+            buffer[(3, 0)].modifier,
+            Modifier::REVERSED,
+            "drawn on a role's colour: a badge or selection bar"
+        );
         assert_eq!(
             buffer[(4, 0)].modifier,
             Modifier::BOLD,
