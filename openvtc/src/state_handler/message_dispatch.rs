@@ -1175,11 +1175,19 @@ async fn process_inbound(
         // A `requestMore` is the one verdict that asks the member to act, so
         // what it lacks is said where they will see it — not only in a trace.
         if let Some(needs) = openvtc_core::messaging::join_verdict_needs(message) {
+            // Under a hidden-vetting criterion the join carried a proof, not statements, and
+            // the sentence is about the proof.
+            let hidden = config
+                .private
+                .vetting
+                .applications
+                .iter()
+                .any(|a| a.community == from_did.as_str() && a.hidden.is_some());
             config.public.logs.insert(
                 LogFamily::Community,
                 format!(
                     "Community ({from_did}) has not decided your join yet: {}.",
-                    openvtc_core::messaging::describe_join_needs(&needs)
+                    openvtc_core::messaging::describe_join_needs(&needs, hidden)
                 ),
             );
         }

@@ -2242,8 +2242,15 @@ pub struct HiddenVettingRow {
     pub token_labels: Vec<String>,
     /// The tick length, in words ("3 days", "12 hours").
     pub tick_length: String,
-    /// Tokens a tick under the ordinary label.
+    /// Tokens a tick under the ordinary label, as the community publishes it.
     pub drip_per_tick: usize,
+    /// Tokens a tick this client asks for under the ordinary label: the published rate, or
+    /// less when an `overQuota` refusal said the community issues less.
+    pub drawn_per_tick: usize,
+    /// When the parameters were last read from the community, in words ("read 21:16 UTC").
+    pub params_read: String,
+    /// Why draws are held on the parameters, when they are.
+    pub params_hold: Option<String>,
     /// The last tick served, in words.
     pub last_draw: Option<String>,
     /// When the next tick window opens.

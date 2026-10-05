@@ -191,6 +191,30 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **A hidden-vetting join says why the community did not count its proof.**
+  When a community changes its published hidden-vetting parameters (drip rate,
+  tick length, live labels, events), its criterion's digest moves, and every
+  vetter attestation made before the change stops counting there. The join page
+  still called such an application satisfied, the proof went in, and the reply
+  read "it still needs more vetting (statements:1)" — the named path's wording,
+  with no reason. Now the checklist no longer counts an attestation the
+  community will refuse, the join stops before submitting when every
+  attestation held is one, and says what to do: ask the vetter to attest again.
+  A community's reply about a hidden-vetting join reads "the community did not
+  count your PCS ZKP proof: …" with its reason (`vetting:hidden:<code>`, sent
+  by vtc-service from VTI #1976 on).
+
+- **Hidden-vetting tokens are drawn at the community's current rate.** A vetter
+  whose community lowered its rate kept asking for the old one (100 tokens a
+  tick where it now issues 20) and was refused each time. Every read of the
+  community's join manifest now updates the rate, tick length, labels and
+  events at once, and no tokens are drawn until the community's settings have
+  been read in the last ten minutes. A "more than it issues a tick" refusal
+  reads the settings again straight away and draws nothing until it has. If the
+  community still publishes the refused rate, drawing stops and the desk says
+  why. The hidden-vetting view shows when the rate was read, for example
+  "Rate 20 tokens every 3 days · read 21:16 UTC".
+
 - **The join page shows a PCS ZKP proof as ready.** Joining a community that
   hides its vetters, with enough vetter attestations gathered, the row read
   "Present your vetting statements … 0 statements ready to present" — it

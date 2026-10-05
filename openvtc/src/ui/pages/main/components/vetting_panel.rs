@@ -1894,15 +1894,10 @@ fn hidden_vetting(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize
     lines.push(Line::from(""));
 
     lines.push(Line::from(" The drip").fg(COLOR_SUCCESS));
-    lines.push(item(
-        "Rate",
-        format!(
-            "{} token{} every {}",
-            row.drip_per_tick,
-            if row.drip_per_tick == 1 { "" } else { "s" },
-            row.tick_length
-        ),
-    ));
+    lines.push(item("Rate", rate_words(row)));
+    if let Some(hold) = &row.params_hold {
+        lines.push(Line::from(format!("  {hold}")).fg(COLOR_ORANGE));
+    }
     lines.push(item(
         "Last draw",
         row.last_draw.clone().unwrap_or_else(|| "none yet".into()),
@@ -1953,6 +1948,26 @@ fn hidden_vetting(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize
     } else {
         "d or Enter: draw now  Esc: back"
     }));
+}
+
+/// The drip's rate as the hidden-vetting view says it, with when it was read from the
+/// community: "20 tokens every 3 days · read 21:16 UTC".
+fn rate_words(row: &crate::state_handler::main_page::content::HiddenVettingRow) -> String {
+    let n = row.drawn_per_tick;
+    let mut words = format!(
+        "{n} token{} every {}",
+        if n == 1 { "" } else { "s" },
+        row.tick_length
+    );
+    if n != row.drip_per_tick {
+        words.push_str(&format!(
+            " (the community publishes {}, and serves no more than {n})",
+            row.drip_per_tick
+        ));
+    }
+    words.push_str(" · ");
+    words.push_str(&row.params_read);
+    words
 }
 
 fn attest(lines: &mut Vec<Line<'static>>, v: &VettingState, request_id: &str, form: &AttestForm) {
@@ -2309,6 +2324,8 @@ mod desk_tests {
             token_labels: vec!["token/2026-10".into(), "token/2026-09".into()],
             tick_length: "3 days".into(),
             drip_per_tick: 3,
+            drawn_per_tick: 3,
+            params_read: "read 21:16 UTC".into(),
             last_draw: Some("token/2026-10 tick 1 — 3 tokens at 2026-10-04 00:07 UTC".into()),
             next_window: Some("2026-10-07 00:00 UTC".into()),
             events: vec![("summit".into(), "pending".into(), 2, 3)],
@@ -2328,7 +2345,7 @@ mod desk_tests {
             "7 — 6 usable",
             "Spent",
             "token/2026-10, token/2026-09",
-            "3 tokens every 3 days",
+            "3 tokens every 3 days · read 21:16 UTC",
             "token/2026-10 tick 1",
             "2026-10-07 00:00 UTC",
             "pending — 2 of 3 vetters needed",
@@ -2345,12 +2362,32 @@ mod desk_tests {
         let v = VettingState {
             hidden: vec![HiddenVettingRow {
                 rekeyed: Some("2026-10-04 09:00 UTC".into()),
-                ..row
+                ..row.clone()
             }]
             .into(),
             ..v
         };
         assert!(drawn(&v).contains("drawing has stopped"));
+
+        // Held to less than it publishes, and held for a read: both said.
+        let v = VettingState {
+            hidden: vec![HiddenVettingRow {
+                drawn_per_tick: 2,
+                params_hold: Some("its parameters are being read again".into()),
+                ..row
+            }]
+            .into(),
+            ..v
+        };
+        let text = drawn(&v);
+        assert!(
+            text.contains("2 tokens every 3 days (the community publishes 3"),
+            "{text}"
+        );
+        assert!(
+            text.contains("its parameters are being read again"),
+            "{text}"
+        );
     }
 
     /// A community known only by its DID is shortened to 48 characters, wider

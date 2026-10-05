@@ -140,6 +140,32 @@ pub struct ChosenFace {
     pub name: String,
 }
 
+/// Why a held hidden-vetting attestation cannot count at its community any more
+/// ([`Application::stale_hidden_attestation`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StaleAttestation {
+    /// Made under another version of the criterion: the community changed its published
+    /// parameters since, which moves the digest the attestation binds.
+    Criterion,
+    /// Spends a token under this label, which the community no longer publishes.
+    TokenLabel(String),
+}
+
+impl std::fmt::Display for StaleAttestation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Criterion => f.write_str(
+                "it was made under an earlier version of the community's criterion (its \
+                 hidden-vetting parameters changed since)",
+            ),
+            Self::TokenLabel(label) => write!(
+                f,
+                "it spends a token under {label}, a label the community no longer accepts"
+            ),
+        }
+    }
+}
+
 /// One application.
 ///
 /// No `PartialEq`: it carries the community's generated requirements and the
@@ -1322,6 +1348,10 @@ impl Application {
             .iter()
             .enumerate()
             .filter(|(_, held)| held.meta.valid_until >= now.date_naive())
+            // One the community will refuse is not progress, whatever it once was: the
+            // checklist that called a join with only stale attestations "satisfied" is how a
+            // join went in and came back "needs more vetting" with no reason anyone could see.
+            .filter(|(_, held)| self.stale_hidden_attestation(held).is_none())
             .map(|(i, held)| StatementFacts {
                 statement_id: format!("hidden-{i}"),
                 // An ordinal, never an identifier: the applicant holds no name for the vetter
@@ -1423,6 +1453,65 @@ impl Application {
         self.hidden_state
             .as_ref()
             .is_some_and(|h| !h.held.is_empty())
+    }
+
+    /// Why `held` cannot count at the community as it publishes itself now, or `None` when it
+    /// can as far as this client can tell.
+    ///
+    /// The community refuses, attestation by attestation and without saying so in the count:
+    ///
+    /// - one made under **another version of the criterion**. The criterion's digest covers
+    ///   its published hidden-vetting parameters — drip rate, tick length, live labels,
+    ///   events — so an operator changing any of them moves it, and every attestation made
+    ///   before the change binds the digest it was asked under (the vetting request's);
+    /// - one spending a token under a **label the community no longer publishes**.
+    ///
+    /// Neither can be mended by the applicant: the digest and the label are inside what the
+    /// vetter signed. The way on is a fresh attestation, made under the criterion as it stands.
+    #[must_use]
+    pub fn stale_hidden_attestation(
+        &self,
+        held: &openvtc_vetting_pcs::snapshot::HeldAttestation,
+    ) -> Option<StaleAttestation> {
+        let params = self.hidden.as_ref()?;
+        if self
+            .requirements_digest
+            .as_deref()
+            .is_some_and(|digest| digest != held.meta.requirements_digest)
+        {
+            return Some(StaleAttestation::Criterion);
+        }
+        if !params.token_labels.contains(&held.token_label) {
+            return Some(StaleAttestation::TokenLabel(held.token_label.clone()));
+        }
+        None
+    }
+
+    /// Why each held attestation that cannot count cannot, one entry per such attestation.
+    #[must_use]
+    pub fn stale_hidden_attestations(&self) -> Vec<StaleAttestation> {
+        self.hidden_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .held
+                    .iter()
+                    .filter_map(|held| self.stale_hidden_attestation(held))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether at least one held attestation can still count at the community
+    /// ([`Self::stale_hidden_attestation`]).
+    #[must_use]
+    pub fn holds_current_hidden_attestation(&self) -> bool {
+        self.hidden_state.as_ref().is_some_and(|state| {
+            state
+                .held
+                .iter()
+                .any(|held| self.stale_hidden_attestation(held).is_none())
+        })
     }
 
     /// Record that a submission carrying this application's hidden proof was sent, and forget

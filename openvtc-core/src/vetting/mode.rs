@@ -298,8 +298,10 @@ impl VettingBook {
     ///
     /// Also keeps [`Self::hidden_published`] — what the community publishes about hidden
     /// vetting — in step: set while it publishes parameters, dropped when it stops. An engine we
-    /// already hold is left alone: a credential does not become worthless because the
-    /// advertisement moved.
+    /// already hold is kept — a credential does not become worthless because the advertisement
+    /// moved — and takes the parameters read, under its own keys
+    /// ([`HiddenVetterState::take_reading`](super::book::HiddenVetterState::take_reading)), so
+    /// no draw is planned on a rate the community has moved off.
     pub fn learn_mode(
         &mut self,
         community: &str,
@@ -315,10 +317,11 @@ impl VettingBook {
             }
         };
         let mut changed = false;
-        match params {
+        match &params {
             Some(params) => {
-                if self.hidden_published.get(community) != Some(&params) {
-                    self.hidden_published.insert(community.to_string(), params);
+                if self.hidden_published.get(community) != Some(params) {
+                    self.hidden_published
+                        .insert(community.to_string(), params.clone());
                     changed = true;
                     // Enrol now rather than at the next sweep: until enrolled, a vetter for
                     // this community can only refuse to attest.
@@ -326,6 +329,26 @@ impl VettingBook {
                 }
             }
             None => changed |= self.hidden_published.remove(community).is_some(),
+        }
+        // Every engine held for this community takes the read now — rate, tick length, labels,
+        // events — not at its next pass, so the desk shows what the community says and no
+        // draw is planned on what it used to say. A pass that held its draws for this read runs
+        // again on it.
+        if let Some(live) = params.as_ref() {
+            let mut resume = false;
+            for held in self
+                .hidden_vetter
+                .iter_mut()
+                .filter(|h| h.community == community)
+            {
+                held.take_reading(live, now);
+                // Changed or not, the time read is worth a save: the desk shows it.
+                changed = true;
+                resume |= std::mem::take(&mut held.awaiting_read);
+            }
+            if resume {
+                self.vetter_refresh_due = true;
+            }
         }
         if let Some(known) = self
             .communities
@@ -403,6 +426,23 @@ impl VettingBook {
                 .find(|c| c.community == community)
                 .and_then(|c| c.vetter_mode)
                 .is_some_and(|r| recent(r.read_at))
+    }
+
+    /// Whether `community`'s manifest is owed a read now whatever [`MANIFEST_MIN_GAP`] says: a
+    /// draw was refused as over its rate (`overQuota`) after the last read and after the last
+    /// ask, and no question is open. Once per refusal — the ask it causes is after it — so it
+    /// never asks in a loop (R1.4).
+    #[must_use]
+    pub fn params_reread_owed(&self, community: &str) -> bool {
+        let asked_at = self.mode_checks.get(community).and_then(|c| c.asked_at);
+        self.waiting_on(community, QueryKind::Manifest).is_none()
+            && self.hidden_vetter.iter().any(|h| {
+                h.community == community
+                    && h.reread_owed()
+                    && h.over_quota
+                        .as_ref()
+                        .is_some_and(|q| asked_at.is_none_or(|a| a <= q.at))
+            })
     }
 
     /// The switches seen since this was last called, oldest first.

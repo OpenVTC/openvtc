@@ -643,13 +643,32 @@ pub fn join_verdict_needs(message: &Message) -> Option<Vec<String>> {
 /// request was decided under still lacks. An unknown token is shown as it
 /// came rather than dropped — the member is better served by a word they can
 /// ask about than by a sentence that leaves something out.
+///
+/// `hidden` says the join was made under a hidden-vetting (PCS ZKP) criterion.
+/// There the applicant presented a proof, not statements, so a count of
+/// "statements" is the named path's wording and the wrong thing to say: the
+/// sentence is about the proof, and carries the community's reasons
+/// (`vetting:hidden:<code>`) when it sent them.
 #[must_use]
-pub fn describe_join_needs(needs: &[String]) -> String {
+pub fn describe_join_needs(needs: &[String], hidden: bool) -> String {
     if needs.is_empty() {
         return "it needs more evidence, but did not say what".to_string();
     }
+    let hidden_reasons: Vec<String> = needs
+        .iter()
+        .filter_map(|n| n.strip_prefix(HIDDEN_NEED_PREFIX))
+        .map(describe_hidden_reason)
+        .collect();
+    let hidden = hidden || !hidden_reasons.is_empty();
+    // Under hidden vetting the count is the proof's shortfall, said with it below.
+    let proof_shortfall = needs
+        .iter()
+        .find_map(|n| n.strip_prefix("vetting:statements:"))
+        .filter(|_| hidden);
     let words: Vec<String> = needs
         .iter()
+        .filter(|n| !n.starts_with(HIDDEN_NEED_PREFIX))
+        .filter(|n| !(hidden && n.starts_with("vetting:statements:")))
         .map(|need| match need.as_str() {
             "credentials" => "a credential it recognises".to_string(),
             "invitation" => "an invitation".to_string(),
@@ -663,7 +682,62 @@ pub fn describe_join_needs(needs: &[String]) -> String {
             },
         })
         .collect();
-    format!("it still needs {}", words.join(", "))
+    let mut sentences = Vec::new();
+    if hidden && (proof_shortfall.is_some() || !hidden_reasons.is_empty()) {
+        let reason = if hidden_reasons.is_empty() {
+            // A community that predates the reasons sends only the count.
+            "it gave no reason".to_string()
+        } else {
+            hidden_reasons.join("; ")
+        };
+        let count = match proof_shortfall {
+            Some("1") => " (it still needs 1 more vetter)".to_string(),
+            Some(n) => format!(" (it still needs {n} more vetters)"),
+            None => String::new(),
+        };
+        sentences.push(format!(
+            "the community did not count your PCS ZKP proof{count}: {reason}"
+        ));
+    }
+    if !words.is_empty() {
+        sentences.push(format!("it still needs {}", words.join(", ")));
+    }
+    sentences.join("; and ")
+}
+
+/// The `needs` prefix a community gives the reasons a hidden-vetting proof did
+/// not count under: `vetting:hidden:<code>`.
+const HIDDEN_NEED_PREFIX: &str = "vetting:hidden:";
+
+/// One `vetting:hidden:<code>` reason, as the member reads it. An unknown code
+/// is shown as it came.
+fn describe_hidden_reason(code: &str) -> String {
+    match code {
+        "requirements-digest-mismatch" => {
+            "a vetter's attestation was made under an earlier version of the community's \
+             criterion (its hidden-vetting parameters changed since) — ask the vetter to attest \
+             again"
+        }
+        "token-label-not-live" => {
+            "a vetter's attestation spends a token under a label the community no longer \
+             accepts — ask the vetter to attest again"
+        }
+        "no-token" => "a vetter's attestation carries a token the community did not issue",
+        "token-mismatch" => "a vetter's attestation does not match the token it spends",
+        "token-double-spend" => "a vetter's attestation spends a token already spent",
+        "expired" => "a vetter's attestation has expired — ask the vetter to attest again",
+        "no-proof" => "no proof arrived with the request — join again",
+        "unsupported" => "the community cannot verify PCS ZKP proofs",
+        "issuer-not-vetter" => "a vetter's attestation is not from an eligible vetter",
+        "revoked" => "a vetter withdrew their attestation",
+        "wrong-community" => "a vetter's attestation is for another community",
+        "method-not-accepted" => "a vetter used a vetting method this criterion does not accept",
+        "claim-not-verified" => "a vetter did not verify a claim this criterion asks for",
+        "too-old" => "a vetter's attestation is older than this criterion accepts",
+        "same-vetter" => "two attestations are from the same vetter",
+        other => return other.to_string(),
+    }
+    .to_string()
 }
 
 /// Read a DIDComm problem-report from `from_did`. `None` when the sender is
@@ -2790,17 +2864,68 @@ mod tests {
     /// and an unknown one is kept rather than dropped.
     #[test]
     fn a_request_more_says_what_the_join_lacks() {
-        let said = describe_join_needs(&[
-            "invitation".to_string(),
-            "vetting:independence".to_string(),
-            "vetting:minStatements".to_string(),
-            "somethingNew".to_string(),
-        ]);
+        let said = describe_join_needs(
+            &[
+                "invitation".to_string(),
+                "vetting:independence".to_string(),
+                "vetting:minStatements".to_string(),
+                "somethingNew".to_string(),
+            ],
+            false,
+        );
         assert!(said.contains("an invitation"), "{said}");
         assert!(said.contains("independent"), "{said}");
         assert!(said.contains("more vetting (minStatements)"), "{said}");
         assert!(said.contains("somethingNew"), "{said}");
-        assert!(describe_join_needs(&[]).contains("did not say"));
+        assert!(describe_join_needs(&[], false).contains("did not say"));
+    }
+
+    /// Under hidden vetting the join carried a PCS ZKP proof, so the sentence is
+    /// about the proof — with the community's reason when it sent one — and
+    /// never the named path's "statements" count.
+    #[test]
+    fn a_hidden_request_more_is_about_the_proof_and_says_why() {
+        let said = describe_join_needs(
+            &[
+                "vetting:statements:1".to_string(),
+                "vetting:hidden:requirements-digest-mismatch".to_string(),
+            ],
+            true,
+        );
+        assert!(
+            said.starts_with("the community did not count your PCS ZKP proof"),
+            "{said}"
+        );
+        assert!(said.contains("1 more vetter"), "{said}");
+        assert!(said.contains("earlier version"), "{said}");
+        assert!(said.contains("attest again"), "{said}");
+        assert!(!said.contains("statements"), "{said}");
+
+        // The reason alone marks the join hidden, whatever the caller knew.
+        let said = describe_join_needs(&["vetting:hidden:token-label-not-live".to_string()], false);
+        assert!(said.contains("PCS ZKP proof"), "{said}");
+        assert!(said.contains("no longer accepts"), "{said}");
+
+        // A community that sends only the count still reads as the proof's.
+        let said = describe_join_needs(&["vetting:statements:2".to_string()], true);
+        assert!(said.contains("PCS ZKP proof"), "{said}");
+        assert!(said.contains("2 more vetters"), "{said}");
+        assert!(said.contains("gave no reason"), "{said}");
+
+        // An unknown code is kept, and other needs still follow.
+        let said = describe_join_needs(
+            &[
+                "vetting:hidden:somethingNew".to_string(),
+                "invitation".to_string(),
+            ],
+            true,
+        );
+        assert!(said.contains("somethingNew"), "{said}");
+        assert!(said.contains("an invitation"), "{said}");
+
+        // The named path is unchanged.
+        let said = describe_join_needs(&["vetting:statements:1".to_string()], false);
+        assert_eq!(said, "it still needs more vetting (statements:1)");
     }
 
     /// The needs come out of a `requestMore` verdict, and out of nothing else.
