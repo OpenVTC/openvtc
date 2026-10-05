@@ -394,6 +394,67 @@ async fn an_application_adopts_the_hidden_vetting_parameters_a_community_publish
     assert!(party.application().requirements.is_some());
 }
 
+/// The challenge a community issues reaches the application and is answered to whoever asked —
+/// by the question's own id, so a join waiting on it resumes on its answer and no other. And it
+/// binds one submission only: once a proof bound to it has gone out, the community has spent it,
+/// so it is not kept for the next attempt.
+#[tokio::test]
+async fn a_challenge_is_answered_to_its_question_and_spent_by_the_submit_it_binds() {
+    let mut applicant = Party::new(1);
+    applicant
+        .book
+        .start_application(COMMUNITY, applicant.persona, &applicant.did, Utc::now())
+        .expect("an application starts");
+    let raw = manifest_raw_with_ext(
+        json!({ super::hidden::HIDDEN_VETTING_NS: hidden_params() }),
+        Some(json!([super::hidden::HIDDEN_VETTING_NS])),
+    );
+    applicant
+        .application()
+        .adopt_manifest(&manifest_body(), &raw)
+        .expect("a hidden criterion");
+
+    let request = wire::pcs_challenge_request(&applicant.did, COMMUNITY, None).unwrap();
+    applicant
+        .book
+        .ask(asked(&request, applicant.persona, QueryKind::PcsChallenge));
+    let issued = wire::pcs::ChallengeResponse {
+        challenge: "c0ffee".into(),
+        expires_at: Utc::now() + Duration::minutes(15),
+        ext: None,
+    };
+    let handled = applicant
+        .receive(&community_answer(&request, &issued).await, COMMUNITY)
+        .await;
+    assert!(matches!(
+        handled.answer,
+        Some(CommunityAnswer::Challenge { ref query, ref community })
+            if *query == request.id && community == COMMUNITY
+    ));
+    assert!(matches!(
+        handled.notice,
+        Some(Notice::ChallengeIssued { .. })
+    ));
+    assert_eq!(
+        applicant.application().hidden_challenge.as_deref(),
+        Some("c0ffee")
+    );
+
+    // A submit that carried no proof spends nothing.
+    assert!(!applicant.application().hidden_submission_sent());
+    assert_eq!(
+        applicant.application().hidden_challenge.as_deref(),
+        Some("c0ffee")
+    );
+    // One that did spends the challenge with it.
+    applicant
+        .application()
+        .set_hidden_submission(json!({ "challenge": "c0ffee" }));
+    assert!(applicant.application().hidden_submission_sent());
+    assert_eq!(applicant.application().hidden_challenge, None);
+    assert_eq!(applicant.application().hidden_submission, None);
+}
+
 #[tokio::test]
 async fn a_critical_namespace_this_build_cannot_honour_stops_the_application() {
     let mut party = Party::new(1);

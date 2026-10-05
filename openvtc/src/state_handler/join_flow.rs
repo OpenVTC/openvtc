@@ -77,6 +77,15 @@ pub(crate) enum JoinEntry {
         vtc_did: String,
         outcome: RequirementsOutcome,
     },
+    /// Back from waiting for the challenge a hidden-vetting proof binds. The
+    /// launch that asked is taken up again exactly where it parked: everything
+    /// the person chose on the way to it — persona, invitation, answers, the
+    /// trust-registry box — is still on the join state, which this entry does
+    /// not reset.
+    Challenge {
+        awaiting: AwaitingChallenge,
+        outcome: ChallengeOutcome,
+    },
 }
 
 /// How a wait for a community's requirements ended.
@@ -104,6 +113,43 @@ pub(crate) struct AwaitingRequirements {
 /// How long the join screen waits for a community's requirements before
 /// offering to go on without them.
 pub(crate) const REQUIREMENTS_WAIT: Duration = Duration::from_secs(15);
+
+/// A join parked on the challenge its hidden-vetting proof must bind.
+///
+/// A community that hides its vetters accepts a proof only over a challenge it
+/// issued itself, once (`vtc/vetting/pcs-challenge/0.1`). The launch asks for
+/// one and then, like [`AwaitingRequirements`], hands the wait to the runtime
+/// loop, which is the only loop that hears the answer: the join flow's own
+/// `select!` reads actions and interrupts, nothing inbound. When the answer
+/// arrives — or [`CHALLENGE_WAIT`] passes without one — that loop enters the
+/// flow again with [`JoinEntry::Challenge`], and the launch carries on from
+/// where it stopped rather than sending the person off to ask for it themselves.
+#[derive(Clone, Debug)]
+pub(crate) struct AwaitingChallenge {
+    pub vtc_did: String,
+    /// The challenge request's document id — what the answer threads on.
+    pub document_id: String,
+    pub asked_at: std::time::Instant,
+    /// The launch to take up again: what `launch_join_sequence` was called
+    /// with when it stopped to ask.
+    pub choice: IdentityPick,
+    pub context_id: String,
+}
+
+/// How a wait for a community's challenge ended.
+#[derive(Debug)]
+pub(crate) enum ChallengeOutcome {
+    /// The challenge is on the application; the launch can build its proof.
+    Issued,
+    /// No usable challenge, and why — worded so the operator can tell a
+    /// community that refused from one that never answered (R6.4).
+    Unanswered(String),
+}
+
+/// How long a join waits for a community's challenge before it says none came.
+/// The same wait as for its requirements: both are one round trip to the same
+/// service, and a person watching the screen should not have to learn two.
+pub(crate) const CHALLENGE_WAIT: Duration = REQUIREMENTS_WAIT;
 
 /// How long sending the question may take before the page says so.
 const ASK_TIMEOUT: Duration = Duration::from_secs(15);
@@ -141,6 +187,178 @@ pub(crate) fn resume_for(
         vtc_did: awaiting.vtc_did.clone(),
         outcome,
     })
+}
+
+/// The entry a community's answer makes for the join waiting on its challenge,
+/// if the answer is to that join's own question.
+///
+/// Matched on the request's document id, not only the community: the Vetting
+/// page asks for challenges too, and an answer to one of those is not the
+/// answer this launch is waiting for.
+pub(crate) fn challenge_resume_for(
+    awaiting: &AwaitingChallenge,
+    answer: &CommunityAnswer,
+) -> Option<JoinEntry> {
+    if answer.community() != awaiting.vtc_did {
+        return None;
+    }
+    let outcome = match answer {
+        CommunityAnswer::Challenge { query, .. } if *query == awaiting.document_id => {
+            ChallengeOutcome::Issued
+        }
+        CommunityAnswer::Refused {
+            query,
+            kind: QueryKind::PcsChallenge,
+            code,
+            message,
+            ..
+        } if *query == awaiting.document_id => {
+            let mut why = format!("it refused ({})", sanitize_display(code, 120));
+            if let Some(note) = message {
+                why.push_str(&format!(", saying: {}", sanitize_display(note, 300)));
+            }
+            ChallengeOutcome::Unanswered(why)
+        }
+        CommunityAnswer::Unreadable {
+            query,
+            kind: QueryKind::PcsChallenge,
+            detail,
+            ..
+        } if *query == awaiting.document_id => ChallengeOutcome::Unanswered(format!(
+            "it answered in a form this client cannot read — the two disagree about the task; \
+             it is not a refusal ({})",
+            sanitize_display(detail, 200)
+        )),
+        _ => return None,
+    };
+    Some(JoinEntry::Challenge {
+        awaiting: awaiting.clone(),
+        outcome,
+    })
+}
+
+/// What a launch does about the challenge its hidden-vetting proof binds.
+#[derive(Debug, PartialEq, Eq)]
+enum ChallengeStep {
+    /// Go on: nothing hidden to prove, a challenge was just issued for this
+    /// launch, or this loop cannot hear an answer anyway (and
+    /// [`hidden_proof_refusal`] says what to do when none is held).
+    Proceed,
+    /// Ask the community for a fresh challenge, and wait for it.
+    Ask,
+}
+
+/// Decide [`ChallengeStep`] for a launch presenting `application`.
+///
+/// A fresh challenge is asked for on **every** hidden-vetting launch that can
+/// hear the answer, even when one is already stored. The community keeps one
+/// open challenge per applicant, replaces it whenever it is asked again, lets
+/// it lapse after fifteen minutes, and spends it on any submission that
+/// carries a proof — counted or refused. A stored one may be any of those
+/// without this client knowing, and a proof over a dead challenge is refused
+/// only after the request has gone out. One round trip at join time is the
+/// price of never sending that.
+///
+/// Nothing is asked when there is nothing to prove: with no vetter's
+/// attestation held there is no proof, and the refusal that follows says so —
+/// asking first would only make the person wait to be told it.
+fn challenge_step(
+    application: Option<&Application>,
+    hears_replies: bool,
+    fresh: bool,
+) -> ChallengeStep {
+    let Some(application) = application.filter(|a| a.hidden.is_some()) else {
+        return ChallengeStep::Proceed;
+    };
+    if fresh || !hears_replies || !application.holds_hidden_attestation() {
+        return ChallengeStep::Proceed;
+    }
+    ChallengeStep::Ask
+}
+
+/// The vetting application a join as `pick` to `vtc_did` presents: the one
+/// made under that persona, and only while it was made for that persona's DID
+/// — the statements and proof it holds name the DID they were gathered for.
+/// The same match `run_join_sequence` makes when it attaches them.
+fn presented_application<'a>(
+    config: &'a Config,
+    vtc_did: &str,
+    pick: &IdentityPick,
+) -> Option<&'a Application> {
+    let IdentityPick::Reuse(id) = pick else {
+        return None;
+    };
+    let persona = config.account.personas.get(id)?;
+    config
+        .private
+        .vetting
+        .application(vtc_did, persona.persona_id)
+        .filter(|a| a.join_did == persona.did)
+}
+
+/// Ask `vtc_did` for the challenge `persona`'s hidden proof must bind. `Ok` is
+/// the request's document id; `Err` is why it could not be put on the wire.
+///
+/// The send is bounded (R1.2) and its failure is worded as *ours* — the
+/// question never left — so it is not mistaken for a community that refused or
+/// one that never answered (R6.4). The stored challenge is dropped once the
+/// request is out: the community replaces it on receipt, so it can no longer
+/// bind anything.
+async fn ask_challenge(
+    config: &mut Config,
+    tdk: &TDK,
+    messaging: Option<&Messaging>,
+    vtc_did: &str,
+    persona: PersonaId,
+) -> Result<String, String> {
+    let service = messaging.ok_or_else(|| {
+        "messaging is not running, so the community's answer could not be heard".to_string()
+    })?;
+    let join_did = config
+        .private
+        .vetting
+        .application(vtc_did, persona)
+        .map(|a| a.join_did.clone())
+        .ok_or_else(|| "the vetting application for this persona is gone".to_string())?;
+    let document = wire::pcs_challenge_request(&join_did, vtc_did, None)
+        .map_err(|e| format!("the request could not be built: {e}"))?;
+    let document_id = match tokio::time::timeout(
+        ASK_TIMEOUT,
+        wire::sign_and_send(config, tdk, service, persona, document),
+    )
+    .await
+    {
+        Ok(Ok(document_id)) => document_id,
+        Ok(Err(e)) => return Err(format!("the request could not be sent: {e}")),
+        Err(_) => {
+            return Err(format!(
+                "the request was not sent within {} seconds — your mediator may be unreachable",
+                ASK_TIMEOUT.as_secs()
+            ));
+        }
+    };
+    config.private.vetting.ask(CommunityQuery {
+        document_id: document_id.clone(),
+        community: vtc_did.to_string(),
+        persona,
+        kind: QueryKind::PcsChallenge,
+        sent_at: Utc::now(),
+    });
+    if let Some(application) = config.private.vetting.application_mut(vtc_did, persona) {
+        application.hidden_challenge = None;
+    }
+    Ok(document_id)
+}
+
+/// The sentence a hidden-vetting join stops on when the community's challenge
+/// did not come. `reason` says which way it failed: not sent, refused,
+/// unreadable, or no answer at all.
+fn challenge_failed_words(community: &str, reason: &str) -> String {
+    format!(
+        "This community hides its vetters, so joining sends a zero-knowledge proof bound to a \
+         challenge the community issues for each attempt. Asking {community} for one failed: \
+         {reason}. Nothing was sent — join again to ask once more."
+    )
 }
 
 /// The contexts a new application by `persona` to `vtc_did` can use.
@@ -876,22 +1094,29 @@ impl StateHandler {
         messaging: Option<&Messaging>,
         entry: JoinEntry,
     ) -> Result<JoinExit> {
-        // Enter the flow on a fresh EnterDid page.
-        state.join.reset();
-        // Surface the launch-supplied invitation on the entry page (reset clears
-        // the transient join sub-state, so mirror the flag back in afterwards).
-        state.join.has_invitation = state.invitation_credential.is_some();
-        state.join.invitation_foreign_subject = state
-            .invitation_credential
-            .as_ref()
-            .and_then(|vic| foreign_invitation_subject(config, vic));
+        // Enter the flow on a fresh EnterDid page — unless this is a launch
+        // coming back with its challenge, which must find everything the person
+        // chose on the way to it exactly as they left it.
+        if !matches!(entry, JoinEntry::Challenge { .. }) {
+            state.join.reset();
+            // Surface the launch-supplied invitation on the entry page (reset
+            // clears the transient join sub-state, so mirror the flag back in
+            // afterwards).
+            state.join.has_invitation = state.invitation_credential.is_some();
+            state.join.invitation_foreign_subject = state
+                .invitation_credential
+                .as_ref()
+                .and_then(|vic| foreign_invitation_subject(config, vic));
+        }
         state.active_page = ActivePage::Join;
         let hears_replies = match &entry {
             JoinEntry::Fresh { hears_replies } | JoinEntry::ForCommunity { hears_replies, .. } => {
                 *hears_replies
             }
-            JoinEntry::Resume { .. } => true,
+            // Only the runtime loop waits on an answer, so only it resumes.
+            JoinEntry::Resume { .. } | JoinEntry::Challenge { .. } => true,
         };
+        state.join.hears_replies = hears_replies;
         match entry {
             JoinEntry::Fresh { .. } => {}
             // The community is already chosen, so the flow opens where the DID
@@ -947,10 +1172,46 @@ impl StateHandler {
                     }
                 }
             }
+            JoinEntry::Challenge { awaiting, outcome } => match outcome {
+                ChallengeOutcome::Issued => {
+                    // The stored challenge is the one this launch asked for;
+                    // the launch takes the flag, so it serves exactly one submit.
+                    state.join.challenge_fresh = true;
+                    if let Some(interrupted) = self
+                        .launch_join_sequence(
+                            awaiting.choice,
+                            awaiting.vtc_did,
+                            awaiting.context_id,
+                            interrupt_rx,
+                            state,
+                            tdk,
+                            config,
+                            admin_vta,
+                            profile,
+                            messaging,
+                        )
+                        .await
+                    {
+                        return Ok(JoinExit::Exit(interrupted));
+                    }
+                }
+                ChallengeOutcome::Unanswered(reason) => {
+                    let name = vetting_actions::community_display(config, &awaiting.vtc_did);
+                    state.join.page = JoinPage::Progress;
+                    state.join.fail(challenge_failed_words(&name, &reason));
+                }
+            },
         }
         let _ = self.state_tx.send(state.clone());
 
         loop {
+            // A launch that stopped to ask a hidden-vetting community for its
+            // challenge leaves the flow here, whichever page or entry started
+            // it: only the caller's loop hears the answer.
+            if let Some(awaiting) = state.join.challenge_wait.take() {
+                let _ = self.state_tx.send(state.clone());
+                return Ok(JoinExit::AwaitChallenge(awaiting));
+            }
             tokio::select! {
                 maybe_action = action_rx.recv() => {
                     let Some(action) = maybe_action else {
@@ -2004,6 +2265,49 @@ impl StateHandler {
             return None;
         }
 
+        // A community that hides its vetters takes a proof bound to a challenge
+        // it issues — once, and fresh for each attempt (see `challenge_step`).
+        // Asked for here, after every question the person answers, so the
+        // challenge is as young as it can be when the proof is built over it.
+        // The flow hands the wait to the loop that can hear the answer and comes
+        // back through `JoinEntry::Challenge`, which lands here again.
+        let fresh = std::mem::take(&mut state.join.challenge_fresh);
+        let step = challenge_step(
+            presented_application(config, &vtc_did, &choice),
+            state.join.hears_replies,
+            fresh,
+        );
+        if step == ChallengeStep::Ask
+            && let IdentityPick::Reuse(persona) = choice
+        {
+            state.join.page = JoinPage::Progress;
+            state.join.completed = Completion::NotFinished;
+            state.join.messages.clear();
+            let name = vetting_actions::community_display(config, &vtc_did);
+            match ask_challenge(config, tdk, messaging, &vtc_did, persona).await {
+                Ok(document_id) => {
+                    // Locked while the answer is awaited: the wait is bounded
+                    // (`CHALLENGE_WAIT`), and nothing on this page can usefully
+                    // be done in the meantime.
+                    state.join.processing = true;
+                    state.join.info(format!(
+                        "This community hides its vetters. Asking {name} for a fresh challenge \
+                         to bind your proof to…"
+                    ));
+                    state.join.challenge_wait = Some(AwaitingChallenge {
+                        vtc_did,
+                        document_id,
+                        asked_at: std::time::Instant::now(),
+                        choice,
+                        context_id,
+                    });
+                }
+                Err(reason) => state.join.fail(challenge_failed_words(&name, &reason)),
+            }
+            let _ = self.state_tx.send(state.clone());
+            return None;
+        }
+
         // Move to the progress page and lock input.
         state.join.page = JoinPage::Progress;
         state.join.processing = true;
@@ -2394,6 +2698,10 @@ pub(crate) enum JoinExit {
     /// screen up, waits for the answer, and enters the flow again
     /// ([`AwaitingRequirements`]).
     AwaitRequirements(AwaitingRequirements),
+    /// The launch is parked on the challenge its hidden-vetting proof binds;
+    /// the caller hears the answer and enters the flow again
+    /// ([`AwaitingChallenge`]).
+    AwaitChallenge(AwaitingChallenge),
     /// Application is exiting (Exit / UXError / interrupt).
     Exit(Interrupted),
 }
@@ -3349,6 +3657,19 @@ async fn run_join_sequence(
         }
     };
 
+    // The challenge a hidden proof was bound to is spent now: the community
+    // consumes it the moment it reads the proof, whatever it then decides. Kept,
+    // it would be bound into the next attempt's proof and refused there. Saved
+    // with the membership below.
+    if let Some(application) = config
+        .private
+        .vetting
+        .application_mut(&vtc_did, persona_id)
+        .filter(|a| a.join_did == applicant_did)
+    {
+        application.hidden_submission_sent();
+    }
+
     // 9. Record the pending membership and persist.
     let record = build_pending_record(
         vtc_did.clone(),
@@ -3565,15 +3886,25 @@ fn hidden_proof_refusal(
     application: &mut openvtc_core::vetting::applicant::Application,
     join: &mut crate::state_handler::join::JoinState,
 ) -> Option<String> {
+    // Nothing to prove is said first: with no attestation held, a missing challenge is beside
+    // the point, and naming it would send the person after the wrong thing.
+    if application.hidden.is_some() && !application.holds_hidden_attestation() {
+        return Some(NO_ATTESTATION.to_string());
+    }
     // The challenge is the COMMUNITY's, asked for over `vtc/vetting/pcs-challenge/0.1` and
     // recorded on the application when it arrives. A proof over one we minted ourselves
     // verifies and is refused, which is the whole point of the exchange: the community
     // accepts each challenge exactly once, so a submission cannot be replayed.
+    //
+    // A launch that can hear the answer has already asked for a fresh one (`challenge_step`),
+    // so this is reached without one only from a loop that cannot — and the way out is a loop
+    // that can, not a key on a page this screen cannot reach.
     let Some(challenge) = application.hidden_challenge.clone() else {
         return Some(
             "This community hides its vetters, so joining sends a zero-knowledge proof bound to \
-             a challenge the community issues — and none has arrived yet. Nothing was sent. In \
-             Vetting, press m on this application to ask for it, then join again."
+             a challenge the community issues — and none is held. Nothing was sent. This screen \
+             cannot hear the community's answer, so it could not ask for one: start the join \
+             again once messaging is running, and it asks for the challenge itself."
                 .to_string(),
         );
     };
@@ -3583,17 +3914,18 @@ fn hidden_proof_refusal(
             None
         }
         // Hidden parameters but no engine state: no vetter's attestation has arrived.
-        Ok(false) => Some(
-            "This community hides its vetters, and no vetter's attestation has reached this \
-             application yet, so there is nothing to prove. Nothing was sent."
-                .to_string(),
-        ),
+        Ok(false) => Some(NO_ATTESTATION.to_string()),
         Err(e) => Some(format!(
             "The zero-knowledge proof of your vetting could not be built ({e}). Nothing was sent \
              — joining without it would present no vetting at all."
         )),
     }
 }
+
+/// Why a hidden-vetting join stops when no vetter has attested yet.
+const NO_ATTESTATION: &str = "This community hides its vetters, and no vetter's attestation has \
+                              reached this application yet, so there is nothing to prove. \
+                              Nothing was sent.";
 
 /// Persist the config, abstracting over the openpgp-card touch prompt.
 /// Roll back a just-minted persona when a later join step fails before the
@@ -3721,13 +4053,7 @@ fn join_review(
                 }
             )
         });
-    let application = persona.and_then(|p| {
-        config
-            .private
-            .vetting
-            .application(vtc_did, p.persona_id)
-            .filter(|a| a.join_did == p.did)
-    });
+    let application = presented_application(config, vtc_did, pick);
     let vetting = match application {
         None => ReviewVetting::None,
         Some(app) if app.hidden.is_some() => ReviewVetting::Hidden {
@@ -4723,8 +5049,14 @@ mod vetting_tests {
         .unwrap();
         let mut join = JoinState::default();
 
+        // Reached without a challenge only from a loop that cannot hear one,
+        // so the way out it names is a join that can — not a key to press.
         let no_challenge = hidden_proof_refusal(&mut app, &mut join).expect("refused");
-        assert!(no_challenge.contains("press m"), "{no_challenge}");
+        assert!(
+            no_challenge.contains("cannot hear the community's answer"),
+            "{no_challenge}"
+        );
+        assert!(!no_challenge.contains("press m"), "{no_challenge}");
         assert!(no_challenge.contains("Nothing was sent"), "{no_challenge}");
 
         app.hidden_challenge = Some("nonce".into());
@@ -4733,6 +5065,208 @@ mod vetting_tests {
             no_attestation.contains("no vetter's attestation"),
             "{no_attestation}"
         );
+    }
+
+    /// An application under a hidden-vetting criterion, holding one vetter's
+    /// attestation when `attested`. The values are placeholders: nothing here
+    /// builds a proof, only decides whether one could be asked for.
+    fn hidden_application(attested: bool) -> Application {
+        use vta_sdk::protocols::vetting::{VettingMethod, VettingRelationship};
+        let mut app =
+            Application::new(VTC, PersonaId::new(), "did:key:zApplicant", Utc::now()).unwrap();
+        app.hidden = Some(
+            serde_json::from_value(serde_json::json!({
+                "suite": "placeholder",
+                "helperKey": "z1",
+                "tokenKey": "z2",
+                "vetterLabels": ["vetter/2026-10"],
+                "tokenLabels": ["token/2026-10"],
+            }))
+            .unwrap(),
+        );
+        let held = serde_json::json!({
+            "attestation": "z3",
+            "meta": {
+                "community": VTC,
+                "requirementsDigest": DIGEST,
+                "method": serde_json::to_value(VettingMethod::InPerson).unwrap(),
+                "claimsVerified": [],
+                "livenessConfirmed": false,
+                "declaredRelationship": serde_json::to_value(VettingRelationship::None).unwrap(),
+                "identityCommitment": "z4",
+                "cardDigestMultibase": "z5",
+                "validFrom": "2026-10-01",
+                "validUntil": "2027-01-01",
+                "tokenLabel": "token/2026-10",
+                "tokenSerial": "z6",
+            },
+            "tokenLabel": "token/2026-10",
+            "tokenSerial": "z6",
+            "tokenShown": "z7",
+        });
+        app.hidden_state = Some(
+            serde_json::from_value(serde_json::json!({
+                "usk": "z8",
+                "id": "z9",
+                "joinDid": "did:key:zApplicant",
+                "held": if attested { vec![held] } else { vec![] },
+            }))
+            .unwrap(),
+        );
+        app
+    }
+
+    /// With nothing to prove, that is what the join says — not that a
+    /// challenge is missing, which would send the person after the wrong thing.
+    #[test]
+    fn a_hidden_join_with_no_attestation_says_so_before_the_challenge() {
+        let mut app = hidden_application(false);
+        let mut join = JoinState::default();
+        let refusal = hidden_proof_refusal(&mut app, &mut join).expect("refused");
+        assert!(refusal.contains("no vetter's attestation"), "{refusal}");
+    }
+
+    /// A hidden-vetting launch that can hear the answer asks for a challenge
+    /// instead of failing — every time, because a stored one may have been
+    /// replaced, lapsed or spent without this client knowing.
+    #[test]
+    fn a_hidden_launch_asks_for_its_challenge_rather_than_failing() {
+        let mut app = hidden_application(true);
+        assert_eq!(
+            challenge_step(Some(&app), true, false),
+            ChallengeStep::Ask,
+            "no challenge held: ask, don't fail"
+        );
+        app.hidden_challenge = Some("an older one".into());
+        assert_eq!(
+            challenge_step(Some(&app), true, false),
+            ChallengeStep::Ask,
+            "a stored challenge is not trusted to be live"
+        );
+        assert_eq!(
+            challenge_step(Some(&app), true, true),
+            ChallengeStep::Proceed,
+            "the challenge just issued for this launch is used"
+        );
+        assert_eq!(
+            challenge_step(Some(&app), false, false),
+            ChallengeStep::Proceed,
+            "a loop that cannot hear the answer does not ask and wait forever"
+        );
+    }
+
+    /// Nothing is asked when there is nothing hidden to prove.
+    #[test]
+    fn only_a_hidden_launch_with_an_attestation_asks() {
+        assert_eq!(challenge_step(None, true, false), ChallengeStep::Proceed);
+        let named =
+            Application::new(VTC, PersonaId::new(), "did:key:zApplicant", Utc::now()).unwrap();
+        assert_eq!(
+            challenge_step(Some(&named), true, false),
+            ChallengeStep::Proceed
+        );
+        assert_eq!(
+            challenge_step(Some(&hidden_application(false)), true, false),
+            ChallengeStep::Proceed,
+            "no attestation: the refusal says so without a wait first"
+        );
+    }
+
+    fn awaiting_challenge() -> AwaitingChallenge {
+        AwaitingChallenge {
+            vtc_did: VTC.into(),
+            document_id: "urn:uuid:c1".into(),
+            asked_at: std::time::Instant::now(),
+            choice: IdentityPick::Reuse(PersonaId::new()),
+            context_id: "ctx".into(),
+        }
+    }
+
+    /// Only the answer to the launch's own question resumes it, and a failed
+    /// one says which way it failed (R6.4).
+    #[test]
+    fn only_the_awaited_challenge_resumes_the_launch() {
+        let waiting = awaiting_challenge();
+        assert!(matches!(
+            challenge_resume_for(
+                &waiting,
+                &CommunityAnswer::Challenge {
+                    query: "urn:uuid:c1".into(),
+                    community: VTC.into(),
+                }
+            ),
+            Some(JoinEntry::Challenge {
+                outcome: ChallengeOutcome::Issued,
+                ..
+            })
+        ));
+        assert!(
+            challenge_resume_for(
+                &waiting,
+                &CommunityAnswer::Challenge {
+                    query: "urn:uuid:asked-from-the-vetting-page".into(),
+                    community: VTC.into(),
+                }
+            )
+            .is_none(),
+            "another question's challenge is not this launch's"
+        );
+        assert!(
+            challenge_resume_for(
+                &waiting,
+                &CommunityAnswer::Challenge {
+                    query: "urn:uuid:c1".into(),
+                    community: "did:web:other".into(),
+                }
+            )
+            .is_none()
+        );
+        assert!(matches!(
+            challenge_resume_for(
+                &waiting,
+                &CommunityAnswer::Refused {
+                    query: "urn:uuid:c1".into(),
+                    community: VTC.into(),
+                    kind: QueryKind::PcsChallenge,
+                    code: "vtc/vetting/pcs-challenge:notHiddenVetting".into(),
+                    message: None,
+                }
+            ),
+            Some(JoinEntry::Challenge { outcome: ChallengeOutcome::Unanswered(why), .. })
+                if why.contains("refused") && why.contains("notHiddenVetting")
+        ));
+        assert!(matches!(
+            challenge_resume_for(
+                &waiting,
+                &CommunityAnswer::Unreadable {
+                    query: "urn:uuid:c1".into(),
+                    community: VTC.into(),
+                    kind: QueryKind::PcsChallenge,
+                    detail: "missing field `challenge`".into(),
+                }
+            ),
+            Some(JoinEntry::Challenge { outcome: ChallengeOutcome::Unanswered(why), .. })
+                if why.contains("cannot read") && why.contains("not a refusal")
+        ));
+        assert!(
+            challenge_resume_for(
+                &waiting,
+                &CommunityAnswer::Manifest {
+                    community: VTC.into()
+                }
+            )
+            .is_none(),
+            "a manifest is not a challenge"
+        );
+    }
+
+    /// The failure names what to do next and that nothing went out.
+    #[test]
+    fn a_challenge_that_did_not_come_stops_the_join_and_says_why() {
+        let words = challenge_failed_words("Kernel", "it refused (notHiddenVetting)");
+        assert!(words.contains("Asking Kernel for one failed"), "{words}");
+        assert!(words.contains("notHiddenVetting"), "{words}");
+        assert!(words.contains("Nothing was sent"), "{words}");
     }
 
     const VTC: &str = "did:web:kernel.example";

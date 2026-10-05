@@ -718,6 +718,18 @@ pub struct JoinState {
     /// name — so a holder who had just made a persona to apply as could carry
     /// on as a different one they already had.
     pub minted_persona: Option<PersonaId>,
+    /// Whether the loop running this join reads inbound messages, and so can
+    /// wait for a community's answer. Set when the flow opens; read by the
+    /// launch, which asks a hidden-vetting community for a fresh challenge only
+    /// when its answer can be heard.
+    pub hears_replies: bool,
+    /// A launch parked on a community's challenge, for the join flow to hand to
+    /// the loop that can hear the answer. The flow takes it the moment it is
+    /// set, so it never outlives the pass that asked.
+    pub challenge_wait: Option<crate::state_handler::join_flow::AwaitingChallenge>,
+    /// The application's stored challenge was issued for the launch now
+    /// resuming. Taken by that launch, so one challenge serves one submit.
+    pub challenge_fresh: bool,
 }
 
 impl JoinState {

@@ -2749,9 +2749,11 @@ async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, method_index: u
 /// tokens left has not failed, it is at capacity until the next drip.
 /// Ask the community for the challenge this submission must bind.
 ///
-/// Called when an applicant opens a hidden-vetting application and before it submits. The
-/// community issues one per applicant and spends it when the proof is counted, so asking twice
-/// replaces rather than accumulates — which is why this is safe to call again on a retry.
+/// Called when an applicant refreshes a hidden-vetting application. The join no longer depends
+/// on it: a launch asks for a fresh challenge of its own and waits for it
+/// (`join_flow::challenge_step`). The community issues one per applicant and spends it when the
+/// proof is read, so asking twice replaces rather than accumulates — which is why this is safe
+/// to call again on a retry.
 pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &str) {
     let Some(app) = ctx
         .config
@@ -4321,7 +4323,9 @@ pub(crate) fn apply_answers(state: &mut State, config: &Config, answers: Vec<Com
         let name = community_display(config, answer.community());
         let v = &mut state.main_page.content_panel.vetting;
         let message = match answer {
-            CommunityAnswer::Manifest { .. } => None,
+            // The challenge's notice already says it arrived; a join waiting on
+            // one has taken its answer before this runs.
+            CommunityAnswer::Manifest { .. } | CommunityAnswer::Challenge { .. } => None,
             CommunityAnswer::Vetters { query, page, .. } => match &mut v.mode {
                 VettingMode::Directory(view) if view.pending.as_deref() == Some(query.as_str()) => {
                     view.pending = None;

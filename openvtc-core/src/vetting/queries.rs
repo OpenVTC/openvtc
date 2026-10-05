@@ -119,6 +119,15 @@ pub enum CommunityAnswer {
         /// The credential's `validUntil`.
         valid_until: DateTime<Utc>,
     },
+    /// The community issued the challenge a hidden-vetting submission binds, and it is now on
+    /// the application. Carried as an answer, not only as a notice, so a join waiting on it can
+    /// tell its own question's answer from any other.
+    Challenge {
+        /// The challenge request's document id.
+        query: String,
+        /// The community.
+        community: String,
+    },
     /// The community refused the question.
     Refused {
         /// The request's document id.
@@ -155,6 +164,7 @@ impl CommunityAnswer {
             | CommunityAnswer::Vetters { community, .. }
             | CommunityAnswer::ProfileStored { community, .. }
             | CommunityAnswer::Resent { community, .. }
+            | CommunityAnswer::Challenge { community, .. }
             | CommunityAnswer::Refused { community, .. }
             | CommunityAnswer::Unreadable { community, .. } => community,
         }

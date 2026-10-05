@@ -1275,6 +1275,13 @@ fn challenge_issued(book: &mut VettingBook, message: &Message, sender: &str) -> 
             application_id: application.id.clone(),
             expires_at: body.expires_at,
         }),
+        // A join that asked for this challenge is waiting on exactly this question: the
+        // answer names it, so the join resumes on its own question's answer and not on one
+        // the Vetting page asked for.
+        answer: Some(CommunityAnswer::Challenge {
+            query: query.document_id,
+            community: sender.to_string(),
+        }),
         ..Handled::default()
     }
 }
