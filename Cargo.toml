@@ -593,8 +593,10 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # `credentialsDelivered` / `credentialResend` / `retryAfter` on an approved
 # reply, which the join-status poller sends and records.
 # **0.63** is the line did-git-sign 0.15 is built on; its join submit body
-# carries `criterion` (submit/0.3) and the manifest is 0.3.
-vta-sdk = { version = "0.63.1", features = [
+# carries `criterion` (submit/0.3) and the manifest is 0.3. **0.63.2** names the
+# four ways a community refuses a PCS challenge (VTI #1954), which the join
+# reports by name.
+vta-sdk = { version = "0.63.2", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
