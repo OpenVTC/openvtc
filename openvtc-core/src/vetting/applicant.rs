@@ -189,6 +189,10 @@ pub struct Application {
     /// Persisted, unlike the proof above: the community spends it at submit, so an applicant
     /// that restarts between asking and submitting keeps the one it was given rather than
     /// asking for a second and stranding the first.
+    ///
+    /// Cleared once a proof bound to it has been sent ([`Self::hidden_submission_sent`]): the
+    /// community has spent it by then, whatever it decided. A join that can hear the answer
+    /// asks for a fresh one at launch anyway rather than trusting this one to be live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_challenge: Option<String>,
     /// One salt for the whole application, so every vetter sees the same
@@ -1409,6 +1413,33 @@ impl Application {
         )?;
         self.hidden_submission = Some(submission);
         Ok(true)
+    }
+
+    /// Whether a hidden-vetting proof could be built at all: at least one vetter's attestation
+    /// has reached this application. Without one there is nothing to prove, and asking the
+    /// community for a challenge would only delay being told so.
+    #[must_use]
+    pub fn holds_hidden_attestation(&self) -> bool {
+        self.hidden_state
+            .as_ref()
+            .is_some_and(|h| !h.held.is_empty())
+    }
+
+    /// Record that a submission carrying this application's hidden proof was sent, and forget
+    /// the challenge it was bound to. Returns whether there was a proof to send.
+    ///
+    /// The community spends a challenge the moment it reads a proof bound to it — and spends it
+    /// whether the proof is counted, refused as expired, or refused as bound to some other
+    /// challenge (`vtc-service`'s `pcs_challenge::consume` removes the row before it checks
+    /// anything). So once a proof has left, the challenge it carried can bind nothing: keeping
+    /// it would only make the next attempt send a proof the community is certain to refuse. The
+    /// proof goes too; it is bound to the same challenge.
+    pub fn hidden_submission_sent(&mut self) -> bool {
+        if self.hidden_submission.take().is_none() {
+            return false;
+        }
+        self.hidden_challenge = None;
+        true
     }
 
     /// Take an attestation a vetter sent under a hidden-vetting criterion.

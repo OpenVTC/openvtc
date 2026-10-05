@@ -1243,6 +1243,10 @@ impl StateHandler {
         // waiting on a community's requirements (see `join_flow::AwaitingRequirements`).
         let mut join_entry: Option<join_flow::JoinEntry> = None;
         let mut awaiting_requirements: Option<join_flow::AwaitingRequirements> = None;
+        // A join parked on a hidden-vetting challenge (see
+        // `join_flow::AwaitingChallenge`) — the same hand-off, for the question
+        // a launch asks rather than the one the vetting page does.
+        let mut awaiting_challenge: Option<join_flow::AwaitingChallenge> = None;
         let result = loop {
             tokio::select! {
                 Some(action) = action_rx.recv() => match action {
@@ -1298,6 +1302,16 @@ impl StateHandler {
                                 outcome: join_flow::RequirementsOutcome::Skipped,
                             });
                         }
+                    },
+                    // Leaving a join parked on its challenge. Nothing was sent
+                    // but the question, and the challenge it brings stands
+                    // unused until the community lets it lapse.
+                    Action::JoinCancel if awaiting_challenge.is_some() => {
+                        if let Some(awaiting) = awaiting_challenge.take() {
+                            config.private.vetting.forget_query(&awaiting.document_id);
+                        }
+                        state.join.processing = false;
+                        state.active_page = state::ActivePage::Main;
                     },
                     // Everything else acts on state and the resources below,
                     // and lives in `runtime_actions` where a test can call it.
@@ -1571,19 +1585,24 @@ impl StateHandler {
                             for check in vetting_grant_checks {
                                 vetting_actions::spawn_grant_check(&dispatch_tx, &tdk, check);
                             }
-                            // The manifest a waiting join asked for resumes it; every
-                            // other answer goes to the Vetting page.
+                            // The manifest or challenge a waiting join asked for
+                            // resumes it; every other answer goes to the Vetting page.
                             let mut answers = Vec::with_capacity(vetting_answers.len());
                             for answer in vetting_answers {
-                                match awaiting_requirements
+                                if let Some(entry) = awaiting_requirements
                                     .as_ref()
                                     .and_then(|a| join_flow::resume_for(a, &answer))
                                 {
-                                    Some(entry) => {
-                                        awaiting_requirements = None;
-                                        join_entry = Some(entry);
-                                    }
-                                    None => answers.push(answer),
+                                    awaiting_requirements = None;
+                                    join_entry = Some(entry);
+                                } else if let Some(entry) = awaiting_challenge
+                                    .as_ref()
+                                    .and_then(|a| join_flow::challenge_resume_for(a, &answer))
+                                {
+                                    awaiting_challenge = None;
+                                    join_entry = Some(entry);
+                                } else {
+                                    answers.push(answer);
                                 }
                             }
                             vetting_actions::apply_answers(&mut state, &config, answers);
@@ -1881,6 +1900,24 @@ impl StateHandler {
                             outcome: join_flow::RequirementsOutcome::Unanswered(format!(
                                 "no answer within {} seconds — its service may be offline",
                                 join_flow::REQUIREMENTS_WAIT.as_secs()
+                            )),
+                        });
+                    }
+                    // R1.2 / R6.4: a challenge that never comes is the community
+                    // not answering — our side sent the question, so it is not
+                    // our mediator, and nothing refused it.
+                    if awaiting_challenge
+                        .as_ref()
+                        .is_some_and(|a| a.asked_at.elapsed() >= join_flow::CHALLENGE_WAIT)
+                        && let Some(awaiting) = awaiting_challenge.take()
+                    {
+                        config.private.vetting.forget_query(&awaiting.document_id);
+                        join_entry = Some(join_flow::JoinEntry::Challenge {
+                            awaiting,
+                            outcome: join_flow::ChallengeOutcome::Unanswered(format!(
+                                "the request was sent, but no answer came within {} seconds — \
+                                 its service may be offline or unreachable",
+                                join_flow::CHALLENGE_WAIT.as_secs()
                             )),
                         });
                     }
@@ -2283,6 +2320,7 @@ impl StateHandler {
             // way in is handled the same.
             if let Some(entry) = join_entry.take() {
                 awaiting_requirements = None;
+                awaiting_challenge = None;
                 match self
                     .join_flow(
                         &mut action_rx,
@@ -2316,6 +2354,9 @@ impl StateHandler {
                     }
                     Ok(join_flow::JoinExit::AwaitRequirements(awaiting)) => {
                         awaiting_requirements = Some(awaiting);
+                    }
+                    Ok(join_flow::JoinExit::AwaitChallenge(awaiting)) => {
+                        awaiting_challenge = Some(awaiting);
                     }
                     Ok(join_flow::JoinExit::Exit(interrupted)) => break interrupted,
                     Err(e) => {
@@ -2555,8 +2596,11 @@ impl StateHandler {
                                     joined_a_community =
                                         joined.is_some() && ctx.config.active_identity().is_some();
                                 }
-                                // Not returned without `hears_replies`.
-                                Ok(join_flow::JoinExit::AwaitRequirements(_)) => {
+                                // Neither is returned without `hears_replies`.
+                                Ok(
+                                    join_flow::JoinExit::AwaitRequirements(_)
+                                    | join_flow::JoinExit::AwaitChallenge(_),
+                                ) => {
                                     state.active_page = state::ActivePage::Main;
                                 }
                                 Ok(join_flow::JoinExit::Exit(interrupted)) => {
