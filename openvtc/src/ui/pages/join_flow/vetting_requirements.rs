@@ -3,8 +3,11 @@
 //! Shown after the community's DID when that community vets its members
 //! (`docs/design/vetting-process.md` §6.1, §12.3). It says in plain words what
 //! the community requires before anything about the applicant is sent, and
-//! then lists every way in at once — present an invitation, be vetted, or send
-//! an open request — each said to be available or not, and why.
+//! then lists every way in at once — be vetted as one of your personas or as a
+//! new one, present an invitation, or send an open request — each said to be
+//! available or not, and why. Each row is one whole choice: the vetting rows
+//! name the persona they are taken as, because a persona's statements count
+//! for that persona alone.
 //!
 //! Listing them together is the point. Which way in is open depends on the
 //! community's manifest *and* on what this account already holds, and neither
@@ -36,21 +39,26 @@ use ratatui::{
 
 use crate::state_handler::{
     actions::Action,
-    join::{JoinRoute, JoinState, JoinVettingView, KnownVetting, VettingPhase, VettingRow},
+    join::{
+        Applicant, JoinRoute, JoinState, JoinVettingView, KnownVetting, RouteGroup, VettingPhase,
+        VettingRow,
+    },
     setup_sequence::MessageType,
 };
 use crate::ui::badges;
 use crate::ui::pages::join_flow::JoinFlow;
 use crate::ui::pages::main::components::vetting_panel::accent_swatch;
 
-/// Width of the routes list's label column, so the details line up under each
-/// other rather than under whichever label happened to be longest.
-///
-/// The detail is padded to `LABEL_WIDTH + 1`, not `LABEL_WIDTH`: a label of
-/// exactly the column's width would otherwise touch its detail, and
-/// "Carry on with your application" is exactly thirty characters — so the
-/// longest label in the list was the one that ran into its own text.
-const LABEL_WIDTH: usize = 32;
+/// The widest the routes list's label column grows. The column is as wide as
+/// the longest label, so the details line up under each other; a persona's
+/// name is part of its row's label now, and without a ceiling one long name
+/// would push every detail off the right of the screen. The persona name in a
+/// label is already shortened (`ROW_PERSONA_WIDTH` in the join flow), so this
+/// is only ever reached by a label that is long through and through.
+const MAX_LABEL_WIDTH: usize = 64;
+
+/// How far a row sits in from its group heading.
+const ROW_INDENT: usize = 2;
 
 #[derive(Clone, Debug, Default)]
 pub struct VettingPage;
@@ -100,16 +108,17 @@ impl VettingPage {
             {
                 Action::JoinVettingApply
             }
-            // No `n`: making a persona is a value of the "Apply as" choice
-            // now, under the way in that needs one. A key for it as well meant
-            // the page offered the same thing twice in two different
-            // vocabularies, and the key's wording contradicted the row's.
+            // No `n`: making a persona is a row of its own — "Apply for
+            // vetting as a new persona". A key for it as well meant the page
+            // offered the same thing twice in two different vocabularies.
+            //
+            // No ←/→ either. Each row is one complete choice, way in and
+            // persona together, so there is nothing to cycle inside a row; a
+            // cycled value hid the alternatives and what set them apart.
             (VettingPhase::Known(_), KeyCode::Up | KeyCode::BackTab) => {
                 Action::JoinVettingRow(false)
             }
             (VettingPhase::Known(_), KeyCode::Down | KeyCode::Tab) => Action::JoinVettingRow(true),
-            (VettingPhase::Known(_), KeyCode::Left) => Action::JoinVettingCycle(false),
-            (VettingPhase::Known(_), KeyCode::Right) => Action::JoinVettingCycle(true),
             _ => return,
         };
         let _ = state.action_tx.send(action);
@@ -170,100 +179,108 @@ fn cursor(focused: bool) -> Span<'static> {
     )
 }
 
-/// The routes list: every way in, available or not.
+/// The routes list: every way in, available or not, under its group heading.
+///
+/// Every row is one complete choice — the way in and, for vetting, the persona
+/// it is taken as — so the alternatives and what sets them apart are all on
+/// screen at once. The "Apply as" value this replaced was cycled with ←/→,
+/// which hid every persona but one and let a row read one way while Enter did
+/// another.
 ///
 /// A blocked route keeps its row and reads dim, with the reason where its
 /// detail would be. Dropping it would leave "why can I not use my invitation?"
 /// unanswered — and the answer ("you hold none", "this community admits nobody
 /// that way") is exactly what the page exists to give.
 fn route_lines(known: &KnownVetting) -> Vec<Line<'static>> {
+    let width = known
+        .routes
+        .iter()
+        .map(|r| r.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(MAX_LABEL_WIDTH);
+    // Under the detail column: past the indent, the cursor and the label, plus
+    // the one space that keeps the longest label off its own detail.
+    let under = " ".repeat(ROW_INDENT + 2 + width + 1);
     let mut lines = Vec::new();
-    for (row_index, row) in known.rows().iter().enumerate() {
-        let focused = known.row == row_index;
-        if !known.shows(*row) {
+    for row in known.rows() {
+        let i = match row {
+            VettingRow::Heading(group) => {
+                let mut spans = vec![Span::styled(
+                    format!("  {}", group.heading()),
+                    Style::new().fg(COLOR_BORDER),
+                )];
+                // A requirement on top of the statements is a fact about the
+                // community, said once beside the group it bears on.
+                if group == RouteGroup::Vetting
+                    && let Some(note) = &known.vetting_note
+                {
+                    spans.push(Span::styled(format!("  — {note}"), dim()));
+                }
+                lines.push(Line::from(spans));
+                continue;
+            }
+            VettingRow::Route(i) => i,
+        };
+        let Some(option) = known.routes.get(i) else {
+            continue;
+        };
+        let focused = known.row == i;
+        let (label_style, detail_style, detail) = match option.blocked() {
+            Some(why) => (dim(), dim(), why.to_string()),
+            None => (
+                text().bold(),
+                Style::new().fg(COLOR_SOFT_PURPLE),
+                option.detail.clone(),
+            ),
+        };
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(ROW_INDENT)),
+            cursor(focused),
+            Span::styled(format!("{:<w$}", option.label, w = width + 1), label_style),
+            Span::styled(detail, detail_style),
+        ]));
+        // What taking it starts with, under the row and past the label
+        // column. Phrased as what happens next rather than as a reason the row
+        // is off — which is the point of it not being dim.
+        if let Some(step) = option.first_step() {
+            lines.push(Line::from(vec![
+                Span::raw(under.clone()),
+                Span::styled("First: ", Style::new().fg(COLOR_SUCCESS).bold()),
+                Span::styled(step.to_string(), Style::new().fg(COLOR_SUCCESS)),
+            ]));
+        }
+        if !focused {
             continue;
         }
-        match row {
-            VettingRow::Route(i) => {
-                let Some(option) = known.routes.get(*i) else {
-                    continue;
-                };
-                let (label_style, detail_style, detail) = match option.blocked() {
-                    Some(why) => (dim(), dim(), why.to_string()),
-                    None => (
-                        text().bold(),
-                        Style::new().fg(COLOR_SOFT_PURPLE),
-                        option.detail.clone(),
+        // The DID the highlighted vetting row joins as. The community admits
+        // a DID, not a label, and two personas can share a label.
+        if let Some(Applicant::Persona(persona)) = option.applicant
+            && let Some(p) = known.personas.iter().find(|p| p.persona == persona)
+        {
+            lines.push(Line::from(vec![
+                Span::raw(under.clone()),
+                Span::styled(
+                    format!(
+                        "as {}",
+                        openvtc_core::display::shorten_for_display(&p.did, 64)
                     ),
-                };
-                lines.push(Line::from(vec![
-                    cursor(focused),
-                    Span::styled(format!("{:<LABEL_WIDTH$}", option.label), label_style),
-                    Span::styled(detail, detail_style),
-                ]));
-                // What taking it starts with, under the row and past the label
-                // column. Phrased as what happens next rather than as a reason
-                // the row is off — which is the point of it not being dim.
-                if let Some(step) = option.first_step() {
-                    lines.push(Line::from(vec![
-                        Span::raw(" ".repeat(LABEL_WIDTH + 2)),
-                        Span::styled("First: ", Style::new().fg(COLOR_SUCCESS).bold()),
-                        Span::styled(step.to_string(), Style::new().fg(COLOR_SUCCESS)),
-                    ]));
-                }
-                // The one thing this page cannot otherwise reach: reading an
-                // application before presenting it. Named where it applies
-                // rather than in a row of keys at the foot of the page.
-                if option.route == JoinRoute::Vetting
-                    && known.selected_application().is_some()
-                    && focused
-                {
-                    lines.push(Line::from(vec![
-                        Span::raw(" ".repeat(LABEL_WIDTH + 2)),
-                        Span::styled("[a]", Style::new().fg(COLOR_BORDER).bold()),
-                        Span::styled(" read it before you send it", dim()),
-                    ]));
-                }
-            }
-            VettingRow::ApplyAs => {
-                let persona = known.personas.get(known.persona_index).map_or_else(
-                    || "a new persona — created when you continue".to_string(),
-                    |p| {
-                        // Whether this persona already has an application is
-                        // the difference between carrying one on and starting
-                        // another, and it is what the reader is cycling to find
-                        // out. Saying it on the row means the answer is where
-                        // the choice is, rather than two lines up in a label
-                        // that changes as a side effect.
-                        let standing =
-                            match known.applications.iter().find(|a| a.persona == p.persona) {
-                                Some(app) if app.satisfied => "  — ready to present",
-                                Some(_) => "  — already applied",
-                                None => "  — no application yet",
-                            };
-                        format!(
-                            "{}  ({}){standing}",
-                            p.label,
-                            openvtc_core::display::shorten_for_display(&p.did, 48)
-                        )
-                    },
-                );
-                lines.push(nested_choice("Apply as", persona, focused));
-            }
+                    dim(),
+                ),
+            ]));
+        }
+        // The one thing this page cannot otherwise reach: reading an
+        // application before presenting it. Named where it applies rather than
+        // in a row of keys at the foot of the page.
+        if known.selected_application().is_some() {
+            lines.push(Line::from(vec![
+                Span::raw(under.clone()),
+                Span::styled("[a]", Style::new().fg(COLOR_BORDER).bold()),
+                Span::styled(" read it before you send it", dim()),
+            ]));
         }
     }
     lines
-}
-
-/// A choice belonging to the way in above it, indented under its label column.
-fn nested_choice(name: &str, shown: String, focused: bool) -> Line<'static> {
-    Line::from(vec![
-        Span::raw(" ".repeat(LABEL_WIDTH - 10)),
-        cursor(focused),
-        Span::styled(format!("{name:<10}"), text()),
-        Span::styled(shown, Style::new().fg(COLOR_SOFT_PURPLE)),
-        Span::styled(if focused { "  ←/→" } else { "" }, dim()),
-    ])
 }
 
 /// What this community does to protect the people in it: whether vetters are
@@ -318,7 +335,7 @@ fn protection_lines(known: &KnownVetting) -> Vec<Line<'static>> {
         None => row(
             "Signing",
             None,
-            "not checked — its DID document was not read on this route".to_string(),
+            "not checked — its DID document could not be resolved".to_string(),
             dim(),
         ),
     });
@@ -469,18 +486,25 @@ pub(crate) fn body_lines(state: &JoinState, view: &JoinVettingView) -> Vec<Line<
                 Style::new().fg(COLOR_BORDER).bold(),
             ));
             lines.extend(route_lines(known));
-            // Only where it is a live choice — the note is about a decision
-            // being made, not a fact about the page.
-            if known.selector().is_some() {
+            // Only while a vetting row is highlighted — the note is about the
+            // decision being made, not a fact about the page.
+            if known
+                .selected_route()
+                .is_some_and(|r| r.route == JoinRoute::Vetting)
+            {
+                lines.push(Line::default());
                 lines.push(Line::styled(
                     "The persona is fixed for the whole application: every card is signed by it, \
-                     and it is the DID the community admits.",
+                     and it is the DID the community admits. Statements count only for the \
+                     persona they were made for.",
                     dim(),
                 ));
             }
-            // Every application, not only the one the chooser is on: a second
+            // Every application, not only the highlighted row's: a second
             // persona's application is a fact about this community that should
-            // not go dark because the cursor moved.
+            // not go dark because the cursor moved. The next step names the
+            // row it is taken from — the Vetting panel's keys mean nothing
+            // here.
             for app in &known.applications {
                 lines.push(Line::default());
                 lines.push(Line::styled(
@@ -552,20 +576,43 @@ mod tests {
     fn route(route: JoinRoute, label: &str, state: RouteState) -> RouteOption {
         RouteOption {
             route,
+            applicant: None,
             label: label.into(),
             detail: "detail".into(),
             state,
         }
     }
 
-    fn routes() -> Vec<RouteOption> {
+    /// The vetting row for `persona`, as `vetting_view` builds it.
+    fn vetting_row(persona: Applicant, label: &str, state: RouteState) -> RouteOption {
+        RouteOption {
+            applicant: Some(persona),
+            ..route(JoinRoute::Vetting, label, state)
+        }
+    }
+
+    /// alice's vetting row, a new persona's, then the other ways in — the
+    /// order `build_routes` draws them in.
+    fn routes(alice: PersonaId) -> Vec<RouteOption> {
         vec![
+            vetting_row(
+                Applicant::Persona(alice),
+                "Apply for vetting as alice",
+                RouteState::Ready,
+            ),
+            vetting_row(
+                Applicant::NewPersona,
+                "Apply for vetting as a new persona",
+                RouteState::FirstStep {
+                    note: "this starts by creating the persona".into(),
+                    kind: FirstStepKind::CreatePersona,
+                },
+            ),
             route(
                 JoinRoute::Invitation,
                 "Use an invitation",
                 RouteState::Blocked("none held".into()),
             ),
-            route(JoinRoute::Vetting, "Apply for vetting", RouteState::Ready),
             route(
                 JoinRoute::OpenRequest,
                 "Send an open request",
@@ -574,16 +621,17 @@ mod tests {
         ]
     }
 
+    /// A page on alice's vetting row. `satisfied` is her application's
+    /// standing: `None` for none at all.
     fn known(satisfied: Option<bool>) -> VettingPhase {
-        // The persona has to exist in `personas` as well as on the application:
-        // which application the page is showing follows from the persona the
-        // chooser is on, so an application whose persona is not in the list
-        // belongs to nobody the cursor can reach.
+        // The persona has to exist in `personas` and have a row as well as an
+        // application: which application the page is showing follows from the
+        // row the cursor is on.
         let persona = PersonaId::new();
         VettingPhase::Known(Box::new(KnownVetting {
             requirements: vec!["2 vetting statements".into()],
-            routes: routes(),
-            row: 1,
+            routes: routes(persona),
+            row: 0,
             personas: vec![ApplyAs {
                 persona,
                 label: "alice".into(),
@@ -597,7 +645,8 @@ mod tests {
                     persona_label: "alice".into(),
                     statements: 2,
                     progress: None,
-                    next_step: "join".into(),
+                    next_step: "join — Enter on \"Present your vetting statements as alice\""
+                        .into(),
                     satisfied,
                 })
                 .collect(),
@@ -642,8 +691,11 @@ mod tests {
         let (mut f, mut rx) = flow(known(None));
         press(&mut f, KeyCode::Down);
         assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingRow(true))));
-        press(&mut f, KeyCode::Right);
-        assert!(matches!(rx.try_recv(), Ok(Action::JoinVettingCycle(true))));
+        // Nothing to cycle: every row is a whole choice.
+        for key in [KeyCode::Left, KeyCode::Right] {
+            press(&mut f, key);
+            assert!(rx.try_recv().is_err(), "{key:?} does nothing here");
+        }
     }
 
     /// The page offers one door per thing, so the keys that were a second,
@@ -790,33 +842,43 @@ mod tests {
         }
     }
 
-    /// The choices that belong to a way in are drawn under it, and only while
-    /// it is the one being considered — two places for one decision is what
-    /// made the reader join them up.
+    /// Every way in is its own row, grouped: being vetted — as each persona,
+    /// or as a new one — under one heading, the other ways in under another.
+    /// Nothing is hidden behind a value cycled with ←/→, which showed one
+    /// persona at a time and hid what set the others apart.
     #[test]
-    fn the_applying_choices_sit_under_the_way_in_they_belong_to() {
-        let mut phase = known(None);
-        if let VettingPhase::Known(k) = &mut phase {
-            k.row = 1; // the vetting route
-        }
-        let shown = text_of(&body_lines(&JoinState::default(), &view(phase)));
+    fn every_choice_is_a_row_under_its_group() {
+        let shown = text_of(&body_lines(&JoinState::default(), &view(known(None))));
         let line_of = |needle: &str| {
             shown
                 .lines()
                 .position(|l| l.contains(needle))
                 .unwrap_or_else(|| panic!("{needle} not drawn:\n{shown}"))
         };
-        assert!(line_of("Apply for vetting") < line_of("Apply as"));
-        assert!(line_of("Apply as") < line_of("Send an open request"));
-        assert!(!shown.contains("Applying as"), "no block of its own");
+        assert!(line_of("Choose how to join") < line_of("With vetting"));
+        assert!(line_of("With vetting") < line_of("Apply for vetting as alice"));
+        assert!(
+            line_of("Apply for vetting as alice") < line_of("Apply for vetting as a new persona")
+        );
+        assert!(line_of("Apply for vetting as a new persona") < line_of("Other ways in"));
+        assert!(line_of("Other ways in") < line_of("Use an invitation"));
+        assert!(line_of("Use an invitation") < line_of("Send an open request"));
+        assert!(!shown.contains("Apply as"), "no nested chooser: {shown}");
+        assert!(!shown.contains("←/→"), "nothing to cycle: {shown}");
+        // The highlighted row says which DID it joins as.
+        assert!(shown.contains("as did:key:zA"), "{shown}");
+    }
 
-        // Considering something else, they are not drawn at all.
-        let mut elsewhere = known(None);
-        if let VettingPhase::Known(k) = &mut elsewhere {
-            k.row = 0; // the invitation route
-        }
-        let shown = text_of(&body_lines(&JoinState::default(), &view(elsewhere)));
-        assert!(!shown.contains("Apply as"), "{shown}");
+    /// The application's next step names the row it is taken from. It used to
+    /// borrow the Vetting panel's "j — join now", and the join page has no `j`.
+    #[test]
+    fn the_next_step_names_the_row_rather_than_a_key_from_another_page() {
+        let shown = text_of(&body_lines(&JoinState::default(), &view(known(Some(true)))));
+        assert!(
+            shown.contains("next: join — Enter on \"Present your vetting statements as alice\""),
+            "{shown}"
+        );
+        assert!(!shown.contains("j — join now"), "{shown}");
     }
 
     /// How the community protects people is said either way: hidden vetters

@@ -157,6 +157,28 @@ are marked wherever they apply. The detailed entries follow the summary below.
   community has not recorded can be sent again**.
 - **The invitation page no longer promises a manual review to someone holding
   vetting** — their statements go with the request either way.
+- **A vetting statement counts only for the persona it vetted.** Joining a
+  vetting community as a new persona — or as one with nothing ready — used to
+  fall back to *another* persona's ready application, so the join went out as
+  the persona that had been vetted, presenting its statements. Rejoining as the
+  persona that was vetted still presents its own statements; choosing a new
+  persona now creates it and starts an application of its own, with a new DID
+  and nothing carried over. An application made for an earlier DID of a
+  persona is no longer called ready.
+- **The vetting join page lists every way in, one row per choice.** Instead of
+  an "Apply as" value cycled with ←/→ under a single vetting row, each persona
+  has its own row — *Present your vetting statements as …*, *Carry on with your
+  application as …*, *Apply for vetting as …* — plus *Apply for vetting as a
+  new persona*, grouped under **With vetting**, with the invitation and open
+  request under **Other ways in**. ↑/↓ moves over the rows only; the page
+  opens on a persona whose statements are ready. The application's next step
+  names the row to press Enter on instead of the Vetting panel's `j`, which
+  does nothing on this page.
+- **The vetting join page says how the community signs** when its manifest
+  arrived over DIDComm or was already known. Only the HTTP route read the DID
+  document, so the page said "Signing: not checked"; the document is now
+  resolved (bounded at 10 s) on the way in, and the page says PQC-signed or
+  "classical keys only".
 
 - **A fast reply is no longer lost to the send that asked for it.** The
   Capabilities and Repos panels started waiting for a reply only once the send

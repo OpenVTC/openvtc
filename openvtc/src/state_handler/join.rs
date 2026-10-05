@@ -269,10 +269,32 @@ pub enum FirstStepKind {
     OnTheWay,
 }
 
+/// Who a vetting row applies, carries on, or presents as.
+///
+/// Part of the row rather than a second choice beside it. Being vetted is
+/// always being vetted *as someone* — every card is signed by that persona and
+/// every statement names its DID — so "which way in" and "as whom" are one
+/// decision, and a page that asks them separately lets the two drift apart.
+/// That drift is how a join made "as a new persona" went out presenting the
+/// statements another persona had gathered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Applicant {
+    /// One of this account's personas.
+    Persona(PersonaId),
+    /// A persona that does not exist yet: the row starts by making it, and
+    /// vetting starts from nothing — a new DID has no statements anywhere.
+    NewPersona,
+}
+
 /// One way in, as the routes list shows it.
 #[derive(Clone, Debug)]
 pub struct RouteOption {
     pub route: JoinRoute,
+    /// Who the row is for. `Some` on every vetting row and only there: the
+    /// invitation and open-request rows pick their persona on the identity
+    /// step further on, where each persona's invitations and statements are
+    /// shown against it.
+    pub applicant: Option<Applicant>,
     /// The row's label.
     pub label: String,
     /// What taking it does, or where it stands, in a few words.
@@ -317,10 +339,40 @@ impl RouteOption {
             _ => None,
         }
     }
+
+    /// The group the row is listed under.
+    #[must_use]
+    pub fn group(&self) -> RouteGroup {
+        match self.route {
+            JoinRoute::Vetting => RouteGroup::Vetting,
+            JoinRoute::Invitation | JoinRoute::OpenRequest => RouteGroup::Other,
+        }
+    }
 }
 
-/// A vetting community's requirements, the ways in, and where this persona
-/// stands.
+/// A heading the routes list is grouped under. Headings are drawn, never
+/// selected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteGroup {
+    /// Being vetted — one row per persona, and one for a new persona.
+    Vetting,
+    /// Everything else: an invitation, or an open request.
+    Other,
+}
+
+impl RouteGroup {
+    /// The heading's words.
+    #[must_use]
+    pub fn heading(self) -> &'static str {
+        match self {
+            RouteGroup::Vetting => "With vetting",
+            RouteGroup::Other => "Other ways in",
+        }
+    }
+}
+
+/// A vetting community's requirements, the ways in, and where each of this
+/// account's personas stands.
 #[derive(Clone, Debug, Default)]
 pub struct KnownVetting {
     /// What it requires, one sentence each.
@@ -331,11 +383,11 @@ pub struct KnownVetting {
     ///
     /// A list, not an option. Applications are keyed on `(community, persona)`,
     /// so a community can hold one from each of your personas, and being vetted
-    /// as one says nothing about another. Showing only the first made that
-    /// impossible to reach from here: the page collapsed to "carry on with your
-    /// application" and hid the chooser, so a second persona could never apply.
+    /// as one says nothing about another.
     pub applications: Vec<JoinApplication>,
-    /// The ways in, in the order they are offered.
+    /// The ways in, in the order they are drawn: the vetting rows, then the
+    /// others. Every row is one complete choice — the way in *and* who takes it
+    /// — so moving to one never changes what another means.
     pub routes: Vec<RouteOption>,
     /// It proves vetting with a PCS zero-knowledge proof: it will learn that
     /// enough vetters vouched for the applicant, not who they were.
@@ -343,156 +395,133 @@ pub struct KnownVetting {
     /// Whether its DID document lists a post-quantum signing key; `None` when
     /// it has not been resolved here.
     pub post_quantum: Option<bool>,
-    /// Personas a new application can be made as.
+    /// This account's personas, for the vetting rows to name.
     pub personas: Vec<ApplyAs>,
-    pub persona_index: usize,
-    /// Appended to the vetting row's detail when this community also asks for
-    /// an invitation. Constant for the page, and kept because the rest of that
-    /// row is rebuilt whenever the persona chooser moves.
-    pub vetting_detail_suffix: Option<String>,
-    /// Where a new application's face is worn. Not a question the page asks —
-    /// [`context_index`](Self::context_index) stays at 0, which is a
-    /// sub-context of the application's own. Kept as a list because the options
-    /// are what decide what that first one *is*: a persona that already has
-    /// keys somewhere has exactly one, its own.
-    pub context_options: Vec<ContextOption>,
-    pub context_index: usize,
-    /// The highlighted row: a route, then its "applying as" selector when it is
-    /// shown. See [`selector`](Self::selector).
+    /// Said beside the vetting heading when this community asks for an
+    /// invitation on top of the statements. Once, there, rather than on every
+    /// persona's row: it is a fact about the community, not about a persona.
+    pub vetting_note: Option<String>,
+    /// The highlighted row, by index into [`routes`](Self::routes). Headings
+    /// are not in that list, so the cursor cannot rest on one.
     pub row: usize,
 }
 
-/// A line the cursor can rest on.
-///
-/// The choices that belong to a way in sit *under* that way in rather than in a
-/// block of their own further down the page. "Apply as" is not a separate
-/// decision from "apply for vetting" — it is part of it, and a page that puts
-/// them in two places makes the reader join them up.
+/// A line of the routes list, in the order it is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VettingRow {
+    /// A group heading. Drawn, never selected.
+    Heading(RouteGroup),
     /// A way in, by index into [`KnownVetting::routes`].
     Route(usize),
-    /// Which persona a new application is made as.
-    ApplyAs,
 }
 
 impl KnownVetting {
-    /// The application belonging to the persona the chooser is on, if any.
-    ///
-    /// Reads `persona_index`, never the cursor, so the nested-row arithmetic in
-    /// [`rows`](Self::rows) can call it without the two defining each other.
+    /// `persona`'s application to this community, if it has one.
     #[must_use]
-    pub fn selected_application(&self) -> Option<&JoinApplication> {
-        let persona = self.personas.get(self.persona_index)?.persona;
+    pub fn application_for(&self, persona: PersonaId) -> Option<&JoinApplication> {
         self.applications.iter().find(|a| a.persona == persona)
     }
 
-    /// Every row the cursor can rest on, in the order they are drawn.
+    /// The persona whose ready statements taking `applicant`'s vetting row
+    /// presents — and only ever that persona's own.
     ///
-    /// The list never depends on the cursor, so an index always names the same
-    /// row. "Apply as" is in it whether or not it is drawn — it is hidden while
-    /// the cursor is elsewhere (see [`shows`](Self::shows)). Building the list
-    /// from the cursor instead made one index mean two rows: stepping down off
-    /// "Apply as" collapsed it, and the cursor landed past the end of the list,
-    /// so "Send an open request" could never be highlighted.
+    /// There is deliberately no fallback to another persona's ready
+    /// application. A statement names the DID it was made for, so a join that
+    /// reached for "any ready application" when the chosen persona had none
+    /// joined as the persona that *was* vetted, not the one chosen — a new
+    /// persona meant to start afresh went out wearing an old one's statements.
+    /// Choosing a new persona, or one with nothing ready, is a new application,
+    /// never a borrowed one.
+    #[must_use]
+    pub fn ready_as(&self, applicant: Option<Applicant>) -> Option<PersonaId> {
+        let Some(Applicant::Persona(persona)) = applicant else {
+            return None;
+        };
+        self.application_for(persona)
+            .is_some_and(|a| a.satisfied)
+            .then_some(persona)
+    }
+
+    /// The persona the highlighted row is for, when it names one.
+    #[must_use]
+    pub fn selected_persona(&self) -> Option<PersonaId> {
+        match self.selected_route()?.applicant? {
+            Applicant::Persona(persona) => Some(persona),
+            Applicant::NewPersona => None,
+        }
+    }
+
+    /// The application belonging to the highlighted row's persona, if any.
+    #[must_use]
+    pub fn selected_application(&self) -> Option<&JoinApplication> {
+        self.application_for(self.selected_persona()?)
+    }
+
+    /// Every line of the list, headings included, in the order they are
+    /// drawn. A group with no rows has no heading.
     #[must_use]
     pub fn rows(&self) -> Vec<VettingRow> {
-        let mut rows = Vec::with_capacity(self.routes.len() + 1);
-        for (i, option) in self.routes.iter().enumerate() {
-            rows.push(VettingRow::Route(i));
-            // One nested choice: which persona applies, because that is the
-            // decision this route *is*. The context the application's face is
-            // worn in is always a sub-context of its own, so it is not asked.
-            if option.route == JoinRoute::Vetting {
-                rows.push(VettingRow::ApplyAs);
+        let mut rows = Vec::with_capacity(self.routes.len() + 2);
+        for group in [RouteGroup::Vetting, RouteGroup::Other] {
+            let mut members = self
+                .routes
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.group() == group)
+                .map(|(i, _)| VettingRow::Route(i))
+                .peekable();
+            if members.peek().is_some() {
+                rows.push(VettingRow::Heading(group));
+                rows.extend(members);
             }
         }
         rows
     }
 
-    /// Whether `row` is drawn. The nested choice shows only while its route is
-    /// the one being considered — it is noise on a page whose reader has
-    /// already decided to do something else.
-    #[must_use]
-    pub fn shows(&self, row: VettingRow) -> bool {
-        match row {
-            VettingRow::Route(_) => true,
-            VettingRow::ApplyAs => {
-                self.selected_route().map(|r| r.route) == Some(JoinRoute::Vetting)
-            }
-        }
-    }
-
-    /// Moves the cursor one drawn row on, wrapping at either end.
-    ///
-    /// Moving down from the vetting route opens its choice; moving up into it
-    /// from below lands on the route itself, since the choice is hidden until
-    /// then and stepping onto an invisible row reads as a lost cursor.
+    /// Moves the cursor one row on in drawn order, wrapping at either end and
+    /// stepping over headings — there is nothing to choose on a heading, and a
+    /// cursor resting on one reads as lost.
     pub fn step(&mut self, forward: bool) {
-        let rows = self.rows();
-        if rows.is_empty() {
+        let order: Vec<usize> = self
+            .rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                VettingRow::Route(i) => Some(i),
+                VettingRow::Heading(_) => None,
+            })
+            .collect();
+        if order.is_empty() {
             return;
         }
-        let n = rows.len();
-        let mut next = self.row.min(n - 1);
-        loop {
-            next = if forward {
-                (next + 1) % n
-            } else {
-                (next + n - 1) % n
-            };
-            let entering_from_outside = rows[next] == VettingRow::ApplyAs
-                && !(forward && self.selected_route().map(|r| r.route) == Some(JoinRoute::Vetting));
-            if !entering_from_outside || next == self.row {
-                break;
-            }
-        }
-        self.row = next;
+        let n = order.len();
+        let here = order.iter().position(|&i| i == self.row).unwrap_or(0);
+        let next = if forward {
+            (here + 1) % n
+        } else {
+            (here + n - 1) % n
+        };
+        self.row = order[next];
     }
 
-    /// What the cursor is on.
-    #[must_use]
-    pub fn selected(&self) -> Option<VettingRow> {
-        self.rows().get(self.row).copied()
-    }
-
-    /// The highlighted way in — the route itself, or the one whose choices the
-    /// cursor is inside.
+    /// The highlighted way in.
     #[must_use]
     pub fn selected_route(&self) -> Option<&RouteOption> {
-        match self.selected()? {
-            VettingRow::Route(i) => self.routes.get(i),
-            // The choice belongs to the vetting route, so resting on it is
-            // resting on the route.
-            VettingRow::ApplyAs => self.routes.iter().find(|r| r.route == JoinRoute::Vetting),
-        }
+        self.routes.get(self.row)
     }
 
-    /// Which choice the cursor is on: `0` the persona, the only one there is.
-    #[must_use]
-    pub fn selector(&self) -> Option<usize> {
-        match self.selected()? {
-            VettingRow::ApplyAs => Some(0),
-            VettingRow::Route(_) => None,
-        }
-    }
-
-    /// The row of `route`, when it is offered.
+    /// The row of `route`, when it is offered. For the vetting route this is
+    /// the first of its rows; [`row_for`](Self::row_for) names one persona's.
     #[must_use]
     pub fn row_of(&self, route: JoinRoute) -> Option<usize> {
-        self.rows().iter().position(|row| {
-            matches!(row, VettingRow::Route(i) if self.routes.get(*i).is_some_and(|r| r.route == route))
-        })
+        self.routes.iter().position(|r| r.route == route)
     }
 
-    /// Whether "Apply as" is set to a persona that does not exist yet.
-    ///
-    /// The last value in that choice is a new persona — which is what makes
-    /// creating one a decision inside the join rather than a separate key. It
-    /// is the only value when there are none.
+    /// The vetting row for `applicant`.
     #[must_use]
-    pub fn applying_as_new_persona(&self) -> bool {
-        self.persona_index >= self.personas.len()
+    pub fn row_for(&self, applicant: Applicant) -> Option<usize> {
+        self.routes
+            .iter()
+            .position(|r| r.route == JoinRoute::Vetting && r.applicant == Some(applicant))
     }
 }
 
@@ -514,9 +543,12 @@ pub struct JoinApplication {
     pub statements: usize,
     /// Progress against the published requirements.
     pub progress: Option<String>,
-    /// What to do next, with its key on the Vetting page.
+    /// What to do next, worded for the join page: the row to press Enter on,
+    /// not the Vetting panel's key for it.
     pub next_step: String,
-    /// It meets the published requirements.
+    /// It meets the published requirements *and* was made for the persona's
+    /// current DID — the statements name the DID they were gathered for, and
+    /// the join attaches them only when that is the DID joining.
     pub satisfied: bool,
 }
 
@@ -810,47 +842,111 @@ mod tests {
         }
     }
 
-    /// Every way in is reachable, and the cursor is always on a drawn row.
-    /// The nested "Apply as" row used to collapse as the cursor left it, which
-    /// shifted the indices under the cursor and stranded it past the end of the
-    /// list — "Send an open request" could never be highlighted.
-    #[test]
-    fn the_cursor_reaches_every_way_in_and_never_rests_on_a_hidden_row() {
-        let route = |route| RouteOption {
+    fn way(route: JoinRoute, applicant: Option<Applicant>) -> RouteOption {
+        RouteOption {
             route,
+            applicant,
             label: String::new(),
             detail: String::new(),
             state: RouteState::Ready,
-        };
+        }
+    }
+
+    fn application(persona: PersonaId, satisfied: bool) -> JoinApplication {
+        JoinApplication {
+            id: "a".to_string(),
+            persona,
+            persona_label: "p".to_string(),
+            statements: usize::from(satisfied),
+            progress: None,
+            next_step: String::new(),
+            satisfied,
+        }
+    }
+
+    /// The list is grouped — the vetting rows under one heading, the other
+    /// ways in under another — whatever order the routes were built in, and
+    /// the cursor walks every row in drawn order without ever resting on a
+    /// heading. The nested "Apply as" row this replaced shifted the indices
+    /// under the cursor and stranded it, so "Send an open request" could never
+    /// be highlighted; a heading the cursor could land on would be the same
+    /// lost cursor in a new place.
+    #[test]
+    fn rows_are_grouped_and_the_cursor_skips_the_headings() {
+        let alice = PersonaId::new();
         let mut known = KnownVetting {
             routes: vec![
-                route(JoinRoute::Invitation),
-                route(JoinRoute::Vetting),
-                route(JoinRoute::OpenRequest),
+                way(JoinRoute::Invitation, None),
+                way(JoinRoute::Vetting, Some(Applicant::Persona(alice))),
+                way(JoinRoute::OpenRequest, None),
+                way(JoinRoute::Vetting, Some(Applicant::NewPersona)),
             ],
             ..KnownVetting::default()
         };
+        use VettingRow::{Heading, Route};
+        assert_eq!(
+            known.rows(),
+            [
+                Heading(RouteGroup::Vetting),
+                Route(1),
+                Route(3),
+                Heading(RouteGroup::Other),
+                Route(0),
+                Route(2),
+            ]
+        );
+        known.row = 1;
         let walk = |known: &mut KnownVetting, forward| {
             (0..4)
                 .map(|_| {
                     known.step(forward);
-                    let row = known.selected().expect("cursor on a row");
-                    assert!(known.shows(row), "cursor on a hidden row");
-                    row
+                    known.row
                 })
                 .collect::<Vec<_>>()
         };
-        use VettingRow::{ApplyAs, Route};
-        assert_eq!(
-            walk(&mut known, true),
-            [Route(1), ApplyAs, Route(2), Route(0)]
-        );
-        // Upward from below, the choice stays shut: the route comes first.
-        known.row = known.row_of(JoinRoute::OpenRequest).unwrap();
-        assert_eq!(
-            walk(&mut known, false),
-            [Route(1), Route(0), Route(2), Route(1)]
-        );
+        assert_eq!(walk(&mut known, true), [3, 0, 2, 1]);
+        assert_eq!(walk(&mut known, false), [2, 0, 3, 1]);
+        assert_eq!(known.row_for(Applicant::NewPersona), Some(3));
+        assert_eq!(known.row_of(JoinRoute::OpenRequest), Some(2));
+    }
+
+    /// A ready application counts only for the persona it was made for. The
+    /// join used to fall back to *any* persona's ready application, so
+    /// choosing a new persona — or one with nothing ready — joined as the
+    /// persona that had been vetted, presenting its statements.
+    #[test]
+    fn a_ready_application_counts_only_for_its_own_persona() {
+        let vetted = PersonaId::new();
+        let other = PersonaId::new();
+        let mut known = KnownVetting {
+            routes: vec![
+                way(JoinRoute::Vetting, Some(Applicant::Persona(vetted))),
+                way(JoinRoute::Vetting, Some(Applicant::Persona(other))),
+                way(JoinRoute::Vetting, Some(Applicant::NewPersona)),
+                way(JoinRoute::OpenRequest, None),
+            ],
+            applications: vec![application(vetted, true)],
+            ..KnownVetting::default()
+        };
+        // What Enter on the highlighted row would present.
+        let presents =
+            |known: &KnownVetting| known.ready_as(known.selected_route().and_then(|r| r.applicant));
+        // The same persona rejoins with its own statements.
+        known.row = 0;
+        assert_eq!(presents(&known), Some(vetted));
+        // A new persona never borrows them, nor does another existing one, nor
+        // a way in that names no persona.
+        for row in [1, 2, 3] {
+            known.row = row;
+            assert_eq!(presents(&known), None, "row {row} borrowed");
+        }
+
+        // Under way is not ready, even for its own persona — but it is still
+        // there to be read.
+        known.applications = vec![application(vetted, false)];
+        known.row = 0;
+        assert_eq!(presents(&known), None);
+        assert!(known.selected_application().is_some());
     }
 
     #[test]
