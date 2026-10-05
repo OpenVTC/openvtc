@@ -228,7 +228,15 @@ pub(crate) async fn handle_vta_start_provision(
     state.setup.vta.context_id = Some(context_id.clone());
 
     state.setup.active_page = SetupPage::VtaProvisioning;
+    // Everything a previous attempt left behind goes, because the failure
+    // classifier reads it (`provision_failure::classify`): a stale
+    // `credential_did` would read as "this attempt already rolled over", and a
+    // stale failed row as this attempt's refusal. The URL-direct path never
+    // refills `diagnostics`, so it has to be emptied here rather than left to
+    // `pending_list` below.
     state.setup.vta.messages.clear();
+    state.setup.vta.diagnostics.clear();
+    state.setup.vta.credential_did.clear();
     state.setup.vta.completed = Completion::NotFinished;
     let _ = state_tx.send(state.clone());
 

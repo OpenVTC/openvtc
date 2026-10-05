@@ -199,6 +199,19 @@ are marked wherever they apply. The detailed entries follow the summary below.
   The default theme is now `auto`, so a light terminal gets a light theme
   instead of near-white text on white.
 
+- **Setup: running the PNM command is its own step, and a refused setup DID
+  leads back to it.** The "Authorise the setup DID" page is now *Step 1 of 2 —
+  Run the PNM command*: numbered actions (copy with F2/F3/F4, run it in PNM,
+  press Enter once PNM prints "ACL entry created"), a warning that
+  "already exists … NOT added" means it did not work, and the 1-hour,
+  use-once grant. When connecting (step 2) fails, the failure is classified
+  and routed: a VTA that refused the setup DID sends you back to step 1 with a
+  banner saying the command probably wasn't run (same DID and context, so the
+  commands still apply); an expired, already-used or hand-off-less grant — or
+  one used up by an attempt that failed after the rollover — asks for the
+  delete-then-create re-grant; an unreachable VTA is retried from step 2
+  without blaming PNM; anything else is shown verbatim with retry or back.
+
 - **A join that ended can be applied for again from Communities.** An
   application whose join was rejected, withdrawn or left is listed under
   *Joining* again, saying how the last attempt ended ("rejected last time —
