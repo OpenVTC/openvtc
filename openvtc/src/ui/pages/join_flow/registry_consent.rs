@@ -29,9 +29,9 @@ use ratatui::{
 use crate::{
     state_handler::{
         actions::Action,
-        join::{JoinState, RegistryChoice},
+        join::{JoinReview, JoinState, RegistryChoice, ReviewVetting},
     },
-    ui::pages::join_flow::JoinFlow,
+    ui::{badges, pages::join_flow::JoinFlow},
 };
 
 /// The opt-in, worded as the thing it permits. Shared with the tests so the
@@ -65,7 +65,7 @@ impl RegistryConsentPage {
             Block::bordered()
                 .fg(COLOR_BORDER)
                 .padding(Padding::proportional(1))
-                .title(" Trust registry "),
+                .title(" Review and send "),
             middle,
         );
         let inner = middle.inner(Margin::new(3, 2));
@@ -88,18 +88,114 @@ impl RegistryConsentPage {
     }
 }
 
+/// What the request will carry, before anything about publication: the
+/// person reads what they are sending, then decides the one thing still open.
+///
+/// Vetting gets the most words because it is where the two kinds of community
+/// differ most for the people who vouched: named statements put each vetter's
+/// DID in front of the community, a PCS zero-knowledge proof does not.
+fn review_lines(community: &str, review: &JoinReview) -> Vec<Line<'static>> {
+    let label =
+        |text: &str| Span::styled(format!("  {text:<17}"), Style::new().fg(COLOR_DARK_GRAY));
+    let value = |text: String| Span::styled(text, Style::new().fg(COLOR_TEXT_DEFAULT));
+    let mut lines = vec![
+        Line::styled(
+            format!("What {community} will receive"),
+            Style::new().fg(COLOR_BORDER).bold(),
+        ),
+        Line::from(vec![label("Your identity"), value(review.persona.clone())]),
+        Line::from(vec![
+            label("Invitation"),
+            value(
+                review
+                    .invitation
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string()),
+            ),
+        ]),
+    ];
+    match &review.vetting {
+        ReviewVetting::None => {
+            lines.push(Line::from(vec![
+                label("Vetting"),
+                value("none".to_string()),
+            ]));
+        }
+        ReviewVetting::Hidden { attestations } => {
+            lines.push(Line::from(vec![
+                label("Vetting"),
+                badges::pcs_zkp(),
+                value(format!(
+                    "  a zero-knowledge proof built from {attestations} vetter attestation{}",
+                    if *attestations == 1 { "" } else { "s" }
+                )),
+            ]));
+            lines.push(Line::from(vec![
+                label(""),
+                Span::styled(
+                    "it learns that enough vetters vouched for you — not who they were",
+                    Style::new().fg(COLOR_SOFT_PURPLE),
+                ),
+            ]));
+        }
+        ReviewVetting::Named(statements) => {
+            lines.push(Line::from(vec![
+                label("Vetting"),
+                value(format!(
+                    "{} named statement{} — it sees who vouched for you",
+                    statements.len(),
+                    if statements.len() == 1 { "" } else { "s" }
+                )),
+            ]));
+            for statement in statements {
+                lines.push(Line::from(vec![
+                    label(""),
+                    Span::styled(format!("• {statement}"), Style::new().fg(COLOR_SOFT_PURPLE)),
+                ]));
+            }
+        }
+    }
+    if review.face.is_empty() {
+        lines.push(Line::from(vec![
+            label("Your face sends"),
+            value("nothing".to_string()),
+        ]));
+    } else {
+        for (i, (claim, shown)) in review.face.iter().enumerate() {
+            lines.push(Line::from(vec![
+                label(if i == 0 { "Your face sends" } else { "" }),
+                Span::styled(format!("{claim}  "), Style::new().fg(COLOR_DARK_GRAY)),
+                value(shown.clone()),
+            ]));
+        }
+    }
+    if let Some(decision) = &review.decision {
+        lines.push(Line::from(vec![
+            label("How it decides"),
+            value(decision.clone()),
+        ]));
+    }
+    lines.push(Line::default());
+    lines
+}
+
 /// The page body. Separate from `render` so it is testable as text.
 pub(crate) fn lines(choice: &RegistryChoice) -> Vec<Line<'static>> {
     let community = choice
         .community_name
         .clone()
         .unwrap_or_else(|| "this community".to_string());
+    let mut body = choice
+        .review
+        .as_ref()
+        .map(|r| review_lines(&community, r))
+        .unwrap_or_default();
     let (mark, mark_style) = if choice.publish {
         ("[x]", Style::new().fg(COLOR_SUCCESS).bold())
     } else {
         ("[ ]", Style::new().fg(COLOR_TEXT_DEFAULT).bold())
     };
-    vec![
+    body.extend([
         Line::from(vec![
             Span::styled("Joining ", Style::new().fg(COLOR_TEXT_DEFAULT)),
             Span::styled(community.clone(), Style::new().fg(COLOR_SOFT_PURPLE)),
@@ -138,7 +234,8 @@ pub(crate) fn lines(choice: &RegistryChoice) -> Vec<Line<'static>> {
             Span::styled(format!("  {mark} "), mark_style),
             Span::styled(OPT_IN_LABEL, Style::new().fg(COLOR_TEXT_DEFAULT)),
         ]),
-    ]
+    ]);
+    body
 }
 
 #[cfg(test)]
@@ -159,7 +256,53 @@ mod tests {
                 "did:webvh:QmScid:vtc.example".into(),
                 "acct/co-op".into(),
             )),
+            review: None,
         }
+    }
+
+    /// The review says what the community receives before the publication
+    /// question — and for vetting, whether it learns who vouched.
+    #[test]
+    fn the_review_says_what_the_community_receives_and_who_it_learns_vouched() {
+        let with = |vetting| RegistryChoice {
+            review: Some(JoinReview {
+                persona: "did:webvh:QmP:persona".into(),
+                invitation: None,
+                vetting,
+                face: vec![("name.legal".into(), "Alice Example".into())],
+                decision: Some("meeting its vetting requirements admits you automatically".into()),
+            }),
+            ..choice(false)
+        };
+        let named = text(&with(ReviewVetting::Named(vec![
+            "did:key:zVetter — vetted you in person, checking your legal name, valid until 1 Feb 2027"
+                .into(),
+        ])));
+        assert!(
+            named.contains("What this community will receive"),
+            "{named}"
+        );
+        assert!(named.contains("did:webvh:QmP:persona"), "{named}");
+        assert!(
+            named.contains("1 named statement — it sees who vouched for you"),
+            "{named}"
+        );
+        assert!(
+            named.contains("did:key:zVetter — vetted you in person"),
+            "{named}"
+        );
+        assert!(named.contains("name.legal  Alice Example"), "{named}");
+        assert!(named.contains("admits you automatically"), "{named}");
+        // The review comes first; the publication question is still there after it.
+        assert!(
+            named.find("will receive") < named.find(OPT_IN_LABEL),
+            "{named}"
+        );
+
+        let hidden = text(&with(ReviewVetting::Hidden { attestations: 2 }));
+        assert!(hidden.contains("PCS ZKP"), "{hidden}");
+        assert!(hidden.contains("not who they were"), "{hidden}");
+        assert!(!hidden.contains("sees who vouched"), "{hidden}");
     }
 
     fn text(choice: &RegistryChoice) -> String {

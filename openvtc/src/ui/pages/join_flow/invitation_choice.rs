@@ -90,7 +90,11 @@ impl InvitationChoice {
             Block::bordered()
                 .fg(COLOR_BORDER)
                 .padding(Padding::proportional(1))
-                .title(" Use an invitation for this community? "),
+                .title(if state.vetting_in_hand.is_some() {
+                    " Also present an invitation? "
+                } else {
+                    " Use an invitation for this community? "
+                }),
             middle,
         );
         let inner = middle.inner(Margin::new(3, 2));
@@ -102,6 +106,28 @@ impl InvitationChoice {
             ),
             Line::default(),
         ];
+        // Holding vetting changes what this question is: the statements go with
+        // the request either way, so an invitation is in addition to them, not
+        // the only alternative to an open request.
+        if let Some(vetting) = &state.vetting_in_hand {
+            lines.insert(
+                1,
+                Line::styled(
+                    {
+                        // One statement, or a proof (always one), is singular.
+                        let one = vetting.hidden || vetting.count == 1;
+                        format!(
+                            "Your {} {} with this request either way. An invitation is optional \
+                             on top of {}.",
+                            vetting_words(vetting),
+                            if one { "goes" } else { "go" },
+                            if one { "it" } else { "them" }
+                        )
+                    },
+                    Style::new().fg(COLOR_SOFT_PURPLE),
+                ),
+            );
+        }
 
         // With nothing found, say so plainly rather than showing a bare list —
         // the step is still worth asking, because the paste row below answers it.
@@ -178,14 +204,40 @@ impl InvitationChoice {
         } else {
             Style::new().fg(COLOR_SOFT_PURPLE)
         };
-        lines.push(Line::from(Span::styled(
-            format!("{marker}Join without it — send an open request"),
-            style,
-        )));
-        lines.push(Line::styled(
-            "    The community reviews and approves the request manually.",
-            Style::new().fg(COLOR_DARK_GRAY),
-        ));
+        // What joining without an invitation actually sends. With vetting in
+        // hand it is not an open request: the statements decide it, under the
+        // community's own admission rule.
+        match &state.vetting_in_hand {
+            Some(vetting) => {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{marker}Join without one — with your {} only",
+                        vetting_words(vetting)
+                    ),
+                    style,
+                )));
+                lines.push(Line::styled(
+                    format!(
+                        "    {}.",
+                        vetting
+                            .decision
+                            .clone()
+                            .unwrap_or_else(|| "The community decides on your vetting".to_string())
+                    ),
+                    Style::new().fg(COLOR_DARK_GRAY),
+                ));
+            }
+            None => {
+                lines.push(Line::from(Span::styled(
+                    format!("{marker}Join without it — send an open request"),
+                    style,
+                )));
+                lines.push(Line::styled(
+                    "    The community reviews and approves the request manually.",
+                    Style::new().fg(COLOR_DARK_GRAY),
+                ));
+            }
+        }
 
         // Why a paste was refused (bad JSON / wrong community / expired). Without
         // this the row simply never appears and the paste looks like it worked.
@@ -219,6 +271,20 @@ impl InvitationChoice {
             Paragraph::new(bottom_line).block(Block::new().padding(Padding::new(2, 0, 1, 0))),
             bottom,
         );
+    }
+}
+
+/// The vetting held, in words: "2 vetting statements", or "PCS ZKP proof
+/// from 2 vetter attestations".
+fn vetting_words(vetting: &crate::state_handler::join::VettingInHand) -> String {
+    let plural = if vetting.count == 1 { "" } else { "s" };
+    if vetting.hidden {
+        format!(
+            "zero-knowledge (PCS ZKP) proof from {} vetter attestation{plural}",
+            vetting.count
+        )
+    } else {
+        format!("{} vetting statement{plural}", vetting.count)
     }
 }
 
@@ -256,6 +322,62 @@ mod tests {
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn drawn(state: &JoinState) -> String {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (width, height) = (160u16, 40u16);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| InvitationChoice.render(state, frame))
+            .expect("render");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Holding vetting, joining without an invitation is not an open request:
+    /// the page says the statements go either way and how the community
+    /// decides on them, instead of promising a manual review.
+    #[test]
+    fn with_vetting_in_hand_the_invitation_is_optional_on_top() {
+        use crate::state_handler::join::VettingInHand;
+        let state = JoinState {
+            vetting_in_hand: Some(VettingInHand {
+                count: 2,
+                hidden: false,
+                decision: Some("meeting its vetting requirements admits you automatically".into()),
+            }),
+            ..JoinState::default()
+        };
+        let page = drawn(&state);
+        assert!(page.contains("Also present an invitation?"), "{page}");
+        assert!(
+            page.contains("Your 2 vetting statements go with this request"),
+            "{page}"
+        );
+        assert!(
+            page.contains("with your 2 vetting statements only"),
+            "{page}"
+        );
+        assert!(page.contains("admits you automatically"), "{page}");
+        assert!(
+            !page.contains("reviews and approves the request manually"),
+            "{page}"
+        );
+
+        // Without vetting, it is the open request it always was.
+        let plain = drawn(&JoinState::default());
+        assert!(plain.contains("send an open request"), "{plain}");
+        assert!(
+            plain.contains("reviews and approves the request manually"),
+            "{plain}"
+        );
     }
 
     #[test]

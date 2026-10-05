@@ -75,6 +75,50 @@ pub struct RegistryChoice {
     pub confirmed: bool,
     /// The join launch waiting on this page: `(identity, community, context)`.
     pub parked: Option<(IdentityPick, String, String)>,
+    /// What the request will carry, for the person to read before it goes.
+    pub review: Option<JoinReview>,
+}
+
+/// What a join request will put in front of the community, gathered before it
+/// is sent so the person can read it first.
+///
+/// Everything here is what the join *will* send, worked out from the same
+/// records the join reads — so the page does not describe a different request
+/// from the one that leaves.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JoinReview {
+    /// The DID the community admits, or that a new one is made on sending.
+    pub persona: String,
+    /// The invitation presented, in words; `None` when none is.
+    pub invitation: Option<String>,
+    pub vetting: ReviewVetting,
+    /// What the face sends, as `(claim type, value)`.
+    pub face: Vec<(String, String)>,
+    /// How the community decides on it, when its manifest says.
+    pub decision: Option<String>,
+}
+
+/// Vetting a join will present, as the invitation page needs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VettingInHand {
+    /// Named statements held, or attestations under a hidden criterion.
+    pub count: usize,
+    /// Proven with a PCS zero-knowledge proof rather than named statements.
+    pub hidden: bool,
+    /// How the community decides on it, when its manifest says.
+    pub decision: Option<String>,
+}
+
+/// The vetting a join request carries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ReviewVetting {
+    /// None: no application for this persona here.
+    #[default]
+    None,
+    /// Named statements, one line each — who vouched, and what they checked.
+    Named(Vec<String>),
+    /// A PCS zero-knowledge proof over this many attestations.
+    Hidden { attestations: usize },
 }
 
 impl RegistryChoice {
@@ -633,6 +677,11 @@ pub struct JoinState {
     /// step can tell a pasted VIC bound to *this* identity from one bound to
     /// another (which needs a subject-linkage proof) and say so on the row.
     pub invitation_persona_did: Option<String>,
+    /// The vetting this join will present whatever the invitation choice, when
+    /// the persona joining holds any for this community. The invitation page
+    /// words its "without" row from it: joining without an invitation is not
+    /// an open request when statements go with it.
+    pub vetting_in_hand: Option<VettingInHand>,
     /// Highlighted row on the invitation-choice page. See
     /// [`invitation_paste_row`](Self::invitation_paste_row) and
     /// [`invitation_without_row`](Self::invitation_without_row) for the layout.

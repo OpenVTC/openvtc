@@ -1995,7 +1995,11 @@ impl StateHandler {
             .is_some_and(|r| r.answered_for(&vtc_did));
         if !registry_answered {
             let community_name = config.agent_name_for(&vtc_did).map(str::to_string);
+            let review = join_review(config, state, &vtc_did, &choice);
             open_registry_choice(state, community_name, (choice, vtc_did, context_id));
+            if let Some(registry) = state.join.registry.as_mut() {
+                registry.review = Some(review);
+            }
             let _ = self.state_tx.send(state.clone());
             return None;
         }
@@ -2114,6 +2118,11 @@ fn open_invitation_choice(state: &mut State, config: &Config, persona_id: Person
     // request here, which is why an operator holding an
     // invitation was never asked for it.
     state.join.invitation_options = invitations;
+    state.join.vetting_in_hand = state
+        .join
+        .pending_vtc
+        .as_deref()
+        .and_then(|vtc| vetting_in_hand(config, vtc, persona_id));
     state.join.invitation_for_persona = Some(persona_id);
     state.join.invitation_persona_did = persona_did;
     state.join.invitation_use_selected = 0;
@@ -3664,6 +3673,171 @@ async fn open_answers(
     state.join.processing = false;
 }
 
+/// What the join request for `vtc_did` as `pick` will carry, read from the
+/// same records `run_join_sequence` builds it from: the persona's DID, the
+/// invitation chosen, the application's statements or hidden proof, and the
+/// face's approved answers.
+fn join_review(
+    config: &Config,
+    state: &State,
+    vtc_did: &str,
+    pick: &IdentityPick,
+) -> crate::state_handler::join::JoinReview {
+    use crate::state_handler::join::{JoinReview, ReviewVetting};
+    use openvtc_core::vetting::guide::{claim_words, method_words};
+    let now = Utc::now();
+    let persona = match pick {
+        IdentityPick::Reuse(id) => config.account.personas.get(id),
+        IdentityPick::Mint => None,
+    };
+    let persona_line = persona.map_or_else(
+        || "a new persona — its DID is made when you send".to_string(),
+        |p| sanitize_display(&p.did, 256),
+    );
+    let invitation = state
+        .join
+        .present_invitation
+        .then_some(state.invitation_credential.as_ref())
+        .flatten()
+        .map(|vic| {
+            let issuer = vic
+                .get("issuer")
+                .and_then(|i| i.as_str().or_else(|| i.get("id").and_then(|x| x.as_str())))
+                .unwrap_or("the community");
+            // Issued to a different DID from the one joining: the join adds a
+            // proof that links the two, which the community sees.
+            let linked = vic
+                .pointer("/credentialSubject/id")
+                .and_then(|v| v.as_str())
+                .zip(persona.map(|p| p.did.as_str()))
+                .is_some_and(|(issued_to, joining)| issued_to != joining);
+            format!(
+                "an invitation issued by {}{}",
+                sanitize_display(issuer, 128),
+                if linked {
+                    ", issued to another of your personas and linked to this one with a proof"
+                } else {
+                    ""
+                }
+            )
+        });
+    let application = persona.and_then(|p| {
+        config
+            .private
+            .vetting
+            .application(vtc_did, p.persona_id)
+            .filter(|a| a.join_did == p.did)
+    });
+    let vetting = match application {
+        None => ReviewVetting::None,
+        Some(app) if app.hidden.is_some() => ReviewVetting::Hidden {
+            attestations: app.hidden_state.as_ref().map_or(0, |h| h.held.len()),
+        },
+        Some(app) => ReviewVetting::Named(
+            app.statements
+                .iter()
+                .filter(|s| s.valid_until > now)
+                .map(|s| {
+                    let checked: Vec<String> =
+                        s.claims_verified.iter().map(|c| claim_words(c)).collect();
+                    format!(
+                        "{} — vetted you {}{}, valid until {}",
+                        openvtc_core::display::display_identifier(
+                            config.agent_name_for(&s.vetter),
+                            &s.vetter,
+                            64
+                        ),
+                        method_words(s.method),
+                        if checked.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", checking your {}", checked.join(", "))
+                        },
+                        s.valid_until.format("%-d %b %Y")
+                    )
+                })
+                .collect(),
+        ),
+    };
+    let face = state
+        .join
+        .answers
+        .as_ref()
+        .and_then(|a| a.approved.as_ref())
+        .map(|(_, values)| {
+            values
+                .iter()
+                .map(|(claim, value)| {
+                    let shown = match value {
+                        serde_json::Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    };
+                    (sanitize_display(claim, 64), sanitize_display(&shown, 256))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let decision = application
+        .and_then(|app| vetting_decision(config, vtc_did, app))
+        .or_else(|| {
+            (application.is_none() && invitation.is_none()).then(|| {
+                "with no invitation or vetting, the request goes to its moderators to decide"
+                    .to_string()
+            })
+        });
+    JoinReview {
+        persona: persona_line,
+        invitation,
+        vetting,
+        face,
+        decision,
+    }
+}
+
+/// How the community decides on a request carrying this application's
+/// vetting, when its manifest says. The criterion an application names is the
+/// one the community decides under.
+fn vetting_decision(config: &Config, vtc_did: &str, app: &Application) -> Option<String> {
+    let digest = app.requirements_digest.as_deref()?;
+    let route = config
+        .private
+        .vetting
+        .routes(vtc_did)
+        .iter()
+        .find(|r| r.requirements_digest.as_deref() == Some(digest))?;
+    Some(match route.admission? {
+        openvtc_core::vetting::protocol::Admission::Automatic => {
+            "meeting its vetting requirements admits you automatically".to_string()
+        }
+        _ => "meeting its vetting requirements sends you to an administrator, who decides"
+            .to_string(),
+    })
+}
+
+/// The vetting a join by `persona_id` to `vtc_did` will present, whatever is
+/// chosen on the invitation page — `run_join_sequence` attaches it either way.
+fn vetting_in_hand(
+    config: &Config,
+    vtc_did: &str,
+    persona_id: PersonaId,
+) -> Option<crate::state_handler::join::VettingInHand> {
+    let did = &config.account.personas.get(&persona_id)?.did;
+    let app = config
+        .private
+        .vetting
+        .application(vtc_did, persona_id)
+        .filter(|a| &a.join_did == did)?;
+    let (count, hidden) = match &app.hidden {
+        Some(_) => (app.hidden_state.as_ref().map_or(0, |h| h.held.len()), true),
+        None => (app.presentable_statements(Utc::now()).len(), false),
+    };
+    (count > 0).then(|| crate::state_handler::join::VettingInHand {
+        count,
+        hidden,
+        decision: vetting_decision(config, vtc_did, app),
+    })
+}
+
 /// Open the trust-registry page for the parked launch, with the box unticked.
 ///
 /// A fresh [`RegistryChoice`] every time — never one carried over from an
@@ -3682,6 +3856,7 @@ fn open_registry_choice(
         community_name,
         confirmed: false,
         parked: Some(parked),
+        review: None,
     });
     state.join.page = JoinPage::RegistryConsent;
     state.join.processing = false;
@@ -4654,6 +4829,28 @@ mod vetting_tests {
             )
             .is_none(),
             "a directory refusal is not about joining"
+        );
+    }
+
+    /// A new persona with no invitation and no application sends no vetting,
+    /// and its request goes to the community's moderators — and the review
+    /// says so rather than leaving the lines blank.
+    #[test]
+    fn a_bare_join_reviews_as_a_new_persona_with_nothing_to_present() {
+        use crate::state_handler::join::ReviewVetting;
+        let config = test_config();
+        let state = State::default();
+        let review = join_review(&config, &state, VTC, &IdentityPick::Mint);
+        assert!(review.persona.contains("a new persona"), "{review:?}");
+        assert_eq!(review.invitation, None);
+        assert_eq!(review.vetting, ReviewVetting::None);
+        assert!(review.face.is_empty());
+        assert!(
+            review
+                .decision
+                .as_deref()
+                .is_some_and(|d| d.contains("moderators")),
+            "{review:?}"
         );
     }
 
