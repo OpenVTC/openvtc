@@ -278,12 +278,19 @@ pub struct HiddenVetterState {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub unanswered: u32,
     /// A class period (`2026-10`) the community enrolled us under whose answer this client could
-    /// not open — it arrived after a restart, or was lost. The community issues one credential
-    /// per member per label and refuses a second (`alreadyEnrolled`), so asking again under the
-    /// same label only collects refusals: the schedule stops asking until the label moves on, and
-    /// the desk says why. Cleared by an enrolment that is opened.
+    /// not open — it arrived after a restart, or was lost. Cleared by an enrolment that is
+    /// opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lost_enrolment: Option<String>,
+    /// Whether the schedule has asked once more under [`Self::lost_enrolment`]'s label.
+    ///
+    /// A community may re-issue a lost answer to the identifier it enrolled (VTI #1972), so a
+    /// lost label is asked for again — once. One that does not re-issue refuses that ask too
+    /// (`alreadyEnrolled`), and the schedule then stops until the label moves on, rather than
+    /// collecting the same refusal every pass. `k` (get tokens) clears it: asking by hand is
+    /// worth one more try, and the community bounds how many re-issues it signs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lost_reasked: bool,
     /// Enrolments asked for whose answers have not been opened yet, each with the blinding that
     /// opens it — **written to the protected config before the request is sent**.
     ///
@@ -439,6 +446,7 @@ impl HiddenVetterState {
             rekeyed_at: None,
             unanswered: 0,
             lost_enrolment: None,
+            lost_reasked: false,
             enrolments_asked: Vec::new(),
         }
     }
@@ -565,9 +573,16 @@ impl HiddenVetterState {
             match due(&self.params, Some(&self.snapshot), &ticks, &events, now) {
                 Due::Nothing => break,
                 // Enrolment blocks every draw behind it, so it is the whole plan.
-                // Except under a label whose answer we lost: the community enrolled us and
-                // refuses a second credential under it, so asking again collects only refusals.
-                Due::Enrol { period } if self.lost_enrolment.as_deref() == Some(&period) => break,
+                // Under a label whose answer we lost, ask once more — a community that
+                // re-issues to the same identifier answers it — and then stop: one that
+                // does not only refuses again ([`Self::lost_reasked`]).
+                Due::Enrol { period } if self.lost_enrolment.as_deref() == Some(&period) => {
+                    if !self.lost_reasked {
+                        self.lost_reasked = true;
+                        plan.owed.push(Due::Enrol { period });
+                    }
+                    break;
+                }
                 enrol @ Due::Enrol { .. } => {
                     plan.owed.push(enrol);
                     break;
@@ -1136,18 +1151,21 @@ impl VettingBook {
             r.code.ends_with(":alreadyEnrolled")
                 && owed.as_deref() == Some(r.at.format("%Y-%m").to_string().as_str())
         });
+        let asking = self.queries.iter().any(|q| {
+            q.community == community
+                && q.persona == persona
+                && matches!(q.kind, QueryKind::PcsRoot | QueryKind::PcsTokens)
+        });
         Some(HiddenOutlook {
             usable: held.tokens().1,
             enrolled: owed.is_none(),
+            // Lost for good only once the one more ask has been answered with a refusal too;
+            // until then — not yet asked, or on its way — there is still an answer to wait for.
             enrolment_lost: owed.is_some()
-                && (owed == held.lost_enrolment
+                && ((owed == held.lost_enrolment && held.lost_reasked && !asking)
                     || (held.lost_enrolment.is_none() && refused_as_enrolled)),
             owed,
-            asking: self.queries.iter().any(|q| {
-                q.community == community
-                    && q.persona == persona
-                    && matches!(q.kind, QueryKind::PcsRoot | QueryKind::PcsTokens)
-            }),
+            asking,
             unanswered: held.unanswered,
             retry_at: held.retry_at.filter(|t| *t > now),
             next_window: super::hidden::next_window(&held.params, &events, now),

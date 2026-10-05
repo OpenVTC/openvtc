@@ -2711,9 +2711,16 @@ async fn an_enrolment_answer_that_cannot_be_opened_stops_the_asking_until_the_ne
     let october = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, 15, 0, 0).unwrap();
     let held = &mut vetter.book.hidden_vetter[0];
     assert_eq!(held.lost_enrolment.as_deref(), Some("2026-10"));
+    assert_eq!(
+        held.plan(None, &[], october).owed,
+        [super::hidden::Due::Enrol {
+            period: "2026-10".into()
+        }],
+        "asked once more: the community may re-issue to the same identifier"
+    );
     assert!(
         held.plan(None, &[], october).owed.is_empty(),
-        "asking again would only be refused"
+        "and only once"
     );
     // The next label is a new enrolment.
     let november = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 11, 1, 9, 0, 0).unwrap();
@@ -2731,20 +2738,29 @@ async fn an_enrolment_answer_that_cannot_be_opened_stops_the_asking_until_the_ne
 }
 
 /// `alreadyEnrolled` for a label we hold no credential under means the answer to an earlier
-/// request was lost: the schedule stops asking under it, rather than collecting the same
-/// refusal every pass.
+/// request was lost. The schedule asks once more — a community may re-issue it to the same
+/// identifier (VTI #1972) — and, refused that too, stops asking under the label rather than
+/// collecting the same refusal every pass.
 #[tokio::test]
-async fn already_enrolled_without_a_credential_stops_the_asking() {
+async fn already_enrolled_without_a_credential_asks_once_more_then_stops() {
     let (mut vetter, request, _) = vetter_asking_to_enrol().await;
-    vetter
-        .receive(
-            &community_refusal(&request, "vtc/vetting/vetters/pcs-root:alreadyEnrolled"),
-            COMMUNITY,
-        )
-        .await;
+    let refusal = community_refusal(&request, "vtc/vetting/vetters/pcs-root:alreadyEnrolled");
+    vetter.receive(&refusal, COMMUNITY).await;
     let october = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, 15, 0, 0).unwrap();
+    let outlook = vetter
+        .book
+        .hidden_outlook(COMMUNITY, vetter.persona, october)
+        .unwrap();
+    assert!(
+        !outlook.enrolment_lost,
+        "one more ask to come, so not given up on"
+    );
     let held = &mut vetter.book.hidden_vetter[0];
     assert_eq!(held.lost_enrolment.as_deref(), Some("2026-10"));
+    assert_eq!(held.plan(None, &[], october).owed.len(), 1, "one more ask");
+    // Asked: not asked again, whatever the answer — a refusal leaves it spent, and an opened
+    // re-issue clears the lost label altogether.
+    assert!(held.lost_reasked);
     assert!(held.plan(None, &[], october).owed.is_empty());
     assert!(
         vetter.book.pending_enrolments.is_empty(),
