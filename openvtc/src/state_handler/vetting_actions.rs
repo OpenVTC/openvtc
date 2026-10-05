@@ -205,11 +205,11 @@ pub(crate) fn outlook_detail(o: &HiddenOutlook, name: &str, now: DateTime<Utc>) 
 /// An enrolment the community made and this client could not open, in full: why it cannot be
 /// recovered, when the vetter can attest again, and what to do until then.
 ///
-/// Not recoverable from here: the blinding that opens the answer is held in memory for the
-/// round trip and never stored, and the community records only *that* it enrolled us under the
-/// label — it keeps no copy of the answer to send again, and refuses a second enrolment under
-/// the same label (`alreadyEnrolled`). The community's labels do not roll over by themselves
-/// either; its admins publish each one, so the date is the soonest the next can start.
+/// Said once the schedule has asked again under the label and been refused that too: a
+/// community may re-issue a lost answer to the identifier it enrolled (VTI #1972), and one that
+/// refuses (`alreadyEnrolled`) does not, or has re-issued as often as it will. `k` asks once
+/// more. The community's labels do not roll over by themselves either; its admins publish each
+/// one, so the date is the soonest the next can start.
 pub(crate) fn lost_enrolment_words(name: &str, period: Option<&str>, now: DateTime<Utc>) -> String {
     let label = period.map_or_else(
         || "its current label".to_string(),
@@ -225,8 +225,8 @@ pub(crate) fn lost_enrolment_words(name: &str, period: Option<&str>, now: DateTi
     };
     format!(
         "{name} already enrolled you under {label}, but this client lost the answer before it \
-         could be opened, and {name} issues one credential per label and keeps no copy to send \
-         again. You can attest there once it enrols you under a new label: {next}. To unblock \
+         could be opened, and it refused to issue it again (k asks once more). You can attest there once it enrols \
+         you under a new label: {next}. To unblock \
          you today, ask its operator to publish hidden vetting again with a new live period \
          first in livePeriods (for example {}) — then press k on the desk to enrol and draw at once. \
          Meanwhile you can still vet for communities that name their vetters",
@@ -505,7 +505,8 @@ fn hidden_row(
             .as_deref()
             .map(|l| l.trim_start_matches("vetter/"))
             == held.lost_enrolment.as_deref()
-            && held.lost_enrolment.is_some(),
+            && held.lost_enrolment.is_some()
+            && held.lost_reasked,
         unanswered: held.unanswered,
         enrolment_owed,
         tokens_held,
@@ -1528,6 +1529,11 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             // what is happening or what blocks it and until when. Said from the book as it was
             // before the pass, which is what the pass acts on.
             let now = Utc::now();
+            // Asked by hand: a lost enrolment is worth one more ask — the community may now
+            // re-issue it to the same identifier, and it bounds how many times it will.
+            for held in &mut ctx.config.private.vetting.hidden_vetter {
+                held.lost_reasked = false;
+            }
             let words: Vec<String> = {
                 let book = &ctx.config.private.vetting;
                 book.vetter_standing(now)
@@ -6788,6 +6794,7 @@ mod tests {
             let held = &mut book.hidden_vetter[0];
             if recorded {
                 held.lost_enrolment = Some("2026-10".into());
+                held.lost_reasked = true;
             }
             held.last_refusal = Some(openvtc_core::vetting::book::HiddenRefusal {
                 what: "your hidden-vetting credential".into(),
@@ -6949,6 +6956,9 @@ mod tests {
         let community = "did:web:first-vtc.example";
         let (mut book, persona) = hidden_vetter_book(0, false);
         book.hidden_vetter[0].lost_enrolment = Some("2026-10".into());
+        // Not yet asked once more: that ask is still to run.
+        assert!(tokens_obtainable_now(&book, community, persona, now));
+        book.hidden_vetter[0].lost_reasked = true;
         assert!(!tokens_obtainable_now(&book, community, persona, now));
         let (said, runs) = settle_gated(book, persona, now);
         assert!(said.contains("Sun 01 Nov 2026"), "{said}");

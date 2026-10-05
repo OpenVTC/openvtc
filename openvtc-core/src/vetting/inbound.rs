@@ -1197,6 +1197,9 @@ fn enrolled(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
     let Some(blinding) = blinding else {
         warn!(community = %sender, label = %body.label, "enrolled, but the blinding state is gone — this label's credential cannot be opened");
         if let Some(state) = book.hidden_vetter_mut(sender, persona) {
+            if state.lost_enrolment.as_deref() != Some(period.as_str()) {
+                state.lost_reasked = false;
+            }
             state.lost_enrolment = Some(period);
         }
         return Handled {
@@ -1222,6 +1225,7 @@ fn enrolled(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
                 state.enrolled_at.insert(period, ctx.now);
                 state.last_refusal = None;
                 state.lost_enrolment = None;
+                state.lost_reasked = false;
             }
             // Draw now rather than at the next pass, which can be an hour away: every tick of
             // the label that has begun is owed already, and until they are drawn this vetter
@@ -1239,6 +1243,9 @@ fn enrolled(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
         Err(e) => {
             warn!(community = %sender, error = %e, "enrolment answer did not unblind");
             if let Some(state) = book.hidden_vetter_mut(sender, persona) {
+                if state.lost_enrolment.as_deref() != Some(period.as_str()) {
+                    state.lost_reasked = false;
+                }
                 state.lost_enrolment = Some(period);
             }
             Handled {
@@ -1795,7 +1802,12 @@ fn hidden_refused(
     // refusal, so the schedule stops until the label moves on (an answer still on its way is
     // taken if it arrives, and clears this).
     if query.kind == QueryKind::PcsRoot && code.ends_with(":alreadyEnrolled") {
-        state.lost_enrolment = state.enrolment_owed();
+        let owed = state.enrolment_owed();
+        // A label newly lost earns its one more ask; a refusal of that ask leaves it spent.
+        if owed != state.lost_enrolment {
+            state.lost_reasked = false;
+        }
+        state.lost_enrolment = owed;
     }
     match code {
         super::hidden::TOKENS_TICK_NOT_YET => {

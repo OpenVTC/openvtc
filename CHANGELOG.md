@@ -191,6 +191,14 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **A lost hidden-vetting enrolment is asked for once more.** A vetter whose
+  enrolment answer was lost (refused `alreadyEnrolled` under a label it holds
+  no credential for) was given up on until the community's next label. A
+  community may now re-issue a lost answer to the same PCS identifier
+  (VTI #1972), so the schedule asks once more under that label — and stops only
+  if that is refused too. `k` (get tokens) asks once more by hand. A vetter left
+  stranded by an earlier build re-asks on its next pass.
+
 - **The join page starts with an empty community box.** The DID typed for the
   last join stayed in the input the next time the page opened, reading as
   though the new join were already aimed somewhere. Each fresh entry now
