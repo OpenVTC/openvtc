@@ -1273,8 +1273,14 @@ impl MainPage {
             return self.handle_device_access_key(key, &view);
         }
         let comms = &self.props.main_page.content_panel.communities;
+        // `count` is the memberships — every index-taking action below indexes
+        // them, so a cursor on a "Joining" row (`selected >= count`) leaves
+        // those keys inert. `rows` is what the cursor moves over.
         let count = comms.items.len();
+        let rows = count + comms.joining.len();
         let selected = comms.selected_index;
+        let joining = components::communities_panel::joining_selected(comms)
+            .map(|j| j.application_id.clone());
 
         // A removal confirmation is pending: only confirm (y/Enter) or cancel
         // (n/Esc) apply; every other key is swallowed so nothing slips through.
@@ -1329,21 +1335,31 @@ impl MainPage {
                 let _ = self.action_tx.send(Action::StartJoin);
                 true
             }
-            KeyCode::Up if count > 0 => {
+            KeyCode::Up if rows > 0 => {
                 let _ = self
                     .action_tx
                     .send(Action::CommunitySelect(selected.saturating_sub(1)));
                 true
             }
-            KeyCode::Down if count > 0 => {
+            KeyCode::Down if rows > 0 => {
                 let _ = self
                     .action_tx
-                    .send(Action::CommunitySelect((selected + 1).min(count - 1)));
+                    .send(Action::CommunitySelect((selected + 1).min(rows - 1)));
                 true
             }
             KeyCode::Enter if selected < count => {
                 // Make the highlighted community the working context (R-C-6).
                 let _ = self.action_tx.send(Action::SetActiveCommunity(selected));
+                true
+            }
+            KeyCode::Enter if joining.is_some() => {
+                // A join in progress: its journey on the Vetting page, where
+                // every step of the application is taken.
+                if let Some(id) = joining {
+                    let _ = self.action_tx.send(Action::Vetting(
+                        crate::state_handler::actions::VettingAction::OpenApplication(id),
+                    ));
+                }
                 true
             }
             KeyCode::Char('f') if selected < count => {
@@ -4538,6 +4554,46 @@ mod key_handler_tests {
             Ok(Action::ToggleFavourite(1)) => {}
             _ => panic!("expected ToggleFavourite(1)"),
         }
+    }
+
+    /// A "Joining" row sits after the memberships: Down reaches it, Enter opens
+    /// its application on the Vetting page, and the membership keys stay inert
+    /// there rather than acting on whichever membership shares the index.
+    #[test]
+    fn communities_enter_on_a_joining_row_opens_its_application() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::JoiningSummary;
+        let joining = || JoiningSummary {
+            application_id: "app-1".to_string(),
+            community_name: "Globex".to_string(),
+            accent: None,
+            persona_label: "Work".to_string(),
+            standing: "1 of 1 statement — ready to join".to_string(),
+            ready: true,
+        };
+
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            s.main_page.content_panel.communities.items = vec![community_summary("a")].into();
+            s.main_page.content_panel.communities.joining = vec![joining()].into();
+        });
+        page.handle_key_event(press(KeyCode::Down));
+        assert!(matches!(rx.try_recv(), Ok(Action::CommunitySelect(1))));
+
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            s.main_page.content_panel.communities.items = vec![community_summary("a")].into();
+            s.main_page.content_panel.communities.joining = vec![joining()].into();
+            s.main_page.content_panel.communities.selected_index = 1;
+        });
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::Vetting(V::OpenApplication(id))) if id == "app-1"
+        ));
+        page.handle_key_event(press(KeyCode::Char('f')));
+        assert!(
+            rx.try_recv().is_err(),
+            "no membership is under the cursor for `f` to star"
+        );
     }
 
     #[test]
