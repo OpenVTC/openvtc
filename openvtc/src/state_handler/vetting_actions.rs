@@ -386,9 +386,13 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
         })
         .collect();
 
+    // Only requests still waiting on us. A finished one leaves at once — its
+    // statement is under History, a decline is a line there too — rather than
+    // sitting among the open ones with the person's card beside it.
     vetting.desk = book
         .desk
         .iter()
+        .filter(|entry| entry.state.is_open())
         .map(|entry| {
             let (state, stage, session, card) = match &entry.state {
                 DeskState::Accepted => (
@@ -487,6 +491,35 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                 .withdrawal
                 .as_ref()
                 .is_some_and(|w| w.recorded_at.is_some()),
+        })
+        .collect();
+
+    // Declines, newest first: the ones still on the desk in their grace, then
+    // the archived. Community and date only — a decline keeps no identifier.
+    let mut declined: Vec<(chrono::DateTime<Utc>, String)> = book
+        .desk
+        .iter()
+        .filter_map(|e| match &e.state {
+            openvtc_core::vetting::vetter::DeskState::Declined { at, .. } => {
+                Some((*at, e.community.clone()))
+            }
+            _ => None,
+        })
+        .chain(book.vetted.iter().filter_map(|r| match r.outcome {
+            openvtc_core::vetting::book::VettedOutcome::Declined => {
+                Some((r.closed_at, r.community.clone()))
+            }
+            openvtc_core::vetting::book::VettedOutcome::Signed { .. } => None,
+        }))
+        .collect();
+    declined.sort_by(|a, b| b.0.cmp(&a.0));
+    vetting.declined = declined
+        .into_iter()
+        .map(|(at, community)| {
+            (
+                community_name(&community).unwrap_or_else(|| shorten_did(&community, 48)),
+                at.format("%Y-%m-%d").to_string(),
+            )
         })
         .collect();
 
@@ -4176,6 +4209,11 @@ impl VettingOutcome {
                 )
             }
         };
+        // Every outcome is a moment the desk may have changed — a statement
+        // sent, a decline delivered — so a card that has served its purpose
+        // is forgotten now rather than at the next hourly sweep.
+        let pruned = config.private.vetting.prune(Utc::now());
+        let persist = persist || pruned;
         dispatch_util::save_and_sync(
             &mut state.main_page,
             config,

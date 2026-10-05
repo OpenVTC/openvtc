@@ -726,8 +726,12 @@ Then it shows a guided checklist. All items are required unless marked:
 
 The vetter's client **must not** offer photo capture and must not persist
 document details. The card itself is retained only per the vetter's
-`cardRetention` (default: delete 7 days after the statement is issued; keep
-only `cardDigestMultibase`).
+`cardRetention` (default: delete as soon as the request closes — the statement
+is issued or the request declined; keep only `cardDigestMultibase`, which the
+statement already commits to). A closed request then leaves the vetter's desk
+for a record that holds no personal data: the community, the date and the
+outcome. A signed statement's applicant DID is kept with the statement, where
+withdrawing it needs it; a decline keeps no identifier at all.
 
 ### 9.4 Vetting Statement — a VSC
 
@@ -1250,7 +1254,7 @@ languages          = ["en"]
 region             = "EU"              # coarse only
 listed             = false             # opt into vtc/vetters/list (V1)
 accepts_documentation = ["passport", "nationalId", "none"]  # this vetter's choice (D16); "none" = prior acquaintance
-card_retention     = "P7D"             # after statement issued or declined
+card_retention     = "P0D"             # forgotten when the request closes
 request_expiry     = "P14D"            # unanswered requests auto-expire
 notify_on_admission = true             # if the VTC offers it
 ```

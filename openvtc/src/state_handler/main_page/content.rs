@@ -2087,7 +2087,7 @@ impl DeskView {
         match self {
             DeskView::Requests => "Requests",
             DeskView::Tickets => "Tickets",
-            DeskView::Issued => "Issued",
+            DeskView::Issued => "History",
         }
     }
 }
@@ -2107,6 +2107,9 @@ pub struct VettingState {
     pub desk: Arc<[DeskRow]>,
     pub tickets: Arc<[TicketRow]>,
     pub issued: Arc<[IssuedRow]>,
+    /// Requests we declined, as `(community, date)`: the record that we
+    /// vetted someone, with nothing about who.
+    pub declined: Arc<[(String, String)]>,
     /// Personas an application can join with.
     pub personas: Arc<[VettingPersona]>,
     /// Communities we are an active member of, and so can vet for.

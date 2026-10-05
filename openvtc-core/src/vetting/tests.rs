@@ -2251,3 +2251,82 @@ async fn a_declines_reason_and_note_reach_the_applicant() {
         other => panic!("declined, with its reason: {other:?}"),
     }
 }
+
+/// A finished request keeps nothing about the person: the card's values go at
+/// the first prune after it closes, the request stays on the desk only through
+/// the grace a failed send needs, and then it is a record of the community,
+/// the date and the outcome — no card, no claims, no DID.
+#[tokio::test]
+async fn a_finished_request_forgets_the_person_and_leaves_the_desk() {
+    use super::book::{CLOSED_GRACE, VettedOutcome};
+    let (mut applicant, mut vetter, _) = ready().await;
+    let resolver = TrustTaskVmResolver::did_key_only();
+    let (request_id, session_doc) = in_session(&mut applicant, &mut vetter).await;
+    let message = signed(session_doc.clone(), &vetter.secret).await;
+    let handled = applicant.receive(&message, &vetter.did).await;
+    let Some(Notice::SessionOpened { session_id, .. }) = handled.notice else {
+        panic!("the session opens");
+    };
+    let draft = applicant
+        .application()
+        .card_draft(
+            &session_id,
+            vec![
+                session::v0_1::VettingCardClaim::try_from(
+                    session::v0_1::VettingCardClaim::builder()
+                        .type_("name.legal")
+                        .value(json!("Alice Example"))
+                        .provenance("selfAsserted"),
+                )
+                .unwrap(),
+            ],
+            Utc::now(),
+        )
+        .unwrap();
+    let card = sign_card(draft, &applicant.secret).await.unwrap();
+    applicant
+        .application()
+        .record_card(&session_id, &card, &resolver, Utc::now())
+        .await
+        .unwrap();
+    let doc = wire::response(&session_doc, &json!({ "card": card })).unwrap();
+    vetter
+        .receive(&signed(doc, &applicant.secret).await, &applicant.did)
+        .await;
+
+    let closed = Utc::now();
+    vetter
+        .book
+        .decline(&request_id, None, None, closed)
+        .unwrap();
+    let held = |book: &VettingBook| {
+        serde_json::to_string(book)
+            .unwrap()
+            .contains("Alice Example")
+    };
+    assert!(
+        held(&vetter.book),
+        "the card is there until the first prune"
+    );
+
+    // The first prune forgets the card; the request waits out the grace.
+    assert!(vetter.book.prune(closed));
+    assert!(!held(&vetter.book), "the legal name is gone at once");
+    assert!(
+        vetter.book.desk_entry(&request_id).is_some(),
+        "a failed send must find it"
+    );
+
+    // After the grace, it is a record with nothing about the person.
+    assert!(vetter.book.prune(closed + CLOSED_GRACE));
+    assert!(vetter.book.desk_entry(&request_id).is_none());
+    let record = vetter
+        .book
+        .vetted
+        .last()
+        .expect("a record that we vetted someone");
+    assert_eq!(record.outcome, VettedOutcome::Declined);
+    assert_eq!(record.community, COMMUNITY);
+    let stored = serde_json::to_string(&vetter.book.vetted).unwrap();
+    assert!(!stored.contains(&applicant.did), "no identifier: {stored}");
+}
