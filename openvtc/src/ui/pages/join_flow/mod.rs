@@ -59,6 +59,13 @@ pub struct JoinFlow {
     /// and anything typed afterwards is left alone.
     pub prefilled_issuer: Option<String>,
 
+    /// The [`JoinState::entry`] the input was last cleared for. A fresh entry
+    /// into the flow starts with an empty box: the previous join's DID left in
+    /// it read as though this join were already aimed somewhere.
+    ///
+    /// [`JoinState::entry`]: crate::state_handler::join::JoinState::entry
+    pub entry: u64,
+
     // Page handlers (zero-sized — they read from `props.state`).
     pub vtc_enter_did: VtcEnterDid,
     pub invitation_choice: InvitationChoice,
@@ -123,6 +130,17 @@ impl JoinFlow {
         self.prefilled_issuer = Some(issuer.to_string());
     }
 
+    /// Empty the community-DID input when the flow has been entered afresh.
+    /// Runs before the invitation prefill, so an invitation brought into the
+    /// new entry still fills the box.
+    fn clear_on_fresh_entry(&mut self) {
+        if self.props.state.entry != self.entry {
+            self.entry = self.props.state.entry;
+            self.vtc_did = Input::default();
+            self.prefilled_issuer = None;
+        }
+    }
+
     /// What a paste on the entry page means, wherever the text came from.
     ///
     /// A JSON object is an invitation credential; anything else is the
@@ -163,6 +181,7 @@ impl Component for JoinFlow {
             action_tx,
             vtc_did: Input::default(),
             prefilled_issuer: None,
+            entry: state.join.entry,
             vtc_enter_did: VtcEnterDid,
             invitation_choice: InvitationChoice,
             identity_choice: IdentityChoice,
@@ -182,6 +201,7 @@ impl Component for JoinFlow {
             props: Props::from(state),
             ..self
         };
+        next.clear_on_fresh_entry();
         next.prefill_from_invitation();
         next
     }
@@ -287,6 +307,33 @@ mod tests {
         let mut state = State::default();
         state.join.invitation_issuer = issuer.map(str::to_string);
         flow.move_with_state(&state)
+    }
+
+    /// Each fresh entry into the flow starts with an empty box; a redraw within
+    /// one entry keeps what was typed.
+    #[test]
+    fn a_fresh_entry_clears_the_did_input() {
+        let mut state = State::default();
+        let mut flow = flow();
+        flow.vtc_did = Input::new("did:webvh:last.join".to_string());
+        let mut flow = flow.move_with_state(&state);
+        assert_eq!(flow.vtc_did.value(), "did:webvh:last.join", "same entry");
+
+        state.join.reset();
+        flow = flow.move_with_state(&state);
+        assert_eq!(flow.vtc_did.value(), "", "a new entry starts empty");
+    }
+
+    /// An invitation brought into the new entry still fills the cleared box.
+    #[test]
+    fn a_fresh_entry_still_takes_an_invitation() {
+        let mut flow = flow();
+        flow.vtc_did = Input::new("did:webvh:last.join".to_string());
+        let mut state = State::default();
+        state.join.reset();
+        state.join.invitation_issuer = Some(ISSUER.to_string());
+        let flow = flow.move_with_state(&state);
+        assert_eq!(flow.vtc_did.value(), ISSUER);
     }
 
     #[test]

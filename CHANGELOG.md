@@ -191,6 +191,11 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **The join page starts with an empty community box.** The DID typed for the
+  last join stayed in the input the next time the page opened, reading as
+  though the new join were already aimed somewhere. Each fresh entry now
+  clears it; an invitation brought into the new join still fills it.
+
 - **A ticket follows how the community vets now, not how it once did.** A
   community can turn PCS ZKP vetting on and off, but the client treated it as
   PCS ZKP forever once it held a hidden-vetting engine there, so a vetter at a
