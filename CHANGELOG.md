@@ -172,6 +172,20 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **Making a persona during a join no longer holds the page.** The new
+  persona is brought online in the background, so Esc and F10 answer at once;
+  the submit still waits, bounded, for it to be live. A listener is now
+  connected at most once at a time, so starting it twice can never open two
+  sockets for one DID.
+- **A vetter learns a community's current requirements as soon as a request
+  arrives**, not only at start-up and hourly, so the desk shows PCS ZKP or
+  named correctly before a session opens. A refresh that cannot send yet — at
+  start-up the vetter's listener is often still connecting — is retried every
+  few seconds (bounded) instead of waiting an hour, and when a community's
+  requirements show it newly runs PCS ZKP, enrolment follows at once.
+- **No "Connecting..." flash at start-up without a community.** The indicator
+  starts at "No active community" when there is no live membership.
+
 - **A finished join leaves the Applications list.** An application stayed
   listed after its persona was admitted, beside the joins still under way. It
   now leaves the list once its persona is an active member, comes back if that

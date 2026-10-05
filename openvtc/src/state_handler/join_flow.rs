@@ -2219,25 +2219,19 @@ impl StateHandler {
                     }
                     state.main_page.sync_from_config(config);
                     state.main_page.log(format!("Created persona DID {did}"));
-                    // Bring it online now. The join is about to offer it as a
-                    // way in, and a persona that cannot send is not one. A
-                    // no-op in State A, which has no service to install into —
-                    // that loop restarts into the full pipeline after a join
-                    // and brings it up there.
-                    //
-                    // This loop reads no keys while it waits, so the wait is
-                    // bounded (`add_listener` gives up on a mediator that does
-                    // not answer) and raced against the interrupt, which Ctrl-C
-                    // reaches without going through this loop (R1.2, R15). The
-                    // overlay is drawn first, so the wait shows as one.
-                    let _ = self.state_tx.send(state.clone());
-                    let online = start_persona_listener(
-                        self, state, messaging, config, tdk, persona_id, &did,
-                    );
-                    tokio::select! {
-                        _ = online => {}
-                        Ok(interrupted) = interrupt_rx.recv() => return Some(interrupted),
-                    }
+                    // Bring it online — in the background. The join is about to
+                    // offer it as a way in, and a persona that cannot send is
+                    // not one; but this loop reads no keys while it awaits, so
+                    // waiting here (up to `add_listener`'s connect bound) left
+                    // Esc and F10 unanswered on a page that had nothing left to
+                    // do. Started and left: the submit waits, bounded, for the
+                    // socket right before the request goes out
+                    // (`await_persona_online`), which is where being online
+                    // matters. A no-op in State A, which has no service.
+                    spawn_persona_listener(messaging, config, tdk, persona_id, &did).await;
+                    state
+                        .join
+                        .info("Connecting the new persona to its mediator…".to_string());
                 }
                 Err(e) => {
                     // The DID exists at the VTA but is not in the config. Say so
@@ -3936,6 +3930,41 @@ async fn start_persona_listener(
         .info("Connecting the new persona to its mediator…");
     let _ = handler.state_tx.send(state.clone());
     Some(listener_id)
+}
+
+/// Start `persona_id`'s listener without waiting for it to connect.
+///
+/// The connect runs on its own task, so the page that made the persona keeps
+/// answering keys meanwhile. What it needs from the config is read here, before
+/// the task starts; the task only connects. A failure is logged — the submit's
+/// own wait for the socket ([`await_persona_online`]) is what tells the person
+/// whether the request went out live.
+async fn spawn_persona_listener(
+    messaging: Option<&Messaging>,
+    config: &Config,
+    tdk: &TDK,
+    persona_id: PersonaId,
+    did: &str,
+) {
+    let Some(service) = messaging else {
+        return;
+    };
+    let listener_id = openvtc_core::didcomm::persona_listener_id(did);
+    if service.has_listener(&listener_id).await {
+        return;
+    }
+    let Some(spec) =
+        openvtc_core::didcomm::persona_listener_config_for(config, tdk, persona_id).await
+    else {
+        debug!(persona = %did, "no listener config for the new persona");
+        return;
+    };
+    let service = service.clone();
+    tokio::spawn(async move {
+        if let Err(e) = openvtc_core::didcomm::add_listener(&service, &spec).await {
+            tracing::warn!(listener = %spec.id, error = %e, "the new persona's mediator session did not open");
+        }
+    });
 }
 
 /// Wait — bounded — for the applicant persona's socket to be live, immediately

@@ -2547,3 +2547,23 @@ fn a_pass_reenrols_when_a_new_vetter_label_is_live() {
         }]
     );
 }
+
+/// A request reaching the desk marks the vetter side due a re-read of what
+/// its community requires — the loop takes the flag and asks, so a community
+/// that turned on PCS ZKP vetting is known before a session opens.
+#[tokio::test]
+async fn a_request_on_the_desk_makes_the_vetter_side_due_a_refresh() {
+    let (mut applicant, mut vetter, _) = ready().await;
+    assert!(!vetter.book.vetter_refresh_due);
+    in_session(&mut applicant, &mut vetter).await;
+    assert!(
+        vetter.book.vetter_refresh_due,
+        "the accepted request asks for a re-read"
+    );
+    assert!(
+        !serde_json::to_string(&vetter.book)
+            .unwrap()
+            .contains("vetter_refresh_due"),
+        "a run-only flag is never saved"
+    );
+}

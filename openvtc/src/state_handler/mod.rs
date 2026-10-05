@@ -1033,8 +1033,15 @@ impl StateHandler {
         config.set_active_persona(initial_active);
         state.main_page.sync_from_config(&config);
 
-        // Send initial state immediately so the UI renders without blocking
-        state.connection.status = state::MediatorStatus::Connecting;
+        // Send initial state immediately so the UI renders without blocking.
+        // Connecting only when there is a community session to connect: with no
+        // live membership there is none, and "Connecting..." would sit on the
+        // screen until the seed below corrected it — or read as a hang.
+        state.connection.status = if config.account.memberships().any(|m| m.is_live()) {
+            state::MediatorStatus::Connecting
+        } else {
+            state::MediatorStatus::NoActiveCommunity
+        };
         let _ = self.state_tx.send(state.clone());
 
         // Install this account's listeners on the runtime started above. Skips
@@ -1911,6 +1918,29 @@ impl StateHandler {
                     .await;
                     // Questions to communities have a reply window too (R1.2).
                     vetting_actions::expire_queries(&mut state, &mut config, chrono::Utc::now());
+                    // A request reached the desk: re-read what its community
+                    // requires now, before a session opens on a stale answer.
+                    if std::mem::take(&mut config.private.vetting.vetter_refresh_due) {
+                        let mut ctx = runtime_actions::ActionCtx {
+                            state: &mut state,
+                            config: &mut config,
+                            save: &mut save,
+                            in_flight: &mut in_flight,
+                            dispatch_tx: &dispatch_tx,
+                            tdk: &tdk,
+                            admin_vta: admin_vta.as_ref(),
+                            didcomm_service: &didcomm_service,
+                            session_manager: &mut session_manager,
+                            ping_sent_at: &mut ping_sent_at,
+                            state_tx: &self.state_tx,
+                            profile: self.profile.as_str(),
+                        };
+                        vetting_actions::dispatch(
+                            &mut ctx,
+                            actions::VettingAction::RefreshVetterSide,
+                        )
+                        .await;
+                    }
                     if awaiting_requirements
                         .as_ref()
                         .is_some_and(|a| a.asked_at.elapsed() >= join_flow::REQUIREMENTS_WAIT)

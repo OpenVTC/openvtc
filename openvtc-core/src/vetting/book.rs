@@ -147,6 +147,12 @@ pub enum VettedOutcome {
     Declined,
 }
 
+/// How many times in a row a vetter-side refresh that could not send is
+/// retried (on the loop's five-second sweep) before waiting for the hourly one
+/// — bounded, so a listener that never comes up does not mean asking forever
+/// (R1.4).
+pub const VETTER_REFRESH_RETRIES: u8 = 12;
+
 /// How long a closed request stays on the desk before it moves to
 /// [`VettingBook::vetted`]. Long enough for the send that closed it to report
 /// back — a failed send restores the request, and must find it still there.
@@ -728,6 +734,18 @@ pub struct VettingBook {
     /// still in [`issued`](Self::issued), where withdrawing needs it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vetted: Vec<VettedRecord>,
+    /// A request arrived on the desk since the vetter side last re-read the
+    /// communities it vets for. Set by the inbound handler, which cannot send;
+    /// taken by the loop, which then asks — so a community that turned on PCS
+    /// ZKP vetting is known before the vetter opens a session. Never saved: it
+    /// is about this run.
+    #[serde(skip)]
+    pub vetter_refresh_due: bool,
+    /// Consecutive vetter-side refreshes that could not send — at start-up the
+    /// listener is often not up yet. Each failure schedules another, up to
+    /// [`VETTER_REFRESH_RETRIES`]; a refresh that sends resets it. Not saved.
+    #[serde(skip)]
+    pub vetter_refresh_failures: u8,
     /// Recent wrong ticket codes.
     #[serde(default, skip_serializing_if = "GuessThrottle::is_empty")]
     pub throttle: GuessThrottle,
