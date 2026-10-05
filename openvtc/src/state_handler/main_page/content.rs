@@ -2191,6 +2191,22 @@ pub struct VettingState {
     /// Stored vetting credentials set aside on load because they pre-date DTG
     /// Credentials v1 (`VettingBook::retired`), one sentence each.
     pub retired: Arc<[String]>,
+    /// A ticket asked for and waiting on a fresh reading of how its community vets. Run state,
+    /// never rebuilt from the book: the ticket does not exist until the answer decides it.
+    pub pending_ticket: Option<PendingTicket>,
+}
+
+/// A ticket asked for (`t`) and not issued yet: whether it may be, and under which mode, is
+/// decided only on an answer about the community's mode that arrived after
+/// [`asked_at`](Self::asked_at) — never on what the client remembered.
+#[derive(Clone, Debug)]
+pub struct PendingTicket {
+    /// The community and persona it is for.
+    pub membership: VettingMembership,
+    /// Requests it will admit.
+    pub uses: u32,
+    /// When the community was asked how it vets.
+    pub asked_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// One community's hidden vetting, as the vetter's own view shows it.
@@ -2305,6 +2321,9 @@ pub struct VetterStandingRow {
     pub tokens: Option<String>,
     /// Whether [`tokens`](Self::tokens) means this vetter cannot attest there now.
     pub tokens_warn: bool,
+    /// How the community vets, when that is not current knowledge: the last reading's age once
+    /// it is stale, or why the last attempt to read it failed. `None` while fresh.
+    pub mode_note: Option<String>,
 }
 
 /// One of the holder's pool attributes, as a row to tick.
@@ -3341,6 +3360,9 @@ pub struct TicketRow {
     /// The `vetting-ticket:` link its QR code carries, when the persona it
     /// admits requests to is available.
     pub uri: Option<String>,
+    /// "issued under named vetting", when the ticket was issued under a mode other than the one
+    /// its community runs now.
+    pub mode_note: Option<String>,
 }
 
 /// One statement we signed, for display.

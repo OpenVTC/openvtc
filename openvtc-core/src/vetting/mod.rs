@@ -63,6 +63,7 @@ pub mod guide;
 pub mod hidden;
 pub mod inbound;
 pub mod journey;
+pub mod mode;
 pub mod protocol;
 pub mod queries;
 pub mod registry;

@@ -71,6 +71,12 @@ pub struct Ticket {
     /// The vetter's own note ("LPC desk", "for Alice").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// How the community vetted when the ticket was issued, read from it just before. A
+    /// community can switch between named vetting and PCS ZKP, and a ticket handed out under
+    /// one brings requests the vetter answers under the other. `None` on a ticket issued before
+    /// this was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<super::mode::VetterMode>,
 }
 
 impl Ticket {
@@ -99,6 +105,7 @@ impl Ticket {
             created_at: now,
             expires_at: now + validity,
             label: None,
+            mode: None,
         }
     }
 

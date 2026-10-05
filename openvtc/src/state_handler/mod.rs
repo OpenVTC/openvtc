@@ -1635,6 +1635,14 @@ impl StateHandler {
                                 }
                             }
                             vetting_actions::apply_answers(&mut state, &config, answers);
+                            // A manifest in is a fresh reading of how its community vets: say a
+                            // switch, and decide a ticket that was waiting on it.
+                            vetting_actions::settle_pending_tickets(
+                                &mut state,
+                                &mut config,
+                                &mut save,
+                                chrono::Utc::now(),
+                            );
                         }
                         didcomm::DIDCommEvent::TrustPingReceived { from, listener_id, message_id } => {
                             let sender = from.as_deref().unwrap_or("unknown");
@@ -1929,6 +1937,14 @@ impl StateHandler {
                     .await;
                     // Questions to communities have a reply window too (R1.2).
                     vetting_actions::expire_queries(&mut state, &mut config, chrono::Utc::now());
+                    // A ticket whose question about its community's mode went unanswered, or
+                    // could not be sent, ends here, saying which.
+                    vetting_actions::settle_pending_tickets(
+                        &mut state,
+                        &mut config,
+                        &mut save,
+                        chrono::Utc::now(),
+                    );
                     // A request reached the desk: re-read what its community
                     // requires now, before a session opens on a stale answer.
                     if std::mem::take(&mut config.private.vetting.vetter_refresh_due) {
@@ -1951,6 +1967,24 @@ impl StateHandler {
                             actions::VettingAction::RefreshVetterSide,
                         )
                         .await;
+                    } else if vetting_actions::desk_open(&state) {
+                        // While the desk is open, how each community vets is kept no older
+                        // than its TTL — asked at most once per re-ask interval (R1.4).
+                        let mut ctx = runtime_actions::ActionCtx {
+                            state: &mut state,
+                            config: &mut config,
+                            save: &mut save,
+                            in_flight: &mut in_flight,
+                            dispatch_tx: &dispatch_tx,
+                            tdk: &tdk,
+                            admin_vta: admin_vta.as_ref(),
+                            didcomm_service: &didcomm_service,
+                            session_manager: &mut session_manager,
+                            ping_sent_at: &mut ping_sent_at,
+                            state_tx: &self.state_tx,
+                            profile: self.profile.as_str(),
+                        };
+                        vetting_actions::refresh_stale_modes(&mut ctx).await;
                     }
                     if awaiting_requirements
                         .as_ref()

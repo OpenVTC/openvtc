@@ -284,6 +284,32 @@ pub struct HiddenVetterState {
     /// the desk says why. Cleared by an enrolment that is opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lost_enrolment: Option<String>,
+    /// Enrolments asked for whose answers have not been opened yet, each with the blinding that
+    /// opens it — **written to the protected config before the request is sent**.
+    ///
+    /// The community issues one credential per member per label and keeps no copy of its
+    /// answer, so an answer that arrives when the blinding is gone (a restart between the ask
+    /// and the answer) can never be opened, and asking again is refused (`alreadyEnrolled`) —
+    /// a lock-out until the community publishes a new label. Kept here, the blinding outlives a
+    /// restart, and a late answer is still this vetter's credential. As secret as the
+    /// snapshot's `usk`, and kept in the same place. Bounded to [`MAX_PENDING_ENROLMENTS`];
+    /// dropped once an answer to it is opened or refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enrolments_asked: Vec<AskedEnrolment>,
+}
+
+/// One enrolment request in flight, as [`HiddenVetterState::enrolments_asked`] keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AskedEnrolment {
+    /// The request's document id — what the answer threads on.
+    pub document_id: String,
+    /// The class period asked for (`2026-10`).
+    pub period: String,
+    /// SECRET: the blinding that opens the answer ([`super::hidden::blinding_text`]).
+    pub blinding: String,
+    /// When it was asked.
+    pub asked_at: DateTime<Utc>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -316,6 +342,8 @@ pub struct HiddenOutlook {
     pub usable: usize,
     /// Whether we hold a credential under the community's current class label.
     pub enrolled: bool,
+    /// The class period (`2026-10`) we owe an enrolment under, when not [`Self::enrolled`].
+    pub owed: Option<String>,
     /// The community enrolled us under the current label and the answer could not be opened
     /// ([`HiddenVetterState::lost_enrolment`]).
     pub enrolment_lost: bool,
@@ -411,7 +439,29 @@ impl HiddenVetterState {
             rekeyed_at: None,
             unanswered: 0,
             lost_enrolment: None,
+            enrolments_asked: Vec::new(),
         }
+    }
+
+    /// Keep the blinding of an enrolment about to be asked for, bounded: the oldest goes first.
+    pub fn remember_asked(&mut self, asked: AskedEnrolment) {
+        self.enrolments_asked
+            .retain(|a| a.document_id != asked.document_id);
+        self.enrolments_asked.push(asked);
+        let excess = self
+            .enrolments_asked
+            .len()
+            .saturating_sub(MAX_PENDING_ENROLMENTS);
+        self.enrolments_asked.drain(..excess);
+    }
+
+    /// Take the stored enrolment `thread` answers, if it is one of ours.
+    pub fn take_asked(&mut self, thread: &str) -> Option<AskedEnrolment> {
+        let i = self
+            .enrolments_asked
+            .iter()
+            .position(|a| a.document_id == thread)?;
+        Some(self.enrolments_asked.remove(i))
     }
 
     /// The period this vetter owes an enrolment under now, if any: the community's current class
@@ -784,6 +834,11 @@ pub struct KnownCommunity {
     /// DIDComm route learns the manifest without a resolve of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_quantum_key: Option<bool>,
+    /// How its vetters vet, as its manifest last said, and when that was read — the last-known
+    /// value only ([`super::mode`]). `None` on a record written before this was kept, and for a
+    /// manifest whose mode could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vetter_mode: Option<super::mode::ModeRead>,
 }
 
 /// One criterion a community publishes, as the join page and the submit need
@@ -947,6 +1002,15 @@ pub struct VettingBook {
     /// nothing is on its way, and a tick asked for again replaces its stale serials.
     #[serde(skip)]
     pub draws_in_flight: std::collections::HashMap<String, (String, u32)>,
+    /// When each community's mode was last asked for, and how the last attempt failed.
+    /// **Memory only**: a failure is news about this run's network, not a fact about the
+    /// community, and the reading it sits beside is persisted on its own ([`super::mode`]).
+    #[serde(skip)]
+    pub mode_checks: super::mode::ModeChecks,
+    /// Communities seen changing mode between two readings, for the page to say once. Memory
+    /// only.
+    #[serde(skip)]
+    pub mode_switches: Vec<super::mode::ModeSwitch>,
     /// Fields written by a newer build, preserved verbatim (D19).
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -1065,10 +1129,20 @@ impl VettingBook {
         let held = self.hidden_vetter(community, persona)?;
         let owed = held.enrolment_owed();
         let events = held.event_draws(now.date_naive());
+        // The answer to this label's enrolment was lost: recorded as such, or — on a record
+        // written before that was — the community's last word was `alreadyEnrolled` during the
+        // owed period. Either way asking again only collects the same refusal.
+        let refused_as_enrolled = held.last_refusal.as_ref().is_some_and(|r| {
+            r.code.ends_with(":alreadyEnrolled")
+                && owed.as_deref() == Some(r.at.format("%Y-%m").to_string().as_str())
+        });
         Some(HiddenOutlook {
             usable: held.tokens().1,
             enrolled: owed.is_none(),
-            enrolment_lost: owed.is_some() && owed == held.lost_enrolment,
+            enrolment_lost: owed.is_some()
+                && (owed == held.lost_enrolment
+                    || (held.lost_enrolment.is_none() && refused_as_enrolled)),
+            owed,
             asking: self.queries.iter().any(|q| {
                 q.community == community
                     && q.persona == persona
@@ -1459,6 +1533,7 @@ impl VettingBook {
                     protocol,
                     routes,
                     post_quantum_key: None,
+                    vetter_mode: None,
                 });
                 true
             }

@@ -191,6 +191,46 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **A ticket follows how the community vets now, not how it once did.** A
+  community can turn PCS ZKP vetting on and off, but the client treated it as
+  PCS ZKP forever once it held a hidden-vetting engine there, so a vetter at a
+  community back on named vetting was refused tickets over an enrolment it no
+  longer needed. How a community vets is now a reading of its join manifest,
+  kept with when it was read: `t` asks the community afresh and issues the
+  ticket only on that answer — a named ticket with no enrolment gate under
+  named vetting, the enrolment and token gate under PCS ZKP. A switch is said
+  ("first-vtc switched from PCS ZKP to named vetting") and every badge follows
+  it. Opening the desk, and keeping it open, re-reads a reading older than ten
+  minutes; the desk says when one is stale, and when a read failed says whether
+  it could not be sent, went unanswered, was refused or could not be read,
+  beside what was last known. A failed read issues no ticket rather than
+  guessing. Attesting and the token drip follow the same reading, and a ticket
+  issued under the other mode is marked.
+- **A lost enrolment answer says when you can vet again.** The message names
+  the label, the date the next monthly label can start, and what to do
+  meanwhile (ask the community's admins to publish a new label). It is said
+  once in full where a ticket is refused; the desk header keeps a short status.
+  A doubled full stop in the refusal is gone.
+- **An enrolment answer is no longer lost to a restart.** What opens the
+  community's answer was held only in memory, and the community issues one
+  credential per label and keeps no copy, so an answer that landed after a
+  restart locked the vetter out until a new label. It is now saved to the
+  protected config before the request is sent, and a late answer still opens.
+  A second enrolment is never asked for while one is unanswered — its
+  `alreadyEnrolled` refusal is what read as a lost answer.
+- **Getting tokens is one key.** `k` on the vetting desk enrols where needed
+  and draws every window that has begun, and says per community what it is
+  doing or exactly what blocks it and until when (the next window's time, the
+  next label's date, what the community's operator can publish today). `t`
+  with no tokens runs the same thing instead of only refusing.
+- **A new vetter enrols at once.** Receiving the vetter credential starts
+  enrolment within seconds and draws the current window's tokens as soon as it
+  is answered, instead of waiting up to an hour for the schedule's next pass.
+- **The manifest is not fetched again within seconds.** A by-hand draw pressed
+  repeatedly, or passes chained on each other's answers, fetched the same
+  manifest several times in a few seconds; a re-read now waits at least 30
+  seconds after the last ask or answer, and never runs while one is open.
+
 - **Monochrome is calmer.** With `--monochrome` or `NO_COLOR`, every
   success-green heading and tick was drawn in reverse video, every caution
   underlined and every value in italics — a page busier than the coloured one.

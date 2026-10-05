@@ -3031,6 +3031,9 @@ impl MainPage {
             (VettingTab::Desk, KeyCode::Char('g')) => V::AskResend,
             (VettingTab::Desk, KeyCode::Char('e')) => V::AskEventMode,
             (VettingTab::Desk, KeyCode::Char('h')) => V::OpenHiddenVetting,
+            // Get tokens: enrol if needed, then draw what has begun — the one key a vetter at a
+            // PCS ZKP community needs before `t` can issue a ticket.
+            (VettingTab::Desk, KeyCode::Char('k')) => V::DrawNow,
             (VettingTab::Desk, KeyCode::Char('o')) if view == DeskView::Requests => V::OpenSession,
             (VettingTab::Desk, KeyCode::Enter) if view == DeskView::Requests => V::OpenJourney,
             (VettingTab::Desk, KeyCode::Char('a')) if view == DeskView::Requests => V::StartAttest,
@@ -4516,6 +4519,9 @@ mod key_handler_tests {
         });
         page.handle_key_event(press(KeyCode::Char('h')));
         assert!(matches!(vetting_action(&mut rx), V::OpenHiddenVetting));
+        // Getting tokens is one key from anywhere on the desk.
+        page.handle_key_event(press(KeyCode::Char('k')));
+        assert!(matches!(vetting_action(&mut rx), V::DrawNow));
 
         let (mut page, mut rx) = page_for(MainMenu::Vetting, |s: &mut State| {
             s.main_page.content_panel.vetting.tab = VettingTab::Desk;

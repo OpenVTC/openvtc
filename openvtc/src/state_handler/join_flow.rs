@@ -767,7 +767,7 @@ pub(crate) fn vetting_view(
         };
     }
     let mut known = KnownVetting {
-        pcs_zkp: book.hidden_vetting(vtc_did),
+        pcs_zkp: book.pcs_zkp(vtc_did),
         post_quantum: book.post_quantum_key(vtc_did),
         requirements: describe_requirements(&criterion.requirements)
             .iter()
@@ -911,10 +911,18 @@ async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Resul
         .await
         .map_err(|e| NotLearned::Unanswered(e.to_string()))?;
 
+    let now = Utc::now();
+    let before = config.private.vetting.vetter_mode(vtc_did).mode();
     config
         .private
         .vetting
-        .learn_manifest_in(vtc_did, &manifest, Some(protocol), &meta, Utc::now());
+        .learn_manifest_in(vtc_did, &manifest, Some(protocol), &meta, now);
+    // Whether it vets by PCS ZKP now, read from the same answer — so the badges, the vetter
+    // desk and this join agree on one reading, whichever route brought it.
+    config
+        .private
+        .vetting
+        .learn_mode(vtc_did, &raw, before, now);
     // The document is in hand already, so how the community signs is free to
     // learn — and before joining it is the only evidence there is.
     note_signing(config, vtc_did, &resolved.doc);

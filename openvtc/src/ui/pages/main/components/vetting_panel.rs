@@ -1644,6 +1644,14 @@ fn standing(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 ),
             ]));
         }
+        // How the community vets is a reading, not a fact: said when it is stale, or when the
+        // last read failed, so the badge above is not taken for current.
+        if let Some(note) = &row.mode_note {
+            lines.push(Line::from(vec![
+                Span::styled("             ", label()),
+                Span::styled(note.clone(), Style::new().fg(COLOR_ORANGE)),
+            ]));
+        }
     }
     lines.push(Line::from(""));
 }
@@ -1780,7 +1788,7 @@ fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
 /// at an event belong to the whole desk — and `←/→` is how the views are
 /// reached at all.
 const DESK_KEYS: &str = "p: your vetter profile  g: ask for your vetter credential again  \
-                         e: vet at an event  h: hidden vetting  \
+                         e: vet at an event  h: hidden vetting  k: get tokens  \
                          ←/→: Requests · Tickets · Issued  Tab: Applications";
 
 /// The hidden-vetting view: one community at a time, everything the schedule
@@ -1854,11 +1862,12 @@ fn hidden_vetting(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize
             Line::from(if row.enrolment_lost {
                 format!(
                     "  {:<20}{owed} — the community enrolled you, but its answer was lost; it \
-                     issues one credential per label, so this label is not asked for again",
+                     issues one credential per label, so this label is not asked for again. Ask \
+                     its operator to publish a new live period, then press d",
                     "Owed"
                 )
             } else {
-                format!("  {:<20}{owed} — enrolling on the next pass", "Owed")
+                format!("  {:<20}{owed} — enrolling now", "Owed")
             })
             .fg(COLOR_ORANGE),
         );
@@ -2113,6 +2122,14 @@ fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 },
                 dim(),
             ),
+            // Issued under a mode the community no longer runs.
+            Span::styled(
+                row.mode_note
+                    .as_ref()
+                    .map(|note| format!(" — {note}"))
+                    .unwrap_or_default(),
+                Style::new().fg(COLOR_ORANGE),
+            ),
         ]));
     }
     if let Some(row) = v.tickets.get(v.selected)
@@ -2236,6 +2253,7 @@ mod desk_tests {
             profile: profile.to_string(),
             tokens: None,
             tokens_warn: false,
+            mode_note: None,
         }
     }
 
@@ -2625,6 +2643,7 @@ mod desk_tests {
             expires: "2026-09-29".into(),
             live: true,
             uri: Some(LINK.to_string()),
+            mode_note: None,
         };
         let base = VettingState {
             tab: VettingTab::Desk,
