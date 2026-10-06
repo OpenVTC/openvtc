@@ -600,6 +600,9 @@ pub enum WorkspaceAction {
     /// Fork the repository to the chosen gh account (which cannot push to
     /// it) and point the checkout's pushes at the fork.
     Fork,
+    /// Point the highlighted (or open) checkout's `origin` and `fork`
+    /// remotes at their SSH URLs, for a checkout that cannot push over HTTPS.
+    RemotesToSsh,
     /// Replace the key path being typed.
     AccountInput(String),
     /// Store the choice and apply it to the checkouts it covers.

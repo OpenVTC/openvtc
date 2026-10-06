@@ -899,6 +899,67 @@ pub fn gh_check_account(host: &str, login: &str, timeout: Duration) -> Result<()
     }
 }
 
+/// The longest `gh config get` may run (R1.2). It only reads a file, so a
+/// slower answer means something is wrong.
+pub const GH_CONFIG_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// gh's `git_protocol` for `host` (`gh config get git_protocol -h <host>`),
+/// else gh's own default (`gh config get git_protocol`). `None` when gh is
+/// missing, fails, outlives `timeout`, or says neither `ssh` nor `https`.
+#[must_use]
+pub fn gh_git_protocol(host: &str, timeout: Duration) -> Option<CloneProtocol> {
+    gh_git_protocol_with(std::ffi::OsStr::new("gh"), host, timeout)
+}
+
+/// [`gh_git_protocol`] with the program to run named, for tests.
+fn gh_git_protocol_with(
+    program: &std::ffi::OsStr,
+    host: &str,
+    timeout: Duration,
+) -> Option<CloneProtocol> {
+    let ask = |args: &[&str]| -> Option<CloneProtocol> {
+        let mut cmd = Command::new(program);
+        cmd.args(["config", "get", "git_protocol"])
+            .args(args)
+            .env("GH_PROMPT_DISABLED", "1");
+        let out = run_bounded(cmd, timeout).ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        CloneProtocol::from_gh(&String::from_utf8_lossy(&out.stdout))
+    };
+    ask(&["-h", host]).or_else(|| ask(&[]))
+}
+
+/// Whether a credential helper applies to `https://<host>` from the global or
+/// system config — what a fresh clone would get. Bounded.
+#[must_use]
+pub fn global_https_helper(host: &str) -> bool {
+    let mut cmd = Command::new("git");
+    // Outside any checkout, so only the global and system config count.
+    cmd.current_dir(std::env::temp_dir())
+        .args([
+            "config",
+            "--get-urlmatch",
+            "credential.helper",
+            &format!("https://{host}"),
+        ])
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
+        .env("GIT_TERMINAL_PROMPT", "0");
+    run_bounded(cmd, GIT_CONFIG_TIMEOUT)
+        .is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty())
+}
+
+/// What this machine says about reaching `host`: gh's protocol and a global
+/// credential helper. Blocking, bounded.
+#[must_use]
+pub fn forge_facts(host: &str) -> crate::git_workspace::ForgeFacts {
+    crate::git_workspace::ForgeFacts {
+        gh_protocol: gh_git_protocol(host, GH_CONFIG_TIMEOUT),
+        https_helper: global_https_helper(host),
+    }
+}
+
 // ****************************************************************************
 // Bounded subprocesses
 // ****************************************************************************
@@ -978,6 +1039,27 @@ mod tests {
         args.iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn a_missing_or_failing_gh_says_nothing_about_the_protocol() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-gh");
+        assert_eq!(
+            gh_git_protocol_with(missing.as_os_str(), "github.com", Duration::from_secs(5)),
+            None
+        );
+        // A gh that fails (exits non-zero) keeps the built-in default too.
+        if cfg!(unix) {
+            assert_eq!(
+                gh_git_protocol_with(
+                    std::ffi::OsStr::new("false"),
+                    "github.com",
+                    Duration::from_secs(5)
+                ),
+                None
+            );
+        }
     }
 
     #[test]

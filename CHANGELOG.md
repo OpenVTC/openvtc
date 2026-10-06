@@ -204,6 +204,29 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **A clone from the Repos view uses the protocol gh is set to use, and
+  warns when an HTTPS checkout cannot push.** Clones always defaulted to
+  HTTPS. A member whose gh clones over SSH, and who had no HTTPS credential
+  helper, got a checkout where `git push` stopped at `Username for
+  'https://github.com'`. Now, when you have not chosen a protocol (`w`) and no
+  forge account (`f`) requires one, a clone follows
+  `gh config get git_protocol` for that forge. If gh is not installed or has
+  no setting, the clone uses HTTPS. The screen shows where the protocol came
+  from ("cloned over SSH (from your gh settings)"), and the `w` form now
+  cycles through automatic, HTTPS and SSH.
+
+  A checkout that pushes over HTTPS with no credential helper for the forge
+  now shows a warning: "git will ask for a username when you push". From
+  there, `f` chooses an account, or the new **`R`** key switches the
+  checkout's `origin` and `fork` remotes to SSH. Before an HTTPS clone, the
+  screen says when gh prefers SSH or when there is no credential helper.
+
+  In the settings file, only an explicit protocol choice is stored now, as
+  `clone_protocol`. Files from before 0.5 always wrote `"protocol"`, so a
+  stored `"https"` is read as the old default and a stored `"ssh"` is kept as
+  a choice. In `openvtc_core::git_workspace`, `WorkspaceSettings::protocol`
+  is now `Option<CloneProtocol>`.
+
 - **did-git-sign 0.18.2.** Commit signing set up from OpenVTC on Linux works:
   did-git-sign now keeps its credential in the same store OpenVTC writes it to
   (Secret Service), so pressing `e` or committing no longer reports "no

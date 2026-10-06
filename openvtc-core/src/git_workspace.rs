@@ -178,6 +178,17 @@ pub enum CloneProtocol {
 }
 
 impl CloneProtocol {
+    /// Read gh's `git_protocol` setting (`gh config get git_protocol`): `ssh`
+    /// or `https`; anything else (empty, unknown) says nothing.
+    #[must_use]
+    pub fn from_gh(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ssh" => Some(CloneProtocol::Ssh),
+            "https" => Some(CloneProtocol::Https),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -193,6 +204,124 @@ impl CloneProtocol {
             CloneProtocol::Ssh => CloneProtocol::Https,
         }
     }
+}
+
+/// Where the protocol a clone uses came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtocolSource {
+    /// The member chose it (`w`).
+    Chosen,
+    /// The forge account chosen for the repository only works over it (a gh
+    /// account over HTTPS, an SSH key over SSH).
+    Account,
+    /// gh's `git_protocol` for the forge.
+    Gh,
+    /// Nothing said otherwise: HTTPS.
+    Default,
+}
+
+impl ProtocolSource {
+    /// Words to put after the protocol's name; empty when there is nothing
+    /// worth saying.
+    #[must_use]
+    pub fn note(self) -> &'static str {
+        match self {
+            ProtocolSource::Chosen | ProtocolSource::Default => "",
+            ProtocolSource::Account => " (the forge account's)",
+            ProtocolSource::Gh => " (from your gh settings)",
+        }
+    }
+}
+
+/// The protocol a clone uses, and why: the forge account's (it only works over
+/// one), else the member's choice (`w`), else gh's setting for the forge, else
+/// HTTPS.
+#[must_use]
+pub fn effective_protocol(
+    chosen: Option<CloneProtocol>,
+    credential: &ForgeCredential,
+    gh: Option<CloneProtocol>,
+) -> (CloneProtocol, ProtocolSource) {
+    match credential {
+        ForgeCredential::GhAccount { .. } | ForgeCredential::SshKey { .. } => (
+            credential.protocol(CloneProtocol::default()),
+            ProtocolSource::Account,
+        ),
+        ForgeCredential::GitDefault => match (chosen, gh) {
+            (Some(p), _) => (p, ProtocolSource::Chosen),
+            (None, Some(p)) => (p, ProtocolSource::Gh),
+            (None, None) => (CloneProtocol::default(), ProtocolSource::Default),
+        },
+    }
+}
+
+/// What this machine says about reaching one forge, read once per view: gh's
+/// protocol for it, and whether git has a credential helper for it from the
+/// global or system config.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ForgeFacts {
+    /// `gh config get git_protocol` for the host (or gh's default); `None`
+    /// when gh is missing or says nothing.
+    pub gh_protocol: Option<CloneProtocol>,
+    /// Whether a `credential.helper` applies to `https://<host>` outside any
+    /// checkout.
+    pub https_helper: bool,
+}
+
+/// The SSH form of an `https://<host>/<owner>/<repo>(.git)` remote:
+/// `git@<host>:<owner>/<repo>.git`. `None` for any other URL, or one whose
+/// parts [`RepoCoords::parse`] would refuse.
+#[must_use]
+pub fn https_remote_to_ssh(url: &str) -> Option<String> {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return None;
+    }
+    let (host, path) = remote_coords(url)?;
+    let coords = RepoCoords::parse(&format!("{}/{path}", host.to_ascii_lowercase())).ok()?;
+    Some(coords.clone_url(CloneProtocol::Ssh))
+}
+
+/// The remotes [`switch_remotes_to_ssh`] changes: `origin`, and the `fork` a
+/// gh fork adds.
+pub const PUSH_REMOTES: [&str; 2] = ["origin", "fork"];
+
+/// Point the checkout's `origin` (and `fork`, if present) at the SSH form of
+/// their `https://` URLs. Returns `(remote, new URL)` for each one changed.
+///
+/// # Errors
+///
+/// When no remote is an `https://` forge URL, or git refuses a change.
+pub fn switch_remotes_to_ssh(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut switched = Vec::new();
+    for name in PUSH_REMOTES {
+        let Some(url) = git_read(dir, &["remote", "get-url", "--", name]) else {
+            continue;
+        };
+        let Some(ssh) = https_remote_to_ssh(&url) else {
+            continue;
+        };
+        let out = git_in(dir)
+            .args(["remote", "set-url", "--", name, &ssh])
+            .output()
+            .map_err(|e| format!("couldn't run git: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "git could not change {name} in {}: {}",
+                display_path(dir),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        switched.push((name.to_string(), ssh));
+    }
+    if switched.is_empty() {
+        return Err(format!(
+            "{} has no https:// forge remote to switch.",
+            display_path(dir)
+        ));
+    }
+    Ok(switched)
 }
 
 /// `~/src`: where checkouts go until the member chooses somewhere else.
@@ -259,27 +388,59 @@ pub struct CredentialChoice {
 /// Where this machine keeps a profile's checkouts. Not secret — paths and a
 /// preference — so it lives in a plain file beside the public config.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "SettingsFile")]
 pub struct WorkspaceSettings {
     /// The directory checkouts are cloned under.
-    #[serde(default = "default_root")]
     pub root: PathBuf,
-    #[serde(default)]
-    pub protocol: CloneProtocol,
+    /// The protocol the member chose (`w`); `None` follows the forge account,
+    /// then gh's setting, then HTTPS ([`effective_protocol`]).
+    #[serde(rename = "clone_protocol", skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<CloneProtocol>,
     /// Checkouts the member pointed openvtc at outside the default layout, by
     /// resource.
     #[serde(default)]
     pub checkouts: BTreeMap<String, PathBuf>,
     /// Forge accounts, by community DID. References only (a key path, a gh
     /// login) — never a token or a key.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub credentials: BTreeMap<String, CommunityCredentials>,
+}
+
+/// The settings file as read, old and new.
+#[derive(Deserialize)]
+struct SettingsFile {
+    #[serde(default = "default_root")]
+    root: PathBuf,
+    #[serde(default)]
+    clone_protocol: Option<CloneProtocol>,
+    /// Before 0.5 the protocol was always written, so `https` there may be the
+    /// old default rather than a choice. `ssh` can only have been chosen.
+    #[serde(default)]
+    protocol: Option<CloneProtocol>,
+    #[serde(default)]
+    checkouts: BTreeMap<String, PathBuf>,
+    #[serde(default)]
+    credentials: BTreeMap<String, CommunityCredentials>,
+}
+
+impl From<SettingsFile> for WorkspaceSettings {
+    fn from(f: SettingsFile) -> Self {
+        Self {
+            root: f.root,
+            protocol: f
+                .clone_protocol
+                .or(f.protocol.filter(|p| *p == CloneProtocol::Ssh)),
+            checkouts: f.checkouts,
+            credentials: f.credentials,
+        }
+    }
 }
 
 impl Default for WorkspaceSettings {
     fn default() -> Self {
         Self {
             root: default_root(),
-            protocol: CloneProtocol::default(),
+            protocol: None,
             checkouts: BTreeMap::new(),
             credentials: BTreeMap::new(),
         }
@@ -373,6 +534,22 @@ impl WorkspaceSettings {
             credential: ForgeCredential::GitDefault,
             scope: None,
         }
+    }
+
+    /// The protocol a clone of `coords` uses in the community `vtc_did`, and
+    /// why; `gh` is gh's setting for the forge ([`ForgeFacts::gh_protocol`]).
+    #[must_use]
+    pub fn protocol_for(
+        &self,
+        vtc_did: &str,
+        coords: &RepoCoords,
+        gh: Option<CloneProtocol>,
+    ) -> (CloneProtocol, ProtocolSource) {
+        effective_protocol(
+            self.protocol,
+            &self.credential_for(vtc_did, coords).credential,
+            gh,
+        )
     }
 
     /// Choose the account for `coords`' repository or forge; `None` removes the
@@ -477,6 +654,53 @@ pub struct CheckoutFacts {
     /// The forge account openvtc set this checkout to use
     /// ([`forge_credential::MARKER_KEY`]); `None` when it set none.
     pub credential: Option<ForgeCredential>,
+    /// The `fork` remote's URL (a gh fork adds it).
+    pub fork: Option<String>,
+    /// `remote.pushDefault`: where `git push` goes when it is set.
+    pub push_default: Option<String>,
+    /// The `credential.helper` git uses for `https://<forge>` here, from any
+    /// scope (`git config --get-urlmatch`); `None` when none applies.
+    pub https_helper: Option<String>,
+}
+
+impl CheckoutFacts {
+    /// The URL `git push` sends to: the `fork` remote when `remote.pushDefault`
+    /// names it, else `origin`.
+    #[must_use]
+    pub fn push_url(&self) -> Option<&str> {
+        match (self.push_default.as_deref(), self.fork.as_deref()) {
+            (Some("fork"), Some(fork)) => Some(fork),
+            _ => self.origin.as_deref(),
+        }
+    }
+
+    /// Whether `git push` here would ask for a username: it goes to an
+    /// `https://` URL on `host`, and no credential helper applies there.
+    #[must_use]
+    pub fn https_push_without_helper(&self, host: &str) -> bool {
+        let Some(url) = self.push_url() else {
+            return false;
+        };
+        let lower = url.trim().to_ascii_lowercase();
+        (lower.starts_with("https://") || lower.starts_with("http://"))
+            && remote_coords(url).is_some_and(|(h, _)| h.eq_ignore_ascii_case(host))
+            && self.https_helper.is_none()
+    }
+}
+
+/// The credential helper that applies to `https://<host>` in `dir`, from any
+/// scope; `None` when none does (an empty last entry resets the list).
+#[must_use]
+pub fn https_helper_in(dir: &Path, host: &str) -> Option<String> {
+    git_read(
+        dir,
+        &[
+            "config",
+            "--get-urlmatch",
+            "credential.helper",
+            &format!("https://{host}"),
+        ],
+    )
 }
 
 /// Parse `git status --porcelain=v2 --branch` output.
@@ -556,6 +780,9 @@ pub fn inspect(path: &Path, coords: &RepoCoords) -> CheckoutFacts {
     )
     .as_deref()
     .and_then(ForgeCredential::from_marker);
+    facts.fork = git_read(path, &["remote", "get-url", "--", "fork"]);
+    facts.push_default = git_read(path, &["config", "--get", "remote.pushDefault"]);
+    facts.https_helper = https_helper_in(path, &coords.host);
     facts.head = git_read(
         path,
         &[
@@ -777,6 +1004,249 @@ mod tests {
     }
 
     #[test]
+    fn gh_protocol_values_are_read() {
+        assert_eq!(CloneProtocol::from_gh("ssh\n"), Some(CloneProtocol::Ssh));
+        assert_eq!(CloneProtocol::from_gh("https"), Some(CloneProtocol::Https));
+        assert_eq!(CloneProtocol::from_gh(" SSH "), Some(CloneProtocol::Ssh));
+        assert_eq!(CloneProtocol::from_gh(""), None);
+        assert_eq!(CloneProtocol::from_gh("\n"), None);
+        assert_eq!(CloneProtocol::from_gh("git"), None);
+        assert_eq!(
+            CloneProtocol::from_gh("could not find key \"git_protocol\""),
+            None
+        );
+    }
+
+    #[test]
+    fn the_protocol_follows_account_then_choice_then_gh_then_https() {
+        use CloneProtocol::{Https, Ssh};
+        let none = ForgeCredential::GitDefault;
+        let gh = ForgeCredential::gh("alice".into());
+        let key = ForgeCredential::SshKey {
+            path: PathBuf::from("/k/id_x"),
+        };
+        // Nothing said: HTTPS.
+        assert_eq!(
+            effective_protocol(None, &none, None),
+            (Https, ProtocolSource::Default)
+        );
+        // gh's setting, when nothing else is.
+        assert_eq!(
+            effective_protocol(None, &none, Some(Ssh)),
+            (Ssh, ProtocolSource::Gh)
+        );
+        // The member's choice (w) beats gh.
+        assert_eq!(
+            effective_protocol(Some(Https), &none, Some(Ssh)),
+            (Https, ProtocolSource::Chosen)
+        );
+        // A forge account only works over its own protocol, so it decides.
+        assert_eq!(
+            effective_protocol(Some(Ssh), &gh, Some(Ssh)),
+            (Https, ProtocolSource::Account)
+        );
+        assert_eq!(
+            effective_protocol(Some(Https), &key, None),
+            (Ssh, ProtocolSource::Account)
+        );
+        assert_eq!(ProtocolSource::Gh.note(), " (from your gh settings)");
+
+        let mut s = WorkspaceSettings::default();
+        let c = widgets();
+        assert_eq!(s.protocol_for("did:c", &c, Some(Ssh)).0, Ssh);
+        s.set_credential("did:c", &c, CredentialScope::Forge, Some(gh));
+        assert_eq!(s.protocol_for("did:c", &c, Some(Ssh)).0, Https);
+    }
+
+    #[test]
+    fn an_old_settings_file_https_is_the_default_not_a_choice() {
+        let old: WorkspaceSettings =
+            serde_json::from_str(r#"{"root":"/w","protocol":"https","checkouts":{}}"#).unwrap();
+        assert_eq!(old.protocol, None);
+        let ssh: WorkspaceSettings =
+            serde_json::from_str(r#"{"root":"/w","protocol":"ssh"}"#).unwrap();
+        assert_eq!(ssh.protocol, Some(CloneProtocol::Ssh));
+        let new: WorkspaceSettings =
+            serde_json::from_str(r#"{"root":"/w","clone_protocol":"https"}"#).unwrap();
+        assert_eq!(new.protocol, Some(CloneProtocol::Https));
+        // Nothing chosen: nothing written.
+        let written = serde_json::to_string(&WorkspaceSettings::default()).unwrap();
+        assert!(!written.contains("protocol"), "{written}");
+    }
+
+    #[test]
+    fn https_remotes_convert_to_ssh() {
+        for (https, ssh) in [
+            (
+                "https://github.com/acme/widgets.git",
+                "git@github.com:acme/widgets.git",
+            ),
+            (
+                "https://github.com/acme/widgets",
+                "git@github.com:acme/widgets.git",
+            ),
+            (
+                "https://github.com/acme/widgets/",
+                "git@github.com:acme/widgets.git",
+            ),
+            (
+                "https://alice@GitHub.com/acme/widgets.git",
+                "git@github.com:acme/widgets.git",
+            ),
+        ] {
+            assert_eq!(https_remote_to_ssh(https).as_deref(), Some(ssh), "{https}");
+        }
+        for not in [
+            "git@github.com:acme/widgets.git",
+            "ssh://git@github.com/acme/widgets.git",
+            "https://github.com/acme",
+            "https://github.com/acme/widgets/extra",
+            "https://github.com/-acme/widgets.git",
+            "https://github.com/acme/--upload-pack=x",
+            "file:///tmp/acme/widgets",
+            "/local/widgets",
+        ] {
+            assert_eq!(https_remote_to_ssh(not), None, "{not}");
+        }
+    }
+
+    #[test]
+    fn a_push_over_https_without_a_helper_is_called_out() {
+        let mut f = CheckoutFacts {
+            origin: Some("https://github.com/acme/widgets.git".into()),
+            ..CheckoutFacts::default()
+        };
+        assert!(f.https_push_without_helper("github.com"));
+        assert!(!f.https_push_without_helper("codeberg.org"));
+        f.https_helper = Some("osxkeychain".into());
+        assert!(!f.https_push_without_helper("github.com"));
+        f.https_helper = None;
+        f.origin = Some("git@github.com:acme/widgets.git".into());
+        assert!(!f.https_push_without_helper("github.com"));
+        // Pushes go to the fork when remote.pushDefault says so.
+        f.fork = Some("https://github.com/alice/widgets.git".into());
+        assert!(!f.https_push_without_helper("github.com"));
+        f.push_default = Some("fork".into());
+        assert_eq!(f.push_url(), Some("https://github.com/alice/widgets.git"));
+        assert!(f.https_push_without_helper("github.com"));
+    }
+
+    /// `git` in `dir` with an empty global config and no system config, so a
+    /// test never depends on this machine's helpers.
+    fn isolated_git(dir: &Path, empty: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", empty)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn a_credential_helper_is_found_in_the_checkout() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.gitconfig");
+        std::fs::write(&empty, "").unwrap();
+        let repo = dir.path().join("r");
+        std::fs::create_dir_all(&repo).unwrap();
+        isolated_git(&repo, &empty, &["init", "-q"]);
+        // An empty helper resets every inherited one, generic and scoped to
+        // the forge: none applies, whatever this machine's global config says
+        // (`--get-urlmatch` reads the user's global config, which the
+        // isolation of `isolated_git` does not reach).
+        isolated_git(&repo, &empty, &["config", "credential.helper", ""]);
+        isolated_git(
+            &repo,
+            &empty,
+            &["config", "credential.https://github.com.helper", ""],
+        );
+        assert_eq!(https_helper_in(&repo, "github.com"), None);
+        // A helper scoped to the forge applies.
+        isolated_git(
+            &repo,
+            &empty,
+            &[
+                "config",
+                "--add",
+                "credential.https://github.com.helper",
+                "store",
+            ],
+        );
+        assert_eq!(
+            https_helper_in(&repo, "github.com").as_deref(),
+            Some("store")
+        );
+        // ...to that forge only.
+        assert_eq!(https_helper_in(&repo, "codeberg.org"), None);
+    }
+
+    #[test]
+    fn remotes_switch_to_ssh_in_a_checkout() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.gitconfig");
+        std::fs::write(&empty, "").unwrap();
+        let repo = dir.path().join("r");
+        std::fs::create_dir_all(&repo).unwrap();
+        isolated_git(&repo, &empty, &["init", "-q"]);
+        // Nothing to switch yet.
+        assert!(switch_remotes_to_ssh(&repo).is_err());
+        isolated_git(
+            &repo,
+            &empty,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/widgets.git",
+            ],
+        );
+        isolated_git(
+            &repo,
+            &empty,
+            &["remote", "add", "fork", "https://github.com/alice/widgets"],
+        );
+        isolated_git(
+            &repo,
+            &empty,
+            &["remote", "add", "other", "https://github.com/x/y.git"],
+        );
+        let switched = switch_remotes_to_ssh(&repo).unwrap();
+        assert_eq!(
+            switched,
+            vec![
+                ("origin".into(), "git@github.com:acme/widgets.git".into()),
+                ("fork".into(), "git@github.com:alice/widgets.git".into()),
+            ]
+        );
+        let read = |name: &str| git_read(&repo, &["remote", "get-url", "--", name]);
+        assert_eq!(
+            read("origin").as_deref(),
+            Some("git@github.com:acme/widgets.git")
+        );
+        assert_eq!(
+            read("fork").as_deref(),
+            Some("git@github.com:alice/widgets.git")
+        );
+        assert_eq!(
+            read("other").as_deref(),
+            Some("https://github.com/x/y.git"),
+            "only origin and fork are touched"
+        );
+        // Already SSH: nothing left to switch.
+        assert!(switch_remotes_to_ssh(&repo).is_err());
+    }
+
+    #[test]
     fn the_default_path_mirrors_the_resource() {
         assert_eq!(
             widgets().default_path(Path::new("/w")),
@@ -854,7 +1324,7 @@ mod tests {
         );
         let mut s = WorkspaceSettings {
             root: dir.path().join("code"),
-            protocol: CloneProtocol::Ssh,
+            protocol: Some(CloneProtocol::Ssh),
             ..WorkspaceSettings::default()
         };
         s.checkouts

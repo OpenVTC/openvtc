@@ -652,10 +652,24 @@ fn render_signing(lines: &mut Vec<Line<'static>>, view: &ReposView) {
             fix(lines, remedy);
         }
     }
+    // The protocol for the highlighted repository's forge, when there is one.
+    let (protocol, source) = repos_workspace::target(view)
+        .and_then(|r| RepoCoords::parse(&r).ok())
+        .map_or_else(
+            || {
+                git_workspace::effective_protocol(
+                    ws.settings.protocol,
+                    &ForgeCredential::GitDefault,
+                    None,
+                )
+            },
+            |c| ws.protocol_for(&view.vtc_did, &c),
+        );
     lines.push(Line::from(dim(format!(
-        "    Checkouts go under {}, cloned over {} — w to change.",
+        "    Checkouts go under {}, cloned over {}{} — w to change.",
         sanitize_display(&git_workspace::display_path(&ws.settings.root), 512),
-        ws.settings.protocol.label()
+        protocol.label(),
+        source.note()
     ))));
 }
 
@@ -687,9 +701,30 @@ fn local_hints(lines: &mut Vec<Line<'static>>, view: &ReposView) {
         if ws.push_access.get(t).is_some_and(|(_, can)| !can) {
             keys.push("F fork");
         }
+        if checkout.is_some_and(|c| push_needs_username(view, t, &c.facts)) {
+            keys.push("R remotes to SSH");
+        }
     }
     keys.push("w workspace");
     lines.push(Line::from(dim(format!("    {}", keys.join("   ")))));
+}
+
+/// Whether `git push` in this checkout would stop at "Username for
+/// 'https://…'": it pushes over HTTPS, no credential helper applies, and no
+/// gh account is chosen for it.
+fn push_needs_username(view: &ReposView, resource: &str, facts: &CheckoutFacts) -> bool {
+    let Ok(coords) = RepoCoords::parse(resource) else {
+        return false;
+    };
+    facts.is_repo
+        && facts.https_push_without_helper(&coords.host)
+        && view
+            .workspace
+            .settings
+            .credential_for(&view.vtc_did, &coords)
+            .credential
+            .gh_login()
+            .is_none()
 }
 
 /// `HEAD`, and whether it would pass `verify-trust` as this persona.
@@ -828,24 +863,36 @@ fn render_local(
             .as_ref()
             .map(|c| git_workspace::display_path(&c.default_path(&ws.settings.root)))
             .unwrap_or_default();
-        // The account decides the protocol: a gh token is HTTPS, a key SSH.
-        let protocol = coords.as_ref().map_or(ws.settings.protocol, |c| {
-            ws.settings
-                .credential_for(&view.vtc_did, c)
-                .credential
-                .protocol(ws.settings.protocol)
-        });
+        // The account decides the protocol (a gh token is HTTPS, a key SSH),
+        // then `w`, then gh's setting.
+        let (protocol, source) = coords.as_ref().map_or_else(
+            || {
+                git_workspace::effective_protocol(
+                    ws.settings.protocol,
+                    &ForgeCredential::GitDefault,
+                    None,
+                )
+            },
+            |c| ws.protocol_for(&view.vtc_did, c),
+        );
         wrapped(
             lines,
             "○",
             COLOR_DARK_GRAY,
             &format!(
-                "Not checked out here. c clones it into {} over {} and makes it sign as you; \
+                "Not checked out here. c clones it into {} over {}{} and makes it sign as you; \
                  u uses a checkout you already have.",
                 sanitize_display(&dest, 512),
-                protocol.label()
+                protocol.label(),
+                source.note()
             ),
         );
+        if let Some(warning) = coords
+            .as_ref()
+            .and_then(|c| ws.https_clone_warning(&view.vtc_did, c))
+        {
+            wrapped(lines, "▲", COLOR_ORANGE, &warning);
+        }
         return;
     };
     let CheckoutView { facts, signing } = checkout;
@@ -871,6 +918,22 @@ fn render_local(
                 ),
                 None => "no origin remote.".into(),
             },
+        );
+    }
+    if push_needs_username(view, resource, facts) {
+        let host = RepoCoords::parse(resource)
+            .map(|c| c.host)
+            .unwrap_or_default();
+        wrapped(
+            lines,
+            "▲",
+            COLOR_WARNING_ACCESSIBLE_RED,
+            &format!("git will ask for a username when you push: no credential helper for {host}."),
+        );
+        fix(
+            lines,
+            "f chooses an account (a gh account or an SSH key), or R switches this checkout's \
+             remotes to SSH",
         );
     }
     match (signing, ws.signs_as_me(checkout)) {
@@ -951,12 +1014,13 @@ fn render_workspace_overlay(lines: &mut Vec<Line<'static>>, view: &ReposView) {
             input(lines, root, true, "~/src");
             lines.push(Line::from(vec![
                 dim("      protocol: "),
-                text(protocol.label()),
+                text(protocol.map_or("automatic", |p| p.label())),
                 dim(match protocol {
-                    git_workspace::CloneProtocol::Https => {
-                        "  (a private repository needs a git credential helper)"
+                    None => "  (the forge account's, else your gh setting, else HTTPS)",
+                    Some(git_workspace::CloneProtocol::Https) => {
+                        "  (a push needs a git credential helper)"
                     }
-                    git_workspace::CloneProtocol::Ssh => {
+                    Some(git_workspace::CloneProtocol::Ssh) => {
                         "  (uses the SSH key your forge account knows, from ssh-agent)"
                     }
                 }),
@@ -967,7 +1031,7 @@ fn render_workspace_overlay(lines: &mut Vec<Line<'static>>, view: &ReposView) {
             if let Some(why) = why {
                 error(lines, why);
             }
-            hints(lines, "⏎ save   Tab switch HTTPS/SSH   Esc cancel");
+            hints(lines, "⏎ save   Tab automatic/HTTPS/SSH   Esc cancel");
         }
         Some(WorkspaceForm::Account(form)) => render_account_form(lines, form),
         Some(WorkspaceForm::UsePath {
@@ -1642,7 +1706,7 @@ mod tests {
         v.workspace = Workspace {
             settings: WorkspaceSettings {
                 root: "/w".into(),
-                protocol: CloneProtocol::Https,
+                protocol: Some(CloneProtocol::Https),
                 ..WorkspaceSettings::default()
             },
             signer: Some(Ok(PersonaSigner {
@@ -1767,6 +1831,106 @@ mod tests {
         );
         assert!(out.contains("E stop signing   p copy path"), "{out}");
         assert!(!out.contains("e sign here"), "{out}");
+    }
+
+    /// The rendered text with every wrap and indent collapsed to one space.
+    fn flat(out: &str) -> String {
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn the_protocol_follows_gh_and_says_so() {
+        use openvtc_core::git_workspace::ForgeFacts;
+        let mut v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });
+        v.workspace.settings.protocol = None;
+        v.workspace.forges.insert(
+            "github.com".into(),
+            ForgeFacts {
+                gh_protocol: Some(CloneProtocol::Ssh),
+                https_helper: false,
+            },
+        );
+        let out = flat(&rendered(v.clone()));
+        assert!(
+            out.contains("cloned over SSH (from your gh settings) — w to change"),
+            "{out}"
+        );
+        v.screen = ReposScreen::Repo {
+            resource: "github.com/acme/gadgets".into(),
+        };
+        let out = flat(&rendered(v.clone()));
+        assert!(out.contains("over SSH (from your gh settings)"), "{out}");
+        assert!(!out.contains("no credential helper for"), "{out}");
+
+        // Chosen HTTPS with gh on SSH and no helper: said before the clone.
+        v.workspace.settings.protocol = Some(CloneProtocol::Https);
+        let out = flat(&rendered(v.clone()));
+        assert!(out.contains("Your gh clones github.com over SSH"), "{out}");
+
+        // gh on HTTPS, but no helper: said too.
+        v.workspace.forges.insert(
+            "github.com".into(),
+            ForgeFacts {
+                gh_protocol: Some(CloneProtocol::Https),
+                https_helper: false,
+            },
+        );
+        let out = flat(&rendered(v.clone()));
+        assert!(
+            out.contains("git has no credential helper for github.com"),
+            "{out}"
+        );
+        // A helper: nothing to say.
+        v.workspace.forges.insert(
+            "github.com".into(),
+            ForgeFacts {
+                gh_protocol: Some(CloneProtocol::Https),
+                https_helper: true,
+            },
+        );
+        let out = flat(&rendered(v));
+        assert!(!out.contains("no credential helper for"), "{out}");
+    }
+
+    #[test]
+    fn an_https_checkout_without_a_helper_warns_before_the_push() {
+        let mut v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });
+        v.screen = ReposScreen::Repo {
+            resource: "github.com/acme/gadgets".into(),
+        };
+        v.workspace.checkouts.insert(
+            "github.com/acme/gadgets".into(),
+            checkout(CheckoutSigning::Off, None),
+        );
+        let out = flat(&rendered(v.clone()));
+        assert!(
+            out.contains(
+                "git will ask for a username when you push: no credential helper for github.com"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("R switches this checkout's"), "{out}");
+        assert!(out.contains("R remotes to SSH"), "{out}");
+
+        // A helper applies: no warning.
+        let mut helped = v.clone();
+        if let Some(c) = helped
+            .workspace
+            .checkouts
+            .get_mut("github.com/acme/gadgets")
+        {
+            c.facts.https_helper = Some("osxkeychain".into());
+        }
+        let out = flat(&rendered(helped));
+        assert!(!out.contains("ask for a username"), "{out}");
+        assert!(!out.contains("R remotes to SSH"), "{out}");
+
+        // Over SSH: no warning.
+        if let Some(c) = v.workspace.checkouts.get_mut("github.com/acme/gadgets") {
+            c.facts.origin = Some("git@github.com:acme/gadgets.git".into());
+        }
+        let out = flat(&rendered(v));
+        assert!(!out.contains("ask for a username"), "{out}");
     }
 
     #[test]
@@ -1995,7 +2159,7 @@ mod tests {
         let mut v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });
         v.workspace.form = Some(WorkspaceForm::Settings {
             root: "~/code".into(),
-            protocol: CloneProtocol::Ssh,
+            protocol: Some(CloneProtocol::Ssh),
             error: Some("Use an absolute path".into()),
         });
         let out = rendered(v.clone());

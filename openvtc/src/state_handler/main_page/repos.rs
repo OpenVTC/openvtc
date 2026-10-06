@@ -23,7 +23,8 @@ use openvtc_core::forge_credential::{ForgeCredential, GhAccount};
 use openvtc_core::git_ns::{self, GitRight, Visibility, view};
 use openvtc_core::git_signing::{BinaryStatus, CheckoutSigning, IdentityStatus, PersonaSigner};
 use openvtc_core::git_workspace::{
-    self, CheckoutFacts, CloneProtocol, CredentialScope, WorkspaceSettings,
+    self, CheckoutFacts, CloneProtocol, CredentialScope, ForgeFacts, ProtocolSource, RepoCoords,
+    WorkspaceSettings,
 };
 
 /// Longest name or DID kept for display.
@@ -320,7 +321,8 @@ pub enum WorkspaceForm {
     /// `w`: where checkouts go, and how they are cloned.
     Settings {
         root: String,
-        protocol: CloneProtocol,
+        /// `None`: follow the forge account, then gh's setting, then HTTPS.
+        protocol: Option<CloneProtocol>,
         error: Option<String>,
     },
     /// `u`: a checkout of `resource` that already exists somewhere.
@@ -569,6 +571,9 @@ pub struct Workspace {
     pub confirm: Option<WorkspaceChange>,
     /// Whether the chosen gh account can push, by resource: `(login, can)`.
     pub push_access: HashMap<String, (String, bool)>,
+    /// gh's protocol and the global credential helper, by forge host; read
+    /// once per view.
+    pub forges: HashMap<String, ForgeFacts>,
 }
 
 impl Workspace {
@@ -579,6 +584,46 @@ impl Workspace {
             .as_ref()
             .and_then(|s| s.as_ref().ok())
             .map(|s| s.did_key_id.as_str())
+    }
+
+    /// The protocol a clone of `coords` uses here, and why.
+    #[must_use]
+    pub fn protocol_for(
+        &self,
+        vtc_did: &str,
+        coords: &RepoCoords,
+    ) -> (CloneProtocol, ProtocolSource) {
+        let gh = self.forges.get(&coords.host).and_then(|f| f.gh_protocol);
+        self.settings.protocol_for(vtc_did, coords, gh)
+    }
+
+    /// Why a clone of `coords` over HTTPS could not push, said before it is
+    /// made: gh clones this forge over SSH, or git has no credential helper
+    /// for it. `None` over SSH, with a forge account chosen, or before the
+    /// forge has been read.
+    #[must_use]
+    pub fn https_clone_warning(&self, vtc_did: &str, coords: &RepoCoords) -> Option<String> {
+        let (protocol, source) = self.protocol_for(vtc_did, coords);
+        if protocol != CloneProtocol::Https || source == ProtocolSource::Account {
+            return None;
+        }
+        let forge = self.forges.get(&coords.host)?;
+        if forge.gh_protocol == Some(CloneProtocol::Ssh) {
+            return Some(format!(
+                "Your gh clones {} over SSH, and git has {} credential helper for it over \
+                 HTTPS: a push from this checkout may ask for a username. w switches to SSH, f \
+                 chooses an account.",
+                coords.host,
+                if forge.https_helper { "a" } else { "no" }
+            ));
+        }
+        (!forge.https_helper).then(|| {
+            format!(
+                "git has no credential helper for {}, so a push over HTTPS will ask for a \
+                 username. f chooses an account (a gh account or an SSH key); w switches to SSH.",
+                coords.host
+            )
+        })
     }
 
     /// Ask for a probe; `identity` is sticky until one runs.

@@ -19,7 +19,7 @@ Highlight a repository (or open it) and press **`f`**. openvtc looks for:
 |---|---|---|
 | **gh account** | An account the [GitHub CLI](https://cli.github.com/) holds on that forge (`gh auth status`). Needs gh 2.40 or later. | HTTPS |
 | **SSH key** | A private key in `~/.ssh` named `id_*` (not the `.pub` half), or any key path you type. | SSH |
-| **Git default** | Nothing written; git does what it did before. | the workspace's protocol (`w`) |
+| **Git default** | Nothing written; git does what it did before. | the workspace's protocol (`w`), else gh's, else HTTPS |
 | **Same as the community's choice** | On a single repository: follow the forge-wide choice. | — |
 
 - `↑`/`↓` choose, `Tab` switches between **this repository** and **every
@@ -123,12 +123,54 @@ config (`git-workspace.json`, or `git-workspace-<profile>.json`), under
 `credentials`, keyed by community DID, then forge host or repository. It holds
 references only — a key path, a gh login — never a token or key material.
 
+## Which protocol a clone uses
+
+openvtc checks these in order and uses the first that applies:
+
+1. **The forge account (`f`).** A gh account works only over HTTPS, and an SSH
+   key only over SSH.
+2. **Your choice in the workspace settings (`w`).** In the form, `Tab` cycles
+   through *automatic*, HTTPS and SSH. Only HTTPS or SSH is stored, as
+   `clone_protocol`.
+3. **gh's setting for the forge:** `gh config get git_protocol -h <host>`, or
+   `gh config get git_protocol` if gh has no setting for that host. gh writes
+   this setting when you answer *"What is your preferred protocol for Git
+   operations?"* during `gh auth login`. openvtc reads it once per forge each
+   time the Repos view opens, and waits at most 5 seconds for gh to answer.
+4. **HTTPS.**
+
+The workspace line and the not-cloned line say where the protocol came from.
+For example: `cloned over SSH (from your gh settings) — w to change`.
+
+### A checkout that cannot push
+
+Over HTTPS, git needs a credential helper to push. Without one, `git push`
+stops at `Username for 'https://github.com':`. openvtc looks this up with
+`git config --get-urlmatch credential.helper https://<host>`, run in the
+checkout. That lookup covers the checkout's own, global and system config, and
+includes the helper that a gh account writes.
+
+- **Before a clone over HTTPS**, the screen warns you if gh clones that forge
+  over SSH, or if git has no credential helper for it.
+- **In a checkout**, the screen warns you if `git push` would go to an
+  `https://` URL on the forge with no credential helper. That URL belongs to
+  `origin`, or to `fork` when `remote.pushDefault = fork`. The warning reads
+  "git will ask for a username when you push: no credential helper for
+  <host>". There are two fixes:
+  - **`f`** chooses an account: a gh account, which brings its own helper, or
+    an SSH key.
+  - **`R`** switches the checkout's `origin` and `fork` remotes from
+    `https://<host>/<owner>/<repo>.git` to `git@<host>:<owner>/<repo>.git`.
+    openvtc changes them with `git remote set-url` and leaves other remotes
+    alone.
+
 ## Limits
 
 - **The account decides the protocol.** A gh account works over HTTPS only and
   an SSH key over SSH only, so a clone uses the matching one whatever the
   workspace's protocol (`w`) says. An existing checkout whose `origin` uses the
-  other protocol is called out: switch it with `git remote set-url origin …`.
+  other protocol is called out: switch it with `git remote set-url origin …`
+  (or `R`, from HTTPS to SSH).
 - **gh accounts need gh 2.40 or later** (multi-account support, `gh auth token
   --user`). gh must be on the `PATH` of whatever runs git — a GUI git client
   started outside your shell may not see it.
