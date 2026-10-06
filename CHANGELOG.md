@@ -191,6 +191,14 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **The messaging connection recovers from a receive side that stops.** On
+  `affinidi-messaging-sdk` 0.33.2 and `affinidi-messaging-delivery` 0.1.20: a
+  socket that stays up but delivers nothing is probed and reconnected within
+  about 90 s, the inbound unpack chain is time-bounded, a slow mediator delete
+  can no longer stall inbound dispatch, and messages that can never be opened
+  are deleted rather than redelivered forever (one sent to a key this app has
+  not loaded is kept).
+
 - **An admin VTA session whose replies stop arriving is noticed and rebuilt.**
   On 2026-10-05 two admin sessions stopped collecting their mediator inbox for
   an hour: every request reached the VTA, every reply queued until the
