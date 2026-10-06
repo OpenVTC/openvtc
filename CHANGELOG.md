@@ -191,6 +191,17 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **A TSP-joined member's Repos view loads instead of timing out.** The
+  community answered `git-ns/view`, but the client's inbound gate
+  (`OPENVTC_CATCH_ALL_PATTERN`) had no `git-ns/*` entry. Over DIDComm the
+  answer arrived in the binding envelope and got through; over TSP the
+  envelope is opened before the gate, so the answer was typed
+  `git-ns/view/0.4#response` and dropped with only a debug line. The view
+  waited out its 30 seconds on an answer that had arrived. The gate now admits
+  every `git-ns` reply. A Trust Task, or anything over TSP, that no handler
+  claims is now logged at WARN with its type, so a missing route shows in the
+  log.
+
 - **After a join the header says you are in a community, and the new
   community's face is read at once.** The header kept "No community yet ·
   persona online" after a join until the next connection event, because the

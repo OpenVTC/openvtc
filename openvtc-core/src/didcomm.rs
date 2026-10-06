@@ -1477,6 +1477,32 @@ fn tsp_frame_to_message(item: &affinidi_messaging_core::transport::Inbound) -> O
     )
 }
 
+/// An already-unsealed TSP payload taken the whole way the live path takes it:
+/// mapped to a [`Message`] ([`tsp_document_to_message`]) and through the inbound
+/// gate ([`classify_inbound`]). `Some` is the message the state handler would
+/// receive; `None` means it never would.
+///
+/// For tests of the inbound path end to end — the gate is where a TSP reply
+/// that the classifier downstream would take was being dropped, and a test
+/// that skips it proves nothing about delivery.
+#[doc(hidden)]
+#[must_use]
+pub fn deliver_tsp_document(payload: &[u8], sender: &str, recipient: &str) -> Option<Message> {
+    let message = tsp_document_to_message(payload, Some(sender), recipient, "frame-hash")?;
+    classify_inbound(
+        message,
+        MessagingTransport::Tsp,
+        Some(sender.to_string()),
+        Some(sender.to_string()),
+        recipient.to_string(),
+    )
+    .into_iter()
+    .find_map(|event| match event {
+        DIDCommEvent::InboundMessage { message, .. } => Some(*message),
+        _ => None,
+    })
+}
+
 /// The mapping itself, over an already-unsealed TSP payload.
 ///
 /// Split from [`tsp_frame_to_message`] because the two ways a TSP frame reaches
@@ -2988,6 +3014,35 @@ mod tsp_carriage_tests {
                 refused,
                 "{type_uri}"
             );
+        }
+    }
+
+    /// The exact reply a live VTC sent a TSP-joined member — `git-ns/view/0.4`
+    /// in the binding envelope — passes the inbound gate and is delivered to
+    /// the state handler, and so does every other `git-ns` reply and a
+    /// refusal. Before the gate admitted `git-ns/*`, this one was logged
+    /// `unhandled message type — dropped` at debug and the Repos view timed
+    /// out on an answer the VTC had sent.
+    #[test]
+    fn a_tsp_git_ns_reply_is_delivered_through_the_inbound_gate() {
+        for type_uri in [
+            "https://trusttasks.org/spec/git-ns/view/0.4#response",
+            "https://trusttasks.org/spec/git-ns/repo/create/0.3#response",
+            "https://trusttasks.org/spec/git-ns/account/link-status/0.1#response",
+            "https://trusttasks.org/spec/trust-task-error/0.1",
+            "https://trusttasks.org/spec/governance/capability/list/0.1#response",
+        ] {
+            let mut doc = document(type_uri);
+            doc["threadId"] = serde_json::json!("urn:uuid:request");
+            let wrapped = vta_sdk::tsp_binding::wrap_envelope(&serde_json::to_vec(&doc).unwrap());
+            let delivered = super::deliver_tsp_document(
+                &wrapped,
+                "did:webvh:example.com:community",
+                "did:key:zPersona",
+            )
+            .unwrap_or_else(|| panic!("{type_uri} was dropped at the inbound gate"));
+            assert_eq!(delivered.typ, type_uri);
+            assert_eq!(delivered.thid.as_deref(), Some("urn:uuid:request"));
         }
     }
 
