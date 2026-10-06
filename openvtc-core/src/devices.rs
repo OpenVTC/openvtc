@@ -28,6 +28,7 @@
 //! its devices. Every entry point returns a `Result` the caller is expected to
 //! log and move past.
 
+use crate::vta_receive_leg::ReceiveLegTracker;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::debug;
@@ -203,20 +204,28 @@ pub enum Registration {
 /// refusal as a failure is what made this install invisible to itself — see
 /// [`live_siblings`].
 ///
+/// `receive` counts the call's reply (or reply timeout) on the session's
+/// receive leg — see [`crate::vta_receive_leg`].
+///
 /// # Errors
 ///
 /// Any VTA failure other than the already-registered conflict. Callers log and
 /// continue — see the module docs.
-pub async fn register(client: &VtaClient, profile: &str) -> Result<Registration, OpenVTCError> {
-    let response = match client
-        .device_register(
-            consumer_kind(),
-            &display_name(profile),
-            Some(std::env::consts::OS),
-            None,
-        )
-        .await
-    {
+pub async fn register(
+    client: &VtaClient,
+    profile: &str,
+    receive: &ReceiveLegTracker,
+) -> Result<Registration, OpenVTCError> {
+    let response = match receive.observe(
+        client
+            .device_register(
+                consumer_kind(),
+                &display_name(profile),
+                Some(std::env::consts::OS),
+                None,
+            )
+            .await,
+    ) {
         Ok(response) => response,
         Err(e) if is_already_registered(&e) => return Ok(Registration::AlreadyRegistered),
         Err(e) => {
@@ -264,13 +273,23 @@ fn is_already_registered(e: &vta_sdk::error::VtaError) -> bool {
 /// string on a five-minute timer, and a correction that depends on a local
 /// belief is one that stays wrong when the belief is.
 ///
+/// `receive` counts the call on the session's receive leg — see
+/// [`crate::vta_receive_leg`].
+///
 /// # Errors
 ///
 /// Any VTA failure.
-pub async fn heartbeat(client: &VtaClient, profile: &str) -> Result<(), OpenVTCError> {
-    client
-        .device_heartbeat_named(Some(std::env::consts::OS), Some(&display_name(profile)))
-        .await
+pub async fn heartbeat(
+    client: &VtaClient,
+    profile: &str,
+    receive: &ReceiveLegTracker,
+) -> Result<(), OpenVTCError> {
+    receive
+        .observe(
+            client
+                .device_heartbeat_named(Some(std::env::consts::OS), Some(&display_name(profile)))
+                .await,
+        )
         .map(|_| ())
         .map_err(|e| OpenVTCError::Vta(format!("device heartbeat failed: {e}")))
 }
@@ -289,13 +308,18 @@ pub fn name_correction_due(row: &DeviceRecord, profile: &str) -> bool {
 
 /// Every device registered against this account.
 ///
+/// `receive` counts the call on the session's receive leg — see
+/// [`crate::vta_receive_leg`].
+///
 /// # Errors
 ///
 /// Any VTA failure.
-pub async fn list(client: &VtaClient) -> Result<Vec<DeviceRecord>, OpenVTCError> {
-    let response = client
-        .device_list(serde_json::json!({}))
-        .await
+pub async fn list(
+    client: &VtaClient,
+    receive: &ReceiveLegTracker,
+) -> Result<Vec<DeviceRecord>, OpenVTCError> {
+    let response = receive
+        .observe(client.device_list(serde_json::json!({})).await)
         .map_err(|e| OpenVTCError::Vta(format!("device list failed: {e}")))?;
 
     let devices = response

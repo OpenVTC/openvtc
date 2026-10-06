@@ -191,6 +191,37 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **An admin VTA session whose replies stop arriving is noticed and rebuilt.**
+  On 2026-10-05 two admin sessions stopped collecting their mediator inbox for
+  an hour: every request reached the VTA, every reply queued until the
+  mediator's per-peer cap refused the rest, and OpenVTC said nothing — the
+  device heartbeat that kept failing logged at debug.
+  - OpenVTC now counts reply timeouts on the admin session (TSP and DIDComm),
+    reset by any reply, from the device-presence registration, listing and
+    heartbeat, the launch-time context fetch, and the probe on a rebuilt
+    session. Two in a row is "replies not arriving". This stands in for
+    `vta-sdk` 0.64's own `VtaError::RepliesNotArriving` /
+    `VtaClient::receive_health()` (VTI #1978), which OpenVTC takes once
+    `did-git-sign` releases on that line.
+  - The state reads as its own (R6.4): "Your VTA received the request, but its
+    replies aren't reaching this app — its message inbox isn't being collected
+    … Reconnecting…", never as "could not reach your VTA" or an authentication
+    failure. A single reply timeout on a community-context call now says the
+    request was sent and no reply arrived in time, rather than "could not
+    reach your VTA".
+  - The VTA panel has a **Replies** row under the transport: the time since the
+    last reply and any replies missed in a row, and — when they have stopped —
+    `NOT ARRIVING`, what recovery is doing, when it next tries, and why the
+    last try failed. A failing device registration, listing or heartbeat is
+    logged at WARN and shown in the panel and activity log.
+  - The session is rebuilt — closed, then reopened, which re-registers for live
+    delivery and drains the inbox — on a capped, jittered backoff (5 s doubling
+    to 5 min, ±20 %, R1.4), one rebuild at a time, every step under a timeout
+    (R1.2). The schedule resets only once a reply is seen on the new session,
+    so a session that reconnects and stalls again keeps backing off rather than
+    rebuilding in a loop. The new client replaces the old one in the runtime
+    loop, the State-A loop, and the device-presence task.
+
 - **A hidden-vetting join says why the community did not count its proof.**
   When a community changes its published hidden-vetting parameters (drip rate,
   tick length, live labels, events), its criterion's digest moves, and every

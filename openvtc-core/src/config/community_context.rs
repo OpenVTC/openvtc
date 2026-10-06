@@ -747,6 +747,13 @@ pub fn confirms_deletion(typed: &str) -> bool {
 /// fault is a permission, or the reverse.
 pub(crate) fn vta_failure(action: &str, e: VtaError) -> OpenVTCError {
     match e {
+        // Not "could not reach": the request was sent, and it is the reply that
+        // is missing — which, repeated, is a session whose inbox is not being
+        // collected, with its own remedy (R6.4, `vta_receive_leg`).
+        ref e if crate::vta_receive_leg::is_reply_timeout(e) => OpenVTCError::Vta(format!(
+            "the request to {action} was sent, but no reply from your VTA reached this app \
+             in time: {e}"
+        )),
         VtaError::Network(_) | VtaError::DidcommTransport(_) | VtaError::TspTransport(_) => {
             OpenVTCError::Vta(format!("could not reach your VTA to {action}: {e}"))
         }
@@ -1353,6 +1360,22 @@ mod tests {
         assert!(matches!(forbidden, OpenVTCError::Auth(ref m) if m.contains("does not allow")));
         let rejected = vta_failure("x", VtaError::Validation("bad".into()));
         assert!(matches!(rejected, OpenVTCError::Vta(ref m) if m.contains("rejected")));
+        // A reply timeout is none of the three: the request was sent.
+        for timeout in [
+            VtaError::TspTransport(
+                "timed out waiting for the TSP reply to request 'urn:uuid:1'".into(),
+            ),
+            VtaError::DidcommTransport("timeout waiting for DIDComm response".into()),
+        ] {
+            match vta_failure("x", timeout) {
+                OpenVTCError::Vta(m) => {
+                    assert!(m.contains("was sent, but no reply"), "{m}");
+                    assert!(!m.contains("could not reach"), "{m}");
+                    assert!(!m.contains("rejected"), "{m}");
+                }
+                other => panic!("expected Vta, got {other:?}"),
+            }
+        }
     }
 
     #[test]

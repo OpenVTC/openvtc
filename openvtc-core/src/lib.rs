@@ -68,6 +68,8 @@ pub mod tsp;
 pub mod tsp_store;
 pub mod vetting;
 pub mod vrc;
+pub mod vta_receive;
+pub mod vta_receive_leg;
 
 /// Packs a DIDComm message with authenticated encryption and forwards it
 /// through the mediator to the recipient.

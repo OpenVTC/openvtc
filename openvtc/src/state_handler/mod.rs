@@ -295,6 +295,7 @@ pub mod state;
 mod verify_queue;
 mod vetting_actions;
 mod vic;
+mod vta_recovery;
 mod vta_transports;
 
 pub struct DeferredLoad {
@@ -829,10 +830,17 @@ impl StateHandler {
         // D13: make this install visible to the rest of the account, and notice
         // the others. Spawned rather than awaited — registration is diagnostic,
         // and a slow or device-slice-less VTA must not delay startup by a
-        // single frame. Uses its OWN client clone so the heartbeat loop can
-        // outlive any one borrow of the admin session.
+        // single frame. Holds the session through a watch rather than a clone,
+        // so the heartbeat loop outlives any one borrow of the admin session —
+        // and any one session, when a stalled one is rebuilt.
         let (presence_tx, mut presence_rx) =
             mpsc::unbounded_channel::<device_presence::PresenceReport>();
+        // When the loop rebuilds a stalled session it publishes the new client
+        // here, and the presence task's next call uses it.
+        let mut admin_vta_watch = None;
+        // The admin session's receive leg, shared by every observer of the
+        // session and handed to the supervisor below.
+        let receive = openvtc_core::vta_receive_leg::ReceiveLegTracker::new();
         if let Some(client) = admin_vta.as_ref() {
             // The DID this install authenticates as. It owns our device binding,
             // so it is how the presence task recognises our own row in the
@@ -843,13 +851,26 @@ impl StateHandler {
                 }
                 openvtc_core::config::KeyBackend::Bip32 { .. } => None,
             };
+            let (watch_tx, watch_rx) = tokio::sync::watch::channel(client.clone());
+            admin_vta_watch = Some(watch_tx);
             tokio::spawn(device_presence::run(
-                client.clone(),
+                watch_rx,
                 self.profile.clone(),
                 self_did,
+                receive.clone(),
                 presence_tx,
             ));
         }
+
+        // Watches the admin session's receive leg and rebuilds it when the
+        // VTA's replies stop arriving (`vta_recovery`). Created here, before the
+        // State-A branch, and lent to whichever loop runs, so a rebuild started
+        // in the degraded loop lands in the runtime loop after a join.
+        let mut vta_supervisor = vta_recovery::AdminVtaSupervisor::new(
+            openvtc_core::config::RuntimeVtaConnect::from_backend(&config.key_backend),
+            admin_vta_watch,
+            receive,
+        );
 
         // Put any membership credential this account holds into the VTA's
         // credential vault, if it is not there already. Idempotent, and covers
@@ -902,7 +923,9 @@ impl StateHandler {
 
         // Fetch VTA context name, reusing the always-on admin session.
         if let Some(client) = admin_vta.as_ref()
-            && let Ok(resp) = client.list_contexts().await
+            && let Ok(resp) = vta_supervisor
+                .receive()
+                .observe(client.list_contexts().await)
         {
             if let Some(ctx) = resp
                 .contexts
@@ -978,7 +1001,7 @@ impl StateHandler {
         // context back as `DegradedOutcome::Joined` instead of looping, so we
         // fall through to the messaging setup below — no process restart needed
         // to receive the approval credential.
-        let (tdk, mut config, admin_vta) = if config.active_identity().is_none() {
+        let (tdk, mut config, mut admin_vta) = if config.active_identity().is_none() {
             state.connection.status = state::MediatorStatus::NoActiveCommunity;
             let _ = self.state_tx.send(state.clone());
             // No persona yet (State A). Hand the always-on admin session to the
@@ -999,6 +1022,7 @@ impl StateHandler {
                     &mut state,
                     Some(join_ctx),
                     Some(&didcomm_service),
+                    &mut vta_supervisor,
                 )
                 .await?
             {
@@ -1851,11 +1875,45 @@ impl StateHandler {
                             state.live_siblings = siblings;
                             let _ = self.state_tx.send(state.clone());
                         }
-                        device_presence::PresenceReport::Unavailable(reason) => {
-                            // Said once, so an absence of sibling warnings is
-                            // not mistaken for an absence of siblings.
-                            debug!("device presence unavailable: {reason}");
+                        device_presence::PresenceReport::Failing {
+                            what,
+                            reason,
+                            replies_not_arriving,
+                        } => {
+                            // Shown in the panel (the task has already logged it
+                            // at WARN), so an absence of sibling warnings is not
+                            // mistaken for an absence of siblings.
+                            // Logged once per failing spell, not every interval.
+                            let problem = format!("{} failed: {reason}", what.label());
+                            let receive = &mut state.main_page.content_panel.vta.receive;
+                            let first = receive.presence_problem.is_none();
+                            receive.presence_problem = Some(problem.clone());
+                            if first {
+                                state.main_page.log(format!("WARNING: {problem}"));
+                            }
+                            // The session's replies have stopped: act on it now,
+                            // not at the next health tick.
+                            if replies_not_arriving {
+                                vta_supervisor.check(admin_vta.as_ref(), &mut state.main_page);
+                            }
                         }
+                        device_presence::PresenceReport::Recovered => {
+                            state.main_page.content_panel.vta.receive.presence_problem = None;
+                        }
+                    }
+                },
+                // The admin session's receive leg: read its health (no I/O) for
+                // the panel, and start a rebuild when one is due.
+                _ = vta_supervisor.tick.tick() => {
+                    vta_supervisor.check(admin_vta.as_ref(), &mut state.main_page);
+                },
+                // A rebuild of the stalled admin session landed. Swap the new
+                // client in everywhere the session is held: `admin_vta` (which
+                // every later operation borrows or clones from) and the
+                // presence task's watch.
+                Some(outcome) = vta_supervisor.done_rx.recv() => {
+                    if let Some(client) = vta_supervisor.land(outcome, &mut state.main_page) {
+                        admin_vta = Some(client);
                     }
                 },
                 // Lifecycle log messages from the Messaging
@@ -2663,6 +2721,13 @@ impl StateHandler {
     /// enforces this for itself *and* re-checks `list_listeners()` as a backstop,
     /// because the cost of getting it wrong is silent, permanent message loss
     /// that looks like a community that never answered.
+    ///
+    /// `vta_supervisor` watches the admin session held in `join_ctx` and
+    /// rebuilds it if its replies stop arriving; it is `run()`'s, lent here so a
+    /// rebuild in flight at a `Joined` hand-off lands in the runtime loop.
+    // Each argument is a distinct piece of the loop's world, lent by `run()`;
+    // bundling them would only move the list into a struct built once.
+    #[allow(clippy::too_many_arguments)]
     async fn run_degraded_loop(
         &self,
         action_rx: &mut UnboundedReceiver<Action>,
@@ -2671,6 +2736,7 @@ impl StateHandler {
         state: &mut State,
         mut join_ctx: Option<DegradedJoinContext>,
         messaging: Option<&didcomm::Messaging>,
+        vta_supervisor: &mut vta_recovery::AdminVtaSupervisor,
     ) -> Result<DegradedOutcome> {
         // R11: the degraded loop persists only via `remove_community` (State-A
         // community withdrawal); `join_flow` saves itself synchronously. Coalesce
@@ -3158,6 +3224,21 @@ impl StateHandler {
                             .log("Not available yet — join a community first.");
                     }
                 },
+                // State A keeps the admin session too (the VTA panel, a join):
+                // the same receive-leg watch and rebuild as the runtime loop.
+                _ = vta_supervisor.tick.tick() => {
+                    let client = join_ctx.as_ref().and_then(|c| c.admin_vta.as_ref());
+                    vta_supervisor.check(client, &mut state.main_page);
+                },
+                Some(outcome) = vta_supervisor.done_rx.recv() => {
+                    if let Some(client) = vta_supervisor.land(outcome, &mut state.main_page) {
+                        match join_ctx.as_mut() {
+                            Some(ctx) => ctx.admin_vta = Some(client),
+                            // Nothing holds the session any more: close it.
+                            None => client.shutdown().await,
+                        }
+                    }
+                },
                 Some(outcome) = dispatch_rx.recv() => {
                     // Applying needs the config the outcome is annotated against.
                     // It lives in `join_ctx`, which is `take`n on hand-off to the
@@ -3264,8 +3345,22 @@ impl StateHandler {
         state: &mut State,
         join_ctx: Option<DegradedJoinContext>,
     ) -> Result<Interrupted> {
+        // No loaded config, so no admin session to watch: an idle supervisor.
+        let mut idle = vta_recovery::AdminVtaSupervisor::new(
+            None,
+            None,
+            openvtc_core::vta_receive_leg::ReceiveLegTracker::new(),
+        );
         match self
-            .run_degraded_loop(action_rx, interrupt_rx, terminator, state, join_ctx, None)
+            .run_degraded_loop(
+                action_rx,
+                interrupt_rx,
+                terminator,
+                state,
+                join_ctx,
+                None,
+                &mut idle,
+            )
             .await?
         {
             DegradedOutcome::Exit(interrupted) => Ok(interrupted),

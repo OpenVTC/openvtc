@@ -21,8 +21,10 @@
 //! correct a machine that has been renamed since.
 
 use openvtc_core::devices::{self, DeviceRecord};
+use openvtc_core::vta_receive_leg::ReceiveLegTracker;
 use std::collections::BTreeSet;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 use vta_sdk::client::VtaClient;
 
@@ -40,9 +42,85 @@ pub enum PresenceReport {
     /// Only the *newly* seen ones, because the loop logs what it receives and a
     /// warning repeated every five minutes is one the user learns to ignore.
     NewSiblings(Vec<DeviceRecord>),
-    /// Registration or listing failed. Non-fatal, but worth one line so the
-    /// absence of sibling warnings is not mistaken for an absence of siblings.
-    Unavailable(String),
+    /// Registration, listing or a heartbeat failed. Non-fatal, but shown: an
+    /// absence of sibling warnings must not be mistaken for an absence of
+    /// siblings, and a heartbeat that keeps failing is often the first sign the
+    /// admin session itself has stopped hearing the VTA.
+    Failing {
+        /// Which call failed.
+        what: PresenceCall,
+        /// The error, as text.
+        reason: String,
+        /// The session's receive leg had tripped when it failed: requests reach
+        /// the VTA, replies do not reach us. The loop rebuilds the session.
+        replies_not_arriving: bool,
+    },
+    /// A call succeeded after a [`PresenceReport::Failing`].
+    Recovered,
+}
+
+/// The presence task's calls to the VTA.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresenceCall {
+    /// `device/register`, once at launch.
+    Register,
+    /// `device/list`, every interval.
+    List,
+    /// `device/heartbeat`, every interval.
+    Heartbeat,
+}
+
+impl PresenceCall {
+    /// For a log line or the panel.
+    pub fn label(self) -> &'static str {
+        match self {
+            PresenceCall::Register => "device registration",
+            PresenceCall::List => "device listing",
+            PresenceCall::Heartbeat => "device heartbeat",
+        }
+    }
+}
+
+/// Tracks whether the last call failed, so [`PresenceReport::Recovered`] is
+/// sent once per recovery rather than after every success.
+#[derive(Default)]
+struct FailureLatch {
+    failing: bool,
+}
+
+impl FailureLatch {
+    /// A call failed: log it at WARN (every time — a failure every five minutes
+    /// is not noise, and a debug line is what hid the 2026-10-05 stall) and
+    /// build the report.
+    ///
+    /// `replies_not_arriving` is the session's receive health at the time
+    /// ([`ReceiveHealth::replies_not_arriving`](openvtc_core::vta_receive_leg::ReceiveHealth::replies_not_arriving)).
+    fn failed(
+        &mut self,
+        what: PresenceCall,
+        e: &dyn std::fmt::Display,
+        replies_not_arriving: bool,
+    ) -> PresenceReport {
+        self.failing = true;
+        if replies_not_arriving {
+            warn!(
+                "{} failed — the VTA's replies are not reaching this app: {e}",
+                what.label()
+            );
+        } else {
+            warn!("{} failed: {e}", what.label());
+        }
+        PresenceReport::Failing {
+            what,
+            reason: e.to_string(),
+            replies_not_arriving,
+        }
+    }
+
+    /// A call succeeded: `Some(Recovered)` if the previous one had failed.
+    fn succeeded(&mut self) -> Option<PresenceReport> {
+        std::mem::take(&mut self.failing).then_some(PresenceReport::Recovered)
+    }
 }
 
 /// Register this install, then heartbeat and watch for siblings until cancelled.
@@ -51,14 +129,25 @@ pub enum PresenceReport {
 /// answer to "which of these bindings is mine", because only a first launch ever
 /// learns its device id (see [`devices::register`]).
 ///
+/// `client` follows the admin session: when the loop rebuilds it, the next call
+/// here uses the new one, never the closed one.
+///
+/// `receive` is the admin session's receive leg: every call here is counted on
+/// it, which makes the heartbeat and listing a periodic probe of whether the
+/// VTA's replies still reach this app.
+///
 /// Returns when `tx` closes — i.e. when the state handler exits.
 pub async fn run(
-    client: VtaClient,
+    client: watch::Receiver<VtaClient>,
     profile: String,
     self_did: Option<String>,
+    receive: ReceiveLegTracker,
     tx: UnboundedSender<PresenceReport>,
 ) {
-    let mut self_id = match devices::register(&client, &profile).await {
+    let current = || client.borrow().clone();
+    let mut latch = FailureLatch::default();
+    let first = current();
+    let mut self_id = match devices::register(&first, &profile, &receive).await {
         Ok(devices::Registration::Claimed(record)) => {
             info!(device_id = %record.device_id, "registered this install with the VTA");
             if tx
@@ -80,8 +169,11 @@ pub async fn run(
         Err(e) => {
             // Not fatal: a VTA without the device slice, or one briefly
             // unreachable, must not degrade anything the user came here for.
-            warn!("device registration unavailable: {e}");
-            let _ = tx.send(PresenceReport::Unavailable(e.to_string()));
+            let _ = tx.send(latch.failed(
+                PresenceCall::Register,
+                &e,
+                receive.health().replies_not_arriving(),
+            ));
             None
         }
     };
@@ -92,8 +184,14 @@ pub async fn run(
     let mut announced: BTreeSet<String> = BTreeSet::new();
 
     loop {
-        match devices::list(&client).await {
+        let client = current();
+        match devices::list(&client, &receive).await {
             Ok(all) => {
+                if let Some(report) = latch.succeeded()
+                    && tx.send(report).is_err()
+                {
+                    return;
+                }
                 let mine = all
                     .iter()
                     .find(|d| d.is_self(self_id.as_deref(), self_did.as_deref()));
@@ -123,7 +221,7 @@ pub async fn run(
                 // the stale name would outlive every launch.
                 if mine.is_some_and(|d| devices::name_correction_due(d, &profile)) {
                     debug!("this install's binding shows a stale name; correcting it");
-                    if let Err(e) = devices::heartbeat(&client, &profile).await {
+                    if let Err(e) = devices::heartbeat(&client, &profile, &receive).await {
                         debug!("name correction failed; it will retry on the next beat: {e}");
                     }
                 }
@@ -138,17 +236,49 @@ pub async fn run(
                     return;
                 }
             }
-            Err(e) => debug!("device listing unavailable: {e}"),
+            Err(e) => {
+                if tx
+                    .send(latch.failed(
+                        PresenceCall::List,
+                        &e,
+                        receive.health().replies_not_arriving(),
+                    ))
+                    .is_err()
+                {
+                    return;
+                }
+            }
         }
 
         tokio::time::sleep(devices::HEARTBEAT_INTERVAL).await;
         if tx.is_closed() {
             return;
         }
-        if let Err(e) = devices::heartbeat(&client, &profile).await {
-            // A missed beat is recoverable — the liveness window tolerates one
-            // — so this is debug, not a warning the user needs to see.
-            debug!("device heartbeat failed: {e}");
+        // Re-read: the session may have been rebuilt during the sleep.
+        let client = current();
+        match devices::heartbeat(&client, &profile, &receive).await {
+            Ok(()) => {
+                if let Some(report) = latch.succeeded()
+                    && tx.send(report).is_err()
+                {
+                    return;
+                }
+            }
+            // One missed beat is tolerated by the liveness window, but a
+            // heartbeat that fails is also the admin session failing — said
+            // at WARN and shown in the panel, not left at debug.
+            Err(e) => {
+                if tx
+                    .send(latch.failed(
+                        PresenceCall::Heartbeat,
+                        &e,
+                        receive.health().replies_not_arriving(),
+                    ))
+                    .is_err()
+                {
+                    return;
+                }
+            }
         }
     }
 }
@@ -241,6 +371,28 @@ mod tests {
         let fresh = newly_appeared(&mut announced, &[record("laptop"), record("desktop")]);
         assert_eq!(fresh.len(), 1);
         assert_eq!(fresh[0].device_id, "desktop");
+    }
+
+    #[test]
+    fn a_failure_is_reported_every_time_and_recovery_once() {
+        let mut latch = FailureLatch::default();
+        assert!(latch.succeeded().is_none(), "nothing to recover from");
+        for _ in 0..2 {
+            match latch.failed(PresenceCall::Heartbeat, &"timed out", true) {
+                PresenceReport::Failing {
+                    what,
+                    reason,
+                    replies_not_arriving,
+                } => {
+                    assert_eq!(what, PresenceCall::Heartbeat);
+                    assert_eq!(reason, "timed out");
+                    assert!(replies_not_arriving);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(matches!(latch.succeeded(), Some(PresenceReport::Recovered)));
+        assert!(latch.succeeded().is_none(), "recovery is said once");
     }
 
     #[test]
