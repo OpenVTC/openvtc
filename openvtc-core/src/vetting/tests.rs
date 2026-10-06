@@ -3209,3 +3209,69 @@ fn a_manifest_is_not_asked_for_again_within_seconds() {
         "an open question is answered once, for everyone"
     );
 }
+
+/// first-vtc's live manifest (`manifest/0.3`), as its REST route served it: three criteria
+/// without vetting and one, `vetted-member`, that publishes hidden vetting in `ext` — alongside
+/// named vetters, never `extCritical`.
+const FIRST_VTC_MANIFEST: &str = include_str!("../../tests/fixtures/first-vtc-manifest-0.3.json");
+
+fn first_vtc() -> (
+    String,
+    manifest::v0_2::Response,
+    Vec<super::protocol::CriterionMeta>,
+    Value,
+) {
+    let document: Value = serde_json::from_str(FIRST_VTC_MANIFEST).unwrap();
+    let payload = document["payload"].clone();
+    let community = payload["communityDid"].as_str().unwrap().to_string();
+    let (parsed, meta) =
+        super::protocol::read_manifest(super::protocol::JoinProtocol::V0_3, &payload)
+            .expect("the live manifest parses");
+    (community, parsed, meta, payload)
+}
+
+/// The live failure: an application started from what the book already knew of first-vtc —
+/// the join page's route — took the criterion's requirements and dropped its hidden-vetting
+/// parameters, so it stayed on named vetting under a criterion that hides its vetters. Both
+/// routes now decide the path the same way: hidden, since `vetted-member` offers it alongside
+/// named vetters and nothing is under way.
+#[tokio::test]
+async fn an_application_started_from_the_book_takes_up_first_vtcs_hidden_vetting() {
+    let (community, parsed, meta, raw) = first_vtc();
+    let mut party = Party::new(1);
+    let now = Utc::now();
+    party.book.learn_manifest_in(
+        &community,
+        &parsed,
+        Some(super::protocol::JoinProtocol::V0_3),
+        &meta,
+        now,
+    );
+    party.book.learn_mode(&community, &raw, None, now);
+    let id = party
+        .book
+        .start_application(&community, party.persona, &party.did, now)
+        .unwrap()
+        .id
+        .clone();
+    assert!(party.book.adopt_known_requirements(&id).unwrap());
+    let app = party
+        .book
+        .application_mut(&community, party.persona)
+        .unwrap();
+    assert_eq!(app.criterion_id.as_deref(), Some("vetted-member"));
+    assert!(app.hidden.is_some(), "the hidden path, from the book");
+    assert!(app.hidden_id().is_some(), "with its own key minted");
+
+    // The manifest read again agrees, and changes nothing.
+    assert!(!app.adopt_manifest(&parsed, &raw).unwrap());
+    assert!(app.hidden.is_some());
+
+    let shown = party.book.application_vetting(&id).unwrap();
+    assert_eq!(shown.path, super::applicant::VettingPath::Hidden);
+    assert_eq!(shown.paths, super::book::CriterionPaths::Either);
+    assert_eq!(
+        shown.description.as_deref(),
+        Some("One vetter must confirm who you are")
+    );
+}

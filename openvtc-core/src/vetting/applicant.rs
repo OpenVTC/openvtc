@@ -221,6 +221,17 @@ pub struct Application {
     /// asks for a fresh one at launch anyway rather than trusting this one to be live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_challenge: Option<String>,
+    /// How the applicant chose to be vetted under a criterion that accepts both a PCS ZKP
+    /// proof and named statements. `None` is the default: hidden — it names no vetter — for an
+    /// application with nothing under way, and the path already taken for one that has
+    /// ([`Self::default_path`]). Ignored under a criterion that offers one path only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vetting_path: Option<VettingPath>,
+    /// The criterion this application was gathering for, when the community stopped publishing
+    /// it and another was picked in its place — said on the application until a request goes
+    /// out under the new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criterion_repicked: Option<String>,
     /// One salt for the whole application, so every vetter sees the same
     /// identity commitment. Goes to vetters, never to the community.
     pub commitment_salt: String,
@@ -468,6 +479,27 @@ pub struct HeldStatement {
     pub credential: Value,
 }
 
+/// How an application is vetted under a criterion that accepts both paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VettingPath {
+    /// Vetters sign statements that name them.
+    Named,
+    /// Vetters attest with a PCS zero-knowledge proof that names nobody.
+    Hidden,
+}
+
+impl VettingPath {
+    /// The path in a few words, as the page says it.
+    #[must_use]
+    pub fn words(self) -> &'static str {
+        match self {
+            VettingPath::Named => "named vetting",
+            VettingPath::Hidden => "PCS ZKP",
+        }
+    }
+}
+
 /// What a request to a vetter says besides the ticket.
 #[derive(Clone, Debug, Default)]
 pub struct RequestDraft {
@@ -507,6 +539,8 @@ impl Application {
             hidden_state: None,
             hidden_submission: None,
             hidden_challenge: None,
+            vetting_path: None,
+            criterion_repicked: None,
             commitment_salt: new_commitment_salt()?,
             identity_claims: Vec::new(),
             requests: Vec::new(),
@@ -517,9 +551,12 @@ impl Application {
     }
 
     /// Take the community's requirements from its manifest (0.2). Keeps the
-    /// criterion already chosen when it still exists; otherwise the first that
-    /// asks for vetting. Returns whether the requirements changed — a changed
-    /// digest mid-application is worth telling the applicant about.
+    /// criterion already chosen when it still exists; otherwise — for an
+    /// application with nothing under way — the first that hides its vetters,
+    /// else the first that asks for vetting. A criterion that is no longer
+    /// published is re-picked and recorded ([`Self::criterion_repicked`]).
+    /// Returns whether the requirements changed — a changed digest
+    /// mid-application is worth telling the applicant about.
     ///
     /// # Errors
     ///
@@ -534,48 +571,97 @@ impl Application {
         manifest: &manifest::v0_2::Response,
         raw: &Value,
     ) -> Result<bool, ApplicantError> {
-        let with_vetting = |c: &&manifest::v0_2::Criterion| c.vetting.is_some();
-        let chosen = self
+        let raw_criterion = |id: &str| {
+            raw.get("criteria")
+                .and_then(Value::as_array)
+                .and_then(|cs| {
+                    cs.iter()
+                        .find(|c| c.get("id").and_then(Value::as_str) == Some(id))
+                })
+        };
+        let with_vetting: Vec<&manifest::v0_2::Criterion> = manifest
+            .criteria
+            .iter()
+            .filter(|c| c.vetting.is_some())
+            .collect();
+        let offers_hidden = |c: &&&manifest::v0_2::Criterion| {
+            raw_criterion(c.id.as_str()).is_some_and(|raw| {
+                matches!(
+                    super::hidden::read_mode(raw),
+                    Ok(super::hidden::Mode::Hidden(_))
+                )
+            })
+        };
+        let kept = self
             .criterion_id
             .as_deref()
-            .and_then(|id| {
-                manifest
-                    .criteria
-                    .iter()
-                    .filter(with_vetting)
-                    .find(|c| c.id.as_str() == id)
+            .and_then(|id| with_vetting.iter().find(|c| c.id.as_str() == id));
+        let chosen = kept
+            .or_else(|| {
+                // A new choice: a criterion that hides its vetters first, when nothing is under
+                // way yet — it names nobody, and a request already out was sent named.
+                (!self.under_way())
+                    .then(|| with_vetting.iter().find(offers_hidden))
+                    .flatten()
             })
-            .or_else(|| manifest.criteria.iter().find(with_vetting))
+            .or_else(|| with_vetting.first())
             .ok_or(ApplicantError::NoVettingCriterion)?;
         let requirements = chosen.vetting.clone().expect("filtered on vetting");
-        requirements
-            .check_shape()
-            .map_err(|e| ApplicantError::InvalidRequirements(e.to_string()))?;
         let digest = chosen
             .requirements_digest
             .as_ref()
             .map(|d| d.as_str().to_string());
+        let id = chosen.id.as_str().to_string();
+        self.adopt_criterion(&id, requirements, digest, raw_criterion(&id))
+    }
+
+    /// Take `requirements` — criterion `id`, as `raw` carries it when the manifest was read as
+    /// received — as what this application gathers for, and decide its path. Shared by a
+    /// manifest just read ([`Self::adopt_manifest`]) and one already in the book
+    /// ([`super::VettingBook::adopt_known_requirements`]), so the two routes agree: one that
+    /// dropped the hidden-vetting parameters left a new application on the named path under a
+    /// criterion that hides its vetters.
+    ///
+    /// # Errors
+    ///
+    /// [`ApplicantError::InvalidRequirements`], or [`ApplicantError::Hidden`] when the criterion
+    /// marks something critical this build cannot honour.
+    pub fn adopt_criterion(
+        &mut self,
+        id: &str,
+        requirements: VettingRequirements,
+        digest: Option<String>,
+        raw: Option<&Value>,
+    ) -> Result<bool, ApplicantError> {
+        requirements
+            .check_shape()
+            .map_err(|e| ApplicantError::InvalidRequirements(e.to_string()))?;
         let changed = !self
             .requirements
             .as_ref()
             .is_some_and(|r| super::book::same_requirements(r, &requirements))
-            || self.requirements_digest != digest;
+            || self.requirements_digest != digest
+            || self.criterion_id.as_deref() != Some(id);
         // What the criterion asks of this client. A criterion that marks a namespace critical
         // which this build cannot honour is refused here: applying without it would send the
         // community something it does not accept, and neither side would learn why.
-        let raw_criterion = raw
-            .get("criteria")
-            .and_then(Value::as_array)
-            .and_then(|cs| {
-                cs.iter()
-                    .find(|c| c.get("id").and_then(Value::as_str) == Some(chosen.id.as_str()))
-            });
-        let hidden = match raw_criterion {
+        let offered = match raw {
             Some(raw) => match super::hidden::read_mode(raw)? {
                 super::hidden::Mode::Hidden(params) => Some(*params),
                 super::hidden::Mode::Named => None,
             },
             None => None,
+        };
+        let accepts_named = raw.is_none_or(super::hidden::accepts_named);
+        let hidden = match offered {
+            Some(params)
+                if !accepts_named
+                    || self.vetting_path.unwrap_or_else(|| self.default_path())
+                        == VettingPath::Hidden =>
+            {
+                Some(params)
+            }
+            _ => None,
         };
         let changed = changed || self.hidden != hidden;
         // A key of this application's own, minted once. Every tag a vetter produces for this
@@ -590,11 +676,45 @@ impl Application {
                 &mut rand::rngs::OsRng,
             )?);
         }
-        self.criterion_id = Some(chosen.id.as_str().to_string());
+        if let Some(previous) = self.criterion_id.as_deref()
+            && previous != id
+        {
+            self.criterion_repicked = Some(previous.to_string());
+        }
+        self.criterion_id = Some(id.to_string());
         self.requirements = Some(requirements);
         self.requirements_digest = digest;
         self.hidden = hidden;
         Ok(changed)
+    }
+
+    /// Whether anything has been asked of a vetter or gathered from one: a request sent, a
+    /// statement or an attestation held. Up to then the application's criterion and path are
+    /// free to change; after it, a change strands what is under way.
+    #[must_use]
+    pub fn under_way(&self) -> bool {
+        !self.requests.is_empty() || self.holds_evidence()
+    }
+
+    /// Whether this application holds vetting evidence: a named statement or a PCS ZKP
+    /// attestation. Once it does, its criterion and path are fixed — the evidence was made for
+    /// them.
+    #[must_use]
+    pub fn holds_evidence(&self) -> bool {
+        !self.statements.is_empty() || self.holds_hidden_attestation()
+    }
+
+    /// The path an application takes under a criterion offering both, when the applicant has
+    /// not chosen: the one already taken once anything is under way — a request sent named
+    /// cannot carry the identifier a PCS ZKP attestation is made to — and otherwise hidden,
+    /// which names no vetter.
+    #[must_use]
+    pub fn default_path(&self) -> VettingPath {
+        if self.hidden.is_none() && self.under_way() {
+            VettingPath::Named
+        } else {
+            VettingPath::Hidden
+        }
     }
 
     /// Build the `vetting/request` payload to `vetter` and record it as sent

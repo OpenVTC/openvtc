@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use vta_sdk::protocols::join_requests::manifest;
 use vta_sdk::protocols::vetting::{CheckShape, VettingRequirements, documentation};
 
-use super::applicant::{Application, RequestState};
+use super::applicant::{Application, RequestState, VettingPath};
 use super::queries::CommunityQuery;
 use super::registry::VetterProfileRecord;
 use super::tickets::{GuessThrottle, Ticket};
@@ -104,6 +104,9 @@ pub struct KnownCriterion {
     pub requirements: VettingRequirements,
     /// When it was read.
     pub fetched_at: DateTime<Utc>,
+    /// How the community describes it, when it does ("One vetter must confirm who you are").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 impl KnownCriterion {
@@ -116,13 +119,99 @@ impl KnownCriterion {
     /// that matters.
     #[must_use]
     pub fn hidden_vetting(&self) -> bool {
-        serde_json::to_value(&self.requirements).is_ok_and(|vetting| {
-            matches!(
-                super::hidden::read_mode(&serde_json::json!({ "vetting": vetting })),
-                Ok(super::hidden::Mode::Hidden(_))
-            )
+        self.hidden_params().is_some()
+    }
+
+    /// The criterion as a manifest carries it — `{ "id", "vetting" }` — for the readers that
+    /// take a criterion as received ([`super::hidden::read_mode`]). The stored requirements keep
+    /// `ext` and `extCritical`, so this reads the same as the manifest did.
+    #[must_use]
+    pub fn as_raw(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.criterion_id,
+            "vetting": serde_json::to_value(&self.requirements).unwrap_or(serde_json::Value::Null),
         })
     }
+
+    /// The hidden-vetting parameters this criterion publishes, if it publishes any it can be
+    /// vetted under.
+    #[must_use]
+    pub fn hidden_params(&self) -> Option<super::hidden::HiddenParams> {
+        match super::hidden::read_mode(&self.as_raw()) {
+            Ok(super::hidden::Mode::Hidden(p)) => Some(*p),
+            _ => None,
+        }
+    }
+
+    /// How this criterion lets an applicant be vetted.
+    #[must_use]
+    pub fn paths(&self) -> CriterionPaths {
+        match (
+            self.hidden_vetting(),
+            super::hidden::accepts_named(&self.as_raw()),
+        ) {
+            (false, _) => CriterionPaths::Named,
+            (true, true) => CriterionPaths::Either,
+            (true, false) => CriterionPaths::HiddenOnly,
+        }
+    }
+}
+
+/// How a criterion lets an applicant be vetted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CriterionPaths {
+    /// Named statements only.
+    Named,
+    /// A PCS ZKP proof or named statements — hidden vetting published in `ext`, alongside named
+    /// vetters. The VTC's own manifest publishes it this way.
+    Either,
+    /// A PCS ZKP proof only — the namespace is marked `extCritical`.
+    HiddenOnly,
+}
+
+impl CriterionPaths {
+    /// The paths in a few words, as the page says them.
+    #[must_use]
+    pub fn words(self) -> &'static str {
+        match self {
+            CriterionPaths::Named => "named vetting",
+            CriterionPaths::Either => "PCS ZKP or named vetting",
+            CriterionPaths::HiddenOnly => "PCS ZKP only",
+        }
+    }
+}
+
+/// One way a community lets an applicant be vetted: a criterion, and a path under it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VettingOption {
+    /// The criterion.
+    pub criterion_id: String,
+    /// How the community describes it, when it does.
+    pub description: Option<String>,
+    /// The path taken under it.
+    pub path: VettingPath,
+    /// Every path the criterion offers.
+    pub paths: CriterionPaths,
+}
+
+/// How a vetter attests to one request ([`VettingBook::request_vetting`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RequestVetting {
+    /// The request carries the applicant's PCS identifier: attest with a proof.
+    Hidden,
+    /// No identifier, under a criterion that counts named statements: sign one.
+    Named {
+        /// The criterion the request names, when this book knows it.
+        criterion: Option<String>,
+    },
+    /// No identifier, under a criterion that takes a PCS ZKP proof only: there is nothing to
+    /// attest to, and the applicant has to send a new request.
+    HiddenWithoutId {
+        /// The criterion.
+        criterion: String,
+    },
+    /// The request's hidden-vetting member could not be read.
+    Unreadable(super::hidden::HiddenError),
 }
 
 /// A request we finished as a vetter, kept as a record that we vetted
@@ -1417,7 +1506,9 @@ impl VettingBook {
         .ok_or_else(|| {
             VetterError::Hidden(super::hidden::HiddenError::Unreadable(
                 "this request carries no hidden-vetting identifier, so there is nobody to attest \
-                 to under this community's criterion"
+                 to with a PCS ZKP proof — sign a named statement instead where its criterion \
+                 accepts one, or ask the applicant to refresh their requirements (m) and send a \
+                 new request"
                     .into(),
             ))
         })?;
@@ -1685,6 +1776,7 @@ impl VettingBook {
                         .map(|d| d.as_str().to_string()),
                     requirements,
                     fetched_at: now,
+                    description: c.description.as_ref().map(|d| d.to_string()),
                 })
             })
             .collect();
@@ -1844,41 +1936,247 @@ impl VettingBook {
     }
 
     /// Give application `application_id` the requirements already known for
-    /// its community — the criterion it chose, else the first — so a new
+    /// its community — the criterion it chose, else (nothing under way yet)
+    /// the first that hides its vetters, else the first — so a new
     /// application shows them before its own manifest request is answered.
-    /// Returns whether anything changed.
-    pub fn adopt_known_requirements(&mut self, application_id: &str) -> bool {
+    ///
+    /// The path is decided here exactly as a manifest just read decides it
+    /// ([`Application::adopt_criterion`]): this route used to copy the
+    /// requirements and leave the hidden-vetting parameters behind, so an
+    /// application started from the join page stayed on named vetting under a
+    /// criterion that hides its vetters, and its requests carried no
+    /// identifier a vetter could attest to.
+    ///
+    /// Returns whether anything changed; `Ok(false)` when nothing is known
+    /// yet.
+    ///
+    /// # Errors
+    ///
+    /// What [`Application::adopt_criterion`] refuses — a criterion this build
+    /// cannot honour — for the page to say (R6.4).
+    pub fn adopt_known_requirements(
+        &mut self,
+        application_id: &str,
+    ) -> Result<bool, super::applicant::ApplicantError> {
         let Some(app) = self.applications.iter().find(|a| a.id == application_id) else {
-            return false;
+            return Ok(false);
         };
-        let mut known = self
+        let known: Vec<&KnownCriterion> = self
             .criteria
             .iter()
-            .filter(|k| k.community == app.community);
+            .filter(|k| k.community == app.community)
+            .collect();
         let chosen = app
             .criterion_id
             .as_deref()
-            .and_then(|id| {
-                self.criteria
-                    .iter()
-                    .find(|k| k.community == app.community && k.criterion_id == id)
+            .and_then(|id| known.iter().find(|k| k.criterion_id == id))
+            .or_else(|| {
+                (!app.under_way())
+                    .then(|| known.iter().find(|k| k.hidden_vetting()))
+                    .flatten()
             })
-            .or_else(|| known.next())
-            .cloned();
+            .or_else(|| known.first())
+            .map(|k| (*k).clone());
         let (Some(criterion), Some(app)) = (chosen, self.application_by_id_mut(application_id))
         else {
-            return false;
+            return Ok(false);
         };
-        let changed = !app
-            .requirements
+        let raw = criterion.as_raw();
+        app.adopt_criterion(
+            &criterion.criterion_id,
+            criterion.requirements,
+            criterion.requirements_digest,
+            Some(&raw),
+        )
+    }
+
+    /// Every way `community` lets an applicant be vetted, as far as its last-read manifest says:
+    /// one entry per path per vetting criterion, in published order — a criterion offering a
+    /// PCS ZKP proof alongside named vetters is two, hidden first.
+    #[must_use]
+    pub fn vetting_options(&self, community: &str) -> Vec<VettingOption> {
+        self.criteria
+            .iter()
+            .filter(|k| k.community == community)
+            .flat_map(|k| {
+                let paths = k.paths();
+                let ways: &[VettingPath] = match paths {
+                    CriterionPaths::Named => &[VettingPath::Named],
+                    CriterionPaths::Either => &[VettingPath::Hidden, VettingPath::Named],
+                    CriterionPaths::HiddenOnly => &[VettingPath::Hidden],
+                };
+                ways.iter().map(move |path| VettingOption {
+                    criterion_id: k.criterion_id.clone(),
+                    description: k.description.clone(),
+                    path: *path,
+                    paths,
+                })
+            })
+            .collect()
+    }
+
+    /// How application `application_id` is being vetted now: its criterion, the path it takes,
+    /// and what that criterion offers. `None` before its requirements are known.
+    #[must_use]
+    pub fn application_vetting(&self, application_id: &str) -> Option<VettingOption> {
+        let app = self.applications.iter().find(|a| a.id == application_id)?;
+        let criterion_id = app.criterion_id.clone()?;
+        let known = self
+            .criteria
+            .iter()
+            .find(|k| k.community == app.community && k.criterion_id == criterion_id);
+        Some(VettingOption {
+            description: known.and_then(|k| k.description.clone()),
+            paths: known.map_or(
+                if app.hidden.is_some() {
+                    CriterionPaths::HiddenOnly
+                } else {
+                    CriterionPaths::Named
+                },
+                KnownCriterion::paths,
+            ),
+            path: if app.hidden.is_some() {
+                VettingPath::Hidden
+            } else {
+                VettingPath::Named
+            },
+            criterion_id,
+        })
+    }
+
+    /// Move application `application_id` to the next way its community offers to be vetted
+    /// ([`Self::vetting_options`]): the other path of the same criterion, then the next
+    /// criterion. Only while it holds no evidence — a statement or an attestation was made for
+    /// the criterion and path it has — and only between ways the community publishes.
+    ///
+    /// Requests already sent stay as they are: they were made under the old path, so the
+    /// vetter needs a new request (a PCS ZKP attestation is made to an identifier only a request
+    /// carries).
+    ///
+    /// # Errors
+    ///
+    /// A sentence saying why it cannot move, for the page.
+    pub fn switch_vetting(&mut self, application_id: &str) -> Result<VettingOption, String> {
+        let Some(current) = self.application_vetting(application_id) else {
+            return Err(
+                "This application's requirements are not known yet — refresh them (m) first."
+                    .to_string(),
+            );
+        };
+        let Some(app) = self.applications.iter().find(|a| a.id == application_id) else {
+            return Err("That application is gone.".to_string());
+        };
+        if app.holds_evidence() {
+            return Err(format!(
+                "This application already holds vetting made under criterion {} ({}), so its \
+                 criterion and path are fixed.",
+                current.criterion_id,
+                current.path.words()
+            ));
+        }
+        let options = self.vetting_options(&app.community);
+        let here = options
+            .iter()
+            .position(|o| o.criterion_id == current.criterion_id && o.path == current.path);
+        let next = match here {
+            Some(i) => options.get((i + 1) % options.len()),
+            None => options.first(),
+        }
+        .filter(|o| **o != current)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "This community offers one way to be vetted: criterion {} ({}).",
+                current.criterion_id,
+                current.paths.words()
+            )
+        })?;
+        let known = self
+            .criteria
+            .iter()
+            .find(|k| k.community == app.community && k.criterion_id == next.criterion_id)
+            .cloned()
+            .expect("an option is a known criterion");
+        let app = self
+            .application_by_id_mut(application_id)
+            .expect("found above");
+        app.vetting_path = Some(next.path);
+        let raw = known.as_raw();
+        app.adopt_criterion(
+            &known.criterion_id,
+            known.requirements,
+            known.requirements_digest,
+            Some(&raw),
+        )
+        .map_err(|e| format!("Could not switch: {e}"))?;
+        app.criterion_repicked = None;
+        Ok(next)
+    }
+
+    /// How the request `request_id` on this vetter's desk is to be attested: by the request,
+    /// not by the community. A community may run hidden vetting alongside named vetters, so a
+    /// request carrying a PCS identifier is attested with a proof, and one without is signed as
+    /// a named statement — unless the criterion it names takes the proof only.
+    #[must_use]
+    pub fn request_vetting(&self, request_id: &str) -> RequestVetting {
+        let Some(entry) = self.desk_entry(request_id) else {
+            return RequestVetting::Named { criterion: None };
+        };
+        let ext = entry
+            .request
+            .ext
             .as_ref()
-            .is_some_and(|r| same_requirements(r, &criterion.requirements))
-            || app.requirements_digest != criterion.requirements_digest
-            || app.criterion_id.as_deref() != Some(criterion.criterion_id.as_str());
-        app.criterion_id = Some(criterion.criterion_id);
-        app.requirements = Some(criterion.requirements);
-        app.requirements_digest = criterion.requirements_digest;
-        changed
+            .and_then(|e| serde_json::to_value(e).ok());
+        match super::hidden::read_request_ext(ext.as_ref()) {
+            Err(e) => RequestVetting::Unreadable(e),
+            Ok(Some(_)) => RequestVetting::Hidden,
+            Ok(None) => {
+                let digest = entry
+                    .request
+                    .requirements_digest
+                    .as_ref()
+                    .map(|d| d.as_str());
+                let ours: Vec<&KnownCriterion> = self
+                    .criteria
+                    .iter()
+                    .filter(|k| k.community == entry.community)
+                    .collect();
+                let named = ours
+                    .iter()
+                    .find(|k| digest.is_some() && k.requirements_digest.as_deref() == digest);
+                match named {
+                    Some(k) if k.paths() == CriterionPaths::HiddenOnly => {
+                        RequestVetting::HiddenWithoutId {
+                            criterion: k.criterion_id.clone(),
+                        }
+                    }
+                    Some(k) => RequestVetting::Named {
+                        criterion: Some(k.criterion_id.clone()),
+                    },
+                    // A digest this book does not know — or none: only a community whose every
+                    // vetting criterion takes the proof alone refuses it.
+                    None => match ours.first() {
+                        Some(first)
+                            if ours.iter().all(|k| k.paths() == CriterionPaths::HiddenOnly) =>
+                        {
+                            RequestVetting::HiddenWithoutId {
+                                criterion: first.criterion_id.clone(),
+                            }
+                        }
+                        _ => RequestVetting::Named { criterion: None },
+                    },
+                }
+            }
+        }
+    }
+
+    /// Whether `community` publishes a criterion that still counts named statements beside one
+    /// that hides its vetters — so a ticket there brings requests of either kind.
+    #[must_use]
+    pub fn named_alongside_hidden(&self, community: &str) -> bool {
+        let ours = || self.criteria.iter().filter(|k| k.community == community);
+        ours().any(KnownCriterion::hidden_vetting)
+            && ours().any(|k| k.paths() != CriterionPaths::HiddenOnly)
     }
 
     /// Active memberships holding no live vetter grant — where a member the
@@ -2392,12 +2690,12 @@ mod tests {
             .unwrap()
             .id
             .clone();
-        assert!(book.adopt_known_requirements(&id));
+        assert!(book.adopt_known_requirements(&id).unwrap());
         let app = book.application_by_id_mut(&id).unwrap();
         assert_eq!(app.criterion_id.as_deref(), Some("c1"));
         assert_eq!(app.requirements_digest.as_deref(), Some(DIGEST));
         assert!(
-            !book.adopt_known_requirements(&id),
+            !book.adopt_known_requirements(&id).unwrap(),
             "nothing new the second time"
         );
     }

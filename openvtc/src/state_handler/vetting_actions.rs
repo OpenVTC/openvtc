@@ -28,7 +28,7 @@ use openvtc_core::vetting::applicant::{
     VetterEligibility,
 };
 use openvtc_core::vetting::book::{
-    Adopted, DrawHold, FALLBACK_REQUIRED_CLAIMS, HiddenOutlook, HiddenVetterState,
+    Adopted, DrawHold, FALLBACK_REQUIRED_CLAIMS, HiddenOutlook, HiddenVetterState, RequestVetting,
 };
 use openvtc_core::vetting::mode::{ModeFailure, VetterMode, age_words};
 use openvtc_core::vetting::queries::{
@@ -369,6 +369,18 @@ fn clause(text: &str) -> &str {
 /// once, not that the community still counts proofs.
 pub(crate) fn hides_vetters(book: &VettingBook, community: &str) -> bool {
     book.pcs_zkp(community)
+}
+
+/// Why a request cannot be attested at all: it carries no PCS identifier, under a criterion
+/// that counts a PCS ZKP proof and nothing else — and what the applicant does about it.
+pub(crate) fn hidden_without_id_words(criterion: &str) -> String {
+    format!(
+        "Cannot attest: this request carries no hidden-vetting identifier, and criterion \
+         {criterion} accepts only a PCS ZKP proof — not a named statement — so there is nothing \
+         to attest to. Nothing was sent; the request stays open. Ask the applicant to refresh \
+         their requirements (m) and send you a new request: the identifier travels in the \
+         request, so a new card alone does not carry it."
+    )
 }
 
 /// Where `persona` stands for PCS ZKP attesting at `community`, in words, and whether that
@@ -946,7 +958,8 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                 applicant: entry.applicant.clone(),
                 applicant_name: name(&entry.applicant),
                 community: entry.community.clone(),
-                pcs_zkp: book.pcs_zkp(&entry.community),
+                pcs_zkp: book.pcs_zkp(&entry.community)
+                    && book.request_vetting(&entry.request_id) == RequestVetting::Hidden,
                 pcs_tokens: pcs_tokens_line(book, &entry.community, entry.persona, now)
                     .map(|(line, _)| line),
                 pcs_events: book
@@ -1109,7 +1122,8 @@ pub(crate) fn sync_journey(vetting: &mut VettingState, config: &Config, now: Dat
                     ),
                     community_display(config, &entry.community)
                 ),
-                pcs_zkp: book.pcs_zkp(&entry.community),
+                pcs_zkp: book.pcs_zkp(&entry.community)
+                    && book.request_vetting(&entry.request_id) == RequestVetting::Hidden,
                 steps: JourneySteps::Vetter(steps, ending),
             }
         }),
@@ -2201,16 +2215,22 @@ async fn start_application(
         }
         Err(e) => return status(ctx, format!("Could not start the application: {e}")),
     };
-    ctx.config
+    // Said, not dropped (R6.4): a criterion this build cannot honour is the one thing that
+    // makes this application gather evidence the community will not count.
+    let unadopted = ctx
+        .config
         .private
         .vetting
-        .adopt_known_requirements(&application_id);
+        .adopt_known_requirements(&application_id)
+        .err()
+        .map(|e| format!(" Its requirements could not be taken up: {e}."))
+        .unwrap_or_default();
     {
         let v = page(ctx);
         v.mode = VettingMode::List;
         v.tab = VettingTab::Applications;
     }
-    persist(ctx, "Application started.");
+    persist(ctx, format!("Application started.{unadopted}"));
     if let Some(i) = page(ctx)
         .applications
         .iter()
@@ -4494,20 +4514,32 @@ async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
     //
     // Only while the community runs PCS ZKP now: an engine says we enrolled once, and a
     // community that has switched back to named vetting counts signed statements, not proofs.
+    //
+    // And only for a request that asked for it. A community may publish hidden vetting
+    // alongside named vetters, so the request decides, not the community: one carrying the
+    // applicant's PCS identifier gets a proof, one without gets a named statement — unless the
+    // criterion it names takes the proof alone, when there is nothing to attest to.
     let book = &ctx.config.private.vetting;
-    if hides_vetters(book, &entry.community)
+    let hidden_request = match book.request_vetting(request_id) {
+        RequestVetting::Hidden => hides_vetters(book, &entry.community),
+        RequestVetting::Named { .. } => false,
+        RequestVetting::HiddenWithoutId { criterion } => {
+            return status(ctx, hidden_without_id_words(&criterion));
+        }
+        RequestVetting::Unreadable(e) => return status(ctx, format!("Cannot attest: {e}")),
+    };
+    if hidden_request
         && book
             .hidden_vetter(&entry.community, entry.persona)
             .is_some()
     {
         return attest_hidden(ctx, request_id, &entry, &vetter_did, attestation, now).await;
     }
-    // The community hides its vetters but this vetter is not enrolled yet:
+    // The request asks for a proof but this vetter is not enrolled yet:
     // signing now would make a named statement — one the applicant's
     // hidden-vetting application cannot use, carrying this vetter's DID to a
     // community that promised not to need it. Enrol first.
-    let book = &ctx.config.private.vetting;
-    if hides_vetters(book, &entry.community) {
+    if hidden_request {
         page(ctx).mode = VettingMode::List;
         status(
             ctx,
