@@ -105,7 +105,13 @@ affinidi-status-list = "0.1"
 # that window's contents are a membership credential or a join reply, which is
 # the class of loss `#218`'s pickup-on-connect exists to prevent — and this layer
 # was undoing it one level down.
-affinidi-messaging-delivery = "0.1.19"
+#
+# **0.1.20** (affinidi-tdk-rs #927): an ack is bounded (10 s) and, once one runs
+# the bound, acks are parked off the dispatcher for 30 s. An unbounded ack let
+# one slow delete stop all inbound dispatch while the socket looked healthy —
+# the "send alive, receive dead" stall that filled this app's mediator inbox
+# until the VTA's replies were refused (`limits.queue.peer`).
+affinidi-messaging-delivery = "0.1.20"
 # Floor is 0.1.6: it marks `Protocol` `#[non_exhaustive]` and adds the
 # `DIDCommV1` variant. The inbound dispatcher's wildcard arm needs both — on
 # 0.1.5 the enum is exhaustively matched already and that arm is an
@@ -136,7 +142,13 @@ affinidi-messaging-core = "0.1.11"
 # messages under a 500 ms poll). vta-sdk's `send_and_wait`, which every
 # DIDComm-backed `VtaClient` call here goes through, polls exactly that way, so
 # a VTA reply could vanish and the call time out. No API change.
-affinidi-messaging-sdk = "0.33.1"
+#
+# **0.33.2** (affinidi-tdk-rs #927): a socket that is up but delivering nothing
+# is probed after 60 s of silence and reconnected if the mediator does not
+# answer within 30 s; the inbound unpack chain is time-bounded; and frames that
+# can never unpack are deleted instead of being redelivered forever against
+# their sender's quota (a frame for a key this app has not loaded is kept).
+affinidi-messaging-sdk = "0.33.2"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
