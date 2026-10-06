@@ -178,6 +178,17 @@ pub enum CloneProtocol {
 }
 
 impl CloneProtocol {
+    /// Read gh's `git_protocol` setting (`gh config get git_protocol`): `ssh`
+    /// or `https`; anything else (empty, unknown) says nothing.
+    #[must_use]
+    pub fn from_gh(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ssh" => Some(CloneProtocol::Ssh),
+            "https" => Some(CloneProtocol::Https),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -193,6 +204,124 @@ impl CloneProtocol {
             CloneProtocol::Ssh => CloneProtocol::Https,
         }
     }
+}
+
+/// Where the protocol a clone uses came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtocolSource {
+    /// The member chose it (`w`).
+    Chosen,
+    /// The forge account chosen for the repository only works over it (a gh
+    /// account over HTTPS, an SSH key over SSH).
+    Account,
+    /// gh's `git_protocol` for the forge.
+    Gh,
+    /// Nothing said otherwise: HTTPS.
+    Default,
+}
+
+impl ProtocolSource {
+    /// Words to put after the protocol's name; empty when there is nothing
+    /// worth saying.
+    #[must_use]
+    pub fn note(self) -> &'static str {
+        match self {
+            ProtocolSource::Chosen | ProtocolSource::Default => "",
+            ProtocolSource::Account => " (the forge account's)",
+            ProtocolSource::Gh => " (from your gh settings)",
+        }
+    }
+}
+
+/// The protocol a clone uses, and why: the forge account's (it only works over
+/// one), else the member's choice (`w`), else gh's setting for the forge, else
+/// HTTPS.
+#[must_use]
+pub fn effective_protocol(
+    chosen: Option<CloneProtocol>,
+    credential: &ForgeCredential,
+    gh: Option<CloneProtocol>,
+) -> (CloneProtocol, ProtocolSource) {
+    match credential {
+        ForgeCredential::GhAccount { .. } | ForgeCredential::SshKey { .. } => (
+            credential.protocol(CloneProtocol::default()),
+            ProtocolSource::Account,
+        ),
+        ForgeCredential::GitDefault => match (chosen, gh) {
+            (Some(p), _) => (p, ProtocolSource::Chosen),
+            (None, Some(p)) => (p, ProtocolSource::Gh),
+            (None, None) => (CloneProtocol::default(), ProtocolSource::Default),
+        },
+    }
+}
+
+/// What this machine says about reaching one forge, read once per view: gh's
+/// protocol for it, and whether git has a credential helper for it from the
+/// global or system config.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ForgeFacts {
+    /// `gh config get git_protocol` for the host (or gh's default); `None`
+    /// when gh is missing or says nothing.
+    pub gh_protocol: Option<CloneProtocol>,
+    /// Whether a `credential.helper` applies to `https://<host>` outside any
+    /// checkout.
+    pub https_helper: bool,
+}
+
+/// The SSH form of an `https://<host>/<owner>/<repo>(.git)` remote:
+/// `git@<host>:<owner>/<repo>.git`. `None` for any other URL, or one whose
+/// parts [`RepoCoords::parse`] would refuse.
+#[must_use]
+pub fn https_remote_to_ssh(url: &str) -> Option<String> {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return None;
+    }
+    let (host, path) = remote_coords(url)?;
+    let coords = RepoCoords::parse(&format!("{}/{path}", host.to_ascii_lowercase())).ok()?;
+    Some(coords.clone_url(CloneProtocol::Ssh))
+}
+
+/// The remotes [`switch_remotes_to_ssh`] changes: `origin`, and the `fork` a
+/// gh fork adds.
+pub const PUSH_REMOTES: [&str; 2] = ["origin", "fork"];
+
+/// Point the checkout's `origin` (and `fork`, if present) at the SSH form of
+/// their `https://` URLs. Returns `(remote, new URL)` for each one changed.
+///
+/// # Errors
+///
+/// When no remote is an `https://` forge URL, or git refuses a change.
+pub fn switch_remotes_to_ssh(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut switched = Vec::new();
+    for name in PUSH_REMOTES {
+        let Some(url) = git_read(dir, &["remote", "get-url", "--", name]) else {
+            continue;
+        };
+        let Some(ssh) = https_remote_to_ssh(&url) else {
+            continue;
+        };
+        let out = git_in(dir)
+            .args(["remote", "set-url", "--", name, &ssh])
+            .output()
+            .map_err(|e| format!("couldn't run git: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "git could not change {name} in {}: {}",
+                display_path(dir),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        switched.push((name.to_string(), ssh));
+    }
+    if switched.is_empty() {
+        return Err(format!(
+            "{} has no https:// forge remote to switch.",
+            display_path(dir)
+        ));
+    }
+    Ok(switched)
 }
 
 /// `~/src`: where checkouts go until the member chooses somewhere else.
@@ -259,27 +388,59 @@ pub struct CredentialChoice {
 /// Where this machine keeps a profile's checkouts. Not secret — paths and a
 /// preference — so it lives in a plain file beside the public config.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "SettingsFile")]
 pub struct WorkspaceSettings {
     /// The directory checkouts are cloned under.
-    #[serde(default = "default_root")]
     pub root: PathBuf,
-    #[serde(default)]
-    pub protocol: CloneProtocol,
+    /// The protocol the member chose (`w`); `None` follows the forge account,
+    /// then gh's setting, then HTTPS ([`effective_protocol`]).
+    #[serde(rename = "clone_protocol", skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<CloneProtocol>,
     /// Checkouts the member pointed openvtc at outside the default layout, by
     /// resource.
     #[serde(default)]
     pub checkouts: BTreeMap<String, PathBuf>,
     /// Forge accounts, by community DID. References only (a key path, a gh
     /// login) — never a token or a key.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub credentials: BTreeMap<String, CommunityCredentials>,
+}
+
+/// The settings file as read, old and new.
+#[derive(Deserialize)]
+struct SettingsFile {
+    #[serde(default = "default_root")]
+    root: PathBuf,
+    #[serde(default)]
+    clone_protocol: Option<CloneProtocol>,
+    /// Before 0.5 the protocol was always written, so `https` there may be the
+    /// old default rather than a choice. `ssh` can only have been chosen.
+    #[serde(default)]
+    protocol: Option<CloneProtocol>,
+    #[serde(default)]
+    checkouts: BTreeMap<String, PathBuf>,
+    #[serde(default)]
+    credentials: BTreeMap<String, CommunityCredentials>,
+}
+
+impl From<SettingsFile> for WorkspaceSettings {
+    fn from(f: SettingsFile) -> Self {
+        Self {
+            root: f.root,
+            protocol: f
+                .clone_protocol
+                .or(f.protocol.filter(|p| *p == CloneProtocol::Ssh)),
+            checkouts: f.checkouts,
+            credentials: f.credentials,
+        }
+    }
 }
 
 impl Default for WorkspaceSettings {
     fn default() -> Self {
         Self {
             root: default_root(),
-            protocol: CloneProtocol::default(),
+            protocol: None,
             checkouts: BTreeMap::new(),
             credentials: BTreeMap::new(),
         }
@@ -373,6 +534,22 @@ impl WorkspaceSettings {
             credential: ForgeCredential::GitDefault,
             scope: None,
         }
+    }
+
+    /// The protocol a clone of `coords` uses in the community `vtc_did`, and
+    /// why; `gh` is gh's setting for the forge ([`ForgeFacts::gh_protocol`]).
+    #[must_use]
+    pub fn protocol_for(
+        &self,
+        vtc_did: &str,
+        coords: &RepoCoords,
+        gh: Option<CloneProtocol>,
+    ) -> (CloneProtocol, ProtocolSource) {
+        effective_protocol(
+            self.protocol,
+            &self.credential_for(vtc_did, coords).credential,
+            gh,
+        )
     }
 
     /// Choose the account for `coords`' repository or forge; `None` removes the
@@ -477,6 +654,53 @@ pub struct CheckoutFacts {
     /// The forge account openvtc set this checkout to use
     /// ([`forge_credential::MARKER_KEY`]); `None` when it set none.
     pub credential: Option<ForgeCredential>,
+    /// The `fork` remote's URL (a gh fork adds it).
+    pub fork: Option<String>,
+    /// `remote.pushDefault`: where `git push` goes when it is set.
+    pub push_default: Option<String>,
+    /// The `credential.helper` git uses for `https://<forge>` here, from any
+    /// scope (`git config --get-urlmatch`); `None` when none applies.
+    pub https_helper: Option<String>,
+}
+
+impl CheckoutFacts {
+    /// The URL `git push` sends to: the `fork` remote when `remote.pushDefault`
+    /// names it, else `origin`.
+    #[must_use]
+    pub fn push_url(&self) -> Option<&str> {
+        match (self.push_default.as_deref(), self.fork.as_deref()) {
+            (Some("fork"), Some(fork)) => Some(fork),
+            _ => self.origin.as_deref(),
+        }
+    }
+
+    /// Whether `git push` here would ask for a username: it goes to an
+    /// `https://` URL on `host`, and no credential helper applies there.
+    #[must_use]
+    pub fn https_push_without_helper(&self, host: &str) -> bool {
+        let Some(url) = self.push_url() else {
+            return false;
+        };
+        let lower = url.trim().to_ascii_lowercase();
+        (lower.starts_with("https://") || lower.starts_with("http://"))
+            && remote_coords(url).is_some_and(|(h, _)| h.eq_ignore_ascii_case(host))
+            && self.https_helper.is_none()
+    }
+}
+
+/// The credential helper that applies to `https://<host>` in `dir`, from any
+/// scope; `None` when none does (an empty last entry resets the list).
+#[must_use]
+pub fn https_helper_in(dir: &Path, host: &str) -> Option<String> {
+    git_read(
+        dir,
+        &[
+            "config",
+            "--get-urlmatch",
+            "credential.helper",
+            &format!("https://{host}"),
+        ],
+    )
 }
 
 /// Parse `git status --porcelain=v2 --branch` output.
@@ -556,6 +780,9 @@ pub fn inspect(path: &Path, coords: &RepoCoords) -> CheckoutFacts {
     )
     .as_deref()
     .and_then(ForgeCredential::from_marker);
+    facts.fork = git_read(path, &["remote", "get-url", "--", "fork"]);
+    facts.push_default = git_read(path, &["config", "--get", "remote.pushDefault"]);
+    facts.https_helper = https_helper_in(path, &coords.host);
     facts.head = git_read(
         path,
         &[
@@ -854,7 +1081,7 @@ mod tests {
         );
         let mut s = WorkspaceSettings {
             root: dir.path().join("code"),
-            protocol: CloneProtocol::Ssh,
+            protocol: Some(CloneProtocol::Ssh),
             ..WorkspaceSettings::default()
         };
         s.checkouts

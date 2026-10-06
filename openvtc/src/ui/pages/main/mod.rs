@@ -568,6 +568,7 @@ fn repos_key(
         KeyCode::Char('w') => Some(R::Workspace(W::SettingsStart)),
         KeyCode::Char('f') => Some(R::Workspace(W::AccountStart)),
         KeyCode::Char('F') => Some(R::Workspace(W::Fork)),
+        KeyCode::Char('R') => Some(R::Workspace(W::RemotesToSsh)),
         _ => None,
     }
 }
@@ -4804,6 +4805,7 @@ mod key_handler_tests {
             (KeyCode::Char('w'), W::SettingsStart),
             (KeyCode::Char('f'), W::AccountStart),
             (KeyCode::Char('F'), W::Fork),
+            (KeyCode::Char('R'), W::RemotesToSsh),
         ] {
             assert_eq!(repos_key(press(key), &list), Some(R::Workspace(want)));
         }
@@ -4813,7 +4815,7 @@ mod key_handler_tests {
         let mut form = repos_view();
         form.workspace.form = Some(WorkspaceForm::Settings {
             root: "~/sr".into(),
-            protocol: CloneProtocol::Https,
+            protocol: Some(CloneProtocol::Https),
             error: None,
         });
         assert_eq!(

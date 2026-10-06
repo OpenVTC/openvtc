@@ -45,7 +45,7 @@ use openvtc_core::git_signing::{
     self, CheckoutSigning, IdentityStatus, PersonaSigner, SignerCredential, VtaEndpoint,
 };
 use openvtc_core::git_workspace::{
-    self, CLONE_TIMEOUT, CredentialScope, RepoCoords, WorkspaceSettings,
+    self, CLONE_TIMEOUT, CloneProtocol, CredentialScope, ForgeFacts, RepoCoords, WorkspaceSettings,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use vta_sdk::client::VtaClient;
@@ -103,6 +103,7 @@ pub(crate) fn reduce(state: &mut State, action: &W) -> bool {
             | W::AccountStart
             | W::AccountSubmit
             | W::Fork
+            | W::RemotesToSsh
     ) {
         return false;
     }
@@ -140,7 +141,12 @@ pub(crate) fn reduce(state: &mut State, action: &W) -> bool {
         }
         W::SettingsProtocol => {
             if let Some(WorkspaceForm::Settings { protocol, .. }) = ws.form.as_mut() {
-                *protocol = protocol.toggled();
+                // Automatic → HTTPS → SSH → automatic.
+                *protocol = match protocol {
+                    None => Some(CloneProtocol::Https),
+                    Some(CloneProtocol::Https) => Some(CloneProtocol::Ssh),
+                    Some(CloneProtocol::Ssh) => None,
+                };
             }
         }
         W::UseStart => match target(view) {
@@ -198,7 +204,8 @@ pub(crate) fn reduce(state: &mut State, action: &W) -> bool {
         | W::UseSubmit
         | W::AccountStart
         | W::AccountSubmit
-        | W::Fork => {}
+        | W::Fork
+        | W::RemotesToSsh => {}
     }
     true
 }
@@ -303,6 +310,8 @@ struct ProbeInput {
     settings: WorkspaceSettings,
     resources: Vec<String>,
     identity: bool,
+    /// Forge hosts not read yet ([`git_workspace::ForgeFacts`]).
+    forge_hosts: Vec<String>,
 }
 
 /// What a probe found. Applied on the loop thread.
@@ -311,6 +320,7 @@ pub(crate) struct ProbeOutcome {
     persona: PersonaId,
     health: Option<SignerHealth>,
     checkouts: HashMap<String, CheckoutView>,
+    forges: HashMap<String, ForgeFacts>,
 }
 
 impl ProbeOutcome {
@@ -325,6 +335,7 @@ impl ProbeOutcome {
             view.workspace.health = Some(health);
         }
         view.workspace.checkouts = self.checkouts;
+        view.workspace.forges.extend(self.forges);
         view.workspace.probed_at = Some(Instant::now());
     }
 }
@@ -356,11 +367,19 @@ fn run_probe(input: ProbeInput) -> ProbeOutcome {
             Some((resource.clone(), CheckoutView { facts, signing }))
         })
         .collect();
+    // gh's protocol and the global credential helper, once per forge per view
+    // (each call bounded).
+    let forges = input
+        .forge_hosts
+        .iter()
+        .map(|host| (host.clone(), forge_credential::forge_facts(host)))
+        .collect();
     ProbeOutcome {
         vtc_did: input.vtc_did,
         persona: input.persona,
         health,
         checkouts,
+        forges,
     }
 }
 
@@ -383,13 +402,22 @@ pub(crate) fn probe_if_due(
         return;
     }
     let identity = ws.probe_wanted.unwrap_or(false) || ws.health.is_none();
+    let resources: Vec<String> = view.my_repos().into_iter().map(|r| r.resource).collect();
+    let mut forge_hosts: Vec<String> = resources
+        .iter()
+        .filter_map(|r| RepoCoords::parse(r).ok().map(|c| c.host))
+        .filter(|h| !ws.forges.contains_key(h))
+        .collect();
+    forge_hosts.sort();
+    forge_hosts.dedup();
     let input = ProbeInput {
         vtc_did: view.vtc_did.clone(),
         persona: view.persona,
         did_key_id: ws.did_key_id().map(str::to_string),
         settings: ws.settings.clone(),
-        resources: view.my_repos().into_iter().map(|r| r.resource).collect(),
+        resources,
         identity,
+        forge_hosts,
     };
     if !in_flight.try_begin(PROBE) {
         return;
@@ -405,6 +433,7 @@ pub(crate) fn probe_if_due(
                 persona,
                 health: None,
                 checkouts: HashMap::new(),
+                forges: HashMap::new(),
             });
         DispatchOutcome::WorkspaceProbe(outcome)
     });
@@ -416,8 +445,16 @@ pub(crate) fn probe_if_due(
 
 /// What a job does.
 enum Plan {
-    /// Clone into the workspace, then sign there.
-    Clone { coords: RepoCoords, dest: PathBuf },
+    /// Clone into the workspace over `protocol`, then sign there; `warning`
+    /// says why the checkout may not be able to push.
+    Clone {
+        coords: RepoCoords,
+        dest: PathBuf,
+        protocol: CloneProtocol,
+        warning: Option<String>,
+    },
+    /// Point the checkout's `origin` and `fork` remotes at their SSH URLs.
+    RemotesToSsh { path: PathBuf },
     /// Make a checkout sign.
     Sign { path: PathBuf },
     /// Stop a checkout signing.
@@ -607,7 +644,34 @@ impl WorkspaceJob {
                 }
                 Err(e) => Err(e),
             },
-            Plan::Clone { coords, dest } => self.clone_and_sign(coords, dest).await,
+            Plan::Clone {
+                coords,
+                dest,
+                protocol,
+                warning,
+            } => self
+                .clone_and_sign(coords, dest, *protocol)
+                .await
+                .map(|done| match warning {
+                    Some(w) => format!("{done} ▲ {w}"),
+                    None => done,
+                }),
+            Plan::RemotesToSsh { path } => {
+                let p = path.clone();
+                blocking(move || git_workspace::switch_remotes_to_ssh(&p))
+                    .await
+                    .and_then(|r| r)
+                    .map(|switched| {
+                        let names: Vec<String> = switched
+                            .iter()
+                            .map(|(name, url)| format!("{name} → {url}"))
+                            .collect();
+                        format!(
+                            "Switched to SSH: {}. git now pushes with your SSH key.",
+                            names.join(", ")
+                        )
+                    })
+            }
             Plan::Sign { path } => self.sign(path).await,
             Plan::Unsign { path } => {
                 let path = path.clone();
@@ -767,8 +831,9 @@ impl WorkspaceJob {
         &self,
         coords: &RepoCoords,
         dest: &std::path::Path,
+        protocol: CloneProtocol,
     ) -> Result<String, String> {
-        let (c, d, protocol) = (coords.clone(), dest.to_path_buf(), self.settings.protocol);
+        let (c, d) = (coords.clone(), dest.to_path_buf());
         let credential = self
             .settings
             .credential_for(&self.vtc_did, coords)
@@ -1038,6 +1103,10 @@ fn save_settings(ctx: &mut ActionCtx<'_>) {
     let mut settings = view.workspace.settings.clone();
     settings.root = root_path;
     settings.protocol = protocol;
+    let how = protocol.map_or_else(
+        || "the forge account's protocol, else gh's, else HTTPS".to_string(),
+        |p| p.label().to_string(),
+    );
     match WorkspaceSettings::path(&profile).and_then(|p| settings.save_to(&p)) {
         Ok(()) => {
             view.workspace.settings = settings;
@@ -1046,9 +1115,8 @@ fn save_settings(ctx: &mut ActionCtx<'_>) {
             view.note(
                 Severity::Success,
                 format!(
-                    "Checkouts go under {}, cloned over {}.",
+                    "Checkouts go under {}, cloned over {how}.",
                     git_workspace::display_path(&view.workspace.settings.root),
-                    protocol.label()
                 ),
             );
         }
@@ -1109,7 +1177,34 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
                 }
             };
             let dest = coords.default_path(&view.workspace.settings.root);
-            (Plan::Clone { coords, dest }, format!("cloning {short}"))
+            let (protocol, _) = view.workspace.protocol_for(&view.vtc_did, &coords);
+            let warning = view.workspace.https_clone_warning(&view.vtc_did, &coords);
+            (
+                Plan::Clone {
+                    coords,
+                    dest,
+                    protocol,
+                    warning,
+                },
+                format!("cloning {short}"),
+            )
+        }
+        W::RemotesToSsh => {
+            let Some(path) = located else {
+                view.note(
+                    Severity::Warning,
+                    if target.is_some() {
+                        format!("{short} is not checked out here.")
+                    } else {
+                        "Highlight a repository first.".to_string()
+                    },
+                );
+                return;
+            };
+            (
+                Plan::RemotesToSsh { path },
+                format!("switching {short}'s remotes to SSH"),
+            )
         }
         W::Sign | W::Unsign => {
             let Some(path) = located else {
@@ -1417,7 +1512,7 @@ mod tests {
             ws.form,
             Some(WorkspaceForm::Settings {
                 root: "~/code".into(),
-                protocol: CloneProtocol::Ssh,
+                protocol: Some(CloneProtocol::Https),
                 error: None
             })
         );
