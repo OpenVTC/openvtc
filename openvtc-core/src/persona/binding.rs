@@ -119,7 +119,10 @@ impl BindingSummary {
     #[must_use]
     pub fn describe(&self) -> String {
         if self.unknown {
-            return "wears: unknown".to_string();
+            // Not "unknown": that reads as a face nobody can identify. What is
+            // unknown is the answer — the agent was not reachable, or has not
+            // been asked yet for a community joined a moment ago.
+            return "wears: not read from your VTA yet".to_string();
         }
         if !self.bound {
             // A fourth reading, and the one a holder is most likely to arrive
@@ -401,7 +404,10 @@ mod tests {
 
     #[test]
     fn unknown_is_not_the_same_as_unbound() {
-        assert_eq!(BindingSummary::unknown().describe(), "wears: unknown");
+        assert_eq!(
+            BindingSummary::unknown().describe(),
+            "wears: not read from your VTA yet"
+        );
         assert_eq!(BindingSummary::default().describe(), "wears: nothing");
     }
 
@@ -448,7 +454,7 @@ mod tests {
             }),
             ..BindingSummary::unknown()
         };
-        assert_eq!(summary.describe(), "wears: unknown");
+        assert_eq!(summary.describe(), "wears: not read from your VTA yet");
     }
 
     /// And it never displaces a real answer either.

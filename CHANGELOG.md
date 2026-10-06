@@ -191,6 +191,14 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **After a join the header says you are in a community, and the new
+  community's face is read at once.** The header kept "No community yet ·
+  persona online" after a join until the next connection event, because the
+  session marked connected never re-derived the indicator. The new community's
+  row read "wears: unknown" until the periodic sweep asked the VTA; it is now
+  asked straight after the join, and a reading not yet in hand says "wears: not
+  read from your VTA yet" rather than suggesting a face nobody can identify.
+
 - **The vetter desk reads the community's vetting mode once the connection is
   up.** At start-up the question was tried a second or two before the
   persona's listener connected; that failed send was counted as an ask, so the
