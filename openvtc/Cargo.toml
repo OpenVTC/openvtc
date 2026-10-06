@@ -98,7 +98,11 @@ anyhow.workspace = true
 # writes no git configuration, each identity is a named profile with its own
 # include file (`profiles`, `enable::write_include`), and a repository signs only
 # once `did-git-sign enable` adds that include to it.
-did-git-sign = "0.15.1"
+#
+# 0.18.1 has the VTA sign each commit (`keys/sign-sshsig`; the key never leaves
+# the VTA) and falls back, in its default `auto` mode, to fetching the key for a
+# credential granted before that task existed — which `git_signing` relies on.
+did-git-sign = "0.18.1"
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true

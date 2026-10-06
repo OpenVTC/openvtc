@@ -28,7 +28,10 @@ arbitrary = ["dep:arbitrary", "chrono/arbitrary"]
 # library writes the keyring entry, profile and include file exactly as
 # `did-git-sign init --profile` does. Kept on the same release as the
 # `openvtc` crate's dependency, and on this workspace's `vta-sdk` line.
-did-git-sign = "0.15.1"
+did-git-sign = "0.18.1"
+# The SSHSIG encoding did-git-sign signs with, to check the VTA's proof
+# signature (`git_signing::verify_signer`). Same release as did-git-sign.
+vgi-core = "0.18.1"
 # Hidden-vetter admission (ZKP). Published from this workspace before this
 # crate; its version moves with the workspace version.
 openvtc-vetting-pcs = { version = "0.5.0", path = "../openvtc-vetting-pcs" }

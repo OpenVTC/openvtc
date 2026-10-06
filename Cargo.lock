@@ -2925,9 +2925,9 @@ dependencies = [
 
 [[package]]
 name = "did-git-sign"
-version = "0.15.1"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0951fe47d888af32ca7c4a9b9fd11c49a3789bf00bdac80d0bcad3497d6daacf"
+checksum = "fc7d352af2779188ff2201890761dc203f16388163da9d5c97442a3148cb1553"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -6397,6 +6397,7 @@ dependencies = [
  "trust-tasks-rs",
  "url",
  "uuid",
+ "vgi-core",
  "vta-sdk",
  "vta-service",
  "wiremock",
@@ -9857,9 +9858,9 @@ dependencies = [
 
 [[package]]
 name = "vgi-core"
-version = "0.15.1"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e00637f71b0d91609ce3f9e48a62d3a644b47c5720471ae3c3e90711308f145b"
+checksum = "d337135b3e1670ccc35dbdd562ab59a1ff6b939baf54796531c4380518985e37"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
