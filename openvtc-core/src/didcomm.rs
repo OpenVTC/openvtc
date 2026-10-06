@@ -1416,9 +1416,29 @@ fn classify_inbound(
         }];
     }
     // Pickup-status heartbeats and anything else: dropped, as the framework's
-    // ignore-handler and fallback did.
-    debug!(typ = %message.typ, "unhandled message type — dropped");
+    // ignore-handler and fallback did. Heartbeats are routine DIDComm traffic
+    // and stay at `debug!`; anything over TSP, or any Trust Task, is a message a
+    // peer meant for us — dropping one of those silently is how an answer the
+    // peer sent turns into a timeout here with nothing in the log (R6.4).
+    if transport == MessagingTransport::Tsp || is_trust_task_type(&message.typ) {
+        tracing::warn!(
+            listener = %crate::display::truncate_did(&listener_id, 32),
+            msg_type = %message.typ,
+            ?transport,
+            from = ?from.as_deref().map(|d| crate::display::truncate_did(d, 32)),
+            thid = ?message.thid,
+            "inbound message of a type no handler claims — dropped"
+        );
+    } else {
+        debug!(typ = %message.typ, "unhandled message type — dropped");
+    }
     Vec::new()
+}
+
+/// Whether `typ` names a Trust Task (or its binding envelope) — traffic a peer
+/// addressed to this client, as opposed to mediator housekeeping.
+fn is_trust_task_type(typ: &str) -> bool {
+    typ.starts_with("https://trusttasks.org/")
 }
 
 /// Normalise an inbound TSP frame into the [`Message`] shape the dispatcher and
@@ -1626,6 +1646,13 @@ pub const OPENVTC_CATCH_ALL_PATTERN: &str = concat!(
     // answers today (the envelope arm below is how it will once it follows the
     // binding's §5 fully). `message_dispatch` reads both.
     r"|https://trusttasks\.org/spec/governance/capability/.*",
+    // Git namespace replies (`git-ns/*`) for the Repos panel. A DIDComm reply
+    // in the binding envelope passed the gate under the `binding/` arm below,
+    // which hid the gap: TSP opens the envelope *before* the gate
+    // (`tsp_document_to_message`), so a TSP-joined member's `git-ns/view`
+    // answer arrived typed as the task, matched nothing here, and was dropped
+    // at `debug!` — the view waited out its timeout on an answer the VTC sent.
+    r"|https://trusttasks\.org/spec/git-ns/.*",
     // The **binding envelopes**, whose type says "a Trust Task is inside" and
     // names no task. A peer built on `trust-tasks-didcomm` types every message
     // this way, and so does this crate's own `capabilities::
