@@ -1506,9 +1506,15 @@ pub(crate) async fn tick(lp: &mut Loop<'_>) {
             let secs = reply_window(&p.purpose).as_secs();
             match p.purpose {
                 Purpose::View if view.data.is_none() => {
+                    // Silence is not a refusal. A VTC that does not serve
+                    // git namespaces still answers, with a refusal that is
+                    // shown in words. So the only thing a timeout can mean is
+                    // that the request or its answer was lost (R6.4).
                     view.phase = ReposPhase::Failed(format!(
-                        "no reply within {secs}s — the community's VTC may be offline, or may \
-                         not serve git namespaces yet"
+                        "no reply within {secs}s. A community that does not serve git \
+                         namespaces says so, so this is not that: the request or its answer \
+                         was lost. Either the community's VTC is offline or unreachable, or it \
+                         answered on a route this persona does not collect. Press r to try again."
                     ));
                 }
                 Purpose::View => {

@@ -2920,6 +2920,50 @@ mod tsp_carriage_tests {
 
     const REPLY_TYPE: &str = "https://trusttasks.org/spec/vtc/join-requests/submit/0.1#response";
 
+    /// A `git-ns/view` answer or refusal that comes back over TSP, in the binding
+    /// envelope, reaches the Repos classifier keyed on the request's thread.
+    /// Repos requests now go over TSP for a membership joined that way, so their
+    /// answers come back that way too. An answer that stopped here would leave
+    /// the view waiting out its timeout.
+    #[test]
+    fn a_tsp_git_ns_answer_reaches_the_repos_classifier_by_thread() {
+        use trust_tasks_rs::Payload as _;
+        let request_id = "urn:uuid:22222222-2222-4222-8222-222222222222";
+        for (type_uri, refused) in [
+            (
+                format!("{}#response", crate::git_ns::view::Payload::TYPE_URI),
+                false,
+            ),
+            (
+                "https://trusttasks.org/spec/trust-task-error/0.1".to_string(),
+                true,
+            ),
+        ] {
+            let mut doc = document(&type_uri);
+            doc["threadId"] = serde_json::json!(request_id);
+            doc["payload"] = if refused {
+                serde_json::json!({ "code": "permission_denied", "message": "not a member" })
+            } else {
+                serde_json::json!({})
+            };
+            let bytes = serde_json::to_vec(&doc).unwrap();
+            let wrapped = vta_sdk::tsp_binding::wrap_envelope(&bytes);
+            let msg = to_message(&wrapped).expect("a TSP git-ns answer maps to a message");
+            assert_eq!(msg.typ, type_uri);
+            assert!(crate::git_ns::is_reply_type(&msg.typ), "{type_uri}");
+            let (_, parsed) = crate::capabilities::parse_envelope_document(&msg.body)
+                .expect("the body is the threaded document");
+            let (thid, reply) =
+                crate::git_ns::parse_reply(&parsed).expect("the Repos classifier takes it");
+            assert_eq!(thid, request_id);
+            assert_eq!(
+                matches!(reply, crate::git_ns::Reply::Refused(_)),
+                refused,
+                "{type_uri}"
+            );
+        }
+    }
+
     fn to_message(payload: &[u8]) -> Option<affinidi_tdk::didcomm::Message> {
         tsp_document_to_message(
             payload,
