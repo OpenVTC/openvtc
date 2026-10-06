@@ -183,7 +183,7 @@ pub async fn request_renewal(
     // Remembered before the send, so a reply quicker than the return from
     // the send still finds its request.
     record_request(request_id, route.vtc_did, route.member_did);
-    if let Err(e) = crate::members::send_document(route, document_id, body).await {
+    if let Err(e) = crate::community_send::send_document(route, document_id, body).await {
         forget(request_id);
         return Err(e);
     }

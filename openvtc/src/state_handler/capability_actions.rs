@@ -62,6 +62,9 @@ pub(crate) struct CapabilityJob {
     pub(crate) vtc_did: String,
     pub(crate) persona: PersonaId,
     pub(crate) verb: Verb,
+    /// The membership was joined over TSP, so the request goes over TSP: the
+    /// community answers on the transport a request arrived on.
+    pub(crate) over_tsp: bool,
 }
 
 impl CapabilityJob {
@@ -98,6 +101,7 @@ impl CapabilityJob {
             mediator: self.mediator,
             vtc_did: self.vtc_did,
             persona: self.persona,
+            over_tsp: self.over_tsp,
             toggle,
             doc,
             signing_secret,
@@ -113,6 +117,7 @@ pub(crate) struct CapabilitySend {
     mediator: String,
     vtc_did: String,
     persona: PersonaId,
+    over_tsp: bool,
     /// `Some((slug, enable))` for a toggle, which words its status differently.
     toggle: Option<(String, bool)>,
     /// Unsigned: signing waits for the job, but nothing it does changes the id.
@@ -146,12 +151,17 @@ impl CapabilitySend {
         let thid = self.thread().to_string();
         let result = async {
             openvtc_core::capabilities::sign_document(&mut self.doc, &self.signing_secret).await?;
+            let tsp_mediator =
+                openvtc_core::community_send::tsp_mediator_for(self.over_tsp, &self.vtc_did).await;
             openvtc_core::capabilities::send_capability_document(
-                &self.atm,
-                &self.profile,
-                &self.persona_did,
-                &self.vtc_did,
-                &self.mediator,
+                &openvtc_core::community_send::Delivery {
+                    atm: &self.atm,
+                    profile: &self.profile,
+                    member_did: &self.persona_did,
+                    vtc_did: &self.vtc_did,
+                    mediator_did: &self.mediator,
+                    tsp_mediator_did: tsp_mediator.as_deref(),
+                },
                 &self.doc,
             )
             .await

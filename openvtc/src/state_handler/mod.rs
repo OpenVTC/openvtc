@@ -3748,6 +3748,20 @@ fn capability_sender(
     ))
 }
 
+/// Whether `persona`'s membership of `vtc_did` was joined over TSP — the
+/// transport its requests to that community then take
+/// ([`openvtc_core::community_send`]).
+fn membership_over_tsp(
+    config: &Config,
+    vtc_did: &str,
+    persona_id: openvtc_core::config::account::PersonaId,
+) -> bool {
+    config
+        .account
+        .membership(vtc_did, persona_id)
+        .is_some_and(|c| c.joined_over_tsp())
+}
+
 /// Send a capability document off the loop.
 ///
 /// The busy-guard is what stops a held key queueing a fan of identical

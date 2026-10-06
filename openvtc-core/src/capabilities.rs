@@ -6,22 +6,15 @@
 //! crate (re-exported below) so this client and the community service's hook
 //! producer cannot drift on the contract. Only the two pieces that are
 //! genuinely openvtc-specific stay here: signing with the persona key
-//! ([`sign_document`]) and sending over the profile's mediator
+//! ([`sign_document`]) and sending on the membership's transport
 //! ([`send_capability_document`]).
 
-use std::sync::Arc;
-
 use affinidi_data_integrity::{DataIntegrityProof, SignOptions};
-use affinidi_tdk::didcomm::Message;
-use affinidi_tdk::messaging::ATM;
-use affinidi_tdk::messaging::profiles::ATMProfile;
 use affinidi_tdk::secrets_resolver::secrets::Secret;
 use serde_json::Value;
 use trust_tasks_rs::TrustTask;
-use uuid::Uuid;
 
 use crate::errors::OpenVTCError;
-use crate::pack_and_send;
 
 // The wire layer, shared with the community service (vtc-service hooks).
 pub use trust_tasks_capability_client::{
@@ -75,34 +68,30 @@ pub async fn sign_document(
     Ok(())
 }
 
-/// Pack `doc` in the DIDComm Trust Task envelope and send it to the VTC via
-/// the mediator. Returns [`correlation_thread`] of `doc` — the `threadId` the
-/// reply carries. That value is fixed by the document, not by the send, so a
-/// caller should take it from the document and wait on it *before* sending:
-/// the reply can be dispatched before this future's result is.
+/// Send `doc` to the community on the membership's own transport
+/// ([`crate::community_send::send_document`]): TSP when `route` names the
+/// community's TSP mediator, the DIDComm Trust Task envelope otherwise.
+/// Returns [`correlation_thread`] of `doc` — the `threadId` the reply carries.
+/// That value is fixed by the document, not by the send, so a caller should
+/// take it from the document and wait on it *before* sending: the reply can be
+/// dispatched before this future's result is.
+///
 /// Sending is fire-and-forget: `Ok` means handed to the transport, never that
 /// the host received it; the caller owns a reply timeout.
+///
+/// This was DIDComm-only. A persona that joined over TSP then had its
+/// capability and `git-ns/*` requests answered over DIDComm, on a route it
+/// may not collect, and the views waited out their timeout on a reply the
+/// community had sent.
 pub async fn send_capability_document(
-    atm: &ATM,
-    profile: &Arc<ATMProfile>,
-    persona_did: &str,
-    vtc_did: &str,
-    mediator: &str,
+    route: &crate::community_send::Delivery<'_>,
     doc: &TrustTask<Value>,
 ) -> Result<String, OpenVTCError> {
     let body = serde_json::to_value(doc)
         .map_err(|e| OpenVTCError::Config(format!("serialise capability document: {e}")))?;
-    let message = Message::build(
-        format!("urn:uuid:{}", Uuid::new_v4()),
-        TRUST_TASK_ENVELOPE_TYPE.to_string(),
-        body,
-    )
-    .from(persona_did.to_string())
-    .to(vtc_did.to_string())
-    .thid(correlation_thread(doc).to_string())
-    .finalize();
-    pack_and_send(atm, profile, &message, persona_did, vtc_did, mediator).await?;
-    Ok(correlation_thread(doc).to_string())
+    let thid = correlation_thread(doc).to_string();
+    crate::community_send::send_document(route, doc.id.clone(), body).await?;
+    Ok(thid)
 }
 
 #[cfg(test)]

@@ -424,7 +424,7 @@ pub async fn submit_self_remove(
     // ([`crate::members::send_document`]): a persona that joined over TSP may
     // have no DIDComm route the community can be reached on, and a leave that
     // never arrives leaves the community holding a member who has gone.
-    crate::members::send_document(route, document_id, body).await?;
+    crate::community_send::send_document(route, document_id, body).await?;
     Ok(msg_id)
 }
 
