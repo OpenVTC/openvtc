@@ -47,7 +47,6 @@ use std::sync::Arc;
 use affinidi_data_integrity::crypto_suites::CryptoSuite;
 use affinidi_data_integrity::{DataIntegrityProof, SignOptions};
 use affinidi_tdk::{
-    didcomm::Message,
     messaging::{ATM, profiles::ATMProfile},
     secrets_resolver::secrets::Secret,
 };
@@ -181,53 +180,22 @@ pub struct Route<'a> {
     pub tsp_mediator_did: Option<&'a str>,
 }
 
-/// The DIDComm message carrying a personhood document to its community: the
-/// binding envelope, with the document as the body and its id as the message
-/// id — so the reply's `thid` and the document's `threadId` coincide.
-fn didcomm_request(document_id: String, body: Value, member_did: &str, vtc_did: &str) -> Message {
-    let now = Utc::now().timestamp().max(0) as u64;
-    Message::build(
-        document_id,
-        crate::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
-        body,
-    )
-    .from(member_did.to_string())
-    .to(vtc_did.to_string())
-    .created_time(now)
-    .finalize()
-}
-
 impl Route<'_> {
     /// Send a built document over whichever transport this route selects.
     async fn send(&self, body: Value, document_id: String) -> Result<(), OpenVTCError> {
-        match self.tsp_mediator_did {
-            Some(tsp_mediator) => {
-                crate::tsp::send_trust_task(
-                    self.atm,
-                    self.profile,
-                    &body,
-                    self.vtc_did,
-                    tsp_mediator,
-                )
-                .await?;
-            }
-            None => {
-                // The binding envelope, not the task URI: a community refuses
-                // a Trust Task typed as itself (`bindings/didcomm/0.2` §2–§4,
-                // VTI #1687).
-                let msg = didcomm_request(document_id, body, self.member_did, self.vtc_did);
-                crate::pack_and_send(
-                    self.atm,
-                    self.profile,
-                    &msg,
-                    self.member_did,
-                    self.vtc_did,
-                    self.mediator_did,
-                )
-                .await?;
-            }
-        }
-        Ok(())
+        crate::community_send::send_document(
+            &crate::community_send::Delivery {
+                atm: self.atm,
+                profile: self.profile,
+                member_did: self.member_did,
+                vtc_did: self.vtc_did,
+                mediator_did: self.mediator_did,
+                tsp_mediator_did: self.tsp_mediator_did,
+            },
+            document_id,
+            body,
+        )
+        .await
     }
 }
 
@@ -502,6 +470,7 @@ pub fn parse_assert_reply(body: &Value) -> Result<AssertReply, OpenVTCError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::community_send::didcomm_request;
 
     /// Over DIDComm a personhood document rides the binding envelope — a VTC
     /// refuses one typed as its task URI (VTI #1687) — with the document as the

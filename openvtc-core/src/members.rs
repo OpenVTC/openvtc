@@ -32,13 +32,7 @@
 //! because the persona DID a membership names is recognised by the community,
 //! by the members it relates to and vets, and possibly by other communities.
 
-use std::sync::Arc;
-
-use affinidi_tdk::{
-    didcomm::Message,
-    messaging::{ATM, profiles::ATMProfile},
-    secrets_resolver::secrets::Secret,
-};
+use affinidi_tdk::secrets_resolver::secrets::Secret;
 use chrono::Utc;
 use dtg_credentials::DTGCredential;
 use serde_json::Value;
@@ -77,69 +71,10 @@ pub async fn issue_and_send_member_vmc(
     Ok((msg_id, vc))
 }
 
-/// Where a member VMC is going and who is sending it — the triple every
-/// `members` delivery needs, resolved by the caller.
-///
-/// Grouped rather than passed loose, matching [`crate::personhood::Route`]
-/// beside it.
-pub struct Delivery<'a> {
-    pub atm: &'a ATM,
-    pub profile: &'a Arc<ATMProfile>,
-    /// The member acting — the authcrypt sender, and so the identity the
-    /// community proves the delivery came from.
-    pub member_did: &'a str,
-    /// The community being addressed.
-    pub vtc_did: &'a str,
-    /// The member's own mediator, for the DIDComm leg.
-    pub mediator_did: &'a str,
-    /// The community's advertised TSP mediator, when the membership was joined
-    /// over TSP: the document then goes over TSP rather than DIDComm.
-    ///
-    /// A persona that joined over TSP may have no DIDComm route the community
-    /// can be reached on at all. Its acknowledgement then never arrived, and
-    /// the community could not tell a delivered credential from a lost one —
-    /// so it re-sent, and the member asked again, until both gave up.
-    pub tsp_mediator_did: Option<&'a str>,
-}
-
-/// Send a signed member Trust Task document (`document`, id `document_id`) to
-/// the community on the membership's own transport: TSP when the route names
-/// the community's TSP mediator, the DIDComm Trust Task envelope otherwise.
-pub(crate) async fn send_document(
-    route: &Delivery<'_>,
-    document_id: String,
-    document: Value,
-) -> Result<(), OpenVTCError> {
-    if let Some(tsp_mediator) = route.tsp_mediator_did {
-        return crate::tsp::send_trust_task(
-            route.atm,
-            route.profile,
-            &document,
-            route.vtc_did,
-            tsp_mediator,
-        )
-        .await;
-    }
-    let now = Utc::now().timestamp().max(0) as u64;
-    let msg = Message::build(
-        document_id,
-        crate::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
-        document,
-    )
-    .from(route.member_did.to_string())
-    .to(route.vtc_did.to_string())
-    .created_time(now)
-    .finalize();
-    crate::pack_and_send(
-        route.atm,
-        route.profile,
-        &msg,
-        route.member_did,
-        route.vtc_did,
-        route.mediator_did,
-    )
-    .await
-}
+/// Where a member delivery is going and who is sending it. One shape for every
+/// member-to-community send ([`crate::community_send`]).
+pub use crate::community_send::Delivery;
+use crate::community_send::send_document;
 
 /// Build + sign the reciprocal member VMC, without sending it. The signing half of
 /// [`issue_and_send_member_vmc`], split out so the credential's shape can be asserted

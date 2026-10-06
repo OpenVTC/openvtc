@@ -19,11 +19,8 @@
 
 use std::sync::Arc;
 
+use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
 use affinidi_tdk::secrets_resolver::secrets::Secret;
-use affinidi_tdk::{
-    didcomm::Message,
-    messaging::{ATM, profiles::ATMProfile},
-};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
@@ -32,7 +29,6 @@ use vta_sdk::protocols::join_requests::{
     MEMBER_SELF_REMOVE_TYPE, SelfRemoveBody,
 };
 
-use crate::capabilities::TRUST_TASK_ENVELOPE_TYPE;
 use crate::errors::OpenVTCError;
 
 /// Ceiling on a join submit's serialized body, guarded before it goes out.
@@ -137,23 +133,17 @@ pub async fn submit_join_request(
         )));
     }
 
-    match tsp_mediator_did {
-        // TSP carries the Trust Task document as-is: no DIDComm envelope, and
-        // the VTC's dispatcher reads `type`/`threadId` out of the document.
-        Some(tsp_mediator) => {
-            crate::tsp::send_trust_task(atm, profile, &body, vtc_did, tsp_mediator).await?;
-        }
-        None => {
-            let now = Utc::now().timestamp().max(0) as u64;
-            let msg = Message::build(document_id, TRUST_TASK_ENVELOPE_TYPE.to_string(), body)
-                .from(persona_did.to_string())
-                .to(vtc_did.to_string())
-                .created_time(now)
-                .finalize();
-
-            crate::pack_and_send(atm, profile, &msg, persona_did, vtc_did, mediator_did).await?;
-        }
-    }
+    send_to_community(
+        atm,
+        profile,
+        persona_did,
+        vtc_did,
+        mediator_did,
+        tsp_mediator_did,
+        document_id,
+        body,
+    )
+    .await?;
 
     Ok(request_id)
 }
@@ -214,21 +204,45 @@ pub async fn poll_join_status(
     )
     .await?;
 
-    match tsp_mediator_did {
-        Some(tsp_mediator) => {
-            crate::tsp::send_trust_task(atm, profile, &body, vtc_did, tsp_mediator).await?;
-        }
-        None => {
-            let now = Utc::now().timestamp().max(0) as u64;
-            let msg = Message::build(document_id, TRUST_TASK_ENVELOPE_TYPE.to_string(), body)
-                .from(persona_did.to_string())
-                .to(vtc_did.to_string())
-                .created_time(now)
-                .finalize();
-            crate::pack_and_send(atm, profile, &msg, persona_did, vtc_did, mediator_did).await?;
-        }
-    }
-    Ok(())
+    send_to_community(
+        atm,
+        profile,
+        persona_did,
+        vtc_did,
+        mediator_did,
+        tsp_mediator_did,
+        document_id,
+        body,
+    )
+    .await
+}
+
+/// Send a signed join-family document on the transport the caller chose, via
+/// the one member-to-community send ([`crate::community_send::send_document`]).
+#[allow(clippy::too_many_arguments)]
+async fn send_to_community(
+    atm: &ATM,
+    profile: &Arc<ATMProfile>,
+    persona_did: &str,
+    vtc_did: &str,
+    mediator_did: &str,
+    tsp_mediator_did: Option<&str>,
+    document_id: String,
+    body: Value,
+) -> Result<(), OpenVTCError> {
+    crate::community_send::send_document(
+        &crate::community_send::Delivery {
+            atm,
+            profile,
+            member_did: persona_did,
+            vtc_did,
+            mediator_did,
+            tsp_mediator_did,
+        },
+        document_id,
+        body,
+    )
+    .await
 }
 
 /// Profile questions we have outstanding: document id → (community, when).
@@ -309,21 +323,17 @@ pub async fn send_community_profile_show(
     )
     .await?;
 
-    match tsp_mediator_did {
-        Some(tsp_mediator) => {
-            crate::tsp::send_trust_task(atm, profile, &body, vtc_did, tsp_mediator).await?;
-        }
-        None => {
-            let now = Utc::now().timestamp().max(0) as u64;
-            let msg = Message::build(document_id, TRUST_TASK_ENVELOPE_TYPE.to_string(), body)
-                .from(persona_did.to_string())
-                .to(vtc_did.to_string())
-                .created_time(now)
-                .finalize();
-            crate::pack_and_send(atm, profile, &msg, persona_did, vtc_did, mediator_did).await?;
-        }
-    }
-    Ok(())
+    send_to_community(
+        atm,
+        profile,
+        persona_did,
+        vtc_did,
+        mediator_did,
+        tsp_mediator_did,
+        document_id,
+        body,
+    )
+    .await
 }
 
 /// Build the DIDComm body for a join-request submit: a Trust Task *document*
@@ -424,7 +434,7 @@ pub async fn submit_self_remove(
     // ([`crate::members::send_document`]): a persona that joined over TSP may
     // have no DIDComm route the community can be reached on, and a leave that
     // never arrives leaves the community holding a member who has gone.
-    crate::members::send_document(route, document_id, body).await?;
+    crate::community_send::send_document(route, document_id, body).await?;
     Ok(msg_id)
 }
 

@@ -540,13 +540,22 @@ pub(crate) struct Sender {
     profile: Arc<ATMProfile>,
     persona_did: String,
     mediator: String,
+    /// The membership was joined over TSP, so its requests go over TSP: the
+    /// community answers on the transport a request arrived on, and a persona
+    /// that joined over TSP may not collect a DIDComm answer at all.
+    over_tsp: bool,
     signer: Box<Secret>,
 }
 
 /// Resolve the persona's messaging identity and signing key. The key comes
 /// from the TDK secrets resolver, an in-memory store populated at startup —
 /// not I/O — which is what lets the job own a plain `Secret`.
-async fn sender(config: &Config, tdk: &TDK, persona: PersonaId) -> Result<Sender, String> {
+async fn sender(
+    config: &Config,
+    tdk: &TDK,
+    persona: PersonaId,
+    vtc_did: &str,
+) -> Result<Sender, String> {
     let id = config
         .identities
         .get(&persona)
@@ -565,6 +574,10 @@ async fn sender(config: &Config, tdk: &TDK, persona: PersonaId) -> Result<Sender
         profile: id.profile().clone(),
         persona_did: id.persona_did().to_string(),
         mediator: id.mediator_did.clone().unwrap_or_default(),
+        over_tsp: config
+            .account
+            .membership(vtc_did, persona)
+            .is_some_and(|c| c.joined_over_tsp()),
         signer: Box::new(keys.authentication.secret.clone()),
     })
 }
@@ -587,12 +600,17 @@ impl ReposJob {
         let s = &self.sender;
         let result = async {
             openvtc_core::capabilities::sign_document(&mut self.doc, &s.signer).await?;
+            let tsp_mediator =
+                openvtc_core::community_send::tsp_mediator_for(s.over_tsp, &self.vtc_did).await;
             openvtc_core::capabilities::send_capability_document(
-                &s.atm,
-                &s.profile,
-                &s.persona_did,
-                &self.vtc_did,
-                &s.mediator,
+                &openvtc_core::community_send::Delivery {
+                    atm: &s.atm,
+                    profile: &s.profile,
+                    member_did: &s.persona_did,
+                    vtc_did: &self.vtc_did,
+                    mediator_did: &s.mediator,
+                    tsp_mediator_did: tsp_mediator.as_deref(),
+                },
                 &self.doc,
             )
             .await
@@ -761,7 +779,7 @@ impl Loop<'_> {
             }
             return false;
         }
-        let sender = match sender(self.config, self.tdk, persona).await {
+        let sender = match sender(self.config, self.tdk, persona, &vtc_did).await {
             Ok(s) => s,
             Err(e) => {
                 if let Some(view) = view_mut(self.state) {
@@ -1488,9 +1506,15 @@ pub(crate) async fn tick(lp: &mut Loop<'_>) {
             let secs = reply_window(&p.purpose).as_secs();
             match p.purpose {
                 Purpose::View if view.data.is_none() => {
+                    // Silence is not a refusal. A VTC that does not serve
+                    // git namespaces still answers, with a refusal that is
+                    // shown in words. So the only thing a timeout can mean is
+                    // that the request or its answer was lost (R6.4).
                     view.phase = ReposPhase::Failed(format!(
-                        "no reply within {secs}s — the community's VTC may be offline, or may \
-                         not serve git namespaces yet"
+                        "no reply within {secs}s. A community that does not serve git \
+                         namespaces says so, so this is not that: the request or its answer \
+                         was lost. Either the community's VTC is offline or unreachable, or it \
+                         answered on a route this persona does not collect. Press r to try again."
                     ));
                 }
                 Purpose::View => {

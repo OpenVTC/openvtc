@@ -291,6 +291,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                                 profile,
                                 persona_did,
                                 mediator,
+                                over_tsp: membership_over_tsp(ctx.config, &vtc, persona_id),
                                 vtc_did: vtc,
                                 persona: persona_id,
                                 verb: capability_actions::Verb::List {
@@ -332,6 +333,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                                 profile,
                                 persona_did,
                                 mediator,
+                                over_tsp: membership_over_tsp(ctx.config, &vtc, persona_id),
                                 vtc_did: vtc,
                                 persona: persona_id,
                                 verb: capability_actions::Verb::List {
@@ -400,6 +402,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                             profile,
                             persona_did,
                             mediator,
+                            over_tsp: membership_over_tsp(ctx.config, &vtc, persona_id),
                             vtc_did: vtc,
                             persona: persona_id,
                             verb: capability_actions::Verb::Toggle {
