@@ -2369,33 +2369,7 @@ impl StateHandler {
                     // TTL, because the answer is the holder's own decision and
                     // they may have changed it from `pnm` a moment ago. The
                     // busy-guard keeps a slow agent from stacking sweeps.
-                    let binding_targets: Vec<persona_binding_refresh::BindingTarget> = config
-                        .account
-                        .memberships()
-                        .filter_map(|c| {
-                            config
-                                .account
-                                .personas
-                                .get(&c.persona_ref)
-                                .map(|p| (c.sub_context_id.clone(), p.did.clone()))
-                        })
-                        .collect();
-                    if !binding_targets.is_empty()
-                        && let Some(client) = admin_vta.as_ref()
-                        && in_flight.try_begin(background_dispatch::DispatchDomain::PersonaBinding)
-                    {
-                        let client = client.clone();
-                        background_dispatch::spawn_dispatch(
-                            dispatch_tx.clone(),
-                            background_dispatch::DispatchDomain::PersonaBinding,
-                            async move {
-                                background_dispatch::DispatchOutcome::PersonaBinding(
-                                    persona_binding_refresh::resolve_batch(client, binding_targets)
-                                        .await,
-                                )
-                            },
-                        );
-                    }
+                    dispatch_binding_refresh(&config, admin_vta.as_ref(), &mut in_flight, &dispatch_tx);
 
                     // Register the contexts memberships name. Joins before
                     // per-community contexts recorded an id without creating it;
@@ -2594,6 +2568,15 @@ impl StateHandler {
                                 &mut state,
                             )
                             .await;
+                            // What the new community's persona wears, now rather than at the
+                            // next sweep — until then its row could only say it had not
+                            // been read.
+                            dispatch_binding_refresh(
+                                &config,
+                                admin_vta.as_ref(),
+                                &mut in_flight,
+                                &dispatch_tx,
+                            );
                         }
                     }
                     Ok(join_flow::JoinExit::AwaitRequirements(awaiting)) => {
@@ -4663,7 +4646,60 @@ fn aggregate_status(
     }
 }
 
+/// Ask the agent what each membership's persona wears, off the loop. Run on the
+/// periodic sweep and straight after a join; the busy-guard keeps a slow agent
+/// from stacking requests.
+fn dispatch_binding_refresh(
+    config: &Config,
+    admin_vta: Option<&vta_sdk::client::VtaClient>,
+    in_flight: &mut background_dispatch::InFlight,
+    dispatch_tx: &mpsc::UnboundedSender<background_dispatch::DispatchOutcome>,
+) {
+    let binding_targets: Vec<persona_binding_refresh::BindingTarget> = config
+        .account
+        .memberships()
+        .filter_map(|c| {
+            config
+                .account
+                .personas
+                .get(&c.persona_ref)
+                .map(|p| (c.sub_context_id.clone(), p.did.clone()))
+        })
+        .collect();
+    if !binding_targets.is_empty()
+        && let Some(client) = admin_vta
+        && in_flight.try_begin(background_dispatch::DispatchDomain::PersonaBinding)
+    {
+        let client = client.clone();
+        background_dispatch::spawn_dispatch(
+            dispatch_tx.clone(),
+            background_dispatch::DispatchDomain::PersonaBinding,
+            async move {
+                background_dispatch::DispatchOutcome::PersonaBinding(
+                    persona_binding_refresh::resolve_batch(client, binding_targets).await,
+                )
+            },
+        );
+    }
+}
+
+/// Bring a just-joined community's session up, then recompute the connection
+/// indicator: marking the session connected changes what the header should
+/// say, and without this it kept "No community yet · persona online" until the
+/// next listener event.
 async fn register_joined_session(
+    session_manager: &mut session_manager::SessionManager,
+    service: &openvtc_core::didcomm::Messaging,
+    tdk: &TDK,
+    config: &Config,
+    joined: join_flow::JoinedSession,
+    state: &mut State,
+) {
+    register_joined_session_inner(session_manager, service, tdk, config, joined, state).await;
+    apply_session_aggregate(session_manager, state);
+}
+
+async fn register_joined_session_inner(
     session_manager: &mut session_manager::SessionManager,
     service: &openvtc_core::didcomm::Messaging,
     tdk: &TDK,
