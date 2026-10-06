@@ -79,7 +79,12 @@ pub fn content_height() -> usize {
 /// Each wrapped line is prefixed with `indent` so callers can indent inside
 /// a panel.
 pub fn push_status(lines: &mut Vec<Line<'static>>, msg: &str, indent: &'static str) {
-    let style = status_style(msg);
+    push_wrapped(lines, msg, indent, status_style(msg));
+}
+
+/// [`push_status`] in a style the caller chooses, for a message whose severity
+/// its wording does not carry.
+pub fn push_wrapped(lines: &mut Vec<Line<'static>>, msg: &str, indent: &'static str, style: Style) {
     let width = wrap_width().saturating_sub(indent.len()).max(1);
     for wrapped in wrap_text(msg, width) {
         lines.push(Line::from(vec![Span::styled(

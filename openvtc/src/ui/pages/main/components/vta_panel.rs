@@ -1,7 +1,8 @@
 use super::panel::Panel;
-use super::status::push_status;
+use super::status::{push_status, push_wrapped};
 use crate::colors::{
     COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,
+    COLOR_WARNING_ACCESSIBLE_RED,
 };
 use crate::state_handler::{
     main_page::content::{ContentPanelState, VicLifecycle, VtaState, VtaTransport},
@@ -128,6 +129,7 @@ pub fn render(state: &VtaState, panel_focused: bool) -> Vec<Line<'static>> {
             &state.vta_did,
         );
         render_transports(state, &mut lines);
+        render_receive(state, std::time::Instant::now(), &mut lines);
         lines.push(Line::from(vec![
             // "Credential" said nothing about what the credential is *for*. It
             // is the DID this client authenticates to the VTA as; a `did:key`
@@ -348,6 +350,90 @@ fn render_transports(state: &VtaState, lines: &mut Vec<Line<'static>>) {
     }
 }
 
+/// Render the receive leg: whether the VTA's replies reach this app.
+///
+/// A healthy session gets one dim line (`last reply 12s ago`). A session whose
+/// replies have stopped gets its own state, in the warning color, saying the
+/// request reached the VTA — so it never reads as "VTA unreachable" or as an
+/// auth failure (R6.4) — and what recovery is doing about it.
+fn render_receive(state: &VtaState, now: std::time::Instant, lines: &mut Vec<Line<'static>>) {
+    use crate::state_handler::main_page::content::VtaRecoveryView;
+    use openvtc_core::vta_receive::{describe_health, replies_not_arriving_text, short_duration};
+
+    let label_style = Style::new().fg(COLOR_TEXT_DEFAULT);
+    let dim = Style::new().fg(COLOR_DARK_GRAY);
+    let warn = Style::new().fg(COLOR_ORANGE);
+    let alarm = Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED).bold();
+    let r = &state.receive;
+
+    let Some(observed) = r.health.as_ref() else {
+        return;
+    };
+    // Age the snapshot to now, so "last reply" keeps counting between checks.
+    let mut health = observed.clone();
+    if let (Some(age), Some(at)) = (health.since_last_reply, r.observed_at) {
+        health.since_last_reply = Some(age + now.saturating_duration_since(at));
+    }
+
+    let stalled = health.replies_not_arriving() || r.recovery != VtaRecoveryView::Healthy;
+    let (value, style) = if health.replies_not_arriving() {
+        ("NOT ARRIVING".to_string(), alarm)
+    } else if health.consecutive_reply_timeouts > 0 {
+        (describe_health(&health), warn)
+    } else {
+        (describe_health(&health), dim)
+    };
+    let mut spans = vec![
+        Span::styled("  Replies:       ", label_style),
+        Span::styled(value, style),
+    ];
+    if health.replies_not_arriving() {
+        spans.push(Span::styled(
+            format!("   ·   {}", describe_health(&health)),
+            dim,
+        ));
+    }
+    lines.push(Line::from(spans));
+
+    if stalled {
+        let what = match r.recovery {
+            VtaRecoveryView::Healthy | VtaRecoveryView::Waiting { .. } => {
+                replies_not_arriving_text(health.consecutive_reply_timeouts)
+            }
+            VtaRecoveryView::Reconnecting { attempt } => format!(
+                "{} (attempt {attempt})",
+                replies_not_arriving_text(health.consecutive_reply_timeouts)
+            ),
+            VtaRecoveryView::Reconnected => "Reconnected to your VTA with a fresh session — \
+                 waiting for its first reply."
+                .to_string(),
+        };
+        push_wrapped(lines, &what, "    ", warn);
+        if let VtaRecoveryView::Waiting { at, attempt } = r.recovery {
+            push_wrapped(
+                lines,
+                &format!(
+                    "Next reconnect (attempt {attempt}) in {}.",
+                    short_duration(at.saturating_duration_since(now))
+                ),
+                "    ",
+                dim,
+            );
+        }
+        if let Some(err) = &r.last_rebuild_error {
+            push_wrapped(
+                lines,
+                &format!("Last reconnect failed: {err}"),
+                "    ",
+                alarm,
+            );
+        }
+    }
+    if let Some(problem) = &r.presence_problem {
+        push_wrapped(lines, problem, "    ", warn);
+    }
+}
+
 /// Render the "Invitation Credentials" (VIC) manager section: the held VICs with
 /// their lifecycle state, the confirm gates, and the focus-aware key hints.
 fn render_vics(state: &VtaState, panel_focused: bool, lines: &mut Vec<Line<'static>>) {
@@ -545,6 +631,85 @@ mod tests {
 
     fn joined(lines: &[Line<'static>]) -> String {
         text(lines).join("\n")
+    }
+
+    // --- receive leg -------------------------------------------------------
+
+    fn with_receive(
+        consecutive: u32,
+        since_last_reply: Option<u64>,
+        recovery: crate::state_handler::main_page::content::VtaRecoveryView,
+    ) -> VtaState {
+        let health = openvtc_core::vta_receive_leg::ReceiveHealth {
+            consecutive_reply_timeouts: consecutive,
+            since_last_reply: since_last_reply.map(std::time::Duration::from_secs),
+            ..Default::default()
+        };
+        let mut state = vta_managed(None);
+        state.receive.health = Some(health);
+        state.receive.recovery = recovery;
+        state
+    }
+
+    /// No admin session (or no check yet): no Replies row at all, rather than
+    /// a claim either way.
+    #[test]
+    fn no_health_renders_no_replies_row() {
+        let out = joined(&render(&vta_managed(None), true));
+        assert!(!out.contains("Replies:"), "{out}");
+    }
+
+    #[test]
+    fn a_healthy_session_shows_its_last_reply() {
+        use crate::state_handler::main_page::content::VtaRecoveryView;
+        let out = joined(&render(
+            &with_receive(0, Some(12), VtaRecoveryView::Healthy),
+            true,
+        ));
+        assert!(out.contains("Replies:"), "{out}");
+        assert!(out.contains("last reply 12s ago"), "{out}");
+        assert!(!out.contains("NOT ARRIVING"), "{out}");
+    }
+
+    /// The stalled state is its own state (R6.4): it says the request reached
+    /// the VTA and that a reconnect is coming, and never "unreachable".
+    #[test]
+    fn a_stalled_session_reads_as_replies_not_arriving() {
+        use crate::state_handler::main_page::content::VtaRecoveryView;
+        let at = std::time::Instant::now() + std::time::Duration::from_secs(40);
+        let mut state = with_receive(3, Some(900), VtaRecoveryView::Waiting { at, attempt: 2 });
+        state.receive.last_rebuild_error = Some("mediator refused the connection".into());
+        let out = joined(&render(&state, true));
+        assert!(out.contains("NOT ARRIVING"), "{out}");
+        assert!(out.contains("3 missed in a row"), "{out}");
+        assert!(out.contains("received the request"), "{out}");
+        assert!(out.contains("Reconnecting"), "{out}");
+        assert!(out.contains("Next reconnect (attempt 2)"), "{out}");
+        assert!(
+            out.contains("Last reconnect failed: mediator refused"),
+            "{out}"
+        );
+        assert!(!out.to_lowercase().contains("unreachable"), "{out}");
+    }
+
+    #[test]
+    fn a_reconnected_session_waits_for_its_first_reply() {
+        use crate::state_handler::main_page::content::VtaRecoveryView;
+        let out = joined(&render(
+            &with_receive(0, None, VtaRecoveryView::Reconnected),
+            true,
+        ));
+        assert!(out.contains("no reply yet this session"), "{out}");
+        assert!(out.contains("Reconnected to your VTA"), "{out}");
+    }
+
+    #[test]
+    fn a_failing_presence_call_is_shown() {
+        use crate::state_handler::main_page::content::VtaRecoveryView;
+        let mut state = with_receive(0, Some(5), VtaRecoveryView::Healthy);
+        state.receive.presence_problem = Some("device heartbeat failed: timed out".into());
+        let out = joined(&render(&state, true));
+        assert!(out.contains("device heartbeat failed: timed out"), "{out}");
     }
 
     /// The headline fact is the transport in use, not the URL. A populated

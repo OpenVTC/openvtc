@@ -1612,6 +1612,9 @@ pub struct VtaState {
     pub credential_did: String,
     /// Which transports the VTA advertises and which one this process is on.
     pub transports: VtaTransports,
+    /// Whether the VTA's replies are reaching this app, and what is being done
+    /// when they are not.
+    pub receive: VtaReceiveStatus,
     /// Total number of keys managed
     pub key_count: usize,
     /// Number of persona keys
@@ -1650,6 +1653,50 @@ pub struct VtaState {
     /// request instead would leave an archived VIC rendered as active until the
     /// next manual refresh.
     pub vic_refresh_queued: bool,
+}
+
+/// The receive leg of the admin VTA session: whether the VTA's replies reach
+/// this app.
+///
+/// Shown beside the transport because a send that succeeds says nothing about
+/// it — the request reaches the VTA either way, and only the replies tell a
+/// working session from one whose inbox is not being collected (2026-10-05).
+#[derive(Clone, Debug, Default)]
+pub struct VtaReceiveStatus {
+    /// The session's last health snapshot. `None` with no admin session.
+    pub health: Option<openvtc_core::vta_receive_leg::ReceiveHealth>,
+    /// When [`health`](Self::health) was taken, so the panel can age the
+    /// "last reply" between checks.
+    pub observed_at: Option<std::time::Instant>,
+    /// Where rebuilding a stalled session is.
+    pub recovery: VtaRecoveryView,
+    /// The last rebuild's failure, while it is the latest word.
+    pub last_rebuild_error: Option<String>,
+    /// The device-presence call that is failing, and why — the heartbeat is
+    /// often the first call to notice a stalled session.
+    pub presence_problem: Option<String>,
+}
+
+/// Recovery of a stalled admin session, for the panel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VtaRecoveryView {
+    /// Nothing to recover from.
+    #[default]
+    Healthy,
+    /// Replies stopped; reconnecting at `at`.
+    Waiting {
+        /// When the next reconnect is due.
+        at: std::time::Instant,
+        /// Which reconnect it will be (1-based).
+        attempt: u32,
+    },
+    /// Reconnecting now.
+    Reconnecting {
+        /// Which reconnect this is (1-based).
+        attempt: u32,
+    },
+    /// Reconnected; waiting to see a reply on the new session.
+    Reconnected,
 }
 
 /// How this process reaches the VTA, and what the VTA says it offers.

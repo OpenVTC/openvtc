@@ -818,7 +818,25 @@ pub async fn build_runtime_vta_client(
             "build_runtime_vta_client called on a non-VTA key backend".to_string(),
         ));
     };
+    connect_runtime_vta_client(
+        vta_url,
+        vta_did,
+        credential_did,
+        credential_private_key.expose_secret(),
+        mediator_did.as_deref(),
+    )
+    .await
+}
 
+/// The connect half of [`build_runtime_vta_client`], over borrowed parts, so
+/// [`RuntimeVtaConnect`] can run it without the whole [`KeyBackend`].
+async fn connect_runtime_vta_client(
+    vta_url: &str,
+    vta_did: &str,
+    credential_did: &str,
+    private_key_multibase: &str,
+    mediator_did: Option<&str>,
+) -> Result<vta_sdk::client::VtaClient, OpenVTCError> {
     // The transport choice (DIDComm vs REST), the `rest_fallback` derivation,
     // and the empty-URL rule are SDK-level knowledge — `connect_auto`
     // encapsulates them so this no longer hand-rolls the branch (R22). The
@@ -828,8 +846,8 @@ pub async fn build_runtime_vta_client(
         vta_url,
         vta_did,
         credential_did,
-        private_key_multibase: credential_private_key.expose_secret(),
-        mediator_did: mediator_did.as_deref(),
+        private_key_multibase,
+        mediator_did,
     })
     .await
     .map(|connected| connected.client)
@@ -837,6 +855,73 @@ pub async fn build_runtime_vta_client(
 
     enable_tsp_if_advertised(&mut client, vta_did).await;
     Ok(client)
+}
+
+/// What it takes to open the runtime VTA session again, owned, so a background
+/// task can rebuild the session without borrowing the live [`Config`].
+///
+/// [`KeyBackend`] is not `Clone` (it holds the seed and encryption material),
+/// and a rebuild needs none of that — only what [`build_runtime_vta_client`]
+/// reads. The private key stays a [`SecretString`].
+pub struct RuntimeVtaConnect {
+    vta_url: String,
+    vta_did: String,
+    credential_did: String,
+    credential_private_key: SecretString,
+    mediator_did: Option<String>,
+}
+
+impl RuntimeVtaConnect {
+    /// The connect parameters of a VTA backend; `None` for a local (BIP32) one,
+    /// which has no VTA session to rebuild.
+    #[must_use]
+    pub fn from_backend(backend: &KeyBackend) -> Option<Self> {
+        match backend {
+            KeyBackend::Vta {
+                vta_url,
+                vta_did,
+                credential_did,
+                credential_private_key,
+                mediator_did,
+                ..
+            } => Some(Self {
+                vta_url: vta_url.clone(),
+                vta_did: vta_did.clone(),
+                credential_did: credential_did.clone(),
+                credential_private_key: SecretString::from(
+                    credential_private_key.expose_secret().to_string(),
+                ),
+                mediator_did: mediator_did.clone(),
+            }),
+            KeyBackend::Bip32 { .. } => None,
+        }
+    }
+
+    /// Open a fresh runtime VTA session — the same session
+    /// [`build_runtime_vta_client`] opens.
+    ///
+    /// # Errors
+    ///
+    /// As [`build_runtime_vta_client`].
+    pub async fn connect(&self) -> Result<vta_sdk::client::VtaClient, OpenVTCError> {
+        connect_runtime_vta_client(
+            &self.vta_url,
+            &self.vta_did,
+            &self.credential_did,
+            self.credential_private_key.expose_secret(),
+            self.mediator_did.as_deref(),
+        )
+        .await
+    }
+}
+
+impl std::fmt::Debug for RuntimeVtaConnect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeVtaConnect")
+            .field("vta_did", &self.vta_did)
+            .field("credential_did", &self.credential_did)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Ceiling on the `#tsp` discovery resolve.
