@@ -551,9 +551,10 @@ pub enum ReposAction {
 /// The Repos panel's local actions: cloning a repository, making a checkout
 /// sign as the community's persona, and did-git-sign's identity for it.
 ///
-/// `Clone`, `Sign`, `Unsign`, `SetUp`, `Confirm`, `SettingsSubmit` and
-/// `UseSubmit` run git, did-git-sign or the VTA, so the runtime loop services
-/// them; the rest move the view's state only.
+/// `Clone`, `Sign`, `Unsign`, `SetUp`, `Confirm`, `SettingsSubmit`,
+/// `UseSubmit`, `AccountStart` and `AccountSubmit` run git, gh, did-git-sign or
+/// the VTA, so the runtime loop services them; the rest move the view's state
+/// only.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkspaceAction {
     /// Clone the highlighted (or open) repository into the workspace, then
@@ -587,6 +588,17 @@ pub enum WorkspaceAction {
     UseInput(String),
     /// Use that path, once it proves to be a checkout of the repository.
     UseSubmit,
+    /// Look for forge accounts (gh, `~/.ssh`), then open the picker for the
+    /// highlighted (or open) repository.
+    AccountStart,
+    /// Highlight a row of the picker.
+    AccountPick(usize),
+    /// Switch the picker between this repository and the whole forge.
+    AccountScope,
+    /// Replace the key path being typed.
+    AccountInput(String),
+    /// Store the choice and apply it to the checkouts it covers.
+    AccountSubmit,
     /// The UI copied something; say so in the panel.
     Copied(String),
 }

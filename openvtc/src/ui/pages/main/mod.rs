@@ -388,10 +388,29 @@ fn repos_key(
         }));
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if let Some(WorkspaceForm::Account(form)) = &view.workspace.form {
+        return match key.code {
+            KeyCode::Esc => Some(R::Workspace(W::Cancel)),
+            KeyCode::Enter => Some(R::Workspace(W::AccountSubmit)),
+            KeyCode::Tab | KeyCode::BackTab => Some(R::Workspace(W::AccountScope)),
+            KeyCode::Up => Some(R::Workspace(W::AccountPick(form.pick.saturating_sub(1)))),
+            KeyCode::Down => Some(R::Workspace(W::AccountPick(form.pick + 1))),
+            KeyCode::Backspace if form.typing() => {
+                let mut v = form.path.clone();
+                v.pop();
+                Some(R::Workspace(W::AccountInput(v)))
+            }
+            KeyCode::Char(c) if form.typing() && !ctrl => {
+                Some(R::Workspace(W::AccountInput(format!("{}{c}", form.path))))
+            }
+            _ => None,
+        };
+    }
     if let Some(form) = &view.workspace.form {
         let (value, settings) = match form {
             WorkspaceForm::Settings { root, .. } => (root, true),
             WorkspaceForm::UsePath { path, .. } => (path, false),
+            WorkspaceForm::Account(_) => return None,
         };
         let edit = |v: String| {
             if settings {
@@ -539,6 +558,7 @@ fn repos_key(
         KeyCode::Char('S') => Some(R::Workspace(W::RemoveArm)),
         KeyCode::Char('u') => Some(R::Workspace(W::UseStart)),
         KeyCode::Char('w') => Some(R::Workspace(W::SettingsStart)),
+        KeyCode::Char('f') => Some(R::Workspace(W::AccountStart)),
         _ => None,
     }
 }
@@ -580,6 +600,11 @@ fn repos_paste(
             }
             Some(WorkspaceForm::UsePath { path, .. }) => {
                 return Some(R::Workspace(W::UseInput(format!("{path}{text}"))));
+            }
+            Some(WorkspaceForm::Account(form)) => {
+                return form
+                    .typing()
+                    .then(|| R::Workspace(W::AccountInput(format!("{}{text}", form.path))));
             }
             None => {}
         }
@@ -4768,6 +4793,7 @@ mod key_handler_tests {
             (KeyCode::Char('S'), W::RemoveArm),
             (KeyCode::Char('u'), W::UseStart),
             (KeyCode::Char('w'), W::SettingsStart),
+            (KeyCode::Char('f'), W::AccountStart),
         ] {
             assert_eq!(repos_key(press(key), &list), Some(R::Workspace(want)));
         }

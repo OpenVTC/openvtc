@@ -13,14 +13,18 @@
 //! from the community.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use openvtc_core::config::account::PersonaId;
+use openvtc_core::forge_credential::{ForgeCredential, GhAccount};
 use openvtc_core::git_ns::{self, GitRight, Visibility, view};
 use openvtc_core::git_signing::{BinaryStatus, CheckoutSigning, IdentityStatus, PersonaSigner};
-use openvtc_core::git_workspace::{CheckoutFacts, CloneProtocol, WorkspaceSettings};
+use openvtc_core::git_workspace::{
+    self, CheckoutFacts, CloneProtocol, CredentialScope, WorkspaceSettings,
+};
 
 /// Longest name or DID kept for display.
 pub const MAX_NAME: usize = 256;
@@ -325,6 +329,203 @@ pub enum WorkspaceForm {
         path: String,
         error: Option<String>,
     },
+    /// `f`: the forge account a repository, or its forge, uses.
+    Account(AccountForm),
+}
+
+/// One row of the forge-account picker.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AccountOption {
+    /// Follow the community's choice for this forge (repository scope only).
+    Inherit,
+    /// This machine's git config, as before openvtc chose anything.
+    GitDefault,
+    /// An account the gh CLI holds on this forge.
+    Gh { login: String, active: bool },
+    /// A private key found in `~/.ssh`, or chosen before.
+    SshKey(PathBuf),
+    /// Type a key path.
+    EnterPath,
+}
+
+impl AccountOption {
+    fn is(&self, credential: &ForgeCredential) -> bool {
+        match (self, credential) {
+            (AccountOption::GitDefault, ForgeCredential::GitDefault) => true,
+            (AccountOption::Gh { login, .. }, ForgeCredential::GhAccount { login: l }) => {
+                login == l
+            }
+            (AccountOption::SshKey(p), ForgeCredential::SshKey { path }) => p == path,
+            _ => false,
+        }
+    }
+}
+
+/// `f`: which forge account a repository — or every repository of this
+/// community on its forge — uses for clone, fetch and push.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountForm {
+    pub resource: String,
+    /// The forge host (`github.com`).
+    pub forge: String,
+    pub scope: CredentialScope,
+    /// Every row, `Inherit` included; [`AccountForm::visible`] filters by scope.
+    pub options: Vec<AccountOption>,
+    /// The highlighted row of [`AccountForm::visible`].
+    pub pick: usize,
+    /// The key path being typed, on [`AccountOption::EnterPath`].
+    pub path: String,
+    /// The forge's current choice, which `Inherit` follows.
+    pub forge_choice: ForgeCredential,
+    /// Why no gh account is offered, when none is.
+    pub gh_note: Option<String>,
+    pub error: Option<String>,
+}
+
+impl AccountForm {
+    /// Build the picker for `resource` on `forge`. Highlights the current
+    /// choice; with none, the gh account whose login matches the forge account
+    /// linked in this session.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        resource: String,
+        forge: String,
+        repo_choice: Option<ForgeCredential>,
+        forge_choice: Option<ForgeCredential>,
+        gh: Result<Vec<GhAccount>, String>,
+        keys: Vec<PathBuf>,
+        linked_login: Option<&str>,
+    ) -> Self {
+        let mut options = vec![AccountOption::Inherit, AccountOption::GitDefault];
+        let gh_note = match gh {
+            Ok(accounts) => {
+                let mut on_forge: Vec<GhAccount> =
+                    accounts.into_iter().filter(|a| a.host == forge).collect();
+                on_forge.sort_by(|a, b| a.login.cmp(&b.login));
+                on_forge.dedup_by(|a, b| a.login == b.login);
+                let note = on_forge
+                    .is_empty()
+                    .then(|| format!("gh has no account logged in on {forge}."));
+                options.extend(on_forge.into_iter().map(|a| AccountOption::Gh {
+                    login: a.login,
+                    active: a.active,
+                }));
+                note
+            }
+            Err(why) => Some(why),
+        };
+        options.extend(keys.into_iter().map(AccountOption::SshKey));
+        // A key chosen before that is not in ~/.ssh stays offered.
+        for chosen in [&repo_choice, &forge_choice].into_iter().flatten() {
+            if let ForgeCredential::SshKey { path } = chosen
+                && !options.iter().any(|o| o.is(chosen))
+            {
+                options.push(AccountOption::SshKey(path.clone()));
+            }
+        }
+        options.push(AccountOption::EnterPath);
+        let scope = if repo_choice.is_some() {
+            CredentialScope::Repo
+        } else {
+            CredentialScope::Forge
+        };
+        let mut form = Self {
+            resource,
+            forge,
+            scope,
+            options,
+            pick: 0,
+            path: String::new(),
+            forge_choice: forge_choice.clone().unwrap_or(ForgeCredential::GitDefault),
+            gh_note,
+            error: None,
+        };
+        let current = match scope {
+            CredentialScope::Repo => repo_choice,
+            CredentialScope::Forge => forge_choice,
+        };
+        let preselect = current.or_else(|| {
+            linked_login.and_then(|login| {
+                form.options
+                    .iter()
+                    .any(|o| matches!(o, AccountOption::Gh { login: l, .. } if l == login))
+                    .then(|| ForgeCredential::GhAccount {
+                        login: login.to_string(),
+                    })
+            })
+        });
+        form.pick = preselect
+            .and_then(|c| form.visible().iter().position(|o| o.is(&c)))
+            .unwrap_or(0);
+        form
+    }
+
+    /// The rows offered in the current scope: `Inherit` only for a repository.
+    #[must_use]
+    pub fn visible(&self) -> Vec<&AccountOption> {
+        self.options
+            .iter()
+            .filter(|o| self.scope == CredentialScope::Repo || **o != AccountOption::Inherit)
+            .collect()
+    }
+
+    /// The highlighted row.
+    #[must_use]
+    pub fn picked(&self) -> Option<&AccountOption> {
+        self.visible().get(self.pick).copied()
+    }
+
+    /// Whether typed characters go to the key path.
+    #[must_use]
+    pub fn typing(&self) -> bool {
+        self.picked() == Some(&AccountOption::EnterPath)
+    }
+
+    /// Switch between this repository and the whole forge, keeping the same
+    /// row highlighted where it is still offered.
+    pub fn toggle_scope(&mut self) {
+        let picked = self.picked().cloned();
+        self.scope = match self.scope {
+            CredentialScope::Repo => CredentialScope::Forge,
+            CredentialScope::Forge => CredentialScope::Repo,
+        };
+        self.pick = picked
+            .and_then(|p| self.visible().iter().position(|o| **o == p))
+            .unwrap_or(0);
+        self.error = None;
+    }
+
+    /// What submitting stores: `Ok(None)` removes the choice in this scope.
+    ///
+    /// # Errors
+    ///
+    /// When the typed path is empty.
+    pub fn choice(&self) -> Result<Option<ForgeCredential>, String> {
+        Ok(match self.picked() {
+            None | Some(AccountOption::Inherit) => None,
+            Some(AccountOption::GitDefault) => match self.scope {
+                // A repository that wants the default while its forge has an
+                // account says so explicitly.
+                CredentialScope::Repo => Some(ForgeCredential::GitDefault),
+                CredentialScope::Forge => None,
+            },
+            Some(AccountOption::Gh { login, .. }) => Some(ForgeCredential::GhAccount {
+                login: login.clone(),
+            }),
+            Some(AccountOption::SshKey(path)) => {
+                Some(ForgeCredential::SshKey { path: path.clone() })
+            }
+            Some(AccountOption::EnterPath) => {
+                if self.path.trim().is_empty() {
+                    return Err("Type the path of the private key.".into());
+                }
+                Some(ForgeCredential::SshKey {
+                    path: git_workspace::expand_tilde(&self.path),
+                })
+            }
+        })
+    }
 }
 
 /// A local change armed for `y`.

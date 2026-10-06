@@ -33,6 +33,7 @@ pub mod didcomm;
 pub mod display;
 pub mod dtg;
 pub mod errors;
+pub mod forge_credential;
 pub mod git_ns;
 pub mod git_signing;
 pub mod git_workspace;

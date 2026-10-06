@@ -18,16 +18,17 @@ use crate::colors::{
 };
 use crate::state_handler::main_page::content::ContentPanelState;
 use crate::state_handler::main_page::repos::{
-    AddPersonForm, CheckoutView, EXPIRY_CHOICES, HookHealth, LinkPhase, LinkedAccount, NewRepoForm,
-    ReposPhase, ReposScreen, ReposView, Severity, SignerHealth, Status, WorkspaceChange,
-    WorkspaceForm, expiry_label,
+    AccountForm, AccountOption, AddPersonForm, CheckoutView, EXPIRY_CHOICES, HookHealth, LinkPhase,
+    LinkedAccount, NewRepoForm, ReposPhase, ReposScreen, ReposView, Severity, SignerHealth, Status,
+    WorkspaceChange, WorkspaceForm, expiry_label,
 };
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
 use crate::state_handler::repos_workspace;
 use crate::state_handler::state::ConnectionState;
+use openvtc_core::forge_credential::ForgeCredential;
 use openvtc_core::git_ns::{self, BreakGlassState, GitRight, RepoStatus};
 use openvtc_core::git_signing::{BinaryStatus, CheckoutSigning, MIN_BINARY};
-use openvtc_core::git_workspace::{self, CheckoutFacts, RepoCoords};
+use openvtc_core::git_workspace::{self, CheckoutFacts, CredentialScope, RepoCoords};
 
 use super::panel::Panel;
 
@@ -679,6 +680,9 @@ fn local_hints(lines: &mut Vec<Line<'static>>, view: &ReposView) {
     if ws.health.as_ref().is_some_and(|h| h.identity.any()) {
         keys.push("S remove");
     }
+    if target.is_some() {
+        keys.push("f forge account");
+    }
     keys.push("w workspace");
     lines.push(Line::from(dim(format!("    {}", keys.join("   ")))));
 }
@@ -711,9 +715,51 @@ fn head_line(view: &ReposView, facts: &CheckoutFacts) -> Option<(&'static str, C
     })
 }
 
+/// Which forge account the repository uses, where that was chosen, and —
+/// for a checkout — whether the checkout itself has it.
+fn account_line(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str) {
+    let Ok(coords) = RepoCoords::parse(resource) else {
+        return;
+    };
+    let ws = &view.workspace;
+    let choice = ws.settings.credential_for(&view.vtc_did, &coords);
+    let from = match choice.scope {
+        Some(CredentialScope::Repo) => " (this repository's choice)".to_string(),
+        Some(CredentialScope::Forge) => format!(" (this community's choice for {})", coords.host),
+        None => " (nothing chosen — your git config, credential helpers and ssh-agent)".into(),
+    };
+    lines.push(Line::from(vec![
+        dim("    forge account: "),
+        text(sanitize_display(&choice.credential.label(), 256)),
+        dim(from),
+    ]));
+    let Some(facts) = ws.checkouts.get(resource).map(|c| &c.facts) else {
+        return;
+    };
+    if !facts.is_repo {
+        return;
+    }
+    let applied = facts
+        .credential
+        .clone()
+        .unwrap_or(ForgeCredential::GitDefault);
+    if applied != choice.credential {
+        wrapped(
+            lines,
+            "▲",
+            COLOR_ORANGE,
+            &format!(
+                "This checkout is set to {}. f, then ⏎, writes the choice into it.",
+                sanitize_display(&applied.label(), 256)
+            ),
+        );
+    }
+}
+
 /// A repository's checkout on this machine, on its own screen.
 fn render_local(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str) {
     heading(lines, "On this machine");
+    account_line(lines, view, resource);
     let ws = &view.workspace;
     let Some(checkout) = ws.checkouts.get(resource) else {
         let dest = RepoCoords::parse(resource)
@@ -853,6 +899,7 @@ fn render_workspace_overlay(lines: &mut Vec<Line<'static>>, view: &ReposView) {
             }
             hints(lines, "⏎ save   Tab switch HTTPS/SSH   Esc cancel");
         }
+        Some(WorkspaceForm::Account(form)) => render_account_form(lines, form),
         Some(WorkspaceForm::UsePath {
             resource,
             path,
@@ -886,6 +933,85 @@ fn render_workspace_overlay(lines: &mut Vec<Line<'static>>, view: &ReposView) {
         )));
         lines.push(Line::from(dim("    y confirm · any other key cancels")));
     }
+}
+
+/// One row of the forge-account picker, in words.
+fn account_option_label(form: &AccountForm, option: &AccountOption) -> String {
+    match option {
+        AccountOption::Inherit => format!(
+            "Same as this community's choice for {} (now: {})",
+            form.forge,
+            form.forge_choice.label()
+        ),
+        AccountOption::GitDefault => {
+            "Git default — your git config, credential helpers and ssh-agent".into()
+        }
+        AccountOption::Gh { login, active } => format!(
+            "gh account {login}{}",
+            if *active {
+                " (gh's active account)"
+            } else {
+                ""
+            }
+        ),
+        AccountOption::SshKey(path) => format!("SSH key {}", git_workspace::display_path(path)),
+        AccountOption::EnterPath => "Another SSH key (type its path)".into(),
+    }
+}
+
+/// `f`: pick the forge account.
+fn render_account_form(lines: &mut Vec<Line<'static>>, form: &AccountForm) {
+    heading(
+        lines,
+        &format!(
+            "Forge account for {}",
+            match form.scope {
+                CredentialScope::Repo => git_ns::short_resource(&form.resource).to_string(),
+                CredentialScope::Forge =>
+                    format!("every {} repository of this community", form.forge),
+            }
+        ),
+    );
+    lines.push(Line::from(dim(
+        "      Used for clone, fetch and push. Commit signing is separate (did-git-sign).",
+    )));
+    for (i, option) in form.visible().into_iter().enumerate() {
+        let picked = i == form.pick;
+        lines.push(Line::from(Span::styled(
+            format!(
+                "    {} {}",
+                if picked { "▸" } else { " " },
+                sanitize_display(&account_option_label(form, option), 256)
+            ),
+            if picked {
+                Style::default().fg(COLOR_SUCCESS).bold()
+            } else {
+                Style::default().fg(COLOR_TEXT_DEFAULT)
+            },
+        )));
+        if picked && *option == AccountOption::EnterPath {
+            input(lines, &form.path, true, "~/.ssh/id_ed25519_work");
+        }
+    }
+    if let Some(note) = &form.gh_note {
+        lines.push(Line::from(dim(format!(
+            "      {}",
+            sanitize_display(note, 256)
+        ))));
+    }
+    if let Some(why) = &form.error {
+        error(lines, why);
+    }
+    hints(
+        lines,
+        &format!(
+            "↑↓ choose   Tab {}   ⏎ save and apply   Esc cancel",
+            match form.scope {
+                CredentialScope::Repo => format!("all of {} in this community", form.forge),
+                CredentialScope::Forge => "this repository only".to_string(),
+            }
+        ),
+    );
 }
 
 // ****************************************************************************
