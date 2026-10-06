@@ -3335,6 +3335,9 @@ pub struct ApplicationRow {
     pub join_did: String,
     /// What the community requires, in a line; `None` until its manifest arrives.
     pub requirements: Option<String>,
+    /// The criterion it gathers for and the path it takes, in words, with a note when one is
+    /// owed — a criterion re-picked, or named vetting chosen where PCS ZKP is on offer.
+    pub criterion: Option<(String, Option<String>)>,
     /// Progress against those requirements.
     pub progress: Option<String>,
     pub satisfied: bool,

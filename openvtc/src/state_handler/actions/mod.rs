@@ -370,6 +370,10 @@ pub enum VettingAction {
     ChooseFace,
     RequestVetter,
     RefreshRequirements,
+    /// Move the selected application to the next way its community offers to be vetted — the
+    /// other path of its criterion (PCS ZKP or named), then the next criterion. Only before it
+    /// holds any evidence.
+    SwitchVettingPath,
     ReviewCard,
     /// Open the vetter directory.
     FindVetters,

@@ -1048,6 +1048,21 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             ),
         },
     ]));
+    // The criterion this application gathers for, and the path it takes under it: a community
+    // can offer a PCS ZKP proof alongside named vetters, and which one this application uses is
+    // what decides whether its vetters are named.
+    if let Some((criterion, note)) = &app.criterion {
+        lines.push(Line::from(vec![
+            Span::styled("Criterion    ", label()),
+            Span::styled(criterion.clone(), value()),
+        ]));
+        if let Some(note) = note {
+            lines.push(Line::from(vec![
+                Span::styled("             ", label()),
+                Span::styled(note.clone(), Style::new().fg(COLOR_ORANGE)),
+            ]));
+        }
+    }
     if let Some(progress) = &app.progress {
         lines.push(Line::from(vec![
             Span::styled("Progress     ", label()),
@@ -1143,6 +1158,9 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     lines.push(Line::from(""));
     lines.push(hint(
         "n: new  f: face  r: ask a vetter  v: find vetters  c: send card  m: refresh requirements",
+    ));
+    lines.push(hint(
+        "p: switch criterion or path (PCS ZKP / named) — before any vetting is held",
     ));
     lines.push(hint("x: abandon this application"));
     lines.push(hint(

@@ -3003,6 +3003,7 @@ impl MainPage {
             (VettingTab::Applications, KeyCode::Char('f')) => V::ChooseFace,
             (VettingTab::Applications, KeyCode::Char('r')) => V::RequestVetter,
             (VettingTab::Applications, KeyCode::Char('m')) => V::RefreshRequirements,
+            (VettingTab::Applications, KeyCode::Char('p')) => V::SwitchVettingPath,
             (VettingTab::Applications, KeyCode::Char('v')) => V::FindVetters,
             // Enter opens the application as a journey; `c` still goes
             // straight to the card for someone who knows where they are.
@@ -4067,6 +4068,7 @@ mod key_handler_tests {
             next_step: None,
             join_did: "did:key:zA".into(),
             requirements: None,
+            criterion: None,
             progress: None,
             satisfied: false,
             face: None,
@@ -4466,6 +4468,7 @@ mod key_handler_tests {
                 next_step: None,
                 join_did: "did:key:zA".into(),
                 requirements: None,
+                criterion: None,
                 progress: None,
                 satisfied: false,
                 face: None,

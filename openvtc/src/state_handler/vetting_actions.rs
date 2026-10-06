@@ -25,10 +25,11 @@ use openvtc_core::persona::{binding, pool, profile};
 use openvtc_core::vetting::VettingBook;
 use openvtc_core::vetting::applicant::{
     Application, ChosenFace, GrantStatus, NextStep, RequestDraft, RequestState, SentCard,
-    VetterEligibility,
+    VetterEligibility, VettingPath,
 };
 use openvtc_core::vetting::book::{
-    Adopted, DrawHold, FALLBACK_REQUIRED_CLAIMS, HiddenOutlook, HiddenVetterState, RequestVetting,
+    Adopted, CriterionPaths, DrawHold, FALLBACK_REQUIRED_CLAIMS, HiddenOutlook, HiddenVetterState,
+    RequestVetting,
 };
 use openvtc_core::vetting::mode::{ModeFailure, VetterMode, age_words};
 use openvtc_core::vetting::queries::{
@@ -830,6 +831,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                     }
                     line
                 }),
+                criterion: criterion_words(book, app),
                 progress: evaluation.as_ref().map(progress_line),
                 satisfied: evaluation.as_ref().is_some_and(Evaluation::satisfied),
                 face: app.face.as_ref().map(|f| f.name.clone()),
@@ -1574,6 +1576,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             // vetters. Asking here is what lets a vetter-only member reach the mode at all.
             refresh_vetter_side(ctx).await;
         }
+        VettingAction::SwitchVettingPath => switch_vetting_path(ctx),
         VettingAction::RefreshVetterSide => refresh_vetter_side(ctx).await,
         VettingAction::OpenHiddenVetting => {
             if page(ctx).hidden.is_empty() {
@@ -2110,6 +2113,103 @@ fn spawn_send(ctx: &mut ActionCtx<'_>, message: Message, from: &str, to: &str, s
         DispatchDomain::Vetting,
         async move { DispatchOutcome::Vetting(job.run().await) },
     );
+}
+
+/// The criterion `app` gathers for and the path it takes, in words, and a note when one is
+/// owed. `None` before its requirements are known.
+pub(crate) fn criterion_words(
+    book: &VettingBook,
+    app: &Application,
+) -> Option<(String, Option<String>)> {
+    let shown = book.application_vetting(&app.id)?;
+    let mut line = shown.criterion_id.clone();
+    if let Some(description) = &shown.description {
+        line.push_str(&format!(" — {}", sanitize_display(description, 120)));
+    }
+    line.push_str(&format!(" · {}", shown.path.words()));
+    let options = book.vetting_options(&app.community);
+    if options.len() > 1 {
+        line.push_str(&format!(
+            " · {} ways to be vetted here{}",
+            options.len(),
+            if app.holds_evidence() {
+                ""
+            } else {
+                ", p switches"
+            }
+        ));
+    }
+    let note = if let Some(previous) = &app.criterion_repicked {
+        Some(format!(
+            "The community no longer publishes criterion {previous}; this application now \
+             gathers for {} instead.",
+            shown.criterion_id
+        ))
+    } else if shown.path == VettingPath::Named && shown.paths == CriterionPaths::Either {
+        Some(format!(
+            "This criterion also accepts PCS ZKP, which names no vetter; this application uses \
+             named vetting{}.",
+            if app.holds_evidence() {
+                " — the statements it holds were made that way"
+            } else {
+                " (its requests went out named). p switches to PCS ZKP; then send your vetter a \
+                 new request"
+            }
+        ))
+    } else if shown.path == VettingPath::Named && book.pcs_zkp(&app.community) {
+        Some(format!(
+            "This community also accepts PCS ZKP vetting; your application uses criterion {} \
+             (named).",
+            shown.criterion_id
+        ))
+    } else {
+        None
+    };
+    Some((line, note))
+}
+
+/// `p` on an application: move it to the next way its community offers to be vetted, and say
+/// what that means for the requests already out.
+fn switch_vetting_path(ctx: &mut ActionCtx<'_>) {
+    let v = page(ctx);
+    let Some(row) = v.applications.get(v.selected).cloned() else {
+        return;
+    };
+    let had_requests = ctx
+        .config
+        .private
+        .vetting
+        .applications
+        .iter()
+        .any(|a| a.id == row.id && !a.requests.is_empty());
+    match ctx.config.private.vetting.switch_vetting(&row.id) {
+        Ok(now) => {
+            let resend = if had_requests {
+                match now.path {
+                    VettingPath::Hidden => {
+                        " The requests already sent went out named, so they cannot carry the \
+                         identifier a PCS ZKP attestation is made to: send your vetter a new \
+                         request (r)."
+                    }
+                    VettingPath::Named => {
+                        " Requests already sent asked for a PCS ZKP attestation: send your \
+                         vetter a new request (r)."
+                    }
+                }
+            } else {
+                ""
+            };
+            persist(
+                ctx,
+                format!(
+                    "This application now uses criterion {} with {}.{resend}",
+                    now.criterion_id,
+                    now.path.words()
+                ),
+            );
+        }
+        Err(why) => status(ctx, why),
+    }
 }
 
 async fn refresh_requirements(ctx: &mut ActionCtx<'_>, application_id: &str) {
@@ -3558,6 +3658,21 @@ async fn issue_ticket(ctx: &mut ActionCtx<'_>, membership_index: usize, uses_ind
     );
 }
 
+/// What a ticket issued under `mode` promises, in words. A community running PCS ZKP alongside
+/// named vetters gets requests of both kinds — an applicant picks its path, and defaults to PCS
+/// ZKP — so the ticket says so rather than promising a proof every time. The token gate still
+/// holds there: most requests will ask for a proof.
+pub(crate) fn ticket_mode_words(book: &VettingBook, community: &str, mode: VetterMode) -> String {
+    if mode == VetterMode::PcsZkp && book.named_alongside_hidden(community) {
+        format!(
+            "{} (named vetting too: a request that asks for a named statement gets one)",
+            mode.words()
+        )
+    } else {
+        mode.words().to_string()
+    }
+}
+
 /// Issue `pending` under `mode`, and show it. `lead` goes first: a switch of mode to say.
 fn mint_ticket(
     state: &mut State,
@@ -3594,7 +3709,7 @@ fn mint_ticket(
          It admits {uses} request{} for 14 days.",
         lead.map(|l| format!("{l} ")).unwrap_or_default(),
         membership.name,
-        mode.words(),
+        ticket_mode_words(&config.private.vetting, &membership.community, mode),
         if uses == 1 { "" } else { "s" }
     );
     dispatch_util::save_and_sync(
