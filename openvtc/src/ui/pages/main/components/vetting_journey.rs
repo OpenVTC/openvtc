@@ -347,6 +347,7 @@ mod tests {
                 next_step: None,
                 join_did: "did:key:zA".into(),
                 requirements: Some("2 statements".into()),
+                criterion: None,
                 progress: None,
                 satisfied: false,
                 face: None,

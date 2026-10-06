@@ -25,10 +25,11 @@ use openvtc_core::persona::{binding, pool, profile};
 use openvtc_core::vetting::VettingBook;
 use openvtc_core::vetting::applicant::{
     Application, ChosenFace, GrantStatus, NextStep, RequestDraft, RequestState, SentCard,
-    VetterEligibility,
+    VetterEligibility, VettingPath,
 };
 use openvtc_core::vetting::book::{
-    Adopted, DrawHold, FALLBACK_REQUIRED_CLAIMS, HiddenOutlook, HiddenVetterState,
+    Adopted, CriterionPaths, DrawHold, FALLBACK_REQUIRED_CLAIMS, HiddenOutlook, HiddenVetterState,
+    RequestVetting,
 };
 use openvtc_core::vetting::mode::{ModeFailure, VetterMode, age_words};
 use openvtc_core::vetting::queries::{
@@ -369,6 +370,18 @@ fn clause(text: &str) -> &str {
 /// once, not that the community still counts proofs.
 pub(crate) fn hides_vetters(book: &VettingBook, community: &str) -> bool {
     book.pcs_zkp(community)
+}
+
+/// Why a request cannot be attested at all: it carries no PCS identifier, under a criterion
+/// that counts a PCS ZKP proof and nothing else — and what the applicant does about it.
+pub(crate) fn hidden_without_id_words(criterion: &str) -> String {
+    format!(
+        "Cannot attest: this request carries no hidden-vetting identifier, and criterion \
+         {criterion} accepts only a PCS ZKP proof — not a named statement — so there is nothing \
+         to attest to. Nothing was sent; the request stays open. Ask the applicant to refresh \
+         their requirements (m) and send you a new request: the identifier travels in the \
+         request, so a new card alone does not carry it."
+    )
 }
 
 /// Where `persona` stands for PCS ZKP attesting at `community`, in words, and whether that
@@ -818,6 +831,7 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                     }
                     line
                 }),
+                criterion: criterion_words(book, app),
                 progress: evaluation.as_ref().map(progress_line),
                 satisfied: evaluation.as_ref().is_some_and(Evaluation::satisfied),
                 face: app.face.as_ref().map(|f| f.name.clone()),
@@ -946,7 +960,8 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
                 applicant: entry.applicant.clone(),
                 applicant_name: name(&entry.applicant),
                 community: entry.community.clone(),
-                pcs_zkp: book.pcs_zkp(&entry.community),
+                pcs_zkp: book.pcs_zkp(&entry.community)
+                    && book.request_vetting(&entry.request_id) == RequestVetting::Hidden,
                 pcs_tokens: pcs_tokens_line(book, &entry.community, entry.persona, now)
                     .map(|(line, _)| line),
                 pcs_events: book
@@ -1109,7 +1124,8 @@ pub(crate) fn sync_journey(vetting: &mut VettingState, config: &Config, now: Dat
                     ),
                     community_display(config, &entry.community)
                 ),
-                pcs_zkp: book.pcs_zkp(&entry.community),
+                pcs_zkp: book.pcs_zkp(&entry.community)
+                    && book.request_vetting(&entry.request_id) == RequestVetting::Hidden,
                 steps: JourneySteps::Vetter(steps, ending),
             }
         }),
@@ -1560,6 +1576,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             // vetters. Asking here is what lets a vetter-only member reach the mode at all.
             refresh_vetter_side(ctx).await;
         }
+        VettingAction::SwitchVettingPath => switch_vetting_path(ctx),
         VettingAction::RefreshVetterSide => refresh_vetter_side(ctx).await,
         VettingAction::OpenHiddenVetting => {
             if page(ctx).hidden.is_empty() {
@@ -2098,6 +2115,105 @@ fn spawn_send(ctx: &mut ActionCtx<'_>, message: Message, from: &str, to: &str, s
     );
 }
 
+/// The criterion `app` gathers for and the path it takes, in words, and a note when one is
+/// owed. `None` before its requirements are known.
+pub(crate) fn criterion_words(
+    book: &VettingBook,
+    app: &Application,
+) -> Option<(String, Option<String>)> {
+    let shown = book.application_vetting(&app.id)?;
+    let mut line = shown.criterion_id.clone();
+    if let Some(description) = &shown.description {
+        line.push_str(&format!(" — {}", sanitize_display(description, 120)));
+    }
+    line.push_str(&format!(" · {}", shown.path.words()));
+    let options = book.vetting_options(&app.community);
+    if options.len() > 1 {
+        line.push_str(&format!(
+            " · {} ways to be vetted here{}",
+            options.len(),
+            if app.holds_evidence() {
+                ""
+            } else {
+                ", p switches"
+            }
+        ));
+    }
+    let note = if let Some(previous) = &app.criterion_repicked {
+        Some(format!(
+            "The community no longer publishes criterion {previous}; this application now \
+             gathers for {} instead.",
+            shown.criterion_id
+        ))
+    } else if shown.path == VettingPath::Named && shown.paths == CriterionPaths::Either {
+        Some(format!(
+            "This criterion also accepts PCS ZKP, which names no vetter; this application uses \
+             named vetting{}.",
+            if app.holds_evidence() {
+                " — the statements it holds were made that way"
+            } else if app.under_way() {
+                " (its requests went out named). p switches to PCS ZKP; then send your vetter a \
+                 new request"
+            } else {
+                ". p switches to PCS ZKP"
+            }
+        ))
+    } else if shown.path == VettingPath::Named && book.pcs_zkp(&app.community) {
+        Some(format!(
+            "This community also accepts PCS ZKP vetting; your application uses criterion {} \
+             (named).",
+            shown.criterion_id
+        ))
+    } else {
+        None
+    };
+    Some((line, note))
+}
+
+/// `p` on an application: move it to the next way its community offers to be vetted, and say
+/// what that means for the requests already out.
+fn switch_vetting_path(ctx: &mut ActionCtx<'_>) {
+    let v = page(ctx);
+    let Some(row) = v.applications.get(v.selected).cloned() else {
+        return;
+    };
+    let had_requests = ctx
+        .config
+        .private
+        .vetting
+        .applications
+        .iter()
+        .any(|a| a.id == row.id && !a.requests.is_empty());
+    match ctx.config.private.vetting.switch_vetting(&row.id) {
+        Ok(now) => {
+            let resend = if had_requests {
+                match now.path {
+                    VettingPath::Hidden => {
+                        " The requests already sent went out named, so they cannot carry the \
+                         identifier a PCS ZKP attestation is made to: send your vetter a new \
+                         request (r)."
+                    }
+                    VettingPath::Named => {
+                        " Requests already sent asked for a PCS ZKP attestation: send your \
+                         vetter a new request (r)."
+                    }
+                }
+            } else {
+                ""
+            };
+            persist(
+                ctx,
+                format!(
+                    "This application now uses criterion {} with {}.{resend}",
+                    now.criterion_id,
+                    now.path.words()
+                ),
+            );
+        }
+        Err(why) => status(ctx, why),
+    }
+}
+
 async fn refresh_requirements(ctx: &mut ActionCtx<'_>, application_id: &str) {
     let Some(app) = ctx
         .config
@@ -2201,16 +2317,22 @@ async fn start_application(
         }
         Err(e) => return status(ctx, format!("Could not start the application: {e}")),
     };
-    ctx.config
+    // Said, not dropped (R6.4): a criterion this build cannot honour is the one thing that
+    // makes this application gather evidence the community will not count.
+    let unadopted = ctx
+        .config
         .private
         .vetting
-        .adopt_known_requirements(&application_id);
+        .adopt_known_requirements(&application_id)
+        .err()
+        .map(|e| format!(" Its requirements could not be taken up: {e}."))
+        .unwrap_or_default();
     {
         let v = page(ctx);
         v.mode = VettingMode::List;
         v.tab = VettingTab::Applications;
     }
-    persist(ctx, "Application started.");
+    persist(ctx, format!("Application started.{unadopted}"));
     if let Some(i) = page(ctx)
         .applications
         .iter()
@@ -3538,6 +3660,21 @@ async fn issue_ticket(ctx: &mut ActionCtx<'_>, membership_index: usize, uses_ind
     );
 }
 
+/// What a ticket issued under `mode` promises, in words. A community running PCS ZKP alongside
+/// named vetters gets requests of both kinds — an applicant picks its path, and defaults to PCS
+/// ZKP — so the ticket says so rather than promising a proof every time. The token gate still
+/// holds there: most requests will ask for a proof.
+pub(crate) fn ticket_mode_words(book: &VettingBook, community: &str, mode: VetterMode) -> String {
+    if mode == VetterMode::PcsZkp && book.named_alongside_hidden(community) {
+        format!(
+            "{} (named vetting too: a request that asks for a named statement gets one)",
+            mode.words()
+        )
+    } else {
+        mode.words().to_string()
+    }
+}
+
 /// Issue `pending` under `mode`, and show it. `lead` goes first: a switch of mode to say.
 fn mint_ticket(
     state: &mut State,
@@ -3574,7 +3711,7 @@ fn mint_ticket(
          It admits {uses} request{} for 14 days.",
         lead.map(|l| format!("{l} ")).unwrap_or_default(),
         membership.name,
-        mode.words(),
+        ticket_mode_words(&config.private.vetting, &membership.community, mode),
         if uses == 1 { "" } else { "s" }
     );
     dispatch_util::save_and_sync(
@@ -4494,20 +4631,32 @@ async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &AttestForm) {
     //
     // Only while the community runs PCS ZKP now: an engine says we enrolled once, and a
     // community that has switched back to named vetting counts signed statements, not proofs.
+    //
+    // And only for a request that asked for it. A community may publish hidden vetting
+    // alongside named vetters, so the request decides, not the community: one carrying the
+    // applicant's PCS identifier gets a proof, one without gets a named statement — unless the
+    // criterion it names takes the proof alone, when there is nothing to attest to.
     let book = &ctx.config.private.vetting;
-    if hides_vetters(book, &entry.community)
+    let hidden_request = match book.request_vetting(request_id) {
+        RequestVetting::Hidden => hides_vetters(book, &entry.community),
+        RequestVetting::Named { .. } => false,
+        RequestVetting::HiddenWithoutId { criterion } => {
+            return status(ctx, hidden_without_id_words(&criterion));
+        }
+        RequestVetting::Unreadable(e) => return status(ctx, format!("Cannot attest: {e}")),
+    };
+    if hidden_request
         && book
             .hidden_vetter(&entry.community, entry.persona)
             .is_some()
     {
         return attest_hidden(ctx, request_id, &entry, &vetter_did, attestation, now).await;
     }
-    // The community hides its vetters but this vetter is not enrolled yet:
+    // The request asks for a proof but this vetter is not enrolled yet:
     // signing now would make a named statement — one the applicant's
     // hidden-vetting application cannot use, carrying this vetter's DID to a
     // community that promised not to need it. Enrol first.
-    let book = &ctx.config.private.vetting;
-    if hides_vetters(book, &entry.community) {
+    if hidden_request {
         page(ctx).mode = VettingMode::List;
         status(
             ctx,
@@ -7675,5 +7824,76 @@ mod tests {
         assert_eq!(v.tickets.len(), 1);
         assert!(v.tickets[0].live);
         assert!(v.documentation.iter().any(|d| d == "none"));
+    }
+
+    /// first-vtc's live manifest: `vetted-member` runs PCS ZKP alongside named vetters.
+    fn first_vtc_book() -> (VettingBook, String) {
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../openvtc-core/tests/fixtures/first-vtc-manifest-0.3.json"
+        ))
+        .unwrap();
+        let payload = document["payload"].clone();
+        let community = payload["communityDid"].as_str().unwrap().to_string();
+        let protocol = openvtc_core::vetting::protocol::JoinProtocol::V0_3;
+        let (parsed, meta) =
+            openvtc_core::vetting::protocol::read_manifest(protocol, &payload).unwrap();
+        let mut book = VettingBook::default();
+        let now = Utc::now();
+        book.learn_manifest_in(&community, &parsed, Some(protocol), &meta, now);
+        book.learn_mode(&community, &payload, None, now);
+        (book, community)
+    }
+
+    /// A request that cannot be attested says why, under which criterion, and what the
+    /// applicant does — not one fixed hint (R6.4).
+    #[test]
+    fn a_request_without_an_identifier_under_a_hidden_only_criterion_says_what_to_do() {
+        let words = hidden_without_id_words("vetted-member");
+        assert!(words.contains("criterion vetted-member"), "{words}");
+        assert!(words.contains("accepts only a PCS ZKP proof"), "{words}");
+        assert!(words.contains("refresh their requirements (m)"), "{words}");
+        assert!(words.contains("send you a new request"), "{words}");
+    }
+
+    /// The application names its criterion and path, and a named one under a criterion that
+    /// also offers PCS ZKP says so — the two badges no longer contradict each other unexplained.
+    #[test]
+    fn an_application_shows_its_criterion_and_path() {
+        let (mut book, community) = first_vtc_book();
+        let persona = PersonaId::new();
+        let id = book
+            .start_application(&community, persona, "did:key:zA", Utc::now())
+            .unwrap()
+            .id
+            .clone();
+        book.adopt_known_requirements(&id).unwrap();
+        let app = book.applications[0].clone();
+        let (line, note) = criterion_words(&book, &app).unwrap();
+        assert_eq!(
+            line,
+            "vetted-member — One vetter must confirm who you are · PCS ZKP · 2 ways to be \
+             vetted here, p switches"
+        );
+        assert!(note.is_none());
+
+        // The live case: a named application whose request already went out.
+        book.switch_vetting(&id).unwrap();
+        let app = book.applications[0].clone();
+        let (line, note) = criterion_words(&book, &app).unwrap();
+        assert!(line.contains("· named vetting ·"), "{line}");
+        let note = note.expect("named where PCS ZKP is on offer is explained");
+        assert!(note.contains("also accepts PCS ZKP"), "{note}");
+    }
+
+    /// A ticket where PCS ZKP runs alongside named vetting does not promise a proof every time.
+    #[test]
+    fn a_ticket_in_a_community_offering_both_paths_says_so() {
+        let (book, community) = first_vtc_book();
+        let words = ticket_mode_words(&book, &community, VetterMode::PcsZkp);
+        assert!(words.starts_with("PCS ZKP (named vetting too"), "{words}");
+        assert_eq!(
+            ticket_mode_words(&VettingBook::default(), &community, VetterMode::PcsZkp),
+            "PCS ZKP"
+        );
     }
 }

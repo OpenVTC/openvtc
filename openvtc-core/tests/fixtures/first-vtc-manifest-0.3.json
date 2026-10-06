@@ -1,0 +1,97 @@
+{
+  "id": "urn:uuid:958a3d11-9f82-47a2-a21e-0147e41cb69b",
+  "issuedAt": "2026-10-06T04:27:37Z",
+  "issuer": "did:webvh:Qme5ThEEr1qRLRHYMrcrmjecG3znC8FBPEoswuSjebFkhx:webvh.storm.ws:first-vtc",
+  "payload": {
+    "communityDid": "did:webvh:Qme5ThEEr1qRLRHYMrcrmjecG3znC8FBPEoswuSjebFkhx:webvh.storm.ws:first-vtc",
+    "criteria": [
+      {
+        "admission": "automatic",
+        "description": "Invited by this community",
+        "id": "invited",
+        "invitationRequired": true,
+        "requirementsDigest": "zQmQn96RqUtEvrotxBniT2zymX4W7kXBmnWiiAmbJemqpoi"
+      },
+      {
+        "admission": "automatic",
+        "credentialIssuers": "recognised",
+        "description": "A member of this community, or of a community it recognises",
+        "id": "member-credential",
+        "presentationDefinition": {
+          "credentials": [
+            {
+              "format": "ldp_vc",
+              "id": "membership",
+              "meta": {
+                "type_values": [
+                  [
+                    "MembershipCredential"
+                  ]
+                ]
+              }
+            }
+          ]
+        },
+        "requirementsDigest": "zQmVfGUEwdZNbUpEtaxyxyafdrXLgAXc6THGxQYWQSGEJso"
+      },
+      {
+        "admission": "review",
+        "description": "Reviewed by an administrator",
+        "id": "review",
+        "requirementsDigest": "zQmV4x4TRAZFNpuqGBgS17EFy1UxRNdD7DpyuTbegBRPeEC"
+      },
+      {
+        "admission": "automatic",
+        "description": "One vetter must confirm who you are",
+        "id": "vetted-member",
+        "requirementsDigest": "zQmTM6jvqtsPUxPWgocENRwKbuBAfNqV1KuS2qZTQjvypsn",
+        "vetting": {
+          "acceptedMethods": [
+            "inPerson",
+            "video"
+          ],
+          "eligibleVetters": {
+            "role": "vetter"
+          },
+          "ext": {
+            "org.openvtc.hidden-vetting": {
+              "dripPerTick": 20,
+              "events": [],
+              "helperKey": "zMyehTmhztkXHpwoWC14JcDm53R7V5DcgdCQE5FceQyJXDbCQj88cHNtf16HuWn6jMBhp3zbMzF7x2V7sM6mLnJDR8oQa4DXz2AYLdT3HUntkpCJGiw4UM6Ki7RiFTtjR1KgCY2fft1S1v4JPgAd5r7YBArWDVgN8fe7ByJ7rafbTdddkbz2JtPxjcjaek49zw5vQZGvAVSsGrsajNUQMqtvyer2LApvAnfH1LZZ4SvueNRypYVjMMDbPbj9fWAbxZ88CTnr2B9EzrSpoPgKbzAJKU4rHXyz6ptAEudVrS3Sg2bfNzDrWHKP7qgjLZ7GGU22tLQwwwTFZjnetpU4ogskVbyihVrtQbHmyZ9ApLBmnSbqR4a2gZajRYYLMPMw28JHTt8QX9APmJGLKpaaY1pfQ8ahv94obrTsetoUSrK8iAuXjwx8yhbNZnYu6KXQjkXXEbFs9v7o",
+              "suite": "ps-ddh-bls12381",
+              "tickLength": "PT1H",
+              "tokenKey": "zNYE4UwYLhmZ18mNESKZhB9WxFZ9WfbijFdJcUQfCVSLRqnJHXpEufXd62z4V8NDVwaihnQZC9XcKJTiaxbR5P1EHNEwRuzPCBRG921usCCKyS18DNp6cfXdDUHdrhDZPK4yuU9mvRxY2pc9Mjjmj24HnTKvmLvNhGHDp8FCVqj8vNn4Qhtz29f6tjdnFZmo4jBpE5ukGmFmB9tzb87WnuALtUJBsJhghiKjcuSx2AfTftakvCfQFFHnAxr2MkKPEAWFmd9SZZ7bPhS8NLT4dxHdjeZ1YWS3zs4DUZLhGCRTPU93sPZ24x3SXdiBeNfwjvfEWTpZtGrEnCdtnre9Uw3S4LkX7iqFfuPaU599ARTgiqxJ4UEWecM2dRC8cvQJTaKWDCkrr5k5o3giJr2MKyGsvJzzCZ6w2YHv2tcqrEWFNQ6C3ejZuWevK44RYRpzTr9ig7PneY7v",
+              "tokenLabels": [
+                "token/2026-10"
+              ],
+              "vetterLabels": [
+                "vetter/2026-10"
+              ]
+            }
+          },
+          "independence": {
+            "requireConsistentIdentityCommitment": true
+          },
+          "invitation": "optional",
+          "maxStatementAge": "P120D",
+          "minStatements": 1,
+          "requiredClaims": [
+            "name.legal"
+          ],
+          "statementType": "https://registry.trustoverip.org/dtg/vsc/vetted/1",
+          "version": "0.1"
+        }
+      }
+    ]
+  },
+  "proof": {
+    "created": "2026-10-06T04:27:37Z",
+    "cryptosuite": "eddsa-jcs-2022",
+    "proofPurpose": "authentication",
+    "proofValue": "z3RjZ1gR3Pe8z9ZNQw7DG4faNNg6yqvxjWBfZp82coZbCK7RiiWmZ2oHWEqCHZcKHBTqx8x5NjCR29qHywhffHt6Y",
+    "type": "DataIntegrityProof",
+    "verificationMethod": "did:webvh:Qme5ThEEr1qRLRHYMrcrmjecG3znC8FBPEoswuSjebFkhx:webvh.storm.ws:first-vtc#key-0"
+  },
+  "threadId": "urn:uuid:030c8141-ac4a-478b-8a7b-3d1f61ac66b3",
+  "type": "https://trusttasks.org/spec/vtc/join-requests/manifest/0.3#response"
+}

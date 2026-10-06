@@ -277,6 +277,21 @@ pub fn read_mode(raw: &Value) -> Result<Mode, HiddenError> {
     Ok(Mode::Hidden(Box::new(params)))
 }
 
+/// Whether a criterion **as received** still counts named statements: everything except one
+/// that marks this namespace in `extCritical`.
+///
+/// A community that publishes hidden-vetting parameters in `ext` alone runs them *alongside*
+/// named vetters — the VTC's own manifest never marks them critical, precisely so a named
+/// applicant is not locked out (its §16, "On, alongside named vetters"). Only a criterion that
+/// marks the namespace critical asks for the proof and nothing else.
+#[must_use]
+pub fn accepts_named(raw: &Value) -> bool {
+    !raw.get("vetting")
+        .and_then(|v| v.get("extCritical"))
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.iter().any(|ns| ns.as_str() == Some(HIDDEN_VETTING_NS)))
+}
+
 // ---------------------------------------------------------------------------------------------
 // Driving the flow
 // ---------------------------------------------------------------------------------------------
@@ -1234,6 +1249,7 @@ mod tests {
             requirements_digest: None,
             requirements: serde_json::from_value(raw["vetting"].clone()).expect("requirements"),
             fetched_at: chrono::Utc::now(),
+            description: None,
         };
         assert!(known(&as_the_service_serves_it()).hidden_vetting());
 

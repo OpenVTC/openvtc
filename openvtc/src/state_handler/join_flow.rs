@@ -33,7 +33,7 @@ use openvtc_core::vetting::guide::describe_requirements;
 use openvtc_core::vetting::queries::{CommunityAnswer, CommunityQuery, QueryKind};
 use openvtc_core::vetting::wire;
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
-use tracing::debug;
+use tracing::{debug, warn};
 use vta_sdk::{
     client::VtaClient,
     protocols::did_management::create::WebvhPathMode,
@@ -946,7 +946,9 @@ async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Resul
         .filter(|a| a.community == vtc_did)
     {
         if let Err(e) = application.adopt_manifest(&manifest, &raw) {
-            debug!(community = %vtc_did, error = %e, "community manifest not adopted");
+            // Not debug-only: an application that cannot take up its criterion gathers
+            // evidence for the wrong one. The vetting page re-reads it (m) and says why.
+            warn!(community = %vtc_did, error = %e, "community manifest not adopted");
         }
     }
     Ok(())
@@ -1134,7 +1136,13 @@ fn apply_for_vetting(
         }
         Err(e) => return Err(format!("Could not start the application: {e}")),
     };
-    book.adopt_known_requirements(&id);
+    // Said, not dropped (R6.4): a criterion this build cannot honour is the one thing that
+    // makes the application below gather evidence the community will not count.
+    let unadopted = book
+        .adopt_known_requirements(&id)
+        .err()
+        .map(|e| format!(" Its requirements could not be taken up: {e}."))
+        .unwrap_or_default();
     let next = book
         .applications
         .iter()
@@ -1148,7 +1156,7 @@ fn apply_for_vetting(
         &id,
         format!(
             "Application to {name} started as {}. Next: {next}. The join to {name} is not lost — \
-             press j here to take it up again, without finding that DID a second time.",
+             press j here to take it up again, without finding that DID a second time.{unadopted}",
             applicant.label
         ),
     );
@@ -5774,7 +5782,11 @@ mod vetting_tests {
             .unwrap()
             .id
             .clone();
-        config.private.vetting.adopt_known_requirements(&id);
+        config
+            .private
+            .vetting
+            .adopt_known_requirements(&id)
+            .unwrap();
         let view = vetting_view(&config, VTC, &[], None, now).unwrap();
         let VettingPhase::Known(known) = &view.phase else {
             panic!("known");
@@ -5811,7 +5823,11 @@ mod vetting_tests {
                 .unwrap()
                 .id
                 .clone();
-            config.private.vetting.adopt_known_requirements(&id);
+            config
+                .private
+                .vetting
+                .adopt_known_requirements(&id)
+                .unwrap();
         }
 
         let view = vetting_view(&config, VTC, &[], None, now).unwrap();
