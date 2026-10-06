@@ -9,13 +9,16 @@
 //! 1. **A credential of its own** ([`SignerCredential::generate`],
 //!    [`grant_signer`]). openvtc mints a fresh
 //!    `did:key` and grants it, through its admin session, `admin` of the
-//!    persona's own context narrowed to [`SIGNER_CAPABILITIES`] — the one
-//!    capability signing needs (`keys/export-secret` is gated on `key-export`
-//!    in the key's own scope). did-git-sign never holds openvtc's account
+//!    persona's own context narrowed to [`SIGNER_CAPABILITIES`]: `sign-sshsig`,
+//!    so the VTA signs each commit (`keys/sign-sshsig/0.1`) and the persona's
+//!    key never leaves it. A VTA that predates that task gets
+//!    [`LEGACY_SIGNER_CAPABILITIES`] instead (`key-export`, for the key to be
+//!    fetched at sign time). did-git-sign never holds openvtc's account
 //!    credential, which is admin of every persona's context; revoking signing
 //!    is revoking that one entry. The grant is proven before anything is
-//!    stored: the new credential connects and fetches the key, and the key
-//!    must be the one the persona's DID document publishes.
+//!    stored: the new credential connects, has the VTA sign (or, on an older
+//!    VTA, fetches the key), and the signature must verify under the key the
+//!    persona's DID document publishes.
 //! 2. **A named profile** ([`install_identity`]): the credential in the OS
 //!    keyring under the persona's `did:…#key-N`, its key in `allowed_signers`,
 //!    a profile in `profiles.json`, and its include file — exactly what
@@ -46,9 +49,18 @@ use crate::config::KeyBackend;
 use crate::errors::OpenVTCError;
 use crate::git_workspace::CheckoutFacts;
 
-/// What the signer's ACL entry is narrowed to: taking the persona's signing
-/// key out of the VTA, and nothing else a capability gates.
-pub const SIGNER_CAPABILITIES: &[&str] = &["key-export"];
+/// What the signer's ACL entry is narrowed to: asking the VTA for an SSHSIG
+/// signature (git's SSH commit-signing format) with the persona's key, and
+/// nothing else a capability gates. The key never leaves the VTA, and the VTA
+/// signs only SSHSIG statements for it — never bytes of the caller's choosing.
+pub const SIGNER_CAPABILITIES: &[&str] = &["sign-sshsig"];
+
+/// The narrowing for a VTA that predates `keys/sign-sshsig`: taking the key
+/// out of the VTA at sign time, which is all such a VTA offers did-git-sign.
+pub const LEGACY_SIGNER_CAPABILITIES: &[&str] = &["key-export"];
+
+/// The task a VTA serves when it can sign commits itself.
+const SIGN_SSHSIG_SLUG: &str = "keys/sign-sshsig";
 
 /// The `did-git-sign` release whose CLI has `enable --profile` (0.14).
 pub const MIN_BINARY: (u32, u32) = (0, 14);
@@ -140,17 +152,42 @@ pub fn stored_credential(did_key_id: &str) -> Option<SignerCredential> {
         })
 }
 
-/// The ACL entry [`grant_signer`] asks for.
-pub fn signer_grant(did: &str, context: &str, label: &str) -> CreateAclRequest {
+/// The ACL entry [`grant_signer`] asks for, narrowed to `capabilities`
+/// ([`SIGNER_CAPABILITIES`], or [`LEGACY_SIGNER_CAPABILITIES`] for a VTA that
+/// cannot sign commits itself).
+pub fn signer_grant(
+    did: &str,
+    context: &str,
+    label: &str,
+    capabilities: &[&str],
+) -> CreateAclRequest {
     CreateAclRequest::new(did, "admin")
         .contexts(vec![context.to_string()])
         .label(format!("did-git-sign · {label} (openvtc)"))
-        .capabilities(
-            SIGNER_CAPABILITIES
-                .iter()
-                .map(|c| (*c).to_string())
-                .collect(),
-        )
+        .capabilities(capabilities.iter().map(|c| (*c).to_string()).collect())
+}
+
+/// Whether the VTA signs commits itself (`keys/sign-sshsig`), from its own
+/// dispatch table (`trust-task-discovery`). An answer that does not list it —
+/// or no answer — means an older VTA, which gets the legacy grant: a grant
+/// naming a capability it does not know would be refused outright.
+pub async fn vta_signs_sshsig(client: &VtaClient) -> bool {
+    match tokio::time::timeout(
+        VTA_TIMEOUT,
+        client.supported_trust_tasks(&[SIGN_SSHSIG_SLUG]),
+    )
+    .await
+    {
+        Ok(Ok(answer)) => answer
+            .supported_types
+            .iter()
+            .any(|t| t.contains(&format!("/{SIGN_SSHSIG_SLUG}/"))),
+        Ok(Err(e)) => {
+            tracing::debug!("trust-task-discovery failed; granting the legacy signer: {e}");
+            false
+        }
+        Err(_) => false,
+    }
 }
 
 /// Refuse a context whose admin would reach other personas' keys.
@@ -187,13 +224,21 @@ async fn timed<T>(
     }
 }
 
-/// Prove `cred` can do what signing does: connect to the VTA as it, fetch the
-/// signing key, and find it is the key the persona publishes.
+/// Prove `cred` can do what signing does: connect to the VTA as it, have it
+/// sign, and find the signature verifies under the key the persona publishes.
+///
+/// It asks for what did-git-sign will ask for: an SSHSIG signature
+/// (`keys/sign-sshsig`), checked here against the persona's published key, so
+/// the key never leaves the VTA. A VTA without that task, or a credential
+/// granted before it existed (narrowed to `key-export`), is proven the older
+/// way — the key is fetched and compared — which is also what did-git-sign's
+/// default `auto` signer falls back to for them.
 ///
 /// # Errors
 ///
-/// When the connection, the export, or the comparison fails — each said
-/// separately, so a refused grant never reads as a network fault (R6.4).
+/// When the connection, the signature, the export, or the comparison fails —
+/// each said separately, so a refused grant never reads as a network fault
+/// (R6.4).
 pub async fn verify_signer(
     cred: &SignerCredential,
     signer: &PersonaSigner,
@@ -210,12 +255,17 @@ pub async fn verify_signer(
         }),
     )
     .await?;
+    let remote = prove_remote_signing(&connected.client, signer).await;
+    if !matches!(remote, Ok(RemoteProof::NotOffered)) {
+        // A DIDComm session must be closed, whatever the answer was.
+        connected.client.shutdown().await;
+        return remote.map(|_| ());
+    }
     let secret = timed(
         "the VTA refused the signing credential the persona's key",
         connected.client.get_key_secret(&signer.vta_key_id),
     )
     .await;
-    // A DIDComm session must be closed, whatever the answer was.
     connected.client.shutdown().await;
     let secret = secret?;
     if secret.key_type != vta_sdk::keys::KeyType::Ed25519 {
@@ -234,6 +284,61 @@ pub async fn verify_signer(
         )));
     }
     Ok(())
+}
+
+/// What asking the VTA to sign proved.
+enum RemoteProof {
+    /// It signed, and the signature verifies under the persona's key.
+    Signed,
+    /// Not on offer for this credential: the VTA has no `keys/sign-sshsig`, or
+    /// the credential may not use it (one narrowed to `key-export`).
+    NotOffered,
+}
+
+/// The digest the proof signs: SHA-512 of a fixed statement. What is signed is
+/// an SSHSIG statement in the `git` namespace over it, which says nothing a
+/// commit could be mistaken for.
+const PROOF_MESSAGE: &[u8] = b"openvtc: proving did-git-sign's credential can sign";
+
+async fn prove_remote_signing(
+    client: &VtaClient,
+    signer: &PersonaSigner,
+) -> Result<RemoteProof, OpenVTCError> {
+    use did_git_sign::vta::{RemoteSignature, sign_sshsig};
+    let hash = vgi_core::sshsig_message_hash(PROOF_MESSAGE);
+    let answer = tokio::time::timeout(VTA_TIMEOUT, sign_sshsig(client, &signer.vta_key_id, &hash))
+        .await
+        .map_err(|_| {
+            OpenVTCError::Config(format!(
+                "the VTA did not sign within {} s",
+                VTA_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| OpenVTCError::Config(format!("the VTA refused to sign: {e}")))?;
+    let raw = match answer {
+        RemoteSignature::Signed(raw) => raw,
+        RemoteSignature::Unsupported | RemoteSignature::NotPermitted(_) => {
+            return Ok(RemoteProof::NotOffered);
+        }
+    };
+    // The bytes the VTA signed are SSHSIG's signed data over the digest; check
+    // the signature over them with the persona's published key.
+    use ed25519_dalek_bip32::ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let key = VerifyingKey::from_bytes(&signer.verifying_key)
+        .map_err(|e| OpenVTCError::Config(format!("the persona's published key: {e}")))?;
+    let signature = Signature::from_slice(&raw)
+        .map_err(|e| OpenVTCError::Config(format!("the VTA's signature: {e}")))?;
+    key.verify(
+        &vgi_core::sshsig_signed_data(vgi_core::GIT_SSHSIG_NAMESPACE, &hash),
+        &signature,
+    )
+    .map_err(|_| {
+        OpenVTCError::Config(format!(
+            "the VTA's key {} is not the key {} publishes; refusing to sign with it",
+            signer.vta_key_id, signer.did_key_id
+        ))
+    })?;
+    Ok(RemoteProof::Signed)
 }
 
 /// Grant `cred` ([`SignerCredential::generate`]) the persona's context.
@@ -256,9 +361,19 @@ pub async fn grant_signer(
     top_context_id: &str,
 ) -> Result<(), OpenVTCError> {
     check_context(&signer.context, top_context_id)?;
+    let capabilities = if vta_signs_sshsig(client).await {
+        SIGNER_CAPABILITIES
+    } else {
+        LEGACY_SIGNER_CAPABILITIES
+    };
     timed(
         "the VTA refused to grant did-git-sign the persona's context",
-        client.create_acl(signer_grant(&cred.did, &signer.context, &signer.label)),
+        client.create_acl(signer_grant(
+            &cred.did,
+            &signer.context,
+            &signer.label,
+            capabilities,
+        )),
     )
     .await?;
     if let Err(e) = verify_signer(cred, signer, endpoint).await {
@@ -741,11 +856,17 @@ mod tests {
     }
 
     #[test]
-    fn the_grant_is_narrowed_to_key_export_in_one_context() {
-        let req = signer_grant("did:key:z6Mk", "openvtc/alice", "Alice");
+    fn the_grant_is_narrowed_to_sshsig_signing_in_one_context() {
+        let req = signer_grant(
+            "did:key:z6Mk",
+            "openvtc/alice",
+            "Alice",
+            SIGNER_CAPABILITIES,
+        );
         assert_eq!(req.role, "admin");
         assert_eq!(req.allowed_contexts, vec!["openvtc/alice".to_string()]);
-        assert_eq!(req.capabilities, vec!["key-export".to_string()]);
+        // The key never leaves the VTA: no `key-export`, no general `sign`.
+        assert_eq!(req.capabilities, vec!["sign-sshsig".to_string()]);
         assert!(
             req.label
                 .as_deref()
@@ -753,6 +874,17 @@ mod tests {
                 .contains("did-git-sign")
         );
         assert!(!req.handoff);
+    }
+
+    #[test]
+    fn an_older_vta_gets_the_key_export_grant() {
+        let req = signer_grant(
+            "did:key:z6Mk",
+            "openvtc/alice",
+            "Alice",
+            LEGACY_SIGNER_CAPABILITIES,
+        );
+        assert_eq!(req.capabilities, vec!["key-export".to_string()]);
     }
 
     #[test]
