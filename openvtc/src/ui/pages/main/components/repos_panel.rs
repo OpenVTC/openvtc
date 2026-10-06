@@ -1833,6 +1833,106 @@ mod tests {
         assert!(!out.contains("e sign here"), "{out}");
     }
 
+    /// The rendered text with every wrap and indent collapsed to one space.
+    fn flat(out: &str) -> String {
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn the_protocol_follows_gh_and_says_so() {
+        use openvtc_core::git_workspace::ForgeFacts;
+        let mut v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });
+        v.workspace.settings.protocol = None;
+        v.workspace.forges.insert(
+            "github.com".into(),
+            ForgeFacts {
+                gh_protocol: Some(CloneProtocol::Ssh),
+                https_helper: false,
+            },
+        );
+        let out = flat(&rendered(v.clone()));
+        assert!(
+            out.contains("cloned over SSH (from your gh settings) — w to change"),
+            "{out}"
+        );
+        v.screen = ReposScreen::Repo {
+            resource: "github.com/acme/gadgets".into(),
+        };
+        let out = flat(&rendered(v.clone()));
+        assert!(out.contains("over SSH (from your gh settings)"), "{out}");
+        assert!(!out.contains("no credential helper for"), "{out}");
+
+        // Chosen HTTPS with gh on SSH and no helper: said before the clone.
+        v.workspace.settings.protocol = Some(CloneProtocol::Https);
+        let out = flat(&rendered(v.clone()));
+        assert!(out.contains("Your gh clones github.com over SSH"), "{out}");
+
+        // gh on HTTPS, but no helper: said too.
+        v.workspace.forges.insert(
+            "github.com".into(),
+            ForgeFacts {
+                gh_protocol: Some(CloneProtocol::Https),
+                https_helper: false,
+            },
+        );
+        let out = flat(&rendered(v.clone()));
+        assert!(
+            out.contains("git has no credential helper for github.com"),
+            "{out}"
+        );
+        // A helper: nothing to say.
+        v.workspace.forges.insert(
+            "github.com".into(),
+            ForgeFacts {
+                gh_protocol: Some(CloneProtocol::Https),
+                https_helper: true,
+            },
+        );
+        let out = flat(&rendered(v));
+        assert!(!out.contains("no credential helper for"), "{out}");
+    }
+
+    #[test]
+    fn an_https_checkout_without_a_helper_warns_before_the_push() {
+        let mut v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });
+        v.screen = ReposScreen::Repo {
+            resource: "github.com/acme/gadgets".into(),
+        };
+        v.workspace.checkouts.insert(
+            "github.com/acme/gadgets".into(),
+            checkout(CheckoutSigning::Off, None),
+        );
+        let out = flat(&rendered(v.clone()));
+        assert!(
+            out.contains(
+                "git will ask for a username when you push: no credential helper for github.com"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("R switches this checkout's"), "{out}");
+        assert!(out.contains("R remotes to SSH"), "{out}");
+
+        // A helper applies: no warning.
+        let mut helped = v.clone();
+        if let Some(c) = helped
+            .workspace
+            .checkouts
+            .get_mut("github.com/acme/gadgets")
+        {
+            c.facts.https_helper = Some("osxkeychain".into());
+        }
+        let out = flat(&rendered(helped));
+        assert!(!out.contains("ask for a username"), "{out}");
+        assert!(!out.contains("R remotes to SSH"), "{out}");
+
+        // Over SSH: no warning.
+        if let Some(c) = v.workspace.checkouts.get_mut("github.com/acme/gadgets") {
+            c.facts.origin = Some("git@github.com:acme/gadgets.git".into());
+        }
+        let out = flat(&rendered(v));
+        assert!(!out.contains("ask for a username"), "{out}");
+    }
+
     #[test]
     fn a_repository_shows_its_checkout_and_head() {
         let mut v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });

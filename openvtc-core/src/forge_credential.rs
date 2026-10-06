@@ -908,8 +908,17 @@ pub const GH_CONFIG_TIMEOUT: Duration = Duration::from_secs(5);
 /// missing, fails, outlives `timeout`, or says neither `ssh` nor `https`.
 #[must_use]
 pub fn gh_git_protocol(host: &str, timeout: Duration) -> Option<CloneProtocol> {
+    gh_git_protocol_with(std::ffi::OsStr::new("gh"), host, timeout)
+}
+
+/// [`gh_git_protocol`] with the program to run named, for tests.
+fn gh_git_protocol_with(
+    program: &std::ffi::OsStr,
+    host: &str,
+    timeout: Duration,
+) -> Option<CloneProtocol> {
     let ask = |args: &[&str]| -> Option<CloneProtocol> {
-        let mut cmd = Command::new("gh");
+        let mut cmd = Command::new(program);
         cmd.args(["config", "get", "git_protocol"])
             .args(args)
             .env("GH_PROMPT_DISABLED", "1");
@@ -1030,6 +1039,27 @@ mod tests {
         args.iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn a_missing_or_failing_gh_says_nothing_about_the_protocol() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-gh");
+        assert_eq!(
+            gh_git_protocol_with(missing.as_os_str(), "github.com", Duration::from_secs(5)),
+            None
+        );
+        // A gh that fails (exits non-zero) keeps the built-in default too.
+        if cfg!(unix) {
+            assert_eq!(
+                gh_git_protocol_with(
+                    std::ffi::OsStr::new("false"),
+                    "github.com",
+                    Duration::from_secs(5)
+                ),
+                None
+            );
+        }
     }
 
     #[test]

@@ -1516,6 +1516,24 @@ mod tests {
                 error: None
             })
         );
+        // Tab cycles: automatic → HTTPS → SSH → automatic.
+        let protocol = |s: &State| match &s
+            .main_page
+            .content_panel
+            .repos
+            .view
+            .as_ref()
+            .unwrap()
+            .workspace
+            .form
+        {
+            Some(WorkspaceForm::Settings { protocol, .. }) => *protocol,
+            _ => panic!("the settings form is open"),
+        };
+        reduce(&mut s, &W::SettingsProtocol);
+        assert_eq!(protocol(&s), Some(CloneProtocol::Ssh));
+        reduce(&mut s, &W::SettingsProtocol);
+        assert_eq!(protocol(&s), None);
         reduce(&mut s, &W::Cancel);
         assert!(
             s.main_page
