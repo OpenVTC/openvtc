@@ -184,7 +184,10 @@ affinidi-messaging-test-mediator = "0.18.0"
 # 0.61 / `vti-common` 0.34; **0.50.0** adds VTI #1894 (a TSP reply reaches a
 # sender on another mediator); **0.53.0** is the family on `vta-sdk` 0.63 /
 # `vti-common` 0.37.
-vta-service = { version = "0.53.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
+# 0.54.0: the first release that serves `keys/sign-sshsig/0.1`. did-git-sign's grant
+# narrows to `sign-sshsig` since #475, and the 0.53 mock refused that task
+# (`unsupportedType`), failing `git_signing_e2e` under coverage.
+vta-service = { version = "0.54.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }
