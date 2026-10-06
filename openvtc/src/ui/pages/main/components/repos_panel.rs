@@ -762,9 +762,18 @@ fn render_local(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str
     account_line(lines, view, resource);
     let ws = &view.workspace;
     let Some(checkout) = ws.checkouts.get(resource) else {
-        let dest = RepoCoords::parse(resource)
+        let coords = RepoCoords::parse(resource).ok();
+        let dest = coords
+            .as_ref()
             .map(|c| git_workspace::display_path(&c.default_path(&ws.settings.root)))
             .unwrap_or_default();
+        // The account decides the protocol: a gh token is HTTPS, a key SSH.
+        let protocol = coords.as_ref().map_or(ws.settings.protocol, |c| {
+            ws.settings
+                .credential_for(&view.vtc_did, c)
+                .credential
+                .protocol(ws.settings.protocol)
+        });
         wrapped(
             lines,
             "○",
@@ -773,7 +782,7 @@ fn render_local(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str
                 "Not checked out here. c clones it into {} over {} and makes it sign as you; \
                  u uses a checkout you already have.",
                 sanitize_display(&dest, 512),
-                ws.settings.protocol.label()
+                protocol.label()
             ),
         );
         return;
@@ -1761,6 +1770,77 @@ mod tests {
         let out = rendered(v);
         assert!(out.contains("not this community's persona"), "{out}");
         assert!(out.contains("(profile 'work')"), "{out}");
+    }
+
+    #[test]
+    fn the_forge_account_is_shown_and_picked() {
+        use crate::state_handler::main_page::repos::AccountForm;
+        use openvtc_core::forge_credential::GhAccount;
+        let mut v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });
+        let resource = "github.com/acme/gadgets";
+        v.screen = ReposScreen::Repo {
+            resource: resource.into(),
+        };
+        let out = rendered(v.clone());
+        assert!(out.contains("forge account: git default"), "{out}");
+        assert!(out.contains("nothing chosen"), "{out}");
+
+        let coords = RepoCoords::parse(resource).unwrap();
+        let vtc = v.vtc_did.clone();
+        v.workspace.settings.set_credential(
+            &vtc,
+            &coords,
+            CredentialScope::Forge,
+            Some(ForgeCredential::SshKey {
+                path: "/k/id_work".into(),
+            }),
+        );
+        let out = rendered(v.clone());
+        assert!(out.contains("forge account: SSH key /k/id_work"), "{out}");
+        assert!(
+            out.contains("this community's choice for github.com"),
+            "{out}"
+        );
+        assert!(out.contains("over SSH"), "a key clones over SSH: {out}");
+
+        // A checkout openvtc set up before the choice changed says so.
+        let mut c = checkout(CheckoutSigning::Off, None);
+        c.facts.credential = Some(ForgeCredential::GhAccount {
+            login: "alice".into(),
+        });
+        v.workspace.checkouts.insert(resource.into(), c);
+        let out = rendered(v.clone());
+        assert!(
+            out.contains("This checkout is set to gh account alice"),
+            "{out}"
+        );
+        assert!(out.contains("f forge account"), "{out}");
+
+        v.workspace.form = Some(WorkspaceForm::Account(AccountForm::new(
+            resource.into(),
+            "github.com".into(),
+            None,
+            None,
+            Ok(vec![GhAccount {
+                host: "github.com".into(),
+                login: "alice-work".into(),
+                active: false,
+            }]),
+            vec!["/h/.ssh/id_ed25519".into()],
+            Some("alice-work"),
+        )));
+        let out = rendered(v);
+        assert!(
+            out.contains("Forge account for every github.com repository"),
+            "{out}"
+        );
+        assert!(
+            out.contains("▸ gh account alice-work"),
+            "preselected: {out}"
+        );
+        assert!(out.contains("SSH key /h/.ssh/id_ed25519"), "{out}");
+        assert!(out.contains("Another SSH key"), "{out}");
+        assert!(out.contains("Tab this repository only"), "{out}");
     }
 
     #[test]
