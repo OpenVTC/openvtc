@@ -191,6 +191,13 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **The vetter desk reads the community's vetting mode once the connection is
+  up.** At start-up the question was tried a second or two before the
+  persona's listener connected; that failed send was counted as an ask, so the
+  desk said "could not read how it vets now — no listener installed" for
+  minutes. An unsent question no longer holds the next ask back, and a listener
+  connecting clears it and asks again at once.
+
 - **A vetter attests the way the request asks, and a new application takes up
   hidden vetting.** A community that turns on hidden vetting publishes it in
   `ext`, alongside named vetters, so a criterion can count either a PCS ZKP

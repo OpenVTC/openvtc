@@ -385,11 +385,35 @@ impl VettingBook {
 
     /// Reading `community`'s mode failed. A failure never replaces the reading itself: the
     /// last-known mode stays, shown with its age, and nothing decides on it.
+    ///
+    /// A question that was never sent ([`ModeFailure::Unsent`]) is not an ask: it does not hold
+    /// the next one back. At start-up the persona's listener comes up a second or two after the
+    /// first question is tried, and counting that attempt as asked kept the desk on "could not
+    /// read how it vets now" for minutes after the connection was fine.
     pub fn mode_failed(&mut self, community: &str, failure: ModeFailure, now: DateTime<Utc>) {
-        self.mode_checks
-            .entry(community.to_string())
-            .or_default()
-            .failed = Some((failure, now));
+        let check = self.mode_checks.entry(community.to_string()).or_default();
+        if matches!(failure, ModeFailure::Unsent(_)) {
+            check.asked_at = None;
+        }
+        check.failed = Some((failure, now));
+    }
+
+    /// A persona's listener has connected: whatever could not be sent before can be now. Forget
+    /// the "could not be sent" failures — they described a connection that is back — and ask
+    /// again on the next sweep rather than waiting out the retry budget.
+    pub fn listener_connected(&mut self) {
+        let mut any = false;
+        for check in self.mode_checks.values_mut() {
+            if matches!(check.failed, Some((ModeFailure::Unsent(_), _))) {
+                check.failed = None;
+                check.asked_at = None;
+                any = true;
+            }
+        }
+        if any || !self.hidden_vetter.is_empty() {
+            self.vetter_refresh_failures = 0;
+            self.vetter_refresh_due = true;
+        }
     }
 
     /// Whether `community`'s mode is worth reading again for display: the reading is older than
@@ -553,6 +577,39 @@ mod tests {
         // An answer clears it.
         book.learn_mode(VTC, &manifest(true), Some(VetterMode::PcsZkp), now);
         assert!(book.vetter_mode(VTC).failed.is_none());
+    }
+
+    /// A question that never left (the listener was not up yet) does not hold the next ask
+    /// back, and the listener connecting clears it and asks again at once.
+    #[test]
+    fn an_unsent_question_is_not_an_ask_and_a_connect_asks_again() {
+        let now = Utc::now();
+        let mut book = book_knowing(VTC, now - chrono::Duration::hours(1));
+        book.mode_asked(VTC, now);
+        book.mode_failed(
+            VTC,
+            ModeFailure::Unsent("no listener installed".into()),
+            now,
+        );
+        assert!(
+            book.mode_checks.get(VTC).and_then(|c| c.asked_at).is_none(),
+            "an unsent question is not an ask"
+        );
+        assert!(
+            book.mode_refresh_due(VTC, now),
+            "so the next one is not held back"
+        );
+
+        book.vetter_refresh_due = false;
+        book.listener_connected();
+        assert!(
+            book.vetter_mode(VTC).failed.is_none(),
+            "the failure described a connection that is back"
+        );
+        assert!(
+            book.vetter_refresh_due,
+            "and the mode is asked for again now"
+        );
     }
 
     #[test]

@@ -1951,6 +1951,11 @@ impl StateHandler {
                                 online.remove(listener_id)
                             }
                         };
+                        // A listener that has just come up can carry what could not be sent
+                        // while it was down: re-ask the communities' modes now.
+                        if matches!(ev, didcomm::ListenerStatus::Connected { .. }) {
+                            config.private.vetting.listener_connected();
+                        }
                         let changed = listener_changed | match ev {
                             didcomm::ListenerStatus::Connected { listener_id } => {
                                 session_manager.mark_connected(&listener_id)
