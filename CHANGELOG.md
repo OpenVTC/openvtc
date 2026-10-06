@@ -78,6 +78,19 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Added
 
+- **Choose the forge account a repository clones, fetches and pushes with.**
+  `f` in the Repos view picks, for one repository or for every repository of
+  the community on that forge, a gh CLI account (gh 2.40+), an SSH key from
+  `~/.ssh` (or a typed path), or the git default. The first clone already uses
+  it (`git clone --config`), the checkout keeps it for every later fetch and
+  push, and an existing checkout is updated with `git config --local`. The
+  repository's screen shows which account it uses. A gh account also authors
+  commits as itself (its `users.noreply` address; `a` keeps your own
+  identity). The screen warns when that account is not the one linked to your
+  membership (the community closes its pull requests), and when it cannot push
+  — `F` forks the repository to it and pushes there. Only references (a key
+  path, a gh login) are stored. See `docs/forge-accounts.md`.
+
 - **`--monochrome`** draws without colour, keeping roles apart with bold,
   underline and reverse — the same as setting `NO_COLOR`, as a flag.
 

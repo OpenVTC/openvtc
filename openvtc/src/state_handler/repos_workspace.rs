@@ -23,6 +23,12 @@
 //!   needs: `c` clones, sets did-git-sign up if it is not, and enables the new
 //!   checkout, so a member goes from "not here" to "commits are signed as me"
 //!   in one step.
+//!
+//! `f` chooses the forge account a repository (or every repository of the
+//! community on that forge) uses for clone, fetch and push
+//! ([`openvtc_core::forge_credential`]): looking for gh's accounts and the
+//! keys in `~/.ssh` is a job, and so is storing the choice and writing it into
+//! the checkouts it covers.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -34,17 +40,21 @@ use openvtc_core::config::account::PersonaId;
 use openvtc_core::config::community_context::persona_context;
 use openvtc_core::config::secured_config::KeySourceMaterial;
 use openvtc_core::config::{Config, KeyBackend};
+use openvtc_core::forge_credential::{self, ForgeCredential};
 use openvtc_core::git_signing::{
     self, CheckoutSigning, IdentityStatus, PersonaSigner, SignerCredential, VtaEndpoint,
 };
-use openvtc_core::git_workspace::{self, CLONE_TIMEOUT, RepoCoords, WorkspaceSettings};
+use openvtc_core::git_workspace::{
+    self, CLONE_TIMEOUT, CredentialScope, RepoCoords, WorkspaceSettings,
+};
 use tokio::sync::mpsc::UnboundedSender;
 use vta_sdk::client::VtaClient;
 
 use crate::state_handler::actions::WorkspaceAction as W;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
 use crate::state_handler::main_page::repos::{
-    CheckoutView, ReposScreen, ReposView, Severity, SignerHealth, WorkspaceChange, WorkspaceForm,
+    AccountForm, CheckoutView, ReposScreen, ReposView, Severity, SignerHealth, WorkspaceChange,
+    WorkspaceForm,
 };
 use crate::state_handler::runtime_actions::ActionCtx;
 use crate::state_handler::state::State;
@@ -83,7 +93,16 @@ pub(crate) fn target(view: &ReposView) -> Option<String> {
 pub(crate) fn reduce(state: &mut State, action: &W) -> bool {
     if matches!(
         action,
-        W::Clone | W::Sign | W::Unsign | W::SetUp | W::Confirm | W::SettingsSubmit | W::UseSubmit
+        W::Clone
+            | W::Sign
+            | W::Unsign
+            | W::SetUp
+            | W::Confirm
+            | W::SettingsSubmit
+            | W::UseSubmit
+            | W::AccountStart
+            | W::AccountSubmit
+            | W::Fork
     ) {
         return false;
     }
@@ -140,6 +159,28 @@ pub(crate) fn reduce(state: &mut State, action: &W) -> bool {
                 *error = None;
             }
         }
+        W::AccountPick(pick) => {
+            if let Some(WorkspaceForm::Account(form)) = ws.form.as_mut() {
+                form.pick = (*pick).min(form.visible().len().saturating_sub(1));
+                form.error = None;
+            }
+        }
+        W::AccountAuthor => {
+            if let Some(WorkspaceForm::Account(form)) = ws.form.as_mut() {
+                form.keep_author = !form.keep_author;
+            }
+        }
+        W::AccountScope => {
+            if let Some(WorkspaceForm::Account(form)) = ws.form.as_mut() {
+                form.toggle_scope();
+            }
+        }
+        W::AccountInput(value) => {
+            if let Some(WorkspaceForm::Account(form)) = ws.form.as_mut() {
+                form.path = value.chars().take(MAX_PATH).collect();
+                form.error = None;
+            }
+        }
         W::Copied(text) => {
             let severity = if text.starts_with('✗') {
                 Severity::Error
@@ -154,7 +195,10 @@ pub(crate) fn reduce(state: &mut State, action: &W) -> bool {
         | W::SetUp
         | W::Confirm
         | W::SettingsSubmit
-        | W::UseSubmit => {}
+        | W::UseSubmit
+        | W::AccountStart
+        | W::AccountSubmit
+        | W::Fork => {}
     }
     true
 }
@@ -384,6 +428,25 @@ enum Plan {
     Remove,
     /// Adopt an existing checkout, then sign there.
     Use { coords: RepoCoords, path: PathBuf },
+    /// Fork the repository to the chosen gh account and push there.
+    Fork {
+        coords: RepoCoords,
+        path: PathBuf,
+        login: String,
+    },
+    /// Look for gh's accounts and `~/.ssh`'s keys, then open the picker.
+    Accounts {
+        coords: RepoCoords,
+        linked_login: Option<String>,
+    },
+    /// Store a forge-account choice (`None` removes it) and write it into
+    /// every located checkout it covers, with each one's `origin`.
+    Account {
+        coords: RepoCoords,
+        scope: CredentialScope,
+        credential: Option<ForgeCredential>,
+        checkouts: Vec<(RepoCoords, PathBuf, Option<String>)>,
+    },
 }
 
 /// Everything a job needs, resolved on the loop thread.
@@ -406,8 +469,12 @@ pub(crate) struct WorkspaceOutcome {
     persona: PersonaId,
     /// What to say: done, or why not.
     result: Result<String, String>,
-    /// Settings the job changed (an adopted checkout).
+    /// Settings the job changed (an adopted checkout, a forge account).
     settings: Option<WorkspaceSettings>,
+    /// A form to open (the forge-account picker, once its rows are found).
+    form: Option<WorkspaceForm>,
+    /// `(resource, login, can push)`, when it was checked.
+    push_access: Option<(String, String, bool)>,
 }
 
 impl WorkspaceOutcome {
@@ -419,19 +486,31 @@ impl WorkspaceOutcome {
             return;
         }
         view.workspace.busy = None;
+        if let Some((resource, login, can)) = self.push_access {
+            view.workspace.push_access.insert(resource, (login, can));
+        }
         if let Some(settings) = self.settings {
             view.workspace.settings = settings;
         }
         match self.result {
             Ok(done) => {
-                if matches!(view.workspace.form, Some(WorkspaceForm::UsePath { .. })) {
+                if matches!(
+                    view.workspace.form,
+                    Some(WorkspaceForm::UsePath { .. } | WorkspaceForm::Account(_))
+                ) {
                     view.workspace.form = None;
+                }
+                if let Some(form) = self.form {
+                    view.workspace.form = Some(form);
+                    view.workspace.confirm = None;
                 }
                 view.note(Severity::Success, done);
             }
             Err(e) => {
-                if let Some(WorkspaceForm::UsePath { error, .. }) = view.workspace.form.as_mut() {
-                    *error = Some(e.clone());
+                match view.workspace.form.as_mut() {
+                    Some(WorkspaceForm::UsePath { error, .. }) => *error = Some(e.clone()),
+                    Some(WorkspaceForm::Account(form)) => form.error = Some(e.clone()),
+                    _ => {}
                 }
                 view.note(Severity::Error, e);
             }
@@ -464,7 +543,70 @@ impl WorkspaceJob {
     async fn run(self) -> WorkspaceOutcome {
         let (vtc_did, persona) = (self.vtc_did.clone(), self.persona);
         let mut settings = None;
+        let mut form = None;
         let result = match &self.plan {
+            Plan::Fork {
+                coords,
+                path,
+                login,
+            } => {
+                let (c, p, l) = (coords.clone(), path.clone(), login.clone());
+                blocking(move || {
+                    forge_credential::gh_fork_for_push(&p, &c, &l, forge_credential::FORK_TIMEOUT)
+                })
+                .await
+                .and_then(|r| r)
+                .map(|()| {
+                    format!(
+                        "Forked {} to {login}. `git push` now goes to the fork (remote 'fork'); \
+                         open the pull request from {login}:<branch>.",
+                        git_ns_short(&coords.resource())
+                    )
+                })
+            }
+            Plan::Accounts {
+                coords,
+                linked_login,
+            } => {
+                let (gh, keys) = blocking(|| {
+                    (
+                        forge_credential::gh_accounts(forge_credential::GH_TIMEOUT),
+                        forge_credential::ssh_keys(),
+                    )
+                })
+                .await
+                .unwrap_or_else(|e| (Err(forge_credential::GhError::Failed(e)), Vec::new()));
+                let community = self.settings.credentials.get(&self.vtc_did);
+                let opened = AccountForm::new(
+                    coords.resource(),
+                    coords.host.clone(),
+                    community.and_then(|c| c.repos.get(&coords.resource()).cloned()),
+                    community.and_then(|c| c.forges.get(&coords.host).cloned()),
+                    gh.map_err(|e| e.to_string()),
+                    keys,
+                    linked_login.as_deref(),
+                );
+                form = Some(WorkspaceForm::Account(opened));
+                Ok(format!(
+                    "Choose the account {} uses for clone, fetch and push.",
+                    git_ns_short(&coords.resource())
+                ))
+            }
+            Plan::Account {
+                coords,
+                scope,
+                credential,
+                checkouts,
+            } => match self
+                .choose_account(coords, *scope, credential, checkouts)
+                .await
+            {
+                Ok((updated, done)) => {
+                    settings = Some(updated);
+                    Ok(done)
+                }
+                Err(e) => Err(e),
+            },
             Plan::Clone { coords, dest } => self.clone_and_sign(coords, dest).await,
             Plan::Sign { path } => self.sign(path).await,
             Plan::Unsign { path } => {
@@ -495,11 +637,36 @@ impl WorkspaceJob {
                 Err(e) => Err(e),
             },
         };
+        // Whether the gh account can push here, once a clone or a choice
+        // lands — said in words rather than as a 403 on the first push.
+        let push_target = match &self.plan {
+            Plan::Clone { coords, .. } | Plan::Account { coords, .. } if result.is_ok() => {
+                let s = settings.as_ref().unwrap_or(&self.settings);
+                s.credential_for(&self.vtc_did, coords)
+                    .credential
+                    .gh_login()
+                    .map(|l| (coords.clone(), l.to_string()))
+            }
+            _ => None,
+        };
+        let mut push_access = None;
+        if let Some((coords, login)) = push_target {
+            let (c, l) = (coords.clone(), login.clone());
+            if let Ok(Some(can)) = blocking(move || {
+                forge_credential::gh_can_push(&c, &l, forge_credential::GH_TIMEOUT)
+            })
+            .await
+            {
+                push_access = Some((coords.resource(), login, can));
+            }
+        }
         WorkspaceOutcome {
             vtc_did,
             persona,
             result,
             settings,
+            form,
+            push_access,
         }
     }
 
@@ -602,12 +769,33 @@ impl WorkspaceJob {
         dest: &std::path::Path,
     ) -> Result<String, String> {
         let (c, d, protocol) = (coords.clone(), dest.to_path_buf(), self.settings.protocol);
-        blocking(move || git_workspace::clone_repo(&c, protocol, &d, CLONE_TIMEOUT))
-            .await
-            .and_then(|r| r)?;
+        let credential = self
+            .settings
+            .credential_for(&self.vtc_did, coords)
+            .credential;
+        let account = match credential {
+            ForgeCredential::GitDefault => String::new(),
+            ref c => format!(" with {}", c.label()),
+        };
+        let author_note = blocking(move || {
+            // A missing key or a logged-out gh account, said before git runs.
+            credential.check(&c.host)?;
+            let (author, note) = resolve_author(&credential, &c.host);
+            git_workspace::clone_repo(
+                &c,
+                protocol,
+                &credential,
+                author.as_ref(),
+                &d,
+                CLONE_TIMEOUT,
+            )
+            .map(|()| note)
+        })
+        .await
+        .and_then(|r| r)?;
         let at = git_workspace::display_path(dest);
         match self.sign(dest).await {
-            Ok(done) => Ok(format!("Cloned into {at}. {done}")),
+            Ok(done) => Ok(format!("Cloned into {at}{account}.{author_note} {done}")),
             // The clone stands; say what is left to do.
             Err(e) => Err(format!("Cloned into {at}, but it does not sign yet: {e}")),
         }
@@ -687,6 +875,129 @@ impl WorkspaceJob {
     }
 }
 
+impl WorkspaceJob {
+    /// Check a forge-account choice, store it, and write what each covered
+    /// checkout now uses into it. Returns the new settings and what to say.
+    async fn choose_account(
+        &self,
+        coords: &RepoCoords,
+        scope: CredentialScope,
+        credential: &Option<ForgeCredential>,
+        checkouts: &[(RepoCoords, PathBuf, Option<String>)],
+    ) -> Result<(WorkspaceSettings, String), String> {
+        if let Some(c) = credential.clone() {
+            let host = coords.host.clone();
+            blocking(move || c.check(&host)).await??;
+        }
+        let mut settings = self.settings.clone();
+        settings.set_credential(&self.vtc_did, coords, scope, credential.clone());
+        if let Some(file) = self.settings_path.clone() {
+            let s = settings.clone();
+            blocking(move || s.save_to(&file))
+                .await?
+                .map_err(|e| e.to_string())?;
+        }
+        let effective = settings.credential_for(&self.vtc_did, coords).credential;
+        let what = match scope {
+            CredentialScope::Repo => git_ns_short(&coords.resource()).to_string(),
+            CredentialScope::Forge => format!("This community's {} repositories", coords.host),
+        };
+        let mut done = format!("{what} now use {}.", effective.label());
+        let plan: Vec<(RepoCoords, PathBuf, Option<String>, ForgeCredential)> = checkouts
+            .iter()
+            .map(|(c, p, origin)| {
+                (
+                    c.clone(),
+                    p.clone(),
+                    origin.clone(),
+                    settings.credential_for(&self.vtc_did, c).credential,
+                )
+            })
+            .collect();
+        let (results, author_notes) = blocking(move || {
+            let mut notes: Vec<String> = Vec::new();
+            let results = plan
+                .into_iter()
+                .map(|(c, path, origin, cred)| {
+                    let (author, note) = resolve_author(&cred, &c.host);
+                    if !note.is_empty() && !notes.contains(&note) {
+                        notes.push(note);
+                    }
+                    let r =
+                        forge_credential::apply_to_checkout(&path, &c.host, &cred, author.as_ref());
+                    (c, path, origin, cred, r)
+                })
+                .collect::<Vec<_>>();
+            (results, notes)
+        })
+        .await?;
+        for note in author_notes {
+            done.push_str(&note);
+        }
+        let mut failed = Vec::new();
+        let mut applied = 0;
+        for (c, path, origin, cred, r) in results {
+            match r {
+                Ok(()) => {
+                    applied += 1;
+                    if let Some(warning) = origin_mismatch(&cred, origin.as_deref()) {
+                        done.push_str(&format!(" {}: {warning}", git_ns_short(&c.resource())));
+                    }
+                }
+                Err(e) => failed.push(format!("{}: {e}", git_workspace::display_path(&path))),
+            }
+        }
+        if applied > 0 {
+            done.push_str(&format!(
+                " Written into {applied} checkout{}.",
+                if applied == 1 { "" } else { "s" }
+            ));
+        }
+        if !failed.is_empty() {
+            return Err(format!(
+                "{done} But it could not be written into {}",
+                failed.join("; ")
+            ));
+        }
+        Ok((settings, done))
+    }
+}
+
+/// The commit author a choice sets, looked up now (blocking, bounded); a
+/// failed lookup leaves the member's own identity and says so.
+fn resolve_author(
+    credential: &ForgeCredential,
+    host: &str,
+) -> (Option<forge_credential::CommitAuthor>, String) {
+    match credential.author(host) {
+        Some(Ok(a)) => {
+            let note = format!(" Commits are authored as {} <{}>.", a.name, a.email);
+            (Some(a), note)
+        }
+        Some(Err(e)) => (None, format!(" Commits keep your own git identity: {e}")),
+        None => (None, String::new()),
+    }
+}
+
+/// A checkout whose `origin` speaks the other protocol never uses the account.
+fn origin_mismatch(credential: &ForgeCredential, origin: Option<&str>) -> Option<String> {
+    let origin = origin?;
+    let https = origin.starts_with("https://") || origin.starts_with("http://");
+    match credential {
+        ForgeCredential::GhAccount { .. } if !https => Some(
+            "its origin is an SSH URL, so the gh account is not used there — switch origin to \
+             the https:// URL to use it."
+                .into(),
+        ),
+        ForgeCredential::SshKey { .. } if https => Some(
+            "its origin is an https:// URL, so the SSH key is not used there — switch origin \
+             to the git@ URL to use it."
+                .into(),
+        ),
+        _ => None,
+    }
+}
+
 fn git_ns_short(resource: &str) -> &str {
     openvtc_core::git_ns::short_resource(resource)
 }
@@ -756,6 +1067,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
         probe_if_due(ctx.state, ctx.dispatch_tx, ctx.in_flight);
         return;
     }
+    let linked = ctx.state.main_page.content_panel.repos.linked.clone();
     let Some(view) = view_mut(ctx.state) else {
         return;
     };
@@ -852,6 +1164,115 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
             (
                 Plan::Use { coords, path },
                 format!("checking the checkout of {short}"),
+            )
+        }
+        W::Fork => {
+            let Some(resource) = target.clone() else {
+                view.note(Severity::Warning, "Highlight a repository first.");
+                return;
+            };
+            let Some(path) = located else {
+                view.note(
+                    Severity::Warning,
+                    format!("{short} is not checked out here — c clones it first."),
+                );
+                return;
+            };
+            let coords = match RepoCoords::parse(&resource) {
+                Ok(c) => c,
+                Err(e) => {
+                    view.note(Severity::Error, e.to_string());
+                    return;
+                }
+            };
+            let credential = view
+                .workspace
+                .settings
+                .credential_for(&view.vtc_did, &coords)
+                .credential;
+            let Some(login) = credential.gh_login().map(str::to_string) else {
+                view.note(
+                    Severity::Warning,
+                    "Forking needs a gh account chosen for this repository (f).",
+                );
+                return;
+            };
+            (
+                Plan::Fork {
+                    coords,
+                    path,
+                    login: login.clone(),
+                },
+                format!("forking {short} to {login}"),
+            )
+        }
+        W::AccountStart => {
+            let Some(resource) = target.clone() else {
+                view.note(Severity::Warning, "Highlight a repository first.");
+                return;
+            };
+            let coords = match RepoCoords::parse(&resource) {
+                Ok(c) => c,
+                Err(e) => {
+                    view.note(Severity::Error, e.to_string());
+                    return;
+                }
+            };
+            let linked_login = view
+                .linked_on(&linked, &coords.host)
+                .map(|a| a.login.clone());
+            (
+                Plan::Accounts {
+                    coords,
+                    linked_login,
+                },
+                "looking for gh accounts and SSH keys".to_string(),
+            )
+        }
+        W::AccountSubmit => {
+            let Some(WorkspaceForm::Account(form)) = view.workspace.form.clone() else {
+                return;
+            };
+            let credential = match form.choice() {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Some(WorkspaceForm::Account(f)) = view.workspace.form.as_mut() {
+                        f.error = Some(e);
+                    }
+                    return;
+                }
+            };
+            let coords = match RepoCoords::parse(&form.resource) {
+                Ok(c) => c,
+                Err(e) => {
+                    view.note(Severity::Error, e.to_string());
+                    return;
+                }
+            };
+            // The located checkouts the choice covers: this one, or every one
+            // of this community on the forge.
+            let checkouts = view
+                .workspace
+                .checkouts
+                .iter()
+                .filter(|(_, c)| c.facts.is_repo)
+                .filter_map(|(r, c)| {
+                    let rc = RepoCoords::parse(r).ok()?;
+                    let covered = match form.scope {
+                        CredentialScope::Repo => rc == coords,
+                        CredentialScope::Forge => rc.host == coords.host,
+                    };
+                    covered.then(|| (rc, c.facts.path.clone(), c.facts.origin.clone()))
+                })
+                .collect();
+            (
+                Plan::Account {
+                    coords,
+                    scope: form.scope,
+                    credential,
+                    checkouts,
+                },
+                "choosing the forge account".to_string(),
             )
         }
         _ => return,
@@ -963,6 +1384,8 @@ mod tests {
             W::Confirm,
             W::SettingsSubmit,
             W::UseSubmit,
+            W::AccountStart,
+            W::AccountSubmit,
         ] {
             assert!(!reduce(&mut s, &a), "{a:?} belongs to the loop");
         }
@@ -1092,6 +1515,8 @@ mod tests {
             persona: PersonaId(uuid::Uuid::nil()),
             result: Ok("done".into()),
             settings: None,
+            form: None,
+            push_access: None,
         }
         .apply(&mut s);
         let v = s.main_page.content_panel.repos.view.as_ref().unwrap();
@@ -1108,9 +1533,273 @@ mod tests {
             persona: PersonaId(uuid::Uuid::nil()),
             result: Ok("done".into()),
             settings: None,
+            form: None,
+            push_access: None,
         }
         .apply(&mut s);
         let v = s.main_page.content_panel.repos.view.as_ref().unwrap();
         assert!(v.workspace.probe_wanted.is_none());
+    }
+
+    fn gh(login: &str, active: bool) -> forge_credential::GhAccount {
+        forge_credential::GhAccount {
+            host: "github.com".into(),
+            login: login.into(),
+            active,
+        }
+    }
+
+    fn picker(
+        repo: Option<ForgeCredential>,
+        forge: Option<ForgeCredential>,
+        linked: Option<&str>,
+    ) -> AccountForm {
+        AccountForm::new(
+            "github.com/acme/widgets".into(),
+            "github.com".into(),
+            repo,
+            forge,
+            Ok(vec![
+                gh("alice", true),
+                gh("alice-work", false),
+                forge_credential::GhAccount {
+                    host: "ghe.example.com".into(),
+                    login: "elsewhere".into(),
+                    active: true,
+                },
+            ]),
+            vec![PathBuf::from("/h/.ssh/id_ed25519")],
+            linked,
+        )
+    }
+
+    #[test]
+    fn the_picker_offers_this_forges_accounts_and_keys() {
+        use crate::state_handler::main_page::repos::AccountOption as O;
+        let f = picker(None, None, None);
+        assert_eq!(
+            f.scope,
+            CredentialScope::Forge,
+            "nothing chosen: the community's choice"
+        );
+        assert_eq!(
+            f.visible().into_iter().cloned().collect::<Vec<_>>(),
+            vec![
+                O::GitDefault,
+                O::Gh {
+                    login: "alice".into(),
+                    active: true
+                },
+                O::Gh {
+                    login: "alice-work".into(),
+                    active: false
+                },
+                O::SshKey(PathBuf::from("/h/.ssh/id_ed25519")),
+                O::EnterPath,
+            ],
+            "another forge's gh account is not offered; Inherit is a repository's"
+        );
+        assert_eq!(f.picked(), Some(&O::GitDefault));
+        assert_eq!(f.choice(), Ok(None), "the default on a forge clears it");
+    }
+
+    #[test]
+    fn the_linked_login_is_preselected_only_when_nothing_is_chosen() {
+        use crate::state_handler::main_page::repos::AccountOption as O;
+        let f = picker(None, None, Some("alice-work"));
+        assert!(matches!(f.picked(), Some(O::Gh { login, .. }) if login == "alice-work"));
+        let chosen = picker(
+            None,
+            Some(ForgeCredential::gh("alice".into())),
+            Some("alice-work"),
+        );
+        assert!(matches!(chosen.picked(), Some(O::Gh { login, .. }) if login == "alice"));
+        let unknown = picker(None, None, Some("nobody"));
+        assert_eq!(unknown.picked(), Some(&O::GitDefault));
+    }
+
+    #[test]
+    fn a_repository_choice_opens_in_repository_scope_and_toggles() {
+        use crate::state_handler::main_page::repos::AccountOption as O;
+        let key = ForgeCredential::SshKey {
+            path: PathBuf::from("/elsewhere/id_x"),
+        };
+        let mut f = picker(Some(key.clone()), None, None);
+        assert_eq!(f.scope, CredentialScope::Repo);
+        assert_eq!(f.visible()[0], &O::Inherit);
+        assert_eq!(
+            f.picked(),
+            Some(&O::SshKey(PathBuf::from("/elsewhere/id_x"))),
+            "a key chosen outside ~/.ssh is still offered"
+        );
+        assert_eq!(f.choice(), Ok(Some(key.clone())));
+        f.toggle_scope();
+        assert_eq!(f.scope, CredentialScope::Forge);
+        assert_eq!(f.choice(), Ok(Some(key)), "the same row stays highlighted");
+        f.toggle_scope();
+        f.pick = 0;
+        assert_eq!(
+            f.choice(),
+            Ok(None),
+            "Inherit removes the repository's choice"
+        );
+        f.pick = 1;
+        assert_eq!(
+            f.choice(),
+            Ok(Some(ForgeCredential::GitDefault)),
+            "a repository can opt out of its forge's account"
+        );
+    }
+
+    #[test]
+    fn the_picker_moves_types_and_reports() {
+        let mut v = view();
+        v.workspace.form = Some(WorkspaceForm::Account(picker(None, None, None)));
+        let mut s = state_with(v);
+        let form = |s: &State| match s
+            .main_page
+            .content_panel
+            .repos
+            .view
+            .as_ref()
+            .unwrap()
+            .workspace
+            .form
+            .clone()
+        {
+            Some(WorkspaceForm::Account(f)) => f,
+            other => panic!("{other:?}"),
+        };
+        assert!(reduce(&mut s, &W::AccountPick(99)));
+        assert!(form(&s).typing(), "clamped to the last row, the path");
+        assert_eq!(
+            form(&s).choice(),
+            Err("Type the path of the private key.".into())
+        );
+        assert!(reduce(&mut s, &W::AccountInput("/k/id_work".into())));
+        assert_eq!(
+            form(&s).choice(),
+            Ok(Some(ForgeCredential::SshKey {
+                path: PathBuf::from("/k/id_work")
+            }))
+        );
+        // A refusal lands in the form, and the form stays open.
+        WorkspaceOutcome {
+            vtc_did: "did:webvh:vtc".into(),
+            persona: PersonaId(uuid::Uuid::nil()),
+            result: Err("The key file ~/k/id_work is missing.".into()),
+            settings: None,
+            form: None,
+            push_access: None,
+        }
+        .apply(&mut s);
+        assert_eq!(
+            form(&s).error.as_deref(),
+            Some("The key file ~/k/id_work is missing.")
+        );
+        assert!(reduce(&mut s, &W::Cancel));
+        let v = s.main_page.content_panel.repos.view.as_ref().unwrap();
+        assert!(v.workspace.form.is_none());
+    }
+
+    #[test]
+    fn found_accounts_open_the_picker() {
+        let mut s = state_with(view());
+        WorkspaceOutcome {
+            vtc_did: "did:webvh:vtc".into(),
+            persona: PersonaId(uuid::Uuid::nil()),
+            result: Ok("Choose the account.".into()),
+            settings: None,
+            form: Some(WorkspaceForm::Account(picker(None, None, None))),
+            push_access: None,
+        }
+        .apply(&mut s);
+        let v = s.main_page.content_panel.repos.view.as_ref().unwrap();
+        assert!(matches!(v.workspace.form, Some(WorkspaceForm::Account(_))));
+    }
+
+    #[test]
+    fn gh_missing_is_said_in_the_picker() {
+        let f = AccountForm::new(
+            "github.com/acme/widgets".into(),
+            "github.com".into(),
+            None,
+            None,
+            Err(forge_credential::GhError::NotInstalled.to_string()),
+            Vec::new(),
+            None,
+        );
+        assert_eq!(
+            f.gh_note.as_deref(),
+            Some("gh is not installed (or not on PATH)")
+        );
+        assert_eq!(f.visible().len(), 2, "git default and a typed path");
+    }
+
+    #[test]
+    fn a_checkout_on_the_other_protocol_is_called_out() {
+        let gh = ForgeCredential::gh("alice".into());
+        assert!(origin_mismatch(&gh, Some("git@github.com:acme/widgets.git")).is_some());
+        assert!(origin_mismatch(&gh, Some("https://github.com/acme/widgets.git")).is_none());
+        let key = ForgeCredential::SshKey {
+            path: PathBuf::from("/k"),
+        };
+        assert!(origin_mismatch(&key, Some("https://github.com/acme/widgets.git")).is_some());
+        assert!(origin_mismatch(&ForgeCredential::GitDefault, Some("x")).is_none());
+    }
+
+    #[test]
+    fn a_gh_account_can_keep_the_members_own_author() {
+        let mut v = view();
+        let mut f = picker(None, None, Some("alice"));
+        assert!(!f.keep_author);
+        assert_eq!(f.choice(), Ok(Some(ForgeCredential::gh("alice".into()))));
+        f.keep_author = true;
+        v.workspace.form = Some(WorkspaceForm::Account(f));
+        let mut s = state_with(v);
+        assert!(!reduce(&mut s, &W::Fork), "forking runs gh");
+        assert!(reduce(&mut s, &W::AccountAuthor));
+        let Some(WorkspaceForm::Account(f)) = s
+            .main_page
+            .content_panel
+            .repos
+            .view
+            .as_ref()
+            .unwrap()
+            .workspace
+            .form
+            .clone()
+        else {
+            panic!("the picker is open");
+        };
+        assert!(!f.keep_author, "a toggles it back");
+        let kept = picker(
+            Some(ForgeCredential::GhAccount {
+                login: "alice".into(),
+                keep_author: true,
+            }),
+            None,
+            None,
+        );
+        assert!(kept.keep_author, "a stored choice opens as it was saved");
+    }
+
+    #[test]
+    fn push_access_is_remembered_from_an_outcome() {
+        let mut s = state_with(view());
+        WorkspaceOutcome {
+            vtc_did: "did:webvh:vtc".into(),
+            persona: PersonaId(uuid::Uuid::nil()),
+            result: Ok("Cloned.".into()),
+            settings: None,
+            form: None,
+            push_access: Some(("github.com/acme/widgets".into(), "alice".into(), false)),
+        }
+        .apply(&mut s);
+        let v = s.main_page.content_panel.repos.view.as_ref().unwrap();
+        assert_eq!(
+            v.workspace.push_access.get("github.com/acme/widgets"),
+            Some(&("alice".to_string(), false))
+        );
     }
 }

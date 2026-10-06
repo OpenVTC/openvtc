@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::public_config::profile_dir;
 use crate::errors::OpenVTCError;
+use crate::forge_credential::{self, ForgeCredential};
 
 /// The longest a clone may run before it is stopped (R1.2). Generous — a large
 /// repository over a slow link is a legitimate wait — but finite, so a clone
@@ -226,6 +227,35 @@ pub fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
+/// Which forge accounts one community's checkouts use: one per forge host, and
+/// any repository that differs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommunityCredentials {
+    /// By forge host (`github.com`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub forges: BTreeMap<String, ForgeCredential>,
+    /// By resource (`github.com/acme/widgets`); wins over the forge's.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repos: BTreeMap<String, ForgeCredential>,
+}
+
+/// Where a forge-account choice applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialScope {
+    /// This repository only.
+    Repo,
+    /// Every repository of the community on this forge without its own.
+    Forge,
+}
+
+/// Which credential a repository uses, and where that came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CredentialChoice {
+    pub credential: ForgeCredential,
+    /// `None`: nothing chosen, so the git default.
+    pub scope: Option<CredentialScope>,
+}
+
 /// Where this machine keeps a profile's checkouts. Not secret — paths and a
 /// preference — so it lives in a plain file beside the public config.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +269,10 @@ pub struct WorkspaceSettings {
     /// resource.
     #[serde(default)]
     pub checkouts: BTreeMap<String, PathBuf>,
+    /// Forge accounts, by community DID. References only (a key path, a gh
+    /// login) — never a token or a key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credentials: BTreeMap<String, CommunityCredentials>,
 }
 
 impl Default for WorkspaceSettings {
@@ -247,6 +281,7 @@ impl Default for WorkspaceSettings {
             root: default_root(),
             protocol: CloneProtocol::default(),
             checkouts: BTreeMap::new(),
+            credentials: BTreeMap::new(),
         }
     }
 }
@@ -315,6 +350,56 @@ impl WorkspaceSettings {
             .filter(|p| p.is_dir())
             .cloned()
             .or_else(|| Some(coords.default_path(&self.root)).filter(|p| p.is_dir()))
+    }
+
+    /// The forge account `coords` uses in the community `vtc_did`: the
+    /// repository's own choice, else the forge's, else the git default.
+    #[must_use]
+    pub fn credential_for(&self, vtc_did: &str, coords: &RepoCoords) -> CredentialChoice {
+        let community = self.credentials.get(vtc_did);
+        if let Some(c) = community.and_then(|c| c.repos.get(&coords.resource())) {
+            return CredentialChoice {
+                credential: c.clone(),
+                scope: Some(CredentialScope::Repo),
+            };
+        }
+        if let Some(c) = community.and_then(|c| c.forges.get(&coords.host)) {
+            return CredentialChoice {
+                credential: c.clone(),
+                scope: Some(CredentialScope::Forge),
+            };
+        }
+        CredentialChoice {
+            credential: ForgeCredential::GitDefault,
+            scope: None,
+        }
+    }
+
+    /// Choose the account for `coords`' repository or forge; `None` removes the
+    /// choice (a repository then follows its forge's, a forge the git default).
+    pub fn set_credential(
+        &mut self,
+        vtc_did: &str,
+        coords: &RepoCoords,
+        scope: CredentialScope,
+        credential: Option<ForgeCredential>,
+    ) {
+        let community = self.credentials.entry(vtc_did.to_string()).or_default();
+        let (map, key) = match scope {
+            CredentialScope::Repo => (&mut community.repos, coords.resource()),
+            CredentialScope::Forge => (&mut community.forges, coords.host.clone()),
+        };
+        match credential {
+            Some(c) => {
+                map.insert(key, c);
+            }
+            None => {
+                map.remove(&key);
+            }
+        }
+        if community.forges.is_empty() && community.repos.is_empty() {
+            self.credentials.remove(vtc_did);
+        }
     }
 }
 
@@ -385,6 +470,13 @@ pub struct CheckoutFacts {
     /// The `core.hooksPath` in effect, from any scope.
     pub hooks_path: Option<String>,
     pub head: Option<HeadCommit>,
+    /// `user.name` and `user.email` as git will author a commit here, from any
+    /// scope.
+    pub author_name: Option<String>,
+    pub author_email: Option<String>,
+    /// The forge account openvtc set this checkout to use
+    /// ([`forge_credential::MARKER_KEY`]); `None` when it set none.
+    pub credential: Option<ForgeCredential>,
 }
 
 /// Parse `git status --porcelain=v2 --branch` output.
@@ -456,6 +548,14 @@ pub fn inspect(path: &Path, coords: &RepoCoords) -> CheckoutFacts {
         .as_deref()
         == Some("true");
     facts.hooks_path = git_read(path, &["config", "--get", "core.hooksPath"]);
+    facts.author_name = git_read(path, &["config", "--get", "user.name"]);
+    facts.author_email = git_read(path, &["config", "--get", "user.email"]);
+    facts.credential = git_read(
+        path,
+        &["config", "--local", "--get", forge_credential::MARKER_KEY],
+    )
+    .as_deref()
+    .and_then(ForgeCredential::from_marker);
     facts.head = git_read(
         path,
         &[
@@ -490,8 +590,8 @@ fn explain_clone_failure(stderr: &str, protocol: CloneProtocol) -> String {
     {
         return match protocol {
             CloneProtocol::Https => "the forge asked for credentials, and openvtc cannot prompt \
-                 for them. Configure a git credential helper for this forge, or switch the \
-                 workspace to SSH (w)."
+                 for them. Choose a forge account for this repository (f), configure a git \
+                 credential helper for this forge, or switch the workspace to SSH (w)."
                 .into(),
             CloneProtocol::Ssh => format!("the forge refused the credentials: {last}"),
         };
@@ -499,8 +599,8 @@ fn explain_clone_failure(stderr: &str, protocol: CloneProtocol) -> String {
     if lower.contains("permission denied (publickey)") || lower.contains("host key verification") {
         return format!(
             "SSH was refused ({last}). Load a key your forge account knows into ssh-agent, \
-             accept the host key once with `ssh -T git@<forge>`, or switch the workspace to \
-             HTTPS (w)."
+             choose the key for this repository (f), accept the host key once with \
+             `ssh -T git@<forge>`, or switch the workspace to HTTPS (w)."
         );
     }
     if lower.contains("repository not found") || lower.contains("not found") {
@@ -527,7 +627,9 @@ fn free_for_clone(dir: &Path) -> bool {
     }
 }
 
-/// Clone `coords` into `dest`, which must not exist yet (or be empty).
+/// Clone `coords` into `dest`, which must not exist yet (or be empty), with
+/// the forge account `credential` — which the new checkout keeps for every
+/// later fetch and push ([`forge_credential::clone_args`]).
 ///
 /// Never prompts: with no terminal to ask on, an HTTPS remote that wants a
 /// password fails, and SSH runs in batch mode unless the member configured
@@ -540,6 +642,8 @@ fn free_for_clone(dir: &Path) -> bool {
 pub fn clone_repo(
     coords: &RepoCoords,
     protocol: CloneProtocol,
+    credential: &ForgeCredential,
+    author: Option<&forge_credential::CommitAuthor>,
     dest: &Path,
     timeout: Duration,
 ) -> Result<(), String> {
@@ -554,23 +658,28 @@ pub fn clone_repo(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("couldn't create {}: {e}", display_path(parent)))?;
     }
-    let url = coords.clone_url(protocol);
+    let protocol = credential.protocol(protocol);
     let mut cmd = Command::new("git");
-    cmd.args(["clone", "--quiet", "--"])
-        .arg(&url)
-        .arg(dest)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let user_ssh = std::env::var_os("GIT_SSH_COMMAND").is_some()
-        || git_read(
-            Path::new("."),
-            &["config", "--global", "--get", "core.sshCommand"],
-        )
-        .is_some();
-    if !user_ssh {
-        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    cmd.args(forge_credential::clone_args(
+        coords, protocol, credential, author, dest,
+    )?)
+    .env("GIT_TERMINAL_PROMPT", "0")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
+    if matches!(credential, ForgeCredential::SshKey { .. }) {
+        // The chosen key's command must win; the environment would beat it.
+        cmd.env_remove("GIT_SSH_COMMAND");
+    } else {
+        let user_ssh = std::env::var_os("GIT_SSH_COMMAND").is_some()
+            || git_read(
+                Path::new("."),
+                &["config", "--global", "--get", "core.sshCommand"],
+            )
+            .is_some();
+        if !user_ssh {
+            cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+        }
     }
     let mut child = cmd.spawn().map_err(|e| format!("couldn't run git: {e}"))?;
     // Drain stderr on its own thread: a clone that prints more than a pipe
@@ -750,8 +859,45 @@ mod tests {
         };
         s.checkouts
             .insert("github.com/acme/widgets".into(), dir.path().join("w"));
+        s.set_credential(
+            "did:webvh:x:c.example",
+            &widgets(),
+            CredentialScope::Repo,
+            Some(ForgeCredential::gh("alice".into())),
+        );
         s.save_to(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("\"gh_account\""), "{saved}");
         assert_eq!(WorkspaceSettings::load_from(&path).unwrap(), s);
+    }
+
+    #[test]
+    fn a_repository_choice_wins_over_its_forge() {
+        let mut s = WorkspaceSettings::default();
+        let c = widgets();
+        let other = RepoCoords::parse("github.com/acme/gadgets").unwrap();
+        assert_eq!(s.credential_for("did:c", &c).scope, None);
+        let work = ForgeCredential::gh("alice-work".into());
+        let key = ForgeCredential::SshKey {
+            path: PathBuf::from("/k/id_x"),
+        };
+        s.set_credential("did:c", &c, CredentialScope::Forge, Some(work.clone()));
+        s.set_credential("did:c", &c, CredentialScope::Repo, Some(key.clone()));
+        assert_eq!(s.credential_for("did:c", &c).credential, key);
+        assert_eq!(
+            s.credential_for("did:c", &c).scope,
+            Some(CredentialScope::Repo)
+        );
+        assert_eq!(s.credential_for("did:c", &other).credential, work);
+        assert_eq!(
+            s.credential_for("did:other", &c).credential,
+            ForgeCredential::GitDefault,
+            "another community's choice does not leak"
+        );
+        s.set_credential("did:c", &c, CredentialScope::Repo, None);
+        assert_eq!(s.credential_for("did:c", &c).credential, work);
+        s.set_credential("did:c", &c, CredentialScope::Forge, None);
+        assert!(s.credentials.is_empty());
     }
 
     #[test]
@@ -860,6 +1006,8 @@ mod tests {
         let err = clone_repo(
             &widgets(),
             CloneProtocol::Https,
+            &ForgeCredential::GitDefault,
+            None,
             dir.path(),
             Duration::from_secs(5),
         )
