@@ -3149,7 +3149,7 @@ mod tests {
             ..IdentityState::default()
         };
         loaded(&mut state);
-        assert!(text(&render(&state)).contains("wears: unknown"));
+        assert!(text(&render(&state)).contains("wears: not read from your VTA yet"));
 
         state.bindings.insert(
             ("ctx".to_string(), membership.persona_did.clone()),
