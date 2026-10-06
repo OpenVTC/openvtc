@@ -60,6 +60,15 @@ fn routed_types() -> Vec<&'static str> {
         // (`is_capability_reply_type`).
         "https://trusttasks.org/spec/governance/capability/list/0.1#response",
         "https://trusttasks.org/spec/governance/capability/enable/0.1#response",
+        // Git namespace replies, routed by prefix (`git_ns::is_reply_type`).
+        // TSP opens the binding envelope before the gate, so these arrive
+        // typed as the task; missing from the gate, every Repos answer to a
+        // TSP-joined member was dropped and the view timed out.
+        "https://trusttasks.org/spec/git-ns/view/0.4#response",
+        "https://trusttasks.org/spec/git-ns/repo/create/0.3#response",
+        "https://trusttasks.org/spec/git-ns/right/grant/0.3#response",
+        "https://trusttasks.org/spec/git-ns/account/link/0.1#response",
+        "https://trusttasks.org/spec/git-ns/drift/resolve/0.1#response",
     ]
 }
 

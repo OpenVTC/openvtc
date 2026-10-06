@@ -2816,6 +2816,78 @@ mod tests {
         assert!(!logged.contains("replay"), "{logged}");
     }
 
+    /// A TSP-joined member's Repos view loads from the community's
+    /// `git-ns/view/0.4` answer, taken the whole way a live one is: sealed in
+    /// the TSP binding envelope, mapped and passed through the inbound gate
+    /// (`deliver_tsp_document`), checked off the loop and dispatched
+    /// (`process_inbound_message`), then correlated by the Repos view
+    /// (`repos_actions::apply_replies`). The gate used to drop this exact type
+    /// at debug, and the view timed out on an answer the VTC had sent.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_tsp_git_ns_view_answer_loads_the_repos_view() {
+        use crate::state_handler::main_page::repos::{Pending, Purpose, ReposPhase, ReposView};
+        let (vtc, key) = community_key();
+        let tdk = test_tdk().await;
+        let mut config = retired_config(&vtc);
+        let thid = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+
+        // The signed document, as the VTC sends it over TSP.
+        let mut document = serde_json::from_value(serde_json::json!({
+            "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+            "type": "https://trusttasks.org/spec/git-ns/view/0.4#response",
+            "issuer": vtc,
+            "recipient": PERSONA,
+            "issuedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "threadId": thid,
+            "payload": {
+                "accounts": [],
+                "namespaces": [{"id": "ns_1", "forge": "github.com", "owner": "acme",
+                                "kind": "organization", "mode": "bridge", "state": "bound"}],
+                "repos": [{"resource": "github.com/acme/gadgets", "forgeId": "1",
+                           "visibility": "public", "state": "active", "owners": [PERSONA],
+                           "bootstrap": {"workflow": true, "keyring": true,
+                                         "variables": true, "requiredCheck": true},
+                           "sync": {"state": "inSync", "drift": []}}],
+                "rights": [{"subject": PERSONA, "right": "git.repo.own",
+                            "resource": "github.com/acme/gadgets", "grantedBy": PERSONA,
+                            "grantedAt": "2026-09-02T00:00:00Z"}]
+            },
+        }))
+        .expect("a reply document");
+        openvtc_core::capabilities::sign_document(&mut document, &key)
+            .await
+            .expect("sign the reply");
+        let wrapped = vta_sdk::tsp_binding::wrap_envelope(
+            &serde_json::to_vec(&document).expect("document bytes"),
+        );
+        let m = openvtc_core::didcomm::deliver_tsp_document(&wrapped, &vtc, PERSONA)
+            .expect("the answer passes the inbound gate");
+
+        let effects = dispatch_checked(&mut config, &tdk, &m).await;
+        assert_eq!(effects.git_ns_replies.len(), 1, "handed to the Repos view");
+
+        // The Repos view, waiting on the request this answers.
+        let pid = config.account.persona_id_for_did(PERSONA).unwrap();
+        let mut state = crate::state_handler::state::State::default();
+        let mut view = ReposView::new(vtc.clone(), pid, PERSONA.into(), "Acme".into());
+        view.pending = Some(Pending {
+            thid: thid.clone(),
+            sent_at: std::time::Instant::now(),
+            purpose: Purpose::View,
+        });
+        state.main_page.content_panel.repos.view = Some(view);
+
+        crate::state_handler::repos_actions::apply_replies(
+            &mut state,
+            &config,
+            effects.git_ns_replies,
+        );
+        let view = state.main_page.content_panel.repos.view.as_ref().unwrap();
+        assert_eq!(view.phase, ReposPhase::Loaded);
+        assert!(view.pending.is_none(), "the wait is over");
+        assert_eq!(view.my_repos().len(), 1);
+    }
+
     /// Dispatch `m` as `arrival`, returning the effects.
     async fn dispatch(
         config: &mut Config,

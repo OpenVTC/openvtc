@@ -1416,9 +1416,29 @@ fn classify_inbound(
         }];
     }
     // Pickup-status heartbeats and anything else: dropped, as the framework's
-    // ignore-handler and fallback did.
-    debug!(typ = %message.typ, "unhandled message type — dropped");
+    // ignore-handler and fallback did. Heartbeats are routine DIDComm traffic
+    // and stay at `debug!`; anything over TSP, or any Trust Task, is a message a
+    // peer meant for us — dropping one of those silently is how an answer the
+    // peer sent turns into a timeout here with nothing in the log (R6.4).
+    if transport == MessagingTransport::Tsp || is_trust_task_type(&message.typ) {
+        tracing::warn!(
+            listener = %crate::display::truncate_did(&listener_id, 32),
+            msg_type = %message.typ,
+            ?transport,
+            from = ?from.as_deref().map(|d| crate::display::truncate_did(d, 32)),
+            thid = ?message.thid,
+            "inbound message of a type no handler claims — dropped"
+        );
+    } else {
+        debug!(typ = %message.typ, "unhandled message type — dropped");
+    }
     Vec::new()
+}
+
+/// Whether `typ` names a Trust Task (or its binding envelope) — traffic a peer
+/// addressed to this client, as opposed to mediator housekeeping.
+fn is_trust_task_type(typ: &str) -> bool {
+    typ.starts_with("https://trusttasks.org/")
 }
 
 /// Normalise an inbound TSP frame into the [`Message`] shape the dispatcher and
@@ -1455,6 +1475,32 @@ fn tsp_frame_to_message(item: &affinidi_messaging_core::transport::Inbound) -> O
         &item.message.recipient,
         &item.message.id,
     )
+}
+
+/// An already-unsealed TSP payload taken the whole way the live path takes it:
+/// mapped to a [`Message`] ([`tsp_document_to_message`]) and through the inbound
+/// gate ([`classify_inbound`]). `Some` is the message the state handler would
+/// receive; `None` means it never would.
+///
+/// For tests of the inbound path end to end — the gate is where a TSP reply
+/// that the classifier downstream would take was being dropped, and a test
+/// that skips it proves nothing about delivery.
+#[doc(hidden)]
+#[must_use]
+pub fn deliver_tsp_document(payload: &[u8], sender: &str, recipient: &str) -> Option<Message> {
+    let message = tsp_document_to_message(payload, Some(sender), recipient, "frame-hash")?;
+    classify_inbound(
+        message,
+        MessagingTransport::Tsp,
+        Some(sender.to_string()),
+        Some(sender.to_string()),
+        recipient.to_string(),
+    )
+    .into_iter()
+    .find_map(|event| match event {
+        DIDCommEvent::InboundMessage { message, .. } => Some(*message),
+        _ => None,
+    })
 }
 
 /// The mapping itself, over an already-unsealed TSP payload.
@@ -1626,6 +1672,13 @@ pub const OPENVTC_CATCH_ALL_PATTERN: &str = concat!(
     // answers today (the envelope arm below is how it will once it follows the
     // binding's §5 fully). `message_dispatch` reads both.
     r"|https://trusttasks\.org/spec/governance/capability/.*",
+    // Git namespace replies (`git-ns/*`) for the Repos panel. A DIDComm reply
+    // in the binding envelope passed the gate under the `binding/` arm below,
+    // which hid the gap: TSP opens the envelope *before* the gate
+    // (`tsp_document_to_message`), so a TSP-joined member's `git-ns/view`
+    // answer arrived typed as the task, matched nothing here, and was dropped
+    // at `debug!` — the view waited out its timeout on an answer the VTC sent.
+    r"|https://trusttasks\.org/spec/git-ns/.*",
     // The **binding envelopes**, whose type says "a Trust Task is inside" and
     // names no task. A peer built on `trust-tasks-didcomm` types every message
     // this way, and so does this crate's own `capabilities::
@@ -2961,6 +3014,35 @@ mod tsp_carriage_tests {
                 refused,
                 "{type_uri}"
             );
+        }
+    }
+
+    /// The exact reply a live VTC sent a TSP-joined member — `git-ns/view/0.4`
+    /// in the binding envelope — passes the inbound gate and is delivered to
+    /// the state handler, and so does every other `git-ns` reply and a
+    /// refusal. Before the gate admitted `git-ns/*`, this one was logged
+    /// `unhandled message type — dropped` at debug and the Repos view timed
+    /// out on an answer the VTC had sent.
+    #[test]
+    fn a_tsp_git_ns_reply_is_delivered_through_the_inbound_gate() {
+        for type_uri in [
+            "https://trusttasks.org/spec/git-ns/view/0.4#response",
+            "https://trusttasks.org/spec/git-ns/repo/create/0.3#response",
+            "https://trusttasks.org/spec/git-ns/account/link-status/0.1#response",
+            "https://trusttasks.org/spec/trust-task-error/0.1",
+            "https://trusttasks.org/spec/governance/capability/list/0.1#response",
+        ] {
+            let mut doc = document(type_uri);
+            doc["threadId"] = serde_json::json!("urn:uuid:request");
+            let wrapped = vta_sdk::tsp_binding::wrap_envelope(&serde_json::to_vec(&doc).unwrap());
+            let delivered = super::deliver_tsp_document(
+                &wrapped,
+                "did:webvh:example.com:community",
+                "did:key:zPersona",
+            )
+            .unwrap_or_else(|| panic!("{type_uri} was dropped at the inbound gate"));
+            assert_eq!(delivered.typ, type_uri);
+            assert_eq!(delivered.thid.as_deref(), Some("urn:uuid:request"));
         }
     }
 
