@@ -4,47 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
-
-### Fixed
-
-- **Hidden vetting draws tokens a community on the new rule accepts.** A drip
-  tick is a window of time — tick `t` of a label starts `t` tick lengths after
-  the label's month or event begins, at the community's published `tickLength`
-  (three days by default). The client sent whole days since 1970, which a VTC
-  built from VTI #1960 refuses on every draw (`tickNotYet`). Ticks a vetter
-  missed while offline are caught up, oldest first, never ahead of the clock;
-  old stored counters are dropped. Older communities accept the new ticks.
-- **The drip runs on its own schedule**, shortly after each tick window opens
-  (with jitter) and at least hourly, whether or not you vetted anyone — not only
-  when `m` was pressed.
-- **A new month moves the vetter on.** Each pass re-reads the manifest and runs
-  on the labels the community publishes now, re-enrolling and drawing under the
-  new month's label, while keeping the keys it enrolled under. If those keys
-  change, drawing stops and you are told.
-- **Served tokens are kept.** The serials a draw waits on are now stored with
-  the engine, so an answer still unblinds after the engine is saved and
-  restored — which happens between every request and its answer.
-- **Hidden-vetting refusals are said in words.** `tickNotYet` waits quietly for
-  the window and `alreadyServed` counts as done.
-
-### Added
-
-- **Hidden vetting view** (`h` on the vetting desk): enrolment, tokens held /
-  usable / spent, live labels, rate and tick length, last draw, next window,
-  event requests, the last refusal, and `d` to draw now.
-
-### Breaking
-
-- `openvtc_core::vetting::book::HiddenVetterState` has new fields; build one
-  with `HiddenVetterState::new`. `hidden::EventDraw` has `opens_on`,
-  `hidden::HiddenParams` has `tick_length`, `openvtc_vetting_pcs::snapshot::
-  VetterSnapshot` has `pending`, and `TokenWallet::receive` takes the label and
-  tick it answers. `hidden::TICK` is gone; `hidden::tick_of` takes the label's
-  start and tick length.
-
-## [0.5.0] - 2026-10-05
-
+## [0.5.0] - 2026-10-06
 The guided-vetting release. Applying to a community that vets, and vetting
 someone, are now each a journey you can see whole: every step, where you are,
 what each step is for, and the one thing to do now. Joining shows what the
@@ -75,6 +35,13 @@ are marked wherever they apply. The detailed entries follow the summary below.
 - **`openvtc_core::join::JoinPresentation` has a `registry_consent` field.**
   A struct literal must now set it; `JoinPresentation::from(vp)` sets it to
   `false`, which is what every join sent before.
+
+- `openvtc_core::vetting::book::HiddenVetterState` has new fields; build one
+  with `HiddenVetterState::new`. `hidden::EventDraw` has `opens_on`,
+  `hidden::HiddenParams` has `tick_length`, `openvtc_vetting_pcs::snapshot::
+  VetterSnapshot` has `pending`, and `TokenWallet::receive` takes the label and
+  tick it answers. `hidden::TICK` is gone; `hidden::tick_of` takes the label's
+  start and tick length.
 
 ### Added
 
@@ -185,6 +152,10 @@ are marked wherever they apply. The detailed entries follow the summary below.
   persona whose keys live in the account's top context is refused, since a
   grant there would reach every persona. Clones never prompt, are bounded, and
   say whether a failure was credentials, SSH, not-found or the network.
+
+- **Hidden vetting view** (`h` on the vetting desk): enrolment, tokens held /
+  usable / spent, live labels, rate and tick length, last draw, next window,
+  event requests, the last refusal, and `d` to draw now.
 
 ### Changed
 
@@ -684,6 +655,26 @@ are marked wherever they apply. The detailed entries follow the summary below.
   its membership credential again and becomes *Active* when it arrives. When
   several personas are waiting on the same community, the persona the reply
   was sent to decides which join it answers.
+
+- **Hidden vetting draws tokens a community on the new rule accepts.** A drip
+  tick is a window of time — tick `t` of a label starts `t` tick lengths after
+  the label's month or event begins, at the community's published `tickLength`
+  (three days by default). The client sent whole days since 1970, which a VTC
+  built from VTI #1960 refuses on every draw (`tickNotYet`). Ticks a vetter
+  missed while offline are caught up, oldest first, never ahead of the clock;
+  old stored counters are dropped. Older communities accept the new ticks.
+- **The drip runs on its own schedule**, shortly after each tick window opens
+  (with jitter) and at least hourly, whether or not you vetted anyone — not only
+  when `m` was pressed.
+- **A new month moves the vetter on.** Each pass re-reads the manifest and runs
+  on the labels the community publishes now, re-enrolling and drawing under the
+  new month's label, while keeping the keys it enrolled under. If those keys
+  change, drawing stops and you are told.
+- **Served tokens are kept.** The serials a draw waits on are now stored with
+  the engine, so an answer still unblinds after the engine is saved and
+  restored — which happens between every request and its answer.
+- **Hidden-vetting refusals are said in words.** `tickNotYet` waits quietly for
+  the window and `alreadyServed` counts as done.
 
 ## [0.4.0] - 2026-10-04
 
