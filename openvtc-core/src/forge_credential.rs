@@ -307,8 +307,7 @@ pub fn local_settings(
 fn check_key_text(path: &Path) -> Result<(), String> {
     match path.to_str() {
         Some(t)
-            if path.is_absolute()
-                && !t.chars().any(|c| c == '\'' || c == '"' || c.is_control()) =>
+            if path.has_root() && !t.chars().any(|c| c == '\'' || c == '"' || c.is_control()) =>
         {
             Ok(())
         }
