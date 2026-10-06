@@ -2151,9 +2151,11 @@ pub(crate) fn criterion_words(
              named vetting{}.",
             if app.holds_evidence() {
                 " — the statements it holds were made that way"
-            } else {
+            } else if app.under_way() {
                 " (its requests went out named). p switches to PCS ZKP; then send your vetter a \
                  new request"
+            } else {
+                ". p switches to PCS ZKP"
             }
         ))
     } else if shown.path == VettingPath::Named && book.pcs_zkp(&app.community) {
@@ -7822,5 +7824,76 @@ mod tests {
         assert_eq!(v.tickets.len(), 1);
         assert!(v.tickets[0].live);
         assert!(v.documentation.iter().any(|d| d == "none"));
+    }
+
+    /// first-vtc's live manifest: `vetted-member` runs PCS ZKP alongside named vetters.
+    fn first_vtc_book() -> (VettingBook, String) {
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../openvtc-core/tests/fixtures/first-vtc-manifest-0.3.json"
+        ))
+        .unwrap();
+        let payload = document["payload"].clone();
+        let community = payload["communityDid"].as_str().unwrap().to_string();
+        let protocol = openvtc_core::vetting::protocol::JoinProtocol::V0_3;
+        let (parsed, meta) =
+            openvtc_core::vetting::protocol::read_manifest(protocol, &payload).unwrap();
+        let mut book = VettingBook::default();
+        let now = Utc::now();
+        book.learn_manifest_in(&community, &parsed, Some(protocol), &meta, now);
+        book.learn_mode(&community, &payload, None, now);
+        (book, community)
+    }
+
+    /// A request that cannot be attested says why, under which criterion, and what the
+    /// applicant does — not one fixed hint (R6.4).
+    #[test]
+    fn a_request_without_an_identifier_under_a_hidden_only_criterion_says_what_to_do() {
+        let words = hidden_without_id_words("vetted-member");
+        assert!(words.contains("criterion vetted-member"), "{words}");
+        assert!(words.contains("accepts only a PCS ZKP proof"), "{words}");
+        assert!(words.contains("refresh their requirements (m)"), "{words}");
+        assert!(words.contains("send you a new request"), "{words}");
+    }
+
+    /// The application names its criterion and path, and a named one under a criterion that
+    /// also offers PCS ZKP says so — the two badges no longer contradict each other unexplained.
+    #[test]
+    fn an_application_shows_its_criterion_and_path() {
+        let (mut book, community) = first_vtc_book();
+        let persona = PersonaId::new();
+        let id = book
+            .start_application(&community, persona, "did:key:zA", Utc::now())
+            .unwrap()
+            .id
+            .clone();
+        book.adopt_known_requirements(&id).unwrap();
+        let app = book.applications[0].clone();
+        let (line, note) = criterion_words(&book, &app).unwrap();
+        assert_eq!(
+            line,
+            "vetted-member — One vetter must confirm who you are · PCS ZKP · 2 ways to be \
+             vetted here, p switches"
+        );
+        assert!(note.is_none());
+
+        // The live case: a named application whose request already went out.
+        book.switch_vetting(&id).unwrap();
+        let app = book.applications[0].clone();
+        let (line, note) = criterion_words(&book, &app).unwrap();
+        assert!(line.contains("· named vetting ·"), "{line}");
+        let note = note.expect("named where PCS ZKP is on offer is explained");
+        assert!(note.contains("also accepts PCS ZKP"), "{note}");
+    }
+
+    /// A ticket where PCS ZKP runs alongside named vetting does not promise a proof every time.
+    #[test]
+    fn a_ticket_in_a_community_offering_both_paths_says_so() {
+        let (book, community) = first_vtc_book();
+        let words = ticket_mode_words(&book, &community, VetterMode::PcsZkp);
+        assert!(words.starts_with("PCS ZKP (named vetting too"), "{words}");
+        assert_eq!(
+            ticket_mode_words(&VettingBook::default(), &community, VetterMode::PcsZkp),
+            "PCS ZKP"
+        );
     }
 }

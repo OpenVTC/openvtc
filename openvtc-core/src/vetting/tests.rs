@@ -3275,3 +3275,256 @@ async fn an_application_started_from_the_book_takes_up_first_vtcs_hidden_vetting
         Some("One vetter must confirm who you are")
     );
 }
+
+/// The second criterion's digest in a community offering two ways to be vetted.
+const NAMED_DIGEST: &str = "zQmNamedCriterionDigestAbcdefgh";
+
+/// A community publishing two vetting criteria: `named` (named statements only) first, then
+/// `vetted`, which runs hidden vetting — alongside named vetters, or (`critical`) alone.
+fn mixed_manifest(critical: bool) -> (manifest::v0_2::Response, Value) {
+    let hidden = manifest_raw_with_ext(
+        json!({ super::hidden::HIDDEN_VETTING_NS: hidden_params() }),
+        critical.then(|| json!([super::hidden::HIDDEN_VETTING_NS])),
+    );
+    let mut named = hidden["criteria"][0].clone();
+    named["id"] = json!("named");
+    named["requirementsDigest"] = json!(NAMED_DIGEST);
+    named["description"] = json!("Two people who know you");
+    let vetting = named["vetting"].as_object_mut().unwrap();
+    vetting.remove("ext");
+    vetting.remove("extCritical");
+    let mut raw = hidden.clone();
+    raw["criteria"] = json!([named, hidden["criteria"][0].clone()]);
+    (serde_json::from_value(raw.clone()).unwrap(), raw)
+}
+
+/// One criterion, `vetted`, running hidden vetting — alongside named vetters, or (`critical`)
+/// alone.
+fn hidden_manifest(critical: bool) -> (manifest::v0_2::Response, Value) {
+    let raw = manifest_raw_with_ext(
+        json!({ super::hidden::HIDDEN_VETTING_NS: hidden_params() }),
+        critical.then(|| json!([super::hidden::HIDDEN_VETTING_NS])),
+    );
+    (serde_json::from_value(raw.clone()).unwrap(), raw)
+}
+
+/// A book that has read `manifest` for [`COMMUNITY`].
+fn learn(book: &mut VettingBook, manifest: &(manifest::v0_2::Response, Value)) {
+    let now = Utc::now();
+    book.learn_manifest_in(COMMUNITY, &manifest.0, None, &[], now);
+    book.learn_mode(COMMUNITY, &manifest.1, None, now);
+}
+
+/// A request that went out, as far as an application's progress goes.
+fn sent_request() -> super::applicant::OutboundRequest {
+    let now = Utc::now();
+    super::applicant::OutboundRequest {
+        document_id: "urn:uuid:sent".into(),
+        vetter: "did:key:zVetter".into(),
+        state: RequestState::Sent,
+        eligibility: None,
+        grant_status: None,
+        sent_at: now,
+        updated_at: now,
+    }
+}
+
+/// A named statement, as far as an application's evidence goes.
+fn held_statement() -> super::applicant::HeldStatement {
+    let now = Utc::now();
+    super::applicant::HeldStatement {
+        id: "urn:uuid:held".into(),
+        vetter: "did:key:zVetter".into(),
+        method: VettingMethod::InPerson,
+        declared_relationship: VettingRelationship::None,
+        document_classes: vec![],
+        claims_verified: vec!["name.legal".into()],
+        identity_commitment: "z".into(),
+        valid_from: now,
+        valid_until: now + Duration::days(30),
+        received_at: now,
+        credential: Value::Null,
+    }
+}
+
+/// Named and hidden criteria side by side: a new application takes the hidden one — it names
+/// no vetter — by either route, while one with a request already out keeps its own.
+#[tokio::test]
+async fn in_a_mixed_community_a_new_application_picks_the_hidden_criterion() {
+    let manifest = mixed_manifest(false);
+    let mut party = Party::new(1);
+    learn(&mut party.book, &manifest);
+    let now = Utc::now();
+    let id = party
+        .book
+        .start_application(COMMUNITY, party.persona, &party.did, now)
+        .unwrap()
+        .id
+        .clone();
+    party.book.adopt_known_requirements(&id).unwrap();
+    let app = party.application();
+    assert_eq!(app.criterion_id.as_deref(), Some("vetted"));
+    assert!(app.hidden.is_some());
+
+    // The manifest route picks the same for a fresh application.
+    let mut fresh = Application::new(COMMUNITY, party.persona, &party.did, now).unwrap();
+    fresh.adopt_manifest(&manifest.0, &manifest.1).unwrap();
+    assert_eq!(fresh.criterion_id.as_deref(), Some("vetted"));
+    assert!(fresh.hidden.is_some());
+
+    // One whose request already went out under `named` is not moved.
+    let mut under_way = Application::new(COMMUNITY, party.persona, &party.did, now).unwrap();
+    under_way.criterion_id = Some("named".into());
+    under_way.requests.push(sent_request());
+    under_way.adopt_manifest(&manifest.0, &manifest.1).unwrap();
+    assert_eq!(under_way.criterion_id.as_deref(), Some("named"));
+    assert!(under_way.hidden.is_none());
+}
+
+/// Under a criterion that offers both paths, an application that already sent a named request
+/// stays named — its request carries no identifier a proof could be made to. A criterion that
+/// takes the proof alone leaves no choice.
+#[tokio::test]
+async fn an_application_under_way_keeps_its_named_path_under_a_criterion_offering_both() {
+    let now = Utc::now();
+    let mut app = Application::new(COMMUNITY, PersonaId::new(), "did:key:zA", now).unwrap();
+    app.requests.push(sent_request());
+    let alongside = hidden_manifest(false);
+    app.adopt_manifest(&alongside.0, &alongside.1).unwrap();
+    assert!(app.hidden.is_none(), "kept named");
+
+    let critical = hidden_manifest(true);
+    app.adopt_manifest(&critical.0, &critical.1).unwrap();
+    assert!(app.hidden.is_some(), "the proof is the only path");
+}
+
+/// Before any evidence, `p` walks the ways a community offers — the other path of the same
+/// criterion, then the next criterion — and once a statement is held, it refuses.
+#[tokio::test]
+async fn an_application_switches_criterion_and_path_before_evidence_only() {
+    use super::applicant::VettingPath;
+    use super::book::CriterionPaths;
+
+    let manifest = mixed_manifest(false);
+    let mut party = Party::new(1);
+    learn(&mut party.book, &manifest);
+    let id = party
+        .book
+        .start_application(COMMUNITY, party.persona, &party.did, Utc::now())
+        .unwrap()
+        .id
+        .clone();
+    party.book.adopt_known_requirements(&id).unwrap();
+
+    let options = party.book.vetting_options(COMMUNITY);
+    let ways: Vec<(&str, VettingPath)> = options
+        .iter()
+        .map(|o| (o.criterion_id.as_str(), o.path))
+        .collect();
+    assert_eq!(
+        ways,
+        vec![
+            ("named", VettingPath::Named),
+            ("vetted", VettingPath::Hidden),
+            ("vetted", VettingPath::Named),
+        ]
+    );
+
+    let now = party.book.switch_vetting(&id).unwrap();
+    assert_eq!(
+        (now.criterion_id.as_str(), now.path, now.paths),
+        ("vetted", VettingPath::Named, CriterionPaths::Either)
+    );
+    assert!(party.application().hidden.is_none());
+    assert!(
+        party.application().hidden_state.is_some(),
+        "its key is kept for a switch back"
+    );
+
+    let now = party.book.switch_vetting(&id).unwrap();
+    assert_eq!(now.criterion_id, "named");
+    assert_eq!(
+        party.application().requirements_digest.as_deref(),
+        Some(NAMED_DIGEST)
+    );
+    assert_eq!(now.description.as_deref(), Some("Two people who know you"));
+    assert!(
+        party.application().criterion_repicked.is_none(),
+        "a switch is not a re-pick"
+    );
+
+    let now = party.book.switch_vetting(&id).unwrap();
+    assert_eq!(
+        (now.criterion_id.as_str(), now.path),
+        ("vetted", VettingPath::Hidden)
+    );
+    assert!(party.application().hidden.is_some());
+    assert!(party.application().hidden_id().is_some());
+
+    // Evidence fixes it.
+    party.application().statements.push(held_statement());
+    let refused = party.book.switch_vetting(&id).unwrap_err();
+    assert!(refused.contains("already holds vetting"), "{refused}");
+}
+
+/// A criterion the community no longer publishes is re-picked, and the application says which
+/// it was.
+#[tokio::test]
+async fn a_stale_criterion_is_repicked_and_said() {
+    let manifest = mixed_manifest(false);
+    let now = Utc::now();
+    let mut app = Application::new(COMMUNITY, PersonaId::new(), "did:key:zA", now).unwrap();
+    app.criterion_id = Some("retired".into());
+    assert!(app.adopt_manifest(&manifest.0, &manifest.1).unwrap());
+    assert_eq!(app.criterion_id.as_deref(), Some("vetted"), "hidden first");
+    assert_eq!(app.criterion_repicked.as_deref(), Some("retired"));
+}
+
+/// The vetter follows the request, not the community: under a criterion running hidden vetting
+/// alongside named vetters, a request without a PCS identifier is a named request.
+#[tokio::test]
+async fn the_vetter_attests_named_for_a_named_request_and_pcs_for_a_hidden_one() {
+    use super::book::RequestVetting;
+    let alongside = hidden_manifest(false);
+
+    // A named request, under a criterion that also accepts PCS ZKP.
+    let (mut applicant, mut vetter, _) = ready().await;
+    learn(&mut vetter.book, &alongside);
+    assert!(vetter.book.pcs_zkp(COMMUNITY), "the community runs PCS ZKP");
+    assert!(
+        applicant.application().hidden.is_none(),
+        "this one is named"
+    );
+    let (request_id, _) = in_session(&mut applicant, &mut vetter).await;
+    assert_eq!(
+        vetter.book.request_vetting(&request_id),
+        RequestVetting::Named {
+            criterion: Some("vetted".into())
+        }
+    );
+
+    // A hidden request carries the identifier.
+    let (mut applicant, mut vetter, _) = ready().await;
+    learn(&mut vetter.book, &alongside);
+    applicant
+        .application()
+        .adopt_manifest(&alongside.0, &alongside.1)
+        .unwrap();
+    assert!(applicant.application().hidden.is_some());
+    let (request_id, _) = in_session(&mut applicant, &mut vetter).await;
+    assert_eq!(
+        vetter.book.request_vetting(&request_id),
+        RequestVetting::Hidden
+    );
+
+    // A named request under a criterion that takes the proof alone has nothing to attest to.
+    let (mut applicant, mut vetter, _) = ready().await;
+    learn(&mut vetter.book, &hidden_manifest(true));
+    let (request_id, _) = in_session(&mut applicant, &mut vetter).await;
+    assert_eq!(
+        vetter.book.request_vetting(&request_id),
+        RequestVetting::HiddenWithoutId {
+            criterion: "vetted".into()
+        }
+    );
+}

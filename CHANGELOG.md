@@ -191,6 +191,27 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **A vetter attests the way the request asks, and a new application takes up
+  hidden vetting.** A community that turns on hidden vetting publishes it in
+  `ext`, alongside named vetters, so a criterion can count either a PCS ZKP
+  proof or named statements. The vetter desk decided from the whole community
+  and refused every request that carried no hidden-vetting identifier ("there
+  is nobody to attest to"). It now follows the request: a request with an
+  identifier gets a PCS ZKP attestation, and one without gets a named
+  statement. Only a criterion that marks hidden vetting `extCritical` refuses,
+  naming the criterion and telling the applicant to refresh (m) and send a new
+  request. On the applicant side, an application started from the join page
+  copied its criterion's requirements without the hidden-vetting parameters,
+  so it stayed on named vetting under a criterion that hides its vetters. Both
+  routes now adopt the criterion the same way. With nothing under way yet, a
+  new application defaults to PCS ZKP, and to a hidden criterion when a
+  community publishes several. The application shows its criterion, the
+  criterion's description and its path. `p` switches criterion or path until
+  any vetting is held. A criterion that is no longer published is re-picked
+  and the page says so. A failure to adopt is reported instead of logged at
+  debug only. In a community that offers both paths, a ticket says that named
+  requests get named statements.
+
 - **The messaging connection recovers from a receive side that stops.** On
   `affinidi-messaging-sdk` 0.33.2 and `affinidi-messaging-delivery` 0.1.20: a
   socket that stays up but delivers nothing is probed and reconnected within
