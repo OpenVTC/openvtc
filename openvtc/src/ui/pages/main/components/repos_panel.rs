@@ -141,7 +141,9 @@ impl Panel for ReposPanel {
 
         match &view.screen {
             ReposScreen::List => render_list(&mut lines, view, &state.repos.linked),
-            ReposScreen::Repo { resource } => render_repo(&mut lines, view, resource),
+            ReposScreen::Repo { resource } => {
+                render_repo(&mut lines, view, resource, &state.repos.linked)
+            }
             ReposScreen::NewRepo(form) => render_new(&mut lines, view, form),
         }
         render_workspace_overlay(&mut lines, view);
@@ -680,8 +682,11 @@ fn local_hints(lines: &mut Vec<Line<'static>>, view: &ReposView) {
     if ws.health.as_ref().is_some_and(|h| h.identity.any()) {
         keys.push("S remove");
     }
-    if target.is_some() {
+    if let Some(t) = &target {
         keys.push("f forge account");
+        if ws.push_access.get(t).is_some_and(|(_, can)| !can) {
+            keys.push("F fork");
+        }
     }
     keys.push("w workspace");
     lines.push(Line::from(dim(format!("    {}", keys.join("   ")))));
@@ -717,7 +722,12 @@ fn head_line(view: &ReposView, facts: &CheckoutFacts) -> Option<(&'static str, C
 
 /// Which forge account the repository uses, where that was chosen, and —
 /// for a checkout — whether the checkout itself has it.
-fn account_line(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str) {
+fn account_line(
+    lines: &mut Vec<Line<'static>>,
+    view: &ReposView,
+    resource: &str,
+    linked: &[LinkedAccount],
+) {
     let Ok(coords) = RepoCoords::parse(resource) else {
         return;
     };
@@ -733,17 +743,63 @@ fn account_line(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str
         text(sanitize_display(&choice.credential.label(), 256)),
         dim(from),
     ]));
+    if let Some(login) = choice.credential.gh_login() {
+        // The community's bridge closes pull requests from an account not
+        // linked to a member.
+        match view.linked_on(linked, &coords.host) {
+            Some(account) if !account.login.eq_ignore_ascii_case(login) => wrapped(
+                lines,
+                "▲",
+                COLOR_ORANGE,
+                &format!(
+                    "This membership is linked to {}, not {login}: pull requests from {login} \
+                     will be closed by the community unless it is linked — press l to link it.",
+                    sanitize_display(&account.login, 100)
+                ),
+            ),
+            Some(_) => {}
+            None => lines.push(Line::from(dim(format!(
+                "      The community accepts pull requests only from a linked account; l \
+                 links {login}."
+            )))),
+        }
+        if let Some((who, false)) = ws.push_access.get(resource)
+            && who == login
+        {
+            wrapped(
+                lines,
+                "▲",
+                COLOR_ORANGE,
+                &format!(
+                    "{login} can read {} but not push to it, so a push here is refused. F \
+                     forks it to {login} and sends pushes there; open the pull request from \
+                     {login}:<branch>.",
+                    git_ns::short_resource(resource)
+                ),
+            );
+        }
+    }
     let Some(facts) = ws.checkouts.get(resource).map(|c| &c.facts) else {
         return;
     };
     if !facts.is_repo {
         return;
     }
+    if facts.author_name.is_some() || facts.author_email.is_some() {
+        lines.push(Line::from(vec![
+            dim("    commits authored as: "),
+            text(format!(
+                "{} <{}>",
+                sanitize_display(facts.author_name.as_deref().unwrap_or("?"), 128),
+                sanitize_display(facts.author_email.as_deref().unwrap_or("?"), 256)
+            )),
+        ]));
+    }
     let applied = facts
         .credential
         .clone()
         .unwrap_or(ForgeCredential::GitDefault);
-    if applied != choice.credential {
+    if !applied.same_account(&choice.credential) {
         wrapped(
             lines,
             "▲",
@@ -757,9 +813,14 @@ fn account_line(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str
 }
 
 /// A repository's checkout on this machine, on its own screen.
-fn render_local(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str) {
+fn render_local(
+    lines: &mut Vec<Line<'static>>,
+    view: &ReposView,
+    resource: &str,
+    linked: &[LinkedAccount],
+) {
     heading(lines, "On this machine");
-    account_line(lines, view, resource);
+    account_line(lines, view, resource, linked);
     let ws = &view.workspace;
     let Some(checkout) = ws.checkouts.get(resource) else {
         let coords = RepoCoords::parse(resource).ok();
@@ -1001,6 +1062,16 @@ fn render_account_form(lines: &mut Vec<Line<'static>>, form: &AccountForm) {
         if picked && *option == AccountOption::EnterPath {
             input(lines, &form.path, true, "~/.ssh/id_ed25519_work");
         }
+        if let (true, AccountOption::Gh { login, .. }) = (picked, option) {
+            lines.push(Line::from(dim(if form.keep_author {
+                format!("        commits keep your own git identity (a: author them as {login})")
+            } else {
+                format!(
+                    "        commits are authored as {login} <id+{login}@users.noreply…> \
+                     (a: keep your own identity)"
+                )
+            })));
+        }
     }
     if let Some(note) = &form.gh_note {
         lines.push(Line::from(dim(format!(
@@ -1027,7 +1098,12 @@ fn render_account_form(lines: &mut Vec<Line<'static>>, form: &AccountForm) {
 // One repository
 // ****************************************************************************
 
-fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str) {
+fn render_repo(
+    lines: &mut Vec<Line<'static>>,
+    view: &ReposView,
+    resource: &str,
+    linked: &[LinkedAccount],
+) {
     let Some(repo) = view.repo(resource) else {
         lines.push(Line::from(""));
         lines.push(Line::from(dim(format!(
@@ -1046,7 +1122,7 @@ fn render_repo(lines: &mut Vec<Line<'static>>, view: &ReposView, resource: &str)
         }),
     ]));
 
-    render_local(lines, view, resource);
+    render_local(lines, view, resource, linked);
 
     // Creation, while it runs: the §5.3 steps as the record reports them.
     if matches!(status, RepoStatus::Creating { .. }) {
@@ -1805,9 +1881,7 @@ mod tests {
 
         // A checkout openvtc set up before the choice changed says so.
         let mut c = checkout(CheckoutSigning::Off, None);
-        c.facts.credential = Some(ForgeCredential::GhAccount {
-            login: "alice".into(),
-        });
+        c.facts.credential = Some(ForgeCredential::gh("alice".into()));
         v.workspace.checkouts.insert(resource.into(), c);
         let out = rendered(v.clone());
         assert!(
@@ -1841,6 +1915,79 @@ mod tests {
         assert!(out.contains("SSH key /h/.ssh/id_ed25519"), "{out}");
         assert!(out.contains("Another SSH key"), "{out}");
         assert!(out.contains("Tab this repository only"), "{out}");
+        assert!(out.contains("a: keep your own identity"), "{out}");
+    }
+
+    /// A gh account that is not the linked one, cannot push, and authors
+    /// commits as itself: each said in words.
+    #[test]
+    fn a_gh_account_says_who_it_is_to_the_community() {
+        let mut v = with_workspace(loaded(), ready(), HookHealth::Current { version: 2 });
+        let resource = "github.com/acme/gadgets";
+        v.screen = ReposScreen::Repo {
+            resource: resource.into(),
+        };
+        let vtc = v.vtc_did.clone();
+        v.workspace.settings.set_credential(
+            &vtc,
+            &RepoCoords::parse(resource).unwrap(),
+            CredentialScope::Repo,
+            Some(ForgeCredential::gh("alice-work".into())),
+        );
+        let render = |v: &ReposView, linked: &[LinkedAccount]| {
+            let mut lines = Vec::new();
+            render_repo(&mut lines, v, resource, linked);
+            lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                // A wrapped line continues on the next, indented.
+                .replace("\n      ", " ")
+        };
+        let out = render(&v, &[]);
+        assert!(
+            out.contains("only from a linked account; l links alice-work"),
+            "{out}"
+        );
+
+        let linked = [LinkedAccount {
+            vtc_did: vtc.clone(),
+            forge: "github.com".into(),
+            login: "alice".into(),
+            id: "1".into(),
+        }];
+        let out = render(&v, &linked);
+        assert!(
+            out.contains("pull requests from alice-work will be closed by the community"),
+            "{out}"
+        );
+        assert!(out.contains("press l to link it"), "{out}");
+
+        let mut c = checkout(CheckoutSigning::Off, None);
+        c.facts.author_name = Some("alice-work".into());
+        c.facts.author_email = Some("7+alice-work@users.noreply.github.com".into());
+        c.facts.credential = Some(ForgeCredential::gh("alice-work".into()));
+        v.workspace.checkouts.insert(resource.into(), c);
+        v.workspace
+            .push_access
+            .insert(resource.into(), ("alice-work".into(), false));
+        let out = render(&v, &linked);
+        assert!(
+            out.contains("commits authored as: alice-work <7+alice-work@users.noreply.github.com>"),
+            "{out}"
+        );
+        assert!(
+            out.contains("can read acme/gadgets but not push to it"),
+            "{out}"
+        );
+        assert!(out.contains("F fork"), "{out}");
+        assert!(!out.contains("This checkout is set to"), "{out}");
     }
 
     #[test]

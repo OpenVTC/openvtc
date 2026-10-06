@@ -552,7 +552,7 @@ pub enum ReposAction {
 /// sign as the community's persona, and did-git-sign's identity for it.
 ///
 /// `Clone`, `Sign`, `Unsign`, `SetUp`, `Confirm`, `SettingsSubmit`,
-/// `UseSubmit`, `AccountStart` and `AccountSubmit` run git, gh, did-git-sign or
+/// `UseSubmit`, `AccountStart`, `AccountSubmit` and `Fork` run git, gh, did-git-sign or
 /// the VTA, so the runtime loop services them; the rest move the view's state
 /// only.
 #[derive(Debug, Clone, PartialEq)]
@@ -595,6 +595,11 @@ pub enum WorkspaceAction {
     AccountPick(usize),
     /// Switch the picker between this repository and the whole forge.
     AccountScope,
+    /// Switch whether a gh account also sets the commit author.
+    AccountAuthor,
+    /// Fork the repository to the chosen gh account (which cannot push to
+    /// it) and point the checkout's pushes at the fork.
+    Fork,
     /// Replace the key path being typed.
     AccountInput(String),
     /// Store the choice and apply it to the checkouts it covers.

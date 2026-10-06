@@ -470,6 +470,10 @@ pub struct CheckoutFacts {
     /// The `core.hooksPath` in effect, from any scope.
     pub hooks_path: Option<String>,
     pub head: Option<HeadCommit>,
+    /// `user.name` and `user.email` as git will author a commit here, from any
+    /// scope.
+    pub author_name: Option<String>,
+    pub author_email: Option<String>,
     /// The forge account openvtc set this checkout to use
     /// ([`forge_credential::MARKER_KEY`]); `None` when it set none.
     pub credential: Option<ForgeCredential>,
@@ -544,6 +548,8 @@ pub fn inspect(path: &Path, coords: &RepoCoords) -> CheckoutFacts {
         .as_deref()
         == Some("true");
     facts.hooks_path = git_read(path, &["config", "--get", "core.hooksPath"]);
+    facts.author_name = git_read(path, &["config", "--get", "user.name"]);
+    facts.author_email = git_read(path, &["config", "--get", "user.email"]);
     facts.credential = git_read(
         path,
         &["config", "--local", "--get", forge_credential::MARKER_KEY],
@@ -637,6 +643,7 @@ pub fn clone_repo(
     coords: &RepoCoords,
     protocol: CloneProtocol,
     credential: &ForgeCredential,
+    author: Option<&forge_credential::CommitAuthor>,
     dest: &Path,
     timeout: Duration,
 ) -> Result<(), String> {
@@ -654,7 +661,7 @@ pub fn clone_repo(
     let protocol = credential.protocol(protocol);
     let mut cmd = Command::new("git");
     cmd.args(forge_credential::clone_args(
-        coords, protocol, credential, dest,
+        coords, protocol, credential, author, dest,
     )?)
     .env("GIT_TERMINAL_PROMPT", "0")
     .stdin(Stdio::null())
@@ -856,9 +863,7 @@ mod tests {
             "did:webvh:x:c.example",
             &widgets(),
             CredentialScope::Repo,
-            Some(ForgeCredential::GhAccount {
-                login: "alice".into(),
-            }),
+            Some(ForgeCredential::gh("alice".into())),
         );
         s.save_to(&path).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
@@ -872,9 +877,7 @@ mod tests {
         let c = widgets();
         let other = RepoCoords::parse("github.com/acme/gadgets").unwrap();
         assert_eq!(s.credential_for("did:c", &c).scope, None);
-        let work = ForgeCredential::GhAccount {
-            login: "alice-work".into(),
-        };
+        let work = ForgeCredential::gh("alice-work".into());
         let key = ForgeCredential::SshKey {
             path: PathBuf::from("/k/id_x"),
         };
@@ -1004,6 +1007,7 @@ mod tests {
             &widgets(),
             CloneProtocol::Https,
             &ForgeCredential::GitDefault,
+            None,
             dir.path(),
             Duration::from_secs(5),
         )

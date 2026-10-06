@@ -29,6 +29,8 @@ Highlight a repository (or open it) and press **`f`**. openvtc looks for:
   (`l`), the gh account with the same login is highlighted.
 - A repository's own choice wins over its community's forge-wide choice.
   Choosing *Git default* on a repository opts it out of the forge-wide account.
+- On a gh account, `a` switches the **commit author** between the account
+  (the default) and your own git identity — see below.
 
 Before saving, openvtc checks the choice works: the key file exists, or
 `gh auth token --user <login>` answers for that account. Otherwise it says why —
@@ -39,6 +41,38 @@ later".
 The repository's screen shows `forge account: …` and where the choice came from,
 and says so when a checkout's own git config disagrees (for example a checkout
 made before you chose); `f`, `⏎` writes the choice into it.
+
+## Commit author
+
+Pushing as an account is not enough for the forge to attribute your commits
+to it: GitHub attributes a commit by its author email. With a global
+`user.email` that belongs to another account, a commit pushed by `alice-work`
+still shows as `alice`, and is not marked *Verified*. So choosing a gh account
+also sets, in the checkout only,
+
+```
+user.name  = alice-work
+user.email = 12345+alice-work@users.noreply.github.com
+```
+
+— the account's `users.noreply` address, with its numeric id looked up once
+with `gh api users/alice-work` (bounded). Press `a` in the picker to keep your
+own identity instead. An SSH key cannot say which account it belongs to, so it
+leaves the author alone. The repository's screen shows `commits authored as:`
+for a checkout.
+
+## Push access, forks and the community's link
+
+- After a clone or a choice, openvtc asks the forge (with that account's own
+  token) whether the gh account can push to the repository. If it can only
+  read, the screen says so, and **`F`** forks the repository to that account
+  (`gh repo fork --remote --remote-name fork`, run in the checkout) and sets
+  `remote.pushDefault = fork`, so `git push` goes to the fork. Open the pull
+  request from `<login>:<branch>`.
+- A community's bridge closes pull requests from a forge account that is not
+  linked to a member. When the chosen gh account differs from the account
+  linked for this membership (`l`), the screen warns that its pull requests
+  will be closed until it is linked.
 
 ## How it is applied
 
@@ -71,7 +105,9 @@ The settings written:
   ```
 
   The empty first entry resets the credential helpers inherited from your
-  global config (such as `osxkeychain`), so they are not asked first. The
+  global and system config for that forge — `osxkeychain`, say, which may hold
+  another account's cached token and would otherwise answer first. (A test
+  holds this: a global helper is never consulted once an account is chosen.) The
   helper asks gh for *that* account's token each time git needs one; the token
   is never written anywhere by openvtc. (`gh auth git-credential` is not used:
   it always answers with gh's *active* account for the host.)

@@ -59,12 +59,31 @@ use crate::git_workspace::{CloneProtocol, RepoCoords};
 /// account's token against the forge, so it is a network call.
 pub const GH_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// The longest `gh repo fork` may run: it waits for the forge to create the
+/// fork.
+pub const FORK_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// The longest a local `git config` call may run.
 const GIT_CONFIG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The local git config key openvtc writes beside the settings it applies:
 /// `ssh:<path>` or `gh:<login>`.
 pub const MARKER_KEY: &str = "openvtc.forgeCredential";
+
+/// Written as `true` when openvtc also set the checkout's `user.name` and
+/// `user.email`, so it knows it may remove them when the choice changes.
+pub const AUTHOR_MARKER_KEY: &str = "openvtc.forgeAuthor";
+
+/// Who commits made in a checkout are authored as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitAuthor {
+    pub name: String,
+    pub email: String,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
 
 /// The account git uses to reach a forge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,11 +93,62 @@ pub enum ForgeCredential {
     GitDefault,
     /// This SSH private key, and no other.
     SshKey { path: PathBuf },
-    /// This account of the `gh` CLI, over HTTPS.
-    GhAccount { login: String },
+    /// This account of the `gh` CLI, over HTTPS. Commits are authored as the
+    /// account too (its `users.noreply` address), unless `keep_author`: then
+    /// the member's own git identity stays.
+    GhAccount {
+        login: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        keep_author: bool,
+    },
 }
 
 impl ForgeCredential {
+    /// A gh account, authoring commits as that account.
+    #[must_use]
+    pub fn gh(login: String) -> Self {
+        ForgeCredential::GhAccount {
+            login,
+            keep_author: false,
+        }
+    }
+
+    /// Whether two choices reach the forge as the same account, whatever they
+    /// say about the commit author.
+    #[must_use]
+    pub fn same_account(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                ForgeCredential::GhAccount { login: a, .. },
+                ForgeCredential::GhAccount { login: b, .. },
+            ) => a == b,
+            _ => self == other,
+        }
+    }
+
+    /// The gh login, for a gh account.
+    #[must_use]
+    pub fn gh_login(&self) -> Option<&str> {
+        match self {
+            ForgeCredential::GhAccount { login, .. } => Some(login),
+            _ => None,
+        }
+    }
+
+    /// Look up the commit author this choice sets: a gh account's
+    /// `users.noreply` identity, unless it keeps the member's own. `None`:
+    /// nothing to set. Blocking; calls `gh api` (bounded).
+    #[must_use]
+    pub fn author(&self, host: &str) -> Option<Result<CommitAuthor, String>> {
+        match self {
+            ForgeCredential::GhAccount {
+                login,
+                keep_author: false,
+            } => Some(gh_noreply_author(host, login, GH_TIMEOUT)),
+            _ => None,
+        }
+    }
+
     /// A few words for the panel.
     #[must_use]
     pub fn label(&self) -> String {
@@ -87,7 +157,7 @@ impl ForgeCredential {
             ForgeCredential::SshKey { path } => {
                 format!("SSH key {}", crate::git_workspace::display_path(path))
             }
-            ForgeCredential::GhAccount { login } => format!("gh account {login}"),
+            ForgeCredential::GhAccount { login, .. } => format!("gh account {login}"),
         }
     }
 
@@ -109,7 +179,7 @@ impl ForgeCredential {
         match self {
             ForgeCredential::GitDefault => None,
             ForgeCredential::SshKey { path } => Some(format!("ssh:{}", path.display())),
-            ForgeCredential::GhAccount { login } => Some(format!("gh:{login}")),
+            ForgeCredential::GhAccount { login, .. } => Some(format!("gh:{login}")),
         }
     }
 
@@ -124,9 +194,7 @@ impl ForgeCredential {
         marker
             .strip_prefix("gh:")
             .filter(|l| valid_login(l))
-            .map(|login| ForgeCredential::GhAccount {
-                login: login.to_string(),
-            })
+            .map(|login| ForgeCredential::gh(login.to_string()))
     }
 
     /// Check the choice is still usable before git relies on it: the key file
@@ -139,7 +207,7 @@ impl ForgeCredential {
         match self {
             ForgeCredential::GitDefault => Ok(()),
             ForgeCredential::SshKey { path } => validate_key_path(path).map(|_| ()),
-            ForgeCredential::GhAccount { login } => gh_check_account(host, login, GH_TIMEOUT),
+            ForgeCredential::GhAccount { login, .. } => gh_check_account(host, login, GH_TIMEOUT),
         }
     }
 }
@@ -265,16 +333,17 @@ fn gh_helper(host: &str, login: &str) -> String {
 }
 
 /// The `(key, value)` pairs a checkout gets for `credential` on `host`, in the
-/// order they are written. Repeated keys are added, not replaced. Empty for
-/// the git default.
+/// order they are written, with `author` as `user.name` / `user.email` when
+/// given. Repeated keys are added, not replaced. Empty for the git default.
 ///
 /// # Errors
 ///
 /// When the login or key path would not be safe inside the shell string git
-/// runs.
+/// runs, or the author holds a control character.
 pub fn local_settings(
     credential: &ForgeCredential,
     host: &str,
+    author: Option<&CommitAuthor>,
 ) -> Result<Vec<(String, String)>, String> {
     let Some(marker) = credential.marker() else {
         return Ok(Vec::new());
@@ -285,7 +354,7 @@ pub fn local_settings(
             check_key_text(path)?;
             vec![("core.sshCommand".to_string(), ssh_command(path, false))]
         }
-        ForgeCredential::GhAccount { login } => {
+        ForgeCredential::GhAccount { login, .. } => {
             if !valid_login(login) {
                 return Err(format!("'{login}' is not a forge login openvtc will use."));
             }
@@ -298,6 +367,17 @@ pub fn local_settings(
             ]
         }
     };
+    if let Some(a) = author {
+        if [&a.name, &a.email]
+            .iter()
+            .any(|v| v.is_empty() || v.chars().any(char::is_control))
+        {
+            return Err("the commit author has an empty or control-character field.".into());
+        }
+        out.push(("user.name".into(), a.name.clone()));
+        out.push(("user.email".into(), a.email.clone()));
+        out.push((AUTHOR_MARKER_KEY.into(), "true".into()));
+    }
     out.push((MARKER_KEY.to_string(), marker));
     Ok(out)
 }
@@ -330,6 +410,7 @@ pub fn clone_args(
     coords: &RepoCoords,
     protocol: CloneProtocol,
     credential: &ForgeCredential,
+    author: Option<&CommitAuthor>,
     dest: &Path,
 ) -> Result<Vec<OsString>, String> {
     let mut args: Vec<OsString> = Vec::new();
@@ -339,7 +420,7 @@ pub fn clone_args(
         args.push(format!("core.sshCommand={}", ssh_command(path, true)).into());
     }
     args.extend(["clone".into(), "--quiet".into()]);
-    for (key, value) in local_settings(credential, &coords.host)? {
+    for (key, value) in local_settings(credential, &coords.host, author)? {
         args.push("--config".into());
         args.push(format!("{key}={value}").into());
     }
@@ -376,8 +457,9 @@ pub fn applied_in(dir: &Path) -> Option<ForgeCredential> {
     ForgeCredential::from_marker(String::from_utf8_lossy(&out.stdout).trim())
 }
 
-/// Make the checkout at `dir` use `credential` on `host`: remove what openvtc
-/// wrote for the previous choice, then write the new settings. A setting the
+/// Make the checkout at `dir` use `credential` on `host` (and `author`, when
+/// given): remove what openvtc wrote for the previous choice, then write the
+/// new settings. A setting the
 /// member wrote themselves is left alone, except that choosing an SSH key
 /// replaces the checkout's own `core.sshCommand` (the choice is that key).
 ///
@@ -388,8 +470,9 @@ pub fn apply_to_checkout(
     dir: &Path,
     host: &str,
     credential: &ForgeCredential,
+    author: Option<&CommitAuthor>,
 ) -> Result<(), String> {
-    let settings = local_settings(credential, host)?;
+    let settings = local_settings(credential, host, author)?;
     // Undo the previous choice — only what its marker says openvtc wrote.
     let unset = |key: &str| -> Result<(), String> {
         let out = git_config(dir, &["--unset-all", "--", key])?;
@@ -410,6 +493,11 @@ pub fn apply_to_checkout(
             unset(&username_key(host))?;
         }
         Some(ForgeCredential::GitDefault) | None => {}
+    }
+    if git_config(dir, &["--get", AUTHOR_MARKER_KEY]).is_ok_and(|o| o.status.success()) {
+        unset("user.name")?;
+        unset("user.email")?;
+        unset(AUTHOR_MARKER_KEY)?;
     }
     unset(MARKER_KEY)?;
     if matches!(credential, ForgeCredential::SshKey { .. }) {
@@ -571,6 +659,190 @@ pub fn gh_accounts(timeout: Duration) -> Result<Vec<GhAccount>, GhError> {
         return Err(GhError::Failed(why));
     }
     Ok(accounts)
+}
+
+/// `gh api users/<login>`: the account's numeric id.
+#[derive(Deserialize)]
+struct GhUser {
+    id: u64,
+    login: String,
+}
+
+/// The `users.noreply` identity of a forge account: `<id>+<login>@users.noreply.<host>`,
+/// which the forge attributes to that account (and shows as Verified when the
+/// commit is signed by a key it knows).
+#[must_use]
+pub fn noreply_author(host: &str, id: u64, login: &str) -> CommitAuthor {
+    CommitAuthor {
+        name: login.to_string(),
+        email: format!("{id}+{login}@users.noreply.{host}"),
+    }
+}
+
+/// Look up `login`'s noreply author on `host` with `gh api` (bounded).
+///
+/// # Errors
+///
+/// A sentence: gh missing, no answer, or an answer for another account.
+pub fn gh_noreply_author(
+    host: &str,
+    login: &str,
+    timeout: Duration,
+) -> Result<CommitAuthor, String> {
+    if !valid_login(login) {
+        return Err(format!("'{login}' is not a forge login openvtc will use."));
+    }
+    let mut cmd = Command::new("gh");
+    cmd.args(["api", "--hostname", host, &format!("users/{login}")])
+        .env("GH_PROMPT_DISABLED", "1");
+    let out = match run_bounded(cmd, timeout) {
+        Ok(out) => out,
+        Err(RunError::NotInstalled) => return Err("gh is not installed (or not on PATH).".into()),
+        Err(RunError::TimedOut) => {
+            return Err(format!(
+                "gh did not answer within {} seconds.",
+                timeout.as_secs()
+            ));
+        }
+        Err(RunError::Io(e)) => return Err(format!("couldn't run gh: {e}")),
+    };
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!("couldn't look {login} up on {host}: {why}"));
+    }
+    parse_gh_user(&String::from_utf8_lossy(&out.stdout), host, login)
+}
+
+/// Read `gh api users/<login>` into the noreply author, checking it answered
+/// for that login.
+fn parse_gh_user(text: &str, host: &str, login: &str) -> Result<CommitAuthor, String> {
+    let user: GhUser = serde_json::from_str(text).map_err(|e| {
+        format!("{host} answered the lookup of {login} in a shape openvtc does not read: {e}")
+    })?;
+    if !user.login.eq_ignore_ascii_case(login) {
+        return Err(format!(
+            "{host} answered for {} when asked for {login}.",
+            user.login
+        ));
+    }
+    Ok(noreply_author(host, user.id, &user.login))
+}
+
+/// Whether `login` can push to `coords`, from `gh api repos/<owner>/<repo>`
+/// read with that account's own token (bounded). `None` when it could not be
+/// told. The token is passed to that one gh call in its environment only.
+#[must_use]
+pub fn gh_can_push(coords: &RepoCoords, login: &str, timeout: Duration) -> Option<bool> {
+    if !valid_login(login) {
+        return None;
+    }
+    let mut cmd = Command::new("gh");
+    cmd.args(["auth", "token", "--hostname", &coords.host, "--user", login])
+        .env("GH_PROMPT_DISABLED", "1");
+    let out = run_bounded(cmd, timeout)
+        .ok()
+        .filter(|o| o.status.success())?;
+    let token = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    let mut cmd = Command::new("gh");
+    cmd.args([
+        "api",
+        "--hostname",
+        &coords.host,
+        &format!("repos/{}/{}", coords.owner, coords.repo),
+    ])
+    .env("GH_PROMPT_DISABLED", "1")
+    .env(
+        if coords.host == "github.com" {
+            "GH_TOKEN"
+        } else {
+            "GH_ENTERPRISE_TOKEN"
+        },
+        token,
+    );
+    let out = run_bounded(cmd, timeout)
+        .ok()
+        .filter(|o| o.status.success())?;
+    parse_push_permission(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `permissions.push` from `gh api repos/<owner>/<repo>`.
+fn parse_push_permission(text: &str) -> Option<bool> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    v.get("permissions")?.get("push")?.as_bool()
+}
+
+/// Fork `coords` (the checkout at `dir`) to `login`'s account and point the
+/// checkout to push there: `gh repo fork --remote --remote-name fork`, run in
+/// the checkout with that account's token, then `remote.pushDefault = fork`.
+/// Bounded.
+///
+/// # Errors
+///
+/// A sentence saying which step failed.
+pub fn gh_fork_for_push(
+    dir: &Path,
+    coords: &RepoCoords,
+    login: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    if !valid_login(login) {
+        return Err(format!("'{login}' is not a forge login openvtc will use."));
+    }
+    let mut cmd = Command::new("gh");
+    cmd.args(["auth", "token", "--hostname", &coords.host, "--user", login])
+        .env("GH_PROMPT_DISABLED", "1");
+    let out = run_bounded(cmd, timeout).map_err(|_| "gh could not give a token.".to_string())?;
+    if !out.status.success() {
+        return Err(explain_gh_token_failure(
+            &String::from_utf8_lossy(&out.stderr),
+            &coords.host,
+            login,
+        ));
+    }
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let mut cmd = Command::new("gh");
+    cmd.current_dir(dir)
+        .args([
+            // No repository argument: gh forks the checkout's own (its
+            // `origin`), and only then adds the remote.
+            "repo",
+            "fork",
+            "--remote",
+            "--remote-name",
+            "fork",
+        ])
+        .env("GH_PROMPT_DISABLED", "1")
+        .env(
+            if coords.host == "github.com" {
+                "GH_TOKEN"
+            } else {
+                "GH_ENTERPRISE_TOKEN"
+            },
+            token,
+        );
+    let out = run_bounded(cmd, timeout).map_err(|e| match e {
+        RunError::NotInstalled => "gh is not installed (or not on PATH).".to_string(),
+        RunError::TimedOut => format!(
+            "gh repo fork did not finish within {} seconds.",
+            timeout.as_secs()
+        ),
+        RunError::Io(e) => format!("couldn't run gh: {e}"),
+    })?;
+    if !out.status.success() {
+        return Err(format!(
+            "gh could not fork {} as {login}: {}",
+            coords.resource(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let out = git_config(dir, &["remote.pushDefault", "fork"])?;
+    if !out.status.success() {
+        return Err(format!(
+            "forked, but git could not set remote.pushDefault: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 /// Explain a failed `gh auth token --user`.
@@ -775,9 +1047,7 @@ mod tests {
             ForgeCredential::SshKey {
                 path: PathBuf::from("/home/a/.ssh/id_work"),
             },
-            ForgeCredential::GhAccount {
-                login: "alice".into(),
-            },
+            ForgeCredential::gh("alice".into()),
         ] {
             assert_eq!(ForgeCredential::from_marker(&c.marker().unwrap()), Some(c));
         }
@@ -792,6 +1062,7 @@ mod tests {
             &widgets(),
             CloneProtocol::Https,
             &ForgeCredential::GitDefault,
+            None,
             Path::new("/w/widgets"),
         )
         .unwrap();
@@ -813,7 +1084,14 @@ mod tests {
             path: PathBuf::from("/home/a/.ssh/id_work"),
         };
         let args = strings(
-            &clone_args(&widgets(), CloneProtocol::Https, &cred, Path::new("/w/x")).unwrap(),
+            &clone_args(
+                &widgets(),
+                CloneProtocol::Https,
+                &cred,
+                None,
+                Path::new("/w/x"),
+            )
+            .unwrap(),
         );
         assert_eq!(
             args,
@@ -835,11 +1113,17 @@ mod tests {
 
     #[test]
     fn a_gh_clone_uses_that_account_over_https() {
-        let cred = ForgeCredential::GhAccount {
-            login: "alice-work".into(),
-        };
-        let args =
-            strings(&clone_args(&widgets(), CloneProtocol::Ssh, &cred, Path::new("/w/x")).unwrap());
+        let cred = ForgeCredential::gh("alice-work".into());
+        let args = strings(
+            &clone_args(
+                &widgets(),
+                CloneProtocol::Ssh,
+                &cred,
+                None,
+                Path::new("/w/x"),
+            )
+            .unwrap(),
+        );
         assert_eq!(args[..2], ["clone", "--quiet"]);
         assert_eq!(
             args[2..4],
@@ -861,14 +1145,13 @@ mod tests {
 
     #[test]
     fn unsafe_choices_are_refused_before_git_sees_them() {
-        let bad_login = ForgeCredential::GhAccount {
-            login: "a;rm -rf".into(),
-        };
+        let bad_login = ForgeCredential::gh("a;rm -rf".into());
         assert!(
             clone_args(
                 &widgets(),
                 CloneProtocol::Https,
                 &bad_login,
+                None,
                 Path::new("/w")
             )
             .is_err()
@@ -876,7 +1159,16 @@ mod tests {
         let bad_key = ForgeCredential::SshKey {
             path: PathBuf::from("/tmp/k'; touch x"),
         };
-        assert!(clone_args(&widgets(), CloneProtocol::Ssh, &bad_key, Path::new("/w")).is_err());
+        assert!(
+            clone_args(
+                &widgets(),
+                CloneProtocol::Ssh,
+                &bad_key,
+                None,
+                Path::new("/w")
+            )
+            .is_err()
+        );
     }
 
     const GH_JSON: &str = r#"{"hosts":{"github.com":[
@@ -988,17 +1280,15 @@ mod tests {
 
         assert_eq!(applied_in(&repo), None);
         let ssh = ForgeCredential::SshKey { path: key.clone() };
-        apply_to_checkout(&repo, "github.com", &ssh).unwrap();
+        apply_to_checkout(&repo, "github.com", &ssh, None).unwrap();
         assert_eq!(applied_in(&repo), Some(ssh));
         assert_eq!(
             local_all(&repo, "core.sshCommand"),
             [format!("ssh -i '{}' -o IdentitiesOnly=yes", key.display())]
         );
 
-        let gh = ForgeCredential::GhAccount {
-            login: "alice".into(),
-        };
-        apply_to_checkout(&repo, "github.com", &gh).unwrap();
+        let gh = ForgeCredential::gh("alice".into());
+        apply_to_checkout(&repo, "github.com", &gh, None).unwrap();
         assert_eq!(applied_in(&repo), Some(gh.clone()));
         assert!(
             local_all(&repo, "core.sshCommand").is_empty(),
@@ -1010,7 +1300,7 @@ mod tests {
         assert!(helpers[1].contains("--user alice"));
 
         // Applying it again does not stack helpers.
-        apply_to_checkout(&repo, "github.com", &gh).unwrap();
+        apply_to_checkout(&repo, "github.com", &gh, None).unwrap();
         assert_eq!(
             local_all(&repo, "credential.https://github.com.helper").len(),
             2
@@ -1018,7 +1308,7 @@ mod tests {
 
         // The member's own sshCommand is left alone by a gh choice.
         assert!(git_config(&repo, &["core.sshCommand", "ssh -i /mine"]).is_ok());
-        apply_to_checkout(&repo, "github.com", &ForgeCredential::GitDefault).unwrap();
+        apply_to_checkout(&repo, "github.com", &ForgeCredential::GitDefault, None).unwrap();
         assert_eq!(applied_in(&repo), None);
         assert!(local_all(&repo, "credential.https://github.com.helper").is_empty());
         assert!(local_all(&repo, "credential.https://github.com.username").is_empty());
@@ -1036,14 +1326,13 @@ mod tests {
         let src = dir.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
         assert!(isolated_git(&src, &["init", "-q"]));
-        let gh = ForgeCredential::GhAccount {
-            login: "alice".into(),
-        };
+        let gh = ForgeCredential::gh("alice".into());
         // The URL is swapped for the local source: same arguments otherwise.
         let mut args = clone_args(
             &widgets(),
             CloneProtocol::Https,
             &gh,
+            Some(&noreply_author("github.com", 7, "alice")),
             &dir.path().join("dst"),
         )
         .unwrap();
@@ -1058,6 +1347,165 @@ mod tests {
             .status
             .success();
         assert!(ok);
-        assert_eq!(applied_in(&dir.path().join("dst")), Some(gh));
+        let dst = dir.path().join("dst");
+        assert_eq!(applied_in(&dst), Some(gh));
+        assert_eq!(
+            local_all(&dst, "user.email"),
+            ["7+alice@users.noreply.github.com"]
+        );
+    }
+
+    #[test]
+    fn the_noreply_author_is_read_from_the_forge() {
+        let a = parse_gh_user(
+            r#"{"login":"Alice-Work","id":12345,"type":"User"}"#,
+            "github.com",
+            "alice-work",
+        )
+        .unwrap();
+        assert_eq!(a.name, "Alice-Work");
+        assert_eq!(a.email, "12345+Alice-Work@users.noreply.github.com");
+        assert!(parse_gh_user(r#"{"login":"bob","id":1}"#, "github.com", "alice").is_err());
+        assert!(parse_gh_user("{}", "github.com", "alice").is_err());
+    }
+
+    #[test]
+    fn push_permission_is_read() {
+        assert_eq!(
+            parse_push_permission(r#"{"permissions":{"admin":false,"push":false,"pull":true}}"#),
+            Some(false)
+        );
+        assert_eq!(
+            parse_push_permission(r#"{"permissions":{"push":true}}"#),
+            Some(true)
+        );
+        assert_eq!(parse_push_permission(r#"{"name":"x"}"#), None);
+    }
+
+    #[test]
+    fn a_gh_choice_sets_the_author_unless_kept() {
+        let author = noreply_author("github.com", 9, "alice");
+        let settings = local_settings(
+            &ForgeCredential::gh("alice".into()),
+            "github.com",
+            Some(&author),
+        )
+        .unwrap();
+        assert!(settings.contains(&("user.name".into(), "alice".into())));
+        assert!(settings.contains(&(
+            "user.email".into(),
+            "9+alice@users.noreply.github.com".into()
+        )));
+        let kept = ForgeCredential::GhAccount {
+            login: "alice".into(),
+            keep_author: true,
+        };
+        assert!(kept.author("github.com").is_none(), "nothing to look up");
+        assert!(ForgeCredential::gh("alice".into()).same_account(&kept));
+        let bad = CommitAuthor {
+            name: "a\nb".into(),
+            email: "x".into(),
+        };
+        assert!(local_settings(&kept, "github.com", Some(&bad)).is_err());
+    }
+
+    /// The author openvtc wrote is removed with the choice; one the member
+    /// wrote is never touched.
+    #[test]
+    fn the_author_is_written_and_removed_with_the_choice() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("empty.gitconfig"), "").unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(isolated_git(&repo, &["init", "-q"]));
+        let author = noreply_author("github.com", 9, "alice");
+        let gh = ForgeCredential::gh("alice".into());
+        apply_to_checkout(&repo, "github.com", &gh, Some(&author)).unwrap();
+        assert_eq!(local_all(&repo, "user.name"), ["alice"]);
+        apply_to_checkout(&repo, "github.com", &gh, Some(&author)).unwrap();
+        assert_eq!(local_all(&repo, "user.email").len(), 1, "not stacked");
+        apply_to_checkout(&repo, "github.com", &ForgeCredential::GitDefault, None).unwrap();
+        assert!(local_all(&repo, "user.name").is_empty());
+        assert!(local_all(&repo, "user.email").is_empty());
+
+        assert!(git_config(&repo, &["user.email", "me@example.com"]).is_ok());
+        let kept = ForgeCredential::GhAccount {
+            login: "alice".into(),
+            keep_author: true,
+        };
+        apply_to_checkout(&repo, "github.com", &kept, None).unwrap();
+        apply_to_checkout(&repo, "github.com", &ForgeCredential::GitDefault, None).unwrap();
+        assert_eq!(local_all(&repo, "user.email"), ["me@example.com"]);
+    }
+
+    /// A helper in the global (or system) config — `osxkeychain` holding
+    /// another account's cached token, say — is never asked once a gh account
+    /// is chosen: the empty entry resets the list for that forge.
+    #[test]
+    fn a_global_helper_is_not_consulted_for_a_chosen_account() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.gitconfig");
+        std::fs::write(
+            &global,
+            "[credential]\n\thelper = \"!f() { echo username=cached-other; echo password=stale; }; f\"\n",
+        )
+        .unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        // Build the repository with the isolated config, then fill.
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", &global)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        let fill = |repo: &Path| -> String {
+            use std::io::Write;
+
+            let mut child = Command::new("git")
+                .args(["credential", "fill"])
+                .current_dir(repo)
+                .env("GIT_CONFIG_GLOBAL", &global)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"protocol=https\nhost=github.com\n\n")
+                .unwrap();
+            String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
+        };
+        assert!(
+            fill(&repo).contains("username=cached-other"),
+            "the global helper answers by default"
+        );
+        apply_to_checkout(
+            &repo,
+            "github.com",
+            &ForgeCredential::gh("alice".into()),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !fill(&repo).contains("cached-other"),
+            "the chosen account's helper is the only one"
+        );
     }
 }

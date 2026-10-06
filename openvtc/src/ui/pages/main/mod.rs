@@ -393,6 +393,14 @@ fn repos_key(
             KeyCode::Esc => Some(R::Workspace(W::Cancel)),
             KeyCode::Enter => Some(R::Workspace(W::AccountSubmit)),
             KeyCode::Tab | KeyCode::BackTab => Some(R::Workspace(W::AccountScope)),
+            KeyCode::Char('a')
+                if matches!(
+                    form.picked(),
+                    Some(crate::state_handler::main_page::repos::AccountOption::Gh { .. })
+                ) =>
+            {
+                Some(R::Workspace(W::AccountAuthor))
+            }
             KeyCode::Up => Some(R::Workspace(W::AccountPick(form.pick.saturating_sub(1)))),
             KeyCode::Down => Some(R::Workspace(W::AccountPick(form.pick + 1))),
             KeyCode::Backspace if form.typing() => {
@@ -559,6 +567,7 @@ fn repos_key(
         KeyCode::Char('u') => Some(R::Workspace(W::UseStart)),
         KeyCode::Char('w') => Some(R::Workspace(W::SettingsStart)),
         KeyCode::Char('f') => Some(R::Workspace(W::AccountStart)),
+        KeyCode::Char('F') => Some(R::Workspace(W::Fork)),
         _ => None,
     }
 }
@@ -4794,6 +4803,7 @@ mod key_handler_tests {
             (KeyCode::Char('u'), W::UseStart),
             (KeyCode::Char('w'), W::SettingsStart),
             (KeyCode::Char('f'), W::AccountStart),
+            (KeyCode::Char('F'), W::Fork),
         ] {
             assert_eq!(repos_key(press(key), &list), Some(R::Workspace(want)));
         }

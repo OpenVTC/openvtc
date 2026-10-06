@@ -352,7 +352,7 @@ impl AccountOption {
     fn is(&self, credential: &ForgeCredential) -> bool {
         match (self, credential) {
             (AccountOption::GitDefault, ForgeCredential::GitDefault) => true,
-            (AccountOption::Gh { login, .. }, ForgeCredential::GhAccount { login: l }) => {
+            (AccountOption::Gh { login, .. }, ForgeCredential::GhAccount { login: l, .. }) => {
                 login == l
             }
             (AccountOption::SshKey(p), ForgeCredential::SshKey { path }) => p == path,
@@ -379,6 +379,9 @@ pub struct AccountForm {
     pub forge_choice: ForgeCredential,
     /// Why no gh account is offered, when none is.
     pub gh_note: Option<String>,
+    /// For a gh account: keep the member's own `user.name`/`user.email`
+    /// rather than author commits as the account.
+    pub keep_author: bool,
     pub error: Option<String>,
 }
 
@@ -439,20 +442,26 @@ impl AccountForm {
             path: String::new(),
             forge_choice: forge_choice.clone().unwrap_or(ForgeCredential::GitDefault),
             gh_note,
+            keep_author: false,
             error: None,
         };
         let current = match scope {
             CredentialScope::Repo => repo_choice,
             CredentialScope::Forge => forge_choice,
         };
+        form.keep_author = matches!(
+            current,
+            Some(ForgeCredential::GhAccount {
+                keep_author: true,
+                ..
+            })
+        );
         let preselect = current.or_else(|| {
             linked_login.and_then(|login| {
                 form.options
                     .iter()
                     .any(|o| matches!(o, AccountOption::Gh { login: l, .. } if l == login))
-                    .then(|| ForgeCredential::GhAccount {
-                        login: login.to_string(),
-                    })
+                    .then(|| ForgeCredential::gh(login.to_string()))
             })
         });
         form.pick = preselect
@@ -512,6 +521,7 @@ impl AccountForm {
             },
             Some(AccountOption::Gh { login, .. }) => Some(ForgeCredential::GhAccount {
                 login: login.clone(),
+                keep_author: self.keep_author,
             }),
             Some(AccountOption::SshKey(path)) => {
                 Some(ForgeCredential::SshKey { path: path.clone() })
@@ -557,6 +567,8 @@ pub struct Workspace {
     pub busy: Option<String>,
     pub form: Option<WorkspaceForm>,
     pub confirm: Option<WorkspaceChange>,
+    /// Whether the chosen gh account can push, by resource: `(login, can)`.
+    pub push_access: HashMap<String, (String, bool)>,
 }
 
 impl Workspace {
