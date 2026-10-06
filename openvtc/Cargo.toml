@@ -102,7 +102,7 @@ anyhow.workspace = true
 # 0.18.1 has the VTA sign each commit (`keys/sign-sshsig`; the key never leaves
 # the VTA) and falls back, in its default `auto` mode, to fetching the key for a
 # credential granted before that task existed — which `git_signing` relies on.
-did-git-sign = "0.18.1"
+did-git-sign = "0.18.2"
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true

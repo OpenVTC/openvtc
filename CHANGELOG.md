@@ -204,6 +204,12 @@ are marked wherever they apply. The detailed entries follow the summary below.
 
 ### Fixed
 
+- **did-git-sign 0.18.2.** Commit signing set up from OpenVTC on Linux works:
+  did-git-sign now keeps its credential in the same store OpenVTC writes it to
+  (Secret Service), so pressing `e` or committing no longer reports "no
+  credentials in the keyring". Linux users must also update the `did-git-sign`
+  program on their PATH (`cargo install did-git-sign --force`).
+
 - **A TSP-joined member's Repos view loads instead of timing out.** The
   community answered `git-ns/view`, but the client's inbound gate
   (`OPENVTC_CATCH_ALL_PATTERN`) had no `git-ns/*` entry. Over DIDComm the
