@@ -1157,9 +1157,16 @@ mod tests {
         let repo = dir.path().join("r");
         std::fs::create_dir_all(&repo).unwrap();
         isolated_git(&repo, &empty, &["init", "-q"]);
-        // An empty helper resets every inherited one: none applies, whatever
-        // this machine's global config says.
+        // An empty helper resets every inherited one, generic and scoped to
+        // the forge: none applies, whatever this machine's global config says
+        // (`--get-urlmatch` reads the user's global config, which the
+        // isolation of `isolated_git` does not reach).
         isolated_git(&repo, &empty, &["config", "credential.helper", ""]);
+        isolated_git(
+            &repo,
+            &empty,
+            &["config", "credential.https://github.com.helper", ""],
+        );
         assert_eq!(https_helper_in(&repo, "github.com"), None);
         // A helper scoped to the forge applies.
         isolated_git(
