@@ -42,7 +42,7 @@ jobs:
       # this action runs with the workflow's token on every pull request. v0.4.9
       # is the release in which the composite action passes every input to its
       # run step through the environment instead of interpolating it into bash.
-      - uses: OpenVTC/verifiable-git-infrastructure/.github/actions/verify-trust@6e75982470243995e67602adaec575a1d2f131fb # v0.5.1
+      - uses: OpenVTC/verifiable-git-infrastructure/.github/actions/verify-trust@b056314d9bd1145af380efeda4c117a381102faa # v0.14.0
         with:
           range: origin/${{ github.base_ref }}..HEAD
           registry-url: ${{ vars.TRUST_REGISTRY_URL }}
