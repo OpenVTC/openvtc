@@ -72,6 +72,7 @@ pub mod vetting;
 pub mod vrc;
 pub mod vta_receive;
 pub mod vta_receive_leg;
+pub mod vta_sync;
 
 /// Packs a DIDComm message with authenticated encryption and forwards it
 /// through the mediator to the recipient.

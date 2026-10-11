@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Account state syncs through the VTA.** Communities (including archived,
+  favourite and acknowledged flags), personas, relationships, contacts,
+  verified agent names, TSP relationship state, relationship credentials,
+  VTA-managed key references and vetting state are kept in the VTA's
+  application-state store (`vta/app-state/*`, namespace `openvtc`). Archiving
+  a community on one machine now shows on the next machine that opens the
+  account. Sync runs at load (before personas are hydrated), after each save
+  and every minute. Edits to different fields merge; an edit to the same
+  field on two devices takes the VTA's value and is reported in the activity
+  log. Personas, relationships, keys, TSP and vetting changes from another
+  device apply at the next launch. Secrets never sync. See
+  `openvtc_core::vta_sync`.
+
 ## [0.5.0] - 2026-10-06
 The guided-vetting release. Applying to a community that vets, and vetting
 someone, are now each a journey you can see whole: every step, where you are,

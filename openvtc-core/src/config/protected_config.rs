@@ -16,6 +16,7 @@ use crate::{
     tsp_store::TspRelationships,
     vetting::VettingBook,
     vrc::Vrcs,
+    vta_sync::SyncState,
 };
 use affinidi_tdk::TDK;
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
@@ -300,6 +301,13 @@ pub struct ProtectedConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_inbound: Vec<DeferredInbound>,
 
+    /// What this device last agreed with the VTA's application-state store on,
+    /// and changes pulled from it that wait for the next launch
+    /// ([`crate::vta_sync`]). Skipped when empty, so a config that has never
+    /// synced round-trips byte-identically.
+    #[serde(default, skip_serializing_if = "SyncState::is_empty")]
+    pub vta_sync: SyncState,
+
     /// Fields written by a newer build, preserved verbatim (D19).
     ///
     /// The protected tier is where the account lives, so an older build
@@ -362,6 +370,7 @@ impl Default for ProtectedConfig {
             vetting: VettingBook::default(),
             seen_documents: SeenDocuments::default(),
             deferred_inbound: Vec::new(),
+            vta_sync: SyncState::default(),
         }
     }
 }
