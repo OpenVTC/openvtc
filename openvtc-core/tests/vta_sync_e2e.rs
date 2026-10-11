@@ -83,24 +83,6 @@ async fn an_archive_on_one_device_is_there_when_another_opens() {
         .await
         .expect("create top-level context");
 
-    // Work around a VTA defect, not part of the scenario: on a namespace that
-    // has never been written, `list` answers `highWatermark: 0`, which the
-    // published schema forbids (`Version` has `minimum: 1`). A production VTA
-    // sends it anyway and the sync reads it fine; MockVta's response
-    // conformance check turns it into a 500. One write under a key no build
-    // interprets moves the counter off zero. Drop this once VTI #2029 is fixed (it either omits
-    // the member at zero or the schema admits it).
-    client
-        .app_state_put(
-            CTX,
-            openvtc_core::vta_sync::NAMESPACE,
-            "e2e/seed",
-            serde_json::json!({}),
-            None,
-        )
-        .await
-        .expect("seed the namespace");
-
     // Device A holds a persona and a membership the community declined.
     let mut a = Device::default();
     a.account.top_context_id = CTX.to_string();
