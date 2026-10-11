@@ -34,7 +34,7 @@ did-git-sign = "0.19.0"
 vgi-core = "0.19.0"
 # Hidden-vetter admission (ZKP). Published from this workspace before this
 # crate; its version moves with the workspace version.
-openvtc-vetting-pcs = { version = "0.5.0", path = "../openvtc-vetting-pcs" }
+openvtc-vetting-pcs = { version = "0.6.0", path = "../openvtc-vetting-pcs" }
 
 aes-gcm.workspace = true
 anyhow.workspace = true

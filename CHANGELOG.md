@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-11
+The multi-device release. Account state now lives at the VTA, so archiving a
+community, starring one, or adding a contact on one machine shows up on the
+next machine that opens the account.
+
 ### Added
 
 - **Account state syncs through the VTA.** Communities (including archived,
