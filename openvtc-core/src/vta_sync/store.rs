@@ -125,7 +125,8 @@ pub trait AppStateStore: Send + Sync {
         cursor: Option<&str>,
     ) -> impl Future<Output = Result<AppStateListResponse, SyncError>> + Send;
 
-    /// Apply up to [`PUT_BATCH`] writes, each on its own merits.
+    /// Apply a batch of writes (at most 64, the VTA's cap), each on its own
+    /// merits.
     fn put_many(
         &self,
         context_id: &str,

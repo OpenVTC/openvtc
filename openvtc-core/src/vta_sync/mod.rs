@@ -19,7 +19,7 @@
 //! change-feed watermark.
 //!
 //! A sync is: pull every change since the watermark, merge each into the local
-//! config against its base ([`merge`]), then push every record whose local
+//! config against its base (the `merge` module), then push every record whose local
 //! value no longer matches its base, each conditional on that base's version.
 //! A push that lost a race comes back carrying the winner's value, which is
 //! merged the same way and pushed again next time. Nothing is clobbered
