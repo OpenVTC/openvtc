@@ -38,11 +38,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Pinned to the v0.4.9 commit rather than the tag: a tag can be moved, and
-      # this action runs with the workflow's token on every pull request. v0.4.9
-      # is the release in which the composite action passes every input to its
-      # run step through the environment instead of interpolating it into bash.
-      - uses: OpenVTC/verifiable-git-infrastructure/.github/actions/verify-trust@6e75982470243995e67602adaec575a1d2f131fb # v0.5.1
+      # Pinned to a commit rather than the tag: a tag can be moved, and this
+      # action runs with the workflow's token on every pull request. (v0.4.9 is
+      # the release from which the composite action passes every input to its
+      # run step through the environment instead of interpolating it into bash.)
+      - uses: OpenVTC/verifiable-git-infrastructure/.github/actions/verify-trust@5f2f7cfcf4d420b706990a56267248d6c1867deb # v0.16.0
         with:
           range: origin/${{ github.base_ref }}..HEAD
           registry-url: ${{ vars.TRUST_REGISTRY_URL }}
@@ -50,9 +50,13 @@ jobs:
           # v0.4.x renamed `authority:` to `vtc-did:`; the value is the same DID,
           # the community whose authority the trust tuple is evaluated under.
           vtc-did: ${{ vars.TRUST_AUTHORITY_DID }}
-          # Preserve the org-wide fallback the previous local action defaulted to.
-          fallback-resource: ${{ github.repository_owner }}
+          # The org-wide fallback the previous local action defaulted to. Written
+          # forge-qualified and lowercased: the bare owner (`legacy`) form was
+          # removed in VGI v0.8.0, and `qualified` is the form the VTC writes
+          # grants in. Hard-coded because Actions expressions cannot lowercase
+          # `github.repository_owner`.
+          fallback-resource: github.com/openvtc
           exempt-keyring: .github/trusted-platform-keys.asc
           # Download the binary from the same release as the action pinned above,
           # rather than whatever `latest` resolves to at run time.
-          version: v0.4.9
+          version: v0.16.0
