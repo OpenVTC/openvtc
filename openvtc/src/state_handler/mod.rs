@@ -296,6 +296,7 @@ mod verify_queue;
 mod vetting_actions;
 mod vic;
 mod vta_recovery;
+mod vta_sync_driver;
 mod vta_transports;
 
 pub struct DeferredLoad {
@@ -1213,6 +1214,25 @@ impl StateHandler {
         // while the save ran. Save failures are surfaced as a status/log here,
         // matching the pre-R11 inline `save_config` failure handling.
         let (save_done_tx, mut save_done_rx) = mpsc::unbounded_channel::<Result<(), String>>();
+
+        // Account-state sync with the VTA (`openvtc_core::vta_sync`). The load
+        // already ran one; report it, and save whatever it changed. From here
+        // a cycle runs after each save and on a timer, off the loop: the plan
+        // is taken here, the network half is spawned, and its result is merged
+        // back here — the loop stays the only thing that mutates `config`.
+        if let Some(report) = config.private.vta_sync.load_report.take() {
+            for line in report.log_lines() {
+                state.main_page.log(line);
+            }
+            if report.touched() {
+                save.mark_dirty();
+            }
+        }
+        let mut vta_sync = vta_sync_driver::SyncDriver::new(tokio::time::Instant::now());
+        let mut vta_sync_tick = tokio::time::interval(vta_sync_driver::TICK);
+        vta_sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let (vta_sync_tx, mut vta_sync_rx) =
+            mpsc::unbounded_channel::<openvtc_core::vta_sync::Exchange>();
 
         // 7-day Pending timeout sweep (R-B-7 / D16). `interval`'s first tick fires
         // immediately, so a Pending that aged out while the app was closed expires
@@ -2518,7 +2538,8 @@ impl StateHandler {
                 // failure did (status + log) and left dirty for retry.
                 Some(result) = save_done_rx.recv() => {
                     match &result {
-                        Ok(()) => {}
+                        // What was just saved may be news for the VTA.
+                        Ok(()) => vta_sync.request(),
                         Err(reason) => {
                             state
                                 .main_page
@@ -2526,6 +2547,68 @@ impl StateHandler {
                         }
                     }
                     save.finish(result.is_ok());
+                },
+                _ = vta_sync_tick.tick() => {
+                    if let Some(client) = admin_vta.as_ref()
+                        && !config.account.top_context_id.is_empty()
+                        && vta_sync.should_start(tokio::time::Instant::now())
+                    {
+                        let context_id = config.account.top_context_id.clone();
+                        config.private.vta_sync.bind_context(&context_id);
+                        let view = openvtc_core::vta_sync::SyncView {
+                            account: &config.account,
+                            private: &config.private,
+                            key_info: &config.key_info,
+                        };
+                        let out = openvtc_core::vta_sync::outgoing(&view, &config.private.vta_sync);
+                        let since = config.private.vta_sync.watermark;
+                        let client = client.clone();
+                        let tx = vta_sync_tx.clone();
+                        tokio::spawn(async move {
+                            let ex =
+                                openvtc_core::vta_sync::exchange(&client, &context_id, since, out)
+                                    .await;
+                            let _ = tx.send(ex);
+                        });
+                    }
+                },
+                Some(ex) = vta_sync_rx.recv() => {
+                    let mut report = openvtc_core::vta_sync::SyncReport::default();
+                    let mut sync_state = std::mem::take(&mut config.private.vta_sync);
+                    let lost_race = {
+                        let mut parts = openvtc_core::vta_sync::SyncParts {
+                            account: &mut config.account,
+                            private: &mut config.private,
+                            key_info: &mut config.key_info,
+                        };
+                        openvtc_core::vta_sync::absorb(
+                            &mut parts,
+                            &mut sync_state,
+                            ex,
+                            openvtc_core::vta_sync::ApplyMode::Live,
+                            &mut report,
+                        )
+                    };
+                    config.private.vta_sync = sync_state;
+                    let error = report.error.take();
+                    for line in report.log_lines() {
+                        state.main_page.log(line);
+                    }
+                    if vta_sync.finished(tokio::time::Instant::now(), error.as_ref())
+                        && let Some(e) = &error
+                    {
+                        state.main_page.log(e.explain());
+                    }
+                    if lost_race {
+                        // The merged record goes up on the next cycle.
+                        vta_sync.request();
+                    }
+                    if !report.changed.is_empty() {
+                        state.main_page.sync_from_config(&config);
+                    }
+                    if report.touched() {
+                        save.mark_dirty();
+                    }
                 },
                 // (keepalive removed — WebSocket-level pings handle connectivity)
                 // Catch and handle interrupt signal to gracefully shutdown

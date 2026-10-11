@@ -59,6 +59,19 @@ impl TspRelationships {
         self.entries.is_empty()
     }
 
+    /// The stored rows, `base64url(key)` → `base64url(value)`. Read by the VTA
+    /// state sync ([`crate::vta_sync`]), which carries each row as one record.
+    pub fn entries(&self) -> &BTreeMap<String, String> {
+        &self.entries
+    }
+
+    /// The stored rows, mutably — how the VTA state sync applies a row
+    /// another device wrote. Only ever touched before the live store is
+    /// hydrated from this snapshot.
+    pub fn entries_mut(&mut self) -> &mut BTreeMap<String, String> {
+        &mut self.entries
+    }
+
     fn from_map(map: &HashMap<Vec<u8>, Vec<u8>>) -> Self {
         Self {
             entries: map

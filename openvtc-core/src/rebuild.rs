@@ -13,10 +13,12 @@
 //! evidence for it*. Reconstruction and verification are the same act, which is
 //! what makes D18 cheap rather than an extra pass.
 //!
-//! What does not come back yet is the soft state: labels, favourites, archive
-//! flags, join request ids, relationships, contacts. That needs the
-//! application-state store (E2). Nothing here is blocked on it — an account
-//! with its personas, keys and verified memberships is a working account.
+//! What a rebuild does not bring back is the soft state: labels, favourites,
+//! archive flags, join request ids, relationships, contacts. That lives in the
+//! VTA's application-state store instead, and [`crate::vta_sync`] pulls it on
+//! the first launch after recovery — if a device ever synced it there. Nothing
+//! here depends on it: an account with its personas, keys and verified
+//! memberships is a working account.
 //!
 //! # Verify, never trust
 //!
@@ -193,12 +195,17 @@ impl RebuildPlan {
     /// expects their relationship list back and does not get it will conclude
     /// the recovery failed.
     #[must_use]
+    ///
+    /// The first three return on the first launch after recovery when a device
+    /// synced them to the VTA ([`crate::vta_sync`]); the screen says so, since
+    /// an account last used by a build that predates the sync has nothing
+    /// there to return.
     pub fn known_gaps() -> &'static [&'static str] {
         &[
-            "Community names, favourites and archive flags",
-            "Relationships and their peer DIDs",
-            "Contacts and the names you gave them",
-            "Activity history and pending join requests",
+            "Community names, favourites and archive flags (synced copies return on first launch)",
+            "Relationships and their peer DIDs (synced copies return on first launch)",
+            "Contacts and the names you gave them (synced copies return on first launch)",
+            "Activity history",
         ]
     }
 }

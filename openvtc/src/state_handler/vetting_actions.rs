@@ -7267,7 +7267,9 @@ mod tests {
     /// it cannot honour; one with tokens is.
     #[test]
     fn no_ticket_is_issued_for_requests_that_cannot_be_attested() {
-        let now = Utc::now();
+        // Pinned, as in `t_without_tokens_gets_them_when_it_can`: how many windows are owed
+        // depends on the date, so a wall-clock `now` made this pass only on 2026-10-05.
+        let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, 15, 14, 0).unwrap();
         let membership = |persona| VettingMembership {
             community: "did:web:first-vtc.example".into(),
             name: "first-vtc".into(),

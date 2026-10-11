@@ -40,6 +40,31 @@
 > `MemoryItem` carries no version at all and there is nothing to build a
 > precondition on. New decisions D13–D16 and a new external ask E3.
 
+> **Status (2026-10): step 5 is built.** E2 shipped in VTI as
+> `vta/app-state/*` (VTI #1029; `docs/05-design-notes/appstate-store.md` there),
+> and `openvtc-core/src/vta_sync` is the writer. D12, D13 and D19 were already
+> in. What was built, and where it departs from this draft:
+>
+> - **Records** follow D8a, under namespace `openvtc` in the account's top
+>   context: personas, memberships, relationships, contacts, positive
+>   agent-name entries, TSP relationship rows, VRCs, VTA-managed key references
+>   and the vetting book. There is no `v1/account` record: its fields are the
+>   address the records live at. The hidden-vetting engine and any locally-held
+>   key never sync; app state is not for secrets.
+> - **When**: at load, before hydration, so a persona or relationship made on
+>   another device comes up with everything else; then after each save and
+>   every minute. Kinds a running session cannot take in (personas,
+>   relationships, TSP, keys, vetting) are held and applied at the next launch.
+> - **Conflicts (departs from D8c/D14).** Edits to *different* fields of one
+>   record merge three-way against the last agreed version, so archiving on one
+>   device and starring on another converge without a conflict. An edit to the
+>   *same* field on both resolves to the VTA's value and is reported in the
+>   activity log, rather than blocking on an acknowledge step. Writes still
+>   carry `expectedVersion` (D14), so nothing is overwritten unseen.
+> - **First sync** of a device with history has no base to compare against,
+>   so a field that differs takes the VTA's value. On the first device to sync,
+>   that is its own value.
+
 ---
 
 ## 1. Objective
@@ -524,7 +549,7 @@ community first, so the VTC learns about it.
 | Same machine, different profile names sharing one persona DID | none | Gap |
 | Two machines, same context | none | Gap |
 | Messaging | mediator ceiling of **one websocket per DID** | **Actively harmful** |
-| Shared application state | no store exists yet — see E2 | Gap |
+| Shared application state | `expectedVersion` on every `vta/app-state` write, three-way merge in `vta_sync` | Covered |
 
 ### 9.2 The messaging layer is already broken
 
@@ -797,7 +822,7 @@ and listener ownership (D15, D16).
 
 | Ask | What | Status |
 |---|---|---|
-| **E2** | A new application-state store — `spec/vta/appstate/*`: versions and `expectedVersion`, prefix + `sinceVersion` listing, tombstones, batch get/put with per-record results, optional values in `list`, out-of-band blobs, and JSON merge-patch. Agent memory is the wrong home. | **Blocking** |
+| **E2** | A new application-state store — `spec/vta/appstate/*`: versions and `expectedVersion`, prefix + `sinceVersion` listing, tombstones, batch get/put with per-record results, optional values in `list`, out-of-band blobs, and JSON merge-patch. Agent memory is the wrong home. | **Delivered** (`vta/app-state/*`, VTI #1029) |
 | **E3** | Mediator: keep the established authenticated connection and refuse the newcomer, rather than evicting the incumbent | High — fixes a live bug |
 | E1 | Register the provisioning task URI as consent-requiring, so recovery runs through the existing DTTE ceremony with a recovery approver set | Small — the machinery exists |
 | E4 | A pluggable audit sink (trait + backends), *not* tamper-evidence in the protocol | When convenient |

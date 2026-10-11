@@ -36,4 +36,13 @@ ignore = [
     # paste: unmaintained build-time proc-macro via vta-service/vti-common
     # (utoipa-axum). No runtime code.
     "RUSTSEC-2024-0436",
+
+    # libcrux-kem 0.0.9: panics on short hybrid-KEM seeds / keys, fixed in
+    # 0.0.10. Reached only through the vta-service *dev*-dependency (MockVta →
+    # vti-rooms → openmls_rust_crypto → hpke-rs → hpke-rs-libcrux), so it is
+    # in the test build and not in any shipped binary. Needs a vti-rooms /
+    # openmls release on hpke-rs-libcrux >= 0.8; re-check on the next
+    # vta-service bump.
+    "RUSTSEC-2026-0330",
+    "RUSTSEC-2026-0331",
 ]

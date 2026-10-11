@@ -339,6 +339,36 @@ impl Config {
 
         log_private_config_shape(&private_cfg);
 
+        // The admin VTA session, opened up front for a VTA account so the
+        // state sync below can run before anything is hydrated from the
+        // account. A persona, relationship or key reference another device
+        // created then comes up with everything else rather than a launch
+        // later.
+        //
+        // An account with personas cannot work without the VTA, so failing to
+        // connect stays fatal for it, as it always was. A State-A account
+        // (R-A-5) has nothing to hydrate, so it loads offline and simply
+        // misses this launch's sync.
+        let mut vta_client = None;
+        if matches!(&key_backend, KeyBackend::Vta { .. })
+            && (!private_cfg.account.personas.is_empty()
+                || !private_cfg.account.top_context_id.is_empty())
+        {
+            report_progress(&on_progress, "VTA establishment", "Connecting to VTA");
+            match super::build_runtime_vta_client(&key_backend).await {
+                Ok(client) => vta_client = Some(client),
+                Err(e) if private_cfg.account.personas.is_empty() => {
+                    warn!(error = %e, "VTA unreachable; loading without syncing account state");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        if let Some(client) = &vta_client {
+            report_progress(&on_progress, "VTA establishment", "Syncing account state");
+            sync_account_state(client, &mut private_cfg, &mut sc.key_info).await;
+        }
+
         // The v2 `account` persisted in the protected tier is the source of
         // truth. v1 (singleton) configs are reset before reaching here
         // (D13/R-RST), so a loadable config always carries an account.
@@ -413,20 +443,22 @@ impl Config {
             })
             .collect();
 
-        // Open the admin VTA session ONLY when there's a persona to rehydrate
-        // (regenerate its keys + register messaging profiles). A State-A account
-        // has none, so opening one here is useless — and opening it then shutting
-        // it down right before `main_loop` opens its own admin session leaves the
-        // shut-down session's auto-reconnect briefly dueling the live one on the
-        // mediator (WebSocket churn → a dropped response on the first burst of
-        // requests, e.g. the join's key creation). Skipping it leaves a single
-        // admin session for the whole runtime.
-        let vta_client = if matches!(&key_backend, KeyBackend::Vta { .. }) && !personas.is_empty() {
+        // A persona to rehydrate needs the admin VTA session (to regenerate its
+        // keys and register messaging profiles). It is normally already open
+        // for the sync above; this covers an account that had no context to
+        // sync. A session opened for the sync alone is handed back to the
+        // caller rather than shut down here, so the runtime reuses it: shutting
+        // one down right before `main_loop` opens its own leaves the closed
+        // session's auto-reconnect dueling the live one on the mediator
+        // (WebSocket churn → a dropped response on the first burst of
+        // requests, e.g. the join's key creation).
+        if vta_client.is_none()
+            && matches!(&key_backend, KeyBackend::Vta { .. })
+            && !personas.is_empty()
+        {
             report_progress(&on_progress, "VTA establishment", "Connecting to VTA");
-            Some(super::build_runtime_vta_client(&key_backend).await?)
-        } else {
-            None
-        };
+            vta_client = Some(super::build_runtime_vta_client(&key_backend).await?);
+        }
 
         let mut identities = BTreeMap::new();
 
@@ -717,6 +749,56 @@ fn log_private_config_shape(private_cfg: &ProtectedConfig) {
         vrcs_received = private_cfg.vrcs_received.keys().len(),
         "private config loaded"
     );
+}
+
+/// How long the load-time state sync may hold up a launch. Past it the load
+/// carries on with the local copy; the runtime sync picks up where this left
+/// off. Each call inside is bounded by the SDK's own app-state timeout, so
+/// this caps the total rather than standing in for those (R1.2).
+const LOAD_SYNC_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Run the VTA state sync over the decrypted config, before anything is
+/// hydrated from it. Never fails the load: the outcome travels to the runtime
+/// as [`crate::vta_sync::SyncState::load_report`], which reports it and saves
+/// what changed.
+async fn sync_account_state(
+    client: &vta_sdk::client::VtaClient,
+    private_cfg: &mut ProtectedConfig,
+    key_info: &mut std::collections::HashMap<String, super::secured_config::KeyInfoConfig>,
+) {
+    use crate::vta_sync::{SyncError, SyncParts, SyncReport, sync_at_load};
+
+    let context_id = private_cfg.account.top_context_id.clone();
+    let mut state = std::mem::take(&mut private_cfg.vta_sync);
+    let mut account = std::mem::take(&mut private_cfg.account);
+    let outcome = tokio::time::timeout(LOAD_SYNC_BUDGET, async {
+        let mut parts = SyncParts {
+            account: &mut account,
+            private: &mut *private_cfg,
+            key_info: &mut *key_info,
+        };
+        sync_at_load(client, &mut parts, &mut state, &context_id).await
+    })
+    .await;
+    let report = outcome.unwrap_or_else(|_| SyncReport {
+        error: Some(SyncError::Unreachable(format!(
+            "no answer within {}s",
+            LOAD_SYNC_BUDGET.as_secs()
+        ))),
+        ..SyncReport::default()
+    });
+    info!(
+        pulled = report.pulled,
+        pushed = report.pushed,
+        removed = report.removed,
+        deferred = report.deferred,
+        conflicts = report.conflicts.len(),
+        error = ?report.error,
+        "account state sync at load"
+    );
+    private_cfg.account = account;
+    state.load_report = Some(report);
+    private_cfg.vta_sync = state;
 }
 
 #[cfg(test)]
