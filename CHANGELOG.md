@@ -21,6 +21,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   device apply at the next launch. Secrets never sync. See
   `openvtc_core::vta_sync`.
 
+### Changed
+
+- **Onto the VTI 0.65 stack:** `vta-sdk` 0.65, `trust-tasks-rs` 0.28,
+  `affinidi-tdk` 0.24, `affinidi-messaging-sdk` 0.34 and `did-git-sign` 0.19
+  (the same signer, rebuilt on that line). No behaviour change. The test
+  `MockVta` moves to `vta-service` 0.57, which accepts a first sync against an
+  empty account (VTI #2029), so the sync e2e no longer seeds a record.
+
 ## [0.5.0] - 2026-10-06
 The guided-vetting release. Applying to a community that vets, and vetting
 someone, are now each a journey you can see whole: every step, where you are,
