@@ -195,13 +195,22 @@ fn to_json<T: serde::Serialize>(v: &T) -> Option<Value> {
     serde_json::to_value(v).ok()
 }
 
-/// The vetting book as synced: everything it persists except the hidden
-/// vetter engine, whose snapshots carry the key every tag derives from. App
-/// state is not for secrets.
+/// The vetting book as synced: everything it persists except the two hidden-
+/// vetting engines, whose snapshots carry a PCS `usk` — the hidden vetter's,
+/// and each application's applicant engine (`hidden_state`), whose key every
+/// tag and proof of that application derives from. App state is not for
+/// secrets.
 fn vetting_json(book: &VettingBook) -> Option<Value> {
     let mut v = to_json(book)?;
     if let Value::Object(map) = &mut v {
         map.remove("hidden_vetter");
+        if let Some(Value::Array(applications)) = map.get_mut("applications") {
+            for application in applications {
+                if let Value::Object(application) = application {
+                    application.remove("hidden_state");
+                }
+            }
+        }
         if map.is_empty() {
             return None;
         }
@@ -439,13 +448,22 @@ pub fn apply(parts: &mut SyncParts<'_>, key: &str, value: Option<&Value>) -> Res
             }),
         },
         RecordKind::Vetting => {
-            // The hidden vetter is never synced; keep this install's.
-            let hidden = std::mem::take(&mut parts.private.vetting.hidden_vetter);
             let mut book: VettingBook = match value {
                 Some(v) => decode(v)?,
                 None => VettingBook::default(),
             };
-            book.hidden_vetter = hidden;
+            // Neither hidden-vetting engine is synced; keep this install's. An
+            // applicant engine that does arrive — written by a build that
+            // synced it — is dropped, never adopted.
+            let local = &mut parts.private.vetting;
+            book.hidden_vetter = std::mem::take(&mut local.hidden_vetter);
+            for application in &mut book.applications {
+                application.hidden_state = local
+                    .applications
+                    .iter_mut()
+                    .find(|here| here.id == application.id)
+                    .and_then(|here| here.hidden_state.take());
+            }
             parts.private.vetting = book;
         }
     }
