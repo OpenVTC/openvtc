@@ -276,6 +276,7 @@ mod community_profile_poll;
 mod device_presence;
 mod dispatch_util;
 mod hidden_vetting_poll;
+mod hidden_vetting_vta;
 mod inbox_actions;
 pub mod join;
 mod join_flow;
@@ -1842,6 +1843,23 @@ impl StateHandler {
                             install_persona_listener(&didcomm_service, &tdk, &config, persona_id, &mut state)
                                 .await;
                         }
+                        AfterSettle::HiddenVetting(outcome) => {
+                            let mut ctx = runtime_actions::ActionCtx {
+                                state: &mut state,
+                                config: &mut config,
+                                save: &mut save,
+                                in_flight: &mut in_flight,
+                                dispatch_tx: &dispatch_tx,
+                                tdk: &tdk,
+                                admin_vta: admin_vta.as_ref(),
+                                didcomm_service: &didcomm_service,
+                                session_manager: &mut session_manager,
+                                ping_sent_at: &mut ping_sent_at,
+                                state_tx: &self.state_tx,
+                                profile: self.profile.as_str(),
+                            };
+                            vetting_actions::apply_pcs_outcome(&mut ctx, *outcome).await;
+                        }
                         AfterSettle::Nothing => {}
                     }
                     // A refresh asked for while the vault was busy is re-issued
@@ -2028,6 +2046,26 @@ impl StateHandler {
                         &mut save,
                         chrono::Utc::now(),
                     );
+                    // Hidden-vetting work for the VTA — answers a community or a vetter sent,
+                    // an application that needs its engine — goes as soon as it arises,
+                    // backed off while the VTA cannot be reached (R1.4).
+                    if vetting_actions::pcs_work_due(&config, chrono::Utc::now()) {
+                        let mut ctx = runtime_actions::ActionCtx {
+                            state: &mut state,
+                            config: &mut config,
+                            save: &mut save,
+                            in_flight: &mut in_flight,
+                            dispatch_tx: &dispatch_tx,
+                            tdk: &tdk,
+                            admin_vta: admin_vta.as_ref(),
+                            didcomm_service: &didcomm_service,
+                            session_manager: &mut session_manager,
+                            ping_sent_at: &mut ping_sent_at,
+                            state_tx: &self.state_tx,
+                            profile: self.profile.as_str(),
+                        };
+                        vetting_actions::start_pcs_work(&mut ctx, Vec::new());
+                    }
                     // A request reached the desk: re-read what its community
                     // requires now, before a session opens on a stale answer.
                     if std::mem::take(&mut config.private.vetting.vetter_refresh_due) {
@@ -3577,6 +3615,9 @@ enum AfterSettle {
     /// loop installs the listener in place; the degraded loop hands off to
     /// `run`, which brings up a listener per identity.
     PersonaMinted(openvtc_core::config::account::PersonaId),
+    /// A hidden-vetting job at the VTA finished. Applying it sends the community what the VTA
+    /// built, which needs the runtime loop's messaging; the degraded loop starts none.
+    HiddenVetting(Box<hidden_vetting_vta::PcsOutcome>),
 }
 
 /// Do the work an outcome handed back because [`background_dispatch::apply_outcome`]
@@ -3598,6 +3639,9 @@ async fn settle_after_apply(
         // Only the runtime loop owns a session manager, so it is handed back up.
         background_dispatch::AfterApply::Deregister(vtc, persona) => {
             AfterSettle::Deregister(vtc, persona)
+        }
+        background_dispatch::AfterApply::HiddenVetting(outcome) => {
+            AfterSettle::HiddenVetting(outcome)
         }
         background_dispatch::AfterApply::PersistPersona(minted) => {
             match minted.persist(config, tdk, profile).await {

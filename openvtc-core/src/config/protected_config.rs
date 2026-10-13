@@ -421,10 +421,14 @@ impl ProtectedConfig {
     /// Credentials stored by an earlier build that do not conform to DTG
     /// Credentials v1 are set aside here, each with a logged reason and a
     /// notice the UI shows (see [`crate::dtg`]); relationship credentials and
-    /// tasks do the same as they deserialize ([`Vrcs`]).
+    /// tasks do the same as they deserialize ([`Vrcs`]). Hidden-vetting keys a
+    /// build that ran the engine on this device stored are dropped the same way
+    /// ([`crate::vetting::VettingBook::forget_local_engines`]): the VTA holds
+    /// them now.
     pub fn parse(plaintext: &[u8]) -> Result<ProtectedConfig, OpenVTCError> {
         let mut config: ProtectedConfig = serde_json::from_slice(plaintext)?;
         config.vetting.retire_nonconformant();
+        config.vetting.forget_local_engines();
         Ok(config)
     }
 

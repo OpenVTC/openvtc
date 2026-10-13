@@ -149,13 +149,11 @@ mod tests {
 
     fn book(tick_length: Option<&str>) -> VettingBook {
         let mut book = VettingBook::default();
+        // The pacer reads labels and times only.
         book.hidden_vetter.push(HiddenVetterState::new(
             "did:example:vtc",
             PersonaId::new(),
             params(tick_length),
-            // A snapshot with no key material: the pacer reads labels and times only.
-            serde_json::from_value(serde_json::json!({ "member": "member", "usk": "", "id": "" }))
-                .unwrap(),
         ));
         book
     }

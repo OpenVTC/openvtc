@@ -340,27 +340,37 @@ fn manifest_raw_with_ext(ext: Value, critical: Option<Value>) -> Value {
     raw
 }
 
-/// Real published parameters: the keys have to decode, because adopting the criterion starts
-/// the applicant's engine against them.
+/// Published parameters, as a community writes them. Nothing on the client decodes the keys —
+/// the VTA's engine does — so placeholders stand in for them.
 fn hidden_params() -> Value {
-    use openvtc_vetting_pcs::{scheme::key_text, vtc::Vtc};
-    use rand::SeedableRng;
-    let mut rng = rand::rngs::StdRng::seed_from_u64(0x0BED);
-    let vtc = Vtc::new(
-        COMMUNITY,
-        "2026-10",
-        serde_json::to_value(requirements()).unwrap(),
-        &mut rng,
-    )
-    .expect("a community");
     json!({
         "suite": super::hidden::SUITE,
-        "helperKey": key_text(vtc.hvk()).unwrap(),
-        "tokenKey": key_text(vtc.tvk()).unwrap(),
+        "helperKey": "z3HeLperKey",
+        "tokenKey": "z3TokenKey",
         "vetterLabels": ["vetter/2026-10"],
-        "tokenLabels": [vtc.current_token_label()],
+        "tokenLabels": ["token/2026-10"],
         "tickLength": "P3D"
     })
+}
+
+/// What the VTA reports for a vetter engine holding a credential under each of `periods`.
+fn engine_enrolled(periods: &[&str]) -> super::pcs_vta::VetterView {
+    super::pcs_vta::VetterView {
+        id: "z3Vetter".into(),
+        enrolled_labels: periods.iter().map(|p| format!("vetter/{p}")).collect(),
+        ..Default::default()
+    }
+}
+
+/// A vetter's schedule at `COMMUNITY` under `params`, its engine as `engine`.
+fn hidden_vetter(
+    persona: PersonaId,
+    params: super::hidden::HiddenParams,
+    engine: super::pcs_vta::VetterView,
+) -> super::book::HiddenVetterState {
+    let mut held = super::book::HiddenVetterState::new(COMMUNITY, persona, params);
+    held.take_engine(engine);
+    held
 }
 
 #[tokio::test]
@@ -388,9 +398,13 @@ async fn an_application_adopts_the_hidden_vetting_parameters_a_community_publish
     assert_eq!(hidden.helper_key, published["helperKey"].as_str().unwrap());
     assert_eq!(hidden.token_key, published["tokenKey"].as_str().unwrap());
     assert_eq!(hidden.vetter_labels, vec!["vetter/2026-10".to_string()]);
-    // Adopting a hidden criterion mints this application's own key, which is what a vetter
-    // attests and what the proof is built from.
-    assert!(party.application().hidden_id().is_some());
+    // Adopting a hidden criterion owes this application an engine of its own at the VTA — its
+    // key is what a vetter attests and what the proof is built from — and the loop asks for it.
+    assert!(party.application().hidden_app_owed());
+    assert!(
+        party.application().hidden_id().is_none(),
+        "not until the VTA has made it"
+    );
     // The named members are adopted exactly as before.
     assert!(party.application().requirements.is_some());
 }
@@ -2333,31 +2347,32 @@ async fn a_finished_request_forgets_the_person_and_leaves_the_desk() {
 }
 
 /// A vetter whose engine is enrolled with `COMMUNITY`, and one draw of the drip asked for and
-/// in flight — what `hidden_vetting_send` leaves behind.
+/// in flight — what a pass leaves behind once it has sent what the VTA built.
 fn vetter_with_a_draw_in_flight(label: &str, tick: u32) -> (Party, TrustTask<Value>) {
-    use rand::SeedableRng;
     let mut vetter = Party::new(7).member_of(COMMUNITY);
     let params: super::hidden::HiddenParams = serde_json::from_value(hidden_params()).unwrap();
-    let mut rng = rand::rngs::StdRng::seed_from_u64(0x71C);
-    let mut snapshot =
-        super::hidden::vetter_start(COMMUNITY, &params, &vetter.did, &mut rng).unwrap();
-    let body =
-        super::hidden::drip_request(COMMUNITY, &params, &mut snapshot, tick, label, 3, &mut rng)
-            .unwrap();
-    assert_eq!(
-        snapshot.pending.len(),
-        3,
-        "the serials are kept for the answer"
-    );
+    let engine = super::pcs_vta::VetterView {
+        draws_in_flight: vec![super::pcs_vta::DrawView {
+            label: label.to_string(),
+            tick,
+        }],
+        ..engine_enrolled(&["2026-10"])
+    };
     vetter
         .book
         .hidden_vetter
-        .push(super::book::HiddenVetterState::new(
-            COMMUNITY,
-            vetter.persona,
-            params,
-            snapshot,
-        ));
+        .push(hidden_vetter(vetter.persona, params, engine));
+    // What the VTA built for the draw: three blinded serials, carried as they are.
+    let body = wire::pcs::TokensRequest {
+        label: label.to_string(),
+        tick,
+        requests: (1..=3)
+            .map(|i| wire::pcs::TokenRequest {
+                commitment: format!("z3C{i}"),
+                opening_proof: format!("z3P{i}"),
+            })
+            .collect(),
+    };
     let request = wire::pcs_tokens_request(&vetter.did, COMMUNITY, &body).unwrap();
     vetter
         .book
@@ -2392,9 +2407,14 @@ async fn a_tick_not_begun_is_waited_for_and_a_served_one_is_done() {
     assert!(state.last_ticks.is_empty(), "not served");
     assert!(state.last_refusal.is_none(), "not a failure");
     assert!(
-        state.snapshot.pending.is_empty(),
-        "the refused draw's serials are dropped"
+        matches!(
+            vetter.book.pcs_inbox.as_slice(),
+            [super::book::PcsInbound::DrawRefused { label: l, tick: 4, .. }] if l == label
+        ),
+        "the VTA is asked to drop the refused draw's serials: {:?}",
+        vetter.book.pcs_inbox
     );
+    assert!(vetter.book.pcs_due);
     assert!(vetter.book.draws_in_flight.is_empty());
 
     let (mut vetter, request) = vetter_with_a_draw_in_flight(label, 4);
@@ -2438,17 +2458,14 @@ async fn any_other_drip_refusal_is_said_in_words_and_kept() {
 /// same keys, and they are taken; new keys are not, and the drip stops until the vetter decides.
 #[test]
 fn the_engine_follows_the_published_labels_and_stops_at_new_keys() {
-    use super::book::{Adopted, HiddenVetterState};
+    use super::book::Adopted;
     use super::hidden::{Due, HiddenParams, due};
     let enrolled: HiddenParams = serde_json::from_value(hidden_params()).unwrap();
-    let mut snapshot = openvtc_vetting_pcs::snapshot::VetterSnapshot::without_keys("member-1");
-    snapshot
-        .credentials
-        .insert("2026-10".into(), "zOctober".into());
-    snapshot
-        .credentials
-        .insert("2026-11".into(), "zNovember".into());
-    let mut state = HiddenVetterState::new(COMMUNITY, PersonaId::new(), enrolled.clone(), snapshot);
+    let mut state = hidden_vetter(
+        PersonaId::new(),
+        enrolled.clone(),
+        engine_enrolled(&["2026-11", "2026-10"]),
+    );
     let november = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 11, 2, 9, 0, 0).unwrap();
 
     // What the community publishes in November: the same keys, the next month's labels.
@@ -2463,7 +2480,7 @@ fn the_engine_follows_the_published_labels_and_stops_at_new_keys() {
     assert_eq!(
         due(
             &state.params,
-            Some(&state.snapshot),
+            Some(&state.engine),
             &state.last_ticks,
             &[],
             november
@@ -2536,16 +2553,11 @@ fn vetter_drawing_at(rate: usize) -> (VettingBook, Value) {
     let mut published = hidden_params();
     published["dripPerTick"] = json!(rate);
     let params: super::hidden::HiddenParams = serde_json::from_value(published.clone()).unwrap();
-    let mut snapshot = openvtc_vetting_pcs::snapshot::VetterSnapshot::without_keys("member-1");
-    snapshot
-        .credentials
-        .insert("2026-10".into(), "zOctober".into());
     let mut book = VettingBook::default();
-    book.hidden_vetter.push(super::book::HiddenVetterState::new(
-        COMMUNITY,
+    book.hidden_vetter.push(hidden_vetter(
         PersonaId::new(),
         params,
-        snapshot,
+        engine_enrolled(&["2026-10"]),
     ));
     (book, published)
 }
@@ -2627,9 +2639,6 @@ async fn an_over_quota_refusal_rereads_the_rate_before_drawing_again() {
         let held = &mut vetter.book.hidden_vetter[0];
         held.params.drip_per_tick = 100;
         held.params_read_at = Some(Utc::now() - Duration::minutes(1));
-        held.snapshot
-            .credentials
-            .insert("2026-10".into(), "zOctober".into());
         vetter.book.vetter_refresh_due = false;
         vetter
             .book
@@ -2735,14 +2744,13 @@ fn an_over_quota_refusal_is_read_for_its_numbers() {
 /// moves to the new month; fed what the community publishes now, it re-enrols.
 #[test]
 fn a_pass_reenrols_when_a_new_vetter_label_is_live() {
-    use super::book::HiddenVetterState;
     use super::hidden::{Due, HiddenParams};
     let enrolled: HiddenParams = serde_json::from_value(hidden_params()).unwrap();
-    let mut snapshot = openvtc_vetting_pcs::snapshot::VetterSnapshot::without_keys("member-1");
-    snapshot
-        .credentials
-        .insert("2026-10".into(), "zOctober".into());
-    let mut state = HiddenVetterState::new(COMMUNITY, PersonaId::new(), enrolled.clone(), snapshot);
+    let mut state = hidden_vetter(
+        PersonaId::new(),
+        enrolled.clone(),
+        engine_enrolled(&["2026-10"]),
+    );
     let november = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 11, 2, 9, 0, 0).unwrap();
     assert!(
         state.plan(None, &[], november).owed.is_empty(),
@@ -2786,82 +2794,51 @@ async fn a_request_on_the_desk_makes_the_vetter_side_due_a_refresh() {
 // Enrolment answers that arrive late, or cannot be opened
 // ---------------------------------------------------------------------------------------------
 
-/// A community that can actually sign: an issuer, and the parameters it publishes.
-fn issuing_community() -> (
-    openvtc_vetting_pcs::issuer::Issuer,
-    super::hidden::HiddenParams,
-) {
-    let issuer = openvtc_vetting_pcs::issuer::Issuer::derive(COMMUNITY, &[0x5E; 32]).unwrap();
-    let (helper_key, token_key) = issuer.public_text().unwrap();
-    let params = super::hidden::HiddenParams {
-        suite: super::hidden::SUITE.into(),
-        helper_key,
-        token_key,
-        vetter_labels: vec!["vetter/2026-10".into()],
-        token_labels: vec!["token/2026-10".into()],
-        drip_per_tick: 10,
-        events: Vec::new(),
-        tick_length: None,
-    };
-    (issuer, params)
-}
-
-/// A vetter with a fresh engine at `COMMUNITY` that has asked to enrol: the request, and the
-/// community's answer to it, signed as the community signs.
+/// A vetter at `COMMUNITY` that has asked to enrol under October: the request the VTA built, and
+/// the community's answer to it, signed as the community signs. Only the VTA can open the
+/// answer, so its content is a placeholder here.
 async fn vetter_asking_to_enrol() -> (Party, TrustTask<Value>, Message) {
-    use rand::SeedableRng;
-    let (issuer, params) = issuing_community();
     let mut vetter = Party::new(7).member_of(COMMUNITY);
-    let mut rng = rand::rngs::StdRng::seed_from_u64(0xE1);
-    let snapshot = super::hidden::vetter_start(COMMUNITY, &params, &vetter.did, &mut rng).unwrap();
-    let (body, blinding) =
-        super::hidden::enrolment_request(COMMUNITY, &params, &snapshot, "2026-10", &mut rng)
-            .unwrap();
+    let params: super::hidden::HiddenParams = serde_json::from_value(hidden_params()).unwrap();
+    let engine = super::pcs_vta::VetterView {
+        id: "z3Vetter".into(),
+        pending_labels: vec!["vetter/2026-10".into()],
+        ..Default::default()
+    };
     vetter
         .book
         .hidden_vetter
-        .push(super::book::HiddenVetterState::new(
-            COMMUNITY,
-            vetter.persona,
-            params,
-            snapshot,
-        ));
+        .push(hidden_vetter(vetter.persona, params, engine));
+    let body = wire::pcs::RootRequest {
+        label: "vetter/2026-10".into(),
+        id: "z3Vetter".into(),
+        request: json!({ "commitment": "z3Commitment" }),
+    };
     let request = wire::pcs_root_request(&vetter.did, COMMUNITY, &body).unwrap();
     vetter
         .book
         .ask(asked(&request, vetter.persona, QueryKind::PcsRoot));
-    vetter
-        .book
-        .remember_enrolment(super::book::PendingEnrolment {
-            document_id: request.id.clone(),
-            community: COMMUNITY.into(),
-            persona: vetter.persona,
-            blinding: std::sync::Arc::new(blinding),
-        });
-
-    // The community's half, as `vtc-service`'s `pcs_issue::enrol` does it.
-    let id = openvtc_vetting_pcs::scheme::point_from_text(&body.id).unwrap();
-    let pre = issuer
-        .issue_root(
-            "2026-10",
-            &id,
-            &serde_json::from_value(body.request.clone()).unwrap(),
-            &mut rng,
-        )
-        .unwrap();
     let answer = wire::pcs::RootResponse {
         label: "vetter/2026-10".into(),
-        pre_credential: openvtc_vetting_pcs::scheme::enc(&pre).unwrap(),
+        pre_credential: "z3PreCredential".into(),
         ext: None,
     };
     let message = community_answer(&request, &answer).await;
     (vetter, request, message)
 }
 
+/// The enrolment answer the VTA was handed, if one was.
+fn enrolment_for_the_vta(book: &VettingBook) -> Option<&wire::pcs::RootResponse> {
+    book.pcs_inbox.iter().find_map(|item| match item {
+        super::book::PcsInbound::Enrolled { answer, .. } => Some(answer),
+        _ => None,
+    })
+}
+
 /// The live failure: the community enrolled the vetter, its answer arrived after the question
 /// had timed out, and was dropped — after which the community refuses every second request
 /// under the label (`alreadyEnrolled`), so the vetter could not attest for the rest of the
-/// month. A late answer is now taken, and the drip follows at once.
+/// month. A late answer to a label the VTA is waiting on is still handed to it.
 #[tokio::test]
 async fn an_enrolment_answered_after_its_question_timed_out_is_still_taken() {
     let (mut vetter, _request, answer) = vetter_asking_to_enrol().await;
@@ -2878,52 +2855,47 @@ async fn an_enrolment_answered_after_its_question_timed_out_is_still_taken() {
     );
 
     let handled = vetter.receive(&answer, COMMUNITY).await;
-    assert!(
-        matches!(handled.notice, Some(Notice::HiddenVetterEnrolled { ref label, .. }) if label == "vetter/2026-10"),
-        "{:?}",
-        handled.notice
+    assert!(handled.changed);
+    assert_eq!(
+        enrolment_for_the_vta(&vetter.book).map(|a| a.label.as_str()),
+        Some("vetter/2026-10"),
+        "handed to the VTA, which holds what opens it"
     );
+    assert!(vetter.book.pcs_due);
     let held = &vetter.book.hidden_vetter[0];
-    assert!(
-        held.snapshot.credentials.contains_key("2026-10"),
-        "the credential is ours"
-    );
     assert_eq!(held.unanswered, 0, "an answer resets the backoff");
     assert!(held.retry_at.is_none());
-    assert!(held.lost_enrolment.is_none());
-    assert!(
-        vetter.book.pending_enrolments.is_empty(),
-        "the blinding state is spent"
-    );
-    assert!(
-        vetter.book.vetter_refresh_due,
-        "the ticks already owed are drawn now, not at the next hourly pass"
-    );
-    let outlook = vetter
-        .book
-        .hidden_outlook(COMMUNITY, vetter.persona, now)
-        .unwrap();
-    assert!(outlook.enrolled);
 }
 
-/// An answer this client cannot open (a restart between the ask and the answer drops the
-/// blinding state) is the same lock-out. It is recorded, said, and the schedule stops asking
-/// for a credential the community will not issue twice — until its next label.
+/// An answer to a label the VTA is not waiting on, to a question we never asked, is not ours.
 #[tokio::test]
-async fn an_enrolment_answer_that_cannot_be_opened_stops_the_asking_until_the_next_label() {
+async fn an_enrolment_answer_nobody_asked_for_is_dropped() {
     let (mut vetter, _request, answer) = vetter_asking_to_enrol().await;
-    vetter.book.pending_enrolments.clear();
-    let handled = vetter.receive(&answer, COMMUNITY).await;
-    let notice = handled.notice.expect("said");
-    assert!(matches!(notice, Notice::HiddenEnrolmentLost { .. }));
+    vetter.book.queries.clear();
+    vetter.book.hidden_vetter[0].engine.pending_labels.clear();
+    vetter.receive(&answer, COMMUNITY).await;
+    assert!(enrolment_for_the_vta(&vetter.book).is_none());
+}
+
+/// An answer the VTA could not open is the same lock-out: the community issues one credential
+/// per label. Recorded ([`super::book::HiddenVetterState::lost_enrolment`]), said, and the
+/// schedule asks once more — a community may re-issue to the same identifier — and then stops
+/// asking under the label until its next one.
+#[test]
+fn a_lost_enrolment_is_asked_for_once_more_then_waits_for_the_next_label() {
+    let notice = Notice::HiddenEnrolmentLost {
+        community: COMMUNITY.into(),
+        label: "vetter/2026-10".into(),
+    };
     assert!(
         notice.describe().contains("one credential per label"),
         "{}",
         notice.describe()
     );
+    let params: super::hidden::HiddenParams = serde_json::from_value(hidden_params()).unwrap();
+    let mut held = hidden_vetter(PersonaId::new(), params, engine_enrolled(&[]));
+    held.lost_enrolment = Some("2026-10".into());
     let october = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, 15, 0, 0).unwrap();
-    let held = &mut vetter.book.hidden_vetter[0];
-    assert_eq!(held.lost_enrolment.as_deref(), Some("2026-10"));
     assert_eq!(
         held.plan(None, &[], october).owed,
         [super::hidden::Due::Enrol {
@@ -2976,7 +2948,7 @@ async fn already_enrolled_without_a_credential_asks_once_more_then_stops() {
     assert!(held.lost_reasked);
     assert!(held.plan(None, &[], october).owed.is_empty());
     assert!(
-        vetter.book.pending_enrolments.is_empty(),
+        enrolment_for_the_vta(&vetter.book).is_none(),
         "a refused request issued nothing to open"
     );
     let outlook = vetter
@@ -2987,60 +2959,19 @@ async fn already_enrolled_without_a_credential_asks_once_more_then_stops() {
 }
 
 /// No credential and no token are states a vetter waits out — not "parameters could not be
-/// read", which is what both used to say.
-#[tokio::test]
-async fn attesting_without_a_credential_or_a_token_says_which() {
+/// read", which is what both used to say. The VTA refuses with `notEnrolled` / `noToken`, and the
+/// desk says them in these words.
+#[test]
+fn attesting_without_a_credential_or_a_token_says_which() {
     use super::hidden::HiddenError;
-    use rand::SeedableRng;
-    let (mut vetter, _request, answer) = vetter_asking_to_enrol().await;
-    let mut rng = rand::rngs::StdRng::seed_from_u64(0xA7);
-    let params = vetter.book.hidden_vetter[0].params.clone();
-    // Somebody to attest to: any point of the group will do.
-    let applicant =
-        super::hidden::start(COMMUNITY, &params, "did:example:applicant", &mut rng).unwrap();
-    let applicant_id = applicant.id.clone();
-    let meta = || openvtc_vetting_pcs::meta::StatementMeta {
-        community: COMMUNITY.into(),
-        requirements_digest: "zDigest".into(),
-        method: vta_sdk::protocols::vetting::VettingMethod::Video,
-        claims_verified: Vec::new(),
-        liveness_confirmed: true,
-        declared_relationship: vta_sdk::protocols::vetting::VettingRelationship::None,
-        identity_commitment: "zCommit".into(),
-        card_digest_multibase: "zCard".into(),
-        valid_from: Utc::now().date_naive(),
-        valid_until: Utc::now().date_naive(),
-        token_label: String::new(),
-        token_serial: String::new(),
-    };
-
-    let mut snapshot = vetter.book.hidden_vetter[0].snapshot.clone();
-    let err = super::hidden::attest(
-        COMMUNITY,
-        &params,
-        &mut snapshot,
-        &applicant_id,
-        meta(),
-        &mut rng,
-    )
-    .unwrap_err();
-    assert_eq!(err, HiddenError::NotEnrolled);
-    assert!(!err.to_string().contains("could not be read"), "{err}");
-
-    vetter.receive(&answer, COMMUNITY).await;
-    let mut snapshot = vetter.book.hidden_vetter[0].snapshot.clone();
-    let err = super::hidden::attest(
-        COMMUNITY,
-        &params,
-        &mut snapshot,
-        &applicant_id,
-        meta(),
-        &mut rng,
-    )
-    .unwrap_err();
-    assert_eq!(err, HiddenError::NoToken);
-    assert!(err.to_string().contains("no vetting token"), "{err}");
-    assert!(!err.to_string().contains("could not be read"), "{err}");
+    let not_enrolled = HiddenError::NotEnrolled.to_string();
+    assert!(
+        !not_enrolled.contains("could not be read"),
+        "{not_enrolled}"
+    );
+    let no_token = HiddenError::NoToken.to_string();
+    assert!(no_token.contains("no vetting token"), "{no_token}");
+    assert!(!no_token.contains("could not be read"), "{no_token}");
 }
 
 /// The backoff after a silence: 1, 2, 4 … minutes, never more than an hour.
@@ -3054,12 +2985,10 @@ fn an_unanswered_question_is_asked_again_backed_off_and_bounded() {
     assert_eq!(hidden_retry_after(u32::MAX), HIDDEN_RETRY_CAP);
 }
 
-/// A draw answered after its question timed out is still taken while the wallet holds the
-/// serials it was asked for: the community served that tick and will not serve it again.
+/// A draw answered after its question timed out is still taken while the VTA is waiting on it:
+/// the community served that tick and will not serve it again.
 #[tokio::test]
 async fn a_draw_answered_after_its_question_timed_out_is_still_taken() {
-    use openvtc_vetting_pcs::vtc::Vtc;
-    use rand::SeedableRng;
     let label = "token/2026-10";
     let (mut vetter, request) = vetter_with_a_draw_in_flight(label, 1);
     vetter.book.expire_queries(
@@ -3067,57 +2996,29 @@ async fn a_draw_answered_after_its_question_timed_out_is_still_taken() {
         super::queries::QUERY_TIMEOUT,
     );
     assert!(vetter.book.queries.is_empty(), "the question timed out");
-
-    // The community that published `hidden_params()`, serving the draw.
-    let mut rng = rand::rngs::StdRng::seed_from_u64(0x0BED);
-    let mut vtc = Vtc::new(
-        COMMUNITY,
-        "2026-10",
-        serde_json::to_value(requirements()).unwrap(),
-        &mut rng,
-    )
-    .unwrap();
-    assert_eq!(vtc.current_token_label(), label);
-    vtc.grant(&vetter.did);
-    let asked: wire::pcs::TokensRequest = serde_json::from_value(request.payload.clone()).unwrap();
-    let requests = asked
-        .requests
-        .iter()
-        .map(|r| {
-            openvtc_vetting_pcs::issuer::TokenRequestWire {
-                commitment: r.commitment.clone(),
-                opening_proof: r.opening_proof.clone(),
-            }
-            .to_request()
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
-    let pres = vtc
-        .drip(&vetter.did, 1, label, &requests, &mut rng)
-        .unwrap();
     let served = wire::pcs::TokensResponse {
         label: label.into(),
         tick: 1,
-        pre_credentials: pres
-            .iter()
-            .map(|p| openvtc_vetting_pcs::scheme::enc(p).unwrap())
-            .collect(),
+        pre_credentials: vec!["z3T1".into(), "z3T2".into(), "z3T3".into()],
         ext: None,
     };
-    let handled = vetter
+    vetter
         .receive(&community_answer(&request, &served).await, COMMUNITY)
         .await;
     assert!(
         matches!(
-            handled.notice,
-            Some(Notice::HiddenTokensDrawn { taken: 3, .. })
+            vetter.book.pcs_inbox.as_slice(),
+            [super::book::PcsInbound::TokensServed { answer, .. }] if answer.tick == 1
         ),
-        "{:?}",
-        handled.notice
+        "handed to the VTA: {:?}",
+        vetter.book.pcs_inbox
     );
     let held = &vetter.book.hidden_vetter[0];
-    assert_eq!(held.tokens().1, 3);
-    assert_eq!(held.last_ticks.get(label), Some(&1));
+    assert_eq!(
+        held.last_ticks.get(label),
+        Some(&1),
+        "served, whatever the VTA makes of it"
+    );
 }
 
 /// A new vetter does not wait for the schedule's next pass, which can be an hour away: the
@@ -3134,57 +3035,59 @@ async fn a_new_vetter_enrols_now_rather_than_at_the_next_pass() {
     );
 }
 
-/// The blinding of an enrolment is stored with the engine before the request goes, so an answer
-/// that arrives after a restart — the in-memory copy gone — is still opened, rather than locking
-/// the vetter out until the community publishes a new label.
+/// An answer that arrives after a restart — every question forgotten — still reaches the VTA,
+/// which kept what opens it and says it is waiting on the label. And what was queued for the VTA
+/// survives the restart: the community answers an enrolment once and keeps no copy.
 #[tokio::test]
-async fn an_enrolment_answer_after_a_restart_is_opened_with_the_stored_blinding() {
-    let (mut vetter, request, answer) = vetter_asking_to_enrol().await;
-    let pending = vetter.book.pending_enrolments.remove(0);
-    let stored = super::hidden::blinding_text(&pending.blinding).unwrap();
-    vetter.book.hidden_vetter[0].remember_asked(super::book::AskedEnrolment {
-        document_id: request.id.clone(),
-        period: "2026-10".into(),
-        blinding: stored,
-        asked_at: Utc::now(),
-    });
+async fn an_enrolment_answer_after_a_restart_still_reaches_the_vta() {
+    let (mut vetter, _request, answer) = vetter_asking_to_enrol().await;
     // The restart: the book as saved and loaded again, and every question forgotten.
     let saved = serde_json::to_value(&vetter.book).unwrap();
     vetter.book = serde_json::from_value(saved).unwrap();
-    assert!(vetter.book.pending_enrolments.is_empty());
     assert!(vetter.book.queries.is_empty());
 
-    let handled = vetter.receive(&answer, COMMUNITY).await;
+    vetter.receive(&answer, COMMUNITY).await;
+    assert!(enrolment_for_the_vta(&vetter.book).is_some());
+    let saved = serde_json::to_value(&vetter.book).unwrap();
+    let again: VettingBook = serde_json::from_value(saved).unwrap();
     assert!(
-        matches!(handled.notice, Some(Notice::HiddenVetterEnrolled { .. })),
-        "{:?}",
-        handled.notice
+        enrolment_for_the_vta(&again).is_some(),
+        "the queue for the VTA is saved"
     );
-    let held = &vetter.book.hidden_vetter[0];
-    assert!(held.snapshot.credentials.contains_key("2026-10"));
-    assert!(held.lost_enrolment.is_none());
-    assert!(held.enrolments_asked.is_empty(), "spent once opened");
-    assert!(vetter.book.vetter_refresh_due, "and the first draw follows");
 }
 
-/// A refused enrolment drops its stored blinding: nothing will ever need it.
-#[tokio::test]
-async fn a_refused_enrolment_drops_its_stored_blinding() {
-    let (mut vetter, request, _) = vetter_asking_to_enrol().await;
-    let stored = super::hidden::blinding_text(&vetter.book.pending_enrolments[0].blinding).unwrap();
-    vetter.book.hidden_vetter[0].remember_asked(super::book::AskedEnrolment {
-        document_id: request.id.clone(),
-        period: "2026-10".into(),
-        blinding: stored,
-        asked_at: Utc::now(),
-    });
-    vetter
-        .receive(
-            &community_refusal(&request, "vtc/vetting/vetters/pcs-root:notAVetter"),
-            COMMUNITY,
-        )
-        .await;
-    assert!(vetter.book.hidden_vetter[0].enrolments_asked.is_empty());
+/// A record written by a build that ran the engine on this device is read, its key dropped, and
+/// the vetting started again through the VTA — said once, and never written back.
+#[test]
+fn a_local_engine_from_an_earlier_build_is_dropped_on_load() {
+    let persona = PersonaId::new();
+    let mut stored = serde_json::to_value(hidden_vetter(
+        persona,
+        serde_json::from_value(hidden_params()).unwrap(),
+        engine_enrolled(&[]),
+    ))
+    .unwrap();
+    stored["snapshot"] = json!({ "usk": "z3SecretKey", "id": "z3Old" });
+    stored["enrolmentsAsked"] = json!([{ "blinding": "secret" }]);
+    stored["enrolledAt"] = json!({ "2026-10": "2026-10-01T00:00:00Z" });
+    let mut book = VettingBook::default();
+    book.hidden_vetter
+        .push(serde_json::from_value(stored).unwrap());
+    assert!(book.hidden_vetter[0].local_engine_dropped);
+
+    assert_eq!(book.forget_local_engines(), 1);
+    assert!(
+        book.hidden_vetter[0].enrolled_at.is_empty(),
+        "enrolment starts again"
+    );
+    assert_eq!(book.retired.len(), 1, "and it is said");
+    assert_eq!(book.forget_local_engines(), 0, "once");
+    let saved = serde_json::to_string(&book).unwrap();
+    assert!(
+        !saved.contains("z3SecretKey"),
+        "the key is never written back: {saved}"
+    );
+    assert!(!saved.contains("secret"), "nor the blinding: {saved}");
 }
 
 /// A manifest is not fetched again within seconds of the last ask or answer, nor while a
@@ -3261,7 +3164,7 @@ async fn an_application_started_from_the_book_takes_up_first_vtcs_hidden_vetting
         .unwrap();
     assert_eq!(app.criterion_id.as_deref(), Some("vetted-member"));
     assert!(app.hidden.is_some(), "the hidden path, from the book");
-    assert!(app.hidden_id().is_some(), "with its own key minted");
+    assert!(app.hidden_app_owed(), "its own engine owed at the VTA");
 
     // The manifest read again agrees, and changes nothing.
     assert!(!app.adopt_manifest(&parsed, &raw).unwrap());
@@ -3415,6 +3318,12 @@ async fn an_application_switches_criterion_and_path_before_evidence_only() {
         .id
         .clone();
     party.book.adopt_known_requirements(&id).unwrap();
+    // The VTA created the hidden path's engine.
+    party.application().hidden_app = Some(super::pcs_vta::ApplicationView {
+        application_id: "app-1".into(),
+        id: "z3Applicant".into(),
+        attestations: Vec::new(),
+    });
 
     let options = party.book.vetting_options(COMMUNITY);
     let ways: Vec<(&str, VettingPath)> = options
@@ -3437,8 +3346,8 @@ async fn an_application_switches_criterion_and_path_before_evidence_only() {
     );
     assert!(party.application().hidden.is_none());
     assert!(
-        party.application().hidden_state.is_some(),
-        "its key is kept for a switch back"
+        party.application().hidden_app.is_some(),
+        "its engine at the VTA is kept for a switch back"
     );
 
     let now = party.book.switch_vetting(&id).unwrap();
@@ -3511,6 +3420,12 @@ async fn the_vetter_attests_named_for_a_named_request_and_pcs_for_a_hidden_one()
         .adopt_manifest(&alongside.0, &alongside.1)
         .unwrap();
     assert!(applicant.application().hidden.is_some());
+    // The VTA created the application's engine: its identifier is what the request carries.
+    applicant.application().hidden_app = Some(super::pcs_vta::ApplicationView {
+        application_id: "app-1".into(),
+        id: "z3Applicant".into(),
+        attestations: Vec::new(),
+    });
     let (request_id, _) = in_session(&mut applicant, &mut vetter).await;
     assert_eq!(
         vetter.book.request_vetting(&request_id),
@@ -3526,5 +3441,33 @@ async fn the_vetter_attests_named_for_a_named_request_and_pcs_for_a_hidden_one()
         RequestVetting::HiddenWithoutId {
             criterion: "vetted".into()
         }
+    );
+}
+
+/// An enrolment the VTA still holds is waited on — across a restart that forgot the question —
+/// and asked for again only once it has gone unanswered for [`ENROLMENT_ANSWER_WAIT`]: the VTA
+/// replaces a pending request when asked again, which would leave the community's answer to the
+/// first unable to open.
+#[test]
+fn an_enrolment_the_vta_still_holds_is_waited_on_then_asked_again() {
+    use super::book::ENROLMENT_ANSWER_WAIT;
+    let params: super::hidden::HiddenParams = serde_json::from_value(hidden_params()).unwrap();
+    let engine = super::pcs_vta::VetterView {
+        pending_labels: vec!["vetter/2026-10".into()],
+        ..Default::default()
+    };
+    let mut held = hidden_vetter(PersonaId::new(), params, engine);
+    let now = Utc::now();
+    assert!(
+        !held.enrolment_pending("2026-10", now),
+        "not asked from this install: nothing to wait on"
+    );
+    held.enrol_asked_at = Some(now);
+    assert!(held.enrolment_pending("2026-10", now + Duration::minutes(5)));
+    assert!(!held.enrolment_pending("2026-10", now + ENROLMENT_ANSWER_WAIT));
+    held.engine.pending_labels.clear();
+    assert!(
+        !held.enrolment_pending("2026-10", now),
+        "taken in, or refused: nothing pending at the VTA"
     );
 }

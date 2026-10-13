@@ -163,10 +163,13 @@ pub struct HiddenEventTier {
     pub drip_per_tick: usize,
 }
 
+/// How many tokens a tick a community that publishes no rate issues — the VTC's own default.
+pub const DEFAULT_DRIP_PER_TICK: usize = 3;
+
 /// What a community that publishes no rate is taken to mean — the same default the VTC's own
 /// minting half carries.
 fn default_drip_per_tick() -> usize {
-    openvtc_vetting_pcs::vtc::DEFAULT_DRIP_PER_TICK
+    DEFAULT_DRIP_PER_TICK
 }
 
 /// Why a criterion could not be adopted.
@@ -195,6 +198,14 @@ pub enum HiddenError {
          credential to attest under"
     )]
     NotEnrolled,
+    /// This application's engine is not at the VTA yet, so it has no PCS identifier for a vetter
+    /// to attest to. The loop asks the VTA to create it as soon as the criterion is adopted; this
+    /// is the moment before that answer.
+    #[error(
+        "your VTA is still setting up PCS ZKP vetting for this application — nothing was sent; \
+         try again in a moment"
+    )]
+    NotReady,
     /// This vetter holds no attestation token. The community issues them on its schedule (the
     /// drip); attesting has to wait for the next one. Not a fault in what the community
     /// publishes — the parameters were read.
@@ -296,193 +307,9 @@ pub fn accepts_named(raw: &Value) -> bool {
 // Driving the flow
 // ---------------------------------------------------------------------------------------------
 
-pub use openvtc_vetting_pcs::wire::EXTENSIONS_MEMBER;
-use openvtc_vetting_pcs::{
-    applicant::ApplicantEngine,
-    community::CommunityParams,
-    meta::StatementMeta,
-    snapshot::{ApplicantSnapshot, VetterSnapshot},
-    vetter::{HiddenAttestation, VetterEngine},
-    wire::SubmissionWire,
-};
-
-/// The community's published parameters, in the form the engines take.
-///
-/// # Errors
-/// [`HiddenError::Unreadable`] if a published key or label cannot be decoded.
-pub fn community(
-    community_did: &str,
-    params: &HiddenParams,
-) -> Result<CommunityParams, HiddenError> {
-    CommunityParams::published(
-        community_did,
-        &params.helper_key,
-        &params.token_key,
-        params.vetter_labels.clone(),
-        params.token_labels.clone(),
-        params.drip_per_tick,
-    )
-    .map_err(|e| HiddenError::Unreadable(e.to_string()))
-}
-
-/// Mint this vetter's key pair for a community, and return the engine to store.
-///
-/// The counterpart of [`start`] on the other side of the desk, and the step that was missing
-/// for the whole of this branch's life: everything after it — enrolment, the drip, attesting —
-/// operates on a [`VetterSnapshot`], and nothing created the first one outside a test.
-///
-/// **`member_did` is load-bearing and is not a label.** It is bound into every opening proof the
-/// token drip sends, and the community checks the binding against the DID that signed the
-/// request. A snapshot built under any other name draws tokens the community refuses, and the
-/// refusal says nothing about why.
-///
-/// One key pair per (vetter, community), minted once and kept: every tag this vetter ever
-/// produces for this community derives from it, so a second one would make the same person count
-/// twice in one proof (§13 C2).
-///
-/// # Errors
-///
-/// [`HiddenError::Unreadable`] if the community's published parameters cannot be read.
-pub fn vetter_start<R: rand::RngCore + rand::CryptoRng>(
-    community_did: &str,
-    params: &HiddenParams,
-    member_did: &str,
-    rng: &mut R,
-) -> Result<VetterSnapshot, HiddenError> {
-    let community = community(community_did, params)?;
-    VetterEngine::enrol_new(member_did, &community, rng)
-        .and_then(|engine| engine.snapshot())
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))
-}
-
-/// Start an application under a hidden-vetting criterion: a fresh key, used for this
-/// application and no other.
-///
-/// # Errors
-/// [`HiddenError::Unreadable`] if the community's parameters cannot be read.
-pub fn start<R: rand::RngCore + rand::CryptoRng>(
-    community_did: &str,
-    params: &HiddenParams,
-    join_did: &str,
-    rng: &mut R,
-) -> Result<ApplicantSnapshot, HiddenError> {
-    let community = community(community_did, params)?;
-    let engine = ApplicantEngine::new(&community, join_did, rng)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    engine
-        .snapshot()
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))
-}
-
-/// Take an attestation a vetter sent, after checking it here rather than at submit: an
-/// attestation that does not verify, or whose token does not, is refused at the session while
-/// the vetter is still there to ask.
-///
-/// # Errors
-/// [`HiddenError::Unreadable`] if the attestation does not verify under the community's
-/// published parameters.
-pub fn receive(
-    community_did: &str,
-    params: &HiddenParams,
-    state: &mut ApplicantSnapshot,
-    attestation: &Value,
-) -> Result<(), HiddenError> {
-    let community = community(community_did, params)?;
-    // The wire form of an attestation is its storable form: same members, same encoding.
-    let held: openvtc_vetting_pcs::snapshot::HeldAttestation =
-        serde_json::from_value(attestation.clone())
-            .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    let att: HiddenAttestation = held
-        .restore()
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    let mut engine =
-        ApplicantEngine::restore(state).map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    engine
-        .receive(&community, att)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    *state = engine
-        .snapshot()
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    Ok(())
-}
-
-/// Prove, for `challenge`, that `k` distinct vetters vetted this applicant. The result goes
-/// into the submission's `extensions` under [`EXTENSIONS_MEMBER`].
-///
-/// # Errors
-/// [`HiddenError::Unreadable`] if no attestation is usable, or the proof cannot be built.
-pub fn prove<R: rand::RngCore + rand::CryptoRng>(
-    community_did: &str,
-    params: &HiddenParams,
-    requirements_digest: &str,
-    state: &ApplicantSnapshot,
-    challenge: &str,
-    rng: &mut R,
-) -> Result<Value, HiddenError> {
-    let community = community(community_did, params)?;
-    let engine =
-        ApplicantEngine::restore(state).map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    let submission = engine
-        .submit(&community, requirements_digest, challenge, rng)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    let wire = SubmissionWire::from_submission(&submission)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    serde_json::to_value(&wire).map_err(|e| HiddenError::Unreadable(e.to_string()))
-}
-
-/// The vetter's half: attest for `applicant_id` after the human check, spending one token.
-///
-/// # Errors
-/// [`HiddenError::NotEnrolled`] if the vetter holds no credential under a live class label,
-/// [`HiddenError::NoToken`] if it holds no free token, and [`HiddenError::Unreadable`] if the
-/// published parameters, the stored engine or the applicant's identifier cannot be read.
-pub fn attest<R: rand::RngCore + rand::CryptoRng>(
-    community_did: &str,
-    params: &HiddenParams,
-    state: &mut VetterSnapshot,
-    applicant_id: &str,
-    meta: StatementMeta,
-    rng: &mut R,
-) -> Result<Value, HiddenError> {
-    let community = community(community_did, params)?;
-    let mut engine = VetterEngine::restore(state, community_did)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    let id = openvtc_vetting_pcs::scheme::point_from_text(applicant_id)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    // Enrolment first: a vetter that holds no credential holds no token either, and "no token"
-    // would send it to wait for a drip it cannot draw.
-    let enrolled = params.vetter_labels.iter().any(|l| {
-        state
-            .credentials
-            .contains_key(l.trim_start_matches("vetter/"))
-    });
-    if !enrolled {
-        return Err(HiddenError::NotEnrolled);
-    }
-    // The tick the engine names in its refusal is not ours to give — the schedule knows when
-    // the next drip is due, and the caller says so — so it is not read here.
-    let reservation = engine.accept(None, 0).map_err(attest_refusal)?;
-    let attestation = engine
-        .attest(&community, &reservation, &id, meta, rng)
-        .map_err(attest_refusal)?;
-    *state = engine
-        .snapshot()
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    let held = openvtc_vetting_pcs::snapshot::HeldAttestation::of(&attestation)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    serde_json::to_value(&held).map_err(|e| HiddenError::Unreadable(e.to_string()))
-}
-
-/// What the engine's refusal to attest means for the vetter. Capacity and a missing credential
-/// are states the vetter waits out, not unreadable parameters, and are said as such.
-fn attest_refusal(e: openvtc_vetting_pcs::ProtoError) -> HiddenError {
-    use openvtc_vetting_pcs::ProtoError;
-    match e {
-        ProtoError::AtCapacity { .. } => HiddenError::NoToken,
-        ProtoError::NoLiveCredential => HiddenError::NotEnrolled,
-        other => HiddenError::Unreadable(other.to_string()),
-    }
-}
+/// The member of a join submission's `extensions` that carries the hidden-vetting proof
+/// (`vta/pcs/prove`'s `hiddenVetting`).
+pub const EXTENSIONS_MEMBER: &str = "hiddenVetting";
 
 // ---------------------------------------------------------------------------------------------
 // The vetter's half
@@ -538,6 +365,9 @@ pub fn read_request_ext(ext: Option<&serde_json::Value>) -> Result<Option<String
 /// timestamps: an exact time would let a community line an attestation up with a vetter's
 /// activity, which undoes the proof without touching it (design §6).
 ///
+/// The result is `vta/pcs/attest`'s `meta` (`AttestMeta`): the statement minus its issuer and its
+/// token, whose members the VTA fills from the token it spends.
+///
 /// `None` when the draft carries none of the vetter-only members: only a vetter attests on
 /// the hidden path, and a vetter's statement always carries all three.
 #[must_use]
@@ -545,224 +375,25 @@ pub fn statement_meta(
     draft: &vta_sdk::vetting::statement::StatementDraft,
     community: &str,
     requirements_digest: &str,
-) -> Option<StatementMeta> {
+) -> Option<Value> {
     let e = &draft.value;
     let members = e.vetter_members()?;
-    Some(StatementMeta {
-        community: community.to_string(),
-        requirements_digest: requirements_digest.to_string(),
-        method: e.method,
-        claims_verified: e
+    Some(serde_json::json!({
+        "community": community,
+        "requirementsDigest": requirements_digest,
+        "method": e.method,
+        "claimsVerified": e
             .claims_verified
             .iter()
             .map(|c| c.as_str().to_string())
-            .collect(),
-        liveness_confirmed: e.liveness_confirmed,
-        declared_relationship: members.declared_relationship,
-        identity_commitment: members.identity_commitment.to_string(),
-        card_digest_multibase: members.card_digest_multibase.to_string(),
-        valid_from: draft.valid_from.date_naive(),
-        valid_until: draft.valid_until.date_naive(),
-        token_label: String::new(),
-        token_serial: String::new(),
-    })
-}
-
-// ---------------------------------------------------------------------------------------------
-// Enrolment and the drip, from the vetter's side
-// ---------------------------------------------------------------------------------------------
-
-/// Build the enrolment request for `period`, and the blinding state that unblinds the answer.
-///
-/// The state is **not** persisted: it is useless without the answer and dangerous to keep past
-/// it, so a client holds it for the round trip and drops it. An enrolment whose answer never
-/// arrives is re-asked from scratch, which costs nothing — the community refuses a second
-/// credential under the same label, and a request that was never answered issued none.
-///
-/// # Errors
-///
-/// [`HiddenError::Unreadable`] if the community's parameters cannot be read, or the request
-/// cannot be built.
-pub fn enrolment_request<R: rand::RngCore + rand::CryptoRng>(
-    community_did: &str,
-    params: &HiddenParams,
-    snapshot: &VetterSnapshot,
-    period: &str,
-    rng: &mut R,
-) -> Result<(crate::vetting::wire::pcs::RootRequest, Blinding), HiddenError> {
-    let params = community(community_did, params)?;
-    let engine = VetterEngine::restore(snapshot, community_did)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    let (wire, state) = engine
-        .enrolment_request(&params, period, rng)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    Ok((
-        crate::vetting::wire::pcs::RootRequest {
-            label: wire.label,
-            id: wire.id,
-            request: wire.request,
-        },
-        state,
-    ))
-}
-
-/// The blinding state of an enrolment in flight, as this module hands it back.
-///
-/// Stored ([`blinding_text`]) before the request goes, in the protected config beside the
-/// engine's `usk` and as secret: an answer that arrives after a restart must still open, because
-/// asking again under the same label is refused (`alreadyEnrolled`) and the community keeps no
-/// copy of its answer to send again.
-pub type Blinding = openvtc_vetting_pcs::vetter::EnrolmentBlinding;
-
-/// `blinding` in its storable form: base64url (no padding) over the scheme's own canonical
-/// encoding.
-///
-/// # Errors
-/// [`HiddenError::Unreadable`] if it cannot be encoded.
-pub fn blinding_text(blinding: &Blinding) -> Result<String, HiddenError> {
-    use base64::Engine;
-    let bytes = blinding
-        .to_bytes()
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes.as_slice()))
-}
-
-/// The blinding [`blinding_text`] stored.
-///
-/// # Errors
-/// [`HiddenError::Unreadable`] if `text` is not one.
-pub fn blinding_from_text(text: &str) -> Result<Blinding, HiddenError> {
-    use base64::Engine;
-    let bytes = zeroize::Zeroizing::new(
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(text)
-            .map_err(|e| HiddenError::Unreadable(e.to_string()))?,
-    );
-    Blinding::from_bytes(&bytes).map_err(|e| HiddenError::Unreadable(e.to_string()))
-}
-
-/// Take the community's answer into the engine.
-///
-/// # Errors
-///
-/// [`HiddenError::Unreadable`] if the answer cannot be decoded, or does not unblind under the
-/// published key — which is what a wrong or swapped answer looks like from here.
-pub fn accept_enrolment(
-    community_did: &str,
-    params: &HiddenParams,
-    snapshot: &mut VetterSnapshot,
-    answer: &crate::vetting::wire::pcs::RootResponse,
-    blinding: &Blinding,
-) -> Result<(), HiddenError> {
-    let params = community(community_did, params)?;
-    let mut engine = VetterEngine::restore(snapshot, community_did)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    engine
-        .accept_enrolment(
-            &params,
-            &openvtc_vetting_pcs::issuer::RootCredentialWire {
-                label: answer.label.clone(),
-                pre_credential: answer.pre_credential.clone(),
-            },
-            blinding,
-        )
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    *snapshot = engine
-        .snapshot()
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    Ok(())
-}
-
-/// Build one tick of the drip: `rate` blinded serials under `label`.
-///
-/// The wallet's pending state lives in the snapshot, so a client that asks and then restarts can
-/// still take the answer.
-///
-/// # Errors
-///
-/// [`HiddenError::Unreadable`] if the requests cannot be built.
-pub fn drip_request<R: rand::RngCore + rand::CryptoRng>(
-    community_did: &str,
-    params: &HiddenParams,
-    snapshot: &mut VetterSnapshot,
-    tick: u32,
-    label: &str,
-    rate: usize,
-    rng: &mut R,
-) -> Result<crate::vetting::wire::pcs::TokensRequest, HiddenError> {
-    let params_built = community(community_did, params)?;
-    let mut engine = VetterEngine::restore(snapshot, community_did)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    let batch = engine
-        .drip_request(&params_built, tick, label, rate, rng)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    *snapshot = engine
-        .snapshot()
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    Ok(crate::vetting::wire::pcs::TokensRequest {
-        label: batch.label,
-        tick: batch.tick,
-        requests: batch
-            .requests
-            .into_iter()
-            .map(|r| crate::vetting::wire::pcs::TokenRequest {
-                commitment: r.commitment,
-                opening_proof: r.opening_proof,
-            })
-            .collect(),
-    })
-}
-
-/// Take a served batch into the wallet. Returns how many tokens it added.
-///
-/// # Errors
-///
-/// [`HiddenError::Unreadable`] if a token cannot be decoded or does not verify under the
-/// published token key.
-pub fn accept_drip(
-    community_did: &str,
-    params: &HiddenParams,
-    snapshot: &mut VetterSnapshot,
-    served: &crate::vetting::wire::pcs::TokensResponse,
-) -> Result<usize, HiddenError> {
-    let params_built = community(community_did, params)?;
-    let mut engine = VetterEngine::restore(snapshot, community_did)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    let taken = engine
-        .accept_drip(
-            &params_built,
-            &openvtc_vetting_pcs::issuer::TokenBatchWire {
-                label: served.label.clone(),
-                tick: served.tick,
-                pre_credentials: served.pre_credentials.clone(),
-            },
-        )
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    *snapshot = engine
-        .snapshot()
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    Ok(taken)
-}
-
-/// Drop the serials of a draw the community refused, so they do not wait in the snapshot for an
-/// answer that is never coming.
-///
-/// # Errors
-///
-/// [`HiddenError::Unreadable`] if the snapshot cannot be restored or stored again.
-pub fn forget_draw(
-    community_did: &str,
-    snapshot: &mut VetterSnapshot,
-    label: &str,
-    tick: u32,
-) -> Result<(), HiddenError> {
-    let mut engine = VetterEngine::restore(snapshot, community_did)
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    engine.forget_draw(label, tick);
-    *snapshot = engine
-        .snapshot()
-        .map_err(|e| HiddenError::Unreadable(e.to_string()))?;
-    Ok(())
+            .collect::<Vec<_>>(),
+        "livenessConfirmed": e.liveness_confirmed,
+        "declaredRelationship": members.declared_relationship,
+        "identityCommitment": members.identity_commitment.to_string(),
+        "cardDigestMultibase": members.card_digest_multibase.to_string(),
+        "validFrom": draft.valid_from.date_naive(),
+        "validUntil": draft.valid_until.date_naive(),
+    }))
 }
 
 /// The `pcs-tokens` refusal that means "not yet": the tick asked for has not begun at the
@@ -1024,7 +655,7 @@ fn next_tick(
 #[must_use]
 pub fn due(
     params: &HiddenParams,
-    snapshot: Option<&VetterSnapshot>,
+    engine: Option<&super::pcs_vta::VetterView>,
     last_ticks: &std::collections::BTreeMap<String, u32>,
     events: &[EventDraw],
     now: chrono::DateTime<chrono::Utc>,
@@ -1036,10 +667,7 @@ pub fn due(
     else {
         return Due::Nothing;
     };
-    let Some(snapshot) = snapshot else {
-        return Due::Enrol { period };
-    };
-    if !snapshot.credentials.contains_key(&period) {
+    if !engine.is_some_and(|engine| engine.enrolled_for(&period)) {
         return Due::Enrol { period };
     }
     let length = params.tick_length();
@@ -1165,7 +793,6 @@ pub fn settle_ticks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use serde_json::json;
 
     fn params() -> Value {
@@ -1189,25 +816,10 @@ mod tests {
     /// configuration parses as nothing at all and `read_mode` answers `Named` for a community
     /// that hides every one of its vetters.
     fn as_the_service_serves_it() -> Value {
-        // Real keys, from a seeded community, because the shape is only half the contract: the
-        // other half is that what a community publishes decodes into the group elements the
-        // engines take. Placeholder multibase parses as JSON and fails there.
-        let mut rng = rand::rngs::StdRng::from_seed([9u8; 32]);
-        let vtc = openvtc_vetting_pcs::vtc::Vtc::new(
-            "did:example:kernel-vtc",
-            "2026-09",
-            json!({
-                "version": "0.1",
-                "statementType": vta_sdk::protocols::vetting::VETTED_PREDICATE,
-                "minStatements": 3,
-                "acceptedMethods": ["inPerson", "video"],
-                "eligibleVetters": { "role": "vetter" }
-            }),
-            &mut rng,
-        )
-        .expect("a community");
-        let hvk = openvtc_vetting_pcs::scheme::key_text(vtc.hvk()).expect("hvk");
-        let tvk = openvtc_vetting_pcs::scheme::key_text(vtc.tvk()).expect("tvk");
+        // The keys are the community's and only the VTA's engine decodes them; what this client
+        // owes is to read them out of the criterion and hand them on unchanged.
+        let hvk = "z3HeLperKey";
+        let tvk = "z3TokenKey";
         json!({
             "id": "kernel-developer",
             "vetting": {
@@ -1280,9 +892,17 @@ mod tests {
         assert_eq!(event.group_floor, 3);
         assert_eq!(event.tiers[0].drip_per_tick, 20);
 
-        // And the keys decode, which is the part a wrong multibase alphabet would fail.
-        community("did:example:kernel-vtc", &params)
-            .expect("the published keys decode into engine parameters");
+        // And what was read is what the VTA's engine takes: every task's `parameters`.
+        let payload = json!({
+            "contextId": "ctx",
+            "community": "did:example:kernel-vtc",
+            "joinDid": "did:key:z6Mk",
+            "parameters": crate::vetting::pcs_vta::parameters(&params),
+        });
+        serde_json::from_value::<
+            trust_tasks_rs::specs::vta::pcs::applications::create::v0_1::Payload,
+        >(payload)
+        .expect("the published parameters are what the engine takes");
     }
 
     /// The service stores one shape and publishes another, and this is why: the stored one does
@@ -1428,13 +1048,12 @@ mod schedule_tests {
         }
     }
 
-    /// Enrolled under 2026-09.
-    fn enrolled() -> VetterSnapshot {
-        let mut snapshot = VetterSnapshot::without_keys("member-1");
-        snapshot
-            .credentials
-            .insert("2026-09".into(), "zCredential".into());
-        snapshot
+    /// Enrolled under 2026-09, as the VTA reports it.
+    fn enrolled() -> crate::vetting::pcs_vta::VetterView {
+        crate::vetting::pcs_vta::VetterView {
+            enrolled_labels: vec!["vetter/2026-09".into()],
+            ..Default::default()
+        }
     }
 
     fn summit() -> EventDraw {
@@ -1454,10 +1073,10 @@ mod schedule_tests {
         events: &[EventDraw],
         now: chrono::DateTime<Utc>,
     ) -> Vec<(String, u32)> {
-        let snapshot = enrolled();
+        let engine = enrolled();
         let mut out = Vec::new();
         for _ in 0..100 {
-            match due(params, Some(&snapshot), &ticks, events, now) {
+            match due(params, Some(&engine), &ticks, events, now) {
                 Due::Draw { label, tick, .. } => {
                     ticks.insert(label.clone(), tick);
                     out.push((label, tick));
@@ -1623,13 +1242,13 @@ mod schedule_tests {
     #[test]
     fn the_draw_is_owed_by_the_clock_and_not_by_the_balance() {
         let now = at(2026, 9, 20, 9, 0, 0); // tick 6 of September at three days
-        let snapshot = enrolled();
+        let engine = enrolled();
 
         // Served this tick already: nothing owed, however empty the wallet is.
         assert_eq!(
             due(
                 &params(3),
-                Some(&snapshot),
+                Some(&engine),
                 &drawn("token/2026-09", 6),
                 &[],
                 now
@@ -1641,7 +1260,7 @@ mod schedule_tests {
         assert_eq!(
             due(
                 &params(3),
-                Some(&snapshot),
+                Some(&engine),
                 &drawn("token/2026-09", 5),
                 &[],
                 now
@@ -1814,7 +1433,7 @@ mod schedule_tests {
             }
         );
         let mut both = enrolled();
-        both.credentials.insert("2026-10".into(), "zOctober".into());
+        both.enrolled_labels.insert(0, "vetter/2026-10".into());
         assert_eq!(
             due(&live, Some(&both), &drawn("token/2026-09", 9), &[], october),
             Due::Draw {

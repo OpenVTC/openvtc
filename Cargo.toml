@@ -2,8 +2,6 @@
 members = [
   "openvtc-core",
   "openvtc",
-  # Hidden-vetter admission (ZKP). Published: `openvtc-core` depends on it.
-  "openvtc-vetting-pcs",
 ]
 resolver = "3"
 

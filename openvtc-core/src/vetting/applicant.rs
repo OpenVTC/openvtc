@@ -202,10 +202,22 @@ pub struct Application {
     /// today.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<super::hidden::HiddenParams>,
-    /// The applicant's own engine state for a hidden-vetting application: its key, and the
-    /// attestations gathered so far ([`super::hidden`]). Absent on the named path.
+    /// The hidden-vetting application as the VTA holds it: its PCS identifier, and the
+    /// metadata of each attestation taken in ([`super::pcs_vta`]). The key is the VTA's and
+    /// never leaves it. Absent on the named path, and until the VTA has created it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hidden_state: Option<openvtc_vetting_pcs::snapshot::ApplicantSnapshot>,
+    pub hidden_app: Option<super::pcs_vta::ApplicationView>,
+    /// The stored record was written by a build that ran this application's engine on this
+    /// device: its key, and every attestation bound to it, went with the upgrade. Read and
+    /// dropped — kept in [`Self::extra`] it would carry the key forward on every save. The
+    /// application starts its hidden vetting again.
+    #[serde(
+        default,
+        rename = "hidden_state",
+        skip_serializing,
+        deserialize_with = "super::legacy::present"
+    )]
+    pub local_engine_dropped: bool,
     /// The proof built for the next submit, held between building it and sending it. Not
     /// persisted: it is bound to a challenge that does not outlive the exchange.
     #[serde(skip)]
@@ -536,7 +548,8 @@ impl Application {
             requirements: None,
             requirements_digest: None,
             hidden: None,
-            hidden_state: None,
+            hidden_app: None,
+            local_engine_dropped: false,
             hidden_submission: None,
             hidden_challenge: None,
             vetting_path: None,
@@ -664,18 +677,6 @@ impl Application {
             _ => None,
         };
         let changed = changed || self.hidden != hidden;
-        // A key of this application's own, minted once. Every tag a vetter produces for this
-        // applicant is derived from it, so it never moves between applications.
-        if let Some(params) = &hidden
-            && self.hidden_state.is_none()
-        {
-            self.hidden_state = Some(super::hidden::start(
-                &self.community,
-                params,
-                &self.join_did,
-                &mut rand::rngs::OsRng,
-            )?);
-        }
         if let Some(previous) = self.criterion_id.as_deref()
             && previous != id
         {
@@ -1450,7 +1451,7 @@ impl Application {
         // inside the proof, deliberately out of reach here — so this is the applicant's own
         // estimate of its progress, and the community's count at submit is the authority. An
         // applicant that asked three different people will find the two agree.
-        let facts = if facts.is_empty() && self.hidden_state.is_some() {
+        let facts = if facts.is_empty() && self.hidden_app.is_some() {
             self.hidden_facts(now)
         } else {
             facts
@@ -1460,14 +1461,13 @@ impl Application {
 
     /// The facts a hidden application's held attestations bind, for its own checklist.
     fn hidden_facts(&self, now: DateTime<Utc>) -> Vec<StatementFacts> {
-        let Some(state) = self.hidden_state.as_ref() else {
+        let Some(app) = self.hidden_app.as_ref() else {
             return Vec::new();
         };
-        state
-            .held
+        app.attestations
             .iter()
             .enumerate()
-            .filter(|(_, held)| held.meta.valid_until >= now.date_naive())
+            .filter(|(_, held)| held.valid_until >= now.date_naive())
             // One the community will refuse is not progress, whatever it once was: the
             // checklist that called a join with only stale attestations "satisfied" is how a
             // join went in and came back "needs more vetting" with no reason anyone could see.
@@ -1478,13 +1478,12 @@ impl Application {
                 // here, and inventing a stable one is how a store becomes the link the
                 // exchange removes.
                 vetter: format!("hidden-vetter-{i}"),
-                method: held.meta.method,
-                claims_verified: held.meta.claims_verified.clone(),
+                method: held.method,
+                claims_verified: held.claims_verified.clone(),
                 document_classes: Vec::new(),
-                declared_relationship: held.meta.declared_relationship,
-                identity_commitment: held.meta.identity_commitment.clone(),
+                declared_relationship: held.declared_relationship,
+                identity_commitment: held.identity_commitment.clone(),
                 valid_from: held
-                    .meta
                     .valid_from
                     .and_hms_opt(0, 0, 0)
                     .map_or(now, |d| d.and_utc()),
@@ -1529,40 +1528,10 @@ impl Application {
         }
     }
 
-    /// Record the proof this application will submit, built by
-    /// [`super::hidden::prove`] against the attestations it holds.
+    /// Record the proof this application will submit, built by the VTA
+    /// ([`super::pcs_vta::prove`]) against the attestations it holds.
     pub fn set_hidden_submission(&mut self, submission: Value) {
         self.hidden_submission = Some(submission);
-    }
-
-    /// Build the proof this application submits, from the attestations it holds.
-    ///
-    /// `Ok(false)` when there is nothing to prove: not a hidden-vetting application, or one no
-    /// vetter's attestation has reached yet. The proof is bound to `challenge`; the community
-    /// rebuilds the same binding and refuses a proof built for another one.
-    ///
-    /// # Errors
-    ///
-    /// [`super::hidden::HiddenError`] when the application holds no usable attestation, or the
-    /// community's published parameters cannot be read.
-    pub fn prepare_hidden_submission(
-        &mut self,
-        challenge: &str,
-    ) -> Result<bool, super::hidden::HiddenError> {
-        let (Some(params), Some(state)) = (&self.hidden, &self.hidden_state) else {
-            return Ok(false);
-        };
-        let digest = self.requirements_digest.clone().unwrap_or_default();
-        let submission = super::hidden::prove(
-            &self.community,
-            params,
-            &digest,
-            state,
-            challenge,
-            &mut rand::rngs::OsRng,
-        )?;
-        self.hidden_submission = Some(submission);
-        Ok(true)
     }
 
     /// Whether a hidden-vetting proof could be built at all: at least one vetter's attestation
@@ -1570,9 +1539,9 @@ impl Application {
     /// community for a challenge would only delay being told so.
     #[must_use]
     pub fn holds_hidden_attestation(&self) -> bool {
-        self.hidden_state
+        self.hidden_app
             .as_ref()
-            .is_some_and(|h| !h.held.is_empty())
+            .is_some_and(|h| !h.attestations.is_empty())
     }
 
     /// Why `held` cannot count at the community as it publishes itself now, or `None` when it
@@ -1591,13 +1560,13 @@ impl Application {
     #[must_use]
     pub fn stale_hidden_attestation(
         &self,
-        held: &openvtc_vetting_pcs::snapshot::HeldAttestation,
+        held: &super::pcs_vta::AttestationMeta,
     ) -> Option<StaleAttestation> {
         let params = self.hidden.as_ref()?;
         if self
             .requirements_digest
             .as_deref()
-            .is_some_and(|digest| digest != held.meta.requirements_digest)
+            .is_some_and(|digest| digest != held.requirements_digest)
         {
             return Some(StaleAttestation::Criterion);
         }
@@ -1610,11 +1579,10 @@ impl Application {
     /// Why each held attestation that cannot count cannot, one entry per such attestation.
     #[must_use]
     pub fn stale_hidden_attestations(&self) -> Vec<StaleAttestation> {
-        self.hidden_state
+        self.hidden_app
             .as_ref()
-            .map(|state| {
-                state
-                    .held
+            .map(|app| {
+                app.attestations
                     .iter()
                     .filter_map(|held| self.stale_hidden_attestation(held))
                     .collect()
@@ -1626,9 +1594,8 @@ impl Application {
     /// ([`Self::stale_hidden_attestation`]).
     #[must_use]
     pub fn holds_current_hidden_attestation(&self) -> bool {
-        self.hidden_state.as_ref().is_some_and(|state| {
-            state
-                .held
+        self.hidden_app.as_ref().is_some_and(|app| {
+            app.attestations
                 .iter()
                 .any(|held| self.stale_hidden_attestation(held).is_none())
         })
@@ -1651,38 +1618,37 @@ impl Application {
         true
     }
 
-    /// Take an attestation a vetter sent under a hidden-vetting criterion.
-    ///
-    /// # Errors
-    ///
-    /// [`super::hidden::HiddenError`] if this is not a hidden-vetting application, or the
-    /// attestation does not verify under the community's published parameters.
-    pub fn receive_hidden_attestation(
-        &mut self,
-        attestation: &Value,
-    ) -> Result<(), super::hidden::HiddenError> {
-        let params = self.hidden.clone().ok_or_else(|| {
-            super::hidden::HiddenError::Unreadable(
-                "this application is not under a hidden-vetting criterion".into(),
-            )
-        })?;
-        let state = self.hidden_state.as_mut().ok_or_else(|| {
-            super::hidden::HiddenError::Unreadable("the application has no key yet".into())
-        })?;
-        super::hidden::receive(&self.community, &params, state, attestation)
-    }
-
     /// The applicant's PCS identifier, which is what a vetter attests. `None` on the named
     /// path.
     #[must_use]
     pub fn hidden_id(&self) -> Option<&str> {
-        self.hidden_state.as_ref().map(|s| s.id.as_str())
+        self.hidden_app.as_ref().map(|a| a.id.as_str())
+    }
+
+    /// Whether this application runs hidden vetting and the VTA has not created its engine yet:
+    /// the loop asks it to ([`super::pcs_vta::create_application`]) before any request goes out.
+    #[must_use]
+    pub fn hidden_app_owed(&self) -> bool {
+        self.hidden.is_some() && self.hidden_app.is_none()
+    }
+
+    /// Start hidden vetting again after an upgrade from a build that ran this application's
+    /// engine on this device ([`Self::local_engine_dropped`]). Returns whether there was
+    /// anything to forget.
+    pub fn forget_local_engine(&mut self) -> bool {
+        if !self.local_engine_dropped {
+            return false;
+        }
+        self.local_engine_dropped = false;
+        self.hidden_app = None;
+        self.hidden_submission = None;
+        true
     }
 
     /// How many hidden attestations this application holds. Zero on the named path, where the
     /// count that matters is [`Self::presentable_statements`].
     #[must_use]
     pub fn hidden_held(&self) -> usize {
-        self.hidden_state.as_ref().map_or(0, |s| s.held.len())
+        self.hidden_app.as_ref().map_or(0, |a| a.attestations.len())
     }
 }

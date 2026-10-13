@@ -3709,7 +3709,7 @@ async fn run_join_sequence(
         .filter(|a| a.join_did == applicant_did && a.hidden.is_some())
     {
         None => None,
-        Some(application) => hidden_proof_refusal(application, &mut state.join),
+        Some(application) => hidden_proof_refusal(application, admin_vta, &mut state.join).await,
     };
     if let Some(refusal) = hidden_refusal {
         state.join.fail(refusal);
@@ -4100,25 +4100,68 @@ async fn await_persona_online(
     online
 }
 
-/// Build a hidden-vetting application's proof for this submission, or say why it cannot be.
+/// Have the VTA build a hidden-vetting application's proof for this submission
+/// ([`openvtc_core::vetting::pcs_vta::prove`]), or say why it cannot be.
 ///
 /// `None` when the proof is built and will ride in `extensions`. `Some` is the sentence the
 /// progress page fails with — each naming what the holder can do, because "the proof could not
 /// be built" alone leaves them nowhere to go.
-fn hidden_proof_refusal(
+async fn hidden_proof_refusal(
     application: &mut openvtc_core::vetting::applicant::Application,
+    admin_vta: &VtaClient,
     join: &mut crate::state_handler::join::JoinState,
 ) -> Option<String> {
+    let challenge = match hidden_proof_precheck(application) {
+        Ok(challenge) => challenge,
+        Err(refusal) => return Some(refusal),
+    };
+    // Hidden parameters but no application at the VTA: no vetter's attestation has arrived.
+    let (Some(params), Some(app)) = (application.hidden.clone(), application.hidden_app.clone())
+    else {
+        return Some(NO_ATTESTATION.to_string());
+    };
+    join.info("Proving that enough vetters vetted you, without naming them…".to_string());
+    let digest = application.requirements_digest.clone().unwrap_or_default();
+    match openvtc_core::vetting::pcs_vta::prove(
+        admin_vta,
+        &app.application_id,
+        &params,
+        &digest,
+        &challenge,
+    )
+    .await
+    {
+        Ok(proof) => {
+            application.set_hidden_submission(proof);
+            None
+        }
+        Err(e)
+            if e.is(openvtc_core::vetting::pcs_vta::tasks::prove::v0_1::error_codes::NO_USABLE_ATTESTATION) =>
+        {
+            Some(NO_ATTESTATION.to_string())
+        }
+        Err(e) => Some(format!(
+            "The zero-knowledge proof of your vetting could not be built ({e}). Nothing was sent \
+             — joining without it would present no vetting at all."
+        )),
+    }
+}
+
+/// Everything that stops a hidden-vetting join before the VTA is asked for a proof: the
+/// community's challenge it must bind, or the sentence the join fails with.
+fn hidden_proof_precheck(
+    application: &openvtc_core::vetting::applicant::Application,
+) -> Result<String, String> {
     // Nothing to prove is said first: with no attestation held, a missing challenge is beside
     // the point, and naming it would send the person after the wrong thing.
     if application.hidden.is_some() && !application.holds_hidden_attestation() {
-        return Some(NO_ATTESTATION.to_string());
+        return Err(NO_ATTESTATION.to_string());
     }
     // Every attestation held is one the community will refuse. A proof built from them
     // verifies, and counts nothing: the join would come back "needs more vetting" while this
     // client called it satisfied. Said here, with what to do, instead.
     if application.hidden.is_some() && !application.holds_current_hidden_attestation() {
-        return Some(stale_attestations_refusal(
+        return Err(stale_attestations_refusal(
             &application.stale_hidden_attestations(),
         ));
     }
@@ -4130,27 +4173,13 @@ fn hidden_proof_refusal(
     // A launch that can hear the answer has already asked for a fresh one (`challenge_step`),
     // so this is reached without one only from a loop that cannot — and the way out is a loop
     // that can, not a key on a page this screen cannot reach.
-    let Some(challenge) = application.hidden_challenge.clone() else {
-        return Some(
-            "This community hides its vetters, so joining sends a zero-knowledge proof bound to \
-             a challenge the community issues — and none is held. Nothing was sent. This screen \
-             cannot hear the community's answer, so it could not ask for one: start the join \
-             again once messaging is running, and it asks for the challenge itself."
-                .to_string(),
-        );
-    };
-    match application.prepare_hidden_submission(&challenge) {
-        Ok(true) => {
-            join.info("Proving that enough vetters vetted you, without naming them…".to_string());
-            None
-        }
-        // Hidden parameters but no engine state: no vetter's attestation has arrived.
-        Ok(false) => Some(NO_ATTESTATION.to_string()),
-        Err(e) => Some(format!(
-            "The zero-knowledge proof of your vetting could not be built ({e}). Nothing was sent \
-             — joining without it would present no vetting at all."
-        )),
-    }
+    application.hidden_challenge.clone().ok_or_else(|| {
+        "This community hides its vetters, so joining sends a zero-knowledge proof bound to \
+         a challenge the community issues — and none is held. Nothing was sent. This screen \
+         cannot hear the community's answer, so it could not ask for one: start the join \
+         again once messaging is running, and it asks for the challenge itself."
+            .to_string()
+    })
 }
 
 /// Why a hidden-vetting join stops when every attestation held is one the community refuses.
@@ -4307,7 +4336,7 @@ fn join_review(
     let vetting = match application {
         None => ReviewVetting::None,
         Some(app) if app.hidden.is_some() => ReviewVetting::Hidden {
-            attestations: app.hidden_state.as_ref().map_or(0, |h| h.held.len()),
+            attestations: app.hidden_held(),
         },
         Some(app) => ReviewVetting::Named(
             app.statements
@@ -4404,7 +4433,7 @@ fn vetting_in_hand(
         .application(vtc_did, persona_id)
         .filter(|a| &a.join_did == did)?;
     let (count, hidden) = match &app.hidden {
-        Some(_) => (app.hidden_state.as_ref().map_or(0, |h| h.held.len()), true),
+        Some(_) => (app.hidden_held(), true),
         None => (app.presentable_statements(Utc::now()).len(), false),
     };
     (count > 0).then(|| crate::state_handler::join::VettingInHand {
@@ -5313,11 +5342,10 @@ mod vetting_tests {
             Utc::now(),
         )
         .unwrap();
-        let mut join = JoinState::default();
 
         // Reached without a challenge only from a loop that cannot hear one,
         // so the way out it names is a join that can — not a key to press.
-        let no_challenge = hidden_proof_refusal(&mut app, &mut join).expect("refused");
+        let no_challenge = hidden_proof_precheck(&app).expect_err("refused");
         assert!(
             no_challenge.contains("cannot hear the community's answer"),
             "{no_challenge}"
@@ -5325,12 +5353,10 @@ mod vetting_tests {
         assert!(!no_challenge.contains("press m"), "{no_challenge}");
         assert!(no_challenge.contains("Nothing was sent"), "{no_challenge}");
 
+        // With the challenge held, what is left is the VTA's: it builds the proof, or finds no
+        // attestation to build it from.
         app.hidden_challenge = Some("nonce".into());
-        let no_attestation = hidden_proof_refusal(&mut app, &mut join).expect("refused");
-        assert!(
-            no_attestation.contains("no vetter's attestation"),
-            "{no_attestation}"
-        );
+        assert_eq!(hidden_proof_precheck(&app), Ok("nonce".to_string()));
     }
 
     /// An application under a hidden-vetting criterion, holding one vetter's
@@ -5351,8 +5377,6 @@ mod vetting_tests {
             .unwrap(),
         );
         let held = serde_json::json!({
-            "attestation": "z3",
-            "meta": {
                 "community": VTC,
                 "requirementsDigest": DIGEST,
                 "method": serde_json::to_value(VettingMethod::InPerson).unwrap(),
@@ -5365,17 +5389,12 @@ mod vetting_tests {
                 "validUntil": "2027-01-01",
                 "tokenLabel": "token/2026-10",
                 "tokenSerial": "z6",
-            },
-            "tokenLabel": "token/2026-10",
-            "tokenSerial": "z6",
-            "tokenShown": "z7",
         });
-        app.hidden_state = Some(
+        app.hidden_app = Some(
             serde_json::from_value(serde_json::json!({
-                "usk": "z8",
+                "applicationId": "app-1",
                 "id": "z9",
-                "joinDid": "did:key:zApplicant",
-                "held": if attested { vec![held] } else { vec![] },
+                "attestations": if attested { vec![held] } else { vec![] },
             }))
             .unwrap(),
         );
@@ -5405,8 +5424,7 @@ mod vetting_tests {
             "no challenge is spent on a proof that cannot count"
         );
         app.hidden_challenge = Some("nonce".into());
-        let mut join = JoinState::default();
-        let refusal = hidden_proof_refusal(&mut app, &mut join).expect("refused");
+        let refusal = hidden_proof_precheck(&app).expect_err("refused");
         assert!(refusal.contains("PCS ZKP proof"), "{refusal}");
         assert!(refusal.contains("earlier version"), "{refusal}");
         assert!(refusal.contains("attest again"), "{refusal}");
@@ -5419,7 +5437,7 @@ mod vetting_tests {
             params.token_labels = vec!["token/2026-11".into()];
         }
         app.hidden_challenge = Some("nonce".into());
-        let refusal = hidden_proof_refusal(&mut app, &mut join).expect("refused");
+        let refusal = hidden_proof_precheck(&app).expect_err("refused");
         assert!(refusal.contains("token/2026-10"), "{refusal}");
         assert!(refusal.contains("no longer accepts"), "{refusal}");
     }
@@ -5428,9 +5446,8 @@ mod vetting_tests {
     /// challenge is missing, which would send the person after the wrong thing.
     #[test]
     fn a_hidden_join_with_no_attestation_says_so_before_the_challenge() {
-        let mut app = hidden_application(false);
-        let mut join = JoinState::default();
-        let refusal = hidden_proof_refusal(&mut app, &mut join).expect("refused");
+        let app = hidden_application(false);
+        let refusal = hidden_proof_precheck(&app).expect_err("refused");
         assert!(refusal.contains("no vetter's attestation"), "{refusal}");
     }
 

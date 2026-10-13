@@ -4,12 +4,19 @@ How to stand up a community that hides its vetters, and take an applicant throug
 real client over the real wire. Everything here runs against two processes — a `vtc-service` and
 an `openvtc` — and nothing is mocked.
 
-For the design, read [`vetting-hidden-vetters-pcs.md`](vetting-hidden-vetters-pcs.md). For what
-the protocol does with nothing around it, run the example instead:
+For the design, read [`vetting-hidden-vetters-pcs.md`](vetting-hidden-vetters-pcs.md).
 
-```sh
-cargo run --release -p openvtc-vetting-pcs --example hidden_vetting
-```
+> **The engine runs in the VTA now.** OpenVTC holds no PCS key and runs no PCS operation: every
+> applicant and vetter key lives in the person's VTA, which serves the engine as the `vta/pcs/*`
+> Trust Tasks (`openvtc_core::vetting::pcs_vta`). The client carries what the VTA builds to the
+> community and back. The VTA you run against must be `vta-service` 0.60 or later. For what the
+> protocol does with nothing around it, run VTI's example
+> (`cargo run --release -p vti-vetting-pcs --example hidden_vetting` in that repository), or
+> this repository's end-to-end test against an in-process VTA:
+>
+> ```sh
+> cargo test -p openvtc-core --test hidden_vetting_onboarding -- --include-ignored
+> ```
 
 ## 0. What is different about this build
 

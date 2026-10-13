@@ -6,7 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **No PCS key is held on the device any more.** Hidden vetting runs on the
+  person's VTA (`vta/pcs/*`, VTA 0.60 or later): it holds each applicant and
+  vetter key, and builds every enrolment request, token draw, attestation and
+  admission proof. OpenVTC carries what the VTA builds to the community and the
+  other member, and keeps only what the VTA says it holds — enrolled labels,
+  token counts, the metadata of each attestation. Keys an earlier version kept
+  in the protected config are dropped the first time this version loads it.
+
 ### Changed
+
+- **Hidden vetting goes through your VTA.** Enrolling, drawing tokens, taking in
+  a vetter's attestation, building the join's proof and attesting are VTA calls,
+  run off the screen's loop; answers from a community or a vetter that the VTA
+  must take in are queued (and survive a restart) until it has them. A vetting
+  request under a hidden criterion waits for the VTA to create the application.
+  **One-time cost of the upgrade:** a vetter enrolled by an earlier version
+  enrols again under a key the VTA holds — a community that refuses
+  (`identifierRebound`) has to let it re-enrol — and an application under way
+  starts its hidden vetting again, since its attestations were bound to the old
+  key. Each is said once on the Vetting page.
+- The attestation a vetter sends is now the `vetting/attestation/0.1` shape the
+  specification states (`suite`, `token { label, serial, shown }`); the earlier
+  flat shape is no longer sent.
+
+### Removed
+
+- The `openvtc-vetting-pcs` crate and the `zkp_reference_flow` example. The
+  engine lives in VTI (`vti-vetting-pcs`); its end-to-end run is
+  `openvtc-core/tests/hidden_vetting_onboarding.rs`, against an in-process VTA.
 
 - **Onto the VTI 0.68 stack:** `vta-sdk` 0.68, `trust-tasks-rs` 0.31,
   `affinidi-tdk` 0.26, `affinidi-messaging-sdk` 0.36 and `did-git-sign` 0.20

@@ -32,9 +32,6 @@ did-git-sign = "0.20.0"
 # The SSHSIG encoding did-git-sign signs with, to check the VTA's proof
 # signature (`git_signing::verify_signer`). Same release as did-git-sign.
 vgi-core = "0.20.0"
-# Hidden-vetter admission (ZKP). Published from this workspace before this
-# crate; its version moves with the workspace version.
-openvtc-vetting-pcs = { version = "0.6.0", path = "../openvtc-vetting-pcs" }
 
 aes-gcm.workspace = true
 anyhow.workspace = true
@@ -194,6 +191,10 @@ affinidi-messaging-test-mediator = "0.22.0"
 # needs no seed record. 0.60.0 is on `vta-sdk` 0.68 and serves `vta/pcs/*`, the
 # hidden-vetting engine (VTI #2056).
 vta-service = { version = "0.60.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
+# The community's half of hidden vetting, in process (`vtc::Vtc`, feature `harness`), for the
+# end-to-end run against `MockVta` (`tests/hidden_vetting_onboarding.rs`). The engine itself is
+# the VTA's: this client holds no PCS key and runs no PCS operation.
+vti-vetting-pcs = { version = "0.1", features = ["harness"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }
