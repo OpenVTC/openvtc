@@ -44,12 +44,18 @@ use crate::forge_credential::{self, ForgeCredential};
 pub const CLONE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// A repository's place on its forge: `github.com/acme/widgets` as its parts.
+/// On a forge with nested groups (GitLab) `repo` is the project's path under
+/// the top-level owner: `platform/tools/cli`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoCoords {
     pub host: String,
     pub owner: String,
     pub repo: String,
 }
+
+/// Most segments in a repository path: GitLab's 20 subgroup levels under a
+/// top-level group, plus the project.
+const MAX_REPO_PATH_SEGMENTS: usize = 21;
 
 /// A host the `git-ns` schema admits: lowercase DNS labels, at least two.
 fn valid_host(host: &str) -> bool {
@@ -69,7 +75,7 @@ fn valid_host(host: &str) -> bool {
 /// An owner or repository name: never an option, never a path step.
 fn valid_segment(segment: &str) -> bool {
     !segment.is_empty()
-        && segment.len() <= 100
+        && segment.len() <= 255
         && !segment.starts_with('-')
         && !segment.starts_with('.')
         && segment
@@ -78,20 +84,22 @@ fn valid_segment(segment: &str) -> bool {
 }
 
 impl RepoCoords {
-    /// Parse a forge-qualified resource, `<host>/<owner>/<repo>`.
+    /// Parse a forge-qualified resource, `<host>/<owner>/<repo>`, where
+    /// `<repo>` may be a nested project path.
     ///
     /// # Errors
     ///
-    /// When the resource is not exactly three parts, or a part is one git or
-    /// the filesystem could misread.
+    /// When the resource has no repository part or too deep a one, or a part
+    /// is one git or the filesystem could misread.
     pub fn parse(resource: &str) -> Result<Self, OpenVTCError> {
         let parts: Vec<&str> = resource.split('/').collect();
-        let [host, owner, repo] = parts.as_slice() else {
-            return Err(OpenVTCError::Config(format!(
-                "'{resource}' is not a repository (expected <forge>/<owner>/<repo>)"
-            )));
+        let [host, owner, repo @ ..] = parts.as_slice() else {
+            return Err(not_a_repository(resource));
         };
-        if !valid_host(host) || !valid_segment(owner) || !valid_segment(repo) {
+        if repo.is_empty() || repo.len() > MAX_REPO_PATH_SEGMENTS {
+            return Err(not_a_repository(resource));
+        }
+        if !valid_host(host) || !valid_segment(owner) || !repo.iter().all(|s| valid_segment(s)) {
             return Err(OpenVTCError::Config(format!(
                 "'{resource}' is not a repository name openvtc will use on disk or on a \
                  command line"
@@ -100,7 +108,7 @@ impl RepoCoords {
         Ok(Self {
             host: (*host).to_string(),
             owner: (*owner).to_string(),
-            repo: (*repo).to_string(),
+            repo: repo.join("/"),
         })
     }
 
@@ -137,6 +145,12 @@ impl RepoCoords {
                 && path.eq_ignore_ascii_case(&format!("{}/{}", self.owner, self.repo))
         })
     }
+}
+
+fn not_a_repository(resource: &str) -> OpenVTCError {
+    OpenVTCError::Config(format!(
+        "'{resource}' is not a repository (expected <forge>/<owner>/<repo>)"
+    ))
 }
 
 /// A remote URL as `(host, owner/repo)`, with any `.git` and trailing slash gone.
@@ -974,7 +988,6 @@ mod tests {
     fn resources_that_could_be_misread_are_refused() {
         for bad in [
             "github.com/acme",
-            "github.com/acme/widgets/extra",
             "github.com/-acme/widgets",
             "github.com/acme/--upload-pack=evil",
             "github.com/../widgets",
@@ -988,6 +1001,44 @@ mod tests {
         ] {
             assert!(RepoCoords::parse(bad).is_err(), "{bad:?} should be refused");
         }
+    }
+
+    #[test]
+    fn a_nested_project_path_is_one_repository() {
+        let c = RepoCoords::parse("gitlab.com/acme/platform/tools/cli").unwrap();
+        assert_eq!(
+            (c.owner.as_str(), c.repo.as_str()),
+            ("acme", "platform/tools/cli")
+        );
+        assert_eq!(c.resource(), "gitlab.com/acme/platform/tools/cli");
+        assert_eq!(
+            c.clone_url(CloneProtocol::Ssh),
+            "git@gitlab.com:acme/platform/tools/cli.git"
+        );
+        assert_eq!(
+            c.default_path(Path::new("/r")),
+            Path::new("/r/gitlab.com/acme/platform/tools/cli")
+        );
+        assert!(c.matches_remote("https://gitlab.com/Acme/Platform/Tools/CLI.git"));
+        assert!(!c.matches_remote("https://gitlab.com/acme/platform/cli.git"));
+        assert_eq!(
+            https_remote_to_ssh("https://gitlab.com/acme/platform/tools/cli.git").as_deref(),
+            Some("git@gitlab.com:acme/platform/tools/cli.git")
+        );
+        for bad in [
+            "gitlab.com/acme/platform//cli",
+            "gitlab.com/acme/platform/../cli",
+            "gitlab.com/acme/platform/",
+            "gitlab.com/acme/platform/-x",
+        ] {
+            assert!(RepoCoords::parse(bad).is_err(), "{bad:?} should be refused");
+        }
+        let deepest = format!(
+            "gitlab.com/acme/{}",
+            ["g"; MAX_REPO_PATH_SEGMENTS].join("/")
+        );
+        assert!(RepoCoords::parse(&deepest).is_ok());
+        assert!(RepoCoords::parse(&format!("{deepest}/x")).is_err());
     }
 
     #[test]
@@ -1100,7 +1151,6 @@ mod tests {
             "git@github.com:acme/widgets.git",
             "ssh://git@github.com/acme/widgets.git",
             "https://github.com/acme",
-            "https://github.com/acme/widgets/extra",
             "https://github.com/-acme/widgets.git",
             "https://github.com/acme/--upload-pack=x",
             "file:///tmp/acme/widgets",
