@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Onto the VTI 0.68 stack:** `vta-sdk` 0.68, `trust-tasks-rs` 0.31,
+  `affinidi-tdk` 0.26, `affinidi-messaging-sdk` 0.36 and `did-git-sign` 0.20
+  (the same signer, rebuilt on that line). No behaviour change. The test
+  `MockVta` moves to `vta-service` 0.60, the first VTA that serves the
+  hidden-vetting engine tasks (`vta/pcs/*`).
+
 ## [0.6.0] - 2026-10-11
 The multi-device release. Account state now lives at the VTA, so archiving a
 community, starring one, or adding a contact on one machine shows up on the
