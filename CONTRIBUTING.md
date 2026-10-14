@@ -66,7 +66,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Pull Request Process
 
-1. **Fork and branch** from `development` (or `main` for hotfixes)
+1. **Fork and branch** from `main`. Every change lands on `main` first, fixes
+   included; a fix a release needs reaches its `release/<major.minor>` branch
+   by backport (see [RELEASES.md](RELEASES.md)). Add a `## [Unreleased]` entry
+   to CHANGELOG.md, and never edit a version: the release tooling owns them
 2. **Write tests** for new functionality — PRs that decrease test coverage will be flagged
 3. **Run the full check suite** locally before submitting:
    ```bash

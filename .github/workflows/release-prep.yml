@@ -1,0 +1,67 @@
+name: Prepare a release
+
+# Opens the PR that prepares the next rc, GA or patch of a release
+# (RELEASES.md). Run it from the Actions tab with the release branch selected
+# as the ref. Merging the PR it opens is the release: release-tag.yml tags it
+# and opens its GitHub Release, publish.yml publishes the crates for a GA or
+# patch.
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "rc (next candidate), ga (rc.N -> .0) or patch (.N -> .N+1)"
+        required: true
+        type: choice
+        options: [patch, rc, ga]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-prep-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare ${{ inputs.kind }} on ${{ github.ref_name }}
+    if: startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Tags: a patch's changelog is the commits since the last `v…` tag.
+          fetch-depth: 0
+          persist-credentials: false
+      # cargo is needed for `cargo update -w` after a patch's version bump.
+      # Plain rustup, as in ci.yml.
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Bump versions, write the changelog, move RELEASE
+        env:
+          KIND: ${{ inputs.kind }}
+        run: python3 scripts/prepare-release.py --kind "$KIND" --pr-body "$RUNNER_TEMP/body.md"
+      - name: Open the PR
+        env:
+          # RELEASE_TOKEN: a PR opened with GITHUB_TOKEN runs no CI, and the
+          # prep PR has to pass it to merge (RELEASES.md).
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          BASE: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          target=$(cat RELEASE)
+          head="release-prep/${BASE#release/}/$target"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$head"
+          git add -A
+          git commit -s -m "chore(release): v$target"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/$head"
+          gh pr create --base "$BASE" --head "$head" --title "chore(release): v$target" \
+            --body-file "$RUNNER_TEMP/body.md"

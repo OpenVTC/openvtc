@@ -94,3 +94,13 @@ it inherits the ecosystem's integration rules. Read the doc set in
   across the ecosystem; check it before debugging an integration failure —
   the cause may already be catalogued.
 - **`vti-architectural-direction.md`** — design-level rationale.
+
+## Releases
+
+Lockstep versioning: both crates carry `[workspace.package] version`, and the
+`openvtc-core` dependency requires it exactly. Never bump a version by hand —
+`scripts/release_lib.py` / `scripts/prepare-release.py` own them, and
+`scripts/check-branch-rules.py` rejects a PR that edits one. Flow is main →
+nightly → `release/X.Y`; fixes land on `main` and are backported with a
+`backport release/X.Y` label. See `RELEASES.md`. Publishing is crates.io
+Trusted Publishing from `publish.yml` only.
