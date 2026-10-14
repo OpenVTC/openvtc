@@ -3971,6 +3971,7 @@ mod key_handler_tests {
             pending_unacknowledged: false,
             approved_awaiting_credential: false,
             credential_resend_note: None,
+            credential_refused: None,
             submit_transport: None,
             archived: false,
             needs_attention: false,

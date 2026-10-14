@@ -665,6 +665,10 @@ pub struct CommunitySummary {
     /// For such a join, what the community last said about re-delivering the
     /// credential, worded for the row. `None` when it has said nothing.
     pub credential_resend_note: Option<String>,
+    /// For such a join, why the last credential the community delivered was
+    /// refused. `Some` means it arrived — the fault is in the credential, not
+    /// the delivery.
+    pub credential_refused: Option<String>,
     /// Which transport carried the join submit, when the record knows.
     ///
     /// Only used to qualify the unacknowledged warning. Without it the warning

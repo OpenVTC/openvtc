@@ -340,6 +340,14 @@ pub struct CommunityRecord {
     /// says. `None` until an `approved` reply reports delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_delivery: Option<CredentialDelivery>,
+    /// Why the last membership credential the community delivered for this
+    /// approved join was refused (it did not verify, or its revocation status
+    /// could not be established). Lets the row say "arrived but refused, and
+    /// why" rather than "not received", which sends the member and the
+    /// community looking at delivery when the fault is in the credential.
+    /// Cleared when a credential is stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_refused: Option<String>,
     /// Which transport carried the join submit.
     ///
     /// Recorded so an unacknowledged join can say *which* transport went
@@ -485,6 +493,8 @@ struct CommunityRecordShadow {
     #[serde(default)]
     credential_delivery: Option<CredentialDelivery>,
     #[serde(default)]
+    credential_refused: Option<String>,
+    #[serde(default)]
     submit_transport: Option<crate::didcomm::MessagingTransport>,
     #[serde(default)]
     request_id_confirmed: bool,
@@ -596,6 +606,7 @@ impl From<CommunityRecordShadow> for CommunityRecord {
             receipt_at: shadow.receipt_at,
             approved_at: shadow.approved_at,
             credential_delivery: shadow.credential_delivery,
+            credential_refused: shadow.credential_refused,
             submit_transport: shadow.submit_transport,
             request_id_confirmed: shadow.request_id_confirmed,
             relationships: shadow.relationships,
@@ -736,6 +747,7 @@ impl CommunityRecord {
             receipt_at: None,
             approved_at: None,
             credential_delivery: None,
+            credential_refused: None,
             // Set by the join flow once it knows which transport carried the
             // submit; `new_pending` itself is transport-agnostic.
             submit_transport: None,
@@ -1170,6 +1182,25 @@ impl Account {
         self.communities.values_mut().flatten()
     }
 
+    /// Record that a membership credential `vtc` delivered was refused, and
+    /// why, on each of its approved joins still awaiting one — so the row says
+    /// the credential arrived and was refused rather than that it never came.
+    /// `None` clears the note on all of `vtc`'s memberships (one was stored).
+    pub fn note_credential_refused(&mut self, vtc: &str, reason: Option<&str>) {
+        let Some(records) = self.communities.get_mut(vtc) else {
+            return;
+        };
+        for record in records {
+            match reason {
+                Some(reason) if record.approved_awaiting_credential() => {
+                    record.credential_refused = Some(reason.to_string());
+                }
+                Some(_) => {}
+                None => record.credential_refused = None,
+            }
+        }
+    }
+
     /// The memberships held with one community (empty if none).
     pub fn memberships_for(&self, vtc: &str) -> &[CommunityRecord] {
         self.communities.get(vtc).map(Vec::as_slice).unwrap_or(&[])
@@ -1538,6 +1569,7 @@ mod tests {
             receipt_at: None,
             approved_at: None,
             credential_delivery: None,
+            credential_refused: None,
             relationships: Relationships::default(),
             tasks: Tasks::default(),
             vrcs_issued: Vrcs::default(),
@@ -1973,6 +2005,30 @@ mod tests {
         let mut no_ts = community("v", pid, pending());
         no_ts.requested_at = None;
         assert!(!no_ts.expire_if_stale(now));
+    }
+
+    /// A refusal is noted only on an approved join still awaiting its
+    /// credential, and a stored credential clears it.
+    #[test]
+    fn a_credential_refusal_is_noted_on_the_awaiting_join_only() {
+        let (awaiting, unapproved) = (PersonaId::new(), PersonaId::new());
+        let mut a = community("v", awaiting, pending());
+        a.approved_at = Some(Utc::now());
+        let mut acct = Account::default();
+        acct.communities
+            .insert("v".into(), vec![a, community("v", unapproved, pending())]);
+
+        acct.note_credential_refused("v", Some("could not reach x.example"));
+        let refused =
+            |acct: &Account, p| acct.membership("v", p).unwrap().credential_refused.clone();
+        assert_eq!(
+            refused(&acct, awaiting).as_deref(),
+            Some("could not reach x.example")
+        );
+        assert_eq!(refused(&acct, unapproved), None);
+
+        acct.note_credential_refused("v", None);
+        assert_eq!(refused(&acct, awaiting), None);
     }
 
     #[test]
