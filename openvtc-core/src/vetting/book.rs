@@ -1208,6 +1208,53 @@ pub struct CommunityCriterion {
     /// Whether it asks for vetting.
     #[serde(default)]
     pub vetting: bool,
+    /// Whether its query asks for a credential a wallet presents over
+    /// OpenID4VP — an SD-JWT VC (`dc+sd-jwt`) — so a wallet session
+    /// (`vtc/join-requests/wallet-session/start/0.1`) can collect it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wallet: bool,
+    /// The SD-JWT VC types (`vct_values`) its wallet query names, to tell the
+    /// person what the wallet will be asked for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wallet_types: Vec<String>,
+    /// Its description, as the manifest gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// The DCQL `format` of an SD-JWT VC — what a wallet presents over OpenID4VP.
+pub const SD_JWT_VC_FORMAT: &str = "dc+sd-jwt";
+
+/// Whether a criterion's `presentationDefinition` (a DCQL query) asks for a
+/// credential a wallet can present, and the `vct_values` it names.
+#[must_use]
+pub fn wallet_query(
+    presentation_definition: &serde_json::Map<String, serde_json::Value>,
+) -> (bool, Vec<String>) {
+    let mut wallet = false;
+    let mut types = Vec::new();
+    let queries = presentation_definition
+        .get("credentials")
+        .and_then(serde_json::Value::as_array);
+    for query in queries.into_iter().flatten() {
+        if query.get("format").and_then(serde_json::Value::as_str) != Some(SD_JWT_VC_FORMAT) {
+            continue;
+        }
+        wallet = true;
+        let vcts = query
+            .pointer("/meta/vct_values")
+            .and_then(serde_json::Value::as_array);
+        for vct in vcts
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            if !types.iter().any(|t| t == vct) {
+                types.push(vct.to_string());
+            }
+        }
+    }
+    (wallet, types)
 }
 
 /// What this book knows of whether a community vets its members.
@@ -1871,7 +1918,11 @@ impl VettingBook {
             .map(|c| {
                 let id = c.id.as_str().to_string();
                 let m = meta.iter().find(|m| m.id == id);
+                let (wallet, wallet_types) = wallet_query(&c.presentation_definition);
                 CommunityCriterion {
+                    wallet,
+                    wallet_types,
+                    description: c.description.as_ref().map(|d| d.to_string()),
                     requirements_digest: c
                         .requirements_digest
                         .as_ref()
@@ -2040,6 +2091,12 @@ impl VettingBook {
     }
 
     #[must_use]
+    pub fn wallet_criterion(&self, community: &str) -> Option<&CommunityCriterion> {
+        self.routes(community)
+            .iter()
+            .find(|c| c.wallet && c.requirements_digest.is_some())
+    }
+
     pub fn routes(&self, community: &str) -> &[CommunityCriterion] {
         self.communities
             .iter()

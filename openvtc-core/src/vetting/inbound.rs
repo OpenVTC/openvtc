@@ -524,7 +524,20 @@ pub fn may_claim(typ: &str) -> bool {
                 | PROBLEM_REPORT_TYPE
         )
         || super::protocol::JoinProtocol::from_manifest_response(typ).is_some()
+        || is_wallet_session_answer_type(typ)
         || is_trust_task_error_type(typ)
+}
+
+/// The community's answers to the applicant's wallet-session questions, which
+/// [`handle`] routes.
+#[must_use]
+pub fn is_wallet_session_answer_type(typ: &str) -> bool {
+    [
+        wire::WALLET_SESSION_START_TYPE,
+        wire::WALLET_SESSION_STATUS_TYPE,
+    ]
+    .iter()
+    .any(|t| typ.strip_suffix("#response") == Some(*t))
 }
 
 /// The community's answers to hidden vetting's four questions — enrolment, a tick of the drip,
@@ -600,6 +613,12 @@ pub async fn handle(
         }
         t if t == wire::pcs::response_of(wire::pcs::CHALLENGE_TYPE) => {
             challenge_issued(book, message, sender)
+        }
+        t if t == wire::pcs::response_of(wire::WALLET_SESSION_START_TYPE) => {
+            wallet_session_started(book, message, sender)
+        }
+        t if t == wire::pcs::response_of(wire::WALLET_SESSION_STATUS_TYPE) => {
+            wallet_session_status(book, message, sender)
         }
         t if is_trust_task_error_type(t) => return refused(book, ctx, message, sender),
         PROBLEM_REPORT_TYPE => return problem_reported(book, ctx, message, sender),
@@ -1364,6 +1383,50 @@ fn challenge_issued(book: &mut VettingBook, message: &Message, sender: &str) -> 
     }
 }
 
+/// `vtc/join-requests/wallet-session/start/0.1#response` — what the wallet is
+/// to scan. Nothing is kept: the join waiting on it holds the session.
+fn wallet_session_started(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
+    use trust_tasks_rs::specs::vtc::join_requests::wallet_session::start::v0_1 as start;
+    let Some((query, body)) =
+        answer_to::<start::Response>(book, message, sender, QueryKind::WalletSessionStart)
+    else {
+        return Handled::default();
+    };
+    Handled {
+        answer: Some(match body {
+            Ok(session) => CommunityAnswer::WalletSessionStarted {
+                query: query.document_id,
+                community: sender.to_string(),
+                session,
+            },
+            Err(unreadable) => unreadable,
+        }),
+        ..Handled::default()
+    }
+}
+
+/// `vtc/join-requests/wallet-session/status/0.1#response` — where the session
+/// stands.
+fn wallet_session_status(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
+    use trust_tasks_rs::specs::vtc::join_requests::wallet_session::status::v0_1 as status;
+    let Some((query, body)) =
+        answer_to::<status::Response>(book, message, sender, QueryKind::WalletSessionStatus)
+    else {
+        return Handled::default();
+    };
+    Handled {
+        answer: Some(match body {
+            Ok(status) => CommunityAnswer::WalletSessionStatus {
+                query: query.document_id,
+                community: sender.to_string(),
+                status,
+            },
+            Err(unreadable) => unreadable,
+        }),
+        ..Handled::default()
+    }
+}
+
 /// `vetting/attestation/0.1` — a hidden attestation from a vetter we asked.
 ///
 /// Queued for the VTA, which verifies it on arrival rather than leaving the applicant to discover
@@ -1638,7 +1701,10 @@ fn refusal_of(
                 );
                 (false, None)
             }
-            QueryKind::VetterList => (false, None),
+            // The join waiting on it says why, in its own words.
+            QueryKind::VetterList
+            | QueryKind::WalletSessionStart
+            | QueryKind::WalletSessionStatus => (false, None),
         };
         return Some(Handled {
             changed,

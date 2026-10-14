@@ -205,6 +205,7 @@ mod tests {
             receipt_at: None,
             approved_at: None,
             credential_delivery: None,
+            credential_refused: None,
             relationships: Default::default(),
             tasks: Default::default(),
             vrcs_issued: Default::default(),
