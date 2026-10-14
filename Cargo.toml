@@ -291,7 +291,7 @@ dbus-secret-service-keyring-store = "1"
 linux-keyutils-keyring-store = "1"
 windows-native-keyring-store = "1"
 multibase = "0.9"
-pgp = "0.20"
+pgp = "0.21"
 # Ticket QR codes on the Vetting page. Default features off: they pull `image`
 # for PNG/SVG output, and all the page needs is the module matrix, drawn with
 # Unicode half-blocks. MIT OR Apache-2.0 with no dependencies of its own, so
