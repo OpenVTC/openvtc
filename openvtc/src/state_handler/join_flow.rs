@@ -49,7 +49,7 @@ use crate::{
             Applicant, ApplyAs, AvailableVic, FirstStepKind, IdentityPick, JoinAnswers,
             JoinApplication, JoinPage, JoinRoute, JoinState, JoinVettingView, KnownVetting,
             PersonaOption, PresentedInvitation, RegistryChoice, RouteOption, RouteState,
-            VettingPhase,
+            VettingPhase, WalletOutcome, WalletPhase, WalletStep,
         },
         main_page::content::{VicLifecycle, VicSummary},
         main_page::{sanitize_display, shorten_did},
@@ -91,7 +91,45 @@ pub(crate) enum JoinEntry {
         awaiting: AwaitingChallenge,
         outcome: ChallengeOutcome,
     },
+    /// Back from a wallet session. Like [`JoinEntry::Challenge`], the join
+    /// state is kept: the launch it parked is on [`WalletStep::parked`].
+    Wallet { end: WalletEnd },
 }
+
+/// How a wallet session ended, for the launch waiting on it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WalletEnd {
+    /// The wallet presented and the community verified it.
+    Presented,
+    /// No evidence, and why — the page offers to try again or go on.
+    Unfinished(String),
+}
+
+/// A join parked on a wallet session.
+///
+/// The applicant's agent opens the session and polls it; the wallet answers
+/// the community directly. Both answers arrive on the runtime loop's inbound
+/// arm, so — like [`AwaitingChallenge`] — the flow hands the wait to that loop,
+/// which keeps the wallet page up, polls on its sweep tick ([`wallet_tick`]),
+/// reads each answer ([`wallet_answer`]) and enters the flow again with
+/// [`JoinEntry::Wallet`].
+#[derive(Clone, Debug)]
+pub(crate) struct AwaitingWallet {
+    pub vtc_did: String,
+    /// The persona that opened the session — the one that will submit, since
+    /// the evidence is bound to the applicant who opened it.
+    pub persona: PersonaId,
+    pub applicant_did: String,
+    /// The question in flight (start, then each status poll), if any.
+    pub asking: Option<String>,
+    pub asked_at: std::time::Instant,
+    /// The session, once the community opened it.
+    pub session_id: Option<String>,
+    pub expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// How long one wallet-session question waits for its answer.
+pub(crate) const WALLET_ANSWER_WAIT: Duration = REQUIREMENTS_WAIT;
 
 /// How a wait for a community's requirements ended.
 pub(crate) enum RequirementsOutcome {
@@ -355,6 +393,301 @@ async fn ask_challenge(
         application.hidden_challenge = None;
     }
     Ok(document_id)
+}
+
+/// The wallet step a launch offers, if it offers one: the community has a
+/// criterion a wallet can answer, the person has not answered the offer on
+/// this join, the loop can hear the community's answers, and the join presents
+/// an existing persona with no vetting application — the persona must exist to
+/// sign the session open (the evidence is bound to the applicant who opened
+/// it), and a vetting application submits under its own criterion.
+fn wallet_offer(
+    config: &Config,
+    state: &State,
+    vtc_did: &str,
+    choice: &IdentityPick,
+) -> Option<WalletStep> {
+    if !state.join.hears_replies
+        || state.join.wallet_outcome.is_some()
+        || !matches!(choice, IdentityPick::Reuse(_))
+        || presented_application(config, vtc_did, choice).is_some()
+    {
+        return None;
+    }
+    let criterion = config.private.vetting.wallet_criterion(vtc_did)?;
+    Some(WalletStep {
+        community: vetting_actions::community_display(config, vtc_did),
+        requirements_digest: criterion.requirements_digest.clone()?,
+        description: criterion.description.clone(),
+        types: criterion.wallet_types.clone(),
+        phase: WalletPhase::Offered { note: None },
+        parked: None,
+    })
+}
+
+/// Send one wallet-session question as `persona`, bounded (R1.2), and record
+/// it so the answer is claimed. `Ok` is the document id.
+async fn ask_wallet(
+    config: &mut Config,
+    tdk: &TDK,
+    messaging: Option<&Messaging>,
+    vtc_did: &str,
+    persona: PersonaId,
+    document: wire::Document,
+    kind: QueryKind,
+) -> Result<String, String> {
+    let service = messaging.ok_or_else(|| {
+        "messaging is not running, so the community's answer could not be heard".to_string()
+    })?;
+    let document_id = match tokio::time::timeout(
+        ASK_TIMEOUT,
+        wire::sign_and_send(config, tdk, service, persona, document),
+    )
+    .await
+    {
+        Ok(Ok(document_id)) => document_id,
+        Ok(Err(e)) => return Err(format!("the request could not be sent: {e}")),
+        Err(_) => {
+            return Err(format!(
+                "the request was not sent within {} seconds — your mediator may be unreachable",
+                ASK_TIMEOUT.as_secs()
+            ));
+        }
+    };
+    config.private.vetting.ask(CommunityQuery {
+        document_id: document_id.clone(),
+        community: vtc_did.to_string(),
+        persona,
+        kind,
+        sent_at: Utc::now(),
+    });
+    Ok(document_id)
+}
+
+/// Ask `vtc_did` to open a wallet session for the criterion
+/// `requirements_digest`, as `persona`.
+async fn ask_wallet_start(
+    config: &mut Config,
+    tdk: &TDK,
+    messaging: Option<&Messaging>,
+    vtc_did: &str,
+    persona: PersonaId,
+    requirements_digest: &str,
+) -> Result<AwaitingWallet, String> {
+    let applicant_did = config
+        .identities
+        .get(&persona)
+        .map(|i| i.persona_did().to_string())
+        .ok_or_else(|| "this persona's identity is not loaded".to_string())?;
+    let document = wire::wallet_session_start_request(&applicant_did, vtc_did, requirements_digest)
+        .map_err(|e| format!("the request could not be built: {e}"))?;
+    let document_id = ask_wallet(
+        config,
+        tdk,
+        messaging,
+        vtc_did,
+        persona,
+        document,
+        QueryKind::WalletSessionStart,
+    )
+    .await?;
+    Ok(AwaitingWallet {
+        vtc_did: vtc_did.to_string(),
+        persona,
+        applicant_did,
+        asking: Some(document_id),
+        asked_at: std::time::Instant::now(),
+        session_id: None,
+        expires_at: None,
+    })
+}
+
+/// What an answer does to the wallet session waiting on it: `None` when it is
+/// not this session's, `Some(None)` when the session goes on, and
+/// `Some(Some(entry))` when it has ended.
+pub(crate) fn wallet_answer(
+    awaiting: &mut AwaitingWallet,
+    answer: &CommunityAnswer,
+    state: &mut State,
+) -> Option<Option<JoinEntry>> {
+    use openvtc_core::vetting::queries::wallet_session::status::v0_1 as status;
+    if answer.community() != awaiting.vtc_did {
+        return None;
+    }
+    let ours = |query: &str| awaiting.asking.as_deref() == Some(query);
+    let end = |why: String| {
+        Some(Some(JoinEntry::Wallet {
+            end: WalletEnd::Unfinished(why),
+        }))
+    };
+    match answer {
+        CommunityAnswer::WalletSessionStarted { query, session, .. } if ours(query) => {
+            awaiting.asking = None;
+            awaiting.session_id = Some(session.session_id.to_string());
+            awaiting.expires_at = Some(session.expires_at);
+            if let Some(wallet) = state.join.wallet.as_mut() {
+                wallet.phase = WalletPhase::Scan {
+                    wallet_uri: session.wallet_uri.clone(),
+                    expires_at: session.expires_at,
+                    retrieved: false,
+                };
+            }
+            Some(None)
+        }
+        CommunityAnswer::WalletSessionStatus {
+            query, status: s, ..
+        } if ours(query) => {
+            awaiting.asking = None;
+            match s.state {
+                status::ResponseState::Presented => {
+                    Some(Some(JoinEntry::Wallet { end: WalletEnd::Presented }))
+                }
+                status::ResponseState::Refused => end(match s.reason {
+                    Some(reason) => wallet_refusal_words(reason),
+                    None => "The community refused what the wallet presented.".to_string(),
+                }),
+                status::ResponseState::Expired => end(
+                    "The session expired before the wallet answered. Try again when your                      wallet is to hand."
+                        .to_string(),
+                ),
+                status::ResponseState::RequestRetrieved => {
+                    if let Some(WalletPhase::Scan { retrieved, .. }) =
+                        state.join.wallet.as_mut().map(|w| &mut w.phase)
+                    {
+                        *retrieved = true;
+                    }
+                    Some(None)
+                }
+                _ => Some(None),
+            }
+        }
+        CommunityAnswer::Refused {
+            query,
+            kind: QueryKind::WalletSessionStart | QueryKind::WalletSessionStatus,
+            code,
+            message,
+            ..
+        } if ours(query) => {
+            let mut why = format!(
+                "The community refused the wallet session ({})",
+                sanitize_display(code, 120)
+            );
+            if let Some(note) = message {
+                why.push_str(&format!(": {}", sanitize_display(note, 300)));
+            }
+            end(why)
+        }
+        CommunityAnswer::Unreadable {
+            query,
+            kind: QueryKind::WalletSessionStart | QueryKind::WalletSessionStatus,
+            detail,
+            ..
+        } if ours(query) => end(format!(
+            "The community answered in a form this client cannot read — the two disagree about              the task; it is not a refusal ({})",
+            sanitize_display(detail, 200)
+        )),
+        _ => None,
+    }
+}
+
+/// What a wallet presentation the community refused was refused for.
+fn wallet_refusal_words(
+    reason: openvtc_core::vetting::queries::wallet_session::status::v0_1::ResponseReason,
+) -> String {
+    use openvtc_core::vetting::queries::wallet_session::status::v0_1::ResponseReason as R;
+    match reason {
+        R::PresentationInvalid => {
+            "The community could not verify what the wallet presented.".to_string()
+        }
+        R::QueryNotSatisfied => {
+            "The wallet's credential does not have what the community asks for.".to_string()
+        }
+        R::IssuerNotTrusted => {
+            "The community does not accept credentials from that credential's issuer.".to_string()
+        }
+        R::StatusNotValid => "The wallet's credential has been revoked or suspended.".to_string(),
+        R::WalletDeclined => "The wallet declined to present.".to_string(),
+        #[allow(unreachable_patterns)]
+        _ => "The community refused what the wallet presented.".to_string(),
+    }
+}
+
+/// One sweep tick of a wallet session: poll where it stands when nothing is in
+/// flight, and end the wait when an answer has been owed too long (R1.2).
+/// `Some` when the wait has ended.
+pub(crate) async fn wallet_tick(
+    awaiting: &mut AwaitingWallet,
+    config: &mut Config,
+    tdk: &TDK,
+    messaging: Option<&Messaging>,
+) -> Option<JoinEntry> {
+    let unanswered = |what: &str| {
+        Some(JoinEntry::Wallet {
+            end: WalletEnd::Unfinished(format!(
+                "The community did not answer {what} within {} seconds — its service may be                  offline or unreachable.",
+                WALLET_ANSWER_WAIT.as_secs()
+            )),
+        })
+    };
+    // Past its expiry with no answer saying so: the community has stopped
+    // answering, or this client could not ask.
+    if awaiting
+        .expires_at
+        .is_some_and(|e| Utc::now() > e + chrono::Duration::seconds(30))
+    {
+        if let Some(query) = awaiting.asking.take() {
+            config.private.vetting.forget_query(&query);
+        }
+        return unanswered("where the wallet session stands");
+    }
+    if let Some(query) = awaiting.asking.clone() {
+        if awaiting.asked_at.elapsed() < WALLET_ANSWER_WAIT {
+            return None;
+        }
+        // An unanswered status poll: the session may still be open, so ask
+        // again below.
+        config.private.vetting.forget_query(&query);
+        awaiting.asking = None;
+        if awaiting.session_id.is_none() {
+            return unanswered("the request for a wallet session");
+        }
+    }
+    let session_id = awaiting.session_id.clone()?;
+    let document = match wire::wallet_session_status_request(
+        &awaiting.applicant_did,
+        &awaiting.vtc_did,
+        &session_id,
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            return Some(JoinEntry::Wallet {
+                end: WalletEnd::Unfinished(format!("The status request could not be built: {e}")),
+            });
+        }
+    };
+    match ask_wallet(
+        config,
+        tdk,
+        messaging,
+        &awaiting.vtc_did,
+        awaiting.persona,
+        document,
+        QueryKind::WalletSessionStatus,
+    )
+    .await
+    {
+        Ok(query) => {
+            awaiting.asking = Some(query);
+            awaiting.asked_at = std::time::Instant::now();
+            None
+        }
+        // Not sent: try again on the next tick, until the session runs out.
+        Err(why) => {
+            warn!(reason = %why, "wallet session status not sent");
+            awaiting.asked_at = std::time::Instant::now();
+            None
+        }
+    }
 }
 
 /// The sentence a hidden-vetting join stops on when the community's challenge
@@ -1215,7 +1548,10 @@ impl StateHandler {
         // Whichever way a parked wait ends, it has ended: Esc is no longer
         // the cheap way out once the launch carries on.
         state.join.waiting_on_challenge = false;
-        if !matches!(entry, JoinEntry::Challenge { .. }) {
+        if !matches!(
+            entry,
+            JoinEntry::Challenge { .. } | JoinEntry::Wallet { .. }
+        ) {
             state.join.reset();
             // Surface the launch-supplied invitation on the entry page (reset
             // clears the transient join sub-state, so mirror the flag back in
@@ -1232,7 +1568,9 @@ impl StateHandler {
                 *hears_replies
             }
             // Only the runtime loop waits on an answer, so only it resumes.
-            JoinEntry::Resume { .. } | JoinEntry::Challenge { .. } => true,
+            JoinEntry::Resume { .. } | JoinEntry::Challenge { .. } | JoinEntry::Wallet { .. } => {
+                true
+            }
         };
         state.join.hears_replies = hears_replies;
         match entry {
@@ -1324,6 +1662,43 @@ impl StateHandler {
                     state.join.fail(challenge_failed_words(&name, &reason));
                 }
             },
+            JoinEntry::Wallet { end } => {
+                state.join.processing = false;
+                match end {
+                    WalletEnd::Presented => {
+                        let parked = state.join.wallet.as_mut().and_then(|w| {
+                            state.join.wallet_outcome =
+                                Some(WalletOutcome::Presented(w.requirements_digest.clone()));
+                            w.parked.take()
+                        });
+                        state.join.wallet = None;
+                        if let Some((pick, vtc_did, context_id)) = parked
+                            && let Some(interrupted) = self
+                                .launch_join_sequence(
+                                    pick,
+                                    vtc_did,
+                                    context_id,
+                                    interrupt_rx,
+                                    state,
+                                    tdk,
+                                    config,
+                                    admin_vta,
+                                    profile,
+                                    messaging,
+                                )
+                                .await
+                        {
+                            return Ok(JoinExit::Exit(interrupted));
+                        }
+                    }
+                    WalletEnd::Unfinished(why) => {
+                        state.join.page = JoinPage::Wallet;
+                        if let Some(wallet) = state.join.wallet.as_mut() {
+                            wallet.phase = WalletPhase::Offered { note: Some(why) };
+                        }
+                    }
+                }
+            }
         }
         let _ = self.state_tx.send(state.clone());
 
@@ -1334,6 +1709,11 @@ impl StateHandler {
             if let Some(awaiting) = state.join.challenge_wait.take() {
                 let _ = self.state_tx.send(state.clone());
                 return Ok(JoinExit::AwaitChallenge(awaiting));
+            }
+            // Likewise a wallet session: the runtime loop hears its answers.
+            if let Some(awaiting) = state.join.wallet_wait.take() {
+                let _ = self.state_tx.send(state.clone());
+                return Ok(JoinExit::AwaitWallet(awaiting));
             }
             tokio::select! {
                 maybe_action = action_rx.recv() => {
@@ -1621,6 +2001,64 @@ impl StateHandler {
                             let Some((pick, vtc_did, context_id)) = answers.parked.take() else {
                                 continue;
                             };
+                            if let Some(interrupted) = self
+                                .launch_join_sequence(
+                                    pick,
+                                    vtc_did,
+                                    context_id,
+                                    interrupt_rx,
+                                    state,
+                                    tdk,
+                                    config,
+                                    admin_vta,
+                                    profile,
+                                    messaging,
+                                )
+                                .await
+                            {
+                                return Ok(JoinExit::Exit(interrupted));
+                            }
+                        }
+                        Action::JoinWalletStart => {
+                            let Some(wallet) = state.join.wallet.as_ref() else {
+                                continue;
+                            };
+                            if !matches!(wallet.phase, WalletPhase::Offered { .. }) {
+                                continue;
+                            }
+                            let Some((IdentityPick::Reuse(persona), vtc_did, _)) =
+                                wallet.parked.clone()
+                            else {
+                                continue;
+                            };
+                            let digest = wallet.requirements_digest.clone();
+                            match ask_wallet_start(config, tdk, messaging, &vtc_did, persona, &digest)
+                                .await
+                            {
+                                Ok(awaiting) => {
+                                    if let Some(wallet) = state.join.wallet.as_mut() {
+                                        wallet.phase = WalletPhase::Opening;
+                                    }
+                                    state.join.wallet_wait = Some(awaiting);
+                                }
+                                Err(why) => {
+                                    if let Some(wallet) = state.join.wallet.as_mut() {
+                                        wallet.phase = WalletPhase::Offered { note: Some(why) };
+                                    }
+                                }
+                            }
+                        }
+                        Action::JoinWalletSkip => {
+                            let parked = state.join.wallet.as_mut().and_then(|w| {
+                                matches!(w.phase, WalletPhase::Offered { .. })
+                                    .then(|| w.parked.take())
+                                    .flatten()
+                            });
+                            let Some((pick, vtc_did, context_id)) = parked else {
+                                continue;
+                            };
+                            state.join.wallet = None;
+                            state.join.wallet_outcome = Some(WalletOutcome::Skipped);
                             if let Some(interrupted) = self
                                 .launch_join_sequence(
                                     pick,
@@ -2401,6 +2839,20 @@ impl StateHandler {
             return None;
         }
 
+        // A criterion asking for a credential a wallet presents: offer to
+        // collect it now, before the request goes out, so the submit can name
+        // the criterion and the community counts the evidence it already holds.
+        if let Some(offer) = wallet_offer(config, state, &vtc_did, &choice) {
+            state.join.wallet = Some(WalletStep {
+                parked: Some((choice, vtc_did, context_id)),
+                ..offer
+            });
+            state.join.page = JoinPage::Wallet;
+            state.join.processing = false;
+            let _ = self.state_tx.send(state.clone());
+            return None;
+        }
+
         // A community that hides its vetters takes a proof bound to a challenge
         // it issues — once, and fresh for each attempt (see `challenge_step`).
         // Asked for here, after every question the person answers, so the
@@ -2841,6 +3293,8 @@ pub(crate) enum JoinExit {
     /// the caller hears the answer and enters the flow again
     /// ([`AwaitingChallenge`]).
     AwaitChallenge(AwaitingChallenge),
+    /// The launch is parked on a wallet session ([`AwaitingWallet`]).
+    AwaitWallet(AwaitingWallet),
     /// Application is exiting (Exit / UXError / interrupt).
     Exit(Interrupted),
 }
@@ -3745,10 +4199,16 @@ async fn run_join_sequence(
         // No application: the community decides under the first criterion this
         // submission meets — an invitation, a credential it recognises, or
         // review — which is the route the person chose.
+        // With wallet evidence, under the criterion it was collected for: the
+        // community counts it only there.
         _ => openvtc_core::join::JoinPresentation {
             attributes,
             protocol,
             registry_consent,
+            criterion: match &state.join.wallet_outcome {
+                Some(WalletOutcome::Presented(digest)) => Some(digest.clone()),
+                _ => None,
+            },
             ..vp.into()
         },
     };
@@ -6114,6 +6574,9 @@ mod vetting_tests {
             admission,
             invitation_required: invitation,
             vetting,
+            wallet: false,
+            wallet_types: Vec::new(),
+            description: None,
         };
         let fresh = || build_routes("Kernel", &requirements(None), &[], &[a_persona()], &[]);
 
@@ -6404,5 +6867,165 @@ mod vetting_tests {
             assert!(shown.contains(said), "{shown}");
             assert!(!shown.contains("not checked"), "{shown}");
         }
+    }
+}
+
+#[cfg(test)]
+mod wallet_tests {
+    use super::*;
+    use openvtc_core::vetting::queries::wallet_session::{
+        start::v0_1 as start, status::v0_1 as status,
+    };
+    use serde_json::json;
+
+    const COMMUNITY: &str = "did:webvh:example.com:community";
+    const SESSION: &str = "s1-0123456789abcdef";
+
+    fn awaiting(asking: &str) -> AwaitingWallet {
+        AwaitingWallet {
+            vtc_did: COMMUNITY.into(),
+            persona: PersonaId::new(),
+            applicant_did: "did:webvh:example.com:alice".into(),
+            asking: Some(asking.into()),
+            asked_at: std::time::Instant::now(),
+            session_id: None,
+            expires_at: None,
+        }
+    }
+
+    fn state_offering() -> State {
+        let mut state = State::default();
+        state.join.wallet = Some(WalletStep {
+            community: "Example".into(),
+            requirements_digest: "zDigest".into(),
+            description: None,
+            types: Vec::new(),
+            phase: WalletPhase::Opening,
+            parked: None,
+        });
+        state
+    }
+
+    fn started(query: &str) -> CommunityAnswer {
+        CommunityAnswer::WalletSessionStarted {
+            query: query.into(),
+            community: COMMUNITY.into(),
+            session: serde_json::from_value::<start::Response>(json!({
+                "sessionId": SESSION,
+                "walletUri": "swiyu-verify://?client_id=x&request_uri=y",
+                "clientId": "decentralized_identifier:did:example:verifier",
+                "dcqlQuery": { "credentials": [] },
+                "expiresAt": "2030-01-01T00:00:00Z"
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn status(query: &str, state: &str, reason: Option<&str>) -> CommunityAnswer {
+        let mut body = json!({
+            "sessionId": SESSION,
+            "state": state,
+            "expiresAt": "2030-01-01T00:00:00Z"
+        });
+        if let Some(reason) = reason {
+            body["reason"] = json!(reason);
+        }
+        CommunityAnswer::WalletSessionStatus {
+            query: query.into(),
+            community: COMMUNITY.into(),
+            status: serde_json::from_value::<status::Response>(body).unwrap(),
+        }
+    }
+
+    /// The session opening puts its code on the page; the wallet fetching the
+    /// request says so; presenting resumes the launch.
+    #[test]
+    fn a_wallet_session_runs_from_code_to_presented() {
+        let mut state = state_offering();
+        let mut waiting = awaiting("q-start");
+        assert!(matches!(
+            wallet_answer(&mut waiting, &started("q-start"), &mut state),
+            Some(None)
+        ));
+        assert_eq!(waiting.session_id.as_deref(), Some(SESSION));
+        assert!(waiting.asking.is_none());
+        assert!(matches!(
+            state.join.wallet.as_ref().unwrap().phase,
+            WalletPhase::Scan {
+                retrieved: false,
+                ..
+            }
+        ));
+
+        waiting.asking = Some("q-1".into());
+        assert!(matches!(
+            wallet_answer(
+                &mut waiting,
+                &status("q-1", "requestRetrieved", None),
+                &mut state
+            ),
+            Some(None)
+        ));
+        assert!(matches!(
+            state.join.wallet.as_ref().unwrap().phase,
+            WalletPhase::Scan {
+                retrieved: true,
+                ..
+            }
+        ));
+
+        waiting.asking = Some("q-2".into());
+        assert!(matches!(
+            wallet_answer(&mut waiting, &status("q-2", "presented", None), &mut state),
+            Some(Some(JoinEntry::Wallet {
+                end: WalletEnd::Presented
+            }))
+        ));
+    }
+
+    /// A refused or expired session ends the wait and says why; an answer to
+    /// another question, or from another community, is not this session's.
+    #[test]
+    fn a_wallet_session_ends_with_why_and_ignores_other_answers() {
+        let mut state = state_offering();
+        let mut waiting = awaiting("q-1");
+        let Some(Some(JoinEntry::Wallet {
+            end: WalletEnd::Unfinished(why),
+        })) = wallet_answer(
+            &mut waiting,
+            &status("q-1", "refused", Some("issuerNotTrusted")),
+            &mut state,
+        )
+        else {
+            panic!("a refusal ends the wait");
+        };
+        assert!(why.contains("issuer"), "{why}");
+
+        let mut waiting = awaiting("q-1");
+        assert!(matches!(
+            wallet_answer(&mut waiting, &status("q-1", "expired", None), &mut state),
+            Some(Some(JoinEntry::Wallet {
+                end: WalletEnd::Unfinished(_)
+            }))
+        ));
+
+        let mut waiting = awaiting("q-1");
+        assert!(
+            wallet_answer(
+                &mut waiting,
+                &status("q-other", "presented", None),
+                &mut state
+            )
+            .is_none()
+        );
+        let elsewhere = CommunityAnswer::WalletSessionStatus {
+            query: "q-1".into(),
+            community: "did:webvh:example.com:other".into(),
+            status: match status("q-1", "presented", None) {
+                CommunityAnswer::WalletSessionStatus { status, .. } => status,
+                _ => unreachable!(),
+            },
+        };
+        assert!(wallet_answer(&mut waiting, &elsewhere, &mut state).is_none());
     }
 }

@@ -3471,3 +3471,82 @@ fn an_enrolment_the_vta_still_holds_is_waited_on_then_asked_again() {
         "taken in, or refused: nothing pending at the VTA"
     );
 }
+
+const CRITERION_DIGEST: &str = "zQmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR";
+
+/// A wallet session's answers — the session opened, then where it stands — reach the question
+/// that asked, and only once: a join waiting on one resumes on its own question's answer.
+#[tokio::test]
+async fn wallet_session_answers_reach_the_question_that_asked() {
+    use super::queries::wallet_session::{start::v0_1 as start, status::v0_1 as status};
+    let mut applicant = Party::new(1);
+
+    let request =
+        wire::wallet_session_start_request(&applicant.did, COMMUNITY, CRITERION_DIGEST).unwrap();
+    assert_eq!(request.payload["criterion"], CRITERION_DIGEST);
+    applicant.book.ask(asked(
+        &request,
+        applicant.persona,
+        QueryKind::WalletSessionStart,
+    ));
+    let opened: start::Response = serde_json::from_value(json!({
+        "sessionId": "s1-0123456789abcdef",
+        "walletUri": "swiyu-verify://?client_id=x&request_uri=y",
+        "clientId": "decentralized_identifier:did:example:verifier",
+        "dcqlQuery": { "credentials": [] },
+        "expiresAt": "2030-01-01T00:00:00Z"
+    }))
+    .unwrap();
+    let handled = applicant
+        .receive(&community_answer(&request, &opened).await, COMMUNITY)
+        .await;
+    assert!(matches!(
+        handled.answer,
+        Some(CommunityAnswer::WalletSessionStarted { ref query, ref session, .. })
+            if *query == request.id && session.wallet_uri.starts_with("swiyu-verify://")
+    ));
+
+    let poll =
+        wire::wallet_session_status_request(&applicant.did, COMMUNITY, "s1-0123456789abcdef")
+            .unwrap();
+    applicant.book.ask(asked(
+        &poll,
+        applicant.persona,
+        QueryKind::WalletSessionStatus,
+    ));
+    let presented: status::Response = serde_json::from_value(json!({
+        "sessionId": "s1-0123456789abcdef",
+        "state": "presented",
+        "expiresAt": "2030-01-01T00:00:00Z"
+    }))
+    .unwrap();
+    let answer = community_answer(&poll, &presented).await;
+    let handled = applicant.receive(&answer, COMMUNITY).await;
+    assert!(matches!(
+        handled.answer,
+        Some(CommunityAnswer::WalletSessionStatus { ref query, ref status, .. })
+            if *query == poll.id && status.state == status::ResponseState::Presented
+    ));
+    // Taken once: the same answer again is to nothing we asked.
+    let handled = applicant.receive(&answer, COMMUNITY).await;
+    assert!(handled.answer.is_none());
+}
+
+/// A criterion asking for an SD-JWT VC is one a wallet can answer; its types are what the page
+/// names. One asking only for a W3C credential is not.
+#[test]
+fn a_criterion_a_wallet_can_answer_is_told_by_its_query() {
+    use super::book::wallet_query;
+    let query = |v: Value| v.as_object().unwrap().clone();
+    let (wallet, types) = wallet_query(&query(json!({ "credentials": [
+        { "id": "pid", "format": "dc+sd-jwt", "meta": { "vct_values": ["urn:eudi:pid:1"] } },
+        { "id": "member", "format": "ldp_vc", "meta": { "type_values": [["Membership"]] } }
+    ]})));
+    assert!(wallet);
+    assert_eq!(types, ["urn:eudi:pid:1"]);
+    let (wallet, types) = wallet_query(&query(json!({ "credentials": [
+        { "id": "member", "format": "ldp_vc" }
+    ]})));
+    assert!(!wallet && types.is_empty());
+    assert!(!wallet_query(&serde_json::Map::new()).0);
+}

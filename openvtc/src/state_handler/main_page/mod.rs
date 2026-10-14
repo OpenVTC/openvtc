@@ -689,6 +689,10 @@ impl MainPageState {
                     .approved_awaiting_credential()
                     .then(|| credential_resend_note(c.credential_delivery.as_ref()))
                     .flatten(),
+                credential_refused: c
+                    .approved_awaiting_credential()
+                    .then(|| c.credential_refused.clone())
+                    .flatten(),
                 submit_transport: c.submit_transport.map(|t| t.to_string()),
                 archived: c.archived,
                 needs_attention: c.needs_attention(),
@@ -1806,6 +1810,7 @@ mod tests {
                 receipt_at: None,
                 approved_at: None,
                 credential_delivery: None,
+                credential_refused: None,
                 relationships: Default::default(),
                 tasks: Default::default(),
                 vrcs_issued: Default::default(),

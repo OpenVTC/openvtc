@@ -22,7 +22,9 @@
 //!   established — an unreachable or unverifiable list fails closed.
 //!
 //! Error text names what failed, never the credential or any DID: it reaches
-//! the log and the user's activity feed.
+//! the log and the user's activity feed. A status the client could not
+//! establish says why, which may name the status list's host — the one detail
+//! that tells an unreachable or misconfigured community apart from a bad list.
 
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use chrono::{DateTime, Utc};
@@ -63,12 +65,13 @@ pub enum IssuedCredentialError {
     Expired,
     #[error("the community has revoked or suspended the credential")]
     Revoked,
+    /// Carries why: an unreachable host and a list that did not verify are
+    /// fixed in different places, and only the reason tells them apart.
     #[error(
-        "the credential's revocation status could not be checked (the community's status \
-         list was unreachable or did not verify); try again once the community is \
-         reachable, or ask it to re-issue the credential"
+        "the credential's revocation status could not be checked ({0}); try again once the \
+         community is reachable, or ask it to re-issue the credential"
     )]
-    StatusUnknown,
+    StatusUnknown(String),
 }
 
 /// A credential that passed [`verify_issued_credential`]. The only way to
@@ -182,7 +185,7 @@ async fn check_status(
 
     let client = status_client(true, STATUS_FETCH_TIMEOUT).map_err(|e| {
         debug!(reason = %e, "issued credential: no HTTP client for the status list");
-        IssuedCredentialError::StatusUnknown
+        IssuedCredentialError::StatusUnknown(e)
     })?;
     match check_credential_status(
         status,
@@ -199,7 +202,7 @@ async fn check_status(
         StatusCheck::Revoked => Err(IssuedCredentialError::Revoked),
         StatusCheck::Unknown(reason) => {
             debug!(%reason, "issued credential: status could not be established");
-            Err(IssuedCredentialError::StatusUnknown)
+            Err(IssuedCredentialError::StatusUnknown(reason))
         }
     }
 }
@@ -334,7 +337,11 @@ mod tests {
         let err = verify_issued_credential(vc, &issuer, &resolver, Utc::now())
             .await
             .unwrap_err();
-        assert_eq!(err, IssuedCredentialError::StatusUnknown);
+        assert!(
+            matches!(&err, IssuedCredentialError::StatusUnknown(reason) if !reason.is_empty()),
+            "{err:?}"
+        );
         assert!(err.to_string().contains("try again"), "{err}");
+        assert!(!err.to_string().contains(&issuer), "{err}");
     }
 }

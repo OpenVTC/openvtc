@@ -20,6 +20,9 @@ use vta_sdk::protocols::vetting::{
     VETTING_VETTER_PROFILE_ERR_NOT_ELIGIBLE, VETTING_VETTER_RESEND_ERR_NOT_GRANTED, vetters,
 };
 
+/// The generated `wallet-session` wire types the answers carry.
+pub use trust_tasks_rs::specs::vtc::join_requests::wallet_session;
+
 use super::book::VettingBook;
 use crate::config::account::PersonaId;
 
@@ -46,6 +49,11 @@ pub enum QueryKind {
     PcsEventMode,
     /// `vtc/vetting/pcs-challenge/0.1` — the nonce a submission binds.
     PcsChallenge,
+    /// `vtc/join-requests/wallet-session/start/0.1` — open an OpenID4VP
+    /// session a wallet answers.
+    WalletSessionStart,
+    /// `vtc/join-requests/wallet-session/status/0.1` — how that session went.
+    WalletSessionStatus,
 }
 
 impl QueryKind {
@@ -75,6 +83,8 @@ impl QueryKind {
             QueryKind::PcsTokens => "your attestation tokens",
             QueryKind::PcsEventMode => "your place at the event",
             QueryKind::PcsChallenge => "the challenge for your submission",
+            QueryKind::WalletSessionStart => "a session for your wallet",
+            QueryKind::WalletSessionStatus => "your wallet session",
         }
     }
 }
@@ -142,6 +152,24 @@ pub enum CommunityAnswer {
         /// The community.
         community: String,
     },
+    /// The community opened a wallet session: what the wallet is to scan.
+    WalletSessionStarted {
+        /// The start request's document id.
+        query: String,
+        /// The community.
+        community: String,
+        /// Its answer.
+        session: wallet_session::start::v0_1::Response,
+    },
+    /// Where a wallet session stands.
+    WalletSessionStatus {
+        /// The status request's document id.
+        query: String,
+        /// The community.
+        community: String,
+        /// Its answer.
+        status: wallet_session::status::v0_1::Response,
+    },
     /// The community refused the question.
     Refused {
         /// The request's document id.
@@ -179,6 +207,8 @@ impl CommunityAnswer {
             | CommunityAnswer::ProfileStored { community, .. }
             | CommunityAnswer::Resent { community, .. }
             | CommunityAnswer::Challenge { community, .. }
+            | CommunityAnswer::WalletSessionStarted { community, .. }
+            | CommunityAnswer::WalletSessionStatus { community, .. }
             | CommunityAnswer::Refused { community, .. }
             | CommunityAnswer::Unreadable { community, .. } => community,
         }

@@ -225,11 +225,20 @@ pub fn render(
         // is made and delivery is what failed, which needs different words —
         // and a different remedy — than a request nobody acknowledged.
         if c.approved_awaiting_credential {
-            let status = match &c.credential_resend_note {
-                Some(note) => {
+            // It may have arrived and been refused: then delivery worked, and
+            // what the member (and the community) need is the reason.
+            let status = match (&c.credential_refused, &c.credential_resend_note) {
+                (Some(reason), _) => {
+                    format!(
+                        "    ✓ approved — the membership credential arrived but was refused: {reason}."
+                    )
+                }
+                (None, Some(note)) => {
                     format!("    ✓ approved — membership credential not received yet; {note}.")
                 }
-                None => "    ✓ approved — membership credential not received yet.".to_string(),
+                (None, None) => {
+                    "    ✓ approved — membership credential not received yet.".to_string()
+                }
             };
             lines.push(Line::from(Span::styled(
                 status,
@@ -872,6 +881,7 @@ mod key_hint_tests {
             pending_unacknowledged: false,
             approved_awaiting_credential: false,
             credential_resend_note: None,
+            credential_refused: None,
             submit_transport: None,
             archived: false,
             needs_attention: false,
@@ -1035,6 +1045,24 @@ mod key_hint_tests {
             !text.contains("may not have been received"),
             "an approved join was received: {text}"
         );
+    }
+
+    /// A credential that arrived and was refused says so, with the reason —
+    /// not "not received", which points at delivery when delivery worked.
+    #[test]
+    fn a_refused_credential_reads_as_refused_not_missing() {
+        let mut approved = row(false, false, true);
+        approved.approved_awaiting_credential = true;
+        approved.credential_refused =
+            Some("its revocation status could not be checked (could not reach x.example)".into());
+        let lines = render_for_test(&state_with(Some(approved), None));
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(text.contains("arrived but was refused"), "{text}");
+        assert!(text.contains("could not reach x.example"), "{text}");
+        assert!(!text.contains("not received"), "{text}");
     }
 
     /// `R` is Active-only otherwise, matching the key handler: a Pending join
