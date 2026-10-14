@@ -141,6 +141,12 @@ pub(crate) enum DispatchDomain {
     /// by an inbound acceptance, not a person, is independent of the others,
     /// and must not hold up a vetting send the person is making.
     VettingStatus,
+    /// Hidden-vetting work at the VTA (`vta/pcs/*`): enrolling, drawing, taking in what a
+    /// community or a vetter sent, creating an application, attesting. Each call is a Trust Task
+    /// round trip, and proving or attesting can take most of a minute. One job at a time, its
+    /// own domain so a pass of the vetter schedule never holds up a vetting send, nor the
+    /// reverse.
+    HiddenVetting,
 }
 
 impl DispatchDomain {
@@ -169,6 +175,7 @@ impl DispatchDomain {
             DispatchDomain::CommunityAccess => "Community context request",
             DispatchDomain::DeviceGrantSweep => "Device access refresh",
             DispatchDomain::VettingStatus => "Vetter grant check",
+            DispatchDomain::HiddenVetting => "Hidden-vetting work at your VTA",
         }
     }
 }
@@ -297,6 +304,9 @@ pub(crate) enum DispatchOutcome {
     Panicked(DispatchDomain),
     /// A vetting send finished (or failed, and was undone).
     Vetting(crate::state_handler::vetting_actions::VettingOutcome),
+    /// A hidden-vetting job at the VTA finished. What it built still has to be sent, which
+    /// needs the loop's messaging, so applying it is [`AfterApply::HiddenVetting`]'s.
+    HiddenVetting(Box<crate::state_handler::hidden_vetting_vta::PcsOutcome>),
     /// A vetter grant's revocation check finished. Its own domain, so it never
     /// releases the `Vetting` domain a person's send holds.
     VettingStatus(crate::state_handler::vetting_actions::GrantChecked),
@@ -342,6 +352,7 @@ impl DispatchOutcome {
             DispatchOutcome::Vic(_) => DispatchDomain::Vic,
             DispatchOutcome::VicMutation(_) => DispatchDomain::Vic,
             DispatchOutcome::Vetting(_) => DispatchDomain::Vetting,
+            DispatchOutcome::HiddenVetting(_) => DispatchDomain::HiddenVetting,
             DispatchOutcome::VettingStatus(_) => DispatchDomain::VettingStatus,
             DispatchOutcome::CommunityContexts(_) => DispatchDomain::CommunityContexts,
             DispatchOutcome::CommunityContext(_) => DispatchDomain::CommunityAccess,
@@ -439,6 +450,9 @@ pub(crate) enum AfterApply {
     /// A persona was minted at the VTA and must now be written into the config.
     /// The persist is `async` and mutates `Config`, so it runs in the loop.
     PersistPersona(Box<crate::state_handler::create_persona::MintedPersona>),
+    /// A hidden-vetting job at the VTA finished. Recording what the VTA said is the loop's,
+    /// and so is sending the community what it built.
+    HiddenVetting(Box<crate::state_handler::hidden_vetting_vta::PcsOutcome>),
 }
 
 pub(crate) fn apply_outcome(
@@ -526,6 +540,10 @@ pub(crate) fn apply_outcome(
                 Some((vtc, persona)) => AfterApply::Deregister(vtc, persona),
                 None => AfterApply::Nothing,
             };
+        }
+        DispatchOutcome::HiddenVetting(outcome) => {
+            in_flight.finish(domain);
+            return AfterApply::HiddenVetting(outcome);
         }
         DispatchOutcome::Persona(outcome) => {
             let pending = outcome.apply(state);

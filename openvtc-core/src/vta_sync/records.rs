@@ -195,18 +195,23 @@ fn to_json<T: serde::Serialize>(v: &T) -> Option<Value> {
     serde_json::to_value(v).ok()
 }
 
-/// The vetting book as synced: everything it persists except the two hidden-
-/// vetting engines, whose snapshots carry a PCS `usk` — the hidden vetter's,
-/// and each application's applicant engine (`hidden_state`), whose key every
-/// tag and proof of that application derives from. App state is not for
-/// secrets.
+/// The vetting book as synced: everything it persists except this install's
+/// view of its hidden-vetting engines and the work it owes them — the
+/// vetter's schedules (`hidden_vetter`), each application's engine summary
+/// (`hidden_app`), and the answers queued for the VTA (`pcs_inbox`). The
+/// engines are the VTA's and carry no secret here, but each install drives
+/// them on its own schedule. `hidden_state` — a PCS `usk`, from builds that
+/// ran the engine locally — is stripped too, should a record carry one: app
+/// state is not for secrets.
 fn vetting_json(book: &VettingBook) -> Option<Value> {
     let mut v = to_json(book)?;
     if let Value::Object(map) = &mut v {
         map.remove("hidden_vetter");
+        map.remove("pcs_inbox");
         if let Some(Value::Array(applications)) = map.get_mut("applications") {
             for application in applications {
                 if let Value::Object(application) = application {
+                    application.remove("hidden_app");
                     application.remove("hidden_state");
                 }
             }
@@ -452,17 +457,21 @@ pub fn apply(parts: &mut SyncParts<'_>, key: &str, value: Option<&Value>) -> Res
                 Some(v) => decode(v)?,
                 None => VettingBook::default(),
             };
-            // Neither hidden-vetting engine is synced; keep this install's. An
-            // applicant engine that does arrive — written by a build that
-            // synced it — is dropped, never adopted.
+            // What this install drives its hidden-vetting engines with is not
+            // synced; keep this install's. A local applicant engine that does
+            // arrive — written by a build that synced one — was dropped on
+            // decode, and says nothing about this install's application.
             let local = &mut parts.private.vetting;
             book.hidden_vetter = std::mem::take(&mut local.hidden_vetter);
+            book.pcs_inbox = std::mem::take(&mut local.pcs_inbox);
+            book.pcs_due = local.pcs_due;
             for application in &mut book.applications {
-                application.hidden_state = local
+                let here = local
                     .applications
                     .iter_mut()
-                    .find(|here| here.id == application.id)
-                    .and_then(|here| here.hidden_state.take());
+                    .find(|here| here.id == application.id);
+                application.hidden_app = here.as_ref().and_then(|h| h.hidden_app.clone());
+                application.local_engine_dropped = here.is_some_and(|h| h.local_engine_dropped);
             }
             parts.private.vetting = book;
         }

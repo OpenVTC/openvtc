@@ -1,7 +1,12 @@
 # Hidden-vetter admission for OpenVTC using the Predicate Credential System (PCS)
 
-> Branch `zkp-pcs`. The crate that implements this is `openvtc-vetting-pcs`; the library it
+> Branch `zkp-pcs`. The crate that implemented this here was `openvtc-vetting-pcs`; the library it
 > builds on is vendored under `vendor/` (see `vendor/PROVENANCE.md`).
+>
+> **Since then (§13 C7):** the engine moved into the VTA. VTI's `vti-vetting-pcs` carries it,
+> the VTA serves it as the `vta/pcs/*` Trust Tasks, and OpenVTC drives it through
+> `openvtc_core::vetting::pcs_vta` — holding no PCS key itself. References below to this
+> repository's crate and example describe the prototype as it was.
 
 **Status:** research and integration proposal, 2026-09-22. A working prototype exists; see §14.
 **Second-pass review (same day):** §13 lists corrections that supersede parts of §3, §4.3 and

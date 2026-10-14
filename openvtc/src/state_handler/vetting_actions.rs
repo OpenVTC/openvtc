@@ -59,6 +59,7 @@ use vta_sdk::vetting::status::StatusCheck;
 use crate::state_handler::actions::VettingAction;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
 use crate::state_handler::dispatch_util::{self, Persist, SyncLog};
+use crate::state_handler::hidden_vetting_vta::{PcsDone, PcsJob, PcsOutcome, PcsWork};
 use crate::state_handler::join_flow;
 use crate::state_handler::main_page::content::{
     ApplicationRow, AttestForm, CardPreview, DECLINE_MESSAGE_MAX, DECLINE_REASONS,
@@ -76,6 +77,10 @@ use crate::state_handler::main_page::{sanitize_display, shorten_did};
 use crate::state_handler::runtime_actions::ActionCtx;
 use crate::state_handler::save_coalesce::SaveScheduler;
 use crate::state_handler::state::State;
+use openvtc_core::logs::LogFamily;
+use openvtc_core::vetting::book::PcsInbound;
+use openvtc_core::vetting::inbound::Notice;
+use openvtc_core::vetting::pcs_vta::PcsError;
 
 // ============================================================================
 // Config → display
@@ -497,15 +502,14 @@ fn hidden_row(
     let when = |t: DateTime<Utc>| t.format("%Y-%m-%d %H:%M UTC").to_string();
     let events = held.event_draws(now.date_naive());
     let mut enrolled: Vec<(String, Option<String>)> = held
-        .snapshot
-        .credentials
-        .keys()
-        .rev()
-        .map(|period| {
+        .engine
+        .enrolled_labels
+        .iter()
+        .map(|label| {
             (
-                format!("vetter/{period}"),
+                label.clone(),
                 held.enrolled_at
-                    .get(period)
+                    .get(label.trim_start_matches("vetter/"))
                     .map(|t| t.format("%Y-%m-%d").to_string()),
             )
         })
@@ -515,12 +519,7 @@ fn hidden_row(
         .params
         .vetter_labels
         .first()
-        .filter(|l| {
-            !held
-                .snapshot
-                .credentials
-                .contains_key(l.trim_start_matches("vetter/"))
-        })
+        .filter(|l| !held.engine.enrolled_for(l.trim_start_matches("vetter/")))
         .cloned();
     let (tokens_held, tokens_free) = held.tokens();
     let last_draw = held.last_draw.as_ref().map(|d| {
@@ -2385,6 +2384,22 @@ async fn request_vetter(
         }
     };
     let vetter = vetter.as_str();
+    // Under a hidden criterion the request carries the application's PCS identifier, which the
+    // VTA mints. Before it has, a request would ask the vetter for a named statement this
+    // application cannot use.
+    if ctx
+        .config
+        .private
+        .vetting
+        .application_by_id(application_id)
+        .is_some_and(Application::hidden_app_owed)
+    {
+        ctx.config.private.vetting.pcs_due = true;
+        return status(
+            ctx,
+            openvtc_core::vetting::hidden::HiddenError::NotReady.to_string(),
+        );
+    }
     if !begin(ctx) {
         return;
     }
@@ -4002,7 +4017,15 @@ pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &
 /// A vetter in event mode owes draws under two labels, and the plan is why the ordinary one is
 /// still among them: dropping the monthly draw for the three days of a conference would say, in
 /// the timing of the requests alone, that those three days were a conference.
-pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str) {
+///
+/// What is owed goes into `work`, for the VTA to build: the pass runs one job for every
+/// community ([`refresh_vetter_side`]), and what the VTA builds is sent when the job is back
+/// ([`apply_pcs_outcome`]).
+pub(crate) fn hidden_vetting_tick(
+    ctx: &mut ActionCtx<'_>,
+    community: &str,
+    work: &mut Vec<PcsWork>,
+) {
     let now = Utc::now();
     ensure_hidden_vetter(ctx, community);
     let book = &mut ctx.config.private.vetting;
@@ -4081,20 +4104,64 @@ pub(crate) async fn hidden_vetting_tick(ctx: &mut ActionCtx<'_>, community: &str
     let Some(did) = persona_did(ctx.config, state.persona) else {
         return;
     };
+    let Some(context_id) = vetter_context(ctx.config, state.persona) else {
+        return;
+    };
     // Never a second enrolment while one is unanswered: the community answers the first and
     // refuses the second (`alreadyEnrolled`), and that refusal is what used to read as a lost
-    // answer. The first's answer is taken whenever it lands — its blinding is stored.
-    let enrolling = ctx
-        .config
-        .private
-        .vetting
-        .waiting_on(community, QueryKind::PcsRoot)
-        .is_some();
+    // answer. The first's answer is taken whenever it lands — the VTA holds its blinding.
+    let enrolling = |owed: &openvtc_core::vetting::hidden::Due| match owed {
+        openvtc_core::vetting::hidden::Due::Enrol { period } => {
+            ctx.config
+                .private
+                .vetting
+                .waiting_on(community, QueryKind::PcsRoot)
+                .is_some()
+                || state.enrolment_pending(period, now)
+        }
+        _ => false,
+    };
+    // What the VTA holds first, so the screens and the next plan read its word, then what the
+    // schedule owes — each built by the VTA and sent from the loop when the job is back.
+    work.push(PcsWork::VetterShow {
+        community: community.to_string(),
+        persona: state.persona,
+        context_id: context_id.clone(),
+    });
     for owed in plan.owed {
-        if enrolling && matches!(owed, openvtc_core::vetting::hidden::Due::Enrol { .. }) {
+        if enrolling(&owed) {
             continue;
         }
-        hidden_vetting_send(ctx, community, &state, &did, owed, now).await;
+        // A tick the VTA still holds a draw for, whose question here is gone (it timed out, or a
+        // restart forgot it): the VTA refuses a second draw for it (`alreadyInFlight`), so its
+        // stale draw is dropped first and the tick asked for afresh.
+        if let openvtc_core::vetting::hidden::Due::Draw { label, tick, .. } = &owed
+            && state
+                .engine
+                .draws_in_flight
+                .iter()
+                .any(|d| &d.label == label && d.tick == *tick)
+        {
+            work.push(PcsWork::Inbound {
+                item: PcsInbound::DrawRefused {
+                    community: community.to_string(),
+                    persona: state.persona,
+                    label: label.clone(),
+                    tick: *tick,
+                },
+                context_id: Some(context_id.clone()),
+                params: Some(state.params.clone()),
+                vta_application: None,
+            });
+        }
+        work.push(PcsWork::Owed {
+            community: community.to_string(),
+            persona: state.persona,
+            context_id: context_id.clone(),
+            did: did.clone(),
+            params: state.params.clone(),
+            owed,
+        });
     }
 }
 
@@ -4133,8 +4200,14 @@ pub(crate) async fn refresh_vetter_side(ctx: &mut ActionCtx<'_>) {
     // longer counts would only collect refusals.
     communities
         .retain(|c| ctx.config.private.vetting.vetter_mode(c).mode() != Some(VetterMode::Named));
+    let mut work = Vec::new();
     for community in communities {
-        hidden_vetting_tick(ctx, &community).await;
+        hidden_vetting_tick(ctx, &community, &mut work);
+    }
+    // One job for the whole pass. Busy with another: the sweep runs the schedule again shortly,
+    // and what is owed is planned afresh then.
+    if !work.is_empty() && !start_pcs_work(ctx, work) {
+        ctx.config.private.vetting.vetter_refresh_due = true;
     }
 }
 
@@ -4255,27 +4328,13 @@ fn ensure_hidden_vetter(ctx: &mut ActionCtx<'_>, community: &str) {
     else {
         return;
     };
-    let Some(did) = persona_did(ctx.config, standing.persona) else {
+    if persona_did(ctx.config, standing.persona).is_none() {
         return;
-    };
-    let snapshot = {
-        let mut rng = rand::thread_rng();
-        match openvtc_core::vetting::hidden::vetter_start(community, &params, &did, &mut rng) {
-            Ok(snapshot) => snapshot,
-            Err(e) => {
-                return status(
-                    ctx,
-                    format!("Could not set up hidden vetting for this community: {e}"),
-                );
-            }
-        }
-    };
-    let mut held = openvtc_core::vetting::book::HiddenVetterState::new(
-        community,
-        standing.persona,
-        params,
-        snapshot,
-    );
+    }
+    // The engine itself is the VTA's, created by the first enrolment request: one key per
+    // (context, community) for life, bound to this persona's DID (`vta/pcs/root-request`).
+    let mut held =
+        openvtc_core::vetting::book::HiddenVetterState::new(community, standing.persona, params);
     // The parameters are the last manifest's; dated by it, so the first draw follows a read.
     let reading = ctx.config.private.vetting.vetter_mode(community);
     held.params_read_at = reading
@@ -4283,9 +4342,6 @@ fn ensure_hidden_vetter(ctx: &mut ActionCtx<'_>, community: &str) {
         .filter(|_| !reading.inferred)
         .map(|r| r.read_at);
     ctx.config.private.vetting.hidden_vetter.push(held);
-    // The engine's key is what the community binds this vetter to at enrolment; one that was
-    // never saved would be replaced by a fresh one after a restart, which the community refuses
-    // (`identifierRebound`).
     ctx.save.mark_dirty();
     status(
         ctx,
@@ -4296,205 +4352,6 @@ fn ensure_hidden_vetter(ctx: &mut ActionCtx<'_>, community: &str) {
     );
 }
 
-/// How long a save that must land before a send may take (R1.2). A config save is a local
-/// encrypt-and-write; this only bounds a stuck keyring or disk.
-const SAVE_BEFORE_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// Write the config now, and wait for it — for state that must be on disk before the request
-/// that depends on it leaves (an enrolment's blinding). Refused while a coalesced save is
-/// already running, so two saves never race; the caller asks again shortly.
-async fn save_before_send(ctx: &mut ActionCtx<'_>) -> Result<(), String> {
-    if ctx.save.in_flight() {
-        return Err("another save is still being written".into());
-    }
-    let pending = ctx
-        .save
-        .snapshot_now(ctx.config)
-        .map_err(|e| e.to_string())?;
-    match tokio::time::timeout(
-        SAVE_BEFORE_SEND_TIMEOUT,
-        tokio::task::spawn_blocking(move || pending.run()),
-    )
-    .await
-    {
-        Ok(Ok(Ok(()))) => {
-            ctx.save.clear_after_external_save();
-            Ok(())
-        }
-        Ok(Ok(Err(e))) => Err(format!("the save failed: {e}")),
-        Ok(Err(e)) => Err(format!("the save did not finish: {e}")),
-        Err(_) => Err(format!(
-            "the save did not finish within {} seconds",
-            SAVE_BEFORE_SEND_TIMEOUT.as_secs()
-        )),
-    }
-}
-
-/// Send one thing the schedule owes.
-async fn hidden_vetting_send(
-    ctx: &mut ActionCtx<'_>,
-    community: &str,
-    state: &openvtc_core::vetting::book::HiddenVetterState,
-    did: &str,
-    owed: openvtc_core::vetting::hidden::Due,
-    now: DateTime<Utc>,
-) {
-    match owed {
-        openvtc_core::vetting::hidden::Due::Nothing => {}
-        openvtc_core::vetting::hidden::Due::Enrol { period } => {
-            let mut rng = rand::thread_rng();
-            let (body, blinding) = match openvtc_core::vetting::hidden::enrolment_request(
-                community,
-                &state.params,
-                &state.snapshot,
-                &period,
-                &mut rng,
-            ) {
-                Ok(pair) => pair,
-                Err(e) => return status(ctx, format!("Could not ask to enrol: {e}")),
-            };
-            let document = match wire::pcs_root_request(did, community, &body) {
-                Ok(d) => d,
-                Err(e) => return abandon(ctx, "Could not ask to enrol", e),
-            };
-            // Held in memory, and past the reply window: a late answer is still this vetter's
-            // one credential under the label (`VettingBook::pending_enrolments`).
-            let document_id = document.id.clone();
-            // And on disk, before anything is sent: the community answers once per label and
-            // keeps no copy, so an answer that lands after a restart must still be openable
-            // (`HiddenVetterState::enrolments_asked`). A save that cannot be made now means no
-            // ask now — the schedule asks again shortly, rather than risk a lost answer.
-            let stored = match openvtc_core::vetting::hidden::blinding_text(&blinding) {
-                Ok(text) => text,
-                Err(e) => return status(ctx, format!("Could not ask to enrol: {e}")),
-            };
-            if let Some(held) = ctx
-                .config
-                .private
-                .vetting
-                .hidden_vetter_mut(community, state.persona)
-            {
-                held.remember_asked(openvtc_core::vetting::book::AskedEnrolment {
-                    document_id: document_id.clone(),
-                    period: period.clone(),
-                    blinding: stored,
-                    asked_at: now,
-                });
-            }
-            if let Err(e) = save_before_send(ctx).await {
-                if let Some(held) = ctx
-                    .config
-                    .private
-                    .vetting
-                    .hidden_vetter_mut(community, state.persona)
-                {
-                    held.take_asked(&document_id);
-                }
-                // Again on the sweep, a bounded number of times (R1.4); the schedule's own
-                // pass after that.
-                let book = &mut ctx.config.private.vetting;
-                if book.vetter_refresh_failures
-                    < openvtc_core::vetting::book::VETTER_REFRESH_RETRIES
-                {
-                    book.vetter_refresh_failures += 1;
-                    book.vetter_refresh_due = true;
-                }
-                return status(
-                    ctx,
-                    format!(
-                        "Not asking to enrol yet: what opens the community's answer could not be \
-                         saved first ({e}). Trying again shortly."
-                    ),
-                );
-            }
-            ctx.config.private.vetting.remember_enrolment(
-                openvtc_core::vetting::book::PendingEnrolment {
-                    document_id: document_id.clone(),
-                    community: community.to_string(),
-                    persona: state.persona,
-                    blinding: std::sync::Arc::new(blinding),
-                },
-            );
-            ctx.config.private.vetting.ask(CommunityQuery {
-                document_id: document_id.clone(),
-                community: community.to_string(),
-                persona: state.persona,
-                kind: QueryKind::PcsRoot,
-                sent_at: now,
-            });
-            status(ctx, format!("Asking to enrol as a vetter for {period}…"));
-            let sent = Sent::Query {
-                document_id,
-                community: community.to_string(),
-                kind: QueryKind::PcsRoot,
-            };
-            if let Err(e) = sign_and_send(ctx, state.persona, document, sent).await {
-                abandon(ctx, "Could not ask to enrol", e);
-            }
-        }
-        openvtc_core::vetting::hidden::Due::Draw { label, tick, rate } => {
-            let mut rng = rand::thread_rng();
-            // The engine as it stands now, not as it stood when the pass was planned: each draw
-            // of a catch-up adds its serials to it, and starting from the planned copy would drop
-            // the previous draw's.
-            let Some(mut snapshot) = ctx
-                .config
-                .private
-                .vetting
-                .hidden_vetter(community, state.persona)
-                .map(|h| h.snapshot.clone())
-            else {
-                return;
-            };
-            let body = match openvtc_core::vetting::hidden::drip_request(
-                community,
-                &state.params,
-                &mut snapshot,
-                tick,
-                &label,
-                rate,
-                &mut rng,
-            ) {
-                Ok(body) => body,
-                Err(e) => return status(ctx, format!("Could not draw tokens: {e}")),
-            };
-            if let Some(held) = ctx
-                .config
-                .private
-                .vetting
-                .hidden_vetter_mut(community, state.persona)
-            {
-                held.snapshot = snapshot;
-            }
-            let document = match wire::pcs_tokens_request(did, community, &body) {
-                Ok(d) => d,
-                Err(e) => return abandon(ctx, "Could not draw tokens", e),
-            };
-            let document_id = document.id.clone();
-            ctx.config.private.vetting.ask(CommunityQuery {
-                document_id: document_id.clone(),
-                community: community.to_string(),
-                persona: state.persona,
-                kind: QueryKind::PcsTokens,
-                sent_at: now,
-            });
-            ctx.config
-                .private
-                .vetting
-                .draws_in_flight
-                .insert(document_id.clone(), (label.clone(), tick));
-            let sent = Sent::Query {
-                document_id,
-                community: community.to_string(),
-                kind: QueryKind::PcsTokens,
-            };
-            if let Err(e) = sign_and_send(ctx, state.persona, document, sent).await {
-                abandon(ctx, "Could not draw tokens", e);
-            }
-        }
-    }
-}
-
 async fn attest_hidden(
     ctx: &mut ActionCtx<'_>,
     request_id: &str,
@@ -4502,74 +4359,693 @@ async fn attest_hidden(
     vetter_did: &str,
     attestation: Attestation,
     now: DateTime<Utc>,
-) -> () {
-    let previous = entry.state.clone();
-    let wire = {
-        let mut rng = rand::thread_rng();
-        match ctx.config.private.vetting.attest_hidden(
-            request_id,
-            vetter_did,
-            attestation,
-            now,
-            &mut rng,
-        ) {
-            Ok(wire) => wire,
-            Err(e) => {
-                // No credential or no token is a state the vetter waits out: say how long,
-                // from the schedule, rather than the engine's bare refusal.
-                use openvtc_core::vetting::{hidden::HiddenError, vetter::VetterError};
-                let waiting = matches!(
-                    e,
-                    VetterError::Hidden(HiddenError::NoToken | HiddenError::NotEnrolled)
-                );
-                let outlook = ctx
-                    .config
-                    .private
-                    .vetting
-                    .hidden_outlook(&entry.community, entry.persona, now)
-                    .filter(|_| waiting);
-                return status(
-                    ctx,
-                    match outlook {
-                        Some(o) => format!(
-                            "Cannot attest yet: {e}. Nothing was sent; the request stays open. \
-                             {}: {}.{}",
-                            community_display(ctx.config, &entry.community),
-                            outlook_words(&o, now),
-                            if o.events_offered {
-                                " Vetting at one of its events (e) draws more."
-                            } else {
-                                ""
-                            }
-                        ),
-                        None => format!("Cannot attest: {e}"),
-                    },
-                );
-            }
-        }
+) {
+    let job = match ctx.config.private.vetting.hidden_attestation_job(
+        request_id,
+        vetter_did,
+        attestation,
+        now,
+    ) {
+        Ok(job) => job,
+        Err(e) => return cannot_attest_hidden(ctx, entry, &e.to_string(), is_wait(&e), now),
     };
-
     let Some(session_id) = session_id_of(entry) else {
         return status(ctx, "This request has no open session to attest on.");
     };
-    let message = match wire::hidden_attestation(vetter_did, &entry.applicant, &wire, &session_id) {
-        Ok(message) => message,
-        Err(e) => {
-            // Put the desk back: the token is spent either way, but the request is not closed on
-            // a delivery that never left.
-            if let Some(e2) = ctx.config.private.vetting.desk_entry_mut(request_id) {
-                e2.state = previous;
-            }
-            return abandon(ctx, "Could not send the attestation", e);
-        }
+    let Some(context_id) = vetter_context(ctx.config, entry.persona) else {
+        return status(
+            ctx,
+            "The persona this request was made to is not available.",
+        );
     };
-    page(ctx).mode = VettingMode::List;
+    let work = PcsWork::Attest {
+        job,
+        context_id,
+        vetter_did: vetter_did.to_string(),
+        session_id,
+    };
+    if start_pcs_work(ctx, vec![work]) {
+        page(ctx).mode = VettingMode::List;
+        status(ctx, "Your VTA is making the attestation — it names nobody…");
+    } else {
+        status(
+            ctx,
+            format!(
+                "{} — attest again in a moment. Nothing was sent; the request stays open.",
+                InFlight::busy_message(DispatchDomain::HiddenVetting)
+            ),
+        );
+    }
+}
+
+/// Whether a refusal to attest is a state the vetter waits out: no credential yet, or no token.
+fn is_wait(e: &openvtc_core::vetting::vetter::VetterError) -> bool {
+    use openvtc_core::vetting::{hidden::HiddenError, vetter::VetterError};
+    matches!(
+        e,
+        VetterError::Hidden(HiddenError::NoToken | HiddenError::NotEnrolled)
+    )
+}
+
+/// Say why nothing was attested. No credential or no token is a state the vetter waits out: say
+/// how long, from the schedule, rather than a bare refusal.
+fn cannot_attest_hidden(
+    ctx: &mut ActionCtx<'_>,
+    entry: &openvtc_core::vetting::vetter::DeskEntry,
+    why: &str,
+    waiting: bool,
+    now: DateTime<Utc>,
+) {
+    let outlook = ctx
+        .config
+        .private
+        .vetting
+        .hidden_outlook(&entry.community, entry.persona, now)
+        .filter(|_| waiting);
+    status(
+        ctx,
+        match outlook {
+            Some(o) => format!(
+                "Cannot attest yet: {why}. Nothing was sent; the request stays open. {}: {}.{}",
+                community_display(ctx.config, &entry.community),
+                outlook_words(&o, now),
+                if o.events_offered {
+                    " Vetting at one of its events (e) draws more."
+                } else {
+                    ""
+                }
+            ),
+            None => format!("Cannot attest: {why}"),
+        },
+    );
+}
+
+/// The VTA context a persona's vetter engines live in: the persona's own.
+fn vetter_context(config: &Config, persona: PersonaId) -> Option<String> {
+    let top = config.account.top_context_id.as_str();
+    config
+        .account
+        .personas
+        .get(&persona)
+        .map(|p| community_context::persona_context(p, top).to_string())
+}
+
+/// Whether there is hidden-vetting work the VTA should be asked to do now: something queued for
+/// it, or an application without its engine — and the VTA is not in its backoff.
+pub(crate) fn pcs_work_due(config: &Config, now: DateTime<Utc>) -> bool {
+    let book = &config.private.vetting;
+    let owed = book.pcs_due
+        || !book.pcs_inbox.is_empty()
+        || book.applications.iter().any(|a| a.hidden_app_owed());
+    owed && book.pcs_retry_at.is_none_or(|t| t <= now)
+}
+
+/// Start a job at the VTA: `extra` (a pass of the vetter schedule, or an attestation) with
+/// whatever else is owed — every answer queued for the VTA, and each application that needs its
+/// engine. Returns whether a job started: `false` when one is already running (the queue is
+/// asked again when it finishes) or the VTA is not connected.
+pub(crate) fn start_pcs_work(ctx: &mut ActionCtx<'_>, extra: Vec<PcsWork>) -> bool {
+    let Some(client) = ctx.admin_vta.cloned() else {
+        // Kept queued: the sweep asks again once the VTA is connected.
+        return false;
+    };
+    let book = &ctx.config.private.vetting;
+    let mut work = Vec::new();
+    for item in &book.pcs_inbox {
+        work.push(inbound_work(ctx.config, item));
+    }
+    let inbox_taken = book.pcs_inbox.len();
+    let owed: Vec<String> = book
+        .applications
+        .iter()
+        .filter(|a| a.hidden_app_owed())
+        .map(|a| a.id.clone())
+        .collect();
+    for application in owed {
+        let Ok((context_id, join_did)) = application_context(ctx.config, &application) else {
+            continue;
+        };
+        let Some(app) = ctx.config.private.vetting.application_by_id(&application) else {
+            continue;
+        };
+        let Some(params) = app.hidden.clone() else {
+            continue;
+        };
+        work.push(PcsWork::Create {
+            application,
+            context_id,
+            community: app.community.clone(),
+            join_did,
+            params,
+        });
+    }
+    work.extend(extra);
+    if work.is_empty() {
+        ctx.config.private.vetting.pcs_due = false;
+        return true;
+    }
+    if !ctx.in_flight.try_begin(DispatchDomain::HiddenVetting) {
+        // The job running now takes what it carried; this is asked for when it is back.
+        ctx.config.private.vetting.pcs_due = true;
+        return false;
+    }
+    ctx.config.private.vetting.pcs_due = false;
+    let job = PcsJob {
+        client,
+        inbox_taken,
+        work,
+    };
+    background_dispatch::spawn_dispatch(
+        ctx.dispatch_tx.clone(),
+        DispatchDomain::HiddenVetting,
+        async move { DispatchOutcome::HiddenVetting(Box::new(job.run().await)) },
+    );
+    true
+}
+
+/// The call that hands `item` to the VTA, with what it needs that the item does not carry.
+fn inbound_work(config: &Config, item: &PcsInbound) -> PcsWork {
+    let book = &config.private.vetting;
+    let (context_id, params, vta_application) = match item {
+        PcsInbound::Enrolled {
+            community, persona, ..
+        }
+        | PcsInbound::TokensServed {
+            community, persona, ..
+        }
+        | PcsInbound::DrawRefused {
+            community, persona, ..
+        } => (
+            vetter_context(config, *persona),
+            book.hidden_vetter(community, *persona)
+                .map(|h| h.params.clone()),
+            None,
+        ),
+        PcsInbound::Attestation { application, .. } => {
+            let app = book.application_by_id(application);
+            (
+                None,
+                app.and_then(|a| a.hidden.clone()),
+                app.and_then(|a| a.hidden_app.as_ref())
+                    .map(|v| v.application_id.clone()),
+            )
+        }
+        PcsInbound::DeleteApplication { .. } => (None, None, None),
+    };
+    PcsWork::Inbound {
+        item: item.clone(),
+        context_id,
+        params,
+        vta_application,
+    }
+}
+
+/// Record a notice as an inbound message's would be: in the community log, and as a task where
+/// it asks something of the person.
+fn pcs_notice(ctx: &mut ActionCtx<'_>, notice: Notice, persona: Option<PersonaId>) {
+    ctx.config
+        .public
+        .logs
+        .insert(LogFamily::Community, notice.describe());
+    if let Some((id, task)) = notice.task() {
+        ctx.config
+            .private
+            .tasks
+            .new_task_for(&Arc::new(id), task, persona);
+    }
+}
+
+/// Take what a hidden-vetting job at the VTA answered: record it, and send the community or the
+/// applicant whatever the VTA built.
+pub(crate) async fn apply_pcs_outcome(ctx: &mut ActionCtx<'_>, outcome: PcsOutcome) {
+    let now = Utc::now();
+    let PcsOutcome {
+        inbox_taken,
+        results,
+    } = outcome;
+    // The inbox entries the job carried, and which of them it finished with. A VTA that could not
+    // be reached finished nothing: those stay, in order, for the next job.
+    let mut finished = vec![false; inbox_taken];
+    let mut position = 0usize;
+    let mut unreachable = None;
+    for (work, result) in results {
+        if let Err(e @ PcsError::Unreachable(_)) = &result {
+            unreachable.get_or_insert_with(|| e.to_string());
+        }
+        if let PcsWork::Inbound { .. } = &work {
+            if position < inbox_taken {
+                finished[position] = !matches!(result, Err(PcsError::Unreachable(_)));
+            }
+            position += 1;
+        }
+        apply_pcs_result(ctx, work, result, now).await;
+    }
+    {
+        let book = &mut ctx.config.private.vetting;
+        let kept: Vec<PcsInbound> = book
+            .pcs_inbox
+            .drain(..)
+            .enumerate()
+            .filter(|(i, _)| *i >= inbox_taken || !finished[*i])
+            .map(|(_, item)| item)
+            .collect();
+        book.pcs_inbox = kept;
+        match &unreachable {
+            Some(e) => {
+                book.pcs_failures = book.pcs_failures.saturating_add(1);
+                let retry =
+                    now + openvtc_core::vetting::book::hidden_retry_after(book.pcs_failures);
+                book.pcs_retry_at = Some(retry);
+                tracing::warn!(error = %e, %retry, "could not reach the VTA for hidden-vetting work; asking again later");
+            }
+            None => {
+                book.pcs_failures = 0;
+                book.pcs_retry_at = None;
+            }
+        }
+        // Anything that arrived while the job ran goes on the next sweep.
+        book.pcs_due = !book.pcs_inbox.is_empty();
+    }
+    ctx.save.mark_dirty();
+    ctx.state.main_page.sync_from_config(ctx.config);
+}
+
+async fn apply_pcs_result(
+    ctx: &mut ActionCtx<'_>,
+    work: PcsWork,
+    result: Result<PcsDone, PcsError>,
+    now: DateTime<Utc>,
+) {
+    match (work, result) {
+        (PcsWork::VetterShow { .. }, Err(e)) => {
+            tracing::debug!(error = %e, "could not read a hidden-vetting engine from the VTA");
+        }
+        (
+            PcsWork::VetterShow {
+                community, persona, ..
+            },
+            Ok(PcsDone::Viewed(view)),
+        ) => {
+            if let (Some(view), Some(held)) = (
+                view,
+                ctx.config
+                    .private
+                    .vetting
+                    .hidden_vetter_mut(&community, persona),
+            ) {
+                held.take_engine(view);
+            }
+        }
+        (
+            PcsWork::Owed {
+                community,
+                persona,
+                did,
+                ..
+            },
+            Ok(PcsDone::Root(request)),
+        ) => send_enrolment(ctx, &community, persona, &did, &request, now).await,
+        (
+            PcsWork::Owed {
+                community,
+                persona,
+                did,
+                ..
+            },
+            Ok(PcsDone::Tokens(request)),
+        ) => send_draw(ctx, &community, persona, &did, &request, now).await,
+        (
+            PcsWork::Owed {
+                community, owed, ..
+            },
+            Err(e),
+        ) => {
+            let what = match owed {
+                openvtc_core::vetting::hidden::Due::Enrol { .. } => "ask to enrol",
+                _ => "draw tokens",
+            };
+            tracing::warn!(community = %community, error = %e, "the VTA could not {what}");
+            if !matches!(e, PcsError::Unreachable(_)) {
+                status(
+                    ctx,
+                    format!(
+                        "Could not {what} for {}: {e}",
+                        community_display(ctx.config, &community)
+                    ),
+                );
+            }
+        }
+        (PcsWork::Inbound { item, .. }, result) => apply_pcs_inbound(ctx, item, result, now),
+        (PcsWork::Create { application, .. }, Ok(PcsDone::Created(view))) => {
+            if let Some(app) = ctx
+                .config
+                .private
+                .vetting
+                .application_by_id_mut(&application)
+            {
+                app.hidden_app = Some(view);
+            }
+        }
+        (PcsWork::Create { community, .. }, Err(e)) => {
+            if !matches!(e, PcsError::Unreachable(_)) {
+                status(
+                    ctx,
+                    format!(
+                        "Could not set up PCS ZKP vetting for {} at your VTA: {e}",
+                        community_display(ctx.config, &community)
+                    ),
+                );
+            }
+        }
+        (
+            PcsWork::Attest {
+                job,
+                vetter_did,
+                session_id,
+                ..
+            },
+            Ok(PcsDone::Attested(attestation)),
+        ) => send_attestation(ctx, &job, &vetter_did, &session_id, &attestation, now),
+        (PcsWork::Attest { job, .. }, Err(e)) => {
+            use openvtc_core::vetting::pcs_vta::tasks::attest::v0_1::error_codes as codes;
+            let waiting = e.is(codes::NO_TOKEN) || e.is(codes::NOT_ENROLLED);
+            let why = if e.is(codes::NO_TOKEN) {
+                openvtc_core::vetting::hidden::HiddenError::NoToken.to_string()
+            } else if e.is(codes::NOT_ENROLLED) {
+                openvtc_core::vetting::hidden::HiddenError::NotEnrolled.to_string()
+            } else {
+                e.to_string()
+            };
+            if let Some(entry) = ctx
+                .config
+                .private
+                .vetting
+                .desk_entry(&job.request_id)
+                .cloned()
+            {
+                cannot_attest_hidden(ctx, &entry, &why, waiting, now);
+            }
+        }
+        (work, Ok(done)) => {
+            tracing::warn!(
+                ?work,
+                ?done,
+                "a hidden-vetting answer from the VTA that fits nothing asked"
+            );
+        }
+    }
+}
+
+/// Send the community the enrolment request the VTA built.
+async fn send_enrolment(
+    ctx: &mut ActionCtx<'_>,
+    community: &str,
+    persona: PersonaId,
+    did: &str,
+    request: &openvtc_core::vetting::wire::pcs::RootRequest,
+    now: DateTime<Utc>,
+) {
+    let document = match wire::pcs_root_request(did, community, request) {
+        Ok(d) => d,
+        Err(e) => return status(ctx, format!("Could not ask to enrol: {e}")),
+    };
+    let document_id = document.id.clone();
+    if let Some(held) = ctx
+        .config
+        .private
+        .vetting
+        .hidden_vetter_mut(community, persona)
+    {
+        held.enrol_asked_at = Some(now);
+    }
+    ctx.config.private.vetting.ask(CommunityQuery {
+        document_id: document_id.clone(),
+        community: community.to_string(),
+        persona,
+        kind: QueryKind::PcsRoot,
+        sent_at: now,
+    });
+    status(
+        ctx,
+        format!("Asking to enrol as a vetter under {}…", request.label),
+    );
+    let sent = Sent::Query {
+        document_id,
+        community: community.to_string(),
+        kind: QueryKind::PcsRoot,
+    };
+    if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
+        status(ctx, format!("Could not ask to enrol: {e}"));
+    }
+}
+
+/// Send the community a draw the VTA built.
+async fn send_draw(
+    ctx: &mut ActionCtx<'_>,
+    community: &str,
+    persona: PersonaId,
+    did: &str,
+    request: &openvtc_core::vetting::wire::pcs::TokensRequest,
+    now: DateTime<Utc>,
+) {
+    let document = match wire::pcs_tokens_request(did, community, request) {
+        Ok(d) => d,
+        Err(e) => return status(ctx, format!("Could not draw tokens: {e}")),
+    };
+    let document_id = document.id.clone();
+    ctx.config.private.vetting.ask(CommunityQuery {
+        document_id: document_id.clone(),
+        community: community.to_string(),
+        persona,
+        kind: QueryKind::PcsTokens,
+        sent_at: now,
+    });
+    ctx.config
+        .private
+        .vetting
+        .draws_in_flight
+        .insert(document_id.clone(), (request.label.clone(), request.tick));
+    let sent = Sent::Query {
+        document_id,
+        community: community.to_string(),
+        kind: QueryKind::PcsTokens,
+    };
+    if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
+        status(ctx, format!("Could not draw tokens: {e}"));
+    }
+}
+
+/// Close the request and send the applicant the attestation the VTA made.
+fn send_attestation(
+    ctx: &mut ActionCtx<'_>,
+    job: &openvtc_core::vetting::book::HiddenAttestJob,
+    vetter_did: &str,
+    session_id: &str,
+    attestation: &Value,
+    now: DateTime<Utc>,
+) {
+    let Some(previous) = ctx
+        .config
+        .private
+        .vetting
+        .desk_entry(&job.request_id)
+        .map(|e| e.state.clone())
+    else {
+        return;
+    };
+    let message =
+        match wire::hidden_attestation(vetter_did, &job.applicant, attestation, session_id) {
+            Ok(message) => message,
+            // The token is spent either way, but the request is not closed on a delivery that never
+            // left.
+            Err(e) => return status(ctx, format!("Could not send the attestation: {e}")),
+        };
+    if let Err(e) = ctx
+        .config
+        .private
+        .vetting
+        .hidden_attested(&job.request_id, now)
+    {
+        return status(ctx, format!("Could not record the attestation: {e}"));
+    }
     persist(ctx, "Sending your attestation — it names nobody.");
     let sent = Sent::Attestation {
-        request_id: request_id.to_string(),
-        previous: entry.state.clone(),
+        request_id: job.request_id.clone(),
+        previous,
     };
-    spawn_send(ctx, message, vetter_did, &entry.applicant, sent);
+    spawn_send(ctx, message, vetter_did, &job.applicant, sent);
+}
+
+/// Take the VTA's answer to an item a community or a vetter sent.
+fn apply_pcs_inbound(
+    ctx: &mut ActionCtx<'_>,
+    item: PcsInbound,
+    result: Result<PcsDone, PcsError>,
+    now: DateTime<Utc>,
+) {
+    use openvtc_core::vetting::pcs_vta::tasks;
+    if let Err(PcsError::Unreachable(_)) = &result {
+        // Still queued; the next job hands it on.
+        return;
+    }
+    match (item, result) {
+        (
+            PcsInbound::Enrolled {
+                community,
+                persona,
+                answer,
+            },
+            result,
+        ) => {
+            let period = answer.label.trim_start_matches("vetter/").to_string();
+            let book = &mut ctx.config.private.vetting;
+            let Some(held) = book.hidden_vetter_mut(&community, persona) else {
+                return;
+            };
+            match result {
+                Ok(PcsDone::Enrolled(view)) => {
+                    held.take_engine(view);
+                    held.enrolled_at.insert(period, now);
+                    held.enrol_asked_at = None;
+                    held.last_refusal = None;
+                    held.lost_enrolment = None;
+                    held.lost_reasked = false;
+                    // Draw now rather than at the next pass, which can be an hour away: every
+                    // tick of the label that has begun is owed already. Driven by the
+                    // enrolment, never by a balance.
+                    book.vetter_refresh_due = true;
+                    pcs_notice(
+                        ctx,
+                        Notice::HiddenVetterEnrolled {
+                            community,
+                            label: answer.label,
+                        },
+                        Some(persona),
+                    );
+                }
+                Err(e) => {
+                    // An answer the VTA did not ask for under this label, or one that does not
+                    // open: the community issues one credential per label, so this label is lost.
+                    tracing::warn!(community = %community, error = %e, "the VTA could not take in an enrolment answer");
+                    if held.lost_enrolment.as_deref() != Some(period.as_str()) {
+                        held.lost_reasked = false;
+                    }
+                    held.lost_enrolment = Some(period);
+                    pcs_notice(
+                        ctx,
+                        Notice::HiddenEnrolmentLost {
+                            community,
+                            label: answer.label,
+                        },
+                        Some(persona),
+                    );
+                }
+                Ok(other) => tracing::warn!(?other, "unexpected answer to root-accept"),
+            }
+        }
+        (
+            PcsInbound::TokensServed {
+                community,
+                persona,
+                answer,
+            },
+            result,
+        ) => match result {
+            Ok(PcsDone::Drawn(taken, view)) => {
+                if let Some(held) = ctx
+                    .config
+                    .private
+                    .vetting
+                    .hidden_vetter_mut(&community, persona)
+                {
+                    held.take_engine(view);
+                    held.last_draw = Some(openvtc_core::vetting::book::HiddenDraw {
+                        label: answer.label.clone(),
+                        tick: answer.tick,
+                        taken: usize::try_from(taken).unwrap_or(usize::MAX),
+                        at: now,
+                    });
+                }
+                pcs_notice(
+                    ctx,
+                    Notice::HiddenTokensDrawn {
+                        community,
+                        taken: usize::try_from(taken).unwrap_or(usize::MAX),
+                    },
+                    Some(persona),
+                );
+            }
+            Err(e) if e.is(tasks::tokens::accept::v0_1::error_codes::NO_DRAW_IN_FLIGHT) => {
+                tracing::info!(community = %community, label = %answer.label, tick = answer.tick, "the VTA was not waiting on this draw — already taken in");
+            }
+            Err(e) => {
+                tracing::warn!(community = %community, error = %e, "served tokens were not taken in");
+            }
+            Ok(other) => tracing::warn!(?other, "unexpected answer to tokens/accept"),
+        },
+        (
+            PcsInbound::DrawRefused {
+                community, persona, ..
+            },
+            result,
+        ) => match result {
+            Ok(PcsDone::Abandoned(Some(view))) => {
+                if let Some(held) = ctx
+                    .config
+                    .private
+                    .vetting
+                    .hidden_vetter_mut(&community, persona)
+                {
+                    held.take_engine(view);
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(community = %community, error = %e, "could not drop a refused draw at the VTA");
+            }
+        },
+        (PcsInbound::Attestation { application, .. }, result) => match result {
+            Ok(PcsDone::Verified(view)) => {
+                let held = view.attestations.len();
+                let persona = ctx
+                    .config
+                    .private
+                    .vetting
+                    .application_by_id(&application)
+                    .map(|a| a.persona);
+                if let Some(app) = ctx
+                    .config
+                    .private
+                    .vetting
+                    .application_by_id_mut(&application)
+                {
+                    app.hidden_app = Some(view);
+                }
+                pcs_notice(
+                    ctx,
+                    Notice::AttestationReceived {
+                        application_id: application,
+                        held,
+                    },
+                    persona,
+                );
+            }
+            Err(e) => {
+                // Not one that counts: it does not verify under the community's published
+                // parameters, or is not bound to this application. Said, and never kept.
+                tracing::warn!(error = %e, "hidden attestation refused");
+                status(
+                    ctx,
+                    format!("A vetter's attestation was refused by your VTA: {e}"),
+                );
+            }
+            Ok(other) => tracing::warn!(?other, "unexpected answer to verify-attestation"),
+        },
+        (PcsInbound::DeleteApplication { .. }, Err(e)) => {
+            tracing::warn!(error = %e, "could not delete a hidden-vetting application at the VTA");
+        }
+        (PcsInbound::DeleteApplication { .. }, Ok(_)) => {}
+    }
 }
 
 /// The session id a desk entry is at, if it has one.
@@ -6733,30 +7209,20 @@ mod tests {
             events: Vec::new(),
             tick_length: None,
         };
-        let mut held = HiddenVetterState::new(
-            "did:web:first-vtc.example",
-            persona,
-            params,
-            serde_json::from_value(serde_json::json!({ "member": "m", "usk": "", "id": "" }))
-                .unwrap(),
-        );
-        let snapshot = &mut held.snapshot;
-        if enrolled {
-            snapshot
-                .credentials
-                .insert("2026-10".into(), "zOctober".into());
-        }
-        for i in 0..tokens {
-            snapshot.tokens.push(
-                serde_json::from_value(serde_json::json!({
-                    "label": "token/2026-10",
-                    "serial": format!("z{i}"),
-                    "mintedTick": 0,
-                    "credential": "z"
-                }))
-                .unwrap(),
-            );
-        }
+        let mut held = HiddenVetterState::new("did:web:first-vtc.example", persona, params);
+        // What the VTA reports holding.
+        let tokens = u64::try_from(tokens).unwrap();
+        held.take_engine(openvtc_core::vetting::pcs_vta::VetterView {
+            id: "z3Vetter".into(),
+            enrolled_labels: if enrolled {
+                vec!["vetter/2026-10".into()]
+            } else {
+                Vec::new()
+            },
+            tokens_free: tokens,
+            tokens_held: tokens,
+            ..Default::default()
+        });
         let mut book = VettingBook::default();
         book.hidden_vetter.push(held);
         read_as(

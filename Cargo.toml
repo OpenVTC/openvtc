@@ -2,8 +2,6 @@
 members = [
   "openvtc-core",
   "openvtc",
-  # Hidden-vetter admission (ZKP). Published: `openvtc-core` depends on it.
-  "openvtc-vetting-pcs",
 ]
 resolver = "3"
 
@@ -83,8 +81,9 @@ argon2 = "0.6"
 # 0.9 does too. This line only records it.
 #
 # 0.18 -> 0.20 follows `vta-sdk` 0.53 -> 0.56 below, the release that declares
-# `affinidi-tdk ^0.20`. 0.23 -> 0.24 follows `vta-sdk` 0.63 -> 0.65 the same way.
-affinidi-tdk = "0.24"
+# `affinidi-tdk ^0.20`. 0.23 -> 0.24 follows `vta-sdk` 0.63 -> 0.65 the same way,
+# and 0.24 -> 0.26 follows 0.65 -> 0.68.
+affinidi-tdk = "0.26"
 affinidi-data-integrity = "0.8"
 # Decodes a community's Bitstring Status List. Already in the graph through
 # `vta-sdk`, whose status reader cannot verify a list signed with a proof set;
@@ -149,8 +148,8 @@ affinidi-messaging-core = "0.1.11"
 # can never unpack are deleted instead of being redelivered forever against
 # their sender's quota (a frame for a key this app has not loaded is kept).
 #
-# **0.34.1** follows `vta-sdk` 0.65, which declares it.
-affinidi-messaging-sdk = "0.34.1"
+# **0.34.1** follows `vta-sdk` 0.65, which declares it; **0.36** follows 0.68.
+affinidi-messaging-sdk = "0.36.0"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
@@ -421,8 +420,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 #
 # **0.28**, following `vta-sdk` 0.65 (VTI #2028); `trust-tasks-capability-client`
 # moves to 0.28.1 with it (0.29 is on trust-tasks 0.29).
-trust-tasks-rs = { version = "0.28.0", features = ["git-ns"] }
-trust-tasks-capability-client = "0.28.1"
+#
+# **0.31**, following `vta-sdk` 0.68, which carries the `vta/pcs/*` hidden-vetting
+# engine tasks (trust-tasks-tf #756); `trust-tasks-capability-client` 0.31 with it.
+trust-tasks-rs = { version = "0.31.0", features = ["git-ns"] }
+trust-tasks-capability-client = "0.31.0"
 tui-input = "0.15"
 url = "2.5"
 uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
@@ -618,7 +620,10 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # **0.65** is the line `vta-service` 0.57 is built on (the app-state fix for
 # VTI #2029), with trust-tasks 0.28 / TDK 0.24 / messaging-sdk 0.34 (VTI
 # #2028). did-git-sign 0.19 (VGI #155) is on it, so the graph keeps one copy.
-vta-sdk = { version = "0.65.1", features = [
+# **0.68** is `vta-service` 0.60's line: the first with `VtaClient::pcs_*`, the
+# VTA as hidden-vetting engine (VTI #2056), on trust-tasks 0.31 / TDK 0.26 /
+# messaging-sdk 0.36. did-git-sign 0.20 is on it.
+vta-sdk = { version = "0.68.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses

@@ -28,13 +28,10 @@ arbitrary = ["dep:arbitrary", "chrono/arbitrary"]
 # library writes the keyring entry, profile and include file exactly as
 # `did-git-sign init --profile` does. Kept on the same release as the
 # `openvtc` crate's dependency, and on this workspace's `vta-sdk` line.
-did-git-sign = "0.19.0"
+did-git-sign = "0.20.0"
 # The SSHSIG encoding did-git-sign signs with, to check the VTA's proof
 # signature (`git_signing::verify_signer`). Same release as did-git-sign.
-vgi-core = "0.19.0"
-# Hidden-vetter admission (ZKP). Published from this workspace before this
-# crate; its version moves with the workspace version.
-openvtc-vetting-pcs = { version = "0.6.0", path = "../openvtc-vetting-pcs" }
+vgi-core = "0.20.0"
 
 aes-gcm.workspace = true
 anyhow.workspace = true
@@ -132,8 +129,9 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # `affinidi-tdk` 0.22 / messaging-sdk 0.32, matching `vta-sdk` 0.61; 0.17.0
 # (affinidi-tdk-rs #920) is the same line built on `vta-sdk` ^0.61. 0.18.0 is on
 # `affinidi-tdk` 0.23 / messaging-sdk 0.33, matching `vta-sdk` 0.63. 0.20.1 is on
-# `affinidi-tdk` 0.24 / messaging-sdk 0.34, matching `vta-sdk` 0.65.
-affinidi-messaging-test-mediator = "0.20.1"
+# `affinidi-tdk` 0.24 / messaging-sdk 0.34, matching `vta-sdk` 0.65. 0.22.0 is on
+# `affinidi-tdk` 0.26 / messaging-sdk 0.36, matching `vta-sdk` 0.68.
+affinidi-messaging-test-mediator = "0.22.0"
 # In-process MockVta for the bootstrap e2e (VTI#406/#427 test-support seams).
 # `vta-service` is the VTA server crate; it carries the credential-vault
 # lifecycle tasks (receive/query/archive/delete/restore/purge) + the
@@ -190,8 +188,13 @@ affinidi-messaging-test-mediator = "0.20.1"
 # (`unsupportedType`), failing `git_signing_e2e` under coverage.
 # 0.57.0 is the family on `vta-sdk` 0.65 and the first whose app-state `list`
 # omits `highWatermark` on an unwritten namespace (VTI #2029), so the sync e2e
-# needs no seed record.
-vta-service = { version = "0.57.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
+# needs no seed record. 0.60.0 is on `vta-sdk` 0.68 and serves `vta/pcs/*`, the
+# hidden-vetting engine (VTI #2056).
+vta-service = { version = "0.60.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
+# The community's half of hidden vetting, in process (`vtc::Vtc`, feature `harness`), for the
+# end-to-end run against `MockVta` (`tests/hidden_vetting_onboarding.rs`). The engine itself is
+# the VTA's: this client holds no PCS key and runs no PCS operation.
+vti-vetting-pcs = { version = "0.1", features = ["harness"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }

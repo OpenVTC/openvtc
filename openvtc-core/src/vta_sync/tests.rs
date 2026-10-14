@@ -495,17 +495,16 @@ async fn a_locally_held_key_never_leaves_the_device() {
     assert!(!text.contains("Imported"));
 }
 
-/// `a` with one hidden-vetting application whose applicant engine holds `usk`.
-fn with_hidden_application(mut d: Device, usk: &str) -> Device {
+/// `a` with one hidden-vetting application whose engine the VTA holds as `id`.
+fn with_hidden_application(mut d: Device, id: &str) -> Device {
     let persona = *d.account.personas.keys().next().expect("a persona");
     let mut application =
         crate::vetting::applicant::Application::new(VTC, persona, "did:key:z6Mkjoin", Utc::now())
             .unwrap();
-    application.hidden_state = Some(openvtc_vetting_pcs::snapshot::ApplicantSnapshot {
-        usk: usk.to_string(),
-        id: "zApplicantId".to_string(),
-        join_did: "did:key:z6Mkjoin".to_string(),
-        held: Vec::new(),
+    application.hidden_app = Some(crate::vetting::pcs_vta::ApplicationView {
+        application_id: "app-on-this-device".to_string(),
+        id: id.to_string(),
+        attestations: Vec::new(),
     });
     d.private.vetting.applications.push(application);
     d
@@ -516,20 +515,19 @@ fn stored_text(store: &MemStore) -> String {
     serde_json::to_string(&inner.records.values().collect::<Vec<_>>()).unwrap()
 }
 
-/// The applicant's PCS key is the one every tag and proof of its application derives from, so
-/// it stays with the install that made it (`vta_sync` module docs: "the hidden-vetting engine
-/// stays local"). The rest of the application syncs.
+/// Each install drives its hidden-vetting engines at the VTA on its own: what it knows of an
+/// application's engine stays with it, and the rest of the application syncs.
 #[tokio::test]
-async fn an_applicants_hidden_vetting_key_never_leaves_the_device() {
+async fn an_applications_hidden_vetting_engine_stays_with_its_install() {
     let store = MemStore::default();
-    let mut a = with_hidden_application(seeded(), "z-applicant-usk");
+    let mut a = with_hidden_application(seeded(), "z3ApplicantId");
     a.load(&store).await;
     let text = stored_text(&store);
-    assert!(!text.contains("z-applicant-usk"), "{text}");
-    assert!(!text.contains("hidden_state"), "{text}");
+    assert!(!text.contains("z3ApplicantId"), "{text}");
+    assert!(!text.contains("hidden_app"), "{text}");
     assert!(
-        a.private.vetting.applications[0].hidden_state.is_some(),
-        "syncing does not take the engine from the install that holds it"
+        a.private.vetting.applications[0].hidden_app.is_some(),
+        "syncing does not take it from the install that holds it"
     );
 
     let mut b = Device::default();
@@ -539,15 +537,16 @@ async fn an_applicants_hidden_vetting_key_never_leaves_the_device() {
         1,
         "the application syncs"
     );
-    assert!(b.private.vetting.applications[0].hidden_state.is_none());
+    assert!(b.private.vetting.applications[0].hidden_app.is_none());
 }
 
-/// A build that synced the applicant engine left its key at the VTA. A device reading that
-/// record does not adopt it, and the next exchange overwrites it with the stripped book.
+/// A build that ran the applicant engine on the device and synced it left a PCS key at the VTA.
+/// A device reading that record neither adopts the key nor takes it for its own upgrade, and the
+/// next exchange overwrites the record with the stripped book.
 #[tokio::test]
 async fn a_synced_applicant_key_is_never_adopted_and_is_overwritten() {
     let store = MemStore::default();
-    let mut a = with_hidden_application(seeded(), "z-applicant-usk");
+    let mut a = with_hidden_application(seeded(), "z3ApplicantId");
     a.load(&store).await;
     {
         let mut inner = store.0.lock().unwrap();
@@ -569,17 +568,27 @@ async fn a_synced_applicant_key_is_never_adopted_and_is_overwritten() {
 
     let mut b = Device::default();
     b.load(&store).await;
-    assert!(b.private.vetting.applications[0].hidden_state.is_none());
+    let application = &b.private.vetting.applications[0];
+    assert!(application.hidden_app.is_none());
+    assert!(
+        !application.local_engine_dropped,
+        "another install's key says nothing about this install's application"
+    );
+    assert!(
+        !serde_json::to_string(application)
+            .unwrap()
+            .contains("z-leaked-usk")
+    );
 
     // Vetting state is applied at launch, not into a running session.
     a.load(&store).await;
     assert_eq!(
         a.private.vetting.applications[0]
-            .hidden_state
+            .hidden_app
             .as_ref()
-            .map(|s| s.usk.as_str()),
-        Some("z-applicant-usk"),
-        "the install keeps its own engine, not the one that arrived"
+            .map(|s| s.id.as_str()),
+        Some("z3ApplicantId"),
+        "the install keeps its own"
     );
     // The book it holds now differs from the record it absorbed, so its next exchange
     // replaces that record.

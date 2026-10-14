@@ -2,20 +2,22 @@
 
 Publishing to crates.io is manual for now; there is no release workflow.
 
-The workspace publishes three crates, all on the one workspace version
+The workspace publishes two crates, both on the one workspace version
 (`[workspace.package] version` in the root `Cargo.toml`). They must go out in
 dependency order, which `cargo publish --workspace` handles:
 
-1. `openvtc-vetting-pcs`
-2. `openvtc-core`
-3. `openvtc`
+1. `openvtc-core`
+2. `openvtc`
+
+`openvtc-vetting-pcs` was published from here up to 0.6.0. The hidden-vetting
+engine now runs in the VTA (`vta/pcs/*`, VTI's `vti-vetting-pcs`), and the crate
+is no longer part of this workspace.
 
 ## Steps
 
 1. Bump `version` in `[workspace.package]`, and the matching version
-   requirements on the path dependencies: `openvtc-core` in
-   `[workspace.dependencies]` and `openvtc-vetting-pcs` in
-   `openvtc-core/Cargo.toml`.
+   requirement on the path dependency `openvtc-core` in
+   `[workspace.dependencies]`.
 2. Update `CHANGELOG.md`, open a PR, and merge it.
 3. From a clean checkout of `main`:
 

@@ -1126,57 +1126,23 @@ async fn statement(
 
 /// `vtc/vetting/vetters/pcs-root/0.1#response` — the community enrolled us.
 ///
-/// The blinding state is held in memory per request ([`VettingBook::pending_enrolments`]),
-/// because it is useless without this answer and dangerous to keep past a restart. It is kept
-/// **past the reply window**, though, and the answer is matched on it as well as on the
-/// question: the community issues one credential per member per label and refuses a second, so
-/// an answer that arrived after its question timed out — and was dropped — would lock this
-/// vetter out until the label moved on.
-///
-/// An answer this client cannot open (the blinding state is gone: a restart in between) is the
-/// same lock-out, and is recorded as such ([`super::book::HiddenVetterState::lost_enrolment`]) so
-/// the schedule stops asking for a credential the community will not issue twice.
-fn enrolled(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender: &str) -> Handled {
+/// The answer is blinded to the request the VTA built, and only the VTA can open it — it holds
+/// the blinding, across restarts. So it is queued for the VTA
+/// ([`super::book::PcsInbound::Enrolled`]), and the VTA's answer says whether this vetter is
+/// enrolled. The answer is matched on the question, or on the label the VTA said it is waiting
+/// on: the community issues one credential per member per label and refuses a second, so an
+/// answer that arrives after its question timed out is still this vetter's one credential.
+fn enrolled(
+    book: &mut VettingBook,
+    _ctx: &Context<'_>,
+    message: &Message,
+    sender: &str,
+) -> Handled {
     let Some(thread) = community_thread(message) else {
         debug!(typ = %message.typ, %sender, "community answer with no thread — ignored");
         return Handled::default();
     };
     let query = book.take_query(sender, &thread, Some(QueryKind::PcsRoot));
-    let pending = book.take_enrolment(sender, &thread);
-    // The blinding as stored before the request went: what opens an answer that arrives after
-    // a restart, when the in-memory copy is gone.
-    let stored = book
-        .hidden_vetter
-        .iter_mut()
-        .filter(|h| h.community == sender)
-        .find_map(|h| h.take_asked(&thread).map(|asked| (h.persona, asked)));
-    let persona = match (&query, &pending, &stored) {
-        (Some(q), _, _) => q.persona,
-        (None, Some(p), _) => {
-            info!(community = %sender, "an enrolment answer arrived after its question timed out — taking it");
-            p.persona
-        }
-        (None, None, Some((persona, _))) => {
-            info!(community = %sender, "an enrolment answer arrived after a restart — opening it with the stored blinding");
-            *persona
-        }
-        (None, None, None) => {
-            debug!(typ = %message.typ, %sender, "community answer to nothing we asked — ignored");
-            return Handled::default();
-        }
-    };
-    let blinding: Option<std::sync::Arc<super::hidden::Blinding>> = match pending {
-        Some(p) => Some(p.blinding),
-        None => stored.and_then(|(_, asked)| {
-            super::hidden::blinding_from_text(&asked.blinding)
-                .map_err(|e| warn!(community = %sender, error = %e, "stored enrolment blinding unreadable"))
-                .ok()
-                .map(std::sync::Arc::new)
-        }),
-    };
-    if let Some(state) = book.hidden_vetter_mut(sender, persona) {
-        state.answered();
-    }
     let body = match community_payload::<wire::pcs::RootResponse>(message) {
         Ok(body) => body,
         Err(detail) => {
@@ -1193,70 +1159,38 @@ fn enrolled(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
             };
         }
     };
-    let period = body.label.trim_start_matches("vetter/").to_string();
-    let Some(blinding) = blinding else {
-        warn!(community = %sender, label = %body.label, "enrolled, but the blinding state is gone — this label's credential cannot be opened");
-        if let Some(state) = book.hidden_vetter_mut(sender, persona) {
-            if state.lost_enrolment.as_deref() != Some(period.as_str()) {
-                state.lost_reasked = false;
-            }
-            state.lost_enrolment = Some(period);
+    // Ours if we asked — or, after the question timed out or a restart forgot it, if the VTA
+    // said it is waiting on this label: it holds the blinding, and an answer the community gives
+    // once is still this vetter's one credential under the label.
+    let persona = match &query {
+        Some(q) => q.persona,
+        None => {
+            let Some(held) = book
+                .hidden_vetter
+                .iter()
+                .find(|h| h.community == sender && h.engine.pending_labels.contains(&body.label))
+            else {
+                debug!(typ = %message.typ, %sender, "community answer to nothing we asked — ignored");
+                return Handled::default();
+            };
+            info!(community = %sender, label = %body.label, "an enrolment answer arrived after its question was forgotten — taking it");
+            held.persona
         }
-        return Handled {
-            changed: true,
-            notice: Some(Notice::HiddenEnrolmentLost {
-                community: sender.to_string(),
-                label: body.label,
-            }),
-            ..Handled::default()
-        };
     };
     let Some(state) = book.hidden_vetter_mut(sender, persona) else {
         return Handled::default();
     };
-    let params = state.params.clone();
-    let mut snapshot = state.snapshot.clone();
-    match super::hidden::accept_enrolment(sender, &params, &mut snapshot, &body, &blinding) {
-        Ok(()) => {
-            if let Some(state) = book.hidden_vetter_mut(sender, persona) {
-                state.snapshot = snapshot;
-                // Opened: no other request under this label will be answered with a credential.
-                state.enrolments_asked.retain(|a| a.period != period);
-                state.enrolled_at.insert(period, ctx.now);
-                state.last_refusal = None;
-                state.lost_enrolment = None;
-                state.lost_reasked = false;
-            }
-            // Draw now rather than at the next pass, which can be an hour away: every tick of
-            // the label that has begun is owed already, and until they are drawn this vetter
-            // can only refuse to attest. Driven by the enrolment, never by a balance.
-            book.vetter_refresh_due = true;
-            Handled {
-                changed: true,
-                notice: Some(Notice::HiddenVetterEnrolled {
-                    community: sender.to_string(),
-                    label: body.label,
-                }),
-                ..Handled::default()
-            }
-        }
-        Err(e) => {
-            warn!(community = %sender, error = %e, "enrolment answer did not unblind");
-            if let Some(state) = book.hidden_vetter_mut(sender, persona) {
-                if state.lost_enrolment.as_deref() != Some(period.as_str()) {
-                    state.lost_reasked = false;
-                }
-                state.lost_enrolment = Some(period);
-            }
-            Handled {
-                changed: true,
-                notice: Some(Notice::HiddenEnrolmentLost {
-                    community: sender.to_string(),
-                    label: body.label,
-                }),
-                ..Handled::default()
-            }
-        }
+    state.answered();
+    // Only the VTA that asked can open it. The VTA's answer — taken in, or refused — is what
+    // says whether this vetter is enrolled ([`super::book::PcsInbound::Enrolled`]).
+    book.queue_for_vta(super::book::PcsInbound::Enrolled {
+        community: sender.to_string(),
+        persona,
+        answer: body,
+    });
+    Handled {
+        changed: true,
+        ..Handled::default()
     }
 }
 
@@ -1291,17 +1225,17 @@ fn tokens_served(
         }
     };
     book.draws_in_flight.remove(&thread);
-    // A draw answered after its question timed out is still ours while the wallet holds the
-    // serials it was asked for: the community served that tick, and will not serve it twice.
+    // A draw answered after its question timed out is still ours while the VTA is waiting on it:
+    // the community served that tick, and will not serve it twice.
     let persona = match query {
         Some(q) => q.persona,
         None => {
             let Some(held) = book.hidden_vetter.iter().find(|h| {
                 h.community == sender
-                    && h.snapshot
-                        .pending
+                    && h.engine
+                        .draws_in_flight
                         .iter()
-                        .any(|p| p.label == body.label && p.tick == body.tick)
+                        .any(|d| d.label == body.label && d.tick == body.tick)
             }) else {
                 debug!(typ = %message.typ, %sender, "community answer to nothing we asked — ignored");
                 return Handled::default();
@@ -1314,36 +1248,20 @@ fn tokens_served(
         return Handled::default();
     };
     state.answered();
-    let params = state.params.clone();
-    let mut snapshot = state.snapshot.clone();
-    match super::hidden::accept_drip(sender, &params, &mut snapshot, &body) {
-        Ok(taken) => {
-            if let Some(state) = book.hidden_vetter_mut(sender, persona) {
-                state.snapshot = snapshot;
-                state.record_served(&body.label, body.tick);
-                state.last_drawn_at = Some(ctx.now);
-                state.last_draw = Some(super::book::HiddenDraw {
-                    label: body.label.clone(),
-                    tick: body.tick,
-                    taken,
-                    at: ctx.now,
-                });
-                state.retry_at = None;
-                state.last_refusal = None;
-            }
-            Handled {
-                changed: true,
-                notice: Some(Notice::HiddenTokensDrawn {
-                    community: sender.to_string(),
-                    taken,
-                }),
-                ..Handled::default()
-            }
-        }
-        Err(e) => {
-            warn!(community = %sender, error = %e, "served tokens did not verify");
-            Handled::default()
-        }
+    // The community has served this tick whatever the VTA makes of the tokens: asking for it
+    // again would only be refused (`alreadyServed`).
+    state.record_served(&body.label, body.tick);
+    state.last_drawn_at = Some(ctx.now);
+    state.retry_at = None;
+    state.last_refusal = None;
+    book.queue_for_vta(super::book::PcsInbound::TokensServed {
+        community: sender.to_string(),
+        persona,
+        answer: body,
+    });
+    Handled {
+        changed: true,
+        ..Handled::default()
     }
 }
 
@@ -1448,10 +1366,10 @@ fn challenge_issued(book: &mut VettingBook, message: &Message, sender: &str) -> 
 
 /// `vetting/attestation/0.1` — a hidden attestation from a vetter we asked.
 ///
-/// The applicant verifies it **here**, on arrival, rather than discovering at submit that it
-/// holds something unusable: an attestation that does not verify under the community's published
-/// parameters, or is not bound to the card it showed, is dropped with a warning and never
-/// reaches the application.
+/// Queued for the VTA, which verifies it on arrival rather than leaving the applicant to discover
+/// at submit that it holds something unusable: an attestation that does not verify under the
+/// community's published parameters, or is not bound to this application, is refused there and
+/// never counts ([`super::book::PcsInbound::Attestation`]).
 ///
 /// The sender is authenticated by the envelope and is deliberately **not** recorded beside the
 /// attestation. Keeping it would rebuild, in the applicant's own store, the link the whole
@@ -1465,27 +1383,31 @@ fn attestation(
     let Some((persona, _)) = ctx.recipient else {
         return Some(Handled::default());
     };
-    for application in book
+    // The community it is for is in its metadata; the application is ours there. Which vetter
+    // sent it is not kept.
+    let community = message
+        .body
+        .get("meta")
+        .and_then(|m| m.get("community"))
+        .and_then(Value::as_str);
+    let Some(application) = book
         .applications
-        .iter_mut()
+        .iter()
         .filter(|a| a.persona == persona && a.hidden.is_some())
-    {
-        match application.receive_hidden_attestation(&message.body) {
-            Ok(()) => {
-                return Some(Handled {
-                    changed: true,
-                    notice: Some(Notice::AttestationReceived {
-                        application_id: application.id.clone(),
-                        held: application.hidden_held(),
-                    }),
-                    ..Handled::default()
-                });
-            }
-            // Not for this application — try the next one; the last error is reported.
-            Err(e) => warn!(%sender, error = %e, "hidden attestation refused"),
-        }
-    }
-    Some(Handled::default())
+        .find(|a| community.is_none_or(|c| c == a.community))
+    else {
+        warn!(%sender, "a hidden attestation for no application of ours — dropped");
+        return Some(Handled::default());
+    };
+    let application = application.id.clone();
+    book.queue_for_vta(super::book::PcsInbound::Attestation {
+        application,
+        attestation: message.body.clone(),
+    });
+    Some(Handled {
+        changed: true,
+        ..Handled::default()
+    })
 }
 
 /// A community's vetter role credential for one of our personas.
@@ -1774,12 +1696,16 @@ fn hidden_refused(
     } else {
         None
     };
-    // A refused enrolment issued nothing, so nothing will ever need its blinding state.
-    if query.kind == QueryKind::PcsRoot {
-        book.take_enrolment(sender, &query.document_id);
-        if let Some(held) = book.hidden_vetter_mut(sender, query.persona) {
-            held.take_asked(&query.document_id);
-        }
+    // The serials of a refused draw will never be answered: the VTA forgets them.
+    if let Some((label, tick)) = &draw
+        && book.hidden_vetter(sender, query.persona).is_some()
+    {
+        book.queue_for_vta(super::book::PcsInbound::DrawRefused {
+            community: sender.to_string(),
+            persona: query.persona,
+            label: label.clone(),
+            tick: *tick,
+        });
     }
     let Some(state) = book.hidden_vetter_mut(sender, query.persona) else {
         // An applicant's challenge, or a vetter that has since dropped its engine.
@@ -1792,12 +1718,6 @@ fn hidden_refused(
             }),
         );
     };
-    // The serials of a refused draw will never be answered.
-    if let Some((label, tick)) = &draw
-        && let Err(e) = super::hidden::forget_draw(sender, &mut state.snapshot, label, *tick)
-    {
-        warn!(community = %sender, error = %e, "could not drop a refused draw's serials");
-    }
     // A refusal is an answer: the community is there.
     state.answered();
     // Enrolled already, under the label we asked for, and this client holds no credential

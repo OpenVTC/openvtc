@@ -1,42 +1,50 @@
-//! Onboarding under a hidden-vetting criterion, end to end, through the client's own API.
+//! Onboarding under a hidden-vetting criterion, end to end, with every PCS key held by the VTA.
 //!
-//! The community here is the same verifier `vtc-service` runs on the VTI `zkp-pcs` branch, so
-//! what this test exercises is the real decision path: what the client builds is what the
-//! service checks. The cross-repo fixture test on the VTI side proves the wire format agrees.
+//! The VTA is a real one, in process (`MockVta`), driven through this client's own calls
+//! (`openvtc_core::vetting::pcs_vta`) exactly as the TUI drives them. The community is the one
+//! `vtc-service` runs (`vti_vetting_pcs::vtc::Vtc`), so what is checked is the real decision
+//! path: what the VTA builds is what the community counts.
 //!
-//! What it demonstrates, in the order an applicant lives it:
+//! In the order the people involved live it:
 //!
 //! 1. The community publishes its parameters in the manifest, under a namespace it controls,
-//!    marked critical.
-//! 2. The applicant adopts the criterion and starts an application with a key of its own.
-//! 3. Two vetters run ordinary vetting sessions and attest — without learning each other, and
-//!    without the community learning either of them.
-//! 4. The applicant proves, and the proof rides in the join submission's `extensions`.
-//! 5. The community counts it with the same rule it counts named statements with, and admits.
+//!    marked critical; the client reads them out of the criterion.
+//! 2. Two vetters enrol and draw a tick of tokens — their VTA builds every request, the client
+//!    carries it to the community and the answer back.
+//! 3. The applicant's VTA creates the application; each vetter's VTA attests to its PCS
+//!    identifier, and the applicant's VTA takes each attestation in.
+//! 4. The applicant's VTA proves, bound to the community's challenge, and the community admits —
+//!    without learning who vetted.
+//!
+//! `#[ignore]`'d like the other MockVta suites: spinning up the VTA is slow. CI's coverage job
+//! runs them via `--include-ignored`.
 
-use chrono::{NaiveDate, TimeZone, Utc};
-use openvtc_core::vetting::hidden::{self, HiddenParams};
-use openvtc_vetting_pcs::{
-    meta::StatementMeta, snapshot::VetterSnapshot, vetter::VetterEngine, vtc::Vtc,
+use openvtc_core::vetting::hidden::{self, HiddenParams, Mode};
+use openvtc_core::vetting::pcs_vta;
+use openvtc_core::vetting::wire::pcs::{RootResponse, TokensResponse};
+use serde_json::{Value, json};
+use vta_sdk::client::{ClientIdentity, CreateContextRequest, VtaClient};
+use vta_sdk::protocols::vetting::VETTED_PREDICATE;
+use vta_sdk::provision_client::EphemeralSetupKey;
+use vta_service::test_support::MockVta;
+use vti_vetting_pcs::{
+    issuer::{RootRequestWire, TokenRequestWire},
+    rand::{SeedableRng, rngs::StdRng},
+    scheme::{enc, key_text, point_from_text},
+    vtc::Vtc,
     wire::SubmissionWire,
 };
-use rand::{SeedableRng, rngs::StdRng};
-use serde_json::{Value, json};
-use vta_sdk::protocols::vetting::{VETTED_PREDICATE, VettingMethod, VettingRelationship};
 
 const COMMUNITY: &str = "did:webvh:QmVtcScid:kernel-vtc.example";
-const PERIOD: &str = "2026-09";
-const JOIN_DID: &str = "did:webvh:QmVtcScid:bob-kernel";
+const PERIOD: &str = "2026-10";
 
 fn requirements() -> Value {
     json!({
         "version": "0.1",
         "statementType": VETTED_PREDICATE,
         "minStatements": 2,
-        "minByMethod": { "inPerson": 1 },
         "acceptedMethods": ["inPerson", "video"],
         "requiredClaims": ["name.legal"],
-        "maxStatementAge": "P120D",
         "eligibleVetters": { "role": "vetter" }
     })
 }
@@ -44,349 +52,330 @@ fn requirements() -> Value {
 /// The criterion as the community publishes it: the named members, plus its parameters under
 /// `vetting.ext`, marked critical so no client applies the wrong way.
 fn published_criterion(vtc: &Vtc) -> Value {
-    let params = vtc.params().unwrap();
     let mut vetting = requirements();
     vetting["ext"] = json!({
         hidden::HIDDEN_VETTING_NS: {
             "suite": hidden::SUITE,
-            "helperKey": openvtc_vetting_pcs::scheme::key_text(vtc.hvk()).unwrap(),
-            "tokenKey": openvtc_vetting_pcs::scheme::key_text(vtc.tvk()).unwrap(),
-            "vetterLabels": params.vetter_labels(),
-            "tokenLabels": params.tokens().live_labels().iter().collect::<Vec<_>>(),
+            "helperKey": key_text(vtc.hvk()).unwrap(),
+            "tokenKey": key_text(vtc.tvk()).unwrap(),
+            "vetterLabels": vtc.live_periods().iter().map(|p| format!("vetter/{p}")).collect::<Vec<_>>(),
+            "tokenLabels": [vtc.current_token_label()],
+            "dripPerTick": vtc.drip_rate(),
+            "tickLength": "P3D",
         }
     });
     vetting["extCritical"] = json!([hidden::HIDDEN_VETTING_NS]);
     json!({
         "id": "kernel-developer",
-        "description": "Two kernel vetters, one in person. The community is told how many, never who.",
-        "presentationDefinition": { "credentials": [] },
         "vetting": vetting,
         "requirementsDigest": vtc.requirements_digest(),
     })
 }
 
-fn statement_meta(method: VettingMethod, digest: &str) -> StatementMeta {
-    StatementMeta {
-        community: COMMUNITY.into(),
-        requirements_digest: digest.into(),
-        method,
-        claims_verified: vec!["name.legal".into()],
-        liveness_confirmed: true,
-        declared_relationship: VettingRelationship::None,
-        identity_commitment: "zCommitmentOfThisApplication".into(),
-        card_digest_multibase: "zCardDigest".into(),
-        valid_from: NaiveDate::from_ymd_opt(2026, 9, 20).unwrap(),
-        valid_until: NaiveDate::from_ymd_opt(2027, 1, 18).unwrap(),
-        token_label: String::new(),
-        token_serial: String::new(),
-    }
+/// What a vetter's statement says, as the desk builds it (`hidden::statement_meta`).
+fn statement_meta(vtc: &Vtc, card: &str) -> Value {
+    let today = chrono::Utc::now().date_naive();
+    json!({
+        "community": COMMUNITY,
+        "requirementsDigest": vtc.requirements_digest(),
+        "method": "inPerson",
+        "claimsVerified": ["name.legal"],
+        "livenessConfirmed": true,
+        "declaredRelationship": "none",
+        "identityCommitment": "z3Commitment",
+        "cardDigestMultibase": card,
+        "validFrom": today.to_string(),
+        "validUntil": (today + chrono::Duration::days(90)).to_string(),
+    })
 }
 
-#[test]
-fn an_applicant_is_admitted_without_the_community_learning_who_vetted_them() {
-    let mut rng = StdRng::seed_from_u64(0x2026_0922);
-    // --- the community ------------------------------------------------------------------
-    let mut vtc = Vtc::new(COMMUNITY, PERIOD, requirements(), &mut rng).unwrap();
+async fn admin_client(mock: &MockVta) -> VtaClient {
+    let admin = EphemeralSetupKey::generate().expect("generate admin key");
+    let token = mock.ctx.mint_token(&admin.did, "admin", vec![]).await;
+    VtaClient::authenticated(
+        mock.base_url(),
+        ClientIdentity::did_key(
+            admin.did.clone(),
+            admin.private_key_multibase(),
+            mock.vta_did(),
+        ),
+        token,
+    )
+    .await
+}
+
+async fn context(client: &VtaClient, id: &str) {
+    client
+        .create_context(CreateContextRequest {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: None,
+            parent: None,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("create context {id}: {e}"));
+}
+
+/// A vetter, enrolled with the community through its VTA and holding one tick of tokens. The
+/// client's part is only carrying: each request the VTA builds goes to the community as the
+/// wire carries it, and each answer comes back the same way.
+async fn enrolled_vetter(
+    client: &VtaClient,
+    vtc: &mut Vtc,
+    params: &HiddenParams,
+    rng: &mut StdRng,
+    ctx: &str,
+    member: &str,
+) {
+    context(client, ctx).await;
+    vtc.grant(member);
+    let label = format!("vetter/{}", vtc.current_period());
+
+    let request = pcs_vta::root_request(client, ctx, COMMUNITY, member, params, &label)
+        .await
+        .expect("the VTA builds the enrolment request");
+    // On the wire to the community (`vtc/vetting/vetters/pcs-root`), as `wire::pcs_root_request`
+    // carries it.
+    let carried: RootRequestWire = serde_json::from_value(serde_json::to_value(&request).unwrap())
+        .expect("the community reads what the client sends");
+    let pre = vtc
+        .issue_vetter_root(
+            member,
+            &point_from_text(&carried.id).unwrap(),
+            &serde_json::from_value(carried.request).unwrap(),
+            rng,
+        )
+        .expect("the community signs the blinded request");
+    let view = pcs_vta::root_accept(
+        client,
+        ctx,
+        COMMUNITY,
+        params,
+        &RootResponse {
+            label: label.clone(),
+            pre_credential: enc(&pre).unwrap(),
+            ext: None,
+        },
+    )
+    .await
+    .expect("the VTA opens the community's answer");
+    assert!(view.enrolled_for(vtc.current_period()), "{view:?}");
+
     let token_label = vtc.current_token_label().to_string();
-    let mut vetters: Vec<VetterSnapshot> = Vec::new();
-    for i in 0..2 {
-        let member = format!("member-{i}");
-        vtc.grant(&member);
-        let mut engine = VetterEngine::new(&member, &vtc, &mut rng).unwrap();
-        engine.enroll(&mut vtc, &mut rng).unwrap();
-        engine.drip(&mut vtc, 1, &token_label, 2, &mut rng).unwrap();
-        vetters.push(engine.snapshot().unwrap());
-    }
-    let criterion = published_criterion(&vtc);
-    let digest = vtc.requirements_digest().to_string();
+    let draw = pcs_vta::tokens_request(
+        client,
+        ctx,
+        COMMUNITY,
+        params,
+        &token_label,
+        1,
+        vtc.drip_rate(),
+    )
+    .await
+    .expect("the VTA builds a draw");
+    let requests: Vec<_> = draw
+        .requests
+        .iter()
+        .map(|r| {
+            TokenRequestWire {
+                commitment: r.commitment.clone(),
+                opening_proof: r.opening_proof.clone(),
+            }
+            .to_request()
+            .unwrap()
+        })
+        .collect();
+    let served = vtc
+        .drip(member, 1, &token_label, &requests, rng)
+        .expect("the community serves the draw");
+    let (received, view) = pcs_vta::tokens_accept(
+        client,
+        ctx,
+        COMMUNITY,
+        params,
+        &TokensResponse {
+            label: token_label,
+            tick: 1,
+            pre_credentials: served.iter().map(|p| enc(p).unwrap()).collect(),
+            ext: None,
+        },
+    )
+    .await
+    .expect("the VTA takes the tokens in");
+    assert_eq!(usize::try_from(received).unwrap(), vtc.drip_rate());
+    assert!(view.draws_in_flight.is_empty(), "{view:?}");
+}
 
-    // --- the applicant reads the manifest -----------------------------------------------
-    let mode = hidden::read_mode(&criterion).expect("this client implements the namespace");
-    let params: HiddenParams = match mode {
-        hidden::Mode::Hidden(p) => *p,
-        hidden::Mode::Named => panic!("the criterion publishes hidden-vetting parameters"),
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow: spins up a VTA"]
+async fn an_applicant_is_admitted_with_every_pcs_key_in_the_vta() {
+    let mock = MockVta::start_provisionable().await;
+    let client = admin_client(&mock).await;
+    let mut rng = StdRng::seed_from_u64(0x2026_1013);
+    let mut vtc = Vtc::new(COMMUNITY, PERIOD, requirements(), &mut rng).unwrap();
+
+    // 1. What the community publishes, read the way the client reads a manifest's criterion.
+    let params = match hidden::read_mode(&published_criterion(&vtc)).expect("readable") {
+        Mode::Hidden(params) => *params,
+        Mode::Named => panic!("the criterion publishes hidden-vetting parameters"),
     };
-    let mut application = hidden::start(COMMUNITY, &params, JOIN_DID, &mut rng).unwrap();
-    let applicant_id = application.id.clone();
 
-    // --- two vetting sessions ------------------------------------------------------------
-    for (i, method) in [(0usize, VettingMethod::InPerson), (1, VettingMethod::Video)] {
-        let attestation = hidden::attest(
+    // 2. Two vetters, each in a context of its own.
+    for (ctx, member) in [
+        ("vetter-a", "did:key:z6MkVetterA"),
+        ("vetter-b", "did:key:z6MkVetterB"),
+    ] {
+        enrolled_vetter(&client, &mut vtc, &params, &mut rng, ctx, member).await;
+    }
+
+    // 3. The application, its identifier in each vetting request, an attestation from each.
+    context(&client, "applicant").await;
+    let application = pcs_vta::create_application(
+        &client,
+        "applicant",
+        COMMUNITY,
+        "did:key:z6MkApplicantJoin",
+        &params,
+    )
+    .await
+    .expect("the VTA creates the application");
+    let ext = hidden::request_ext(hidden::SUITE, &application.id);
+    let applicant_id = hidden::read_request_ext(Some(&ext))
+        .unwrap()
+        .expect("the vetter reads the identifier off the request");
+    for (ctx, card) in [("vetter-a", "z3CardA"), ("vetter-b", "z3CardB")] {
+        let attestation = pcs_vta::attest(
+            &client,
+            ctx,
             COMMUNITY,
             &params,
-            &mut vetters[i],
             &applicant_id,
-            statement_meta(method, &digest),
-            &mut rng,
+            statement_meta(&vtc, card),
+            None,
         )
-        .expect("the vetter holds a live credential and a token");
-        hidden::receive(COMMUNITY, &params, &mut application, &attestation)
-            .expect("the applicant checks it at the session, not at submit");
+        .await
+        .expect("the vetter's VTA spends a token and attests");
+        assert!(
+            attestation.get("tokenSerial").is_none() && attestation.get("token").is_some(),
+            "the `vetting/attestation/0.1` shape: {attestation}"
+        );
+        pcs_vta::verify_attestation(&client, &application.application_id, &params, &attestation)
+            .await
+            .expect("the applicant's VTA takes the attestation in");
     }
+    let held = pcs_vta::show_application(&client, &application.application_id)
+        .await
+        .unwrap()
+        .expect("the application is there");
+    assert_eq!(held.attestations.len(), 2);
+    assert!(
+        held.attestations
+            .iter()
+            .all(|a| a.token_label == vtc.current_token_label()),
+        "{held:?}"
+    );
 
-    // --- submit ---------------------------------------------------------------------------
+    // 4. The proof, bound to the community's challenge — and the community admits.
     let challenge = vtc.challenge(&mut rng);
-    let submission = hidden::prove(
+    let proof = pcs_vta::prove(
+        &client,
+        &application.application_id,
+        &params,
+        vtc.requirements_digest(),
+        &challenge,
+    )
+    .await
+    .expect("the VTA proves");
+    let submission: SubmissionWire = serde_json::from_value(proof).unwrap();
+    let decision = vtc
+        .submit(&submission.to_submission().unwrap(), chrono::Utc::now())
+        .expect("the community verifies the proof");
+    assert!(
+        decision.evaluation.satisfied(),
+        "two distinct hidden vetters satisfy the criterion: {:?}",
+        decision.evaluation.needs
+    );
+
+    // A vetter that has attested sees it, and has spent the token.
+    let vetter = pcs_vta::vetter_show(&client, "vetter-a", COMMUNITY)
+        .await
+        .unwrap()
+        .expect("the engine is there");
+    assert_eq!(vetter.attested, 1);
+    assert_eq!(
+        usize::try_from(vetter.tokens_held).unwrap(),
+        vtc.drip_rate() - 1
+    );
+
+    // Done with: the application's key and attestations go.
+    pcs_vta::delete_application(&client, &application.application_id)
+        .await
+        .unwrap();
+    assert!(
+        pcs_vta::show_application(&client, &application.application_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A refusal reaches the client as the code its specification declares, so the desk can say
+/// "no token yet" rather than a failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow: spins up a VTA"]
+async fn attesting_with_no_engine_is_refused_with_its_declared_code() {
+    let mock = MockVta::start_provisionable().await;
+    let client = admin_client(&mock).await;
+    let mut rng = StdRng::seed_from_u64(7);
+    let vtc = Vtc::new(COMMUNITY, PERIOD, requirements(), &mut rng).unwrap();
+    let Mode::Hidden(params) = hidden::read_mode(&published_criterion(&vtc)).unwrap() else {
+        panic!("hidden");
+    };
+    context(&client, "vetter").await;
+    context(&client, "applicant").await;
+    assert!(
+        pcs_vta::vetter_show(&client, "vetter", COMMUNITY)
+            .await
+            .unwrap()
+            .is_none(),
+        "no engine before the first enrolment"
+    );
+    // Somebody real to attest to: the identifier is checked before the engine is looked up.
+    let applicant = pcs_vta::create_application(
+        &client,
+        "applicant",
+        COMMUNITY,
+        "did:key:z6MkApplicantJoin",
+        &params,
+    )
+    .await
+    .unwrap();
+    let refused = pcs_vta::attest(
+        &client,
+        "vetter",
         COMMUNITY,
         &params,
-        &digest,
-        &application,
-        &challenge,
-        &mut rng,
+        &applicant.id,
+        statement_meta(&vtc, "z3Card"),
+        None,
     )
-    .unwrap();
-
-    // What rides in `extensions`, and nothing in it names a vetter.
-    let json = serde_json::to_string(&submission).unwrap();
-    assert!(!json.contains("member-0") && !json.contains("member-1"));
-    assert!(!json.contains("did:webvh:QmVtcScid:kernel-vtc.example:member"));
-
-    // --- the community decides --------------------------------------------------------------
-    let wire: SubmissionWire = serde_json::from_value(submission).unwrap();
-    let decision = vtc
-        .submit(
-            &wire.to_submission().unwrap(),
-            Utc.with_ymd_and_hms(2026, 9, 22, 12, 0, 0).unwrap(),
-        )
-        .expect("the proof verifies under the published parameters");
-    assert!(decision.evaluation.satisfied(), "{:?}", decision.evaluation);
-    assert_eq!(decision.evaluation.distinct_vetters(), 2);
-
-    // The facts the policy sees carry tags, not vetters.
-    for statement in &decision.statements {
-        assert!(statement.counted);
-        assert!(statement.issuer.starts_with('z'));
-        for v in &vetters {
-            assert_ne!(statement.issuer, v.id);
-            assert_ne!(statement.issuer, v.member);
-        }
-    }
-}
-
-/// The same flow again, but driven through `Application` — the type the join flow actually
-/// holds — so what lands in the submission's `extensions` is what a real submit would carry.
-#[test]
-fn the_join_submission_carries_the_proof_in_its_extensions() {
-    use openvtc_core::config::account::PersonaId;
-    use openvtc_core::vetting::book::VettingBook;
-    use openvtc_core::vetting::hidden::EXTENSIONS_MEMBER;
-
-    let mut rng = StdRng::seed_from_u64(0x2026_0923);
-    let mut vtc = Vtc::new(COMMUNITY, PERIOD, requirements(), &mut rng).unwrap();
-    let token_label = vtc.current_token_label().to_string();
-    let mut vetters: Vec<VetterSnapshot> = Vec::new();
-    for i in 0..2 {
-        let member = format!("member-{i}");
-        vtc.grant(&member);
-        let mut engine = VetterEngine::new(&member, &vtc, &mut rng).unwrap();
-        engine.enroll(&mut vtc, &mut rng).unwrap();
-        engine.drip(&mut vtc, 1, &token_label, 2, &mut rng).unwrap();
-        vetters.push(engine.snapshot().unwrap());
-    }
-    let digest = vtc.requirements_digest().to_string();
-
-    // The applicant adopts the criterion. Adopting it mints this application's own key.
-    let mut book = VettingBook::default();
-    let persona = PersonaId::new();
-    book.start_application(COMMUNITY, persona, JOIN_DID, Utc::now())
-        .unwrap();
-    let manifest_payload = json!({
-        "communityDid": COMMUNITY,
-        "criteria": [published_criterion(&vtc)],
-    });
-    let parsed = serde_json::from_value(manifest_payload.clone()).unwrap();
-    let application = book.application_mut(COMMUNITY, persona).unwrap();
-    application
-        .adopt_manifest(&parsed, &manifest_payload)
-        .unwrap();
-    assert!(
-        application.hidden.is_some(),
-        "the criterion is hidden-vetting"
-    );
-    let applicant_id = application
-        .hidden_id()
-        .expect("adopting a hidden criterion mints a key")
-        .to_string();
-
-    // Two sessions, and the attestations land on the application itself.
-    let params = application.hidden.clone().unwrap();
-    for (i, method) in [(0usize, VettingMethod::InPerson), (1, VettingMethod::Video)] {
-        let attestation = hidden::attest(
-            COMMUNITY,
-            &params,
-            &mut vetters[i],
-            &applicant_id,
-            statement_meta(method, &digest),
-            &mut rng,
-        )
-        .unwrap();
-        book.application_mut(COMMUNITY, persona)
-            .unwrap()
-            .receive_hidden_attestation(&attestation)
-            .expect("the applicant verifies it on receipt");
-    }
-
-    // Submit: the proof is built and carried in `extensions`, beside the requirements digest.
-    let application = book.application_mut(COMMUNITY, persona).unwrap();
-    let challenge = vtc.challenge(&mut rng);
-    assert!(application.prepare_hidden_submission(&challenge).unwrap());
-    let extensions =
-        application.join_extensions(openvtc_core::vetting::protocol::JoinProtocol::V0_2);
-    assert_eq!(
-        extensions["requirementsDigest"].as_str(),
-        Some(digest.as_str())
-    );
-    let carried = extensions
-        .get(EXTENSIONS_MEMBER)
-        .expect("the proof rides in extensions");
-
-    // And the community admits on it.
-    let wire: SubmissionWire = serde_json::from_value(carried.clone()).unwrap();
-    let decision = vtc
-        .submit(
-            &wire.to_submission().unwrap(),
-            Utc.with_ymd_and_hms(2026, 9, 22, 12, 0, 0).unwrap(),
-        )
-        .unwrap();
-    assert!(decision.evaluation.satisfied(), "{:?}", decision.evaluation);
-    assert_eq!(decision.evaluation.distinct_vetters(), 2);
-
-    // The submission is inside the VTC's 16 KiB `extensions` cap, with room over.
-    let bytes = serde_json::to_vec(&extensions).unwrap().len();
-    assert!(bytes < 16 * 1024, "extensions is {bytes} bytes");
-}
-
-/// The vetter's half, through the desk — the path the screen calls.
-///
-/// A vetter with an engine for the community takes an ordinary request, runs an ordinary
-/// session, and attests *without signing anything*: the desk closes the request exactly as the
-/// named path closes it, and what it hands back is an attestation carrying a tag where an issuer
-/// would be. The applicant then verifies it on arrival, which is where an unusable attestation
-/// is caught rather than at submit.
-#[test]
-fn a_vetter_attests_through_the_desk_without_signing_a_statement() {
-    use openvtc_core::config::account::PersonaId;
-    use openvtc_core::vetting::book::{HiddenVetterState, VettingBook};
-    use openvtc_core::vetting::vetter::Attestation;
-
-    let mut rng = StdRng::seed_from_u64(0x2026_0925);
-    let mut vtc = Vtc::new(COMMUNITY, PERIOD, requirements(), &mut rng).unwrap();
-    let token_label = vtc.current_token_label().to_string();
-    let digest = vtc.requirements_digest().to_string();
-    let params: HiddenParams = match hidden::read_mode(&published_criterion(&vtc)).unwrap() {
-        hidden::Mode::Hidden(p) => *p,
-        hidden::Mode::Named => panic!("hidden"),
-    };
-
-    // A vetter the community has enrolled and served a tick of the drip.
-    const VETTER: &str = "did:webvh:QmVtcScid:vetter-1";
-    vtc.grant(VETTER);
-    let mut engine = VetterEngine::new(VETTER, &vtc, &mut rng).unwrap();
-    engine.enroll(&mut vtc, &mut rng).unwrap();
-    engine.drip(&mut vtc, 1, &token_label, 3, &mut rng).unwrap();
-
-    let persona = PersonaId::new();
-    let mut desk = VettingBook::default();
-    desk.hidden_vetter.push(HiddenVetterState::new(
+    .await
+    .unwrap_err();
+    assert!(refused.is_not_found(), "{refused}");
+    // And a malformed identifier is said as such, by its own code.
+    let refused = pcs_vta::attest(
+        &client,
+        "vetter",
         COMMUNITY,
-        persona,
-        params.clone(),
-        engine.snapshot().unwrap(),
-    ));
-
-    // The applicant's side: an application, and the request that carries its identifier.
-    let mut book = VettingBook::default();
-    let applicant_persona = PersonaId::new();
-    book.start_application(COMMUNITY, applicant_persona, JOIN_DID, Utc::now())
-        .unwrap();
-    let manifest_payload = json!({
-        "communityDid": COMMUNITY,
-        "criteria": [published_criterion(&vtc)],
-    });
-    let parsed = serde_json::from_value(manifest_payload.clone()).unwrap();
-    let application = book.application_mut(COMMUNITY, applicant_persona).unwrap();
-    application
-        .adopt_manifest(&parsed, &manifest_payload)
-        .unwrap();
-    let document_id = format!("urn:uuid:{}", uuid::Uuid::new_v4());
-    let ticket = openvtc_core::vetting::tickets::Ticket::issue(
-        COMMUNITY.to_string(),
-        persona,
-        vec![VettingMethod::InPerson],
-        1,
-        chrono::Duration::days(1),
-        Utc::now(),
-    );
-    let code = ticket.code.clone();
-    desk.tickets.push(ticket);
-    let request = application
-        .prepare_request(
-            &document_id,
-            VETTER,
-            vta_sdk::protocols::vetting::request::v0_1::Ticket::ShortCodeTicket(
-                vta_sdk::protocols::vetting::request::v0_1::ShortCodeTicket::try_from(
-                    vta_sdk::protocols::vetting::request::v0_1::ShortCodeTicket::builder()
-                        .code(code),
-                )
-                .unwrap(),
-            ),
-            openvtc_core::vetting::applicant::RequestDraft {
-                preferred_method: Some(VettingMethod::InPerson),
-                languages: vec![],
-                message: None,
-                availability: None,
-            },
-            Utc::now(),
-        )
-        .expect("a well-formed request");
-
-    // The request carries the identifier the vetter will attest to — and nothing else new.
-    let raw = serde_json::to_value(&request).unwrap();
+        &params,
+        "z3Nobody",
+        statement_meta(&vtc, "z3Card"),
+        None,
+    )
+    .await
+    .unwrap_err();
     assert!(
-        raw["ext"][hidden::HIDDEN_VETTING_NS]["id"].is_string(),
-        "{raw}"
+        refused.is(pcs_vta::tasks::attest::v0_1::error_codes::APPLICANT_INVALID),
+        "{refused}"
     );
-
-    // The desk takes it, opens a session, and receives the card. (Covered in full by the
-    // reference example; here it is the shortest path to `CardReceived`.)
-    let accepted = desk.take_request(
-        openvtc_core::vetting::vetter::IncomingRequest {
-            document_id: &document_id,
-            sender: JOIN_DID,
-            persona,
-            body: request,
-            eligible: true,
-        },
-        Utc::now(),
-    );
-    let openvtc_core::vetting::vetter::Intake::Accepted(response) = accepted else {
-        panic!("the desk accepts it");
-    };
-    let request_id = desk
-        .desk
-        .iter()
-        .find(|e| e.request_document_id == document_id)
-        .map(|e| e.request_id.clone())
-        .expect("the desk took it");
-    let _ = response;
-
-    // Without a card there is nothing to attest to, and the desk says so rather than attesting.
-    let err = desk
-        .attest_hidden(
-            &request_id,
-            VETTER,
-            Attestation {
-                method: VettingMethod::InPerson,
-                document_classes: vec!["passport".into()],
-                claims_verified: vec!["name.legal".into()],
-                liveness_confirmed: true,
-                declared_relationship: VettingRelationship::None,
-                attestation_text_digest: None,
-            },
-            Utc::now(),
-            &mut rng,
-        )
-        .expect_err("no card yet");
-    assert!(format!("{err}").contains("cannot"), "{err}");
-    let _ = digest;
 }

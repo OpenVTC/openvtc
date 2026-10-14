@@ -268,39 +268,12 @@ pub struct VetterGrant {
     pub credential: serde_json::Value,
 }
 
-/// The most enrolment requests whose blinding state is kept for a late answer.
-pub const MAX_PENDING_ENROLMENTS: usize = 8;
-
-/// An enrolment request on its way, with what opens its answer. Memory only.
-#[derive(Clone)]
-pub struct PendingEnrolment {
-    /// The request's document id — what the answer threads on.
-    pub document_id: String,
-    /// The community asked.
-    pub community: String,
-    /// The persona that asked.
-    pub persona: PersonaId,
-    /// The blinding state that unblinds the answer.
-    pub blinding: std::sync::Arc<openvtc_vetting_pcs::vetter::EnrolmentBlinding>,
-}
-
-impl std::fmt::Debug for PendingEnrolment {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The blinding state is a secret of the round trip; it is never printed.
-        f.debug_struct("PendingEnrolment")
-            .field("document_id", &self.document_id)
-            .field("community", &self.community)
-            .field("persona", &self.persona)
-            .finish_non_exhaustive()
-    }
-}
-
 /// Our hidden-vetting engine for one community and persona.
 ///
-/// A vetter holds one of these per community that runs hidden vetting: the key its identifier
-/// and every tag derive from, the class credentials it has been issued, and the tokens it has
-/// drawn. It is created when the community first issues a class credential and kept until the
-/// last label it holds has closed.
+/// A vetter holds one of these per community that runs hidden vetting. The engine itself — the
+/// key its identifier and every tag derive from, the class credentials it has been issued, the
+/// tokens it has drawn — is held by the person's VTA ([`super::pcs_vta`]); this is the schedule
+/// that drives it, and what the VTA last said it holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HiddenVetterState {
@@ -319,8 +292,30 @@ pub struct HiddenVetterState {
     /// month is new labels under the same keys, and drawing on last month's labels would only be
     /// refused. New keys are a different matter — see [`Self::rekeyed_at`].
     pub params: super::hidden::HiddenParams,
-    /// The engine, as [`openvtc_vetting_pcs::snapshot::VetterSnapshot`] stores it.
-    pub snapshot: openvtc_vetting_pcs::snapshot::VetterSnapshot,
+    /// What the VTA said it holds for this engine, as of its last answer: the class labels a
+    /// credential is held under, and how many tokens. The keys, credentials and tokens are the
+    /// VTA's and never leave it. Nothing held until its first answer.
+    #[serde(default)]
+    pub engine: super::pcs_vta::VetterView,
+    /// The stored record was written by a build that ran the engine on this device. That
+    /// engine's key went with the upgrade, so the community knows this vetter under an
+    /// identifier the VTA cannot prove, and enrolment starts again
+    /// ([`Self::forget_local_engine`]). Read, never written.
+    #[serde(
+        default,
+        rename = "snapshot",
+        skip_serializing,
+        deserialize_with = "super::legacy::present"
+    )]
+    pub local_engine_dropped: bool,
+    /// The blinding of enrolments a local engine asked for: read and dropped, like the engine.
+    #[serde(
+        default,
+        rename = "enrolmentsAsked",
+        skip_serializing,
+        deserialize_with = "super::legacy::discard"
+    )]
+    pub legacy_enrolments_asked: (),
     /// The last drip tick we were served, **per token label**, so the next ask is the next tick
     /// and a restart does not re-ask for one the community has already served.
     ///
@@ -380,18 +375,14 @@ pub struct HiddenVetterState {
     /// worth one more try, and the community bounds how many re-issues it signs.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lost_reasked: bool,
-    /// Enrolments asked for whose answers have not been opened yet, each with the blinding that
-    /// opens it — **written to the protected config before the request is sent**.
-    ///
-    /// The community issues one credential per member per label and keeps no copy of its
-    /// answer, so an answer that arrives when the blinding is gone (a restart between the ask
-    /// and the answer) can never be opened, and asking again is refused (`alreadyEnrolled`) —
-    /// a lock-out until the community publishes a new label. Kept here, the blinding outlives a
-    /// restart, and a late answer is still this vetter's credential. As secret as the
-    /// snapshot's `usk`, and kept in the same place. Bounded to [`MAX_PENDING_ENROLMENTS`];
-    /// dropped once an answer to it is opened or refused.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub enrolments_asked: Vec<AskedEnrolment>,
+    /// When we last asked to enrol. While the VTA still holds that request
+    /// ([`super::pcs_vta::VetterView::pending_labels`]) and it was asked within
+    /// [`ENROLMENT_ANSWER_WAIT`], the schedule waits for its answer rather than asking again —
+    /// even across a restart that forgot the question: the VTA replaces a pending request when
+    /// asked again under its label, so a second ask would leave the community's answer to the
+    /// first unable to open, and the community issues one credential per label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrol_asked_at: Option<DateTime<Utc>>,
     /// When [`Self::params`] were last taken from a manifest the community served — the age of
     /// the rate, tick length and labels this engine draws under. `None` until the first read
     /// after this was kept. No draw is asked for on parameters older than
@@ -408,6 +399,10 @@ pub struct HiddenVetterState {
     #[serde(skip)]
     pub awaiting_read: bool,
 }
+
+/// How long an enrolment request the VTA still holds is waited on before it is asked for again
+/// ([`HiddenVetterState::enrol_asked_at`]).
+pub const ENROLMENT_ANSWER_WAIT: chrono::Duration = chrono::Duration::hours(1);
 
 /// How old [`HiddenVetterState::params`] may be when a draw is asked for under them. A pass
 /// reads the manifest before it draws; this is how long that read counts.
@@ -465,20 +460,6 @@ fn number_after(text: &str, marker: &str) -> Option<usize> {
     let rest = &text[text.find(marker)? + marker.len()..];
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
-}
-
-/// One enrolment request in flight, as [`HiddenVetterState::enrolments_asked`] keeps it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AskedEnrolment {
-    /// The request's document id — what the answer threads on.
-    pub document_id: String,
-    /// The class period asked for (`2026-10`).
-    pub period: String,
-    /// SECRET: the blinding that opens the answer ([`super::hidden::blinding_text`]).
-    pub blinding: String,
-    /// When it was asked.
-    pub asked_at: DateTime<Utc>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -584,19 +565,21 @@ pub enum Adopted {
 }
 
 impl HiddenVetterState {
-    /// A freshly minted engine for `community`, enrolled under nothing yet.
+    /// A new schedule for `community`, enrolled under nothing yet. The VTA creates the engine
+    /// itself on the first enrolment request.
     #[must_use]
     pub fn new(
         community: impl Into<String>,
         persona: PersonaId,
         params: super::hidden::HiddenParams,
-        snapshot: openvtc_vetting_pcs::snapshot::VetterSnapshot,
     ) -> Self {
         Self {
             community: community.into(),
             persona,
             params,
-            snapshot,
+            engine: super::pcs_vta::VetterView::default(),
+            local_engine_dropped: false,
+            legacy_enrolments_asked: (),
             last_ticks: std::collections::BTreeMap::new(),
             last_drawn_at: None,
             events: Vec::new(),
@@ -609,7 +592,7 @@ impl HiddenVetterState {
             unanswered: 0,
             lost_enrolment: None,
             lost_reasked: false,
-            enrolments_asked: Vec::new(),
+            enrol_asked_at: None,
             params_read_at: None,
             over_quota: None,
             awaiting_read: false,
@@ -722,27 +705,6 @@ impl HiddenVetterState {
         })
     }
 
-    /// Keep the blinding of an enrolment about to be asked for, bounded: the oldest goes first.
-    pub fn remember_asked(&mut self, asked: AskedEnrolment) {
-        self.enrolments_asked
-            .retain(|a| a.document_id != asked.document_id);
-        self.enrolments_asked.push(asked);
-        let excess = self
-            .enrolments_asked
-            .len()
-            .saturating_sub(MAX_PENDING_ENROLMENTS);
-        self.enrolments_asked.drain(..excess);
-    }
-
-    /// Take the stored enrolment `thread` answers, if it is one of ours.
-    pub fn take_asked(&mut self, thread: &str) -> Option<AskedEnrolment> {
-        let i = self
-            .enrolments_asked
-            .iter()
-            .position(|a| a.document_id == thread)?;
-        Some(self.enrolments_asked.remove(i))
-    }
-
     /// The period this vetter owes an enrolment under now, if any: the community's current class
     /// label, when no credential under it is held.
     #[must_use]
@@ -753,7 +715,7 @@ impl HiddenVetterState {
             .first()?
             .trim_start_matches("vetter/")
             .to_string();
-        (!self.snapshot.credentials.contains_key(&period)).then_some(period)
+        (!self.engine.enrolled_for(&period)).then_some(period)
     }
 
     /// The community did not answer a question of ours in time: wait before asking again, a
@@ -841,7 +803,7 @@ impl HiddenVetterState {
             *entry = (*entry).max(*tick);
         }
         while plan.owed.len() < MAX_DRAWS_PER_PASS {
-            match due(&self.params, Some(&self.snapshot), &ticks, &events, now) {
+            match due(&self.params, Some(&self.engine), &ticks, &events, now) {
                 Due::Nothing => break,
                 // Enrolment blocks every draw behind it, so it is the whole plan.
                 // Under a label whose answer we lost, ask once more — a community that
@@ -879,17 +841,51 @@ impl HiddenVetterState {
         *entry = (*entry).max(tick);
     }
 
-    /// Tokens held here, and how many of them are under a label the community still accepts.
+    /// Tokens the VTA holds for this engine, and how many of them are free to spend — as of its
+    /// last answer.
     #[must_use]
     pub fn tokens(&self) -> (usize, usize) {
-        let held = self.snapshot.tokens.len();
-        let usable = self
-            .snapshot
-            .tokens
-            .iter()
-            .filter(|t| self.params.token_labels.contains(&t.label))
-            .count();
-        (held, usable)
+        let count = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+        (
+            count(self.engine.tokens_held),
+            count(self.engine.tokens_free),
+        )
+    }
+
+    /// Take what the VTA says it now holds for this engine.
+    pub fn take_engine(&mut self, engine: super::pcs_vta::VetterView) {
+        self.engine = engine;
+    }
+
+    /// Start again after an upgrade from a build that ran the engine on this device
+    /// ([`Self::local_engine_dropped`]): what this record says about enrolment and served ticks
+    /// belonged to that engine. Returns whether there was anything to forget.
+    pub fn forget_local_engine(&mut self) -> bool {
+        if !self.local_engine_dropped {
+            return false;
+        }
+        self.local_engine_dropped = false;
+        self.engine = super::pcs_vta::VetterView::default();
+        self.enrolled_at.clear();
+        self.last_ticks.clear();
+        self.last_draw = None;
+        self.lost_enrolment = None;
+        self.lost_reasked = false;
+        self.enrol_asked_at = None;
+        self.retry_at = None;
+        self.unanswered = 0;
+        true
+    }
+
+    /// Whether an enrolment under `period` is still awaiting the community's answer: the VTA
+    /// holds the request, asked within [`ENROLMENT_ANSWER_WAIT`].
+    #[must_use]
+    pub fn enrolment_pending(&self, period: &str, now: DateTime<Utc>) -> bool {
+        let label = format!("vetter/{period}");
+        self.engine.pending_labels.contains(&label)
+            && self
+                .enrol_asked_at
+                .is_some_and(|at| now - at < ENROLMENT_ANSWER_WAIT)
     }
 
     /// The event labels this vetter may draw under today, with the rate each yields.
@@ -952,6 +948,67 @@ pub struct HiddenEventState {
     pub closes_after: Option<chrono::NaiveDate>,
     /// When we last heard about it.
     pub answered_at: DateTime<Utc>,
+}
+
+/// Something a community or another member sent that the VTA has to take in
+/// ([`VettingBook::pcs_inbox`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum PcsInbound {
+    /// The community's answer to our enrolment: a blinded class credential, which only the VTA
+    /// that asked can open.
+    Enrolled {
+        community: String,
+        persona: PersonaId,
+        answer: super::wire::pcs::RootResponse,
+    },
+    /// The community served a draw of the drip.
+    TokensServed {
+        community: String,
+        persona: PersonaId,
+        answer: super::wire::pcs::TokensResponse,
+    },
+    /// The community refused a draw: the VTA forgets its serials.
+    DrawRefused {
+        community: String,
+        persona: PersonaId,
+        label: String,
+        tick: u32,
+    },
+    /// A vetter's attestation for one of our applications (`vetting/attestation/0.1`).
+    Attestation {
+        /// Our application's id ([`super::applicant::Application::id`]).
+        application: String,
+        attestation: serde_json::Value,
+    },
+    /// An application we abandoned or finished: its key and attestations at the VTA go.
+    DeleteApplication {
+        /// The VTA's handle for it.
+        application_id: String,
+    },
+}
+
+/// What the VTA needs to attest for a request ([`VettingBook::hidden_attestation_job`]).
+#[derive(Debug, Clone)]
+pub struct HiddenAttestJob {
+    /// The desk request.
+    pub request_id: String,
+    /// The community.
+    pub community: String,
+    /// Our persona there.
+    pub persona: PersonaId,
+    /// The applicant's join DID, which the attestation is sent to.
+    pub applicant: String,
+    /// The applicant's PCS identifier, from its request.
+    pub applicant_id: String,
+    /// `vta/pcs/attest`'s `meta`.
+    pub meta: serde_json::Value,
+    /// The parameters our schedule runs under.
+    pub params: super::hidden::HiddenParams,
 }
 
 /// Where one community has put us as a vetter: its grant, and the profile we
@@ -1248,12 +1305,8 @@ pub struct VettingBook {
     /// The vetter profile we last sent each community, per persona.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vetter_profiles: Vec<VetterProfileRecord>,
-    /// Our hidden-vetting engine per community, where one runs it.
-    ///
-    /// **This carries secrets.** A snapshot's `usk` is the key every tag of ours derives from,
-    /// so a copy of one links every attestation that persona ever made. It belongs exactly where
-    /// the persona keys belong, and in the design's intended shape it lives in the VTA rather
-    /// than here — see `openvtc_vetting_pcs::snapshot`.
+    /// Our hidden-vetting schedule per community, where one runs it. The engines themselves
+    /// are the VTA's ([`super::pcs_vta`]); nothing secret is kept here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_vetter: Vec<HiddenVetterState>,
     /// Hidden-vetting parameters each community published in its manifest, by community DID.
@@ -1274,25 +1327,33 @@ pub struct VettingBook {
     /// [`super::queries`].
     #[serde(skip)]
     pub queries: Vec<CommunityQuery>,
-    /// The blinding state of an enrolment in flight. **Memory only, and deliberately**: it is
-    /// useless without the community's answer and dangerous to keep past it, so an answer that
-    /// arrives after a restart is dropped and the vetter asks again. That costs nothing — a
-    /// request whose answer was never unblinded issued no credential anyone will count.
-    ///
-    /// Kept per request, and **past the reply window**: a community that answers late has still
-    /// enrolled us, and refuses every second request under the same label, so an answer dropped
-    /// because the question timed out locks the vetter out until the label moves on. Bounded to
-    /// [`MAX_PENDING_ENROLMENTS`]; the oldest goes first.
-    #[serde(skip)]
-    pub pending_enrolments: Vec<PendingEnrolment>,
     /// The drip ticks asked for and not yet answered, by request document id: `(label, tick)`.
     ///
     /// Memory only, like [`Self::queries`]: it is how a refusal, which names neither, finds the
     /// draw it refuses — and how a pass knows not to ask again for a tick whose answer is still
-    /// on its way, which would replace the serials that answer unblinds under. After a restart
-    /// nothing is on its way, and a tick asked for again replaces its stale serials.
+    /// on its way. After a restart nothing is on its way here, while the VTA may still hold the
+    /// draw ([`super::pcs_vta::VetterView::draws_in_flight`]): a pass drops that draw at the VTA
+    /// before asking for the tick again.
     #[serde(skip)]
     pub draws_in_flight: std::collections::HashMap<String, (String, u32)>,
+    /// Answers the VTA has to take in, oldest first ([`PcsInbound`]). The inbound handler that
+    /// receives one cannot reach the VTA, so it queues it here; the loop hands it on
+    /// ([`Self::pcs_due`]). **Persisted**: a community answers an enrolment once and keeps no
+    /// copy, so an answer the VTA has not taken yet must survive a restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pcs_inbox: Vec<PcsInbound>,
+    /// There is hidden-vetting work for the VTA: something in [`Self::pcs_inbox`], or an
+    /// application without its engine yet. Set where the work arises, taken by the loop. Not
+    /// saved — the next run sees the inbox.
+    #[serde(skip)]
+    pub pcs_due: bool,
+    /// Not before this is the VTA asked again: the last job could not reach it. Backs off
+    /// ([`hidden_retry_after`]) over [`Self::pcs_failures`] in a row (R1.4). Not saved.
+    #[serde(skip)]
+    pub pcs_retry_at: Option<DateTime<Utc>>,
+    /// Jobs in a row that could not reach the VTA. Not saved.
+    #[serde(skip)]
+    pub pcs_failures: u32,
     /// When each community's mode was last asked for, and how the last attempt failed.
     /// **Memory only**: a failure is news about this run's network, not a fact about the
     /// community, and the reading it sits beside is persisted on its own ([`super::mode`]).
@@ -1378,33 +1439,55 @@ impl VettingBook {
         count
     }
 
+    /// Start hidden vetting again wherever a build that ran the engine on this device left its
+    /// state, and say so in [`Self::retired`]. Run once on load (`ProtectedConfig::parse`).
+    ///
+    /// Those builds kept each PCS key here. The keys were dropped as the records were read
+    /// ([`HiddenVetterState::local_engine_dropped`], [`Application::local_engine_dropped`]) and
+    /// cannot move into the VTA, which mints its own: a vetter enrols again, under an identifier
+    /// the community has not seen, and an application starts its hidden vetting again — its
+    /// attestations were bound to the old key. Returns how many were reset.
+    pub fn forget_local_engines(&mut self) -> usize {
+        let mut notes = Vec::new();
+        for held in &mut self.hidden_vetter {
+            if held.forget_local_engine() {
+                tracing::warn!(community = %held.community, "hidden-vetting key from a local engine dropped; enrolling again through the VTA");
+                notes.push(format!(
+                    "Your hidden-vetting key for {} was kept on this device by an earlier \
+                     version. Your VTA holds it now, so you are being enrolled again there. If \
+                     the community refuses (it knows your old key), ask its admins to let you \
+                     enrol again.",
+                    held.community
+                ));
+            }
+        }
+        for application in &mut self.applications {
+            if application.forget_local_engine() {
+                tracing::warn!(community = %application.community, "hidden-vetting application key from a local engine dropped; starting again through the VTA");
+                notes.push(format!(
+                    "Your PCS ZKP vetting for {} started again: an earlier version kept its key \
+                     on this device, and your VTA holds it now. Attestations gathered under the \
+                     old key no longer count — ask your vetters again.",
+                    application.community,
+                ));
+                self.pcs_due = true;
+            }
+        }
+        let count = notes.len();
+        for note in notes {
+            if !self.retired.contains(&note) {
+                self.retired.push(note);
+            }
+        }
+        count
+    }
+
     /// Our hidden-vetting engine for `community` and `persona`, if one has been enrolled.
     #[must_use]
     pub fn hidden_vetter(&self, community: &str, persona: PersonaId) -> Option<&HiddenVetterState> {
         self.hidden_vetter
             .iter()
             .find(|h| h.community == community && h.persona == persona)
-    }
-
-    /// Keep the blinding state of an enrolment request until its answer arrives — even late.
-    pub fn remember_enrolment(&mut self, pending: PendingEnrolment) {
-        self.pending_enrolments
-            .retain(|p| p.document_id != pending.document_id);
-        self.pending_enrolments.push(pending);
-        let excess = self
-            .pending_enrolments
-            .len()
-            .saturating_sub(MAX_PENDING_ENROLMENTS);
-        self.pending_enrolments.drain(..excess);
-    }
-
-    /// The enrolment request `thread` names, sent to `community`, with what opens its answer.
-    pub fn take_enrolment(&mut self, community: &str, thread: &str) -> Option<PendingEnrolment> {
-        let i = self
-            .pending_enrolments
-            .iter()
-            .position(|p| p.document_id == thread && p.community == community)?;
-        Some(self.pending_enrolments.remove(i))
     }
 
     /// Where `persona` stands for attesting under `community`'s hidden vetting, or `None` when
@@ -1462,38 +1545,34 @@ impl VettingBook {
             .find(|h| h.community == community && h.persona == persona)
     }
 
-    /// Attest to a request the hidden way: no statement, no signature, nothing that names us.
+    /// Prepare an attestation to a request the hidden way: no statement, no signature, nothing
+    /// that names us. The VTA makes it ([`super::pcs_vta::attest`]); this is what it needs.
     ///
     /// The facts are the ones [`Self::statement_draft`] builds — the same checklist, the same
     /// refusals, the same identity commitment and card digest — so a vetter's obligations do not
     /// change with the path. What changes is the last step: instead of signing an endorsement
-    /// whose issuer is this persona, the engine spends a token and produces an attestation that
+    /// whose issuer is this persona, the VTA spends a token and produces an attestation that
     /// carries a tag in place of a name.
-    ///
-    /// The desk entry moves to `Attested` with the attestation's own identifier in place of a
-    /// statement id, so the request closes exactly as the named path closes it. Nothing is added
-    /// to [`Self::issued`]: there is no statement to withdraw, and a withdrawal on this path is a
-    /// different mechanism (design §4.4).
     ///
     /// # Errors
     ///
     /// - [`VetterError::NoSuchRequest`] / [`VetterError::WrongState`] as for the named path.
     /// - [`VetterError::Shape`] if the checklist does not support the statement.
-    /// - [`VetterError::Hidden`] if this persona holds no engine for the community, if the
-    ///   request carries no PCS identifier, or if the engine has no live credential or no free
-    ///   token — the last is `atCapacity`, and the vetter declines rather than attests.
-    pub fn attest_hidden<R: rand::RngCore + rand::CryptoRng>(
-        &mut self,
+    /// - [`VetterError::Hidden`] if this persona has no schedule for the community, if the
+    ///   request carries no PCS identifier, or if no credential is held under a live class label.
+    pub fn hidden_attestation_job(
+        &self,
         request_id: &str,
         vetter_did: &str,
         attestation: super::vetter::Attestation,
         now: DateTime<Utc>,
-        rng: &mut R,
-    ) -> Result<serde_json::Value, VetterError> {
+    ) -> Result<HiddenAttestJob, VetterError> {
         let entry = self
             .desk_entry(request_id)
-            .ok_or(VetterError::NoSuchRequest)?
-            .clone();
+            .ok_or(VetterError::NoSuchRequest)?;
+        if !matches!(entry.state, DeskState::CardReceived { .. }) {
+            return Err(VetterError::WrongState("be attested"));
+        }
         let applicant_id = super::hidden::read_request_ext(
             entry
                 .request
@@ -1535,20 +1614,50 @@ impl VettingBook {
             })?;
 
         let state = self
-            .hidden_vetter_mut(&entry.community, entry.persona)
+            .hidden_vetter(&entry.community, entry.persona)
             .ok_or(VetterError::Hidden(super::hidden::HiddenError::NotEnrolled))?;
-        let params = state.params.clone();
-        let wire = super::hidden::attest(
-            &entry.community,
-            &params,
-            &mut state.snapshot,
-            &applicant_id,
+        // Enrolment first: a vetter that holds no credential holds no token either, and "no
+        // token" would send it to wait for a drip it cannot draw.
+        if !state
+            .params
+            .vetter_labels
+            .iter()
+            .any(|l| state.engine.enrolled_for(l.trim_start_matches("vetter/")))
+        {
+            return Err(VetterError::Hidden(super::hidden::HiddenError::NotEnrolled));
+        }
+        Ok(HiddenAttestJob {
+            request_id: request_id.to_string(),
+            community: entry.community.clone(),
+            persona: entry.persona,
+            applicant: entry.applicant.clone(),
+            applicant_id,
             meta,
-            rng,
-        )
-        .map_err(VetterError::Hidden)?;
-        state.tokens_spent = state.tokens_spent.saturating_add(1);
+            params: state.params.clone(),
+        })
+    }
 
+    /// The VTA attested for `request_id`: close the request as the named path closes it.
+    ///
+    /// The desk entry moves to `Attested` with an identifier of the attestation's own in place
+    /// of a statement id. Nothing is added to [`Self::issued`]: there is no statement to
+    /// withdraw, and a withdrawal on this path is a different mechanism (design §4.4).
+    ///
+    /// # Errors
+    ///
+    /// [`VetterError::NoSuchRequest`] / [`VetterError::WrongState`] if the request moved on while
+    /// the VTA was attesting.
+    pub fn hidden_attested(
+        &mut self,
+        request_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), VetterError> {
+        let (community, persona) = {
+            let entry = self
+                .desk_entry(request_id)
+                .ok_or(VetterError::NoSuchRequest)?;
+            (entry.community.clone(), entry.persona)
+        };
         let entry = self
             .desk_entry_mut(request_id)
             .ok_or(VetterError::NoSuchRequest)?;
@@ -1561,7 +1670,20 @@ impl VettingBook {
             card: card.clone(),
         };
         entry.updated_at = now;
-        Ok(wire)
+        if let Some(state) = self.hidden_vetter_mut(&community, persona) {
+            state.tokens_spent = state.tokens_spent.saturating_add(1);
+            // The token the VTA spent, until its next answer says what it holds.
+            state.engine.tokens_free = state.engine.tokens_free.saturating_sub(1);
+            state.engine.tokens_held = state.engine.tokens_held.saturating_sub(1);
+            state.engine.attested = state.engine.attested.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// Queue something for the VTA to take in, and say there is work.
+    pub fn queue_for_vta(&mut self, item: PcsInbound) {
+        self.pcs_inbox.push(item);
+        self.pcs_due = true;
     }
 
     /// Nothing to persist — keeps a config without vetting byte-identical.
@@ -2275,6 +2397,12 @@ impl VettingBook {
     }
 
     /// The application with this id.
+    #[must_use]
+    pub fn application_by_id(&self, id: &str) -> Option<&Application> {
+        self.applications.iter().find(|a| a.id == id)
+    }
+
+    /// The application with this id, to write.
     pub fn application_by_id_mut(&mut self, id: &str) -> Option<&mut Application> {
         self.applications.iter_mut().find(|a| a.id == id)
     }
@@ -2320,11 +2448,19 @@ impl VettingBook {
         now: DateTime<Utc>,
     ) -> usize {
         let before = self.applications.len();
+        let mut retired = Vec::new();
         self.applications.retain(|a| {
-            !(joined(a)
+            let retire = joined(a)
                 && a.presentable_statements(now).is_empty()
-                && !a.holds_hidden_attestation())
+                && !a.holds_hidden_attestation();
+            if retire && let Some(app) = &a.hidden_app {
+                retired.push(app.application_id.clone());
+            }
+            !retire
         });
+        for application_id in retired {
+            self.queue_for_vta(PcsInbound::DeleteApplication { application_id });
+        }
         before - self.applications.len()
     }
 
@@ -2344,9 +2480,18 @@ impl VettingBook {
     /// Needed because an application is otherwise permanent. Started as the
     /// wrong persona — easy, since the persona is fixed for its whole life —
     /// it would own that community's vetting route forever.
+    ///
+    /// A hidden-vetting application's key and attestations at the VTA go with it
+    /// ([`PcsInbound::DeleteApplication`]).
     pub fn abandon_application(&mut self, id: &str) -> Option<Application> {
         let i = self.applications.iter().position(|a| a.id == id)?;
-        Some(self.applications.remove(i))
+        let application = self.applications.remove(i);
+        if let Some(app) = &application.hidden_app {
+            self.queue_for_vta(PcsInbound::DeleteApplication {
+                application_id: app.application_id.clone(),
+            });
+        }
+        Some(application)
     }
 
     /// The desk entry with our `request_id`.
