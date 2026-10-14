@@ -1316,6 +1316,8 @@ impl StateHandler {
         // `join_flow::AwaitingChallenge`) — the same hand-off, for the question
         // a launch asks rather than the one the vetting page does.
         let mut awaiting_challenge: Option<join_flow::AwaitingChallenge> = None;
+        // A join parked on a wallet session (see `join_flow::AwaitingWallet`).
+        let mut awaiting_wallet: Option<join_flow::AwaitingWallet> = None;
         let result = loop {
             tokio::select! {
                 Some(action) = action_rx.recv() => match action {
@@ -1386,6 +1388,22 @@ impl StateHandler {
                              join again when you are ready.",
                         );
                         state.active_page = state::ActivePage::Main;
+                    },
+                    // Leaving a wallet session. The session lapses on its own;
+                    // the page offers to try again or go on without it.
+                    Action::JoinCancel if awaiting_wallet.is_some() => {
+                        if let Some(query) =
+                            awaiting_wallet.take().and_then(|a| a.asking)
+                        {
+                            config.private.vetting.forget_query(&query);
+                        }
+                        join_entry = Some(join_flow::JoinEntry::Wallet {
+                            end: join_flow::WalletEnd::Unfinished(
+                                "You stopped waiting for the wallet. Nothing has been sent to \
+                                 the community but the session request."
+                                    .to_string(),
+                            ),
+                        });
                     },
                     // Everything else acts on state and the resources below,
                     // and lives in `runtime_actions` where a test can call it.
@@ -1675,6 +1693,14 @@ impl StateHandler {
                                 {
                                     awaiting_challenge = None;
                                     join_entry = Some(entry);
+                                } else if let Some(step) = awaiting_wallet
+                                    .as_mut()
+                                    .and_then(|a| join_flow::wallet_answer(a, &answer, &mut state))
+                                {
+                                    if let Some(entry) = step {
+                                        awaiting_wallet = None;
+                                        join_entry = Some(entry);
+                                    }
                                 } else {
                                     answers.push(answer);
                                 }
@@ -2138,6 +2164,20 @@ impl StateHandler {
                                 join_flow::CHALLENGE_WAIT.as_secs()
                             )),
                         });
+                    }
+                    // A wallet session is polled on this tick, and given up on
+                    // when the community stops answering (R1.2).
+                    if let Some(awaiting) = awaiting_wallet.as_mut()
+                        && let Some(entry) = join_flow::wallet_tick(
+                            awaiting,
+                            &mut config,
+                            &tdk,
+                            Some(&didcomm_service),
+                        )
+                        .await
+                    {
+                        awaiting_wallet = None;
+                        join_entry = Some(entry);
                     }
                     // R4.3: a capability query has a defined reply window. The
                     // send was fire-and-forget; if no correlated reply arrived,
@@ -2660,6 +2700,7 @@ impl StateHandler {
             if let Some(entry) = join_entry.take() {
                 awaiting_requirements = None;
                 awaiting_challenge = None;
+                awaiting_wallet = None;
                 match self
                     .join_flow(
                         &mut action_rx,
@@ -2705,6 +2746,9 @@ impl StateHandler {
                     }
                     Ok(join_flow::JoinExit::AwaitChallenge(awaiting)) => {
                         awaiting_challenge = Some(awaiting);
+                    }
+                    Ok(join_flow::JoinExit::AwaitWallet(awaiting)) => {
+                        awaiting_wallet = Some(awaiting);
                     }
                     // F10 on a join page lands here. Like every other exit it
                     // must tell the UI to stop: the UI leaves its loop only on
@@ -2965,7 +3009,8 @@ impl StateHandler {
                                 // Neither is returned without `hears_replies`.
                                 Ok(
                                     join_flow::JoinExit::AwaitRequirements(_)
-                                    | join_flow::JoinExit::AwaitChallenge(_),
+                                    | join_flow::JoinExit::AwaitChallenge(_)
+                                    | join_flow::JoinExit::AwaitWallet(_),
                                 ) => {
                                     state.active_page = state::ActivePage::Main;
                                 }
@@ -3288,6 +3333,7 @@ impl StateHandler {
                     Action::JoinContextSelect(..) | Action::JoinContextSlug(..) |
                     Action::JoinContextChoose | Action::JoinAnswersSelect(..) | Action::JoinAnswersChoose |
                     Action::JoinRegistryToggle | Action::JoinRegistryConfirm |
+                    Action::JoinWalletStart | Action::JoinWalletSkip |
                     Action::JoinVettingTake | Action::JoinVettingApply |
                     Action::JoinVettingJoin |
                     Action::JoinVettingAskAgain | Action::JoinVettingRow(..) |

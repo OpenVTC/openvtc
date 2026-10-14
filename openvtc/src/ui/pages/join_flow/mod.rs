@@ -41,6 +41,7 @@ pub mod join_progress;
 pub mod registry_consent;
 pub mod vetting_requirements;
 pub mod vtc_enter_did;
+pub mod wallet;
 
 /// Handles the join flow sequence.
 #[derive(Clone)]
@@ -230,6 +231,7 @@ impl Component for JoinFlow {
             JoinPage::RegistryConsent => {
                 registry_consent::RegistryConsentPage::handle_key_event(self, key)
             }
+            JoinPage::Wallet => wallet::WalletPage::handle_key_event(self, key),
         }
     }
 
@@ -260,7 +262,8 @@ impl Component for JoinFlow {
             | JoinPage::Progress
             | JoinPage::Vetting
             | JoinPage::Answers
-            | JoinPage::RegistryConsent => {}
+            | JoinPage::RegistryConsent
+            | JoinPage::Wallet => {}
         }
     }
 }
@@ -281,6 +284,7 @@ impl ComponentRender<()> for JoinFlow {
             JoinPage::RegistryConsent => {
                 registry_consent::RegistryConsentPage.render(&self.props.state, frame)
             }
+            JoinPage::Wallet => wallet::WalletPage.render(&self.props.state, frame),
         }
         if let Some(overlay) = self.props.create_persona.as_ref() {
             create_persona_overlay::render(frame, overlay);

@@ -1278,6 +1278,8 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::JoinAnswersChoose
         | Action::JoinRegistryToggle
         | Action::JoinRegistryConfirm
+        | Action::JoinWalletStart
+        | Action::JoinWalletSkip
         | Action::JoinVettingTake
         | Action::JoinVettingApply
         | Action::JoinVettingJoin

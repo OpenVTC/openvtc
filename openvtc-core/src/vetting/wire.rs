@@ -537,6 +537,63 @@ pub fn pcs_challenge_request(
     )
 }
 
+/// `vtc/join-requests/wallet-session/start/0.1`.
+pub const WALLET_SESSION_START_TYPE: &str =
+    <trust_tasks_rs::specs::vtc::join_requests::wallet_session::start::v0_1::Payload as trust_tasks_rs::Payload>::TYPE_URI;
+/// `vtc/join-requests/wallet-session/status/0.1`.
+pub const WALLET_SESSION_STATUS_TYPE: &str =
+    <trust_tasks_rs::specs::vtc::join_requests::wallet_session::status::v0_1::Payload as trust_tasks_rs::Payload>::TYPE_URI;
+
+/// A `vtc/join-requests/wallet-session/start/0.1` request: ask `community_did`
+/// for an OpenID4VP session that collects, from the applicant's wallet, the
+/// credential the criterion `requirements_digest` asks for. The evidence is
+/// held for the applicant's next submission under that criterion.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the digest is not a `digestMultibase` or the
+/// document cannot be built.
+pub fn wallet_session_start_request(
+    applicant_did: &str,
+    community_did: &str,
+    requirements_digest: &str,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    use trust_tasks_rs::specs::vtc::join_requests::wallet_session::start::v0_1 as start;
+    let payload: start::Payload =
+        serde_json::from_value(serde_json::json!({ "criterion": requirements_digest }))
+            .map_err(|e| OpenVTCError::Config(format!("wallet-session/start: {e}")))?;
+    document(
+        WALLET_SESSION_START_TYPE,
+        applicant_did,
+        community_did,
+        new_id(),
+        &payload,
+    )
+}
+
+/// A `vtc/join-requests/wallet-session/status/0.1` request for `session_id`.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the document cannot be built.
+pub fn wallet_session_status_request(
+    applicant_did: &str,
+    community_did: &str,
+    session_id: &str,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    use trust_tasks_rs::specs::vtc::join_requests::wallet_session::status::v0_1 as status;
+    let payload: status::Payload =
+        serde_json::from_value(serde_json::json!({ "sessionId": session_id }))
+            .map_err(|e| OpenVTCError::Config(format!("wallet-session/status: {e}")))?;
+    document(
+        WALLET_SESSION_STATUS_TYPE,
+        applicant_did,
+        community_did,
+        new_id(),
+        &payload,
+    )
+}
+
 /// A `vtc/vetting/vetters/resend/0.1` request asking `community_did` to
 /// deliver our live vetter grant credential again.
 pub fn vetter_resend_request(
