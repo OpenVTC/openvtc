@@ -65,7 +65,6 @@ pub mod inbound;
 pub mod journey;
 mod legacy;
 pub mod mode;
-/// The VTA as hidden-vetting (PCS) engine: the `vta/pcs/*` calls, and what is kept of them.
 pub mod pcs_vta;
 pub mod protocol;
 pub mod queries;
