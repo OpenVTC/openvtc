@@ -1095,6 +1095,9 @@ async fn process_inbound(
                 // The reason only: never the credential, and the DID stays out
                 // of the log line (the activity feed names the community).
                 warn!(reason = %e, "refused an issued credential");
+                config
+                    .account
+                    .note_credential_refused(&from_did, Some(&e.to_string()));
                 config.public.logs.insert(
                     LogFamily::Community,
                     format!("Refused a credential from community ({from_did}): {e}."),
@@ -1103,6 +1106,9 @@ async fn process_inbound(
             }
         };
         let outcome = handle_credential_issue(&mut config.account, verified, &from_did);
+        if outcome.changed {
+            config.account.note_credential_refused(&from_did, None);
+        }
         // Admission is the moment the member owes the community its half of
         // the membership pair. Sending it here — naming the join request it
         // closes — is what `vtc/members/vmc/0.1`'s `requestId` is for; without
@@ -1247,6 +1253,9 @@ async fn process_inbound(
                 // not consumed — a forged reply must not be able to cancel the
                 // genuine one still on its way.
                 if openvtc_core::renewal::is_pending(&from_did, thid) {
+                    config
+                        .account
+                        .note_credential_refused(&from_did, Some(&e.to_string()));
                     let outcome = RenewalOutcome::Failed(e.to_string());
                     config.public.logs.insert(
                         LogFamily::Community,
@@ -1278,6 +1287,7 @@ async fn process_inbound(
             match openvtc_core::renewal::apply_renewal(&mut config.account, &verified, &from_did) {
                 Err(e) => RenewalOutcome::Failed(e.to_string()),
                 Ok(summary) => {
+                    config.account.note_credential_refused(&from_did, None);
                     // The new grant has a new digest, so the community is owed a
                     // fresh acknowledgement — sent the way the join flow sends one
                     // on admission. Best-effort: the renewed credentials are
