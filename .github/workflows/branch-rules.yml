@@ -1,0 +1,34 @@
+name: Branch rules
+
+# Where a PR may go and what it may change: fixes reach a release branch by
+# backport, only the release tooling edits versions and RELEASE. See
+# scripts/check-branch-rules.py and RELEASES.md.
+#
+# Its own workflow for the trigger: `labeled` / `unlabeled` must re-run it (the
+# `release-direct` label changes the verdict), and adding those to ci.yml would
+# rebuild the world on every label. Seconds, no build.
+on:
+  pull_request:
+    branches: [main, "release/**"]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  rules:
+    name: branch rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge commit and its first parent: the PR's effect on the base.
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check the PR against the branch rules
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: python3 scripts/check-branch-rules.py

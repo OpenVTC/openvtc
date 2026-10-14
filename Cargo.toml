@@ -17,7 +17,7 @@ license = "Apache-2.0"
 repository = "https://github.com/OpenVTC/openvtc"
 
 [workspace.dependencies]
-openvtc-core = { version = "0.6", path = "openvtc-core", default-features = false }
+openvtc-core = { version = "0.6.0", path = "openvtc-core", default-features = false }
 
 # Decentralized Trust Graph Credentials.
 #

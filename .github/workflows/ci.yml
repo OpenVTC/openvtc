@@ -1,10 +1,12 @@
 name: CI
 
+# main and every release branch (RELEASES.md). nightly.yml reads this
+# workflow's push runs on main to decide where `nightly` may move.
 on:
   push:
-    branches: [main, development]
+    branches: [main, "release/**"]
   pull_request:
-    branches: [main, development]
+    branches: [main, "release/**"]
 
 # Read-only by default. Without this block every job inherits the repository
 # default, which is write-all, and hands that token to third-party actions.
@@ -173,6 +175,58 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libdbus-1-dev
       - run: cargo check --workspace
+
+  guards:
+    # Cheap, build-free guards that protect the release pipeline: lockstep
+    # versions, CHANGELOG / RELEASE consistency (scripts/check-release-guards.py).
+    name: release guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The base commit, for "RELEASE never moves backwards".
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Release guards
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/check-release-guards.py ${BASE_SHA:+--base-sha "$BASE_SHA"}
+
+  semver:
+    # Patch releases must be semver-compatible. Every PR into a release branch
+    # (a backport, a `release-direct` fix, a prep PR) is checked against the
+    # branch tip it merges into — not against crates.io, whose newest version
+    # may belong to a later release line.
+    name: semver (patch-compatible)
+    if: github.event_name == 'pull_request' && startsWith(github.base_ref, 'release/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: semver
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libdbus-1-dev
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-semver-checks@0.51.0
+      - name: cargo semver-checks --release-type patch
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          cargo semver-checks --workspace \
+            --release-type patch \
+            --baseline-rev "$BASE_SHA"
 
   audit:
     name: Security Audit
