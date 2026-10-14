@@ -48,6 +48,59 @@ pub enum JoinPage {
     /// registry. The last question before anything is sent, asked on every
     /// join, and unticked until the person ticks it. See [`RegistryChoice`].
     RegistryConsent,
+    /// A community whose criterion asks for a credential a wallet presents
+    /// (swiyu, EUDI): offer to collect it, then the QR code the wallet scans
+    /// and where the session stands. See [`WalletStep`].
+    Wallet,
+}
+
+/// The wallet step of a join: collecting, over OpenID4VP, a credential the
+/// community's criterion asks for from the applicant's wallet.
+///
+/// The applicant's agent opens the session (`wallet-session/start/0.1`, signed
+/// by the persona that will submit); the wallet scans the code and answers the
+/// community directly. The evidence is held there for this applicant's next
+/// submission under the criterion, which the join then names.
+#[derive(Clone, Debug)]
+pub struct WalletStep {
+    /// The community, as shown.
+    pub community: String,
+    /// The criterion the session is for (`requirementsDigest`).
+    pub requirements_digest: String,
+    /// What the criterion says of itself.
+    pub description: Option<String>,
+    /// The SD-JWT VC types its query names.
+    pub types: Vec<String>,
+    /// Where the step stands.
+    pub phase: WalletPhase,
+    /// The launch to take up again once the step ends.
+    pub parked: Option<(IdentityPick, String, String)>,
+}
+
+/// Where a [`WalletStep`] stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WalletPhase {
+    /// Not started — or ended without evidence, and why (`note`).
+    Offered { note: Option<String> },
+    /// The session has been asked for.
+    Opening,
+    /// The session is open: the code to scan.
+    Scan {
+        wallet_uri: String,
+        expires_at: chrono::DateTime<chrono::Utc>,
+        /// The wallet has fetched the request: it is up to the holder now.
+        retrieved: bool,
+    },
+}
+
+/// How the wallet step ended, for the submit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WalletOutcome {
+    /// The wallet presented and the community verified it: the submit names
+    /// this criterion (`requirementsDigest`), under which the evidence counts.
+    Presented(String),
+    /// The person went on without it.
+    Skipped,
 }
 
 /// The applicant's answer to "may this community publish my membership in its
@@ -778,6 +831,13 @@ pub struct JoinState {
     /// The application's stored challenge was issued for the launch now
     /// resuming. Taken by that launch, so one challenge serves one submit.
     pub challenge_fresh: bool,
+    /// The wallet step, while it is offered or running.
+    pub wallet: Option<WalletStep>,
+    /// How the wallet step ended; `None` before it was offered.
+    pub wallet_outcome: Option<WalletOutcome>,
+    /// A wallet session parked for the loop that hears the community's
+    /// answers — handed over like [`challenge_wait`](Self::challenge_wait).
+    pub wallet_wait: Option<crate::state_handler::join_flow::AwaitingWallet>,
 }
 
 impl JoinState {

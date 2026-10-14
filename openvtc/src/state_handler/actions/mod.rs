@@ -715,6 +715,12 @@ pub enum Action {
     /// Registry page: answer with the box as it stands, and go on.
     JoinRegistryConfirm,
 
+    /// Wallet page: open a wallet session for the community's criterion.
+    JoinWalletStart,
+
+    /// Wallet page: go on without the wallet's credential.
+    JoinWalletSkip,
+
     /// Vetting page: take the highlighted way in. A route the page drew as
     /// blocked answers with why instead.
     JoinVettingTake,

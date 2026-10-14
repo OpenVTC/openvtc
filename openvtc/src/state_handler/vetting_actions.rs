@@ -6413,7 +6413,11 @@ pub(crate) fn apply_answers(state: &mut State, config: &Config, answers: Vec<Com
         let message = match answer {
             // The challenge's notice already says it arrived; a join waiting on
             // one has taken its answer before this runs.
-            CommunityAnswer::Manifest { .. } | CommunityAnswer::Challenge { .. } => None,
+            // Likewise a wallet session's: the join that opened it takes them.
+            CommunityAnswer::Manifest { .. }
+            | CommunityAnswer::Challenge { .. }
+            | CommunityAnswer::WalletSessionStarted { .. }
+            | CommunityAnswer::WalletSessionStatus { .. } => None,
             CommunityAnswer::Vetters { query, page, .. } => match &mut v.mode {
                 VettingMode::Directory(view) if view.pending.as_deref() == Some(query.as_str()) => {
                     view.pending = None;
