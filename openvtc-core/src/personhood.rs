@@ -332,11 +332,16 @@ pub async fn build_presentation(
 /// The member is always the subject. The community refuses an assertion sent
 /// by anyone else, because `assert/0.1` declares `actsAsSubject: true`: this
 /// is the member exercising authority over their own personhood state.
+///
+/// `ext` is the payload's `ext`, when the presentation carries witness credentials: their
+/// sessions' outcome evidence under `org.openvtc.witness` ([`crate::witness::personhood_ext`]),
+/// without which a VTC counts no VWC.
 pub async fn assert_personhood(
     route: &Route<'_>,
     signing_secret: &Secret,
     challenge_id: &Uuid,
     credentials: Vec<Value>,
+    ext: Option<Value>,
 ) -> Result<Uuid, OpenVTCError> {
     let presentation =
         build_presentation(signing_secret, route.member_did, challenge_id, credentials).await?;
@@ -353,7 +358,7 @@ pub async fn assert_personhood(
         route.member_did,
         route.vtc_did,
         &document_id,
-        json!({ "did": route.member_did, "presentation": presentation }),
+        assert_payload(route.member_did, presentation, ext),
         signing_secret,
     )
     .await?;
@@ -361,6 +366,15 @@ pub async fn assert_personhood(
     route.send(body, document_id).await?;
 
     Ok(request_id)
+}
+
+/// The `assert/0.1` payload: the member, the presentation, and `ext` when there is one.
+fn assert_payload(member_did: &str, presentation: Value, ext: Option<Value>) -> Value {
+    let mut payload = json!({ "did": member_did, "presentation": presentation });
+    if let Some(ext) = ext {
+        payload["ext"] = ext;
+    }
+    payload
 }
 
 // ─── Replies ─────────────────────────────────────────────────────────────
@@ -471,6 +485,21 @@ pub fn parse_assert_reply(body: &Value) -> Result<AssertReply, OpenVTCError> {
 #[cfg(test)]
 mod tests {
     use crate::community_send::didcomm_request;
+
+    /// An assertion carrying witness credentials carries their outcome evidence in the
+    /// payload's `ext` (VTI `trusted-witnesses.md`), and one without carries no `ext` at all.
+    #[test]
+    fn witness_evidence_rides_the_assertion_ext() {
+        let vp = serde_json::json!({ "type": ["VerifiablePresentation"] });
+        let bare = super::assert_payload("did:key:zMember", vp.clone(), None);
+        assert!(bare.get("ext").is_none(), "{bare}");
+
+        let ext = serde_json::json!({ crate::witness::WITNESS_EXT: {
+            "outcomeEvidence": [{ "session": {}, "outcome": {} }] } });
+        let carried = super::assert_payload("did:key:zMember", vp, Some(ext.clone()));
+        assert_eq!(carried["ext"], ext);
+        assert_eq!(carried["did"], "did:key:zMember");
+    }
 
     /// Over DIDComm a personhood document rides the binding envelope — a VTC
     /// refuses one typed as its task URI (VTI #1687) — with the document as the

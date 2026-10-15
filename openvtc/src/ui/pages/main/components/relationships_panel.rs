@@ -38,6 +38,10 @@ pub fn render(state: &RelationshipsState) -> Vec<Line<'static>> {
         RelationshipsMode::EditAlias { index, alias_input } => {
             render_edit_alias(state, *index, alias_input)
         }
+        RelationshipsMode::Witness {
+            index,
+            witness_input,
+        } => render_witness(state, *index, witness_input),
         RelationshipsMode::Detail {
             index,
             selected_vrc,
@@ -148,6 +152,10 @@ fn render_detail(
 
     lines.push(Line::from("Relationship Details").fg(COLOR_SUCCESS).bold());
     lines.push(Line::from(""));
+    if let Some(msg) = &state.status_message {
+        super::status::push_status(&mut lines, msg, "");
+        lines.push(Line::from(""));
+    }
 
     if let Some(alias) = &rel.alias {
         lines.push(Line::from(vec![
@@ -366,6 +374,36 @@ fn render_detail(
         lines.push(Line::from("  No credentials exchanged yet").fg(COLOR_DARK_GRAY));
     }
 
+    if !rel.witnessings.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(format!(" Witnessed ({})", rel.witnessings.len()))
+                .fg(COLOR_SUCCESS)
+                .bold(),
+        );
+        for w in &rel.witnessings {
+            lines.push(Line::from(vec![
+                Span::styled("    ● ", Style::new().fg(COLOR_SUCCESS)),
+                Span::styled(
+                    format!(
+                        "By: {}  ",
+                        display_identifier(
+                            w.witness_agent_name.as_deref(),
+                            &w.witness,
+                            VRC_ID_WIDTH
+                        )
+                    ),
+                    Style::new().fg(COLOR_SOFT_PURPLE),
+                ),
+                Span::styled(w.witnessed_at.clone(), Style::new().fg(COLOR_DARK_GRAY)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("      Credential: ", Style::new().fg(COLOR_TEXT_DEFAULT)),
+                Span::styled(w.credential_id.clone(), Style::new().fg(COLOR_DARK_GRAY)),
+            ]));
+        }
+    }
+
     lines.push(Line::from(""));
     // A pending removal confirmation replaces the footer hint (R25).
     if state.confirm_delete.is_some() {
@@ -377,7 +415,7 @@ fn render_detail(
     } else {
         lines.push(
             Line::from(
-                "e: edit alias  p: ping  v: request VRC  d: remove  \u{2191}/\u{2193}: browse VRCs  Esc: back",
+                "e: edit alias  p: ping  v: request VRC  w: witness  d: remove  \u{2191}/\u{2193}: browse VRCs  Esc: back",
             )
             .fg(COLOR_DARK_GRAY),
         );
@@ -412,6 +450,67 @@ fn render_edit_alias(
     ]));
     lines.push(Line::from(""));
     lines.push(Line::from("Enter: save  Esc: cancel").fg(COLOR_DARK_GRAY));
+
+    lines
+}
+
+/// Render the prompt for the witness to have a relationship witnessed by.
+///
+/// Says what witnessing discloses at the point of choice, because which witness observes an
+/// exchange is the member's privacy decision (VTI `docs/02-vta/witness-party.md`).
+fn render_witness(
+    state: &RelationshipsState,
+    index: usize,
+    witness_input: &str,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("")];
+
+    let Some(rel) = state.relationships.get(index) else {
+        lines.push(Line::from("Relationship not found").fg(COLOR_WARNING_ACCESSIBLE_RED));
+        return lines;
+    };
+
+    lines.push(
+        Line::from("Have this relationship witnessed")
+            .fg(COLOR_SUCCESS)
+            .bold(),
+    );
+    lines.push(Line::from(""));
+    let name = rel
+        .alias
+        .as_deref()
+        .or(rel.agent_name.as_deref())
+        .unwrap_or(&rel.remote_p_did)
+        .to_string();
+    lines.push(Line::from(vec![
+        Span::styled("With: ", Style::new().fg(COLOR_TEXT_DEFAULT)),
+        Span::styled(name, Style::new().fg(COLOR_SOFT_PURPLE)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("▸ Witness: ", Style::new().fg(COLOR_SUCCESS)),
+        Span::styled(
+            witness_input.to_string(),
+            Style::new().fg(COLOR_SOFT_PURPLE),
+        ),
+        Span::styled("▎", Style::new().fg(COLOR_SUCCESS)),
+    ]));
+    lines.push(Line::from(""));
+    for text in [
+        "  Your VTA presents the relationship credential you issued, and your membership",
+        "  credential, to the witness, which issues a witness credential (VWC) in return.",
+        "  The witness sees both credentials in full — including which community you belong",
+        "  to and, when your membership names your persona, that persona's DID.",
+    ] {
+        lines.push(Line::from(text).fg(COLOR_ORANGE));
+    }
+    lines.push(Line::from(""));
+    if let Some(msg) = &state.status_message {
+        super::status::push_status(&mut lines, msg, "");
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from("A DID or an agent name, e.g. example.com/@witness").fg(COLOR_DARK_GRAY));
+    lines.push(Line::from("Enter: witness  Esc: cancel").fg(COLOR_DARK_GRAY));
 
     lines
 }
@@ -645,6 +744,7 @@ mod tests {
                 created: "2024-06-18 10:00".to_string(),
                 vrcs_issued: vec![vrc.clone()],
                 vrcs_received: vec![vrc],
+                witnessings: Vec::new(),
                 needs_reestablishment: false,
             }]
             .into(),
@@ -689,5 +789,43 @@ mod tests {
             out.iter().any(|l| l.contains(&format!("From: {issuer}"))),
             "received row keeps the issuer DID: {out:?}"
         );
+    }
+
+    /// A witnessed relationship lists each witnessing — the witness, by its verified name when
+    /// one is cached, and the credential's handle at the VTA — and the footer offers `w`.
+    #[test]
+    fn the_detail_lists_witnessings_and_offers_witnessing() {
+        use crate::state_handler::main_page::content::RelationshipWitnessing;
+        let mut state = detail_state(vrc(None, None));
+        let plain = text(&render(&state)).join("\n");
+        assert!(plain.contains("w: witness"), "{plain}");
+        assert!(!plain.contains("Witnessed"), "{plain}");
+
+        let mut rels = state.relationships.to_vec();
+        rels[0].witnessings = vec![RelationshipWitnessing {
+            witness: "did:key:z6MkWitness".into(),
+            witness_agent_name: Some("witness.example/@w".into()),
+            credential_id: "vwc-1".into(),
+            witnessed_at: "2026-10-15 10:00".into(),
+        }];
+        state.relationships = rels.into();
+        let out = text(&render(&state)).join("\n");
+        assert!(out.contains("Witnessed (1)"), "{out}");
+        assert!(out.contains("By: witness.example/@w"), "{out}");
+        assert!(out.contains("vwc-1"), "{out}");
+    }
+
+    /// The prompt says what the witness will see before anything is sent.
+    #[test]
+    fn the_witness_prompt_says_what_is_disclosed() {
+        let mut state = detail_state(vrc(None, None));
+        state.mode = RelationshipsMode::Witness {
+            index: 0,
+            witness_input: "did:key:z6MkW".into(),
+        };
+        let out = text(&render(&state)).join("\n");
+        assert!(out.contains("Witness: did:key:z6MkW"), "{out}");
+        assert!(out.contains("sees both credentials in full"), "{out}");
+        assert!(out.contains("Enter: witness"), "{out}");
     }
 }

@@ -260,6 +260,9 @@ pub struct CommunitiesState {
     /// only ever be a stale one — and showing a member a match code the
     /// community has already forgotten is worse than showing none.
     pub personhood_challenge: Option<PersonhoodChallengeView>,
+    /// Choosing which witness credentials a personhood assertion presents, while it is open.
+    /// `None` otherwise — and every assertion starts with none chosen.
+    pub personhood_evidence: Option<PersonhoodEvidenceView>,
     /// Deleting one membership's context: the VTA's preview, the typed
     /// confirmation, then the delete. `None` when nothing is being deleted.
     pub context_delete: Option<ContextDeleteView>,
@@ -404,6 +407,48 @@ pub struct PersonhoodChallengeView {
     pub match_code: String,
     /// When the community stops accepting a presentation for it.
     pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The witness credentials a personhood assertion could present, and which the member has
+/// chosen. Built afresh for each assertion with **nothing** chosen: a VWC discloses a
+/// relationship to the community, so each one is the member's decision, never a default.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PersonhoodEvidenceView {
+    pub choices: Vec<WitnessChoice>,
+    /// Parallel to `choices`.
+    pub chosen: Vec<bool>,
+    pub cursor: usize,
+    /// "Include all" was asked for and waits on its own confirmation. Never set by anything but
+    /// that request, and cleared by any answer but `y`.
+    pub confirm_all: bool,
+    /// Why the last key did nothing (a selection over the community's limit, say).
+    pub notice: Option<String>,
+}
+
+impl PersonhoodEvidenceView {
+    /// The session ids chosen, in list order.
+    pub fn selected(&self) -> Vec<String> {
+        self.choices
+            .iter()
+            .zip(&self.chosen)
+            .filter(|(_, chosen)| **chosen)
+            .map(|(c, _)| c.session_id.clone())
+            .collect()
+    }
+}
+
+/// One witnessed relationship of the persona, as the picker shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WitnessChoice {
+    /// The witnessing's session id — how the selection names it.
+    pub session_id: String,
+    /// The witness: its verified agent name, else its DID.
+    pub witness: String,
+    /// The other party: the contact's alias or verified name, else their DID.
+    pub counterparty: String,
+    pub witnessed_at: String,
+    /// The VWC's digest, which the community will see.
+    pub digest: String,
 }
 
 impl PersonhoodChallengeView {
@@ -3685,6 +3730,8 @@ pub enum RelationshipsMode {
     },
     /// Editing the alias for an existing relationship
     EditAlias { index: usize, alias_input: String },
+    /// Naming the witness to have the relationship at `index` witnessed by.
+    Witness { index: usize, witness_input: String },
     /// Filling out a new relationship request form
     NewRequest {
         did_input: String,
@@ -3726,11 +3773,26 @@ pub struct RelationshipSummary {
     pub vrcs_issued: Vec<RelationshipVrc>,
     /// VRCs we received from this party
     pub vrcs_received: Vec<RelationshipVrc>,
+    /// Witnessings of this relationship, oldest first.
+    pub witnessings: Vec<RelationshipWitnessing>,
     /// Whether this relationship's R-DID keys were lost and could not be
     /// recovered at load (see `Relationship::needs_reestablishment`). When set,
     /// the list shows a "needs re-establishment" badge: the relationship can no
     /// longer send or receive and must be re-created.
     pub needs_reestablishment: bool,
+}
+
+/// A completed witnessing, for the relationship detail view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelationshipWitnessing {
+    /// The witness's DID.
+    pub witness: String,
+    /// Its verified agent name, if one is cached.
+    pub witness_agent_name: Option<String>,
+    /// The witness credential's handle in the VTA's credential vault.
+    pub credential_id: String,
+    /// When it completed, formatted.
+    pub witnessed_at: String,
 }
 
 /// VRC info for display in the relationship detail view.

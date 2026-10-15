@@ -60,10 +60,14 @@ pub(crate) enum Verb {
     ///
     /// `credentials` are presented whole: `eddsa-jcs-2022` credentials cannot
     /// be redacted, so a member discloses each one entire or not at all.
+    ///
+    /// `ext` carries the outcome evidence of every witness credential among `credentials`
+    /// (`openvtc_core::witness::personhood_ext`): a community counts a VWC only beside it.
     AssertPersonhood {
         signing_secret: Box<Secret>,
         challenge_id: uuid::Uuid,
         credentials: Vec<serde_json::Value>,
+        ext: Option<serde_json::Value>,
     },
     /// `members/renew` — ask the community to re-issue this membership's VMC
     /// and role VAC. The reply carries both and arrives asynchronously; it is
@@ -189,11 +193,13 @@ impl CommunityJob {
                 signing_secret,
                 challenge_id,
                 credentials,
+                ext,
             } => openvtc_core::personhood::assert_personhood(
                 &route,
                 signing_secret,
                 challenge_id,
                 credentials.clone(),
+                ext.clone(),
             )
             .await
             .map(|_| ()),

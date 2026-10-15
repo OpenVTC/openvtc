@@ -58,6 +58,8 @@ pub(crate) struct ActionCtx<'a> {
     pub(crate) ping_sent_at: &'a mut Option<std::time::Instant>,
     pub(crate) state_tx: &'a watch::Sender<State>,
     pub(crate) profile: &'a str,
+    /// Where the inbound arm hands a witness's answers to a witnessing in progress.
+    pub(crate) witness_router: &'a openvtc_core::witness::ReplyRouter,
 }
 
 /// What the loop must do after an action was handled.
@@ -603,88 +605,17 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 }
             }
         }
-        Action::AssertPersonhood => {
-            // The challenge names its own membership, so the target comes from
-            // the challenge rather than from whichever row is highlighted.
-            let challenge = ctx
-                .state
-                .main_page
-                .content_panel
-                .communities
-                .personhood_challenge
-                .clone();
-            let Some(challenge) = challenge else {
-                ctx.state.main_page.content_panel.communities.status_message =
-                    Some("No personhood challenge in hand — ask for one first.".to_string());
+        Action::AssertPersonhood { witnessed } => return assert_personhood(ctx, witnessed).await,
+        Action::PersonhoodEvidence(action) => {
+            let comms = &mut ctx.state.main_page.content_panel.communities;
+            let Some(view) = comms.personhood_evidence.as_mut() else {
                 return Handled::Continue;
             };
-            if !challenge.is_live(chrono::Utc::now()) {
-                // Drop it rather than send: the community would refuse it, and
-                // leaving a dead challenge on screen invites a second attempt
-                // that fails the same way.
-                ctx.state
-                    .main_page
-                    .content_panel
-                    .communities
-                    .personhood_challenge = None;
-                ctx.state.main_page.content_panel.communities.status_message =
-                    Some("That personhood challenge expired — ask for a fresh one.".to_string());
-                return Handled::Continue;
-            }
-
-            // Present the credentials this community itself issued to this
-            // membership and let its policy choose among them. A client-side
-            // filter would have to guess at a policy it cannot read, and
-            // guessing wrong means withholding the very credential that would
-            // have satisfied it — the identity-verification endorsement an
-            // administrator issued after vetting the member in person.
-            //
-            // Scoped to this membership rather than the whole wallet: another
-            // community's credentials are not evidence here, and sending them
-            // would disclose one community's membership to another.
-            let credentials: Vec<serde_json::Value> = ctx
-                .config
-                .account
-                .membership(&challenge.vtc_did, challenge.persona)
-                .map(|m| m.credentials.values().cloned().collect())
-                .unwrap_or_default();
-
-            match (
-                capability_sender(ctx.config, ctx.tdk, challenge.persona),
-                ctx.config
-                    .get_persona_keys_for(challenge.persona, ctx.tdk)
-                    .await,
-            ) {
-                (Some((atm, profile, member_did, mediator)), Ok(keys)) => spawn_community_job(
-                    ctx.dispatch_tx,
-                    ctx.in_flight,
-                    ctx.state,
-                    community_actions::CommunityJob {
-                        atm,
-                        profile,
-                        member_did,
-                        mediator,
-                        over_tsp: ctx
-                            .config
-                            .account
-                            .membership(&challenge.vtc_did, challenge.persona)
-                            .is_some_and(|c| c.joined_over_tsp()),
-                        vtc_did: challenge.vtc_did.clone(),
-                        persona: challenge.persona,
-                        verb: community_actions::Verb::AssertPersonhood {
-                            signing_secret: Box::new(keys.authentication.secret.clone()),
-                            challenge_id: challenge.challenge_id,
-                            credentials,
-                        },
-                    },
-                ),
-                (_, Err(e)) => {
-                    ctx.state.main_page.content_panel.communities.status_message =
-                        Some(format!("Couldn't sign the personhood presentation: {e}"));
-                }
-                (None, _) => {
-                    ctx.state.main_page.content_panel.communities.status_message =
-                        Some("Messaging unavailable — cannot assert right now.".to_string());
+            match witness_actions::evidence_step(view, action) {
+                witness_actions::EvidenceStep::Stay => {}
+                witness_actions::EvidenceStep::Close => comms.personhood_evidence = None,
+                witness_actions::EvidenceStep::Assert(selected) => {
+                    return assert_personhood(ctx, Some(selected)).await;
                 }
             }
         }
@@ -1054,6 +985,54 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 .await;
             }
         }
+        // A witnessing runs as its own job in its own domain: it waits on a witness for up to two
+        // minutes, which must not hold up a ping or a VRC request (`witness_actions`).
+        Action::Relationship(actions::RelationshipAction::Witness {
+            remote_p_did,
+            witness,
+        }) => {
+            let domain = background_dispatch::DispatchDomain::Witness;
+            if !ctx.in_flight.try_begin(domain) {
+                let msg = background_dispatch::InFlight::busy_message(domain);
+                ctx.state
+                    .main_page
+                    .content_panel
+                    .relationships
+                    .status_message = Some(msg);
+                return Handled::Continue;
+            }
+            match witness_actions::prepare(
+                ctx.config,
+                ctx.tdk,
+                ctx.didcomm_service,
+                ctx.admin_vta,
+                ctx.witness_router,
+                ctx.dispatch_tx,
+                &remote_p_did,
+                &witness,
+            ) {
+                Ok(job) => {
+                    ctx.state
+                        .main_page
+                        .content_panel
+                        .relationships
+                        .status_message = Some("Starting the witnessing…".to_string());
+                    background_dispatch::spawn_dispatch(
+                        ctx.dispatch_tx.clone(),
+                        domain,
+                        async move { DispatchOutcome::Witness(job.run().await) },
+                    );
+                }
+                Err(reason) => {
+                    ctx.in_flight.finish(domain);
+                    ctx.state
+                        .main_page
+                        .content_panel
+                        .relationships
+                        .status_message = Some(reason);
+                }
+            }
+        }
         Action::Relationship(ra) => {
             // Network relationship actions (create/ping/remove/request
             // VRC) run off the loop (R14). Same pattern as Inbox: claim
@@ -1316,6 +1295,145 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
     Handled::Continue
 }
 
+/// `Action::AssertPersonhood`: answer the live personhood challenge.
+///
+/// `witnessed` is the witness credentials the member chose for this assertion, by session id.
+/// `None` asks: when the persona holds any, the picker opens with **none** chosen and nothing is
+/// sent; when it holds none, the assertion goes without. A VWC tells the community that a
+/// relationship exists and which witness attested it, so none goes unless chosen.
+async fn assert_personhood(ctx: &mut ActionCtx<'_>, witnessed: Option<Vec<String>>) -> Handled {
+    // The challenge names its own membership, so the target comes from
+    // the challenge rather than from whichever row is highlighted.
+    let challenge = ctx
+        .state
+        .main_page
+        .content_panel
+        .communities
+        .personhood_challenge
+        .clone();
+    let Some(challenge) = challenge else {
+        ctx.state
+            .main_page
+            .content_panel
+            .communities
+            .personhood_evidence = None;
+        ctx.state.main_page.content_panel.communities.status_message =
+            Some("No personhood challenge in hand — ask for one first.".to_string());
+        return Handled::Continue;
+    };
+    if !challenge.is_live(chrono::Utc::now()) {
+        // Drop it rather than send: the community would refuse it, and
+        // leaving a dead challenge on screen invites a second attempt
+        // that fails the same way.
+        let comms = &mut ctx.state.main_page.content_panel.communities;
+        comms.personhood_challenge = None;
+        comms.personhood_evidence = None;
+        comms.status_message =
+            Some("That personhood challenge expired — ask for a fresh one.".to_string());
+        return Handled::Continue;
+    }
+
+    let selected = match witnessed {
+        Some(selected) => selected,
+        None => {
+            let choices = witness_actions::witness_choices(ctx.config, challenge.persona);
+            if !choices.is_empty() {
+                ctx.state
+                    .main_page
+                    .content_panel
+                    .communities
+                    .personhood_evidence = Some(witness_actions::evidence_view(choices));
+                return Handled::Continue;
+            }
+            Vec::new()
+        }
+    };
+    if selected.len() > openvtc_core::witness::MAX_OUTCOME_EVIDENCE {
+        if let Some(view) = ctx
+            .state
+            .main_page
+            .content_panel
+            .communities
+            .personhood_evidence
+            .as_mut()
+        {
+            view.confirm_all = false;
+            view.notice = Some(witness_actions::too_many_witness_credentials());
+        }
+        return Handled::Continue;
+    }
+    ctx.state
+        .main_page
+        .content_panel
+        .communities
+        .personhood_evidence = None;
+
+    // Present the credentials this community itself issued to this
+    // membership and let its policy choose among them. A client-side
+    // filter would have to guess at a policy it cannot read, and
+    // guessing wrong means withholding the very credential that would
+    // have satisfied it — the identity-verification endorsement an
+    // administrator issued after vetting the member in person.
+    //
+    // Scoped to this membership rather than the whole wallet: another
+    // community's credentials are not evidence here, and sending them
+    // would disclose one community's membership to another.
+    let mut credentials: Vec<serde_json::Value> = ctx
+        .config
+        .account
+        .membership(&challenge.vtc_did, challenge.persona)
+        .map(|m| m.credentials.values().cloned().collect())
+        .unwrap_or_default();
+    // And exactly the witness credentials chosen, each with its session's outcome evidence.
+    // Only this persona's: another persona's relationships are not this member's evidence here.
+    let (vwcs, ext) = openvtc_core::witness::personhood_ext(
+        witness_actions::persona_witnessings(ctx.config, challenge.persona),
+        &selected,
+    );
+    credentials.extend(vwcs);
+
+    match (
+        capability_sender(ctx.config, ctx.tdk, challenge.persona),
+        ctx.config
+            .get_persona_keys_for(challenge.persona, ctx.tdk)
+            .await,
+    ) {
+        (Some((atm, profile, member_did, mediator)), Ok(keys)) => spawn_community_job(
+            ctx.dispatch_tx,
+            ctx.in_flight,
+            ctx.state,
+            community_actions::CommunityJob {
+                atm,
+                profile,
+                member_did,
+                mediator,
+                over_tsp: ctx
+                    .config
+                    .account
+                    .membership(&challenge.vtc_did, challenge.persona)
+                    .is_some_and(|c| c.joined_over_tsp()),
+                vtc_did: challenge.vtc_did.clone(),
+                persona: challenge.persona,
+                verb: community_actions::Verb::AssertPersonhood {
+                    signing_secret: Box::new(keys.authentication.secret.clone()),
+                    challenge_id: challenge.challenge_id,
+                    credentials,
+                    ext,
+                },
+            },
+        ),
+        (_, Err(e)) => {
+            ctx.state.main_page.content_panel.communities.status_message =
+                Some(format!("Couldn't sign the personhood presentation: {e}"));
+        }
+        (None, _) => {
+            ctx.state.main_page.content_panel.communities.status_message =
+                Some("Messaging unavailable — cannot assert right now.".to_string());
+        }
+    }
+    Handled::Continue
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1338,6 +1456,7 @@ mod tests {
         session_manager: SessionManager,
         ping_sent_at: Option<std::time::Instant>,
         state_tx: watch::Sender<State>,
+        witness_router: openvtc_core::witness::ReplyRouter,
     }
 
     impl Harness {
@@ -1367,6 +1486,7 @@ mod tests {
                 session_manager: SessionManager::default(),
                 ping_sent_at: None,
                 state_tx,
+                witness_router: openvtc_core::witness::ReplyRouter::default(),
             }
         }
 
@@ -1384,6 +1504,7 @@ mod tests {
                 ping_sent_at: &mut self.ping_sent_at,
                 state_tx: &self.state_tx,
                 profile: "test",
+                witness_router: &self.witness_router,
             };
             handle_action(&mut ctx, action).await
         }
@@ -1880,5 +2001,133 @@ mod tests {
             .unwrap();
         assert!(view.message.unwrap_or_default().contains("did:key"));
         assert!(view.form.is_some(), "the form stays open to fix the DID");
+    }
+
+    /// This harness has no persona keys or messaging, so an assertion that got as far as
+    /// sending stops there, saying so.
+    fn went_on_to_send(status: Option<&str>) -> bool {
+        status.is_some_and(|s| {
+            s.starts_with("Couldn't sign the personhood presentation")
+                || s.starts_with("Messaging unavailable")
+        })
+    }
+
+    /// A live personhood challenge for `persona`, and one witnessed relationship of it.
+    fn with_witnessed_persona(h: &mut Harness, persona: openvtc_core::config::account::PersonaId) {
+        use openvtc_core::relationships::{Relationship, RelationshipState};
+        use openvtc_core::witness::{WitnessRecord, Witnessed};
+        h.state
+            .main_page
+            .content_panel
+            .communities
+            .personhood_challenge = Some(
+            crate::state_handler::main_page::content::PersonhoodChallengeView {
+                vtc_did: "did:webvh:QmScidVtc:community.example".into(),
+                persona,
+                challenge_id: uuid::Uuid::new_v4(),
+                match_code: "ABCD-EFGH".into(),
+                expires_at: chrono::Utc::now() + chrono::TimeDelta::minutes(10),
+            },
+        );
+        let bob = std::sync::Arc::new("did:webvh:QmScidBob:example.com:bob".to_string());
+        h.config.private.relationships.relationships.insert(
+            bob.clone(),
+            Relationship {
+                task_id: std::sync::Arc::new("urn:uuid:t".into()),
+                our_did: std::sync::Arc::new("did:peer:2.Vz6MkOurs".into()),
+                remote_p_did: bob.clone(),
+                remote_did: std::sync::Arc::new("did:peer:2.Vz6MkTheirs".into()),
+                created: chrono::Utc::now(),
+                state: RelationshipState::Established,
+                our_persona: Some(persona),
+                needs_reestablishment: false,
+            },
+        );
+        h.config.private.witnessings.push(WitnessRecord {
+            remote_p_did: bob.to_string(),
+            relationship_did: "did:peer:2.Vz6MkOurs".into(),
+            witnessed_at: chrono::Utc::now(),
+            witnessed: Witnessed {
+                session_id: "urn:uuid:session-1".into(),
+                credential_id: "vwc-1".into(),
+                witness: "did:key:z6MkWitness".into(),
+                vwc_digest_multibase: "zDigest".into(),
+                evidence: serde_json::json!({
+                    "session": {}, "outcome": { "payload": { "vwc": { "id": "urn:vwc" } } }
+                }),
+            },
+        });
+    }
+
+    /// Asserting personhood with witnessed relationships asks first, with none chosen, and sends
+    /// nothing until the member answers; "include all" does nothing unless asked for and
+    /// confirmed; a submitted choice closes the picker and goes on to send.
+    #[tokio::test]
+    async fn personhood_asks_which_witness_credentials_to_present() {
+        let mut h = Harness::new(false).await;
+        let persona = openvtc_core::config::account::PersonaId::new();
+        with_witnessed_persona(&mut h, persona);
+
+        h.handle(Action::AssertPersonhood { witnessed: None }).await;
+        let view = h
+            .state
+            .main_page
+            .content_panel
+            .communities
+            .personhood_evidence
+            .clone()
+            .expect("the picker opens");
+        assert_eq!(view.choices.len(), 1);
+        assert_eq!(view.choices[0].digest, "zDigest");
+        assert!(view.selected().is_empty(), "nothing chosen by default");
+        assert!(
+            h.dispatch_rx.try_recv().is_err(),
+            "nothing is sent while asking"
+        );
+
+        // An unarmed "include all" confirmation is inert.
+        h.handle(Action::PersonhoodEvidence(
+            crate::state_handler::actions::PersonhoodEvidenceAction::ConfirmIncludeAll,
+        ))
+        .await;
+        assert!(
+            h.state
+                .main_page
+                .content_panel
+                .communities
+                .personhood_evidence
+                .is_some(),
+            "still asking"
+        );
+
+        h.handle(Action::AssertPersonhood {
+            witnessed: Some(Vec::new()),
+        })
+        .await;
+        let comms = &h.state.main_page.content_panel.communities;
+        assert!(comms.personhood_evidence.is_none(), "answered");
+        assert!(
+            went_on_to_send(comms.status_message.as_deref()),
+            "and it went on to send: {:?}",
+            comms.status_message
+        );
+    }
+
+    /// A persona with no witnessed relationship is not asked anything.
+    #[tokio::test]
+    async fn personhood_without_witnessings_asks_nothing() {
+        let mut h = Harness::new(false).await;
+        let persona = openvtc_core::config::account::PersonaId::new();
+        with_witnessed_persona(&mut h, persona);
+        h.config.private.witnessings = Default::default();
+
+        h.handle(Action::AssertPersonhood { witnessed: None }).await;
+        let comms = &h.state.main_page.content_panel.communities;
+        assert!(comms.personhood_evidence.is_none());
+        assert!(
+            went_on_to_send(comms.status_message.as_deref()),
+            "{:?}",
+            comms.status_message
+        );
     }
 }

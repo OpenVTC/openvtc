@@ -57,6 +57,24 @@ pub enum InboxAction {
     Back,
 }
 
+/// Keys of the personhood witness-credential picker. Choosing and submitting go through here;
+/// "include all" is two steps — [`Self::ArmIncludeAll`], then [`Self::ConfirmIncludeAll`] —
+/// and the second does nothing unless the first armed it.
+pub enum PersonhoodEvidenceAction {
+    Up,
+    Down,
+    /// Choose or unchoose the credential under the cursor.
+    Toggle,
+    /// Ask to include every one — not yet included.
+    ArmIncludeAll,
+    /// Include every one, for this assertion only, and assert. Inert unless armed.
+    ConfirmIncludeAll,
+    /// Back out of "include all"; the choices stand.
+    CancelIncludeAll,
+    /// Close without asserting.
+    Close,
+}
+
 pub enum RelationshipAction {
     Select(usize),
     OpenDetail(usize),
@@ -107,6 +125,21 @@ pub enum RelationshipAction {
     /// Request a VRC from a relationship partner
     RequestVrc {
         remote_p_did: String,
+    },
+    /// Open the witness prompt for the relationship at `index`.
+    StartWitness {
+        index: usize,
+    },
+    /// Update the witness DID being typed.
+    WitnessInputUpdate(String),
+    /// Close the witness prompt without witnessing.
+    CancelWitness {
+        index: usize,
+    },
+    /// Have the relationship witnessed by `witness` (a DID or an agent name), through the VTA.
+    Witness {
+        remote_p_did: String,
+        witness: String,
     },
 }
 
@@ -751,7 +784,15 @@ pub enum Action {
     /// Takes no index: the challenge already names the membership it belongs
     /// to, and answering it against whichever row happens to be highlighted is
     /// exactly the confusion the stored `vtc_did` exists to prevent.
-    AssertPersonhood,
+    ///
+    /// `witnessed` is the witness credentials to present, by session id, exactly as the member
+    /// chose them. `None` asks first: when the persona holds any, the picker opens with none
+    /// chosen; when it holds none, the assertion goes with none.
+    AssertPersonhood {
+        witnessed: Option<Vec<String>>,
+    },
+    /// The witness-credential picker of a personhood assertion.
+    PersonhoodEvidence(PersonhoodEvidenceAction),
     /// Ask the community at display index `usize` to renew this Active
     /// membership (`vtc/members/renew/0.1`): re-issue its membership credential
     /// and role credential. The reply arrives asynchronously; when it verifies,

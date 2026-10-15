@@ -157,6 +157,11 @@ pub struct InboundEffects {
     /// How renewals we asked for ended (`vtc/members/renew/0.1`), keyed by the
     /// community — the panel's status line says what happened.
     pub renewals: Vec<(String, openvtc_core::renewal::RenewalOutcome)>,
+    /// Documents that may be a witness's answer to a witnessing in progress: its session or
+    /// submission `#response`, or a `trust-task-error`. The loop hands each to the witnessing
+    /// waiting on its thread, which verifies it as the witness's before reading it; one on a
+    /// thread nobody waits on is dropped there.
+    pub witness_replies: Vec<openvtc_core::witness::InboundReply>,
     /// A message whose handling waits on a network-bound check (a DID resolve,
     /// a status-list fetch). The loop runs [`VerifyJob::run`] off the loop and
     /// hands the message back with the result; nothing about it is applied
@@ -767,6 +772,7 @@ async fn process_inbound(
         vetting_answers,
         vetting_grant_checks,
         renewals,
+        witness_replies,
         deferred,
     } = effects;
     // A message handed back with its check's result (or restored from before
@@ -964,6 +970,25 @@ async fn process_inbound(
             issuer: doc.issuer.clone(),
             thid,
             reply,
+        });
+        if !is_trust_task_error_type(&message.typ) {
+            return Ok(false);
+        }
+    }
+
+    // A witness's answers (`witness/session/0.1#response`, `witness/session/submit/0.1#response`),
+    // for a witnessing of one of our relationships. They arrive on the relationship DID's own
+    // listener, in either carriage, threaded on the session id. Nothing is read here: the
+    // witnessing waiting on that thread verifies each as the witness's first. A
+    // `trust-task-error` may be a witness's refusal as much as anything else's, so it is offered
+    // here too and falls through, as it does for the capability and git-ns views above.
+    if (openvtc_core::witness::is_reply_type(&message.typ)
+        || is_trust_task_error_type(&message.typ))
+        && message.body.get("threadId").is_some()
+    {
+        witness_replies.push(openvtc_core::witness::InboundReply {
+            sender: from_did.to_string(),
+            document: message.body.clone(),
         });
         if !is_trust_task_error_type(&message.typ) {
             return Ok(false);
@@ -2726,6 +2751,62 @@ mod tests {
         let deferred = effects.deferred.expect("set aside for its check");
         let pre = deferred.job.run(tdk.clone()).await;
         dispatch(config, tdk, &deferred.message, Arrival::Returning(pre)).await
+    }
+
+    /// A witness's answer reaches the witnessing waiting on it whoever sent it — a witness is
+    /// no contact and no community — in either carriage, and is not read here: the witnessing
+    /// verifies it as the witness's. A refusal (`trust-task-error`) is offered too.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_witness_answer_is_handed_to_the_witnessing() {
+        let tdk = test_tdk().await;
+        let mut config = test_config();
+        let witness = "did:key:z6MkWitness";
+        let session = "urn:uuid:9e8d7c6b-0000-4000-8000-0000000000aa";
+        for (typ, enveloped) in [
+            (
+                "https://trusttasks.org/spec/witness/session/0.1#response",
+                true,
+            ),
+            (
+                "https://trusttasks.org/spec/witness/session/submit/0.1#response",
+                false,
+            ),
+            ("https://trusttasks.org/spec/trust-task-error/0.5", true),
+        ] {
+            let document = serde_json::json!({
+                "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+                "type": typ,
+                "threadId": session,
+                "issuer": witness,
+                "recipient": "did:peer:2.Vz6MkOurs",
+                "payload": {},
+            });
+            let message = Message::build(
+                format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+                if enveloped {
+                    openvtc_core::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string()
+                } else {
+                    typ.to_string()
+                },
+                document.clone(),
+            )
+            .from(witness.to_string())
+            .to("did:peer:2.Vz6MkOurs".to_string())
+            .finalize();
+            let effects = dispatch(&mut config, &tdk, &message, Arrival::FRESH).await;
+            assert!(
+                effects.deferred.is_none(),
+                "{typ}: nothing to check off the loop"
+            );
+            let [reply] = effects.witness_replies.as_slice() else {
+                panic!(
+                    "{typ}: one answer for the witnessing, got {:?}",
+                    effects.witness_replies
+                );
+            };
+            assert_eq!(reply.sender, witness);
+            assert_eq!(reply.document, document);
+        }
     }
 
     /// A community that offers no capability management refuses the query

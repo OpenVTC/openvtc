@@ -299,6 +299,7 @@ mod vic;
 mod vta_recovery;
 mod vta_sync_driver;
 mod vta_transports;
+mod witness_actions;
 
 pub struct DeferredLoad {
     pub profile: String,
@@ -921,6 +922,25 @@ impl StateHandler {
                     report.failed
                 ));
             }
+
+            // The relationship credentials this account issued, likewise: the VTA presents
+            // one to a witness by its vault handle, and holds only what is in its vault.
+            let report =
+                openvtc_core::credential_sync::sync_relationship_credentials(&config, client).await;
+            if report.stored > 0 {
+                state.main_page.log(format!(
+                    "Stored {} issued relationship credential(s) at the VTA, where witnessing \
+                     presents them from",
+                    report.stored
+                ));
+            }
+            if report.failed > 0 {
+                state.main_page.log(format!(
+                    "{} issued relationship credential(s) could not be stored at the VTA — \
+                     they are stored when a witnessing needs them",
+                    report.failed
+                ));
+            }
         }
 
         // Fetch VTA context name, reusing the always-on admin session.
@@ -1195,6 +1215,9 @@ impl StateHandler {
         let (dispatch_tx, mut dispatch_rx) =
             mpsc::unbounded_channel::<background_dispatch::DispatchOutcome>();
         let mut in_flight = background_dispatch::InFlight::default();
+        // Hands a witness's answers from the inbound arm to the witnessing waiting on them
+        // (`witness_actions`); the job verifies each one before reading it.
+        let witness_router = openvtc_core::witness::ReplyRouter::default();
         // Membership contexts already checked at the VTA this run. A failure is
         // logged and retried on the next launch rather than every tick.
         let mut contexts_checked: std::collections::HashSet<String> =
@@ -1425,6 +1448,7 @@ impl StateHandler {
                             ping_sent_at: &mut ping_sent_at,
                             state_tx: &self.state_tx,
                             profile: self.profile.as_str(),
+                            witness_router: &witness_router,
                         };
                         if matches!(
                             runtime_actions::handle_action(&mut ctx, action).await,
@@ -1498,8 +1522,21 @@ impl StateHandler {
                                 vetting_answers,
                                 vetting_grant_checks,
                                 renewals,
+                                witness_replies,
                                 deferred,
                             } = effects;
+                            // A witness's answers, to the witnessing waiting on their thread.
+                            for reply in witness_replies {
+                                let thread = reply
+                                    .document
+                                    .get("threadId")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string();
+                                if witness_router.deliver(&reply.sender, reply.document) {
+                                    debug!(%thread, "a witness's answer, handed to its witnessing");
+                                }
+                            }
                             if returning_credential {
                                 state
                                     .main_page
@@ -1883,6 +1920,7 @@ impl StateHandler {
                                 ping_sent_at: &mut ping_sent_at,
                                 state_tx: &self.state_tx,
                                 profile: self.profile.as_str(),
+                                witness_router: &witness_router,
                             };
                             vetting_actions::apply_pcs_outcome(&mut ctx, *outcome).await;
                         }
@@ -2089,6 +2127,7 @@ impl StateHandler {
                             ping_sent_at: &mut ping_sent_at,
                             state_tx: &self.state_tx,
                             profile: self.profile.as_str(),
+                            witness_router: &witness_router,
                         };
                         vetting_actions::start_pcs_work(&mut ctx, Vec::new());
                     }
@@ -2108,6 +2147,7 @@ impl StateHandler {
                             ping_sent_at: &mut ping_sent_at,
                             state_tx: &self.state_tx,
                             profile: self.profile.as_str(),
+                            witness_router: &witness_router,
                         };
                         vetting_actions::dispatch(
                             &mut ctx,
@@ -2130,6 +2170,7 @@ impl StateHandler {
                             ping_sent_at: &mut ping_sent_at,
                             state_tx: &self.state_tx,
                             profile: self.profile.as_str(),
+                            witness_router: &witness_router,
                         };
                         vetting_actions::refresh_stale_modes(&mut ctx).await;
                     }
@@ -2403,6 +2444,7 @@ impl StateHandler {
                             ping_sent_at: &mut ping_sent_at,
                             state_tx: &self.state_tx,
                             profile: self.profile.as_str(),
+                            witness_router: &witness_router,
                         };
                         vetting_actions::dispatch(
                             &mut ctx,
@@ -3365,7 +3407,8 @@ impl StateHandler {
                     // silent — a dead key is indistinguishable from a broken one.
                     Action::Inbox(..) | Action::Relationship(..) | Action::Credential(..) |
                     Action::IssueMemberVmc(..) | Action::CapabilitiesOpen(..) | Action::Repos(..) |
-                    Action::RequestPersonhoodChallenge(..) | Action::AssertPersonhood |
+                    Action::RequestPersonhoodChallenge(..) | Action::AssertPersonhood { .. } |
+                    Action::PersonhoodEvidence(..) |
                     Action::RenewMembership(..) |
                     Action::CapabilitiesRefresh | Action::CapabilitiesToggleCommit |
                     Action::SetActiveCommunity(..) | Action::ToggleFavourite(..) |

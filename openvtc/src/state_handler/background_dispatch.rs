@@ -147,6 +147,10 @@ pub(crate) enum DispatchDomain {
     /// own domain so a pass of the vetter schedule never holds up a vetting send, nor the
     /// reverse.
     HiddenVetting,
+    /// Having a relationship witnessed: three Trust Tasks at the VTA and two documents carried
+    /// to the witness, each waited on for up to a minute. Its own domain so the wait never
+    /// holds up a ping or a VRC request on the same relationship.
+    Witness,
 }
 
 impl DispatchDomain {
@@ -176,6 +180,7 @@ impl DispatchDomain {
             DispatchDomain::DeviceGrantSweep => "Device access refresh",
             DispatchDomain::VettingStatus => "Vetter grant check",
             DispatchDomain::HiddenVetting => "Hidden-vetting work at your VTA",
+            DispatchDomain::Witness => "Witnessing",
         }
     }
 }
@@ -324,6 +329,8 @@ pub(crate) enum DispatchOutcome {
             Result<Vec<openvtc_core::community_access::DeviceGrant>, String>,
         )>,
     ),
+    /// A witnessing finished (or failed).
+    Witness(crate::state_handler::witness_actions::WitnessOutcome),
 }
 
 impl DispatchOutcome {
@@ -357,6 +364,7 @@ impl DispatchOutcome {
             DispatchOutcome::CommunityContexts(_) => DispatchDomain::CommunityContexts,
             DispatchOutcome::CommunityContext(_) => DispatchDomain::CommunityAccess,
             DispatchOutcome::DeviceGrantSweep(_) => DispatchDomain::DeviceGrantSweep,
+            DispatchOutcome::Witness(_) => DispatchDomain::Witness,
             DispatchOutcome::Panicked(domain) => *domain,
         }
     }
@@ -368,6 +376,8 @@ impl DispatchOutcome {
 pub(crate) enum ProgressUpdate {
     /// A step of a standalone persona mint, for the create-persona overlay.
     PersonaMint(String),
+    /// A step of a witnessing, for the relationships panel's status line.
+    Witness(String),
 }
 
 impl ProgressUpdate {
@@ -376,6 +386,7 @@ impl ProgressUpdate {
     fn domain(&self) -> DispatchDomain {
         match self {
             ProgressUpdate::PersonaMint(_) => DispatchDomain::Persona,
+            ProgressUpdate::Witness(_) => DispatchDomain::Witness,
         }
     }
 }
@@ -473,6 +484,9 @@ pub(crate) fn apply_outcome(
                 if let Some(o) = state.main_page.create_persona.as_mut() {
                     o.messages.push(step);
                 }
+            }
+            ProgressUpdate::Witness(step) => {
+                state.main_page.content_panel.relationships.status_message = Some(step);
             }
         }
         return AfterApply::Nothing;
@@ -603,6 +617,7 @@ pub(crate) fn apply_outcome(
         }
         DispatchOutcome::Vic(outcome) => outcome.apply(state, config),
         DispatchOutcome::VicMutation(outcome) => outcome.apply(state),
+        DispatchOutcome::Witness(outcome) => outcome.apply(state, config, save),
         // Handled above, before the domain is finished. Listed because the
         // match must stay exhaustive.
         DispatchOutcome::Progress(_) => unreachable!("progress returns before this match"),

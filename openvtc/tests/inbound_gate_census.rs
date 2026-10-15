@@ -69,6 +69,9 @@ fn routed_types() -> Vec<&'static str> {
         "https://trusttasks.org/spec/git-ns/right/grant/0.3#response",
         "https://trusttasks.org/spec/git-ns/account/link/0.1#response",
         "https://trusttasks.org/spec/git-ns/drift/resolve/0.1#response",
+        // A witness's answers, routed by `witness::is_reply_type`.
+        "https://trusttasks.org/spec/witness/session/0.1#response",
+        "https://trusttasks.org/spec/witness/session/submit/0.1#response",
     ]
 }
 

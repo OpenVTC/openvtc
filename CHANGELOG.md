@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Have a relationship witnessed.** Press `w` on a relationship, name a witness,
+  and your VTA does the witnessing (`vta/witness/{open,present,accept}/0.1`): it
+  signs every document as the relationship DID and presents the VRC you issued and
+  your membership credential, while OpenVTC carries the documents to the witness on
+  that DID's own connection (DIDComm, or TSP where both sides advertise it) and
+  hands the answers back. The witness's answers are verified as its own before they
+  are used; a refusal is explained, never handed back. The resulting witness
+  credential is stored at your VTA and listed on the relationship. Needs a VTA that
+  serves `vta/witness/*`; not available to a BIP32 account.
+- **Issued relationship credentials are stored in the VTA's credential vault** on
+  connect, where witnessing presents them from. Only credentials the vault does not
+  hold are stored.
+- **A personhood assertion can present witness credentials you choose.** None is
+  included by default: when the persona has witnessed relationships, `P` lists them
+  (other party, witness, date, digest) and says what the community learns from each;
+  you include them one by one, or all of them only through a separate confirmation
+  for that assertion. Each included VWC carries its outcome evidence
+  (`ext["org.openvtc.witness"].outcomeEvidence`), which a community needs beside a
+  VWC to count it.
+
 ### Security
 
 - **No PCS key is held on the device any more.** Hidden vetting runs on the
