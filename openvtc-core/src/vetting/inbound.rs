@@ -330,6 +330,15 @@ pub enum Notice {
         /// The error code, e.g. `notGranted`.
         code: String,
     },
+    /// Vetter: a grant credential arrived and we refused it, so we are not a
+    /// vetter here until one is accepted. Said, because a resend that is
+    /// answered and then refused otherwise looks like one that never came.
+    GrantRefused {
+        /// The community.
+        community: String,
+        /// Why — what failed, never the credential.
+        reason: String,
+    },
 }
 
 impl Notice {
@@ -458,6 +467,10 @@ impl Notice {
             Notice::ResendRefused { community, code } => {
                 refusal_words(QueryKind::VetterResend, community, code)
             }
+            Notice::GrantRefused { community, reason } => format!(
+                "Refused the vetter credential from {community}: {reason}. You are not a vetter \
+                 there until one is accepted."
+            ),
         }
     }
 }
@@ -1078,7 +1091,11 @@ async fn statement(
         // community's hand-off, however well the credential inside is signed.
         if let Err(e) = wire::open::<Value>(message, sender, ctx.resolver).await {
             warn!(%sender, reason = %e, "vetter grant delivery refused");
-            return Some(Handled::default());
+            return Some(grant_refused(
+                ctx,
+                sender,
+                format!("its delivery did not verify ({e})"),
+            ));
         }
         // Then the grant itself: it is what makes this persona a vetter, and
         // the transport sender is not proof the community issued it.
@@ -1088,11 +1105,15 @@ async fn statement(
             }
             Some(Err(e)) => {
                 warn!(reason = %e, "vetter role credential refused");
-                Handled::default()
+                grant_refused(ctx, sender, e.to_string())
             }
             _ => {
                 warn!("vetter role credential not checked — refused");
-                Handled::default()
+                grant_refused(
+                    ctx,
+                    sender,
+                    crate::issued_credential::IssuedCredentialError::NotChecked.to_string(),
+                )
             }
         });
     }
@@ -1473,6 +1494,26 @@ fn attestation(
     })
 }
 
+/// A grant credential `sender` delivered was refused for `reason`. Nothing is
+/// stored either way; the activity log says why when `sender` is a community
+/// the persona it reached is a member of. A stranger's delivery is only
+/// logged, so nobody else can write to the activity feed this way.
+fn grant_refused(ctx: &Context<'_>, sender: &str, reason: String) -> Handled {
+    let ours = ctx
+        .recipient
+        .is_some_and(|(persona, _)| ctx.account.membership(sender, persona).is_some());
+    if !ours {
+        return Handled::default();
+    }
+    Handled {
+        notice: Some(Notice::GrantRefused {
+            community: sender.to_string(),
+            reason,
+        }),
+        ..Handled::default()
+    }
+}
+
 /// A community's vetter role credential for one of our personas.
 ///
 /// Kept when the community that it names issued and signed it (its proof is
@@ -1495,13 +1536,25 @@ fn vetter_grant(
     let subject = credential
         .pointer("/credentialSubject/id")
         .and_then(Value::as_str);
-    if community != sender || issuer != Some(sender) || subject != Some(our_did) {
-        warn!(%sender, %community, "vetter role credential not from its community, or not for us — ignored");
-        return Handled::default();
+    if community != sender || issuer != Some(sender) {
+        warn!(%sender, %community, "vetter role credential not from its community — ignored");
+        return grant_refused(
+            ctx,
+            sender,
+            "it was not issued by the community that sent it".into(),
+        );
+    }
+    if subject != Some(our_did) {
+        warn!(%sender, "vetter role credential not for the persona it reached — ignored");
+        return grant_refused(
+            ctx,
+            sender,
+            "it names a different identity from the persona it was sent to".into(),
+        );
     }
     if ctx.account.membership(&community, persona).is_none() {
         warn!(%community, "vetter role credential from a community we are not a member of — ignored");
-        return Handled::default();
+        return grant_refused(ctx, sender, "this persona holds no membership there".into());
     }
     let valid_until = credential
         .get("validUntil")

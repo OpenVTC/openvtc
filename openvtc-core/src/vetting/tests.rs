@@ -1050,7 +1050,12 @@ async fn a_vetter_grant_is_kept_only_from_its_community() {
             COMMUNITY,
         )
         .await;
-    assert!(handled.notice.is_none() && member.book.vetter_grants.is_empty());
+    assert!(member.book.vetter_grants.is_empty());
+    assert!(
+        matches!(&handled.notice, Some(Notice::GrantRefused { reason, .. }) if reason.contains("different identity")),
+        "{:?}",
+        handled.notice
+    );
 
     let ordinary = role_credential(
         &secret(COMMUNITY_SEED),
@@ -1997,7 +2002,13 @@ async fn a_tampered_vetter_grant_is_not_kept() {
             COMMUNITY,
         )
         .await;
-    assert!(handled.notice.is_none() && member.book.vetter_grants.is_empty());
+    assert!(member.book.vetter_grants.is_empty());
+    // Refused, and said: a refused grant otherwise reads as one never sent.
+    assert!(
+        matches!(&handled.notice, Some(Notice::GrantRefused { community, .. }) if community == COMMUNITY),
+        "{:?}",
+        handled.notice
+    );
 }
 
 /// A vetter grant naming a status list that cannot be read is not kept:
@@ -2013,7 +2024,21 @@ async fn a_grant_whose_status_cannot_be_read_is_not_kept() {
             COMMUNITY,
         )
         .await;
-    assert!(handled.notice.is_none() && vetter.book.vetter_grants.is_empty());
+    assert!(vetter.book.vetter_grants.is_empty());
+    // The activity log says why — the status check, not a missing delivery —
+    // which is what tells a vetter to ask again once the community is fixed.
+    let Some(Notice::GrantRefused { reason, .. }) = &handled.notice else {
+        panic!("a refused grant is reported: {:?}", handled.notice);
+    };
+    assert!(reason.contains("revocation status"), "{reason}");
+    assert!(
+        handled
+            .notice
+            .as_ref()
+            .unwrap()
+            .describe()
+            .starts_with("Refused the vetter credential from"),
+    );
 }
 
 /// A community answer is operational: signed with the community's
