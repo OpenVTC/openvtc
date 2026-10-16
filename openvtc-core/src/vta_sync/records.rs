@@ -24,6 +24,7 @@ use crate::config::secured_config::{KeyInfoConfig, KeySourceMaterial};
 use crate::relationships::Relationship;
 use crate::vetting::VettingBook;
 use crate::vrc::Vrcs;
+use crate::witness::WitnessRecord;
 
 /// What a record holds. The key prefix names it, so a record from a newer
 /// build with a kind this one does not know is recognisable as such.
@@ -51,11 +52,14 @@ pub enum RecordKind {
     Key,
     /// Vetting state, minus the hidden-vetting engine, which carries secrets.
     Vetting,
+    /// A completed witnessing ([`WitnessRecord`]): the VWC's vault handle and the outcome
+    /// evidence a personhood assertion presents beside it.
+    Witnessing,
 }
 
 impl RecordKind {
     /// Every kind, for iteration.
-    pub const ALL: [RecordKind; 10] = [
+    pub const ALL: [RecordKind; 11] = [
         RecordKind::Persona,
         RecordKind::Membership,
         RecordKind::Relationship,
@@ -66,6 +70,7 @@ impl RecordKind {
         RecordKind::VrcReceived,
         RecordKind::Key,
         RecordKind::Vetting,
+        RecordKind::Witnessing,
     ];
 
     fn prefix(self) -> &'static str {
@@ -80,6 +85,7 @@ impl RecordKind {
             RecordKind::VrcReceived => "v1/vrc-received/",
             RecordKind::Key => "v1/key/",
             RecordKind::Vetting => "v1/vetting",
+            RecordKind::Witnessing => "v1/witnessing/",
         }
     }
 
@@ -107,6 +113,7 @@ impl RecordKind {
                 | RecordKind::AgentName
                 | RecordKind::VrcIssued
                 | RecordKind::VrcReceived
+                | RecordKind::Witnessing
         )
     }
 
@@ -123,6 +130,7 @@ impl RecordKind {
             RecordKind::VrcIssued | RecordKind::VrcReceived => "relationship credential",
             RecordKind::Key => "key reference",
             RecordKind::Vetting => "vetting state",
+            RecordKind::Witnessing => "witnessing",
         }
     }
 }
@@ -147,6 +155,19 @@ fn membership_key(c: &CommunityRecord) -> String {
 
 fn simple_key(kind: RecordKind, id: &str) -> String {
     format!("{}{}", kind.prefix(), h(id))
+}
+
+/// A witnessing's key, by its session id — what a personhood assertion selects it by.
+fn witnessing_key(r: &WitnessRecord) -> String {
+    simple_key(RecordKind::Witnessing, &r.witnessed.session_id)
+}
+
+/// A witnessing as the record it syncs as: `(key, value)`. The value is the local record whole,
+/// evidence included — as a VRC record carries its credential — because the VTA's vault keeps
+/// that evidence where no client task can read it back.
+#[must_use]
+pub fn witnessing_record(r: &WitnessRecord) -> Option<(String, Value)> {
+    Some((witnessing_key(r), to_json(r)?))
 }
 
 fn vrc_key(kind: RecordKind, remote: &str, id: &str) -> String {
@@ -298,6 +319,11 @@ pub fn project(view: &SyncView<'_>) -> BTreeMap<String, Value> {
     }
     if let Some(v) = vetting_json(&view.private.vetting) {
         out.insert(RecordKind::Vetting.prefix().to_string(), v);
+    }
+    for r in &view.private.witnessings.0 {
+        if let Some((key, value)) = witnessing_record(r) {
+            out.insert(key, value);
+        }
     }
     out
 }
@@ -474,6 +500,21 @@ pub fn apply(parts: &mut SyncParts<'_>, key: &str, value: Option<&Value>) -> Res
                 application.local_engine_dropped = here.is_some_and(|h| h.local_engine_dropped);
             }
             parts.private.vetting = book;
+        }
+        RecordKind::Witnessing => {
+            let incoming: Option<WitnessRecord> = value.map(decode).transpose()?;
+            if let Some(r) = &incoming
+                && witnessing_key(r) != key
+            {
+                return Err("witnessing does not match its key".to_string());
+            }
+            let list = &mut parts.private.witnessings.0;
+            list.retain(|r| witnessing_key(r) != key);
+            if let Some(r) = incoming {
+                // Kept oldest first, which is how the relationships view lists them.
+                let at = list.partition_point(|here| here.witnessed_at <= r.witnessed_at);
+                list.insert(at, r);
+            }
         }
     }
     Ok(())
