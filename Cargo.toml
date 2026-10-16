@@ -628,7 +628,10 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # **0.68** is `vta-service` 0.60's line: the first with `VtaClient::pcs_*`, the
 # VTA as hidden-vetting engine (VTI #2056), on trust-tasks 0.31 / TDK 0.26 /
 # messaging-sdk 0.36. did-git-sign 0.20 is on it.
-vta-sdk = { version = "0.68.0", features = [
+# **0.69** is `vta-service` 0.61's line: the first with `VtaClient::witness_*`,
+# the VTA as witnessed party (`vta/witness/{open,present,accept}`, VTI #2123),
+# on the same trust-tasks 0.31 / TDK 0.26 / messaging-sdk 0.36.
+vta-sdk = { version = "0.69.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
