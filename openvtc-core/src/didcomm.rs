@@ -1679,6 +1679,11 @@ pub const OPENVTC_CATCH_ALL_PATTERN: &str = concat!(
     // answer arrived typed as the task, matched nothing here, and was dropped
     // at `debug!` — the view waited out its timeout on an answer the VTC sent.
     r"|https://trusttasks\.org/spec/git-ns/.*",
+    // A witness's answers to the documents a witnessing carries (`witness/session/*#response`,
+    // `openvtc_core::witness`). Over DIDComm they pass in the binding envelope below; TSP opens
+    // the envelope before the gate, so without this arm a witness answering over TSP would be
+    // dropped here and the witnessing would wait out its timeout.
+    r"|https://trusttasks\.org/spec/witness/.*",
     // The **binding envelopes**, whose type says "a Trust Task is inside" and
     // names no task. A peer built on `trust-tasks-didcomm` types every message
     // this way, and so does this crate's own `capabilities::

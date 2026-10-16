@@ -152,6 +152,82 @@ pub async fn sync_membership_credentials(
     report
 }
 
+/// Ensure every relationship credential this account **issued** is also in the vault.
+///
+/// The VTA presents a relationship credential to a witness by its vault handle
+/// (`vta/witness/open`, [`crate::witness`]), and only one it holds: a VRC this account issued
+/// lives in the local config and the VTA's app-state store, neither of which the VTA's
+/// witnessing reads. Issued, not received: a witnessed party presents its own half of the edge,
+/// issued by its relationship DID to the other party.
+///
+/// The VTA verifies each proof on receipt against the issuer's DID (a relationship DID is a
+/// `did:peer`, resolved without I/O), so nothing is verified here: these are credentials this
+/// client signed itself. Idempotent and best-effort, as
+/// [`sync_membership_credentials`] is — and, like it, it stores only what the vault does not
+/// already hold, because re-storing one would change the bytes a witnessed session in flight
+/// is bound to.
+pub async fn sync_relationship_credentials(config: &Config, client: &VtaClient) -> SyncReport {
+    let issued: Vec<Value> = config
+        .private
+        .vrcs_issued
+        .values()
+        .flat_map(|by_id| by_id.values())
+        .filter_map(|vrc| serde_json::to_value(vrc.as_ref()).ok())
+        .collect();
+    store_relationship_credentials(client, issued).await
+}
+
+/// The pass [`sync_relationship_credentials`] runs, over the credentials themselves.
+pub async fn store_relationship_credentials(client: &VtaClient, issued: Vec<Value>) -> SyncReport {
+    let held: Vec<(String, Value)> = issued
+        .into_iter()
+        .filter_map(|vrc| {
+            // Without an id the vault would mint a fresh handle every pass.
+            let id = vrc.get("id").and_then(Value::as_str)?.to_string();
+            Some((id, vrc))
+        })
+        .collect();
+    if held.is_empty() {
+        return SyncReport::default();
+    }
+
+    let in_vault = match client
+        .cred_vault_query(crate::witness::relationship_credential_filter())
+        .await
+    {
+        Ok(listing) => held_ids(&listing),
+        Err(e) => {
+            // Unlike the membership pass, *not* storing regardless: receive overwrites, and
+            // overwriting a VRC a witnessed session is bound to fails that session. Try again
+            // on the next pass.
+            debug!("could not read held relationship credentials ({e}); not storing this pass");
+            return SyncReport {
+                failed: held.len(),
+                ..SyncReport::default()
+            };
+        }
+    };
+
+    let mut report = SyncReport::default();
+    for (id, credential) in held {
+        if in_vault.iter().any(|h| h == &id) {
+            report.already_held += 1;
+            continue;
+        }
+        match client.cred_vault_receive(credential, None).await {
+            Ok(_) => {
+                debug!(id = %id, "stored an issued relationship credential in the vault");
+                report.stored += 1;
+            }
+            Err(e) => {
+                warn!(id = %id, "could not store an issued relationship credential: {e}");
+                report.failed += 1;
+            }
+        }
+    }
+    report
+}
+
 /// The filter used to see which membership credentials the vault already holds.
 ///
 /// Factored out so the "must carry a filter" contract is testable without a
@@ -166,7 +242,7 @@ fn held_query_filter() -> Value {
 /// Tolerant about the envelope key because the response is consumed untyped,
 /// and reading a full vault as empty would mean re-storing everything on every
 /// launch.
-fn held_ids(listing: &Value) -> Vec<String> {
+pub(crate) fn held_ids(listing: &Value) -> Vec<String> {
     let array = if let Some(arr) = listing.as_array() {
         arr.clone()
     } else {

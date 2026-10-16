@@ -401,6 +401,19 @@ impl MainPageState {
                     created: rel.created.format("%Y-%m-%d %H:%M").to_string(),
                     vrcs_issued,
                     vrcs_received,
+                    witnessings: config
+                        .private
+                        .witnessings
+                        .for_relationship(remote_p_did)
+                        .map(|w| content::RelationshipWitnessing {
+                            witness: sanitize_display(&w.witnessed.witness, 256),
+                            witness_agent_name: config
+                                .agent_name_for(&w.witnessed.witness)
+                                .map(|n| sanitize_display(n, 256)),
+                            credential_id: sanitize_display(&w.witnessed.credential_id, 256),
+                            witnessed_at: w.witnessed_at.format("%Y-%m-%d %H:%M").to_string(),
+                        })
+                        .collect(),
                     needs_reestablishment: rel.needs_reestablishment,
                 }
             })

@@ -58,6 +58,7 @@ sequenceDiagram
   - [2. Generate and Issue VRC (Respondent)](#2-generate-and-issue-vrc-respondent)
   - [3. Claim and Store VRC (Requestor)](#3-claim-and-store-vrc-requestor)
 - [List and View VRCs](#list-and-view-vrcs)
+- [Have a relationship witnessed](#have-a-relationship-witnessed)
 
 ## Choosing your identifier
 
@@ -333,3 +334,72 @@ openvtc vrcs show <VRC_ID>
 This displays the credential details on the screen.
 
 For more details, see the [CLI documentation](openvtc-tool-commands.md#openvtc-vrcs).
+
+## Have a relationship witnessed
+
+A **witness** is an independent party that watches you present the VRC you issued
+to a contact and then issues a **Verifiable Witness Credential (VWC)** saying so. A
+community that trusts that witness can count the VWC — for example as evidence in a
+personhood assertion.
+
+Your VTA does the witnessing for you: it builds and signs every document as your
+relationship DID, presents your credentials, and verifies and stores the witness's
+credential. OpenVTC only carries the documents to the witness, on the relationship
+DID's own connection, and hands its answers back to the VTA. Nothing is signed on
+this device. See VTI's
+[the VTA as a witnessed party](https://github.com/OpenVTC/verifiable-trust-infrastructure/blob/main/docs/02-vta/witness-party.md).
+
+**In the TUI:** open the relationship in the Relationships panel, press **`w`**,
+type the witness's DID or agent name, and press **Enter**. The status line follows
+each step. When it completes, the relationship's detail lists the witnessing — the
+witness and the VWC's handle in your VTA's credential vault.
+
+**What you need:**
+
+- An account whose keys are held by a VTA. A BIP32 account keeps its keys on the
+  device, so the VTA cannot sign as its relationship DIDs; witnessing is not
+  available there.
+- A VTA that serves `vta/witness/*`, and an account credential that may request
+  witnessing (`admin` or `initiator` in its context).
+- An established relationship to which **you have issued a VRC** (you issue one by
+  accepting the contact's VRC request). The witness observes you presenting your
+  own half of the edge.
+- Usually a membership of a community the witness serves. Your membership
+  credential is presented beside the VRC.
+
+**What the witness learns:** both credentials, in full — your relationship DID, the
+contact's, and which community you belong to. Your membership credential names your
+persona DID, not the pairwise relationship DID, so your VTA links the two for the
+witness with a second presentation by your persona (the *member link*); the witness
+then also learns **which member** is behind the relationship DID. Choose a witness
+you are willing to tell that.
+
+**When it does not complete,** the status line says why:
+
+| Message | What to do |
+| --- | --- |
+| *the witness will not witness this relationship* | The witness's policy refused (`witness/session:refused`). Another witness may accept. |
+| *the witness no longer holds this session* | The session expired or was used (`challengeMismatch`). Start again. |
+| *the witness did not accept your credentials* | A proof, validity period, or a community it does not serve (`presentationInvalid`). |
+| *your VTA does not present your membership to this witness* | The member link is sent only to witnesses your VTA's operator lists in `[witness] member_link_witnesses` (`memberLinkUnsupported`). Ask the operator, or choose a listed witness. |
+| *your VTA holds no key of this relationship's DID* | The relationship predates VTA-held keys, or belongs to another context. Re-establish it. |
+| *the witness did not answer* | It is offline or unreachable from your mediator. Try later or choose another witness. |
+
+**Relationship credentials in the vault.** The VTA names what it presents by its
+handle in its credential vault, so OpenVTC stores every VRC you issue there when it
+connects to the VTA (and again, if needed, when a witnessing starts). Only a VRC
+the vault does not already hold is stored, so a witnessing in progress is never
+disturbed.
+
+**Personhood.** A personhood assertion presents **no** witness credential unless you
+choose it. When the persona has witnessed relationships, pressing **`P`** first lists
+them — the other party, the witness, the date and the credential's digest — with
+none chosen, and says what the community learns from each one you include: that the
+relationship exists (both relationship DIDs), which witness attested it, and its
+digest. **Space** includes or excludes one; **Enter** asserts with exactly those (or
+none). **`A`** asks to include all of them, for that one assertion only, and only
+**`y`** to that question does; it is never remembered. Each included VWC is
+presented with its session's **outcome evidence** — the session document and the
+witness's answer — in the assertion's `ext["org.openvtc.witness"].outcomeEvidence`;
+a community counts a VWC only with that evidence, only from a witness it lists as
+trusted, and accepts at most 16 in one assertion.

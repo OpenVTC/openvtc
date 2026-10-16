@@ -3,6 +3,7 @@
 */
 
 use crate::operational::SeenDocuments;
+use crate::witness::Witnessings;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
@@ -308,6 +309,13 @@ pub struct ProtectedConfig {
     #[serde(default, skip_serializing_if = "SyncState::is_empty")]
     pub vta_sync: SyncState,
 
+    /// Witnessings this account completed through its VTA — the VWC's vault handle, the
+    /// witness, and the session's outcome evidence a community needs beside the VWC
+    /// ([`crate::witness`]). Skipped when empty, so a config that has never witnessed
+    /// round-trips byte-identically.
+    #[serde(default, skip_serializing_if = "Witnessings::is_empty")]
+    pub witnessings: Witnessings,
+
     /// Fields written by a newer build, preserved verbatim (D19).
     ///
     /// The protected tier is where the account lives, so an older build
@@ -371,6 +379,7 @@ impl Default for ProtectedConfig {
             seen_documents: SeenDocuments::default(),
             deferred_inbound: Vec::new(),
             vta_sync: SyncState::default(),
+            witnessings: Witnessings::default(),
         }
     }
 }

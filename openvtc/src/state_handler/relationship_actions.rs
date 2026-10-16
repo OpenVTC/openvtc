@@ -996,6 +996,12 @@ impl RelationshipOutcome {
                     &mut config.private.vrcs_issued,
                     &mut config.private.vrcs_received,
                 );
+                // Its witnessings go with it: they attest to an edge that no longer exists
+                // here. The witness credentials stay in the VTA's vault, where the VTA put them.
+                config
+                    .private
+                    .witnessings
+                    .remove_relationship(&remote_p_did);
                 config
                     .private
                     .contacts
@@ -1680,11 +1686,37 @@ pub(crate) async fn dispatch(
             remote_p_did,
             alias,
         } => handle_edit_alias(config, state, save, &remote_p_did, &alias),
-        RelationshipAction::CancelEditAlias { index } => {
+        RelationshipAction::CancelEditAlias { index }
+        | RelationshipAction::CancelWitness { index } => {
             state.main_page.content_panel.relationships.mode = RelationshipsMode::Detail {
                 index,
                 selected_vrc: None,
             };
+        }
+        RelationshipAction::StartWitness { index } => {
+            let rels = &mut state.main_page.content_panel.relationships;
+            rels.status_message = None;
+            rels.mode = RelationshipsMode::Witness {
+                index,
+                witness_input: String::new(),
+            };
+        }
+        RelationshipAction::WitnessInputUpdate(value) => {
+            if let RelationshipsMode::Witness {
+                ref mut witness_input,
+                ..
+            } = state.main_page.content_panel.relationships.mode
+            {
+                *witness_input = value;
+            }
+        }
+        // The runtime loop takes a witnessing before it reaches here: it runs as its own job in
+        // its own domain (`witness_actions`). Reaching here means a loop with no runtime
+        // services — say so rather than drop it.
+        RelationshipAction::Witness { .. } => {
+            state.main_page.content_panel.relationships.status_message = Some(
+                "Witnessing is not available until messaging and the VTA are connected.".into(),
+            );
         }
         RelationshipAction::RequestVrc { remote_p_did } => {
             match prepare_request_vrc(config, service, state, &remote_p_did) {

@@ -63,6 +63,10 @@ pub fn render(
         render_device_access(&mut lines, view, state.device_grants.get(&view.context_id));
         return lines;
     }
+    if let Some(view) = &state.personhood_evidence {
+        render_personhood_evidence(&mut lines, view);
+        return lines;
+    }
 
     push_personhood_challenge(&mut lines, state);
 
@@ -701,6 +705,77 @@ fn render_device_access(
         lines.push(
             Line::from(
                 "This membership is over: no device can be added, but existing access can be revoked.",
+            )
+            .style(dim),
+        );
+    }
+}
+
+/// The witness-credential picker of a personhood assertion: each witnessed relationship, what the
+/// community learns from including it, and what is chosen. Nothing is chosen until the member
+/// chooses it; "include all" is a question of its own.
+fn render_personhood_evidence(
+    lines: &mut Vec<Line<'static>>,
+    view: &crate::state_handler::main_page::content::PersonhoodEvidenceView,
+) {
+    let dim = Style::new().fg(COLOR_DARK_GRAY);
+    lines.push(
+        Line::from("Witness credentials for this personhood assertion")
+            .fg(COLOR_SUCCESS)
+            .bold(),
+    );
+    lines.push(Line::from(""));
+    for text in [
+        "None is included unless you choose it. For each one you include, the community",
+        "learns that the relationship exists (your relationship DID and the other party's),",
+        "which witness attested it, and the witness credential's digest.",
+    ] {
+        lines.push(Line::from(text).fg(COLOR_ORANGE));
+    }
+    lines.push(Line::from(""));
+    for (i, choice) in view.choices.iter().enumerate() {
+        let chosen = view.chosen.get(i).copied().unwrap_or(false);
+        let at = i == view.cursor;
+        let style = if at {
+            Style::new().fg(COLOR_SUCCESS).bold()
+        } else {
+            Style::new().fg(COLOR_TEXT_DEFAULT)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if at { "▸ " } else { "  " }, style),
+            Span::styled(if chosen { "[x] " } else { "[ ] " }, style),
+            Span::styled(format!("with {}", choice.counterparty), style),
+            Span::styled(format!("  {}", choice.witnessed_at), dim),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("      witness: ", dim),
+            Span::styled(choice.witness.clone(), Style::new().fg(COLOR_SOFT_PURPLE)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("      digest:  ", dim),
+            Span::styled(choice.digest.clone(), dim),
+        ]));
+    }
+    lines.push(Line::from(""));
+    if let Some(notice) = &view.notice {
+        lines.push(Line::from(notice.clone()).fg(COLOR_ORANGE));
+        lines.push(Line::from(""));
+    }
+    if view.confirm_all {
+        lines.push(
+            Line::from(format!(
+                "Include all {} for this assertion only? The community learns each relationship.   y: include all    any other key: back",
+                view.choices.len()
+            ))
+            .fg(COLOR_ORANGE)
+            .bold(),
+        );
+    } else {
+        let n = view.chosen.iter().filter(|c| **c).count();
+        lines.push(Line::from(format!("{n} chosen")).style(dim));
+        lines.push(
+            Line::from(
+                "↑/↓ move  Space: include/exclude  A: include all…  Enter: assert  Esc: cancel",
             )
             .style(dim),
         );
@@ -1490,5 +1565,64 @@ mod key_hint_tests {
         assert!(!hints.contains("f: ★"), "{hints}");
         assert!(!hints.contains("l: leave"), "{hints}");
         assert!(hints.contains("j: join"), "{hints}");
+    }
+}
+
+#[cfg(test)]
+mod personhood_evidence_tests {
+    use super::*;
+    use crate::state_handler::main_page::content::{PersonhoodEvidenceView, WitnessChoice};
+
+    fn text(view: &PersonhoodEvidenceView) -> String {
+        let mut lines = Vec::new();
+        render_personhood_evidence(&mut lines, view);
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The picker says what the community learns, shows each relationship's witness, other party,
+    /// date and digest, and starts with nothing chosen.
+    #[test]
+    fn the_picker_says_what_is_disclosed_and_starts_empty() {
+        let view = PersonhoodEvidenceView {
+            choices: vec![WitnessChoice {
+                session_id: "urn:uuid:1".into(),
+                witness: "witness.example/@w".into(),
+                counterparty: "Bob".into(),
+                witnessed_at: "2026-10-15 10:00".into(),
+                digest: "zQmDigest".into(),
+            }],
+            chosen: vec![false],
+            ..PersonhoodEvidenceView::default()
+        };
+        let out = text(&view);
+        assert!(
+            out.contains("None is included unless you choose it"),
+            "{out}"
+        );
+        assert!(out.contains("which witness attested it"), "{out}");
+        assert!(out.contains("[ ] with Bob"), "{out}");
+        assert!(
+            out.contains("witness.example/@w") && out.contains("zQmDigest"),
+            "{out}"
+        );
+        assert!(out.contains("0 chosen"), "{out}");
+
+        let confirming = text(&PersonhoodEvidenceView {
+            confirm_all: true,
+            ..view
+        });
+        assert!(
+            confirming.contains("for this assertion only"),
+            "{confirming}"
+        );
     }
 }

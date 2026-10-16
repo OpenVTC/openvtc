@@ -1285,6 +1285,22 @@ impl MainPage {
             }
             return handled;
         }
+        // The personhood witness-credential picker owns the keys while open.
+        if let Some(view) = self
+            .props
+            .main_page
+            .content_panel
+            .communities
+            .personhood_evidence
+            .clone()
+        {
+            let action = personhood_evidence_key(key, &view);
+            let handled = action.is_some();
+            if let Some(action) = action {
+                let _ = self.action_tx.send(action);
+            }
+            return handled;
+        }
         // Deleting a context, or device access, owns the keys while open.
         if let Some(view) = self
             .props
@@ -1466,7 +1482,11 @@ impl MainPage {
                     .as_ref()
                     .is_some_and(|c| c.is_live(chrono::Utc::now())) =>
             {
-                let _ = self.action_tx.send(Action::AssertPersonhood);
+                // Asks first: the witness credentials to present are chosen in a picker
+                // that opens with none chosen.
+                let _ = self
+                    .action_tx
+                    .send(Action::AssertPersonhood { witnessed: None });
                 true
             }
             KeyCode::Char('x') if sel_inactive => {
@@ -2106,7 +2126,47 @@ impl MainPage {
                         }
                         true
                     }
+                    KeyCode::Char('w') => {
+                        let _ = self.action_tx.send(Action::Relationship(
+                            RelationshipAction::StartWitness { index },
+                        ));
+                        true
+                    }
                     _ => false,
+                }
+            }
+            RelationshipsMode::Witness {
+                index,
+                witness_input,
+            } => {
+                let index = *index;
+                match key.code {
+                    KeyCode::Esc => {
+                        let _ = self.action_tx.send(Action::Relationship(
+                            RelationshipAction::CancelWitness { index },
+                        ));
+                        true
+                    }
+                    KeyCode::Enter => {
+                        if let Some(rel) = rels.relationships.get(index) {
+                            let _ = self.action_tx.send(Action::Relationship(
+                                RelationshipAction::Witness {
+                                    remote_p_did: rel.remote_p_did.clone(),
+                                    witness: witness_input.clone(),
+                                },
+                            ));
+                        }
+                        true
+                    }
+                    code => match edit_text(code, witness_input) {
+                        Some(value) => {
+                            let _ = self.action_tx.send(Action::Relationship(
+                                RelationshipAction::WitnessInputUpdate(value),
+                            ));
+                            true
+                        }
+                        None => false,
+                    },
                 }
             }
             RelationshipsMode::EditAlias { index, alias_input } => {
@@ -3204,6 +3264,7 @@ fn view_id(page: &MainPageState) -> String {
             RelationshipsMode::Detail { .. } => "detail",
             RelationshipsMode::NewRequest { .. } => "new",
             RelationshipsMode::EditAlias { .. } => "edit",
+            RelationshipsMode::Witness { .. } => "witness",
         },
         MainMenu::Settings => match &page.content_panel.settings.mode {
             SettingsMode::View => "view",
@@ -3220,6 +3281,38 @@ fn view_id(page: &MainPageState) -> String {
         _ => "",
     };
     format!("{menu:?}:{mode}")
+}
+
+/// A key in the personhood witness-credential picker.
+///
+/// "Include all" is two keys: `A` asks, and only `y` to that question includes them; any other
+/// key backs out with the choices as they were. Enter asserts with exactly what is chosen —
+/// nothing, unless something was.
+fn personhood_evidence_key(
+    key: KeyEvent,
+    view: &crate::state_handler::main_page::content::PersonhoodEvidenceView,
+) -> Option<Action> {
+    use crate::state_handler::actions::PersonhoodEvidenceAction as E;
+    if view.confirm_all {
+        return Some(Action::PersonhoodEvidence(match key.code {
+            KeyCode::Char('y') => E::ConfirmIncludeAll,
+            _ => E::CancelIncludeAll,
+        }));
+    }
+    let action = match key.code {
+        KeyCode::Up => E::Up,
+        KeyCode::Down => E::Down,
+        KeyCode::Char(' ') => E::Toggle,
+        KeyCode::Char('A') => E::ArmIncludeAll,
+        KeyCode::Esc => E::Close,
+        KeyCode::Enter => {
+            return Some(Action::AssertPersonhood {
+                witnessed: Some(view.selected()),
+            });
+        }
+        _ => return None,
+    };
+    Some(Action::PersonhoodEvidence(action))
 }
 
 /// The account's self-display name for the top-right header slot, or `None` when
@@ -4013,6 +4106,7 @@ mod key_handler_tests {
             created: String::new(),
             vrcs_issued: Vec::new(),
             vrcs_received: Vec::new(),
+            witnessings: Vec::new(),
             needs_reestablishment: false,
         }
     }
@@ -6508,6 +6602,73 @@ mod key_handler_tests {
         match rx.try_recv() {
             Ok(Action::MainPanelSwitch(MainPanel::MainMenu)) => {}
             _ => panic!("expected MainPanelSwitch(MainMenu)"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod personhood_evidence_key_tests {
+    use super::*;
+    use crate::state_handler::actions::PersonhoodEvidenceAction as E;
+    use crate::state_handler::main_page::content::{PersonhoodEvidenceView, WitnessChoice};
+    use crossterm::event::KeyModifiers;
+
+    fn view(chosen: Vec<bool>, confirm_all: bool) -> PersonhoodEvidenceView {
+        PersonhoodEvidenceView {
+            choices: (0..chosen.len())
+                .map(|i| WitnessChoice {
+                    session_id: format!("urn:uuid:{i}"),
+                    witness: "w".into(),
+                    counterparty: "c".into(),
+                    witnessed_at: "t".into(),
+                    digest: "z".into(),
+                })
+                .collect(),
+            chosen,
+            confirm_all,
+            ..PersonhoodEvidenceView::default()
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Enter asserts with exactly what is chosen — nothing when nothing is.
+    #[test]
+    fn enter_presents_only_the_chosen() {
+        match personhood_evidence_key(key(KeyCode::Enter), &view(vec![false, false], false)) {
+            Some(Action::AssertPersonhood { witnessed: Some(w) }) => assert!(w.is_empty()),
+            _ => panic!("expected an assertion with nothing chosen"),
+        }
+        match personhood_evidence_key(key(KeyCode::Enter), &view(vec![false, true], false)) {
+            Some(Action::AssertPersonhood { witnessed: Some(w) }) => {
+                assert_eq!(w, vec!["urn:uuid:1".to_string()])
+            }
+            _ => panic!("expected an assertion with the one chosen"),
+        }
+    }
+
+    /// `A` only asks; `y` to the question includes all, any other key backs out.
+    #[test]
+    fn include_all_is_a_separate_confirmation() {
+        assert!(matches!(
+            personhood_evidence_key(key(KeyCode::Char('A')), &view(vec![false], false)),
+            Some(Action::PersonhoodEvidence(E::ArmIncludeAll))
+        ));
+        assert!(
+            personhood_evidence_key(key(KeyCode::Char('y')), &view(vec![false], false)).is_none(),
+            "`y` means nothing until include-all was asked for"
+        );
+        assert!(matches!(
+            personhood_evidence_key(key(KeyCode::Char('y')), &view(vec![false], true)),
+            Some(Action::PersonhoodEvidence(E::ConfirmIncludeAll))
+        ));
+        for other in [KeyCode::Enter, KeyCode::Char('n'), KeyCode::Esc] {
+            assert!(matches!(
+                personhood_evidence_key(key(other), &view(vec![false], true)),
+                Some(Action::PersonhoodEvidence(E::CancelIncludeAll))
+            ));
         }
     }
 }
