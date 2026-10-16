@@ -132,14 +132,20 @@ pub enum RelationshipAction {
     },
     /// Update the witness DID being typed.
     WitnessInputUpdate(String),
+    /// Turn presenting the membership credential to this witness on or off, for this one
+    /// witnessing.
+    ToggleWitnessMembership,
     /// Close the witness prompt without witnessing.
     CancelWitness {
         index: usize,
     },
     /// Have the relationship witnessed by `witness` (a DID or an agent name), through the VTA.
+    /// The membership credential is presented only when `share_membership` — the member chose
+    /// it for this witnessing.
     Witness {
         remote_p_did: String,
         witness: String,
+        share_membership: bool,
     },
 }
 
@@ -779,7 +785,7 @@ pub enum Action {
     /// (`members/personhood/challenge/0.1`). The reply arrives asynchronously
     /// and lands as the panel's live challenge.
     RequestPersonhoodChallenge(usize),
-    /// Answer the live personhood challenge (`members/personhood/assert/0.1`).
+    /// Answer the live personhood challenge (`members/personhood/assert/0.2`).
     ///
     /// Takes no index: the challenge already names the membership it belongs
     /// to, and answering it against whichever row happens to be highlighted is

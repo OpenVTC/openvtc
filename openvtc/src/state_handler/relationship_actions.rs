@@ -1553,6 +1553,29 @@ pub(crate) enum RelationshipDispatch {
 /// Whether a `RelationshipAction` is a network-bound action that the loop should
 /// run off-thread (claiming the `Relationship` busy-domain first). Lets the loop
 /// reject a busy domain *before* `dispatch` does any pre-send config mutation.
+/// Open the witness prompt. Membership off every time it opens: a member's identity goes to a
+/// witness only when chosen for that one witnessing, and the choice is never carried over.
+fn handle_start_witness(state: &mut State, index: usize) {
+    let rels = &mut state.main_page.content_panel.relationships;
+    rels.status_message = None;
+    rels.mode = RelationshipsMode::Witness {
+        index,
+        witness_input: String::new(),
+        share_membership: false,
+    };
+}
+
+/// Turn presenting the membership credential to this witness on or off.
+fn handle_toggle_witness_membership(state: &mut State) {
+    if let RelationshipsMode::Witness {
+        ref mut share_membership,
+        ..
+    } = state.main_page.content_panel.relationships.mode
+    {
+        *share_membership = !*share_membership;
+    }
+}
+
 pub(crate) fn is_network(action: &RelationshipAction) -> bool {
     matches!(
         action,
@@ -1693,14 +1716,8 @@ pub(crate) async fn dispatch(
                 selected_vrc: None,
             };
         }
-        RelationshipAction::StartWitness { index } => {
-            let rels = &mut state.main_page.content_panel.relationships;
-            rels.status_message = None;
-            rels.mode = RelationshipsMode::Witness {
-                index,
-                witness_input: String::new(),
-            };
-        }
+        RelationshipAction::StartWitness { index } => handle_start_witness(state, index),
+        RelationshipAction::ToggleWitnessMembership => handle_toggle_witness_membership(state),
         RelationshipAction::WitnessInputUpdate(value) => {
             if let RelationshipsMode::Witness {
                 ref mut witness_input,
@@ -1742,6 +1759,28 @@ pub(crate) async fn dispatch(
 
 #[cfg(test)]
 mod tests {
+    /// Sharing the membership with a witness starts off, is turned on only by the member, and is
+    /// never remembered into the next witnessing.
+    #[test]
+    fn witness_membership_is_off_by_default_and_never_remembered() {
+        let mut state = State::default();
+        let share = |state: &State| match &state.main_page.content_panel.relationships.mode {
+            RelationshipsMode::Witness {
+                share_membership, ..
+            } => *share_membership,
+            _ => panic!("not on the witness prompt"),
+        };
+        super::handle_start_witness(&mut state, 0);
+        assert!(!share(&state), "off when the prompt opens");
+        super::handle_toggle_witness_membership(&mut state);
+        assert!(share(&state));
+        super::handle_toggle_witness_membership(&mut state);
+        assert!(!share(&state));
+        super::handle_toggle_witness_membership(&mut state);
+        super::handle_start_witness(&mut state, 0);
+        assert!(!share(&state), "the next witnessing starts off again");
+    }
+
     use super::*;
     use crate::state_handler::dispatch_util::test_config;
 

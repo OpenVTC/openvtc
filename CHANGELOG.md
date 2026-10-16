@@ -9,14 +9,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **Have a relationship witnessed.** Press `w` on a relationship, name a witness,
-  and your VTA does the witnessing (`vta/witness/{open,present,accept}/0.1`): it
-  signs every document as the relationship DID and presents the VRC you issued and
-  your membership credential, while OpenVTC carries the documents to the witness on
+  and your VTA does the witnessing (`vta/witness/{open,present,accept}/0.2`): it
+  signs every document as the relationship DID and presents the VRC you issued
+  (and, only if you choose, your membership credential), while OpenVTC carries the documents to the witness on
   that DID's own connection (DIDComm, or TSP where both sides advertise it) and
   hands the answers back. The witness's answers are verified as its own before they
   are used; a refusal is explained, never handed back. The resulting witness
-  credential is stored at your VTA and listed on the relationship. Needs a VTA that
-  serves `vta/witness/*`; not available to a BIP32 account.
+  credential is stored at your VTA and listed on the relationship. By default only
+  the VRC is presented and the witness learns nothing of who you are. Presenting
+  your community membership is an explicit choice for that one witnessing (**Tab**
+  on the prompt, off every time it opens, never remembered); the prompt says the
+  witness will learn which community member is behind the relationship, and the VTA
+  then links the two in the submission's `memberPresentation`. Needs a VTA that
+  serves the witness tasks at 0.2 (`vta-service` 0.62 or later); not available to a
+  BIP32 account.
+- **A witnessing whose record was lost is rebuilt from the VTA.** At start, after
+  the account-state sync, OpenVTC reads the VTA's stored witness credentials
+  (`vta/witness/list/0.1`) and rebuilds any witnessing it holds a VWC for that
+  this device never kept — a crash between the VTA storing it and the record being
+  saved — for relationships the account still holds. A rebuilt witnessing is only
+  listed and offered; it is never presented on its own.
 - **Issued relationship credentials are stored in the VTA's credential vault** on
   connect, where witnessing presents them from. Only credentials the vault does not
   hold are stored.
@@ -24,9 +36,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   included by default: when the persona has witnessed relationships, `P` lists them
   (other party, witness, date, digest) and says what the community learns from each;
   you include them one by one, or all of them only through a separate confirmation
-  for that assertion. Each included VWC carries its outcome evidence
-  (`ext["org.openvtc.witness"].outcomeEvidence`), which a community needs beside a
-  VWC to count it.
+  for that assertion. Each included VWC carries its outcome evidence in the
+  assertion's `outcomeEvidence` (`vtc/members/personhood/assert/0.2`, at most 16),
+  which a community needs beside a VWC to count it.
 
 ### Security
 
@@ -40,6 +52,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Personhood assertions are sent as `vtc/members/personhood/assert/0.2`**, the
+  only version a community on `vtc-service` with VTI #2147 serves, with or without
+  witness credentials. `openvtc_core::personhood::assert_personhood` takes the
+  outcome evidence as its own argument instead of an `ext`, and
+  `openvtc_core::witness::personhood_ext` / `WITNESS_EXT` are replaced by
+  `personhood_evidence`. On `vta-sdk` 0.70, `vta-service` 0.62, `trust-tasks-rs`
+  0.31.12 and `did-git-sign` 0.22.
 - **Hidden vetting goes through your VTA.** Enrolling, drawing tokens, taking in
   a vetter's attestation, building the join's proof and attesting are VTA calls,
   run off the screen's loop; answers from a community or a vetter that the VTA

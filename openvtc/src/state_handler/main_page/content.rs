@@ -3731,7 +3731,15 @@ pub enum RelationshipsMode {
     /// Editing the alias for an existing relationship
     EditAlias { index: usize, alias_input: String },
     /// Naming the witness to have the relationship at `index` witnessed by.
-    Witness { index: usize, witness_input: String },
+    ///
+    /// `share_membership` is the member's explicit choice, for this one witnessing, to present
+    /// their membership credential — and so let this witness learn which community member is
+    /// behind the relationship. Off whenever the prompt opens; never remembered.
+    Witness {
+        index: usize,
+        witness_input: String,
+        share_membership: bool,
+    },
     /// Filling out a new relationship request form
     NewRequest {
         did_input: String,

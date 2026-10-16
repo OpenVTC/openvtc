@@ -2138,6 +2138,7 @@ impl MainPage {
             RelationshipsMode::Witness {
                 index,
                 witness_input,
+                share_membership,
             } => {
                 let index = *index;
                 match key.code {
@@ -2153,9 +2154,17 @@ impl MainPage {
                                 RelationshipAction::Witness {
                                     remote_p_did: rel.remote_p_did.clone(),
                                     witness: witness_input.clone(),
+                                    share_membership: *share_membership,
                                 },
                             ));
                         }
+                        true
+                    }
+                    // Tab, not a letter: the witness is typed into this prompt.
+                    KeyCode::Tab => {
+                        let _ = self.action_tx.send(Action::Relationship(
+                            RelationshipAction::ToggleWitnessMembership,
+                        ));
                         true
                     }
                     code => match edit_text(code, witness_input) {
