@@ -671,3 +671,152 @@ async fn a_record_from_a_newer_build_is_held_not_applied() {
     assert!(a.state.deferred.contains_key(&key));
     assert_eq!(a.membership().vtc_did, VTC, "local copy untouched");
 }
+
+// ─── witnessings ─────────────────────────────────────────────────────────────
+
+const THEIRS: &str = "did:webvh:scid:example.com:bob-persona";
+
+fn witnessing(session: &str, at: chrono::DateTime<Utc>) -> crate::witness::WitnessRecord {
+    crate::witness::WitnessRecord {
+        remote_p_did: THEIRS.to_string(),
+        relationship_did: "did:peer:2.Vz6MkOurs".to_string(),
+        witnessed_at: at,
+        witnessed: crate::witness::Witnessed {
+            session_id: session.to_string(),
+            credential_id: format!("vwc-{session}"),
+            witness: "did:webvh:scid:witness.example.com".to_string(),
+            vwc_digest_multibase: "zQmDigest".to_string(),
+            evidence: json!({
+                "session": { "id": session },
+                "outcome": { "payload": { "vwc": { "id": format!("urn:vwc:{session}") } } },
+            }),
+        },
+    }
+}
+
+#[tokio::test]
+async fn a_witnessing_reaches_the_other_device_with_its_evidence() {
+    let store = MemStore::default();
+    let mut a = seeded();
+    a.load(&store).await;
+    let mut b = Device::default();
+    b.load(&store).await;
+
+    let w = witnessing("urn:uuid:s1", Utc::now());
+    a.private.witnessings.push(w.clone());
+    let report = a.live(&store).await;
+    assert_eq!(report.pushed, 1);
+
+    let report = b.live(&store).await;
+    assert!(report.changed.contains(&RecordKind::Witnessing));
+    assert_eq!(
+        b.private.witnessings.0,
+        vec![w],
+        "whole, evidence included: a personhood assertion presents it"
+    );
+}
+
+#[tokio::test]
+async fn witnessings_from_two_devices_merge_in_time_order() {
+    let store = MemStore::default();
+    let mut a = seeded();
+    a.load(&store).await;
+    let mut b = Device::default();
+    b.load(&store).await;
+
+    let earlier = witnessing("urn:uuid:early", Utc::now() - chrono::Duration::hours(1));
+    let later = witnessing("urn:uuid:late", Utc::now());
+    b.private.witnessings.push(later.clone());
+    b.live(&store).await;
+    a.private.witnessings.push(earlier.clone());
+    a.live(&store).await;
+    b.live(&store).await;
+
+    let sessions = |d: &Device| {
+        d.private
+            .witnessings
+            .0
+            .iter()
+            .map(|r| r.witnessed.session_id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(sessions(&a), ["urn:uuid:early", "urn:uuid:late"]);
+    assert_eq!(sessions(&b), sessions(&a));
+}
+
+#[tokio::test]
+async fn removing_a_relationships_witnessings_removes_them_everywhere() {
+    let store = MemStore::default();
+    let mut a = seeded();
+    a.private
+        .witnessings
+        .push(witnessing("urn:uuid:s1", Utc::now()));
+    a.load(&store).await;
+    let mut b = Device::default();
+    b.load(&store).await;
+    assert_eq!(b.private.witnessings.0.len(), 1);
+
+    a.private.witnessings.remove_relationship(THEIRS);
+    let report = a.live(&store).await;
+    assert_eq!(report.removed, 1, "a tombstone, not a lingering record");
+
+    b.live(&store).await;
+    assert!(b.private.witnessings.is_empty());
+}
+
+/// The crash window: the VTA stored the VWC, the job recorded the witnessing at the VTA, and the
+/// app died before it saved. The next launch lists it; a device that did save converges with it
+/// without reporting a conflict.
+#[tokio::test]
+async fn a_witnessing_recorded_before_the_save_survives_a_crash() {
+    let store = MemStore::default();
+    let mut a = seeded();
+    a.load(&store).await;
+    let mut b = seeded();
+    b.load(&store).await;
+
+    let w = witnessing("urn:uuid:crash", Utc::now());
+    let (key, value) = records::witnessing_record(&w).expect("record");
+    let outcome = put_new(&store, CTX, &key, &value).await.expect("written");
+    assert_eq!(outcome, WriteOutcome::Written);
+
+    // Crashed before saving: the next launch pulls it.
+    let report = a.load(&store).await;
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert_eq!(a.private.witnessings.0, vec![w.clone()]);
+    assert!(a.pending().is_empty());
+
+    // Saved after all: the same record, pushed create-only, merges as identical.
+    b.private.witnessings.push(w.clone());
+    let report = b.live(&store).await;
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    b.live(&store).await;
+    assert_eq!(b.private.witnessings.0, vec![w]);
+    assert!(b.pending().is_empty());
+}
+
+/// The job records at the VTA, a running sync pulls it, then the job's outcome keeps it: still
+/// one witnessing.
+#[tokio::test]
+async fn a_witnessing_pulled_before_its_outcome_is_kept_once() {
+    let store = MemStore::default();
+    let mut a = seeded();
+    a.load(&store).await;
+    let w = witnessing("urn:uuid:race", Utc::now());
+    let (key, value) = records::witnessing_record(&w).unwrap();
+    put_new(&store, CTX, &key, &value).await.unwrap();
+    a.live(&store).await;
+    a.private.witnessings.push(w.clone());
+    assert_eq!(a.private.witnessings.0, vec![w]);
+    assert!(a.pending().is_empty());
+}
+
+#[test]
+fn a_witnessing_under_another_key_is_refused() {
+    let mut d = Device::default();
+    let (key, _) = records::witnessing_record(&witnessing("urn:uuid:a", Utc::now())).unwrap();
+    let other = serde_json::to_value(witnessing("urn:uuid:b", Utc::now())).unwrap();
+    let (mut parts, _) = d.parts();
+    assert!(records::apply(&mut parts, &key, Some(&other)).is_err());
+    assert!(d.private.witnessings.is_empty());
+}

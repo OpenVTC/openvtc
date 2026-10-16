@@ -47,8 +47,9 @@
 >
 > - **Records** follow D8a, under namespace `openvtc` in the account's top
 >   context: personas, memberships, relationships, contacts, positive
->   agent-name entries, TSP relationship rows, VRCs, VTA-managed key references
->   and the vetting book. There is no `v1/account` record: its fields are the
+>   agent-name entries, TSP relationship rows, VRCs, VTA-managed key references,
+>   the vetting book and witnessings (`v1/witnessing/`, each with its outcome
+>   evidence). There is no `v1/account` record: its fields are the
 >   address the records live at. The hidden-vetting engine and any locally-held
 >   key never sync; app state is not for secrets.
 > - **When**: at load, before hydration, so a persona or relationship made on
@@ -103,6 +104,7 @@ against `vta-sdk` 0.25.1.
 | Relationships (relationship DIDs, `did:peer`) | OpenVTC only | **→ VTA** |
 | VRCs issued / received | OpenVTC only | **→ VTA credential vault** |
 | Contacts (DID + your alias) | OpenVTC only | **→ VTA** (D22) |
+| Witnessings (VWC handle + outcome evidence) | VWC + evidence in the VTA credential vault at `vta/witness/accept`; the listing in OpenVTC | **→ VTA** app state, written by the witnessing job before the local save |
 | Agent-name cache | OpenVTC only | **→ VTA** as a *stale* hint (D22) |
 | Tasks, activity log, UI preferences | OpenVTC only | stays local (D9) |
 | Admin credential bundle | OpenVTC keyring only | re-issuable (§3, §4) |

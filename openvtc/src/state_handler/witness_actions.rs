@@ -29,6 +29,7 @@ use openvtc_core::witness::{
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 use vta_sdk::client::VtaClient;
+use vta_sdk::protocols::app_state::WriteOutcome;
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 
 use crate::state_handler::actions::PersonhoodEvidenceAction;
@@ -112,6 +113,9 @@ pub(crate) struct WitnessJob {
     witness_input: String,
     remote_p_did: String,
     request: WitnessRequest,
+    /// The account's app-state context, where the witnessing is recorded the moment the VTA has
+    /// stored its VWC. Empty for an account that does not sync.
+    sync_context: String,
     progress: UnboundedSender<DispatchOutcome>,
 }
 
@@ -196,6 +200,7 @@ pub(crate) fn prepare(
             relationship_credential,
             membership: membership_evidence(config, rel),
         },
+        sync_context: config.account.top_context_id.clone(),
         progress: progress.clone(),
     })
 }
@@ -205,11 +210,23 @@ impl WitnessJob {
     pub(crate) async fn run(self) -> WitnessOutcome {
         let remote_p_did = self.remote_p_did.clone();
         let relationship_did = self.request.relationship_did.clone();
-        let result = self.witness().await.map_err(|e| e.to_string());
-        WitnessOutcome {
+        let vta = self.vta.clone();
+        let sync_context = self.sync_context.clone();
+        let result = self.witness().await.map(|witnessed| WitnessRecord {
             remote_p_did,
             relationship_did,
-            result,
+            witnessed_at: Utc::now(),
+            witnessed,
+        });
+        let sync_failure = match &result {
+            Ok(record) if !sync_context.is_empty() => {
+                record_at_vta(&vta, &sync_context, record).await.err()
+            }
+            _ => None,
+        };
+        WitnessOutcome {
+            result: result.map_err(|e| e.to_string()),
+            sync_failure,
         }
     }
 
@@ -275,27 +292,48 @@ impl WitnessJob {
     }
 }
 
+/// Record a completed witnessing in the account's app state before the loop thread saves it
+/// locally (R2.1). By now the VTA holds the VWC, and its evidence is kept where no client task
+/// reads it back, so a crash before the save would otherwise leave the VWC in the vault and the
+/// witnessing listed nowhere. A failure here loses nothing: the save and the next sync carry the
+/// same record.
+async fn record_at_vta(
+    vta: &VtaClient,
+    context_id: &str,
+    record: &WitnessRecord,
+) -> Result<(), String> {
+    use openvtc_core::vta_sync::{self, records};
+    let (key, value) = records::witnessing_record(record)
+        .ok_or_else(|| "the witnessing would not serialize".to_string())?;
+    match vta_sync::put_new(vta, context_id, &key, &value).await {
+        Ok(WriteOutcome::Written | WriteOutcome::Conflict) => Ok(()),
+        Ok(other) => Err(format!("the VTA answered {other:?}")),
+        Err(e) => Err(e.explain()),
+    }
+}
+
 /// What the round did. Data only; applied on the loop thread.
 pub(crate) struct WitnessOutcome {
-    remote_p_did: String,
-    relationship_did: String,
-    result: Result<Witnessed, String>,
+    result: Result<WitnessRecord, String>,
+    /// Why the witnessing could not be recorded at the VTA straight away, if it could not.
+    sync_failure: Option<String>,
 }
 
 impl WitnessOutcome {
     pub(crate) fn apply(self, state: &mut State, config: &mut Config, save: &mut SaveScheduler) {
         match self.result {
-            Ok(witnessed) => {
+            Ok(record) => {
                 let line = format!(
                     "Witnessed by {} — the witness credential is stored at your VTA as {}",
-                    witnessed.witness, witnessed.credential_id
+                    record.witnessed.witness, record.witnessed.credential_id
                 );
-                config.private.witnessings.push(WitnessRecord {
-                    remote_p_did: self.remote_p_did,
-                    relationship_did: self.relationship_did,
-                    witnessed_at: Utc::now(),
-                    witnessed,
-                });
+                if let Some(reason) = self.sync_failure {
+                    state.main_page.log(format!(
+                        "Not yet recorded in your account's synced state ({reason}); the next \
+                         sync records it"
+                    ));
+                }
+                config.private.witnessings.push(record);
                 save.mark_dirty();
                 state.main_page.sync_from_config(config);
                 // Back to the relationship, which now lists the witnessing. A failure stays on
@@ -613,9 +651,8 @@ mod tests {
         };
 
         WitnessOutcome {
-            remote_p_did: THEIR_PERSONA.into(),
-            relationship_did: OURS.into(),
             result: Err("the witness refused".into()),
+            sync_failure: None,
         }
         .apply(&mut state, &mut config, &mut save);
         assert!(config.private.witnessings.is_empty());
@@ -635,15 +672,20 @@ mod tests {
         ));
 
         WitnessOutcome {
-            remote_p_did: THEIR_PERSONA.into(),
-            relationship_did: OURS.into(),
-            result: Ok(Witnessed {
-                session_id: "urn:uuid:s".into(),
-                credential_id: "vwc-1".into(),
-                witness: WITNESS.into(),
-                vwc_digest_multibase: "z".into(),
-                evidence: json!({ "session": {}, "outcome": {} }),
+            result: Ok(WitnessRecord {
+                remote_p_did: THEIR_PERSONA.into(),
+                relationship_did: OURS.into(),
+                witnessed_at: Utc::now(),
+                witnessed: Witnessed {
+                    session_id: "urn:uuid:s".into(),
+                    credential_id: "vwc-1".into(),
+                    witness: WITNESS.into(),
+                    vwc_digest_multibase: "z".into(),
+                    evidence: json!({ "session": {}, "outcome": {} }),
+                },
             }),
+            // Recorded at the VTA or not, the witnessing is kept locally all the same.
+            sync_failure: Some("could not reach the VTA".into()),
         }
         .apply(&mut state, &mut config, &mut save);
         let kept: Vec<_> = config

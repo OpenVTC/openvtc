@@ -1002,8 +1002,17 @@ impl Witnessings {
         self.0.is_empty()
     }
 
+    /// Keep `record`, replacing one of the same session: the witnessing job records it at the VTA
+    /// before the loop thread keeps it here, so a sync in between may already have pulled it.
     pub fn push(&mut self, record: WitnessRecord) {
-        self.0.push(record);
+        match self
+            .0
+            .iter_mut()
+            .find(|r| r.witnessed.session_id == record.witnessed.session_id)
+        {
+            Some(existing) => *existing = record,
+            None => self.0.push(record),
+        }
     }
 
     /// The witnessings of one relationship, oldest first.

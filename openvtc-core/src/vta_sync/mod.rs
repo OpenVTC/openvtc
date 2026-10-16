@@ -1,5 +1,5 @@
 //! Keep this account's OpenVTC state at the VTA, so every device that opens
-//! the same context sees the same communities, relationships and contacts.
+//! the same context sees the same communities, relationships, contacts and witnessings.
 //!
 //! # Why
 //!
@@ -438,6 +438,33 @@ pub async fn exchange<S: AppStateStore>(
         }
     }
     ex
+}
+
+/// Write one new record straight to the VTA, create-only, ahead of the local save that will
+/// also hold it (R2.1): for state the VTA has just committed elsewhere — a witnessing, whose VWC
+/// is already in the vault — so a crash before the save does not leave it unlisted. The next
+/// sync learns the record's version (its create-only push conflicts with this write and merges
+/// as identical), and a device that never saved it pulls it.
+///
+/// # Errors
+///
+/// The store's, unchanged. The caller logs it: the local save and the next sync still carry the
+/// record.
+pub async fn put_new<S: AppStateStore>(
+    store: &S,
+    context_id: &str,
+    key: &str,
+    value: &Value,
+) -> Result<WriteOutcome, SyncError> {
+    let mut w = AppStateWrite::new(key.to_string());
+    w.value = Some(envelope(value));
+    w.expected_version = Some(0);
+    let results = store.put_many(context_id, vec![w]).await?;
+    results
+        .into_iter()
+        .find(|r| r.key == key)
+        .map(|r| r.outcome)
+        .ok_or_else(|| SyncError::Contract(format!("no result for `{key}`")))
 }
 
 /// Merge pulled changes into the config.
