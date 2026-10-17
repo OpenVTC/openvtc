@@ -170,6 +170,10 @@ pub struct SyncReport {
     /// Whether the sync bookkeeping moved (a version learned, the watermark
     /// advanced) even if no local state did.
     pub bookkeeping: bool,
+    /// Witnessings rebuilt from the VTA's own list (`vta/witness/list`): the VTA
+    /// stored the VWC, and this device never kept the record
+    /// ([`crate::witness::reconcile`]).
+    pub recovered_witnessings: usize,
 }
 
 impl SyncReport {
@@ -182,6 +186,7 @@ impl SyncReport {
             || self.removed > 0
             || self.deferred > 0
             || self.bookkeeping
+            || self.recovered_witnessings > 0
     }
 
     /// Activity-log lines worth showing. Empty for a quiet sync.
@@ -192,6 +197,12 @@ impl SyncReport {
             lines.push(format!(
                 "Applied {} change(s) made on another device",
                 self.pulled
+            ));
+        }
+        if self.recovered_witnessings > 0 {
+            lines.push(format!(
+                "Recovered {} witnessing(s) your VTA holds that this device had not kept",
+                self.recovered_witnessings
             ));
         }
         for c in &self.conflicts {

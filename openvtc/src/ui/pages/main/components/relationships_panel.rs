@@ -41,7 +41,8 @@ pub fn render(state: &RelationshipsState) -> Vec<Line<'static>> {
         RelationshipsMode::Witness {
             index,
             witness_input,
-        } => render_witness(state, *index, witness_input),
+            share_membership,
+        } => render_witness(state, *index, witness_input, *share_membership),
         RelationshipsMode::Detail {
             index,
             selected_vrc,
@@ -462,6 +463,7 @@ fn render_witness(
     state: &RelationshipsState,
     index: usize,
     witness_input: &str,
+    share_membership: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("")];
 
@@ -497,12 +499,37 @@ fn render_witness(
     ]));
     lines.push(Line::from(""));
     for text in [
-        "  Your VTA presents the relationship credential you issued, and your membership",
-        "  credential, to the witness, which issues a witness credential (VWC) in return.",
-        "  The witness sees both credentials in full — including which community you belong",
-        "  to and, when your membership names your persona, that persona's DID.",
+        "  Your VTA presents the relationship credential you issued to the witness, which",
+        "  issues a witness credential (VWC) in return. The witness sees it in full: your",
+        "  relationship DID and the other party's.",
     ] {
         lines.push(Line::from(text).fg(COLOR_ORANGE));
+    }
+    lines.push(Line::from(""));
+    let (mark, colour) = if share_membership {
+        ("[x]", COLOR_ORANGE)
+    } else {
+        ("[ ]", COLOR_TEXT_DEFAULT)
+    };
+    lines.push(
+        Line::from(format!(
+            "{mark} Also present my community membership (Tab) — off unless you choose it"
+        ))
+        .fg(colour),
+    );
+    if share_membership {
+        for text in [
+            "  The witness will learn which community member is behind this relationship:",
+            "  your membership credential in full, the community, and your persona DID.",
+            "  For this witnessing only. Choose it only for a witness that asks for it.",
+        ] {
+            lines.push(Line::from(text).fg(COLOR_ORANGE));
+        }
+    } else {
+        lines.push(
+            Line::from("  No membership is presented: the witness does not learn who you are.")
+                .fg(COLOR_DARK_GRAY),
+        );
     }
     lines.push(Line::from(""));
     if let Some(msg) = &state.status_message {
@@ -510,7 +537,9 @@ fn render_witness(
         lines.push(Line::from(""));
     }
     lines.push(Line::from("A DID or an agent name, e.g. example.com/@witness").fg(COLOR_DARK_GRAY));
-    lines.push(Line::from("Enter: witness  Esc: cancel").fg(COLOR_DARK_GRAY));
+    lines.push(
+        Line::from("Enter: witness  Tab: membership on/off  Esc: cancel").fg(COLOR_DARK_GRAY),
+    );
 
     lines
 }
@@ -822,10 +851,33 @@ mod tests {
         state.mode = RelationshipsMode::Witness {
             index: 0,
             witness_input: "did:key:z6MkW".into(),
+            share_membership: false,
         };
         let out = text(&render(&state)).join("\n");
         assert!(out.contains("Witness: did:key:z6MkW"), "{out}");
-        assert!(out.contains("sees both credentials in full"), "{out}");
+        assert!(out.contains("sees it in full"), "{out}");
+        assert!(
+            out.contains("[ ] Also present my community membership"),
+            "{out}"
+        );
+        assert!(out.contains("does not learn who you are"), "{out}");
         assert!(out.contains("Enter: witness"), "{out}");
+
+        // Chosen: the prompt says plainly what the witness will learn.
+        state.mode = RelationshipsMode::Witness {
+            index: 0,
+            witness_input: "did:key:z6MkW".into(),
+            share_membership: true,
+        };
+        let out = text(&render(&state)).join("\n");
+        assert!(
+            out.contains("[x] Also present my community membership"),
+            "{out}"
+        );
+        assert!(
+            out.contains("will learn which community member is behind this relationship"),
+            "{out}"
+        );
+        assert!(out.contains("For this witnessing only"), "{out}");
     }
 }

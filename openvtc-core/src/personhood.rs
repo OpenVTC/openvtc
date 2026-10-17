@@ -14,9 +14,10 @@
  *    single-use nonce with a ten-minute life.
  * 2. Out of band, two humans confirm they are talking about the same
  *    ceremony — see [`match_code`].
- * 3. `vtc/members/personhood/assert/0.1` → the member presents a signed VP
+ * 3. `vtc/members/personhood/assert/0.2` → the member presents a signed VP
  *    carrying that nonce and whatever credentials the community's policy
- *    wants to see.
+ *    wants to see — and, for each witness credential among them, its
+ *    session's outcome evidence in `outcomeEvidence`.
  *
  * Both verbs ride the same Trust Task document path as the join ceremony
  * ([`crate::join`]): DIDComm wraps the document in an authcrypt envelope, TSP
@@ -56,14 +57,15 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::errors::OpenVTCError;
+use trust_tasks_rs::specs::vtc::members::personhood::assert::v0_2 as pa;
 
 /// `vtc/members/personhood/challenge/0.1`.
 pub const PERSONHOOD_CHALLENGE_TYPE: &str =
     "https://trusttasks.org/spec/vtc/members/personhood/challenge/0.1";
 
-/// `vtc/members/personhood/assert/0.1`.
+/// `vtc/members/personhood/assert/0.2` — pinned to the generated type's URI by a test.
 pub const PERSONHOOD_ASSERT_TYPE: &str =
-    "https://trusttasks.org/spec/vtc/members/personhood/assert/0.1";
+    "https://trusttasks.org/spec/vtc/members/personhood/assert/0.2";
 
 /// The community's reply to a challenge request.
 ///
@@ -76,7 +78,7 @@ pub const PERSONHOOD_CHALLENGE_RESPONSE_TYPE: &str =
 
 /// The community's reply to an assertion.
 pub const PERSONHOOD_ASSERT_RESPONSE_TYPE: &str =
-    "https://trusttasks.org/spec/vtc/members/personhood/assert/0.1#response";
+    "https://trusttasks.org/spec/vtc/members/personhood/assert/0.2#response";
 
 /// W3C VC Data Model 2.0 context — the presentation's `@context`.
 const VC_V2_CONTEXT_URL: &str = "https://www.w3.org/ns/credentials/v2";
@@ -322,7 +324,7 @@ pub async fn build_presentation(
     Ok(signed)
 }
 
-/// Assert personhood (`vtc/members/personhood/assert/0.1`).
+/// Assert personhood (`vtc/members/personhood/assert/0.2`).
 ///
 /// The community verifies the presentation against `member_did`'s resolved
 /// key, consumes the challenge, runs its personhood policy, and — if it
@@ -330,26 +332,28 @@ pub async fn build_presentation(
 /// their role credential. The reply carries both.
 ///
 /// The member is always the subject. The community refuses an assertion sent
-/// by anyone else, because `assert/0.1` declares `actsAsSubject: true`: this
+/// by anyone else, because `assert/0.2` declares `actsAsSubject: true`: this
 /// is the member exercising authority over their own personhood state.
 ///
-/// `ext` is the payload's `ext`, when the presentation carries witness credentials: their
-/// sessions' outcome evidence under `org.openvtc.witness` ([`crate::witness::personhood_ext`]),
-/// without which a VTC counts no VWC.
+/// `outcome_evidence` is the outcome evidence of the witness credentials among `credentials`
+/// ([`crate::witness::personhood_evidence`]), without which a VTC counts no VWC — at most
+/// [`crate::witness::MAX_OUTCOME_EVIDENCE`], and empty (the member omitted) when none is
+/// presented.
 pub async fn assert_personhood(
     route: &Route<'_>,
     signing_secret: &Secret,
     challenge_id: &Uuid,
     credentials: Vec<Value>,
-    ext: Option<Value>,
+    outcome_evidence: Vec<Value>,
 ) -> Result<Uuid, OpenVTCError> {
     let presentation =
         build_presentation(signing_secret, route.member_did, challenge_id, credentials).await?;
+    let payload = assert_payload(route.member_did, presentation, outcome_evidence)?;
 
     let request_id = Uuid::new_v4();
     let document_id = format!("urn:uuid:{request_id}");
     // Signed with the same key — and the same proof purpose — that signed
-    // the presentation inside it: `vtc/members/personhood/assert/0.1`
+    // the presentation inside it: `vtc/members/personhood/assert/0.2`
     // declares `proof` REQUIRED, and `signing_secret` is the persona's
     // authentication key (#key-2), which is listed only under
     // `authentication` in the DID document, not `assertionMethod`.
@@ -358,7 +362,7 @@ pub async fn assert_personhood(
         route.member_did,
         route.vtc_did,
         &document_id,
-        assert_payload(route.member_did, presentation, ext),
+        payload,
         signing_secret,
     )
     .await?;
@@ -368,13 +372,32 @@ pub async fn assert_personhood(
     Ok(request_id)
 }
 
-/// The `assert/0.1` payload: the member, the presentation, and `ext` when there is one.
-fn assert_payload(member_did: &str, presentation: Value, ext: Option<Value>) -> Value {
-    let mut payload = json!({ "did": member_did, "presentation": presentation });
-    if let Some(ext) = ext {
-        payload["ext"] = ext;
+/// The `assert/0.2` payload: the member, the presentation, and `outcomeEvidence` when any
+/// witness credential is presented — omitted, never empty, otherwise (the member is
+/// `minItems: 1`). Read against the generated type before it is sent, so a payload the
+/// specification would refuse fails here, worded, rather than at the community.
+fn assert_payload(
+    member_did: &str,
+    presentation: Value,
+    outcome_evidence: Vec<Value>,
+) -> Result<Value, OpenVTCError> {
+    if outcome_evidence.len() > crate::witness::MAX_OUTCOME_EVIDENCE {
+        return Err(OpenVTCError::Config(format!(
+            "at most {} witness credentials can be presented at once, not {}",
+            crate::witness::MAX_OUTCOME_EVIDENCE,
+            outcome_evidence.len()
+        )));
     }
-    payload
+    let mut payload = json!({ "did": member_did, "presentation": presentation });
+    if !outcome_evidence.is_empty() {
+        payload["outcomeEvidence"] = Value::Array(outcome_evidence);
+    }
+    serde_json::from_value::<pa::Payload>(payload.clone()).map_err(|e| {
+        OpenVTCError::Config(format!(
+            "the personhood assertion does not match `vtc/members/personhood/assert/0.2`: {e}"
+        ))
+    })?;
+    Ok(payload)
 }
 
 // ─── Replies ─────────────────────────────────────────────────────────────
@@ -460,11 +483,11 @@ pub struct AssertReply {
     /// The re-minted VMC, carrying `PersonhoodCredential` in its `type`.
     pub vmc: Value,
     /// The re-minted role credential — a community role VAC (wire `roleVac`,
-    /// `vtc/members/personhood/assert/0.1`).
+    /// `vtc/members/personhood/assert/0.2`).
     pub role_vac: Value,
 }
 
-/// Parse a `members/personhood/assert/0.1#response`.
+/// Parse a `members/personhood/assert/0.2#response`.
 pub fn parse_assert_reply(body: &Value) -> Result<AssertReply, OpenVTCError> {
     let payload = reply_payload(body);
     Ok(AssertReply {
@@ -487,18 +510,35 @@ mod tests {
     use crate::community_send::didcomm_request;
 
     /// An assertion carrying witness credentials carries their outcome evidence in the
-    /// payload's `ext` (VTI `trusted-witnesses.md`), and one without carries no `ext` at all.
+    /// payload's own `outcomeEvidence` (`assert/0.2`, VTI `trusted-witnesses.md`) — never in
+    /// `ext` — and one without carries no `outcomeEvidence` at all (`minItems: 1`).
     #[test]
-    fn witness_evidence_rides_the_assertion_ext() {
+    fn witness_evidence_rides_the_assertion_outcome_evidence() {
         let vp = serde_json::json!({ "type": ["VerifiablePresentation"] });
-        let bare = super::assert_payload("did:key:zMember", vp.clone(), None);
+        let bare = super::assert_payload("did:key:zMember", vp.clone(), Vec::new()).unwrap();
+        assert!(bare.get("outcomeEvidence").is_none(), "{bare}");
         assert!(bare.get("ext").is_none(), "{bare}");
 
-        let ext = serde_json::json!({ crate::witness::WITNESS_EXT: {
-            "outcomeEvidence": [{ "session": {}, "outcome": {} }] } });
-        let carried = super::assert_payload("did:key:zMember", vp, Some(ext.clone()));
-        assert_eq!(carried["ext"], ext);
+        let evidence = serde_json::json!({
+            "session": { "id": "urn:uuid:s" }, "outcome": { "id": "urn:uuid:o" } });
+        let carried =
+            super::assert_payload("did:key:zMember", vp.clone(), vec![evidence.clone()]).unwrap();
+        assert_eq!(carried["outcomeEvidence"], serde_json::json!([evidence]));
+        assert!(carried.get("ext").is_none(), "{carried}");
         assert_eq!(carried["did"], "did:key:zMember");
+
+        // More than the community accepts is refused here, not trimmed.
+        let too_many = vec![evidence; crate::witness::MAX_OUTCOME_EVIDENCE + 1];
+        assert!(super::assert_payload("did:key:zMember", vp, too_many).is_err());
+    }
+
+    /// The constant the inbound router matches is the generated type's URI.
+    #[test]
+    fn the_assert_type_is_the_generated_one() {
+        assert_eq!(
+            super::PERSONHOOD_ASSERT_TYPE,
+            <super::pa::Payload as trust_tasks_rs::Payload>::TYPE_URI
+        );
     }
 
     /// Over DIDComm a personhood document rides the binding envelope — a VTC

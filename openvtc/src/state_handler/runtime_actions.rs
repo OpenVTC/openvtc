@@ -990,6 +990,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         Action::Relationship(actions::RelationshipAction::Witness {
             remote_p_did,
             witness,
+            share_membership,
         }) => {
             let domain = background_dispatch::DispatchDomain::Witness;
             if !ctx.in_flight.try_begin(domain) {
@@ -1010,6 +1011,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 ctx.dispatch_tx,
                 &remote_p_did,
                 &witness,
+                share_membership,
             ) {
                 Ok(job) => {
                     ctx.state
@@ -1386,7 +1388,7 @@ async fn assert_personhood(ctx: &mut ActionCtx<'_>, witnessed: Option<Vec<String
         .unwrap_or_default();
     // And exactly the witness credentials chosen, each with its session's outcome evidence.
     // Only this persona's: another persona's relationships are not this member's evidence here.
-    let (vwcs, ext) = openvtc_core::witness::personhood_ext(
+    let (vwcs, outcome_evidence) = openvtc_core::witness::personhood_evidence(
         witness_actions::persona_witnessings(ctx.config, challenge.persona),
         &selected,
     );
@@ -1418,7 +1420,7 @@ async fn assert_personhood(ctx: &mut ActionCtx<'_>, witnessed: Option<Vec<String
                     signing_secret: Box::new(keys.authentication.secret.clone()),
                     challenge_id: challenge.challenge_id,
                     credentials,
-                    ext,
+                    outcome_evidence,
                 },
             },
         ),

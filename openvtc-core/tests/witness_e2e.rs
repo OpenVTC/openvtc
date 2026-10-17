@@ -1,6 +1,6 @@
 //! Witnessing a relationship through the member's VTA, end to end (`openvtc_core::witness`).
 //!
-//! The VTA is a real one, in process (`MockVta`, the `vta/witness/*` tasks behind the production
+//! The VTA is a real one, in process (`MockVta`, the `vta/witness/*/0.2` tasks behind the production
 //! spine), driven through this client's own round (`witness::run`) exactly as the TUI drives it.
 //! The relationship is the shape this client mints: a `did:peer:2` over keys created at the VTA
 //! with no context named — so they land in the account's one context — and a VRC signed locally
@@ -73,7 +73,7 @@ impl TestWitness {
         let payload = if type_uri == witness::session_type() {
             if self.behaviour == Behaviour::RefuseSession {
                 return self
-                    .refuse(&doc, sender, session::v0_1::error_codes::REFUSED.into())
+                    .refuse(&doc, sender, session::v0_2::error_codes::REFUSED.into())
                     .await;
             }
             assert_eq!(doc.thread_id.as_deref(), Some(doc.id.as_str()));
@@ -184,8 +184,21 @@ struct World {
     community: EphemeralSetupKey,
 }
 
+/// Which of our DIDs the relationship uses.
+#[derive(Clone, Copy, PartialEq)]
+enum OurSide {
+    /// A pairwise `did:peer:2`, as this client mints one by default.
+    PairwiseDid,
+    /// The persona DID itself — a `did:key` over a key the VTA holds, in the account's context.
+    PersonaDid,
+}
+
 impl World {
     async fn new() -> Self {
+        Self::with(OurSide::PairwiseDid).await
+    }
+
+    async fn with(our_side: OurSide) -> Self {
         let mock = MockVta::start_provisionable().await;
         let admin = EphemeralSetupKey::generate().expect("admin key");
         let super_token = mock.ctx.mint_token(&admin.did, "admin", vec![]).await;
@@ -263,16 +276,26 @@ impl World {
             }
         };
         let mut v_secret = secret(KeyType::Ed25519).await;
-        let mut e_secret = secret(KeyType::X25519).await;
-        let mediator = EphemeralSetupKey::generate().unwrap().did;
-        let relationship = DID::generate_did_peer_from_secrets(
-            &mut [
-                (PeerKeyRole::Verification, &mut v_secret),
-                (PeerKeyRole::Encryption, &mut e_secret),
-            ],
-            Some(mediator),
-        )
-        .expect("the relationship DID");
+        let relationship = match our_side {
+            OurSide::PairwiseDid => {
+                let mut e_secret = secret(KeyType::X25519).await;
+                let mediator = EphemeralSetupKey::generate().unwrap().did;
+                DID::generate_did_peer_from_secrets(
+                    &mut [
+                        (PeerKeyRole::Verification, &mut v_secret),
+                        (PeerKeyRole::Encryption, &mut e_secret),
+                    ],
+                    Some(mediator),
+                )
+                .expect("the relationship DID")
+            }
+            OurSide::PersonaDid => {
+                let public = v_secret.get_public_keymultibase().expect("a public key");
+                let did = format!("did:key:{public}");
+                v_secret.id = format!("{did}#{public}");
+                did
+            }
+        };
 
         // Our VRC to the counterparty, as `prepare_accept_vrc_request` issues it.
         let counterparty = EphemeralSetupKey::generate().unwrap().did;
@@ -421,6 +444,11 @@ async fn a_relationship_is_witnessed_through_the_vta() {
         "everything carried is the relationship DID's, to the witness"
     );
 
+    assert!(
+        carried[1]["payload"].get("memberPresentation").is_none(),
+        "a VMC naming the relationship DID needs no member link"
+    );
+
     // The VWC is in the vault under the handle the VTA reported.
     let held = w
         .client
@@ -436,18 +464,15 @@ async fn a_relationship_is_witnessed_through_the_vta() {
         witnessed_at: Utc::now(),
         witnessed: witnessed.clone(),
     };
-    let (none, no_ext) = witness::personhood_ext([&record], &[]);
+    let (none, no_evidence) = witness::personhood_evidence([&record], &[]);
     assert!(
-        none.is_empty() && no_ext.is_none(),
+        none.is_empty() && no_evidence.is_empty(),
         "nothing unless selected"
     );
-    let (vwcs, ext) =
-        witness::personhood_ext([&record], std::slice::from_ref(&witnessed.session_id));
+    let (vwcs, evidence) =
+        witness::personhood_evidence([&record], std::slice::from_ref(&witnessed.session_id));
     assert_eq!(vwcs, vec![vwc.clone()]);
-    assert_eq!(
-        ext.unwrap()[witness::WITNESS_EXT]["outcomeEvidence"][0],
-        witnessed.evidence
-    );
+    assert_eq!(evidence, vec![witnessed.evidence.clone()]);
 }
 
 /// A refusal from the witness ends the session at the client, classified, and is never handed
@@ -467,12 +492,13 @@ async fn a_witness_refusal_ends_the_session_with_a_reason() {
     assert_eq!(carried.len(), 1, "nothing is presented after a refusal");
 }
 
-/// A membership credential naming the persona rather than the relationship DID needs the member
-/// link, which a VTA presents only to witnesses its operator listed — and the member is told so,
-/// not shown a code.
+/// When the member explicitly opts in for this witnessing (`membership` with `memberDid`), a
+/// membership credential naming the persona rather than the relationship DID is linked to it by a
+/// second presentation by the persona, which the VTA carries in the submission's own
+/// `memberPresentation` (`witness/session/submit/0.2`) — never in a vendor `ext`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "slow: spins up a VTA"]
-async fn the_member_link_is_refused_for_a_witness_the_vta_does_not_list() {
+async fn the_member_link_rides_the_submissions_member_presentation() {
     let w = World::new().await;
     // A persona DID the VTA holds a key of, in the account's context.
     let persona_key = w
@@ -493,23 +519,134 @@ async fn the_member_link_is_refused_for_a_witness_the_vta_does_not_list() {
     let persona = affinidi_tdk::affinidi_crypto::did_key::ed25519_pub_to_did_key(&raw);
     let vmc = w.vmc(&persona).await;
 
+    // The explicit opt-in: the member chose to let this witness learn who they are.
+    let opted_in = Some(MembershipEvidence {
+        credential: vmc,
+        member_did: Some(persona.clone()),
+    });
+    let (result, carried) = w.run(witness(Behaviour::Witness), opted_in).await;
+    result.expect("witnessed with the member link");
+    let submit = &carried[1];
+    assert_eq!(submit["type"], witness::submit_type());
+    let member = &submit["payload"]["memberPresentation"];
+    assert_eq!(member["holder"], persona.as_str(), "{submit}");
+    assert!(
+        submit.get("ext").is_none() && submit["payload"].get("ext").is_none(),
+        "no vendor carriage: {submit}"
+    );
+}
+
+/// By default — the member chose nothing — no membership is named on `vta/witness/open`, so
+/// the witness learns nothing of the member: the submission carries only the relationship
+/// credential, and no member presentation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "slow: spins up a VTA"]
+async fn by_default_no_membership_and_no_member_presentation_is_sent() {
+    let w = World::new().await;
+    let (result, carried) = w.run(witness(Behaviour::Witness), None).await;
+    result.expect("witnessed without any membership");
+    let submit = &carried[1];
+    assert_eq!(submit["type"], witness::submit_type());
+    assert!(
+        submit["payload"].get("memberPresentation").is_none(),
+        "no member presentation: {submit}"
+    );
+    let presented = submit["payload"]["vp"]["verifiableCredential"]
+        .as_array()
+        .expect("the presentation's credentials");
+    assert_eq!(presented.len(), 1, "only the relationship credential");
+    assert!(
+        presented[0]["type"]
+            .as_array()
+            .is_some_and(|t| t.iter().any(|t| t == "RelationshipCredential")),
+        "{presented:?}"
+    );
+}
+
+/// A witnessing whose record this client lost — `accept` answered, then the process died before
+/// the record was kept anywhere — is rebuilt from `vta/witness/list`, byte for byte what `accept`
+/// returned, and only once. Rebuilding it presents nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "slow: spins up a VTA"]
+async fn a_lost_witnessing_is_rebuilt_from_the_vtas_list() {
+    let w = World::new().await;
+    let (result, _) = w.run(witness(Behaviour::Witness), None).await;
+    let witnessed = result.expect("witnessed");
+
+    let ours = |relationship_did: &str, parties: &[String]| {
+        (relationship_did == w.relationship && parties.contains(&w.counterparty))
+            .then(|| "did:webvh:bob".to_string())
+    };
+
+    // The crash: nothing kept locally.
+    let mut local = witness::Witnessings::default();
+    let rebuilt = witness::reconcile(&w.client, &mut local, ours)
+        .await
+        .expect("listed");
+    assert_eq!(rebuilt, 1);
+    let record = &local.0[0];
+    assert_eq!(record.remote_p_did, "did:webvh:bob");
+    assert_eq!(record.relationship_did, w.relationship);
+    assert_eq!(
+        record.witnessed, witnessed,
+        "the record is what `accept` answered: handle, witness, digest and evidence"
+    );
+    assert!(record.witnessed.vwc().is_some());
+
+    // Once: what is kept is not rebuilt again.
+    assert_eq!(
+        witness::reconcile(&w.client, &mut local, ours)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(local.0.len(), 1);
+
+    // A rebuilt record is a choice the picker offers, never a disclosure on its own.
+    let (vwcs, evidence) = witness::personhood_evidence(&local.0, &[]);
+    assert!(vwcs.is_empty() && evidence.is_empty());
+
+    // A relationship this account no longer holds is not brought back.
+    let mut fresh = witness::Witnessings::default();
+    assert_eq!(
+        witness::reconcile(&w.client, &mut fresh, |_, _| None)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(fresh.is_empty());
+}
+
+/// A relationship that uses the persona DID itself (not a pairwise DID) is witnessed the same
+/// way: the VTA signs as the persona, and the membership credential, which names the persona,
+/// needs no member link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "slow: spins up a VTA"]
+async fn a_persona_did_relationship_is_witnessed_through_the_vta() {
+    let w = World::with(OurSide::PersonaDid).await;
+    assert!(w.relationship.starts_with("did:key:"), "{}", w.relationship);
+    let vmc = w.vmc(&w.relationship).await;
+    let witness = witness(Behaviour::Witness);
     let (result, carried) = w
         .run(
-            witness(Behaviour::Witness),
+            witness.clone(),
             Some(MembershipEvidence {
                 credential: vmc,
-                member_did: Some(persona),
+                member_did: None,
             }),
         )
         .await;
-    let err = result.expect_err("the VTA lists no member-link witness");
+    let witnessed = result.expect("witnessed as the persona");
+    assert_eq!(witnessed.witness, witness.did());
+    assert_eq!(carried.len(), 2);
     assert!(
-        matches!(&err, WitnessError::VtaRefused { code, .. } if code.ends_with("memberLinkUnsupported")),
-        "{err:?}"
+        carried
+            .iter()
+            .all(|d| d["issuer"] == w.relationship.as_str() && d["recipient"] == witness.did()),
+        "everything carried is the persona's, to the witness"
     );
-    assert!(err.to_string().contains("member_link_witnesses"), "{err}");
-    assert!(
-        carried.is_empty(),
-        "the witness learns nothing of a session that cannot succeed"
+    assert_eq!(
+        witnessed.vwc().expect("a VWC")["credentialSubject"]["id"],
+        w.relationship.as_str()
     );
 }

@@ -76,7 +76,12 @@ fn issued_vrc(config: &Config, remote_p_did: &str, rel: &Relationship) -> Option
 /// The membership to present beside the relationship credential: a live membership of the
 /// relationship's persona whose credential carries its own `id`. When the credential names a
 /// DID other than the relationship's (a pairwise relationship DID — the usual case), the VTA
-/// links the two for the witness (`memberDid`).
+/// links the two for the witness (`memberDid`, the submission's `memberPresentation`).
+///
+/// Only ever called when the member chose to share it for this witnessing ([`prepare`]):
+/// `witness/session/submit/0.2` has a party carry a member presentation only when it intends
+/// the witness to learn the member DID, and `vta/witness/open/0.2`'s `membership` is that
+/// opt-in.
 fn membership_evidence(config: &Config, rel: &Relationship) -> Option<MembershipEvidence> {
     let persona = relationship_persona(config, rel)?;
     let credential = config
@@ -130,6 +135,7 @@ pub(crate) fn prepare(
     progress: &UnboundedSender<DispatchOutcome>,
     remote_p_did: &str,
     witness_input: &str,
+    share_membership: bool,
 ) -> Result<WitnessJob, String> {
     if matches!(config.key_backend, KeyBackend::Bip32 { .. }) {
         return Err(
@@ -198,7 +204,16 @@ pub(crate) fn prepare(
             counterparty_did: rel.remote_did.to_string(),
             relationship_thread_id: rel.task_id.to_string(),
             relationship_credential,
-            membership: membership_evidence(config, rel),
+            // Nothing of the member's identity unless chosen for this one witnessing.
+            membership: if share_membership {
+                Some(membership_evidence(config, rel).ok_or(
+                    "You chose to present your community membership, but this relationship's \
+                     persona holds no live membership credential to present. Turn it off \
+                     (Tab) to be witnessed without one.",
+                )?)
+            } else {
+                None
+            },
         },
         sync_context: config.account.top_context_id.clone(),
         progress: progress.clone(),
@@ -553,6 +568,13 @@ mod tests {
     }
 
     async fn prepared(config: &Config) -> Result<WitnessJob, String> {
+        prepared_sharing(config, true).await
+    }
+
+    async fn prepared_sharing(
+        config: &Config,
+        share_membership: bool,
+    ) -> Result<WitnessJob, String> {
         let tdk = test_tdk().await;
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
         let service = openvtc_core::didcomm::start_empty_service(
@@ -569,6 +591,7 @@ mod tests {
             &progress,
             THEIR_PERSONA,
             WITNESS,
+            share_membership,
         )
     }
 
@@ -595,7 +618,8 @@ mod tests {
     }
 
     /// The request names our relationship DID, theirs, the relationship's thread, our VRC, and —
-    /// because the VMC names the persona, not the pairwise DID — the member link.
+    /// when the member chose to share it, and because the VMC names the persona, not the
+    /// pairwise DID — the member link.
     #[tokio::test]
     async fn the_request_presents_our_vrc_and_links_the_persona() {
         let mut config = vta_config();
@@ -638,6 +662,27 @@ mod tests {
         assert_eq!(job.request.membership.unwrap().member_did, None);
     }
 
+    /// By default nothing of the member's identity is presented: no membership credential, so
+    /// no `membership` on `vta/witness/open` and no member presentation — even when the persona
+    /// holds a live membership.
+    #[tokio::test]
+    async fn the_membership_is_presented_only_when_chosen() {
+        let mut config = vta_config();
+        let persona = PersonaId::new();
+        relate(&mut config, persona);
+        issue_vrc(&mut config, THEIRS).await;
+        join(&mut config, persona, PERSONA);
+        let job = prepared_sharing(&config, false).await.expect("prepared");
+        assert!(job.request.membership.is_none(), "nothing unless chosen");
+
+        // Chosen, but nothing to present: said, not silently dropped.
+        let mut none = vta_config();
+        relate(&mut none, PersonaId::new());
+        issue_vrc(&mut none, THEIRS).await;
+        let err = prepared_sharing(&none, true).await.err().expect("refused");
+        assert!(err.contains("no live membership"), "{err}");
+    }
+
     /// A completed witnessing is kept against its relationship and shown; a failure is said and
     /// keeps nothing.
     #[test]
@@ -648,6 +693,7 @@ mod tests {
         state.main_page.content_panel.relationships.mode = RelationshipsMode::Witness {
             index: 0,
             witness_input: WITNESS.into(),
+            share_membership: false,
         };
 
         WitnessOutcome {

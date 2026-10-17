@@ -976,7 +976,7 @@ async fn process_inbound(
         }
     }
 
-    // A witness's answers (`witness/session/0.1#response`, `witness/session/submit/0.1#response`),
+    // A witness's answers (`witness/session/0.2#response`, `witness/session/submit/0.2#response`),
     // for a witnessing of one of our relationships. They arrive on the relationship DID's own
     // listener, in either carriage, threaded on the session id. Nothing is read here: the
     // witnessing waiting on that thread verifies each as the witness's first. A
@@ -2764,11 +2764,11 @@ mod tests {
         let session = "urn:uuid:9e8d7c6b-0000-4000-8000-0000000000aa";
         for (typ, enveloped) in [
             (
-                "https://trusttasks.org/spec/witness/session/0.1#response",
+                "https://trusttasks.org/spec/witness/session/0.2#response",
                 true,
             ),
             (
-                "https://trusttasks.org/spec/witness/session/submit/0.1#response",
+                "https://trusttasks.org/spec/witness/session/submit/0.2#response",
                 false,
             ),
             ("https://trusttasks.org/spec/trust-task-error/0.5", true),

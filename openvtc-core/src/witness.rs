@@ -6,7 +6,7 @@
 //! challenge (`witness/session/submit`), and receives the VWC.
 //!
 //! This client does not build or sign any of that. The VTA does — it is the witnessed party for
-//! its principal (`vta/witness/{open,present,accept}/0.1`, VTI `docs/02-vta/witness-party.md`):
+//! its principal (`vta/witness/{open,present,accept}/0.2`, VTI `docs/02-vta/witness-party.md`):
 //! it signs every document **as the relationship DID**, reads the credentials from its vault, and
 //! verifies and stores what the witness answers. This client **carries** the documents: it sends
 //! each one to the witness from the relationship DID, on that DID's own mediator connection, and
@@ -25,7 +25,11 @@
 //!    presentations, and nothing after this reads it (CONVENTIONS §6).
 //! 4. `vta/witness/accept` with the witness's answer → the stored VWC's handle and the session's
 //!    **outcome evidence**, which a community needs beside the VWC to count it
-//!    ([`personhood_ext`]).
+//!    ([`personhood_evidence`]).
+//!
+//! `vta/witness/list` reads back every VWC the VTA stored, with its evidence exactly as stored.
+//! [`reconcile`] uses it to rebuild a record this client lost — `accept` answered, and the
+//! process died before the record was kept — and never presents anything as a result.
 //!
 //! A refusal from the witness ends the session here and is **not** handed back to the VTA; the
 //! VTA's record expires on its own. An answer that does not verify as the witness's is not an
@@ -60,22 +64,19 @@ const TRUST_TASK_ERROR_PREFIX: &str = "https://trusttasks.org/spec/trust-task-er
 /// all, so a minute is generous; the VTA's session lives ten (its `session_ttl_secs` default).
 pub const DEFAULT_ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The vendor namespace the personhood assertion carries outcome evidence in
-/// (VTI `docs/03-vtc/trusted-witnesses.md`).
-pub const WITNESS_EXT: &str = "org.openvtc.witness";
-
-/// At most this many outcome-evidence entries ride a personhood assertion; a VTC refuses more,
-/// so the selection a member makes is held to it ([`personhood_ext`] never trims one).
+/// At most this many outcome-evidence entries ride a personhood assertion (`outcomeEvidence`,
+/// `maxItems` 16 in `vtc/members/personhood/assert/0.2`); a VTC refuses more, so the selection a
+/// member makes is held to it ([`personhood_evidence`] never trims one).
 pub const MAX_OUTCOME_EVIDENCE: usize = 16;
 
-/// `witness/session/0.1`.
+/// `witness/session/0.2`.
 pub fn session_type() -> &'static str {
-    <session::v0_1::Payload as Payload>::TYPE_URI
+    <session::v0_2::Payload as Payload>::TYPE_URI
 }
 
-/// `witness/session/submit/0.1`.
+/// `witness/session/submit/0.2`.
 pub fn submit_type() -> &'static str {
-    <session::submit::v0_1::Payload as Payload>::TYPE_URI
+    <session::submit::v0_2::Payload as Payload>::TYPE_URI
 }
 
 /// Whether `typ` is a witness's answer to a document this client carries: the session's or the
@@ -146,13 +147,6 @@ fn local_code(code: &str) -> &str {
 
 fn vta_refusal_text(step: &str, code: &str, message: &str) -> String {
     let advice = match local_code(code) {
-        "memberLinkUnsupported" => {
-            "your VTA does not present your membership to this witness. Your membership \
-             credential names your persona DID, not this relationship's DID, so the VTA has to \
-             link the two for the witness — and it does that only for witnesses its operator has \
-             listed in `[witness] member_link_witnesses`. Ask your VTA's operator to list this \
-             witness, or choose a witness they have listed"
-        }
         "credentialMismatch" => {
             "a credential does not fit the session — the relationship credential must be issued \
              by this relationship's DID to the other party, and every credential must be within \
@@ -167,6 +161,9 @@ fn vta_refusal_text(step: &str, code: &str, message: &str) -> String {
         }
         "responseInvalid" => {
             "your VTA did not accept the witness's answer as the witness's own for this session"
+        }
+        "cursorInvalid" => {
+            "your VTA could not continue its listing from where it left off. Try again"
         }
         "vwcInvalid" => {
             "the witness's credential did not verify against the session, so your VTA did not \
@@ -244,9 +241,9 @@ fn vta_failure(step: &'static str, e: VtaError) -> WitnessError {
 /// Which session document is about to be carried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WitnessDocument {
-    /// `witness/session/0.1`, from `vta/witness/open`.
+    /// `witness/session/0.2`, from `vta/witness/open`.
     Session,
-    /// `witness/session/submit/0.1`, from `vta/witness/present`.
+    /// `witness/session/submit/0.2`, from `vta/witness/present`.
     Submit,
 }
 
@@ -343,8 +340,8 @@ pub enum WitnessRefusal {
 }
 
 fn refusal_for(code: &str) -> WitnessRefusal {
-    use session::submit::v0_1::error_codes as submit;
-    use session::v0_1::error_codes as open;
+    use session::submit::v0_2::error_codes as submit;
+    use session::v0_2::error_codes as open;
     if code == open::REFUSED.code {
         WitnessRefusal::SessionRefused
     } else if code == submit::CHALLENGE_MISMATCH.code {
@@ -740,8 +737,10 @@ pub struct MembershipEvidence {
     /// The community's membership credential (VMC), as held.
     pub credential: Value,
     /// The DID the VMC names, when it is not the relationship DID: the VTA then presents a second
-    /// presentation by it, linking the two for the witness (the member link, VTI
-    /// `witness-host-service.md` §3.3a). `None` when the VMC names the relationship DID itself.
+    /// presentation by it, linking the two for the witness — the member link, in the submit
+    /// document's `memberPresentation` (`witness/session/submit/0.2`; VTI
+    /// `docs/02-vta/witness-party.md`, *The member link*). The witness then learns which member
+    /// is behind the relationship DID. `None` when the VMC names the relationship DID itself.
     pub member_did: Option<String>,
 }
 
@@ -757,6 +756,11 @@ pub struct WitnessRequest {
     pub relationship_thread_id: String,
     /// Our relationship credential: issued by `relationship_did`, naming `counterparty_did`.
     pub relationship_credential: Value,
+    /// The membership to present — `Some` **only** when the member chose, for this one
+    /// witnessing, to let this witness learn which community member is behind the relationship.
+    /// `None` sends no `membership` on `vta/witness/open`, so the VTA presents no membership
+    /// credential and no `memberPresentation` (`witness/session/submit/0.2`, *The member
+    /// presentation*: carried only when the party intends the witness to learn the member DID).
     pub membership: Option<MembershipEvidence>,
 }
 
@@ -851,7 +855,7 @@ pub async fn run(
     if let Some(membership) = membership {
         open_payload["membership"] = membership;
     }
-    let open_payload: vta_witness::open::v0_1::Payload = serde_json::from_value(open_payload)
+    let open_payload: vta_witness::open::v0_2::Payload = serde_json::from_value(open_payload)
         .map_err(|e| WitnessError::Document(format!("the witnessing request is not valid: {e}")))?;
     let opened = round
         .vta
@@ -882,7 +886,7 @@ pub async fn run(
     .await?;
 
     progress(Step::Presenting);
-    let present_payload: vta_witness::present::v0_1::Payload =
+    let present_payload: vta_witness::present::v0_2::Payload =
         serde_json::from_value(json!({ "sessionId": session_id, "response": session_answer }))
             .map_err(|e| WitnessError::Document(format!("the witness's answer: {e}")))?;
     let presented = round
@@ -914,7 +918,7 @@ pub async fn run(
     let outcome = outcome?;
 
     progress(Step::Accepting);
-    let accept_payload: vta_witness::accept::v0_1::Payload =
+    let accept_payload: vta_witness::accept::v0_2::Payload =
         serde_json::from_value(json!({ "sessionId": session_id, "response": outcome }))
             .map_err(|e| WitnessError::Document(format!("the witness's answer: {e}")))?;
     let accepted = round
@@ -1031,45 +1035,190 @@ impl Witnessings {
     }
 }
 
-/// The VWCs and the `ext` a personhood assertion carries for the witnessings the member
-/// **selected**, by session id: each selected VWC goes in the presentation, and its session's
-/// outcome evidence beside it, in `ext["org.openvtc.witness"].outcomeEvidence` — without which a
-/// VTC counts no VWC (`noOutcomeEvidence`).
+/// The VWCs and the outcome evidence a personhood assertion carries for the witnessings the
+/// member **selected**, by session id: each selected VWC goes in the presentation, and its
+/// session's outcome evidence beside it, in the payload's `outcomeEvidence`
+/// (`vtc/members/personhood/assert/0.2`) — without which a VTC counts no VWC
+/// (`noOutcomeEvidence`).
 ///
 /// Exactly the selected ones, in the order selected, and nothing at all when nothing is: a VWC
 /// tells the community that a relationship exists and which witness attested it, so none is
 /// disclosed unless the member chose it for this assertion. A selected id with no record (or a
 /// record with no VWC) is skipped. The caller keeps a selection within
 /// [`MAX_OUTCOME_EVIDENCE`]; nothing here drops a selected entry to fit.
-pub fn personhood_ext<'a>(
+pub fn personhood_evidence<'a>(
     records: impl IntoIterator<Item = &'a WitnessRecord>,
     selected: &[String],
-) -> (Vec<Value>, Option<Value>) {
+) -> (Vec<Value>, Vec<Value>) {
     let records: Vec<&WitnessRecord> = records.into_iter().collect();
-    let chosen: Vec<&WitnessRecord> = selected
+    selected
         .iter()
         .filter_map(|id| {
             records
                 .iter()
-                .find(|r| &r.witnessed.session_id == id && r.witnessed.vwc().is_some())
-                .copied()
+                .find(|r| &r.witnessed.session_id == id)
+                .and_then(|r| Some((r.witnessed.vwc()?.clone(), r.witnessed.evidence.clone())))
         })
-        .collect();
-    if chosen.is_empty() {
-        return (Vec::new(), None);
+        .unzip()
+}
+
+// ─── Reconciling with the VTA ────────────────────────────────────────────────
+
+/// Most witnessings asked for per `vta/witness/list` page — the task's own ceiling.
+const LIST_PAGE_SIZE: u64 = 100;
+
+/// At most this many pages are read in one reconciliation (10 000 witnessings), so a VTA that
+/// kept answering `truncated` could not hold the caller forever.
+const LIST_MAX_PAGES: usize = 100;
+
+/// Every witnessing the VTA stored that this account may read, oldest first
+/// (`vta/witness/list/0.1`, every page).
+///
+/// A cursor the VTA cannot honour (`cursorInvalid`) restarts the listing once from the start;
+/// a second is a failure.
+pub async fn list_stored(
+    vta: &VtaClient,
+) -> Result<Vec<vta_witness::list::v0_1::StoredWitnessing>, WitnessError> {
+    let mut stored = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut restarted = false;
+    let mut pages = 0;
+    loop {
+        let mut payload = json!({ "pageSize": LIST_PAGE_SIZE });
+        if let Some(c) = &cursor {
+            payload["cursor"] = json!(c);
+        }
+        let payload: vta_witness::list::v0_1::Payload = serde_json::from_value(payload)
+            .map_err(|e| WitnessError::Document(format!("the listing request: {e}")))?;
+        let page = match vta.witness_list(&payload).await {
+            Ok(page) => page,
+            Err(VtaError::Rejected { code, .. })
+                if local_code(&code) == "cursorInvalid" && !restarted =>
+            {
+                restarted = true;
+                cursor = None;
+                stored.clear();
+                pages = 0;
+                continue;
+            }
+            Err(e) => return Err(vta_failure("list its witness credentials", e)),
+        };
+        stored.extend(page.witnessings);
+        pages += 1;
+        match page.cursor {
+            Some(next) if page.truncated && pages < LIST_MAX_PAGES => {
+                cursor = Some(next.to_string());
+            }
+            _ => break,
+        }
     }
-    let vwcs = chosen
-        .iter()
-        .filter_map(|r| r.witnessed.vwc().cloned())
-        .collect();
-    let evidence: Vec<Value> = chosen
-        .iter()
-        .map(|r| r.witnessed.evidence.clone())
-        .collect();
-    (
-        vwcs,
-        Some(json!({ WITNESS_EXT: { "outcomeEvidence": evidence } })),
-    )
+    Ok(stored)
+}
+
+/// The records `stored` holds that `local` does not: a VWC the VTA stored whose witnessing this
+/// account never kept — the process died between `accept` and the save, and the app-state write
+/// (`record_at_vta`) did not land either.
+///
+/// A stored witnessing is already kept when a local record has its vault handle or its session.
+/// `relationship_for(relationship_did, parties)` names the relationship (its key, the other
+/// party's persona DID) the witnessing belongs to, or `None` when this account holds no such
+/// relationship any more — a removed relationship's witnessings are forgotten on purpose, and are
+/// not brought back. A stored entry whose evidence carries no readable session is skipped.
+///
+/// Rebuilding a record discloses nothing: a record is what the personhood picker *offers*, and
+/// the picker opens with none chosen.
+pub fn recover_records(
+    local: &Witnessings,
+    stored: Vec<vta_witness::list::v0_1::StoredWitnessing>,
+    relationship_for: impl Fn(&str, &[String]) -> Option<String>,
+) -> Vec<WitnessRecord> {
+    let mut recovered: Vec<WitnessRecord> = Vec::new();
+    for s in stored {
+        let credential_id = s.credential_id.to_string();
+        let session = Value::Object(s.evidence.session.0);
+        let Some(session_id) = session
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let known = |r: &WitnessRecord| {
+            r.witnessed.credential_id == credential_id || r.witnessed.session_id == session_id
+        };
+        if local.0.iter().any(known) || recovered.iter().any(known) {
+            continue;
+        }
+        let parties: Vec<String> = session
+            .pointer("/payload/parties")
+            .and_then(Value::as_array)
+            .map(|p| {
+                p.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let relationship_did = s.relationship_did.to_string();
+        let Some(remote_p_did) = relationship_for(&relationship_did, &parties) else {
+            continue;
+        };
+        let outcome = Value::Object(s.evidence.outcome.0);
+        recovered.push(WitnessRecord {
+            remote_p_did,
+            relationship_did,
+            witnessed_at: s.accepted_at,
+            witnessed: Witnessed {
+                session_id,
+                credential_id,
+                witness: s.witness.to_string(),
+                vwc_digest_multibase: s.vwc_digest_multibase.to_string(),
+                evidence: json!({ "session": session, "outcome": outcome }),
+            },
+        });
+    }
+    recovered
+}
+
+/// The relationship (by the other party's persona DID, the relationships map's key) a stored
+/// witnessing belongs to: ours is `relationship_did`, and the other party is one of the
+/// session's `parties`. A persona DID can be our side of many relationships, so the parties
+/// decide; `None` unless exactly one relationship fits.
+pub fn relationship_of(
+    relationships: &crate::relationships::Relationships,
+    relationship_did: &str,
+    parties: &[String],
+) -> Option<String> {
+    let mut fits = relationships.relationships.iter().filter(|(_, rel)| {
+        rel.our_did.as_str() == relationship_did
+            && parties.iter().any(|p| p == rel.remote_did.as_str())
+    });
+    match (fits.next(), fits.next()) {
+        (Some((key, _)), None) => Some(key.to_string()),
+        _ => None,
+    }
+}
+
+/// Rebuild, from `vta/witness/list`, every witnessing the VTA holds a VWC for and `local` does
+/// not, and keep them in `local` (in time order). Returns how many were rebuilt.
+///
+/// Nothing is presented, sent or selected as a result: the records only reappear in the
+/// relationships view and as choices in the personhood picker, which starts empty.
+pub async fn reconcile(
+    vta: &VtaClient,
+    local: &mut Witnessings,
+    relationship_for: impl Fn(&str, &[String]) -> Option<String>,
+) -> Result<usize, WitnessError> {
+    let stored = list_stored(vta).await?;
+    let recovered = recover_records(local, stored, relationship_for);
+    let n = recovered.len();
+    for r in recovered {
+        let at = local
+            .0
+            .partition_point(|here| here.witnessed_at <= r.witnessed_at);
+        local.0.insert(at, r);
+    }
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -1155,7 +1304,7 @@ mod tests {
         assert!(is_reply_type(&format!("{}#response", submit_type())));
         assert!(!is_reply_type(session_type()));
         assert!(!is_reply_type(
-            "https://trusttasks.org/spec/vtc/members/personhood/assert/0.1#response"
+            "https://trusttasks.org/spec/vtc/members/personhood/assert/0.2#response"
         ));
     }
 
@@ -1179,17 +1328,6 @@ mod tests {
     /// Each refusal reads as what the member can do about it, not as a code.
     #[test]
     fn a_refusal_says_what_to_do() {
-        let member_link = WitnessError::VtaRefused {
-            step: "open a witnessed session",
-            code: "vta/witness/open:memberLinkUnsupported".into(),
-            message: "no".into(),
-        }
-        .to_string();
-        assert!(
-            member_link.contains("member_link_witnesses"),
-            "{member_link}"
-        );
-
         let refused = WitnessError::Refused {
             refusal: WitnessRefusal::SessionRefused,
             code: "witness/session:refused".into(),
@@ -1324,16 +1462,15 @@ mod tests {
     fn personhood_carries_only_the_selected_vwcs() {
         let records: Vec<WitnessRecord> = (0..20).map(|i| record(i, true)).collect();
 
-        // Default: no selection, no VWC, no ext.
-        assert_eq!(personhood_ext(&records, &[]), (Vec::new(), None));
+        // Default: no selection, no VWC, no evidence.
+        assert_eq!(personhood_evidence(&records, &[]), (Vec::new(), Vec::new()));
 
         let selected = vec!["urn:uuid:3".to_string(), "urn:uuid:17".to_string()];
-        let (vwcs, ext) = personhood_ext(&records, &selected);
+        let (vwcs, evidence) = personhood_evidence(&records, &selected);
         assert_eq!(vwcs.len(), 2);
         assert_eq!(vwcs[0]["id"], "urn:vwc:3");
         assert_eq!(vwcs[1]["id"], "urn:vwc:17");
-        let evidence = ext.unwrap()[WITNESS_EXT]["outcomeEvidence"].clone();
-        assert_eq!(evidence.as_array().unwrap().len(), 2);
+        assert_eq!(evidence.len(), 2);
         assert_eq!(evidence[0]["session"]["id"], "urn:uuid:3");
         assert_eq!(evidence[1]["session"]["id"], "urn:uuid:17");
 
@@ -1342,15 +1479,132 @@ mod tests {
             .iter()
             .map(|r| r.witnessed.session_id.clone())
             .collect();
-        assert_eq!(personhood_ext(&records, &all).0.len(), 20);
+        assert_eq!(personhood_evidence(&records, &all).0.len(), 20);
 
         // An unknown id, or a record whose outcome carries no VWC, adds nothing.
         assert_eq!(
-            personhood_ext(
+            personhood_evidence(
                 &[record(1, false)],
                 &["urn:uuid:1".into(), "urn:uuid:x".into()]
             ),
-            (Vec::new(), None)
+            (Vec::new(), Vec::new())
+        );
+    }
+
+    const OTHER_PARTY: &str = "did:peer:2.Vz6MkOtherParty";
+
+    /// One `vta/witness/list` entry, as the VTA answers it.
+    fn stored(at: i64, relationship_did: &str) -> vta_witness::list::v0_1::StoredWitnessing {
+        serde_json::from_value(json!({
+            "acceptedAt": DateTime::from_timestamp(at, 0).unwrap(),
+            "credentialId": format!("vwc-{at}"),
+            "relationshipDid": relationship_did,
+            "witness": WITNESS,
+            "vwcDigestMultibase": "zQmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR",
+            "evidence": {
+                "session": {
+                    "id": format!("urn:uuid:{at}"),
+                    "type": session_type(),
+                    "payload": { "parties": [relationship_did, OTHER_PARTY] }
+                },
+                "outcome": { "payload": { "vwc": { "id": format!("urn:vwc:{at}") } } }
+            }
+        }))
+        .expect("a stored witnessing")
+    }
+
+    fn ours(relationship_did: &str, parties: &[String]) -> Option<String> {
+        (relationship_did == RELATIONSHIP && parties.iter().any(|p| p == OTHER_PARTY))
+            .then(|| "did:webvh:bob".to_string())
+    }
+
+    /// A VWC the VTA holds and this account never kept is rebuilt with its evidence exactly as
+    /// listed; one already kept (by vault handle or by session) is not rebuilt twice.
+    #[test]
+    fn a_lost_witnessing_is_rebuilt_from_the_list() {
+        let mut local = Witnessings::default();
+        local.push(record(1, true));
+
+        let recovered = recover_records(
+            &local,
+            vec![
+                stored(1, RELATIONSHIP),
+                stored(2, RELATIONSHIP),
+                stored(2, RELATIONSHIP),
+            ],
+            ours,
+        );
+        assert_eq!(recovered.len(), 1, "only the one not kept, once");
+        let r = &recovered[0];
+        assert_eq!(r.remote_p_did, "did:webvh:bob");
+        assert_eq!(r.relationship_did, RELATIONSHIP);
+        assert_eq!(r.witnessed.session_id, "urn:uuid:2");
+        assert_eq!(r.witnessed.credential_id, "vwc-2");
+        assert_eq!(r.witnessed.witness, WITNESS);
+        assert_eq!(r.witnessed_at, DateTime::from_timestamp(2, 0).unwrap());
+        assert_eq!(
+            r.witnessed.vwc(),
+            Some(&json!({ "id": "urn:vwc:2" })),
+            "the VWC is read where the round reads it"
+        );
+        assert_eq!(r.witnessed.evidence["session"]["id"], "urn:uuid:2");
+    }
+
+    /// A witnessing of a relationship this account no longer holds stays forgotten: removing a
+    /// relationship forgets its witnessings on purpose.
+    #[test]
+    fn a_removed_relationships_witnessing_is_not_brought_back() {
+        let recovered = recover_records(
+            &Witnessings::default(),
+            vec![stored(3, "did:peer:2.Vz6MkSomeOtherRelationship")],
+            ours,
+        );
+        assert!(recovered.is_empty());
+    }
+
+    /// A rebuilt record is only something the picker offers: a personhood assertion still
+    /// carries nothing unless it is selected.
+    #[test]
+    fn a_rebuilt_record_is_never_presented_unselected() {
+        let recovered =
+            recover_records(&Witnessings::default(), vec![stored(4, RELATIONSHIP)], ours);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(
+            personhood_evidence(&recovered, &[]),
+            (Vec::new(), Vec::new())
+        );
+    }
+
+    /// A persona DID is our side of many relationships: the session's parties decide which.
+    #[test]
+    fn the_relationship_is_found_by_its_parties() {
+        use crate::relationships::{Relationship, Relationships};
+        let mut rels = Relationships::default();
+        for (key, remote) in [
+            ("did:webvh:bob", OTHER_PARTY),
+            ("did:webvh:carol", "did:key:z6MkCarol"),
+        ] {
+            let rel = Relationship {
+                task_id: Arc::new("urn:uuid:task".into()),
+                our_did: Arc::new(RELATIONSHIP.into()),
+                remote_did: Arc::new(remote.into()),
+                remote_p_did: Arc::new(key.into()),
+                created: Utc::now(),
+                state: crate::relationships::RelationshipState::Established,
+                our_persona: None,
+                needs_reestablishment: false,
+            };
+            rels.relationships.insert(Arc::new(key.into()), rel);
+        }
+        let parties = vec![RELATIONSHIP.to_string(), OTHER_PARTY.to_string()];
+        assert_eq!(
+            relationship_of(&rels, RELATIONSHIP, &parties).as_deref(),
+            Some("did:webvh:bob")
+        );
+        assert_eq!(relationship_of(&rels, RELATIONSHIP, &[]), None);
+        assert_eq!(
+            relationship_of(&rels, "did:key:z6MkNotOurs", &parties),
+            None
         );
     }
 

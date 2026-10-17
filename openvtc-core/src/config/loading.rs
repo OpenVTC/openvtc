@@ -772,12 +772,34 @@ async fn sync_account_state(
     let mut state = std::mem::take(&mut private_cfg.vta_sync);
     let mut account = std::mem::take(&mut private_cfg.account);
     let outcome = tokio::time::timeout(LOAD_SYNC_BUDGET, async {
-        let mut parts = SyncParts {
-            account: &mut account,
-            private: &mut *private_cfg,
-            key_info: &mut *key_info,
+        let mut report = {
+            let mut parts = SyncParts {
+                account: &mut account,
+                private: &mut *private_cfg,
+                key_info: &mut *key_info,
+            };
+            sync_at_load(client, &mut parts, &mut state, &context_id).await
         };
-        sync_at_load(client, &mut parts, &mut state, &context_id).await
+        // After the pull, so a record another device (or this one, before a crash) wrote to
+        // the app state is already here and is not rebuilt twice. Only a VTA that answered.
+        if report.error.is_none() && !context_id.is_empty() {
+            let relationships = &private_cfg.relationships;
+            match crate::witness::reconcile(
+                client,
+                &mut private_cfg.witnessings,
+                |ours, parties| crate::witness::relationship_of(relationships, ours, parties),
+            )
+            .await
+            {
+                Ok(n) => report.recovered_witnessings = n,
+                // A VTA that predates `vta/witness/list`, or a refusal: nothing to rebuild from,
+                // and nothing lost — the records this device holds are untouched.
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not reconcile witnessings with the VTA")
+                }
+            }
+        }
+        report
     })
     .await;
     let report = outcome.unwrap_or_else(|_| SyncReport {
@@ -793,6 +815,7 @@ async fn sync_account_state(
         removed = report.removed,
         deferred = report.deferred,
         conflicts = report.conflicts.len(),
+        recovered_witnessings = report.recovered_witnessings,
         error = ?report.error,
         "account state sync at load"
     );

@@ -428,7 +428,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # (trust-tasks-tf #779), the tasks `openvtc-core::witness` drives at the VTA, beside
 # the `witness/session/*` documents it carries to the witness. A patch move on the
 # line `vta-sdk` is already on, so nothing else follows it.
-trust-tasks-rs = { version = "0.31.8", features = ["git-ns"] }
+trust-tasks-rs = { version = "0.31.12", features = ["git-ns"] }
 trust-tasks-capability-client = "0.31.0"
 tui-input = "0.15"
 url = "2.5"
@@ -631,7 +631,11 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # **0.69** is `vta-service` 0.61's line: the first with `VtaClient::witness_*`,
 # the VTA as witnessed party (`vta/witness/{open,present,accept}`, VTI #2123),
 # on the same trust-tasks 0.31 / TDK 0.26 / messaging-sdk 0.36.
-vta-sdk = { version = "0.69.0", features = [
+# **0.70** is `vta-service` 0.62's line (VTI #2147): the witness tasks at 0.2
+# (`vta/witness/{open,present,accept}/0.2`, `memberPresentation` and
+# `outcomeEvidence` as spec members, the `ext` carriage gone) and
+# `vta/witness/list/0.1`. did-git-sign 0.22 is on it.
+vta-sdk = { version = "0.70.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
