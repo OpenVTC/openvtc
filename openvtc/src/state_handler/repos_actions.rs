@@ -536,21 +536,21 @@ fn capitalise(s: &str) -> String {
 
 /// Everything a send needs, resolved on the loop thread.
 pub(crate) struct Sender {
-    atm: ATM,
-    profile: Arc<ATMProfile>,
-    persona_did: String,
-    mediator: String,
+    pub(crate) atm: ATM,
+    pub(crate) profile: Arc<ATMProfile>,
+    pub(crate) persona_did: String,
+    pub(crate) mediator: String,
     /// The membership was joined over TSP, so its requests go over TSP: the
     /// community answers on the transport a request arrived on, and a persona
     /// that joined over TSP may not collect a DIDComm answer at all.
-    over_tsp: bool,
-    signer: Box<Secret>,
+    pub(crate) over_tsp: bool,
+    pub(crate) signer: Box<Secret>,
 }
 
 /// Resolve the persona's messaging identity and signing key. The key comes
 /// from the TDK secrets resolver, an in-memory store populated at startup —
 /// not I/O — which is what lets the job own a plain `Secret`.
-async fn sender(
+pub(crate) async fn sender(
     config: &Config,
     tdk: &TDK,
     persona: PersonaId,

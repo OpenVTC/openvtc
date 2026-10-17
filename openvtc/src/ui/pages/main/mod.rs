@@ -357,6 +357,23 @@ impl Component for MainPage {
     }
 }
 
+/// The Rooms panel's keys: navigate, accept, refresh, close.
+fn rooms_key(
+    key: KeyEvent,
+    view: &crate::state_handler::main_page::rooms::RoomsView,
+) -> Option<crate::state_handler::actions::RoomsAction> {
+    use crate::state_handler::actions::RoomsAction as R;
+    let last = view.rooms.len().saturating_sub(1);
+    Some(match key.code {
+        KeyCode::Esc => R::Back,
+        KeyCode::Char('r') => R::Refresh,
+        KeyCode::Up | KeyCode::Char('k') => R::Select(view.selected.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') => R::Select((view.selected + 1).min(last)),
+        KeyCode::Enter | KeyCode::Char('a') => R::Accept,
+        _ => return None,
+    })
+}
+
 /// The Repos view's key map. `None` when the key means nothing here.
 ///
 /// Innermost first: an armed change takes only `y`/`⏎` (anything else
@@ -1285,6 +1302,15 @@ impl MainPage {
             }
             return handled;
         }
+        // Rooms view open: the same.
+        if let Some(view) = self.props.main_page.content_panel.rooms.view.as_ref() {
+            let action = rooms_key(key, view);
+            let handled = action.is_some();
+            if let Some(action) = action {
+                let _ = self.action_tx.send(Action::Rooms(action));
+            }
+            return handled;
+        }
         // The personhood witness-credential picker owns the keys while open.
         if let Some(view) = self
             .props
@@ -1452,6 +1478,13 @@ impl MainPage {
                 // Open the community's Repos view (git-ns/*).
                 let _ = self.action_tx.send(Action::Repos(
                     crate::state_handler::actions::ReposAction::Open(selected),
+                ));
+                true
+            }
+            KeyCode::Char('o') if sel_active => {
+                // Open the community's data rooms (vtc/rooms/memberships/*).
+                let _ = self.action_tx.send(Action::Rooms(
+                    crate::state_handler::actions::RoomsAction::Open(selected),
                 ));
                 true
             }

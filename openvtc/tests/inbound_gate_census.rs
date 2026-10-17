@@ -69,6 +69,11 @@ fn routed_types() -> Vec<&'static str> {
         "https://trusttasks.org/spec/git-ns/right/grant/0.3#response",
         "https://trusttasks.org/spec/git-ns/account/link/0.1#response",
         "https://trusttasks.org/spec/git-ns/drift/resolve/0.1#response",
+        // Data-room replies for the Rooms panel, routed by prefix
+        // (`community_rooms::is_reply_type`).
+        "https://trusttasks.org/spec/vtc/rooms/memberships/list/0.1#response",
+        "https://trusttasks.org/spec/vtc/rooms/offers/list/0.1#response",
+        "https://trusttasks.org/spec/vtc/rooms/offers/accept/0.1#response",
         // A witness's answers, routed by `witness::is_reply_type`.
         "https://trusttasks.org/spec/witness/session/0.2#response",
         "https://trusttasks.org/spec/witness/session/submit/0.2#response",

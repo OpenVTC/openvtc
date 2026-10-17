@@ -110,6 +110,13 @@ pub(crate) enum DispatchDomain {
     /// only. Its own domain so a periodic read never makes a member's key
     /// press wait.
     GitWorkspaceProbe,
+    /// A `vtc/rooms/*` request sent to a community from the Rooms panel. The answer
+    /// arrives on the inbound channel; this serialises the sends.
+    Rooms,
+    /// The Rooms panel asking the member's VTA — the rooms' key holder — what it holds,
+    /// for a KeyPackage, or to join from a Welcome. Separate from [`Self::Rooms`] so the
+    /// two halves of a refresh run together.
+    RoomsVta,
     /// What each persona presents, for the communities panel.
     PersonaBinding,
     /// The identity pane's own reads and writes — the attribute pool, the
@@ -171,6 +178,8 @@ impl DispatchDomain {
             DispatchDomain::GitNs => "Repository request",
             DispatchDomain::GitWorkspace => "Checkout or signing change",
             DispatchDomain::GitWorkspaceProbe => "Checkout check",
+            DispatchDomain::Rooms => "Data room request",
+            DispatchDomain::RoomsVta => "Data room keys at your VTA",
             DispatchDomain::PersonaBinding => "Persona binding refresh",
             DispatchDomain::PersonaManage => "Identity request",
             DispatchDomain::Vic => "Invitation credential refresh",
@@ -284,6 +293,10 @@ pub(crate) enum DispatchOutcome {
     Workspace(crate::state_handler::repos_workspace::WorkspaceOutcome),
     /// A Repos-panel checkout and signing read finished.
     WorkspaceProbe(crate::state_handler::repos_workspace::ProbeOutcome),
+    /// A `vtc/rooms/*` request was sent to a community (or failed to send).
+    Rooms(crate::state_handler::rooms_actions::RoomsOutcome),
+    /// The member's VTA answered the Rooms panel.
+    RoomsVta(crate::state_handler::rooms_actions::RoomsVtaOutcome),
     PersonaBinding(
         std::collections::HashMap<
             crate::state_handler::persona_binding_refresh::BindingTarget,
@@ -354,6 +367,8 @@ impl DispatchOutcome {
             DispatchOutcome::Repos(_) => DispatchDomain::GitNs,
             DispatchOutcome::Workspace(_) => DispatchDomain::GitWorkspace,
             DispatchOutcome::WorkspaceProbe(_) => DispatchDomain::GitWorkspaceProbe,
+            DispatchOutcome::Rooms(_) => DispatchDomain::Rooms,
+            DispatchOutcome::RoomsVta(_) => DispatchDomain::RoomsVta,
             DispatchOutcome::PersonaBinding(_) => DispatchDomain::PersonaBinding,
             DispatchOutcome::PersonaManage(_) => DispatchDomain::PersonaManage,
             DispatchOutcome::Vic(_) => DispatchDomain::Vic,
@@ -572,6 +587,8 @@ pub(crate) fn apply_outcome(
         DispatchOutcome::Repos(outcome) => outcome.apply(state),
         DispatchOutcome::Workspace(outcome) => outcome.apply(state),
         DispatchOutcome::WorkspaceProbe(outcome) => outcome.apply(state),
+        DispatchOutcome::Rooms(outcome) => outcome.apply(state),
+        DispatchOutcome::RoomsVta(outcome) => outcome.apply(state),
         // Merged, not replaced. A sweep only carries the targets it was given,
         // and replacing the map would blank every row the sweep did not cover
         // — which reads on screen as those personas having stopped presenting
@@ -628,6 +645,9 @@ pub(crate) fn apply_outcome(
             let msg = format!("{} failed (internal error)", domain.label());
             if domain == DispatchDomain::GitWorkspace {
                 crate::state_handler::repos_workspace::job_lost(state, &msg);
+            }
+            if matches!(domain, DispatchDomain::Rooms | DispatchDomain::RoomsVta) {
+                crate::state_handler::rooms_actions::job_lost(state, &msg);
             }
             state.main_page.log(msg);
         }

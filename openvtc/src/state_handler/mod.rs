@@ -262,6 +262,7 @@ mod persona_actions;
 mod persona_binding_refresh;
 mod repos_actions;
 pub(crate) mod repos_workspace;
+mod rooms_actions;
 mod signing_health;
 /// The DIDComm transport module, which now lives in `openvtc-core`.
 ///
@@ -1518,6 +1519,7 @@ impl StateHandler {
                                 inactivated,
                                 capability_replies,
                                 git_ns_replies,
+                                rooms_replies,
                                 personhood_challenges,
                                 vetting_answers,
                                 vetting_grant_checks,
@@ -1709,6 +1711,21 @@ impl StateHandler {
                             // The answer names the repositories to look for
                             // on this machine.
                             repos_workspace::probe_if_due(&mut state, &dispatch_tx, &mut in_flight);
+                            // Data-room answers for the Rooms panel; each may call for the
+                            // next step of a refresh or an acceptance.
+                            if !rooms_replies.is_empty()
+                                && rooms_actions::apply_replies(&mut state, rooms_replies)
+                            {
+                                rooms_actions::advance(&mut rooms_actions::Loop {
+                                    state: &mut state,
+                                    config: &config,
+                                    tdk: &tdk,
+                                    vta: admin_vta.as_ref(),
+                                    dispatch_tx: &dispatch_tx,
+                                    in_flight: &mut in_flight,
+                                })
+                                .await;
+                            }
                             // A vetter's grant is checked for revocation off the
                             // loop: the check fetches the community's status list.
                             for check in vetting_grant_checks {
@@ -1874,6 +1891,17 @@ impl StateHandler {
                         &mut in_flight,
                         outcome,
                     );
+                    // A VTA answer or a failed send may call for the Rooms panel's next
+                    // step, and frees the lane it waits on.
+                    rooms_actions::advance(&mut rooms_actions::Loop {
+                        state: &mut state,
+                        config: &config,
+                        tdk: &tdk,
+                        vta: admin_vta.as_ref(),
+                        dispatch_tx: &dispatch_tx,
+                        in_flight: &mut in_flight,
+                    })
+                    .await;
                     let settled = settle_after_apply(
                         after, &mut state, &mut config, &tdk, self.profile.as_str(),
                     )
@@ -2096,6 +2124,16 @@ impl StateHandler {
                         state: &mut state,
                         config: &config,
                         tdk: &tdk,
+                        dispatch_tx: &dispatch_tx,
+                        in_flight: &mut in_flight,
+                    })
+                    .await;
+                    // The Rooms panel: reply windows, and a step left on a busy lane.
+                    rooms_actions::tick(&mut rooms_actions::Loop {
+                        state: &mut state,
+                        config: &config,
+                        tdk: &tdk,
+                        vta: admin_vta.as_ref(),
                         dispatch_tx: &dispatch_tx,
                         in_flight: &mut in_flight,
                     })
@@ -3406,7 +3444,7 @@ impl StateHandler {
                     // messaging runtime that comes with it. Inert, but not
                     // silent — a dead key is indistinguishable from a broken one.
                     Action::Inbox(..) | Action::Relationship(..) | Action::Credential(..) |
-                    Action::IssueMemberVmc(..) | Action::CapabilitiesOpen(..) | Action::Repos(..) |
+                    Action::IssueMemberVmc(..) | Action::CapabilitiesOpen(..) | Action::Repos(..) | Action::Rooms(..) |
                     Action::RequestPersonhoodChallenge(..) | Action::AssertPersonhood { .. } |
                     Action::PersonhoodEvidence(..) |
                     Action::RenewMembership(..) |
@@ -4698,6 +4736,9 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
         }
         Action::Repos(action) => {
             return repos_actions::reduce(state, action);
+        }
+        Action::Rooms(action) => {
+            return rooms_actions::reduce(state, action);
         }
         Action::AgentNameManagerInput(key) => {
             use tui_input::backend::crossterm::EventHandler;

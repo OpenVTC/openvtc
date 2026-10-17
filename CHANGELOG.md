@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **A community's data rooms, the same everywhere you reach them.** Press `o` on an
+  active community to see every data room it has offered this persona, and where
+  each stands: offered, joined, accepted but not finished, needing re-admission, or
+  removed. OpenVTC keeps no record of its own: it reads the community's
+  (`vtc/rooms/memberships/list/0.1`) beside your VTA's (`rooms/keys/list`), as the
+  member portal and `pnm rooms memberships` do, so a room accepted in the portal shows
+  as joined here and the other way round. **⏎** accepts an offer — the VTA stores its
+  credentials, gives the KeyPackage (`rooms/keys/key-package/0.2`), and joins from the
+  Welcome — and finishes an acceptance begun on another surface rather than starting a
+  second one; a Welcome another surface already handed over reads as joined. Needs a
+  VTA (it holds the rooms' keys) serving `rooms/keys/key-package/0.2` for an
+  interrupted acceptance to be finishable elsewhere, and a community serving
+  `vtc/rooms/memberships/list/0.1`. See [`docs/community-rooms.md`](docs/community-rooms.md).
 - **Have a relationship witnessed.** Press `w` on a relationship, name a witness,
   and your VTA does the witnessing (`vta/witness/{open,present,accept}/0.2`): it
   signs every document as the relationship DID and presents the VRC you issued
