@@ -428,7 +428,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # (trust-tasks-tf #779), the tasks `openvtc-core::witness` drives at the VTA, beside
 # the `witness/session/*` documents it carries to the witness. A patch move on the
 # line `vta-sdk` is already on, so nothing else follows it.
-trust-tasks-rs = { version = "0.31.12", features = ["git-ns"] }
+#
+# **0.31.16** for community rooms: `vtc/rooms/memberships/list/0.1`,
+# `rooms/keys/key-package/0.2` and `rooms/keys/act/0.5` (trust-tasks-tf #813), which
+# the Rooms panel reads and completes; `vta-sdk` 0.71 declares it.
+trust-tasks-rs = { version = "0.31.16", features = ["git-ns"] }
 trust-tasks-capability-client = "0.31.0"
 tui-input = "0.15"
 url = "2.5"
@@ -635,7 +639,10 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # (`vta/witness/{open,present,accept}/0.2`, `memberPresentation` and
 # `outcomeEvidence` as spec members, the `ext` carriage gone) and
 # `vta/witness/list/0.1`. did-git-sign 0.22 is on it.
-vta-sdk = { version = "0.70.0", features = [
+# **0.71** is `vta-service` 0.63's line (VTI #2186): community rooms every surface
+# shows alike — `room_key_package_v0_2` (an acceptance any surface can finish) and
+# `room_list`, which the Rooms panel reads. did-git-sign 0.23 is on it.
+vta-sdk = { version = "0.71.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
