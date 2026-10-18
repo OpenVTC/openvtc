@@ -77,6 +77,8 @@ impl ContentPanelState {
                     Some(Box::new(super::capabilities_panel::CapabilitiesPanel))
                 } else if self.repos.view.is_some() {
                     Some(Box::new(super::repos_panel::ReposPanel))
+                } else if self.rooms.view.is_some() {
+                    Some(Box::new(super::rooms_panel::RoomsPanel))
                 } else {
                     Some(Box::new(CommunitiesPanel))
                 }

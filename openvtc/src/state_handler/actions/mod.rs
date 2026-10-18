@@ -494,6 +494,25 @@ pub enum CommunityContextAction {
     RevokeConfirm,
 }
 
+/// The per-community Rooms panel (data rooms), opened from Communities with `o`.
+///
+/// `Open`, `Refresh` and `Accept` read the config and ask the community or the member's
+/// VTA, so the runtime loop services them; `Back` and `Select` move the open view only.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RoomsAction {
+    /// Open the panel for the Active community at this display index, and read the
+    /// community's record of its rooms and the VTA's custody.
+    Open(usize),
+    /// Read both again.
+    Refresh,
+    /// Accept the highlighted room's offer — or finish an acceptance begun elsewhere.
+    Accept,
+    /// Close the panel.
+    Back,
+    /// Move the highlight.
+    Select(usize),
+}
+
 /// The per-community Repos panel (git namespaces), opened from Communities
 /// with `r`.
 ///
@@ -686,6 +705,8 @@ pub enum Action {
     CommunityContext(CommunityContextAction),
     /// Communities panel: a community's git repositories (git namespaces).
     Repos(ReposAction),
+    /// Communities panel: a community's data rooms.
+    Rooms(RoomsAction),
 
     /// Dismiss the startup loading screen (Enter, once loading has completed) and
     /// reveal the main page. Phase-2 connections are already running in the

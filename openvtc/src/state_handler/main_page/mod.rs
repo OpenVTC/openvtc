@@ -33,6 +33,7 @@ use crate::state_handler::main_page::{
 pub mod content;
 pub mod menu;
 pub mod repos;
+pub mod rooms;
 
 /// Maximum number of activity log entries to keep in the UI.
 const MAX_ACTIVITY_LOG_ENTRIES: usize = 100;
