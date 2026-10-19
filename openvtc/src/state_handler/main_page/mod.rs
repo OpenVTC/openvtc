@@ -1813,6 +1813,7 @@ mod tests {
                 display_name: display_name.map(str::to_owned),
                 sub_context_id: String::new(),
                 submit_transport: None,
+                directory_statement_digest: None,
                 request_id_confirmed: false,
                 persona_ref: persona_id,
                 status: CommunityStatus::Active,

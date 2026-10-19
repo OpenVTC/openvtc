@@ -10,6 +10,11 @@
 //! is the person's privacy decision, and nothing — the community, the persona,
 //! an earlier join — is allowed to pre-fill it. The page says plainly what
 //! ticking it means, and that leaving it unticked is a complete answer.
+//!
+//! Where the community's manifest states what its member directory would show
+//! about the person joining (`manifest/0.4`), that is said here too, in
+//! sentences, beside what the request carries: it is the other half of what
+//! joining makes visible, and this is the last page before anything is sent.
 
 use crate::colors::{
     COLOR_BORDER, COLOR_DARK_GRAY, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,
@@ -29,7 +34,7 @@ use ratatui::{
 use crate::{
     state_handler::{
         actions::Action,
-        join::{JoinReview, JoinState, RegistryChoice, ReviewVetting},
+        join::{DirectoryReview, JoinReview, JoinState, RegistryChoice, ReviewVetting},
     },
     ui::{badges, pages::join_flow::JoinFlow},
 };
@@ -183,6 +188,23 @@ fn review_lines(community: &str, review: &JoinReview) -> Vec<Line<'static>> {
     lines
 }
 
+/// What the community's member directory would show about the person joining,
+/// in sentences. Labels are the community's own text, shown as text.
+fn directory_lines(community: &str, directory: &DirectoryReview) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled(
+        format!("What {community}'s member directory would show about you"),
+        Style::new().fg(COLOR_BORDER).bold(),
+    )];
+    for sentence in &directory.sentences {
+        lines.push(Line::styled(
+            format!("  • {sentence}"),
+            Style::new().fg(COLOR_TEXT_DEFAULT),
+        ));
+    }
+    lines.push(Line::default());
+    lines
+}
+
 /// The page body. Separate from `render` so it is testable as text.
 pub(crate) fn lines(choice: &RegistryChoice) -> Vec<Line<'static>> {
     let community = choice
@@ -194,6 +216,9 @@ pub(crate) fn lines(choice: &RegistryChoice) -> Vec<Line<'static>> {
         .as_ref()
         .map(|r| review_lines(&community, r))
         .unwrap_or_default();
+    if let Some(directory) = &choice.directory {
+        body.extend(directory_lines(&community, directory));
+    }
     let (mark, mark_style) = if choice.publish {
         ("[x]", Style::new().fg(COLOR_SUCCESS).bold())
     } else {
@@ -261,7 +286,52 @@ mod tests {
                 "acct/co-op".into(),
             )),
             review: None,
+            directory: None,
         }
+    }
+
+    /// The directory statement is said in sentences, between what the request
+    /// carries and the publication question; without one, nothing is claimed
+    /// about whether the community has a directory.
+    #[test]
+    fn the_directory_statement_is_said_before_the_question() {
+        let none = text(&choice(false));
+        assert!(!none.contains("directory"), "{none}");
+
+        let statement = serde_json::json!({
+            "fields": [
+                { "key": "displayName", "label": "Name", "type": "text", "source": "member",
+                  "ceiling": "public", "defaultVisibility": "members", "searchable": true },
+            ],
+            "newCard": { "listing": "listed", "search": "byName" },
+            "membershipIdentifiers": "admins",
+            "adminNotes": false,
+            "externalCards": false,
+            "statementDigest": "zQmUeLYeywAWrRgAw5k8dtbYMxU8gq7zvZCh5K6ykjt8ZYw",
+        });
+        let directory: openvtc_core::vetting::disclosure::DirectoryDisclosure =
+            serde_json::from_value(statement).unwrap();
+        use openvtc_core::vetting::disclosure::Describe;
+        let shown = text(&RegistryChoice {
+            directory: Some(DirectoryReview {
+                sentences: directory.describe(str::to_string),
+                statement_digest: directory.statement_digest.to_string(),
+            }),
+            ..choice(false)
+        });
+        assert!(
+            shown.contains("What this community's member directory would show about you"),
+            "{shown}"
+        );
+        assert!(shown.contains("Name to every member"), "{shown}");
+        assert!(
+            shown.contains("anyone, outside the community too"),
+            "{shown}"
+        );
+        assert!(
+            shown.find("member directory") < shown.find(OPT_IN_LABEL),
+            "{shown}"
+        );
     }
 
     /// The review says what the community receives before the publication

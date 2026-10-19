@@ -510,6 +510,7 @@ mod tests {
             routes: Vec::new(),
             post_quantum_key: None,
             vetter_mode: None,
+            directory: None,
         });
         book
     }

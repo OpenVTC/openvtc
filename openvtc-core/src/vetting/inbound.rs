@@ -1647,7 +1647,7 @@ fn retry_manifest_in_older_version(
     query: &super::queries::CommunityQuery,
     community: &str,
 ) -> Option<Handled> {
-    let asked = book.protocol_for(community);
+    let asked = book.manifest_protocol_for(community);
     let applicant_did = ctx.account.personas.get(&query.persona)?.did.clone();
     let next = book.fall_back_from(community, asked)?;
     let document = match wire::manifest_request(&applicant_did, community, next) {
@@ -1986,6 +1986,8 @@ fn manifest(book: &mut VettingBook, ctx: &Context<'_>, message: &Message, sender
     // kept whether or not we have an application here: a vetter has no application, and this is
     // how its client learns the community runs the mode at all, and when it stops.
     handled.changed |= book.learn_mode(sender, &raw, before, ctx.now);
+    // What its directory would disclose about someone who joins (`manifest/0.4`).
+    handled.changed |= book.learn_directory(sender, &raw);
     for application in book
         .applications
         .iter_mut()

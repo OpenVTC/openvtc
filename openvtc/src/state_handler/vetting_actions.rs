@@ -2228,7 +2228,11 @@ async fn refresh_requirements(ctx: &mut ActionCtx<'_>, application_id: &str) {
     if !begin(ctx) {
         return;
     }
-    let protocol = ctx.config.private.vetting.protocol_for(&app.community);
+    let protocol = ctx
+        .config
+        .private
+        .vetting
+        .manifest_protocol_for(&app.community);
     let document = match wire::manifest_request(&app.join_did, &app.community, protocol) {
         Ok(d) => d,
         Err(e) => return abandon(ctx, "Could not ask the community", e),
@@ -3639,7 +3643,7 @@ async fn issue_ticket(ctx: &mut ActionCtx<'_>, membership_index: usize, uses_ind
     }
     let now = Utc::now();
     let community = membership.community.clone();
-    let protocol = ctx.config.private.vetting.protocol_for(&community);
+    let protocol = ctx.config.private.vetting.manifest_protocol_for(&community);
     let document = match wire::manifest_request(&did, &community, protocol) {
         Ok(d) => d,
         Err(e) => return abandon(ctx, "No ticket issued: could not build the question", e),
@@ -3850,7 +3854,11 @@ async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, method_index: u
         page(ctx)
             .requirements_requested
             .push(entry.community.clone());
-        let protocol = ctx.config.private.vetting.protocol_for(&entry.community);
+        let protocol = ctx
+            .config
+            .private
+            .vetting
+            .manifest_protocol_for(&entry.community);
         let document = match wire::manifest_request(&vetter_did, &entry.community, protocol) {
             Ok(d) => d,
             Err(e) => return abandon(ctx, "Could not ask the community", e),
@@ -4269,7 +4277,7 @@ async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>, only_stale: bool) {
         let Some(did) = persona_did(ctx.config, persona) else {
             continue;
         };
-        let protocol = ctx.config.private.vetting.protocol_for(&community);
+        let protocol = ctx.config.private.vetting.manifest_protocol_for(&community);
         let Ok(document) = wire::manifest_request(&did, &community, protocol) else {
             continue;
         };
@@ -7258,6 +7266,7 @@ mod tests {
                 routes: Vec::new(),
                 post_quantum_key: None,
                 vetter_mode: read,
+                directory: None,
             }),
         }
     }

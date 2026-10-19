@@ -1187,6 +1187,12 @@ pub struct KnownCommunity {
     /// manifest whose mode could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vetter_mode: Option<super::mode::ModeRead>,
+    /// What its member directory would disclose about someone who joins, as
+    /// its last manifest said (`manifest/0.4` `directoryDisclosure`). `None`
+    /// when the manifest carried none — a 0.3 answer never does — which is not
+    /// "it has no directory".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<super::disclosure::DirectoryStatement>,
 }
 
 /// One criterion a community publishes, as the join page and the submit need
@@ -2004,6 +2010,7 @@ impl VettingBook {
                     routes,
                     post_quantum_key: None,
                     vetter_mode: None,
+                    directory: None,
                 });
                 true
             }
@@ -2037,6 +2044,51 @@ impl VettingBook {
             .and_then(|c| c.protocol)
             .or_else(|| self.protocol_hints.get(community).copied())
             .unwrap_or_default()
+    }
+
+    /// Record what `community`'s manifest, read as `payload`, said about its
+    /// member directory. Only for a community this book has a record of; the
+    /// manifest read that makes one comes first. Returns whether it changed.
+    pub fn learn_directory(&mut self, community: &str, payload: &serde_json::Value) -> bool {
+        let directory = super::disclosure::read(payload);
+        match self
+            .communities
+            .iter_mut()
+            .find(|c| c.community == community)
+        {
+            Some(known) if known.directory != directory => {
+                known.directory = directory;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// What `community`'s member directory would disclose, as its last
+    /// manifest said. `None` when it said nothing or has not been read.
+    #[must_use]
+    pub fn directory(&self, community: &str) -> Option<&super::disclosure::DirectoryStatement> {
+        self.communities
+            .iter()
+            .find(|c| c.community == community)
+            .and_then(|c| c.directory.as_ref())
+    }
+
+    /// The version to ask `community` for its manifest in: the newest it may
+    /// serve. [`Self::protocol_for`] is the version it last answered in, which
+    /// for a community known as 0.3 would never ask it for the 0.4 directory
+    /// statement once it moves. So a 0.3 community is asked in 0.4 again —
+    /// unless it has already refused 0.4, which the fallback records as a hint.
+    #[must_use]
+    pub fn manifest_protocol_for(&self, community: &str) -> JoinProtocol {
+        match self.protocol_for(community) {
+            JoinProtocol::V0_3
+                if self.protocol_hints.get(community) != Some(&JoinProtocol::V0_3) =>
+            {
+                JoinProtocol::V0_4
+            }
+            known => known,
+        }
     }
 
     /// `community` refused a request in `asked` as a version it does not

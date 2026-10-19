@@ -1,16 +1,22 @@
-//! Which `vtc/join-requests` version a community speaks: `manifest/0.3` +
-//! `submit/0.3`, or the `manifest/0.2` + `submit/0.2` it replaced.
+//! Which `vtc/join-requests` version a community speaks: `manifest/0.4` +
+//! `submit/0.3`, `manifest/0.3` + `submit/0.3`, or the `manifest/0.2` +
+//! `submit/0.2` they replaced.
+//!
+//! `manifest/0.4` is 0.3 plus one optional member, `directoryDisclosure`: what
+//! the community's member directory would show about the person joining, and
+//! to whom ([`super::disclosure`]). Its submit is still 0.3. A community that
+//! predates it answers `unsupportedType`, and the client asks again in 0.3.
 //!
 //! A community serves exactly one. VTI-13 dropped 0.2 without a transition, so
 //! a client that spoke one version could not join communities on the other
-//! until every community had moved. This client speaks both: it asks for 0.3
-//! first, falls back to 0.2 when the community refuses the version
+//! until every community had moved. This client speaks all three: it asks for
+//! 0.4 first, falls back a version at a time when the community refuses one
 //! ([`is_version_refusal`]), remembers which one the community answered, and
 //! submits in that version.
 //!
 //! Inside, a manifest is kept in its 0.2 shape ([`manifest::v0_2::Response`]),
 //! which the book, the applicant and the attribute questions all read. A 0.3
-//! manifest is carried into that shape by [`read_manifest`], and what 0.3 adds
+//! or 0.4 manifest is carried into that shape by [`read_manifest`], and what 0.3 adds
 //! per criterion — above all whether meeting it admits or only submits for
 //! review — is kept alongside as [`CriterionMeta`].
 
@@ -36,17 +42,24 @@ pub fn is_version_refusal(code: &str) -> bool {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum JoinProtocol {
-    /// `manifest/0.3` + `submit/0.3` (Keyring VTI-13). Asked first.
+    /// `manifest/0.4` + `submit/0.3`: 0.3 with the directory disclosure.
+    /// Asked first.
     #[default]
+    V0_4,
+    /// `manifest/0.3` + `submit/0.3` (Keyring VTI-13).
     V0_3,
     /// `manifest/0.2` + `submit/0.2`, for a community that has not moved.
     V0_2,
 }
 
 impl JoinProtocol {
+    /// Every version, newest first.
+    const ALL: [Self; 3] = [Self::V0_4, Self::V0_3, Self::V0_2];
+
     /// The manifest request type.
     pub fn manifest_type(self) -> &'static str {
         match self {
+            Self::V0_4 => manifest::v0_4::Payload::TYPE_URI,
             Self::V0_3 => manifest::v0_3::Payload::TYPE_URI,
             Self::V0_2 => manifest::v0_2::Payload::TYPE_URI,
         }
@@ -55,6 +68,7 @@ impl JoinProtocol {
     /// The manifest response type.
     pub fn manifest_response_type(self) -> &'static str {
         match self {
+            Self::V0_4 => manifest::v0_4::Response::TYPE_URI,
             Self::V0_3 => manifest::v0_3::Response::TYPE_URI,
             Self::V0_2 => manifest::v0_2::Response::TYPE_URI,
         }
@@ -63,7 +77,7 @@ impl JoinProtocol {
     /// The submit request type.
     pub fn submit_type(self) -> &'static str {
         match self {
-            Self::V0_3 => submit::v0_3::Payload::TYPE_URI,
+            Self::V0_4 | Self::V0_3 => submit::v0_3::Payload::TYPE_URI,
             Self::V0_2 => submit::v0_2::Payload::TYPE_URI,
         }
     }
@@ -71,36 +85,41 @@ impl JoinProtocol {
     /// The submit response type.
     pub fn submit_response_type(self) -> &'static str {
         match self {
-            Self::V0_3 => submit::v0_3::Response::TYPE_URI,
+            Self::V0_4 | Self::V0_3 => submit::v0_3::Response::TYPE_URI,
             Self::V0_2 => submit::v0_2::Response::TYPE_URI,
         }
     }
 
     /// The version a manifest response of type `typ` is in.
     pub fn from_manifest_response(typ: &str) -> Option<Self> {
-        [Self::V0_3, Self::V0_2]
+        Self::ALL
             .into_iter()
             .find(|p| p.manifest_response_type() == typ)
     }
 
     /// The version a manifest request of type `typ` is in.
     pub fn from_manifest_request(typ: &str) -> Option<Self> {
-        [Self::V0_3, Self::V0_2]
-            .into_iter()
-            .find(|p| p.manifest_type() == typ)
+        Self::ALL.into_iter().find(|p| p.manifest_type() == typ)
     }
 
     /// Whether `typ` is a submit response of either version.
     pub fn is_submit_response(typ: &str) -> bool {
-        [Self::V0_3, Self::V0_2]
+        Self::ALL
             .into_iter()
             .any(|p| p.submit_response_type() == typ)
+    }
+
+    /// Whether its submit is `submit/0.3`, which names the criterion it is
+    /// decided under.
+    pub fn names_criterion(self) -> bool {
+        matches!(self, Self::V0_4 | Self::V0_3)
     }
 
     /// The version to fall back to when a community refuses this one as
     /// `unsupportedType`, if any.
     pub fn fallback(self) -> Option<Self> {
         match self {
+            Self::V0_4 => Some(Self::V0_3),
             Self::V0_3 => Some(Self::V0_2),
             Self::V0_2 => None,
         }
@@ -140,6 +159,10 @@ const V0_3_ONLY_CRITERION_MEMBERS: [&str; 3] =
 /// Read a manifest payload in `protocol` into the 0.2 shape the rest of the
 /// client reads, plus what 0.3 adds per criterion.
 ///
+/// A 0.4 payload is a 0.3 one plus `directoryDisclosure`, which is read on its
+/// own ([`super::disclosure::read`]) and taken out here, so the rest is checked
+/// as the 0.3 it is.
+///
 /// A 0.3 payload is checked against its own generated type first, so a
 /// malformed 0.3 manifest is refused as 0.3 rather than half-accepted as 0.2.
 /// It is then carried across: the 0.3-only members are taken out, and an
@@ -151,6 +174,13 @@ pub fn read_manifest(
 ) -> Result<(manifest::v0_2::Response, Vec<CriterionMeta>), serde_json::Error> {
     match protocol {
         JoinProtocol::V0_2 => Ok((serde_json::from_value(payload.clone())?, Vec::new())),
+        JoinProtocol::V0_4 => {
+            let mut as_v3 = payload.clone();
+            if let Some(members) = as_v3.as_object_mut() {
+                members.remove(super::disclosure::MANIFEST_MEMBER);
+            }
+            read_manifest(JoinProtocol::V0_3, &as_v3)
+        }
         JoinProtocol::V0_3 => {
             let v3: manifest::v0_3::Response = serde_json::from_value(payload.clone())?;
             let meta = v3
@@ -243,6 +273,18 @@ mod tests {
         assert!(read_manifest(JoinProtocol::V0_3, &m).is_err());
     }
 
+    /// A 0.4 manifest is a 0.3 one with the directory statement beside it:
+    /// the criteria read the same, and a 0.3 reading refuses the extra member.
+    #[test]
+    fn a_v0_4_manifest_reads_its_criteria_as_v0_3() {
+        let mut m = v3_manifest();
+        m[super::super::disclosure::MANIFEST_MEMBER] = json!({ "anything": true });
+        let (manifest, meta) = read_manifest(JoinProtocol::V0_4, &m).unwrap();
+        assert_eq!(manifest.criteria.len(), 2);
+        assert_eq!(meta[1].admission, Some(Admission::Review));
+        assert!(read_manifest(JoinProtocol::V0_3, &m).is_err());
+    }
+
     /// The versions name the right types and fall back one way only.
     #[test]
     fn the_versions_name_their_types_and_fall_back_once() {
@@ -259,6 +301,19 @@ mod tests {
         assert!(JoinProtocol::is_submit_response(
             JoinProtocol::V0_2.submit_response_type()
         ));
+        assert!(
+            JoinProtocol::V0_4
+                .manifest_type()
+                .ends_with("/manifest/0.4")
+        );
+        assert!(JoinProtocol::V0_4.submit_type().ends_with("/submit/0.3"));
+        assert!(JoinProtocol::V0_4.names_criterion() && !JoinProtocol::V0_2.names_criterion());
+        assert_eq!(
+            JoinProtocol::from_manifest_response(JoinProtocol::V0_4.manifest_response_type()),
+            Some(JoinProtocol::V0_4)
+        );
+        assert_eq!(JoinProtocol::default(), JoinProtocol::V0_4);
+        assert_eq!(JoinProtocol::V0_4.fallback(), Some(JoinProtocol::V0_3));
         assert_eq!(JoinProtocol::V0_3.fallback(), Some(JoinProtocol::V0_2));
         assert_eq!(JoinProtocol::V0_2.fallback(), None);
         assert!(is_version_refusal("unsupportedVersion"));
