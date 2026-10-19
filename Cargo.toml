@@ -83,7 +83,7 @@ argon2 = "0.6"
 # 0.18 -> 0.20 follows `vta-sdk` 0.53 -> 0.56 below, the release that declares
 # `affinidi-tdk ^0.20`. 0.23 -> 0.24 follows `vta-sdk` 0.63 -> 0.65 the same way,
 # and 0.24 -> 0.26 follows 0.65 -> 0.68.
-affinidi-tdk = "0.26"
+affinidi-tdk = "0.27"
 affinidi-data-integrity = "0.8"
 # Decodes a community's Bitstring Status List. Already in the graph through
 # `vta-sdk`, whose status reader cannot verify a list signed with a proof set;
@@ -149,7 +149,7 @@ affinidi-messaging-core = "0.1.11"
 # their sender's quota (a frame for a key this app has not loaded is kept).
 #
 # **0.34.1** follows `vta-sdk` 0.65, which declares it; **0.36** follows 0.68.
-affinidi-messaging-sdk = "0.36.0"
+affinidi-messaging-sdk = "0.37.0"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
@@ -432,8 +432,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # **0.31.16** for community rooms: `vtc/rooms/memberships/list/0.1`,
 # `rooms/keys/key-package/0.2` and `rooms/keys/act/0.5` (trust-tasks-tf #813), which
 # the Rooms panel reads and completes; `vta-sdk` 0.71 declares it.
-trust-tasks-rs = { version = "0.31.16", features = ["git-ns"] }
-trust-tasks-capability-client = "0.31.0"
+#
+# **0.32.1**, following `vta-sdk` 0.72: it generates
+# `vtc/join-requests/manifest/0.4` and the directory `DirectoryDisclosure` it
+# carries (trust-tasks-tf #823), which the join shows before submitting;
+# `trust-tasks-capability-client` 0.32.1 with it.
+trust-tasks-rs = { version = "0.32.1", features = ["git-ns"] }
+trust-tasks-capability-client = "0.32.1"
 tui-input = "0.15"
 url = "2.5"
 uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
@@ -642,7 +647,9 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # **0.71** is `vta-service` 0.63's line (VTI #2186): community rooms every surface
 # shows alike — `room_key_package_v0_2` (an acceptance any surface can finish) and
 # `room_list`, which the Rooms panel reads. did-git-sign 0.23 is on it.
-vta-sdk = { version = "0.71.0", features = [
+# **0.72** is the trust-tasks 0.32 / TDK 0.27 / messaging-sdk 0.37 line, for
+# `vtc/join-requests/manifest/0.4`. did-git-sign 0.24 (VGI #167) is on it.
+vta-sdk = { version = "0.72.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
