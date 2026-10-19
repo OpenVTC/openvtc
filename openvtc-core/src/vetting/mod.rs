@@ -57,6 +57,7 @@ where
 
 pub mod applicant;
 pub mod book;
+pub mod disclosure;
 pub mod discover;
 pub mod guide;
 /// Hidden-vetter admission: the parameters a community publishes, and the criticality rule.

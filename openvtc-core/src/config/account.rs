@@ -361,6 +361,11 @@ pub struct CommunityRecord {
     /// that submits without going through the join flow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submit_transport: Option<crate::didcomm::MessagingTransport>,
+    /// The `statementDigest` of the directory disclosure the person was shown
+    /// before submitting (`manifest/0.4`), so they can later tell whether the
+    /// terms changed after they joined. `None` when the community stated none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_statement_digest: Option<String>,
     /// Whether the `Pending` request id is the **community's** id rather than
     /// our submit-time placeholder.
     ///
@@ -497,6 +502,8 @@ struct CommunityRecordShadow {
     #[serde(default)]
     submit_transport: Option<crate::didcomm::MessagingTransport>,
     #[serde(default)]
+    directory_statement_digest: Option<String>,
+    #[serde(default)]
     request_id_confirmed: bool,
     #[serde(default)]
     relationships: Relationships,
@@ -608,6 +615,7 @@ impl From<CommunityRecordShadow> for CommunityRecord {
             credential_delivery: shadow.credential_delivery,
             credential_refused: shadow.credential_refused,
             submit_transport: shadow.submit_transport,
+            directory_statement_digest: shadow.directory_statement_digest,
             request_id_confirmed: shadow.request_id_confirmed,
             relationships: shadow.relationships,
             tasks: shadow.tasks,
@@ -751,6 +759,7 @@ impl CommunityRecord {
             // Set by the join flow once it knows which transport carried the
             // submit; `new_pending` itself is transport-agnostic.
             submit_transport: None,
+            directory_statement_digest: None,
             // `request_id` here is the id of the document we just sent. It only
             // becomes the community's once a reply says so — see
             // `confirm_request_id`.
@@ -1558,6 +1567,7 @@ mod tests {
             display_name: Some(vtc.to_string()),
             sub_context_id: format!("openvtc/{vtc}"),
             submit_transport: None,
+            directory_statement_digest: None,
             request_id_confirmed: false,
             persona_ref,
             status,

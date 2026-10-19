@@ -52,6 +52,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for that assertion. Each included VWC carries its outcome evidence in the
   assertion's `outcomeEvidence` (`vtc/members/personhood/assert/0.2`, at most 16),
   which a community needs beside a VWC to count it.
+- **What a community's member directory would show about you, before you join.**
+  Requirements are asked as `vtc/join-requests/manifest/0.4`, falling back to 0.3
+  (then 0.2) when a community refuses the version. When the manifest carries a
+  `directoryDisclosure`, the join review says it in plain sentences before anything
+  is sent: what a new card shows, the most you could show, what admins or
+  credentials write, how you can be found, and for how long. Every audience is the
+  widest it can reach (`public` reads as "anyone, outside the community too");
+  labels are the community's own text, shown as text. The statement's
+  `statementDigest` is kept with the join record. A malformed statement stops the
+  join; a manifest without one says nothing about a directory.
 
 ### Security
 

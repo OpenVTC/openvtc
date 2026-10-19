@@ -28,6 +28,7 @@ use openvtc_core::health::ProbePolicy;
 use openvtc_core::logs::LogFamily;
 use openvtc_core::vetting::applicant::Application;
 use openvtc_core::vetting::book::Knowledge;
+use openvtc_core::vetting::disclosure::{Describe, DirectoryStatement};
 use openvtc_core::vetting::discover;
 use openvtc_core::vetting::guide::describe_requirements;
 use openvtc_core::vetting::queries::{CommunityAnswer, CommunityQuery, QueryKind};
@@ -1263,6 +1264,9 @@ async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Resul
         .private
         .vetting
         .learn_manifest_in(vtc_did, &manifest, Some(protocol), &meta, now);
+    // What its directory would show about the person joining, shown on the
+    // review page before anything is sent (`manifest/0.4`).
+    config.private.vetting.learn_directory(vtc_did, &raw);
     // Whether it vets by PCS ZKP now, read from the same answer — so the badges, the vetter
     // desk and this join agree on one reading, whichever route brought it.
     config
@@ -1341,7 +1345,7 @@ async fn ask_requirements(
             "there is no persona to ask as — create one under My Identity".to_string()
         })?;
         let persona = identity.persona_id;
-        let protocol = config.private.vetting.protocol_for(vtc_did);
+        let protocol = config.private.vetting.manifest_protocol_for(vtc_did);
         let document = wire::manifest_request(identity.persona_did(), vtc_did, protocol)
             .map_err(|e| e.to_string())?;
         match tokio::time::timeout(
@@ -2818,6 +2822,22 @@ impl StateHandler {
             return None;
         }
 
+        // A directory statement the community published but this client could
+        // not read stops the join: the person would otherwise apply without
+        // seeing what joining makes visible about them (`manifest/0.4`).
+        if let Some(DirectoryStatement::Malformed(why)) = config.private.vetting.directory(&vtc_did)
+        {
+            let name = vetting_actions::community_display(config, &vtc_did);
+            state.join.page = JoinPage::Progress;
+            state.join.messages.clear();
+            state.join.fail(format!(
+                "{name} published a statement of what its member directory would show about                  you, and it could not be read ({}). Nothing has been sent: joining without                  seeing it is not offered. Ask the community to fix it, then try again.",
+                sanitize_display(why, 200)
+            ));
+            let _ = self.state_tx.send(state.clone());
+            return None;
+        }
+
         // Then the trust-registry question, last, so it is the final thing the
         // person sees before the request goes out — and on every join, because
         // there is no right answer to assume. Every launch passes through here
@@ -2831,9 +2851,19 @@ impl StateHandler {
         if !registry_answered {
             let community_name = config.agent_name_for(&vtc_did).map(str::to_string);
             let review = join_review(config, state, &vtc_did, &choice);
+            let directory = match config.private.vetting.directory(&vtc_did) {
+                Some(DirectoryStatement::Stated(d)) => {
+                    Some(crate::state_handler::join::DirectoryReview {
+                        sentences: d.describe(|label| sanitize_display(label, 64)),
+                        statement_digest: d.statement_digest.to_string(),
+                    })
+                }
+                _ => None,
+            };
             open_registry_choice(state, community_name, (choice, vtc_did, context_id));
             if let Some(registry) = state.join.registry.as_mut() {
                 registry.review = Some(review);
+                registry.directory = directory;
             }
             let _ = self.state_tx.send(state.clone());
             return None;
@@ -3636,11 +3666,14 @@ async fn run_join_sequence(
     // The person's trust-registry answer, consumed by this one submit. Taken,
     // not read: a later join from the same open flow — another community, or a
     // retry after a failure — asks again rather than inheriting it.
-    let registry_consent = state
-        .join
-        .registry
-        .take()
-        .is_some_and(|r| r.consent_for(&vtc_did));
+    let registry = state.join.registry.take();
+    let registry_consent = registry.as_ref().is_some_and(|r| r.consent_for(&vtc_did));
+    // The directory statement the person was shown, named by its digest, kept
+    // with the join so a later change to the terms can be told apart.
+    let directory_statement_digest = registry
+        .filter(|r| r.community == vtc_did)
+        .and_then(|r| r.directory)
+        .map(|d| d.statement_digest);
 
     // The mint + join sequence needs the admin VTA session.
     let Some(admin_vta) = admin_vta else {
@@ -4328,6 +4361,10 @@ async fn run_join_sequence(
         Utc::now(),
         submit_transport,
     );
+    let record = CommunityRecord {
+        directory_statement_digest,
+        ..record
+    };
     config.account.add_membership(record.clone());
     if let Err(e) = save_config(config, profile) {
         state
@@ -4922,6 +4959,7 @@ fn open_registry_choice(
         confirmed: false,
         parked: Some(parked),
         review: None,
+        directory: None,
     });
     state.join.page = JoinPage::RegistryConsent;
     state.join.processing = false;

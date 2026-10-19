@@ -130,6 +130,21 @@ pub struct RegistryChoice {
     pub parked: Option<(IdentityPick, String, String)>,
     /// What the request will carry, for the person to read before it goes.
     pub review: Option<JoinReview>,
+    /// What the community's member directory would disclose about the person
+    /// joining, and to whom, as its manifest said (`manifest/0.4`). Shown
+    /// beside the review, and its digest kept with the join it informed.
+    /// `None` when the manifest stated none — which is not "no directory".
+    pub directory: Option<DirectoryReview>,
+}
+
+/// A community's directory statement as the review page shows it: in
+/// sentences, with the digest that names the statement they were made from.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DirectoryReview {
+    /// The statement in words, labels already sanitised for display.
+    pub sentences: Vec<String>,
+    /// Its `statementDigest`, kept with the join it informed.
+    pub statement_digest: String,
 }
 
 /// What a join request will put in front of the community, gathered before it

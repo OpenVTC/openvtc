@@ -364,7 +364,7 @@ async fn build_join_submit_document(
     } = presentation.into();
     // `submit/0.3` is the 0.2 payload plus `criterion`, so a 0.2 submission
     // never names one, whatever the presentation carried.
-    let criterion = criterion.filter(|_| protocol == crate::vetting::protocol::JoinProtocol::V0_3);
+    let criterion = criterion.filter(|_| protocol.names_criterion());
     let body = JoinRequestSubmitBody {
         vp,
         criterion,
@@ -1228,7 +1228,7 @@ mod tests {
         let (applicant, signer) =
             affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
                 .expect("did:key generates");
-        for protocol in [JoinProtocol::V0_2, JoinProtocol::V0_3] {
+        for protocol in [JoinProtocol::V0_2, JoinProtocol::V0_3, JoinProtocol::V0_4] {
             for consent in [false, true] {
                 let doc = build_join_submit_document(
                     &applicant,
@@ -1262,7 +1262,7 @@ mod tests {
                             .expect("the generated submit/0.2 payload")
                             .registry_consent
                     }
-                    JoinProtocol::V0_3 => {
+                    JoinProtocol::V0_3 | JoinProtocol::V0_4 => {
                         serde_json::from_value::<submit::v0_3::Payload>(payload.clone())
                             .expect("the generated submit/0.3 payload")
                             .registry_consent

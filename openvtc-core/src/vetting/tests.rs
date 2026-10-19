@@ -2170,47 +2170,55 @@ async fn a_v0_3_manifest_is_learned_with_its_version_and_admission() {
     ));
 }
 
-/// A community that does not serve 0.3 — answering `unsupportedVersion`, as a
-/// 0.2 VTC does — is asked again in 0.2, and the person waiting keeps waiting
-/// instead of hearing a refusal. A refusal of 0.2 too is reported as one.
+/// A community that does not serve the version asked — answering
+/// `unsupportedVersion`, as an older VTC does — is asked again one version
+/// older, 0.4 then 0.3 then 0.2, and the person waiting keeps waiting instead
+/// of hearing a refusal. A refusal of 0.2 too is reported as one.
 #[tokio::test]
-async fn a_manifest_refused_as_an_unsupported_version_is_asked_again_in_0_2() {
+async fn a_manifest_refused_as_an_unsupported_version_is_asked_again_one_older() {
     use super::protocol::JoinProtocol;
     let mut applicant = Party::new(1).with_persona_record();
-    let request = wire::manifest_request(&applicant.did, COMMUNITY, JoinProtocol::V0_3).unwrap();
+    let first = applicant.book.manifest_protocol_for(COMMUNITY);
+    assert_eq!(
+        first,
+        JoinProtocol::V0_4,
+        "a community never read is asked in the newest"
+    );
+    let mut request = wire::manifest_request(&applicant.did, COMMUNITY, first).unwrap();
     applicant
         .book
         .ask(asked(&request, applicant.persona, QueryKind::Manifest));
 
-    let handled = applicant
-        .receive(
-            &community_refusal(&request, "unsupportedVersion"),
-            COMMUNITY,
-        )
-        .await;
-    assert!(
-        handled.answer.is_none(),
-        "not an answer: {:?}",
-        handled.answer
-    );
-    let reply = handled.reply.expect("asked again");
-    assert_eq!(
-        reply.document.type_uri.to_string(),
-        JoinProtocol::V0_2.manifest_type()
-    );
-    assert_eq!(reply.persona, applicant.persona);
-    assert_eq!(applicant.book.protocol_for(COMMUNITY), JoinProtocol::V0_2);
-    assert!(
-        applicant
-            .book
-            .waiting_on(COMMUNITY, QueryKind::Manifest)
-            .is_some_and(|q| q.document_id == reply.document.id),
-        "the new question is the one waited on"
-    );
+    for next in [JoinProtocol::V0_3, JoinProtocol::V0_2] {
+        let handled = applicant
+            .receive(
+                &community_refusal(&request, "unsupportedVersion"),
+                COMMUNITY,
+            )
+            .await;
+        assert!(
+            handled.answer.is_none(),
+            "not an answer: {:?}",
+            handled.answer
+        );
+        let reply = handled.reply.expect("asked again");
+        assert_eq!(reply.document.type_uri.to_string(), next.manifest_type());
+        assert_eq!(reply.persona, applicant.persona);
+        assert_eq!(applicant.book.protocol_for(COMMUNITY), next);
+        assert_eq!(applicant.book.manifest_protocol_for(COMMUNITY), next);
+        assert!(
+            applicant
+                .book
+                .waiting_on(COMMUNITY, QueryKind::Manifest)
+                .is_some_and(|q| q.document_id == reply.document.id),
+            "the new question is the one waited on"
+        );
+        request = reply.document;
+    }
 
     let handled = applicant
         .receive(
-            &community_refusal(&reply.document, "unsupportedVersion"),
+            &community_refusal(&request, "unsupportedVersion"),
             COMMUNITY,
         )
         .await;
@@ -2222,6 +2230,55 @@ async fn a_manifest_refused_as_an_unsupported_version_is_asked_again_in_0_2() {
             ..
         })
     ));
+}
+
+/// A 0.4 manifest is learned like a 0.3 one, with its directory statement kept
+/// beside it; a community known as 0.3 is asked in 0.4 again, so a move to 0.4
+/// is heard.
+#[tokio::test]
+async fn a_v0_4_manifest_is_learned_with_its_directory_statement() {
+    use super::disclosure::DirectoryStatement;
+    use super::protocol::JoinProtocol;
+    let mut applicant = Party::new(1);
+    let request = wire::manifest_request(&applicant.did, COMMUNITY, JoinProtocol::V0_4).unwrap();
+    applicant
+        .book
+        .ask(asked(&request, applicant.persona, QueryKind::Manifest));
+    let body = json!({
+        "communityDid": COMMUNITY,
+        "criteria": [
+            { "id": "review", "admission": "review", "requirementsDigest": DIGEST },
+        ],
+        "directoryDisclosure": {
+            "fields": [],
+            "newCard": { "listing": "hidden", "search": "off" },
+            "membershipIdentifiers": "admins",
+            "adminNotes": false,
+            "externalCards": false,
+            "statementDigest": DIGEST,
+        },
+    });
+    let handled = applicant
+        .receive(&community_answer(&request, &body).await, COMMUNITY)
+        .await;
+    assert!(
+        matches!(handled.answer, Some(CommunityAnswer::Manifest { .. })),
+        "{:?}",
+        handled.answer
+    );
+    assert_eq!(applicant.book.protocol_for(COMMUNITY), JoinProtocol::V0_4);
+    assert!(matches!(
+        applicant.book.directory(COMMUNITY),
+        Some(DirectoryStatement::Stated(d)) if d.statement_digest.as_str() == DIGEST
+    ));
+
+    // The same community answering 0.3 later carries no statement, and is
+    // still asked in 0.4 next time.
+    applicant.book.communities[0].protocol = Some(JoinProtocol::V0_3);
+    assert_eq!(
+        applicant.book.manifest_protocol_for(COMMUNITY),
+        JoinProtocol::V0_4
+    );
 }
 
 /// Both journeys follow the real exchange: the applicant's moves on to the
