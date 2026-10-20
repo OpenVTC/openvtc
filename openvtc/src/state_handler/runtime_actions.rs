@@ -1274,7 +1274,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::ImportConfig(..)
         | Action::SetProtection(..)
         | Action::VtaSubmitDid(..)
-        | Action::VtaStartProvision(..)
+        | Action::VtaStartProvision { .. }
         | Action::RecoverPlanContext
         | Action::SetupCompleted(..) => {}
         #[cfg(feature = "openpgp-card")]

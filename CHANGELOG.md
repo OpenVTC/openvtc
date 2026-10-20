@@ -63,6 +63,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `statementDigest` is kept with the join record. A malformed statement stops the
   join; a manifest without one says nothing about a directory.
 
+- **Choose how setup reaches your VTA.** When the VTA advertises more than one
+  transport, the PNM step of `openvtc setup` has a Transport row: **Tab** cycles
+  between Automatic (TSP, then DIDComm, then REST) and each advertised transport on
+  its own. Automatic moves on only when a transport fails to connect; once the VTA
+  has acted on the request, a lost reply is final, so picking the transport up front
+  is the way round a mediator that drops replies (#501).
+
 ### Security
 
 - **No PCS key is held on the device any more.** Hidden vetting runs on the
@@ -95,6 +102,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The attestation a vetter sends is now the `vetting/attestation/0.1` shape the
   specification states (`suite`, `token { label, serial, shown }`); the earlier
   flat shape is no longer sent.
+
+### Fixed
+
+- **A setup over REST keeps the VTA's DIDComm mediator.** A REST bootstrap
+  saved the account with no mediator even when the VTA's DID document advertised
+  one, so the first persona then refused with "your VTA did not advertise a DIDComm
+  mediator". The advertised mediator is now kept, on the dev `OPENVTC_VTA_URL`
+  route too where the DID resolves. The refusal now also names the other cause, an
+  account set up over REST by an earlier OpenVTC, and says to reconnect it (#501).
+- **A lost provisioning reply is no longer reported as "VTA unreachable".** When
+  the VTA got the provisioning request but its reply never arrived, setup said to
+  retry as-is, which the VTA then refused because the one-time grant was spent.
+  It now says the grant must be re-granted, and how to find and delete the unusable
+  admin entry the VTA created (`pnm acl list`, labelled `openvtc`) (#501).
+- A VTA that advertises only TSP is no longer refused at the enter-DID step as
+  advertising "neither a REST endpoint nor a DIDComm mediator".
 
 ### Removed
 

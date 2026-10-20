@@ -17,6 +17,7 @@
 //! |---|---|---|
 //! | [`ProvisionFailure::NotAuthorised`] | the PNM session | back to step 1, same DID, banner |
 //! | [`ProvisionFailure::GrantSpent`] | the PNM session (re-grant) | back to step 1, delete + re-create |
+//! | ↳ [`GrantProblem::ReplyLost`] | the PNM session, and the orphaned admin | as above, plus clear the unused admin |
 //! | [`ProvisionFailure::Unreachable`] | the network / the VTA's host | stay on step 2, retry |
 //! | [`ProvisionFailure::Other`] | it depends — the error says | verbatim, then step 1 or retry |
 //!
@@ -87,6 +88,11 @@ pub enum GrantProblem {
     /// and retired the setup DID's entry — and then a later step failed. A
     /// retry needs the setup DID granted again.
     UsedByThisAttempt,
+    /// The provision request reached the VTA and its reply never arrived. The
+    /// VTA has most likely minted the long-term admin and spent the hand-off,
+    /// so a retry as-is is refused; the admin it minted sits in the ACL with a
+    /// key only the lost reply carried (#501).
+    ReplyLost,
 }
 
 /// Re-grant needles, from `vta-service`. Checked first: each is also a
@@ -156,6 +162,11 @@ const UNREACHABLE: &[&str] = &[
     "timed out",
 ];
 
+/// A reply that never came. `timed out waiting for the TSP reply` is the
+/// SDK's `TSP_REPLY_TIMEOUT_PREFIX`; DIDComm and REST time out in the same
+/// words, so the shorter phrase covers all three.
+const REPLY_TIMEOUT: &str = "timed out";
+
 /// Classify a failed provisioning attempt from what the runner left on the
 /// state: its error messages and the diagnostics rows.
 ///
@@ -184,6 +195,18 @@ pub fn classify(vta: &VtaSetupState) -> ProvisionFailure {
     }
     if has(NOT_AUTHORISED) {
         return ProvisionFailure::NotAuthorised;
+    }
+
+    // A timeout on the provision row itself is not "unreachable": the request
+    // was sent on a session that worked, so the VTA has most likely acted on
+    // it. Typed by the row, because the same "timed out" on an earlier row
+    // means the request never went out.
+    let reply_lost = vta.diagnostics.iter().any(|e| {
+        e.check == DiagCheck::ProvisionIntegration
+            && matches!(&e.status, DiagStatus::Failed(s) if s.to_lowercase().contains(REPLY_TIMEOUT))
+    });
+    if reply_lost {
+        return ProvisionFailure::GrantSpent(GrantProblem::ReplyLost);
     }
 
     // The DID never resolved: nothing reached the VTA, whatever the text.
@@ -372,6 +395,43 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(classify(&state), ProvisionFailure::Other);
+    }
+
+    /// #501: the provision request went out over a working TSP session and its
+    /// reply never came back. The VTA has acted on it, so this is a re-grant,
+    /// not "unreachable, retry as-is" — which the VTA would refuse.
+    #[test]
+    fn a_timeout_on_the_provision_row_is_a_lost_reply() {
+        let mut state = failed_with(
+            "AdminRotation provisioning failed after auth. (provision-integration call \
+             failed: tsp transport error: timed out waiting for the TSP reply to request \
+             'urn:uuid:94d45875')",
+        );
+        state.diagnostics = vec![
+            row(
+                DiagCheck::AuthenticateTSP,
+                DiagStatus::Ok("session open".into()),
+            ),
+            row(
+                DiagCheck::ProvisionIntegration,
+                DiagStatus::Failed(
+                    "provision-integration call failed: tsp transport error: timed out \
+                     waiting for the TSP reply to request 'urn:uuid:94d45875'"
+                        .into(),
+                ),
+            ),
+        ];
+        assert_eq!(
+            classify(&state),
+            ProvisionFailure::GrantSpent(GrantProblem::ReplyLost)
+        );
+
+        // The same words before the request went out are still reachability.
+        state.diagnostics = vec![row(
+            DiagCheck::AuthenticateTSP,
+            DiagStatus::Failed("tsp transport error: timed out".into()),
+        )];
+        assert_eq!(classify(&state), ProvisionFailure::Unreachable);
     }
 
     /// Once the VTA has rolled the setup DID over, it has said yes; what failed
