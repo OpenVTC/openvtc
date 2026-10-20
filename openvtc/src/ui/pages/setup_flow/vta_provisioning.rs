@@ -106,8 +106,9 @@ impl VtaProvisioning {
                     FailureMove::Retry => {
                         // Same setup DID, same context: nothing on step 1 has
                         // changed, so there is nothing to go back for.
-                        let context_id = state.vta_acl_instructions.chosen_context_id();
-                        let _ = state.action_tx.send(Action::VtaStartProvision(context_id));
+                        let _ = state
+                            .action_tx
+                            .send(state.vta_acl_instructions.start_action());
                         // Mid-flight locally until the handler's own state
                         // arrives, so a second press cannot queue a second
                         // attempt behind the first.
@@ -324,16 +325,32 @@ fn failure_lines(failure: ProvisionFailure) -> Vec<Line<'static>> {
                     "The VTA accepted the setup DID and rolled it over, then a later step \
                      failed. Its one-time grant is used up, so a retry needs it again."
                 }
+                GrantProblem::ReplyLost => {
+                    "The VTA received the provisioning request, but its reply never \
+                     arrived. It has most likely created the admin and used up the \
+                     setup DID's one-time grant."
+                }
             };
-            vec![
+            let mut lines = vec![
                 Line::styled(why, alarm),
                 Line::styled(
                     "Re-grant it in PNM: delete the old entry, then re-create it.",
                     prose,
                 ),
-                Line::default(),
-                enter(" back to step 1, where [F4] and [F3] copy those two commands."),
-            ]
+            ];
+            if problem == GrantProblem::ReplyLost {
+                lines.push(Line::styled(
+                    "The admin it created can't be used — its key was in the lost reply. \
+                     Find it with `pnm acl list --context <context>` (labelled openvtc) \
+                     and delete it. Step 1 lets you pick another transport.",
+                    prose,
+                ));
+            }
+            lines.push(Line::default());
+            lines.push(enter(
+                " back to step 1, where [F4] and [F3] copy those two commands.",
+            ));
+            lines
         }
         ProvisionFailure::Unreachable => vec![
             Line::styled("The VTA could not be reached.", caution),
@@ -485,7 +502,9 @@ mod tests {
             SetupPage::VtaProvisioning
         ));
         match rx.try_recv() {
-            Ok(Action::VtaStartProvision(ctx)) => assert_eq!(ctx, "openvtc"),
+            Ok(Action::VtaStartProvision { context_id, .. }) => {
+                assert_eq!(context_id, "openvtc");
+            }
             _ => panic!("Enter should retry"),
         }
         // A second press while the retry is in flight queues nothing.
@@ -520,7 +539,10 @@ mod tests {
 
         let (mut flow, mut rx) = flow(state.clone());
         press(&mut flow, KeyCode::Char('r'));
-        assert!(matches!(rx.try_recv(), Ok(Action::VtaStartProvision(_))));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::VtaStartProvision { .. })
+        ));
 
         let (mut flow, _rx) = self::flow(state);
         press(&mut flow, KeyCode::Enter);

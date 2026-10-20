@@ -98,11 +98,17 @@ fn operator_chosen_name(username: &str) -> Option<&str> {
 /// every persona minted against a VTA that advertised none. There is no
 /// fallback now, and the message says what is actually missing (R6.4) instead
 /// of minting a persona whose inbound mail goes somewhere nobody chose.
-pub(crate) const NO_VTA_MEDIATOR: &str = "Your VTA did not advertise a DIDComm mediator \
-     when this account connected to it, so a new persona cannot be given one — a persona's \
-     DID document publishes the mediator others reach it through, and OpenVTC has no \
-     built-in one to fall back on. Ask the VTA's operator to \
-     configure a DIDComm mediator for it, then reconnect this account to the VTA.";
+///
+/// It names both ways an account ends up here. Before #501 a setup that
+/// connected over REST saved no mediator even when the VTA advertised one, so
+/// "your VTA did not advertise one" alone would blame a VTA that is fine.
+pub(crate) const NO_VTA_MEDIATOR: &str = "This account has no DIDComm mediator recorded for its \
+     VTA, so a new persona cannot be given one — a persona's DID document publishes the \
+     mediator others reach it through, and OpenVTC has no built-in one to fall back on. \
+     Either the VTA did not advertise a DIDComm mediator when this account connected, or \
+     the account was set up over REST by an earlier OpenVTC that did not record it. If the \
+     VTA's DID document lists a DIDComm mediator, reconnect this account to the VTA; if \
+     not, ask the VTA's operator to configure one.";
 
 /// The mediator a new persona is given: the account's VTA mediator, the one the
 /// VTA advertised at connect time (`KeyBackend::Vta { mediator_did }`).
@@ -583,7 +589,10 @@ mod tests {
     /// a generic failure.
     #[test]
     fn the_no_mediator_refusal_names_the_cause_and_the_fix() {
+        assert!(NO_VTA_MEDIATOR.contains("no DIDComm mediator recorded"));
         assert!(NO_VTA_MEDIATOR.contains("did not advertise a DIDComm mediator"));
+        assert!(NO_VTA_MEDIATOR.contains("set up over REST"));
+        assert!(NO_VTA_MEDIATOR.contains("reconnect this account"));
         assert!(NO_VTA_MEDIATOR.contains("VTA's operator"));
     }
 

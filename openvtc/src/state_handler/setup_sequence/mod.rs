@@ -182,8 +182,15 @@ pub struct VtaSetupState {
     /// Mediator DID that carried the bootstrap, captured from
     /// `VtaEvent::Connected`: the `#tsp` mediator when the chosen transport is
     /// TSP, the `#DIDCommMessaging` one when it is DIDComm. Required to open
-    /// further sessions on either transport post-bootstrap; `None` on REST.
+    /// further sessions on either transport post-bootstrap. On REST it is the
+    /// VTA's advertised `#DIDCommMessaging` mediator, kept from resolution:
+    /// nothing carried the bootstrap, but the account still needs the mediator
+    /// its personas publish (#501). `None` when the VTA advertises none.
     pub mediator_did: Option<String>,
+    /// Transports the VTA DID document advertises, in preference order, from
+    /// the resolve at `VtaEnterDid`. Step 1 offers these as the transport
+    /// choice; empty until the DID resolves.
+    pub advertised: Vec<Protocol>,
 }
 
 impl fmt::Debug for VtaSetupState {
@@ -225,6 +232,7 @@ impl fmt::Debug for VtaSetupState {
             )
             .field("protocol", &self.protocol)
             .field("mediator_did", &self.mediator_did)
+            .field("advertised", &self.advertised)
             .finish()
     }
 }

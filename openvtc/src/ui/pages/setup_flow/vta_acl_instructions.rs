@@ -37,6 +37,15 @@
 //!   re-grant after an expired or spent entry needs the entry deleted first,
 //!   since the hand-off flag is fixed when an entry is created (VTI-ACL-054).
 //!
+//! # The transport
+//!
+//! When the VTA advertises more than one transport, a row under the context id
+//! lets the operator pick one with `[TAB]` instead of the runner's automatic
+//! TSP > DIDComm > REST. Automatic moves on only when a transport fails to
+//! *connect*; a reply lost after the VTA acted is final, because the grant is
+//! spent by then (#501). Picking the transport up front is the way round a
+//! mediator that drops replies.
+//!
 //! Both must carry the same grant: a 1h expiry, the one-time hand-off and the
 //! `persona-holder` capability. The flags are spelled differently on the two
 //! commands (`--admin-handoff` / `--handoff`, `--admin-holder` /
@@ -59,6 +68,7 @@ use ratatui::{
     widgets::{Block, Padding, Paragraph, Wrap},
 };
 use tui_input::{Input, backend::crossterm::EventHandler};
+use vta_sdk::provision_client::Protocol;
 
 use crate::{
     state_handler::{
@@ -90,6 +100,9 @@ pub struct VtaAclInstructions {
     /// banner at the top of the page; cleared when the operator presses Enter
     /// to try again, so a stale reason never sits over a fresh attempt.
     pub retry_reason: Option<RetryReason>,
+    /// The transport to force, or `None` for the runner's automatic choice.
+    /// Only ever one the VTA advertises: `[TAB]` cycles through those.
+    pub transport: Option<Protocol>,
 }
 
 /// A failed step 2, as carried back to step 1.
@@ -126,6 +139,7 @@ impl Default for VtaAclInstructions {
             context_id: Input::new(DEFAULT_CONTEXT_ID.to_string()),
             copy_status: None,
             retry_reason: None,
+            transport: None,
         }
     }
 }
@@ -140,6 +154,24 @@ impl VtaAclInstructions {
             DEFAULT_CONTEXT_ID.to_string()
         } else {
             raw.to_string()
+        }
+    }
+
+    /// The action that starts step 2 with this page's choices. Step 2's retry
+    /// sends it too, so a retry runs exactly what step 1 shows.
+    pub fn start_action(&self) -> Action {
+        Action::VtaStartProvision {
+            context_id: self.chosen_context_id(),
+            transport: self.transport,
+        }
+    }
+
+    /// The next transport `[TAB]` selects: automatic, then each advertised
+    /// one in preference order, then back round.
+    fn next_transport(current: Option<Protocol>, advertised: &[Protocol]) -> Option<Protocol> {
+        match current.and_then(|p| advertised.iter().position(|a| *a == p)) {
+            None => advertised.first().copied(),
+            Some(i) => advertised.get(i + 1).copied(),
         }
     }
 
@@ -169,12 +201,20 @@ impl VtaAclInstructions {
                         Err(e) => CopyStatus::Failed(e),
                     });
             }
+            KeyCode::Tab => {
+                let advertised = &state.props.state.vta.advertised;
+                if offers_choice(advertised) {
+                    state.vta_acl_instructions.transport =
+                        Self::next_transport(state.vta_acl_instructions.transport, advertised);
+                }
+            }
             KeyCode::Enter => {
                 // "I've run it." Whatever went wrong last time is about to be
                 // re-decided by a fresh attempt.
                 state.vta_acl_instructions.retry_reason = None;
-                let context_id = state.vta_acl_instructions.chosen_context_id();
-                let _ = state.action_tx.send(Action::VtaStartProvision(context_id));
+                let _ = state
+                    .action_tx
+                    .send(state.vta_acl_instructions.start_action());
             }
             KeyCode::Esc => {
                 state.vta_acl_instructions.context_id = Input::new(DEFAULT_CONTEXT_ID.to_string());
@@ -232,11 +272,25 @@ impl VtaAclInstructions {
         //   ctx_label   — "Context id" label
         //   ctx_input   — "> " + editable input on the same row
         //   rest        — the three actions, then the commands
-        let [banner_area, intro, ctx_label, ctx_input, rest] = Layout::vertical([
+        //   transport   — only when there is a choice to make
+        let transport_height = if offers_choice(&state.vta.advertised) {
+            2
+        } else {
+            0
+        };
+        let [
+            banner_area,
+            intro,
+            ctx_label,
+            ctx_input,
+            transport_row,
+            rest,
+        ] = Layout::vertical([
             Length(banner_height),
             Length(6),
             Length(1),
             Length(1),
+            Length(transport_height),
             Min(0),
         ])
         .areas(area);
@@ -289,6 +343,23 @@ impl VtaAclInstructions {
             prompt_col,
         );
         render_input(&self.context_id, frame, input_col);
+
+        if transport_height > 0 {
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::default(),
+                    Line::from(vec![
+                        Span::styled("Transport  ", Style::new().fg(COLOR_BORDER).bold()),
+                        Span::styled(
+                            transport_label(self.transport, &state.vta.advertised),
+                            Style::new().fg(COLOR_SOFT_PURPLE),
+                        ),
+                        Span::styled("  [TAB] change", Style::new().fg(COLOR_DARK_GRAY)),
+                    ]),
+                ]),
+                transport_row,
+            );
+        }
 
         let regrant = self
             .retry_reason
@@ -432,6 +503,22 @@ impl VtaAclInstructions {
     }
 }
 
+/// Whether step 1 has a transport to choose: more than one advertised.
+fn offers_choice(advertised: &[Protocol]) -> bool {
+    advertised.len() > 1
+}
+
+/// What the transport row says for `choice`.
+fn transport_label(choice: Option<Protocol>, advertised: &[Protocol]) -> String {
+    match choice {
+        Some(p) => format!("{} only", p.label()),
+        None => {
+            let order: Vec<&str> = advertised.iter().map(|p| p.label()).collect();
+            format!("Automatic ({})", order.join(" → "))
+        }
+    }
+}
+
 /// The banner shown when step 2 sent the operator back, saying what failed
 /// and what fixes it. Each arm is one [`ProvisionFailure`] class, and none of
 /// them reuses another's advice — that is R6.4's whole point.
@@ -469,11 +556,24 @@ fn banner_lines(reason: &RetryReason) -> Vec<Line<'static>> {
                     "✗ The last attempt used the setup DID's one-time grant, then failed.",
                     "The context exists now, so [F2] would not add the grant.",
                 ),
+                GrantProblem::ReplyLost => (
+                    "✗ The VTA's reply to the last attempt never arrived.",
+                    "It has most likely created the admin and used up the one-time grant.",
+                ),
             };
-            vec![
+            let mut lines = vec![
                 Line::styled(headline, alarm),
                 Line::styled(format!("{why} {regrant}"), prose),
-            ]
+            ];
+            if problem == GrantProblem::ReplyLost {
+                lines.push(Line::styled(
+                    "The admin it created can't be used — its key was in the lost reply. \
+                     Find it with `pnm acl list --context <context>` (labelled openvtc) and \
+                     delete it. Choosing another transport below may avoid a second loss.",
+                    prose,
+                ));
+            }
+            lines
         }
         ProvisionFailure::Unreachable => vec![
             Line::styled("! The VTA could not be reached last time.", caution),
@@ -903,9 +1003,64 @@ mod tests {
 
         assert!(flow.vta_acl_instructions.retry_reason.is_none());
         match rx.try_recv() {
-            Ok(Action::VtaStartProvision(ctx)) => assert_eq!(ctx, "my-ctx"),
+            Ok(Action::VtaStartProvision {
+                context_id,
+                transport,
+            }) => {
+                assert_eq!(context_id, "my-ctx");
+                assert_eq!(transport, None, "automatic unless the operator picked");
+            }
             _ => panic!("Enter should start provisioning"),
         }
+    }
+
+    /// #501: `[TAB]` cycles automatic → each advertised transport → automatic,
+    /// and Enter carries the pick to step 2.
+    #[test]
+    fn tab_picks_an_advertised_transport_and_enter_carries_it() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut flow = SetupFlow::new(&State::default(), tx);
+        flow.props.state.vta.advertised = vec![Protocol::Tsp, Protocol::Rest];
+
+        press(&mut flow, KeyCode::Tab);
+        assert_eq!(flow.vta_acl_instructions.transport, Some(Protocol::Tsp));
+        press(&mut flow, KeyCode::Tab);
+        assert_eq!(flow.vta_acl_instructions.transport, Some(Protocol::Rest));
+        press(&mut flow, KeyCode::Enter);
+        match rx.try_recv() {
+            Ok(Action::VtaStartProvision { transport, .. }) => {
+                assert_eq!(transport, Some(Protocol::Rest));
+            }
+            _ => panic!("Enter should start provisioning"),
+        }
+        press(&mut flow, KeyCode::Tab);
+        assert_eq!(flow.vta_acl_instructions.transport, None, "back round");
+        assert!(
+            flow.vta_acl_instructions.context_id.value() == DEFAULT_CONTEXT_ID,
+            "Tab is not typed into the context id"
+        );
+    }
+
+    /// One advertised transport is no choice: Tab does nothing and the row is
+    /// not drawn.
+    #[test]
+    fn a_single_transport_offers_no_choice() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut flow = SetupFlow::new(&State::default(), tx);
+        flow.props.state.vta.advertised = vec![Protocol::DidComm];
+        press(&mut flow, KeyCode::Tab);
+        assert_eq!(flow.vta_acl_instructions.transport, None);
+        assert!(!flat(&VtaAclInstructions::default()).contains("Transport"));
+    }
+
+    #[test]
+    fn the_transport_row_names_the_order_or_the_pick() {
+        let all = [Protocol::Tsp, Protocol::DidComm, Protocol::Rest];
+        assert_eq!(
+            transport_label(None, &all),
+            "Automatic (TSP → DIDComm → REST)"
+        );
+        assert_eq!(transport_label(Some(Protocol::Rest), &all), "REST only");
     }
 
     /// Typing a context id is not "I've run it": the banner stays until Enter.

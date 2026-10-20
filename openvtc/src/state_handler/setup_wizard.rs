@@ -100,7 +100,7 @@ impl StateHandler {
                         .await;
                     }
                 },
-                Action::VtaStartProvision(context_id) => {
+                Action::VtaStartProvision { context_id, transport } => {
                     // Close any prior admin session before re-provisioning.
                     if let Some(c) = admin_client.take() {
                         c.shutdown().await;
@@ -114,7 +114,7 @@ impl StateHandler {
                     // `create_account`, so a cancel here leaves no on-disk state)
                     // and we leave via the existing `Interrupted` exit path.
                     tokio::select! {
-                        result = setup_vta_actions::handle_vta_start_provision(state, &self.state_tx, context_id) => {
+                        result = setup_vta_actions::handle_vta_start_provision(state, &self.state_tx, context_id, transport) => {
                             admin_client = result?;
                         }
                         Ok(interrupted) = interrupt_rx.recv() => {

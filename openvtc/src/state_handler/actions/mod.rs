@@ -1077,8 +1077,12 @@ pub enum Action {
     /// Operator finished the PNM ACL grant — kick off
     /// `provision_client::run_connection_test` to bootstrap. Carries the
     /// context id the operator typed on the AclInstructions screen so it
-    /// matches what they ran `pnm contexts create --id …` with.
-    VtaStartProvision(String),
+    /// matches what they ran `pnm contexts create --id …` with, and the
+    /// transport they picked there — `None` lets the runner choose.
+    VtaStartProvision {
+        context_id: String,
+        transport: Option<vta_sdk::provision_client::Protocol>,
+    },
     /// Work out what recovering the chosen Trust Context would restore.
     ///
     /// Read-only: builds a plan and the account it would produce, and shows
