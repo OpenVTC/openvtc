@@ -144,13 +144,18 @@ fn cross_check(integrity: &mut LoadIntegrity, account: &Account, key_ids: &[Stri
     }
 
     // A key id is `{did}#key-N`; it is ours if some persona owns that DID.
+    // A persona's DID is a did:webvh or a did:scid:vh:1 (VTI-KEY-001), and a
+    // key id is compared by the identity it names, ignoring a did:scid `src`.
     // Relationship (R-DID) keys are `did:peer:...` and are not persona keys, so
     // they are excluded rather than reported as orphans.
-    let persona_dids: std::collections::HashSet<&str> =
-        account.personas.values().map(|p| p.did.as_str()).collect();
+    let persona_dids: std::collections::HashSet<String> = account
+        .personas
+        .values()
+        .map(|p| vta_sdk::did_scid::identity(&p.did))
+        .collect();
     for key_id in key_ids {
-        let did = key_id.split('#').next().unwrap_or(key_id);
-        if did.starts_with("did:webvh:") && !persona_dids.contains(did) {
+        let did = vta_sdk::did_scid::identity(key_id);
+        if vta_sdk::did_scid::is_durable(&did) && !persona_dids.contains(&did) {
             integrity.orphaned_key_ids.push(key_id.clone());
         }
     }
@@ -398,6 +403,7 @@ impl Config {
             std::sync::Arc<String>,
             String,
             Option<affinidi_tdk::did_common::Document>,
+            Option<String>,
         );
         let personas: Vec<PersonaSeed> = account
             .personas
@@ -439,6 +445,8 @@ impl Config {
                     // PERF #3: the cached DID document, used instead of a network
                     // resolve when present.
                     p.did_document.clone(),
+                    // A did:scid persona's DID URL with `src` (VTI-KEY-163).
+                    p.did_locator.clone(),
                 )
             })
             .collect();
@@ -472,7 +480,18 @@ impl Config {
         let mut integrity = LoadIntegrity::default();
 
         let hydrate: Result<(), OpenVTCError> = async {
-            for (persona_id, persona_did, persona_mediator, cached_document) in &personas {
+            for (persona_id, persona_did, persona_mediator, cached_document, did_locator) in
+                &personas
+            {
+                // A did:scid persona's bare DID resolves only through a source
+                // the resolver holds, and the resolver forgets its sources on
+                // restart: seed it with the one recorded at mint (VTI-KEY-162).
+                // It is also the DID the persona sends as, so a peer meeting it
+                // for the first time can resolve it (VTI-KEY-163).
+                if let Some(locator) = did_locator {
+                    tdk.did_resolver().scid_sources().add_source(locator);
+                }
+                let presented_did: &str = did_locator.as_deref().unwrap_or(persona_did.as_str());
                 // Name the persona's messaging profile after its community AND
                 // its own DID, so two personas in one community are still
                 // distinguishable. Shares one helper
@@ -497,7 +516,7 @@ impl Config {
                     doc
                 } else {
                     report_progress(&on_progress, "Identity", "Resolving DID document");
-                    match tdk.did_resolver().resolve(persona_did).await {
+                    match tdk.did_resolver().resolve(presented_did).await {
                         Ok(resolved) => resolved.doc,
                         Err(e) => {
                             // Isolated, not fatal: this persona has no usable
@@ -575,7 +594,7 @@ impl Config {
                 let persona_profile = match ATMProfile::new(
                     &atm,
                     Some(profile_label.clone()),
-                    persona_did.to_string(),
+                    presented_did.to_string(),
                     Some(persona_mediator.clone()),
                 )
                 .await
@@ -636,12 +655,12 @@ impl Config {
             let relationship_mediator = identities
                 .values()
                 .find_map(|i| i.mediator_did.clone())
-                .or_else(|| personas.first().map(|(_, _, m, _)| m.clone()));
+                .or_else(|| personas.first().map(|(_, _, m, _, _)| m.clone()));
             if let Some(first_mediator) = relationship_mediator.as_ref() {
                 report_progress(&on_progress, "Identity", "Loading relationships");
                 let our_p_dids: std::collections::HashSet<String> = personas
                     .iter()
-                    .map(|(_, did, _, _)| did.to_string())
+                    .map(|(_, did, _, _, _)| did.to_string())
                     .collect();
 
                 // Repair relationship (R-DID) `key_info` entries that older
@@ -942,6 +961,7 @@ mod integrity_tests {
                 persona_id,
                 did: did.to_string(),
                 did_document: None,
+                did_locator: None,
                 key_refs: Vec::new(),
                 mediator_did: None,
                 origin_context_id: "top".to_string(),

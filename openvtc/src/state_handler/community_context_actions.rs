@@ -1229,6 +1229,7 @@ mod tests {
                 persona_id: persona,
                 did: PERSONA_DID.into(),
                 did_document: None,
+                did_locator: None,
                 key_refs: vec![],
                 mediator_did: None,
                 origin_context_id: CTX.into(),

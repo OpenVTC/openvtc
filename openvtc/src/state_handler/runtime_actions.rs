@@ -1744,6 +1744,7 @@ mod tests {
                 persona_id: persona,
                 did: "did:webvh:scid:example.com:kernel".into(),
                 did_document: None,
+                did_locator: None,
                 key_refs: vec![],
                 mediator_did: None,
                 origin_context_id: "openvtc/acme".into(),

@@ -5343,6 +5343,7 @@ mod tests {
                 persona_id: pid,
                 did: "did:webvh:QmP:example.com:alice".into(),
                 did_document: None,
+                did_locator: None,
                 key_refs: vec![],
                 mediator_did: None,
                 origin_context_id: "openvtc".into(),

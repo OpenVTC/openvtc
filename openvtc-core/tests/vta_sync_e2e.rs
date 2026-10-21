@@ -91,6 +91,7 @@ async fn an_archive_on_one_device_is_there_when_another_opens() {
         persona_id: PersonaId::new(),
         did: "did:webvh:scid:example.com:alice".to_string(),
         did_document: None,
+        did_locator: None,
         key_refs: vec![KeyRef {
             key_id: "key-alice".to_string(),
             purpose: KeyTypes::PersonaSigning,

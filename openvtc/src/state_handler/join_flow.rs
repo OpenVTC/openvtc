@@ -3852,16 +3852,28 @@ async fn run_join_sequence(
                 .join
                 .info(format!("Creating persona DID via {server_id}…"));
             let _ = handler.state_tx.send(state.clone());
+            // How the new persona is presented: the operator's choice on the
+            // identity page, else the account's preference (VTI-VTA-036).
+            let presentation = openvtc_core::config::account::persona_presentation(
+                &config.account,
+                state.join.new_persona_did_method,
+            );
             match vta::create_did_via_server(
                 admin_vta,
                 tdk,
                 &context_id,
                 &server_id,
                 WebvhPathMode::AutoAssign,
+                presentation,
             )
             .await
             {
-                Ok((keys, did, document, _mnemonic)) => {
+                Ok(vta::MintedDid {
+                    keys,
+                    did,
+                    document,
+                    locator,
+                }) => {
                     // A persona the VTA minted without `#tsp` can never reach a
                     // TSP-only community — and this join may be to one. Say so
                     // here rather than letting it surface later as a request
@@ -3874,6 +3886,7 @@ async fn run_join_sequence(
                     state.setup.did_keys = Some(keys);
                     state.setup.webvh_address.did = did;
                     state.setup.webvh_address.document = document;
+                    state.setup.webvh_address.locator = locator;
                 }
                 Err(e) => {
                     state
@@ -5223,6 +5236,7 @@ mod tests {
                 persona_id,
                 did: "did:webvh:scid:example.com:alice".into(),
                 did_document: None,
+                did_locator: None,
                 key_refs: vec![],
                 mediator_did: None,
                 origin_context_id: "openvtc/work".into(),
@@ -5507,6 +5521,7 @@ mod tests {
                 persona_id,
                 did: did.into(),
                 did_document: None,
+                did_locator: None,
                 key_refs: vec![],
                 mediator_did: None,
                 origin_context_id: "openvtc".into(),
