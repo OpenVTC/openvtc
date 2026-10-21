@@ -2120,6 +2120,7 @@ impl Party {
                 persona_id: self.persona,
                 did: self.did.clone(),
                 did_document: None,
+                did_locator: None,
                 key_refs: Vec::new(),
                 mediator_did: None,
                 origin_context_id: String::new(),

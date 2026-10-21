@@ -1179,8 +1179,14 @@ pub(crate) fn apply_replies(
         else {
             continue;
         };
-        let from_vtc = did_part(&inbound.from) == vtc;
-        let issued_by_vtc = inbound.issuer.as_deref().map(did_part) == Some(vtc.as_str());
+        // By DID: a did:scid community may name itself with the `?src=` it is
+        // resolved through (VTI-KEY-163).
+        let from_vtc = vta_sdk::did_scid::same_reference(did_part(&inbound.from), &vtc);
+        let issued_by_vtc = inbound
+            .issuer
+            .as_deref()
+            .map(did_part)
+            .is_some_and(|issuer| vta_sdk::did_scid::same_reference(issuer, &vtc));
         if !(from_vtc && issued_by_vtc) {
             tracing::warn!(
                 from = %inbound.from,

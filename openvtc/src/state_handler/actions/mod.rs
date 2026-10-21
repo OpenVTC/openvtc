@@ -734,6 +734,10 @@ pub enum Action {
     /// trailing "mint new" row).
     JoinIdentitySelect(usize),
 
+    /// Cycle how a persona minted for this join is presented: the account's
+    /// preference, then did:webvh, then did:scid (VTI-VTA-036).
+    JoinNewPersonaMethodCycle,
+
     /// Commit the highlighted identity choice: "mint new" launches the sequence;
     /// a reuse option arms the cross-community linkage warning (R-B-3 / D1).
     JoinIdentityChoose,
@@ -973,6 +977,10 @@ pub enum Action {
     /// Choose whether the hosting server names the persona's DID path or the
     /// operator does (path phase).
     CreatePersonaPathChoice(crate::state_handler::main_page::content::PersonaPathChoice),
+
+    /// Cycle how the new persona is presented: the account's preference, then
+    /// did:webvh, then did:scid (path phase).
+    CreatePersonaMethodCycle,
 
     /// Forward a key event to the create-persona custom-path input. Sent only
     /// while the custom row is chosen; Enter/Esc are handled by the panel.

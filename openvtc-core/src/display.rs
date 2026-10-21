@@ -133,12 +133,24 @@ pub fn truncate_did_centered(did: &str, max_len: usize) -> Cow<'_, str> {
 ///
 /// Anything that is not a parseable `did:webvh` is returned untouched — this
 /// shortens one method and says nothing about the others.
+///
+/// A `did:scid:vh:1` gives up its SCID the same way, keeping any `?src=`
+/// locator, which is where its host and path are:
+/// `did:scid:vh:1:QmUF…aFtL3?src=webvh.storm.ws/kid-long`.
 #[must_use]
 pub fn shorten_webvh(did: &str, scid_keep: usize) -> Cow<'_, str> {
-    let Ok(parsed) = didwebvh_rs::url::WebVHURL::parse_did_url(did) else {
-        return Cow::Borrowed(did);
+    let scid = if did.starts_with(vta_sdk::did_scid::SCID_VH_PREFIX) {
+        match vta_sdk::did_scid::scid_of(did) {
+            Some(scid) => scid.to_string(),
+            None => return Cow::Borrowed(did),
+        }
+    } else {
+        match didwebvh_rs::url::WebVHURL::parse_did_url(did) {
+            Ok(parsed) => parsed.scid,
+            Err(_) => return Cow::Borrowed(did),
+        }
     };
-    let scid = &parsed.scid;
+    let scid = &scid;
     // Nothing to gain from eliding a SCID that is already short.
     if scid.chars().count() <= scid_keep * 2 + 1 {
         return Cow::Borrowed(did);
@@ -269,6 +281,26 @@ pub fn task_label(type_uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A did:scid gives up its SCID and keeps its locator, the part a reader
+    /// tells it apart by; a bare one keeps just its prefix.
+    #[test]
+    fn a_did_scid_is_shortened_at_its_scid() {
+        let scid = "QmUFMgMsbGpei5bGSx6yXT8ZTkmKUT7sQMGWFkx28aFtL3";
+        assert_eq!(
+            shorten_webvh(
+                &format!("did:scid:vh:1:{scid}?src=webvh.storm.ws/kid-long"),
+                4
+            ),
+            "did:scid:vh:1:QmUF…FtL3?src=webvh.storm.ws/kid-long"
+        );
+        assert_eq!(
+            shorten_webvh(&format!("did:scid:vh:1:{scid}"), 4),
+            "did:scid:vh:1:QmUF…FtL3"
+        );
+        // Another did:scid format is not ours to shorten.
+        assert_eq!(shorten_webvh("did:scid:ke:1:Eabc", 4), "did:scid:ke:1:Eabc");
+    }
 
     /// The defect this exists for: a Trust Task URI ends in its version, so the
     /// last-segment label named the version and nothing else.

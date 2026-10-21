@@ -392,6 +392,9 @@ pub(crate) async fn handle_vta_start_provision(
                     state.setup.vta.completed = Completion::CompletedFail;
                     let _ = state_tx.send(state.clone());
                 }
+                // `VtaEvent` is non-exhaustive (vta-sdk #2196): an event this
+                // build does not know carries nothing the setup page acts on.
+                _ => {}
             }
             let _ = state_tx.send(state.clone());
         }

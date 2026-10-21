@@ -2642,6 +2642,7 @@ mod tests {
             show_values: true,
             personas: vec![ManagedDid {
                 did: "did:webvh:example.com:alice".into(),
+                did_locator: None,
                 label: "Work me".into(),
                 ..ManagedDid::default()
             }]
@@ -3204,6 +3205,7 @@ mod tests {
             tab: PersonaTab::Personas,
             personas: vec![ManagedDid {
                 did: "did:webvh:example.com:alice".into(),
+                did_locator: None,
                 label: "Work me".into(),
                 ..ManagedDid::default()
             }]
@@ -3229,6 +3231,7 @@ mod tests {
             tab: PersonaTab::Personas,
             personas: vec![ManagedDid {
                 did: DID.into(),
+                did_locator: None,
                 agent_name: Some("example.com/@alice".into()),
                 label: String::new(),
                 bound_communities: 0,
@@ -3261,6 +3264,7 @@ mod tests {
             tab: PersonaTab::Personas,
             personas: vec![ManagedDid {
                 did: DID.into(),
+                did_locator: None,
                 ..ManagedDid::default()
             }]
             .into(),

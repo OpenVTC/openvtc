@@ -10,7 +10,7 @@ use std::future::Future;
 use std::time::Duration;
 use tracing::warn;
 use vta_sdk::{
-    client::{CreateDidWebvhRequest, CreateKeyRequest, VtaClient},
+    client::{CreateDidWebvhRequest, CreateKeyRequest, DidPresentation, VtaClient},
     error::VtaError,
     keys::KeyType,
     protocols::did_management::create::WebvhPathMode,
@@ -375,13 +375,30 @@ pub async fn list_webvh_servers(client: &VtaClient) -> Result<Vec<WebvhServerRec
 /// [`tsp_advertisement_warning`] and show what it returns.
 ///
 /// [`tsp_advertisement_warning`]: openvtc_core::config::did::tsp_advertisement_warning
+/// A persona DID minted at the VTA.
+pub struct MintedDid {
+    pub keys: PersonaDIDKeys,
+    /// The identity in the form the VTA applied: the did:webvh, or the bare
+    /// did:scid:vh:1 (VTI-KEY-165). Key ids are `{did}#key-N` either way.
+    pub did: String,
+    pub document: Document,
+    /// For a did:scid identity, its DID URL with `?src=` (VTI-KEY-163).
+    pub locator: Option<String>,
+}
+
+/// Mint a persona DID on the VTA's hosting server `server_id`.
+///
+/// `presentation` chooses how the new log is presented and whether it lists
+/// its did:scid alias; a default one states nothing, which sends
+/// `vta/webvh/dids/create/1.1` and leaves both to the VTA (VTI-VTA-036).
 pub async fn create_did_via_server(
     client: &VtaClient,
     tdk: &TDK,
     context_id: &str,
     server_id: &str,
     path_mode: WebvhPathMode,
-) -> Result<(PersonaDIDKeys, String, Document, String)> {
+    presentation: DidPresentation,
+) -> Result<MintedDid> {
     let created = Utc::now();
 
     // `path_mode` is the authoritative path selector (WellKnown / Explicit /
@@ -444,13 +461,28 @@ pub async fn create_did_via_server(
             template_context: None,
             template_vars: std::collections::HashMap::new(),
         };
-        client.create_did_webvh(req)
+        client.create_did_webvh_presented(req, presentation)
     })
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create DID via WebVH server: {}", explain(&e)))?;
 
+    // `did` is the identity in the applied form; its document lists the keys
+    // under it, so the secret ids below are `{did}#key-N` for a did:scid too
+    // (VTI-KEY-161). A bare did:scid resolves only through a source, which the
+    // DID URL with `src` carries.
     let did = result.did.clone();
-    let mnemonic = result.mnemonic.clone().unwrap_or_default();
+    let locator = if vta_sdk::did_scid::is_scid(&did) {
+        let locator = result
+            .scid_did_url
+            .clone()
+            .or_else(|| vta_sdk::did_scid::scid_forms(result.log_did()).map(|(_, url)| url))
+            .ok_or_else(|| {
+                anyhow::anyhow!("The VTA minted {did} but gave no did:scid DID URL to locate it by")
+            })?;
+        Some(locator)
+    } else {
+        None
+    };
 
     // Fetch signing key secret (#key-0 = Ed25519)
     let sign_secret_resp = vta_retry("get WebVH DID signing key secret", || {
@@ -512,7 +544,7 @@ pub async fn create_did_via_server(
     // Resolve the DID to get the document
     let resolved = tdk
         .did_resolver()
-        .resolve(&did)
+        .resolve(locator.as_deref().unwrap_or(&did))
         .await
         .map_err(|e| anyhow::anyhow!("Failed to resolve created DID: {e}"))?;
 
@@ -532,7 +564,12 @@ pub async fn create_did_via_server(
         );
     }
 
-    Ok((persona_keys, did, resolved.doc, mnemonic))
+    Ok(MintedDid {
+        keys: persona_keys,
+        did,
+        document: resolved.doc,
+        locator,
+    })
 }
 
 #[cfg(test)]

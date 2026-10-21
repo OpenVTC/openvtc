@@ -719,6 +719,10 @@ pub struct JoinState {
     /// When `Some(id)`, the cross-community linkage warning for reusing that
     /// persona is shown and awaiting `y`/`n` confirmation (D1).
     pub reuse_confirm: Option<PersonaId>,
+    /// How a persona minted for this join is presented, chosen on the
+    /// identity-choice page: `None` takes the account's preference
+    /// (VTI-VTA-036).
+    pub new_persona_did_method: Option<vta_sdk::did_scid::DidMethod>,
     /// True while the background mint+join sequence is running. Locks input.
     pub processing: bool,
     /// Progress / error log shown on the `JoinProgress` page.
