@@ -61,6 +61,7 @@ pub fn handle_key(
                 KeyCode::Char('p') if !typing => {
                     Action::CreatePersonaPathChoice(PersonaPathChoice::Custom)
                 }
+                KeyCode::Char('m') if !typing => Action::CreatePersonaMethodCycle,
                 _ if typing => Action::CreatePersonaPathInput(key),
                 _ => return,
             };
@@ -106,9 +107,9 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
         // and whatever the path was refused for.
         overlay.messages.len() as u16
             + if overlay.path_choice == PersonaPathChoice::Custom {
-                17
+                18
             } else {
-                16
+                17
             }
     } else if label {
         overlay.messages.len() as u16 + 14
@@ -200,7 +201,12 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
                 "  The path is the last part of the DID:",
                 Style::new().fg(COLOR_BORDER),
             )));
-            let lead = "did:webvh:QmXi1\u{2026}U83F:webvh.example.com:";
+            let scid = overlay.did_method == Some(vta_sdk::did_scid::DidMethod::Scid);
+            let lead = if scid {
+                "did:scid:vh:1:QmXi1\u{2026}U83F?src=webvh.example.com/"
+            } else {
+                "did:webvh:QmXi1\u{2026}U83F:webvh.example.com:"
+            };
             // The example shows the outcome of the screen you are on, so the
             // default is not illustrated with a name nobody is going to get.
             let typed = overlay.path.value();
@@ -266,6 +272,17 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
                     Style::new().fg(COLOR_BORDER),
                 )));
             }
+            // How the persona is presented. A did:scid is verified by the same
+            // log but does not name its host, so it keeps its identity if the
+            // log moves (VTI-KEY-160).
+            let presented = match overlay.did_method {
+                None => "your account's default".to_string(),
+                Some(method) => format!("did:{method}"),
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  Presented as {presented}"),
+                Style::new().fg(COLOR_TEXT_DEFAULT),
+            )));
             for msg in &overlay.messages {
                 lines.push(Line::from(Span::styled(
                     msg.clone(),
@@ -277,7 +294,7 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
                 if custom {
                     "⏎ create   esc: let the server pick"
                 } else {
-                    "⏎ create   p: choose the path yourself   esc back"
+                    "⏎ create   p: choose the path yourself   m: DID method   esc back"
                 },
                 Style::new().fg(COLOR_BORDER),
             )));

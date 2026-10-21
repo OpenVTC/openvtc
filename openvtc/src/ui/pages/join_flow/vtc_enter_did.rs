@@ -167,6 +167,10 @@ impl VtcEnterDid {
                 Style::new().fg(COLOR_ORANGE).italic(),
             ),
             Line::styled(
+                "  • did:scid:vh:1:QmRoot…?src=community.example.com",
+                Style::new().fg(COLOR_ORANGE).italic(),
+            ),
+            Line::styled(
                 "  • community.example.com/@acme",
                 Style::new().fg(COLOR_ORANGE).italic(),
             ),

@@ -1843,6 +1843,11 @@ impl StateHandler {
                             state.join.reuse_confirm = None;
                             let _ = self.state_tx.send(state.clone());
                         }
+                        Action::JoinNewPersonaMethodCycle => {
+                            state.join.new_persona_did_method =
+                                next_did_method(state.join.new_persona_did_method);
+                            let _ = self.state_tx.send(state.clone());
+                        }
                         Action::JoinIdentityChoose => {
                             if state.join.mint_row_selected() {
                                 let Some(vtc_did) = state.join.pending_vtc.clone() else {
@@ -2680,20 +2685,23 @@ impl StateHandler {
         };
 
         if let Some(minted) = outcome.apply(state) {
+            // The identity names the listener; the shareable form (a
+            // did:scid's DID URL with `src`) is what is shown and copied.
             let did = minted.did.clone();
+            let shareable = minted.shareable_did();
             match minted.persist(config, tdk, profile).await {
                 Ok(persona_id) => {
                     state.join.minted_persona = Some(persona_id);
-                    let copied = crate::clipboard::copy_to_clipboard(&did).is_ok();
+                    let copied = crate::clipboard::copy_to_clipboard(&shareable).is_ok();
                     if let Some(o) = state.main_page.create_persona.as_mut() {
                         o.phase =
                             crate::state_handler::main_page::content::CreatePersonaPhase::Done;
-                        o.did = Some(did.clone());
+                        o.did = Some(shareable.clone());
                         o.copied = copied;
                         o.messages.push("Persona created.".to_string());
                     }
                     state.main_page.sync_from_config(config);
-                    state.main_page.log(format!("Created persona DID {did}"));
+                    state.main_page.log(format!("Created persona DID {shareable}"));
                     // Bring it online — in the background. The join is about to
                     // offer it as a way in, and a persona that cannot send is
                     // not one; but this loop reads no keys while it awaits, so
@@ -7080,5 +7088,31 @@ mod wallet_tests {
             },
         };
         assert!(wallet_answer(&mut waiting, &elsewhere, &mut state).is_none());
+    }
+}
+
+/// The next presentation the identity-choice page offers for a new persona:
+/// the account's preference (`None`), then did:webvh, then did:scid.
+pub(crate) fn next_did_method(
+    current: Option<vta_sdk::did_scid::DidMethod>,
+) -> Option<vta_sdk::did_scid::DidMethod> {
+    use vta_sdk::did_scid::DidMethod;
+    match current {
+        None => Some(DidMethod::Webvh),
+        Some(DidMethod::Webvh) => Some(DidMethod::Scid),
+        Some(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod did_method_choice_tests {
+    use super::next_did_method;
+    use vta_sdk::did_scid::DidMethod;
+
+    #[test]
+    fn the_choice_cycles_through_the_account_default() {
+        assert_eq!(next_did_method(None), Some(DidMethod::Webvh));
+        assert_eq!(next_did_method(Some(DidMethod::Webvh)), Some(DidMethod::Scid));
+        assert_eq!(next_did_method(Some(DidMethod::Scid)), None);
     }
 }

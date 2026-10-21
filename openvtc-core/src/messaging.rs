@@ -1521,6 +1521,21 @@ pub fn validate_did(did: &str) -> Result<(), anyhow::Error> {
         )
     };
 
+    // A did:scid DID URL with its `?src=` locator is a DID with a query, which
+    // the method-specific-id grammar below does not admit. Its identity is the
+    // DID without `src` (VTI-KEY-160): validate that, and the locator as a
+    // host and path. No other query, and no other method's, is admitted.
+    if let Some(src) = vta_sdk::did_scid::src(did) {
+        if did.contains('#')
+            || !src
+                .chars()
+                .all(|c| is_did_msi_char(c) || c == '/' || c == ':')
+        {
+            return Err(bail());
+        }
+        return validate_did(&vta_sdk::did_scid::strip_src(did));
+    }
+
     let rest = did.strip_prefix("did:").ok_or_else(bail)?;
     let (method, msi) = rest.split_once(':').ok_or_else(bail)?;
     if method.is_empty()
@@ -3729,6 +3744,20 @@ mod tests {
         assert!(validate_did("did:peer:2.Vz6Mk-something").is_ok());
         assert!(validate_did("did:key:z6MkpzExampleKey").is_ok());
         assert!(validate_did("did:web:example.com%3A8080:path").is_ok());
+    }
+
+    /// A did:scid is valid bare or as a DID URL with its `?src=` locator, and
+    /// with no other query (VTI-KEY-160). Nothing else gains a query.
+    #[test]
+    fn validate_did_accepts_a_did_scid_with_its_locator_only() {
+        assert!(validate_did("did:scid:vh:1:QmScid").is_ok());
+        assert!(validate_did("did:scid:vh:1:QmScid?src=example.com/alice").is_ok());
+        assert!(validate_did("did:scid:vh:1:QmScid?src=localhost%3A8000/a").is_ok());
+        assert!(validate_did("did:scid:vh:1:QmScid?src=example.com&x=1").is_err());
+        assert!(validate_did("did:scid:vh:1:QmScid?versionId=1").is_err());
+        assert!(validate_did("did:scid:vh:1:QmScid?src=exam ple.com").is_err());
+        assert!(validate_did("did:scid:vh:1:QmScid?src=example.com#key-1").is_err());
+        assert!(validate_did("did:webvh:Qm:example.com?src=example.com").is_err());
     }
 
     #[test]

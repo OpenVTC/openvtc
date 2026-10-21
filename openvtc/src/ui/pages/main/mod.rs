@@ -5387,6 +5387,7 @@ mod key_handler_tests {
     fn persona(did: &str, label: &str, bound: usize) -> ManagedDid {
         ManagedDid {
             did: did.to_string(),
+            did_locator: None,
             agent_name: None,
             label: label.to_string(),
             bound_communities: bound,
@@ -5774,6 +5775,59 @@ mod key_handler_tests {
             drawn.contains("cannot be changed"),
             "and why it is worth getting right: {drawn}"
         );
+    }
+
+    /// `m` chooses how the persona is presented, on the default path screen
+    /// only — while a path is being typed it is a letter of the path. The
+    /// worked example follows the choice.
+    #[test]
+    fn create_persona_path_phase_chooses_the_did_method() {
+        use crate::state_handler::main_page::content::{
+            CreatePersonaPhase, CreatePersonaState, PersonaPathChoice,
+        };
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut page, mut rx) = page_for(MainMenu::Identity, |s: &mut State| {
+            s.main_page.create_persona = Some(CreatePersonaState {
+                phase: CreatePersonaPhase::Path,
+                ..Default::default()
+            });
+        });
+        page.handle_key_event(press(KeyCode::Char('m')));
+        assert!(matches!(rx.try_recv(), Ok(Action::CreatePersonaMethodCycle)));
+
+        let (mut page, mut rx) = page_for(MainMenu::Identity, |s: &mut State| {
+            s.main_page.create_persona = Some(CreatePersonaState {
+                phase: CreatePersonaPhase::Path,
+                path_choice: PersonaPathChoice::Custom,
+                ..Default::default()
+            });
+        });
+        page.handle_key_event(press(KeyCode::Char('m')));
+        assert!(
+            matches!(rx.try_recv(), Ok(Action::CreatePersonaPathInput(k)) if k.code == KeyCode::Char('m')),
+        );
+
+        let (page, _rx) = page_for(MainMenu::Identity, |s: &mut State| {
+            s.main_page.create_persona = Some(CreatePersonaState {
+                phase: CreatePersonaPhase::Path,
+                did_method: Some(vta_sdk::did_scid::DidMethod::Scid),
+                ..Default::default()
+            });
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| page.render(frame, ()))
+            .expect("render");
+        let drawn: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(drawn.contains("did:scid:vh:1:"), "{drawn}");
+        assert!(drawn.contains("Presented as did:scid"), "{drawn}");
     }
 
     #[test]

@@ -1228,6 +1228,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::CreatePersonaClose
         | Action::CreatePersonaBack
         | Action::CreatePersonaPathChoice(..)
+        | Action::CreatePersonaMethodCycle
         | Action::CreatePersonaPathInput(..)
         | Action::AgentNameManagerInput(..)
         | Action::AgentNameManagerSelect(..)
@@ -1248,6 +1249,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         Action::ActivateMainMenu
         | Action::JoinSubmitVtc(..)
         | Action::JoinIdentitySelect(..)
+        | Action::JoinNewPersonaMethodCycle
         | Action::JoinIdentityChoose
         | Action::JoinReuseConfirm
         | Action::JoinReuseCancel
@@ -1515,6 +1517,7 @@ mod tests {
         fn with_persona(&mut self) {
             self.state.main_page.content_panel.identity.personas = vec![ManagedDid {
                 did: "did:webvh:QmScidPersona:example.com:alice".into(),
+                did_locator: None,
                 agent_name: None,
                 label: "Alice".into(),
                 bound_communities: 0,

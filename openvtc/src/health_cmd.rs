@@ -609,7 +609,12 @@ impl VtaAccess {
 /// (`…:dids.example.dev:legend-swear` → `legend-swear`). Falls back to the whole
 /// string for DID methods with no path.
 fn short_tail(did: &str) -> String {
-    did.rsplit(':').next().unwrap_or(did).to_string()
+    // A did:scid DID URL names its path in `?src=`; a bare one has only its SCID.
+    if let Some(src) = vta_sdk::did_scid::src(did) {
+        return src.rsplit('/').next().unwrap_or(src).to_string();
+    }
+    let did = vta_sdk::did_scid::identity(did);
+    did.rsplit(':').next().unwrap_or(&did).to_string()
 }
 
 /// Which transport URLs this run is willing to dial.
@@ -1126,6 +1131,11 @@ mod tests {
     #[test]
     fn short_tail_falls_back_for_pathless_dids() {
         assert_eq!(short_tail("did:key:z6Mkabc"), "z6Mkabc");
+        assert_eq!(
+            short_tail("did:scid:vh:1:QmScid?src=dids.example.dev/legend-swear"),
+            "legend-swear"
+        );
+        assert_eq!(short_tail("did:scid:vh:1:QmScid"), "QmScid");
         assert_eq!(short_tail("notadid"), "notadid");
     }
 
