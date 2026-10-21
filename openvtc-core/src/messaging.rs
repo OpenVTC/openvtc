@@ -1101,6 +1101,9 @@ pub fn handle_member_removal_notice(
     let code = match body.code {
         RemovalCode::AdminRemoved => "adminRemoved",
         RemovalCode::Purged => "purged",
+        // `RemovalCode` is non-exhaustive (vta-sdk #2196): a code this build
+        // does not know is still a removal, and is recorded as such.
+        _ => "unknown",
     };
     record.remove(DecisionEvidence {
         code: Some(code.to_string()),

@@ -191,6 +191,8 @@ impl VtaProvisioning {
                     Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED).bold(),
                     s.clone(),
                 ),
+                // `DiagStatus` is non-exhaustive (vta-sdk #2196).
+                _ => ("?", Style::new().fg(COLOR_DARK_GRAY), String::new()),
             };
             let mut spans = vec![
                 Span::styled(format!(" {marker} "), marker_style),
