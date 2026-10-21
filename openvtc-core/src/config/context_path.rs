@@ -179,7 +179,8 @@ pub fn slugify(name: &str) -> String {
     out
 }
 
-/// A short, stable token derived from a VTC `did:webvh` via `didwebvh-rs`.
+/// A short, stable token derived from a VTC's SCID: of its `did:webvh`, parsed
+/// via `didwebvh-rs`, or of its `did:scid:vh:1` (VTI-KEY-160).
 ///
 /// Used as the slug when a community has no usable display name (D9). The token
 /// is the lowercased, alphanumeric-only prefix of the DID's SCID — stable for a
@@ -187,13 +188,19 @@ pub fn slugify(name: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns an error if `vtc_did` is not a parseable `did:webvh` or its SCID
-/// yields no usable characters.
+/// Returns an error if `vtc_did` is not a parseable `did:webvh` or
+/// `did:scid:vh:1`, or its SCID yields no usable characters.
 pub fn fallback_token(vtc_did: &str) -> Result<String, OpenVTCError> {
-    let parsed = WebVHURL::parse_did_url(vtc_did)
-        .map_err(|e| OpenVTCError::Config(format!("Invalid VTC did:webvh ({vtc_did}): {e}")))?;
-    let token: String = parsed
-        .scid
+    let scid = if vta_sdk::did_scid::is_scid(vtc_did) {
+        vta_sdk::did_scid::scid_of(vtc_did)
+            .ok_or_else(|| OpenVTCError::Config(format!("Invalid VTC did:scid ({vtc_did})")))?
+            .to_string()
+    } else {
+        WebVHURL::parse_did_url(vtc_did)
+            .map_err(|e| OpenVTCError::Config(format!("Invalid VTC did:webvh ({vtc_did}): {e}")))?
+            .scid
+    };
+    let token: String = scid
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .map(|c| c.to_ascii_lowercase())
@@ -317,6 +324,12 @@ mod tests {
     #[test]
     fn fallback_token_rejects_non_webvh() {
         assert!(fallback_token("did:key:z6Mk").is_err());
+        // A did:scid VTC takes the token from its SCID, whatever its `src`.
+        assert_eq!(
+            fallback_token("did:scid:vh:1:QmAbCdEf?src=vtc.example.com").unwrap(),
+            fallback_token("did:scid:vh:1:QmAbCdEf").unwrap(),
+        );
+        assert!(fallback_token("did:scid:vh:1:QmAbCdEf").unwrap().starts_with("qmabcd"));
         assert!(fallback_token("not-a-did").is_err());
     }
 

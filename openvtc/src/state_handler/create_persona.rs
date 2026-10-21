@@ -215,6 +215,7 @@ impl MintInputs {
         config: &Config,
         context_id: String,
         path_mode: WebvhPathMode,
+        did_method: Option<vta_sdk::did_scid::DidMethod>,
     ) -> Self {
         Self {
             top_context_id: config.account.top_context_id.clone(),
@@ -223,7 +224,7 @@ impl MintInputs {
             path_mode,
             presentation: openvtc_core::config::account::persona_presentation(
                 &config.account,
-                None,
+                did_method,
             ),
         }
     }
@@ -247,6 +248,17 @@ pub(crate) struct MintedPersona {
 }
 
 impl MintedPersona {
+    /// The DID to hand to someone: the persona's `did:webvh`, or a did:scid's
+    /// DID URL with `?src=`, without which a recipient that holds no source
+    /// for it cannot resolve the bare DID (VTI-KEY-163).
+    pub(crate) fn shareable_did(&self) -> String {
+        self.setup
+            .webvh_address
+            .locator
+            .clone()
+            .unwrap_or_else(|| self.did.clone())
+    }
+
     /// Write the persona into the config, recording the context it was minted
     /// in as its origin. Runs on the loop thread, from whichever loop is live —
     /// a first persona is minted in State A.

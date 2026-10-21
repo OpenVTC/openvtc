@@ -586,6 +586,7 @@ impl MainPageState {
                     .agent_name_for(&p.did)
                     .map(|n| sanitize_display(n, 256)),
                 did: p.did.clone(),
+                did_locator: p.did_locator.clone(),
                 label: p.label.clone().unwrap_or_default(),
                 bound_communities: config
                     .account

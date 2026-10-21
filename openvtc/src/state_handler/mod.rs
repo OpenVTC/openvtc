@@ -3396,6 +3396,7 @@ impl StateHandler {
                     Action::StartCreatePersona | Action::CreatePersonaInput(..) |
                     Action::CreatePersonaClose | Action::CreatePersonaBack |
                     Action::CreatePersonaPathChoice(..) | Action::CreatePersonaPathInput(..) |
+                    Action::CreatePersonaMethodCycle |
                     Action::AgentNameManagerInput(..) |
                     Action::AgentNameManagerSelect(..) | Action::AgentNameManagerConfirmRemove |
                     Action::AgentNameManagerCancelRemove | Action::AgentNameManagerClose |
@@ -3408,6 +3409,7 @@ impl StateHandler {
                     // run their own action loops and never delegate to this one.
                     Action::ActivateMainMenu | Action::JoinSubmitVtc(..) |
                     Action::JoinIdentitySelect(..) | Action::JoinIdentityChoose |
+                    Action::JoinNewPersonaMethodCycle |
                     Action::JoinReuseConfirm | Action::JoinReuseCancel |
                     Action::JoinInvitationSelect(..) | Action::JoinInvitationChoose |
                     Action::JoinContextSelect(..) | Action::JoinContextSlug(..) |
@@ -3773,7 +3775,7 @@ async fn settle_after_apply(
         background_dispatch::AfterApply::PersistPersona(minted) => {
             match minted.persist(config, tdk, profile).await {
                 Ok(persona_id) => {
-                    let did = minted.did.clone();
+                    let did = minted.shareable_did();
                     let copied = crate::clipboard::copy_to_clipboard(&did).is_ok();
                     if let Some(o) = state.main_page.create_persona.as_mut() {
                         o.phase = CreatePersonaPhase::Done;
@@ -3950,7 +3952,12 @@ pub(crate) fn advance_persona_overlay(
     Some(create_persona::MintJob {
         admin_vta: admin_vta.clone(),
         tdk: tdk.clone(),
-        inputs: create_persona::MintInputs::from_config(config, context_id, path_mode),
+        inputs: create_persona::MintInputs::from_config(
+            config,
+            context_id,
+            path_mode,
+            overlay.did_method,
+        ),
         label,
         progress_tx: progress_tx.clone(),
     })
@@ -4193,7 +4200,16 @@ fn spawn_agent_name_job(
 
     let job = agent_name_actions::AgentNameJob {
         vta: admin_vta.clone(),
-        host: agent_name_manage::derive_host(&persona_did).unwrap_or_default(),
+        // The host the overlay derived from the persona's locator when it
+        // opened, which a bare did:scid cannot supply on its own.
+        host: state
+            .main_page
+            .agent_names
+            .as_ref()
+            .map(|o| o.host.clone())
+            .filter(|host| !host.is_empty())
+            .or_else(|| agent_name_manage::derive_host(&persona_did))
+            .unwrap_or_default(),
         persona_did,
         verb,
     };
@@ -4394,7 +4410,10 @@ fn open_agent_name_overlay(state: &mut State, index: usize) -> Option<String> {
     state.main_page.agent_names = Some(AgentNameManagerState {
         persona_did: persona.did.clone(),
         persona_label: persona.label.clone(),
-        host: agent_name_manage::derive_host(&persona.did).unwrap_or_default(),
+        host: agent_name_manage::derive_host(
+            persona.did_locator.as_deref().unwrap_or(&persona.did),
+        )
+        .unwrap_or_default(),
         phase: AgentNameManagerPhase::Loading,
         ..Default::default()
     });
@@ -4697,6 +4716,13 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
             {
                 o.path_choice = *choice;
                 o.messages.clear();
+            }
+        }
+        Action::CreatePersonaMethodCycle => {
+            if let Some(o) = state.main_page.create_persona.as_mut()
+                && o.phase == main_page::content::CreatePersonaPhase::Path
+            {
+                o.did_method = join_flow::next_did_method(o.did_method);
             }
         }
         Action::CreatePersonaPathInput(key) => {

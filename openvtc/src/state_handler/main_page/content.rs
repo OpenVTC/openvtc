@@ -502,10 +502,14 @@ pub struct CreatePersonaState {
     pub path: tui_input::Input,
     /// Progress / error lines shown in the `Working` and `Failed` phases.
     pub messages: Vec<String>,
-    /// The minted persona `did:webvh`, set in the `Done` phase.
+    /// The minted persona's DID to hand out, set in the `Done` phase: its
+    /// `did:webvh`, or a did:scid's DID URL with `?src=`.
     pub did: Option<String>,
     /// Whether [`did`](Self::did) was copied to the clipboard.
     pub copied: bool,
+    /// How the persona is presented (`Path` phase): `None` takes the account's
+    /// preference (VTI-VTA-036).
+    pub did_method: Option<vta_sdk::did_scid::DidMethod>,
 }
 
 /// "Manage agent names" overlay for a persona. `Some` while open; floats over
@@ -1934,8 +1938,11 @@ pub enum AddVicPhase {
 /// A persona DID in the account's context, for the DID manager view.
 #[derive(Clone, Debug, Default)]
 pub struct ManagedDid {
-    /// The persona `did:webvh`.
+    /// The persona's identity: a `did:webvh`, or a bare `did:scid:vh:1`.
     pub did: String,
+    /// For a did:scid persona, its DID URL with `?src=`, which names the host
+    /// a bare did:scid cannot.
+    pub did_locator: Option<String>,
     /// Verified agent name for [`did`](Self::did) (`example.com/@me`), if one is
     /// cached. Shown in place of the DID; the DID is the fallback. Populated in
     /// `sync_from_config` from the persisted cache, which only ever holds
