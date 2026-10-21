@@ -99,9 +99,10 @@ pub enum MessagingError {
 /// the signatures is what would force every caller to change again at the swap.
 #[derive(Clone)]
 pub struct ListenerSpec {
-    /// The listener id — the DID, per [`persona_listener_id`].
+    /// The listener id — the identity DID, per [`persona_listener_id`].
     pub id: String,
-    /// The identity this listener speaks as.
+    /// The DID this listener speaks as: the identity, or a did:scid persona's
+    /// DID URL with `?src=` (VTI-KEY-163).
     pub did: String,
     /// The mediator it connects through.
     pub mediator_did: String,
@@ -1343,8 +1344,11 @@ fn authenticated_sender(
     }
     let kid = meta.encrypted_from_kid.as_deref()?;
     let key_did = kid.split_once('#').map(|(did, _)| did).unwrap_or(kid);
+    // By DID: a did:scid sender's `from` and `skid` may differ only in the
+    // `?src=` locator (VTI-KEY-163). The `from` is returned as presented, as
+    // the live path returns it, so both route a message the same way.
     match message.from.as_deref() {
-        Some(from) if from == key_did => Some(from.to_string()),
+        Some(from) if vta_sdk::did_scid::same_reference(from, key_did) => Some(from.to_string()),
         _ => None,
     }
 }
@@ -1755,7 +1759,7 @@ pub async fn build_listener_configs(config: &Config, tdk: &affinidi_tdk::TDK) ->
         let label = config.persona_profile_label_for(identity.persona_id);
         configs.push(ListenerSpec {
             id: persona_listener_id(did),
-            did: did.to_string(),
+            did: config.presented_did(identity.persona_id, did).to_string(),
             mediator_did: mediator.to_string(),
             label,
             secrets: persona_secrets,
@@ -2365,9 +2369,13 @@ async fn poll_listener_status(
 /// Build a single [`ListenerSpec`] for the persona DID.
 pub async fn persona_listener_config(config: &Config, tdk: &affinidi_tdk::TDK) -> ListenerSpec {
     let secrets = get_secrets_for_did(tdk, config, config.persona_did()).await;
+    let presented = config
+        .active_identity()
+        .map(|i| config.presented_did(i.persona_id, config.persona_did()))
+        .unwrap_or(config.persona_did());
     ListenerSpec {
         id: persona_listener_id(config.persona_did()),
-        did: config.persona_did().to_string(),
+        did: presented.to_string(),
         mediator_did: config.mediator_did().to_string(),
         label: config.persona_profile_label(),
         secrets,
@@ -2393,7 +2401,7 @@ pub async fn persona_listener_config_for(
     let label = config.persona_profile_label_for(persona_id);
     Some(ListenerSpec {
         id: persona_listener_id(did),
-        did: did.to_string(),
+        did: config.presented_did(persona_id, did).to_string(),
         mediator_did: mediator.to_string(),
         label,
         secrets,
@@ -3418,5 +3426,53 @@ mod catch_all_tests {
         ] {
             assert!(!matches(uri), "{uri} must NOT be routed here");
         }
+    }
+}
+
+#[cfg(test)]
+mod authenticated_sender_tests {
+    use super::authenticated_sender;
+    use affinidi_messaging_sdk::messages::compat::UnpackMetadata;
+    use affinidi_tdk::didcomm::Message;
+    use serde_json::json;
+
+    fn message(from: &str) -> Message {
+        Message::build("m".to_string(), "example/v1".to_string(), json!({}))
+            .from(from.to_string())
+            .finalize()
+    }
+
+    fn meta(kid: &str) -> UnpackMetadata {
+        let mut meta = UnpackMetadata::default();
+        meta.authenticated = true;
+        meta.encrypted_from_kid = Some(kid.to_string());
+        meta
+    }
+
+    /// A did:scid sender's `from` and `skid` may differ only in `?src=`; the
+    /// sender is bound by DID and returned as presented. Another DID is not it.
+    #[test]
+    fn a_did_scid_sender_binds_by_did() {
+        let located = "did:scid:vh:1:QmS?src=example.com";
+        let bare_kid = "did:scid:vh:1:QmS#key-1";
+        assert_eq!(
+            authenticated_sender(&message(located), &meta(bare_kid)).as_deref(),
+            Some(located)
+        );
+        assert_eq!(
+            authenticated_sender(&message(located), &meta(&format!("{located}#key-1"))).as_deref(),
+            Some(located)
+        );
+        assert_eq!(
+            authenticated_sender(
+                &message("did:scid:vh:1:QmOther?src=example.com"),
+                &meta(bare_kid)
+            ),
+            None
+        );
+        assert_eq!(
+            authenticated_sender(&message("did:webvh:QmS:example.com"), &meta(bare_kid)),
+            None
+        );
     }
 }

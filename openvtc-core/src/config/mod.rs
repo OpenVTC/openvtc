@@ -537,6 +537,22 @@ impl Config {
         self.active_identity().map(|i| i.did.as_str()).unwrap_or("")
     }
 
+    /// The DID `persona_id` speaks as: its identity, or for a did:scid persona
+    /// its DID URL with `?src=`, so a peer that holds no source for it can
+    /// resolve it on first contact (VTI-KEY-163). `identity` is returned when
+    /// the persona records no locator.
+    pub fn presented_did<'a>(
+        &'a self,
+        persona_id: crate::config::account::PersonaId,
+        identity: &'a str,
+    ) -> &'a str {
+        self.account
+            .personas
+            .get(&persona_id)
+            .and_then(|p| p.did_locator.as_deref())
+            .unwrap_or(identity)
+    }
+
     /// The active persona's `did:webvh` as an owned `Arc<String>`.
     ///
     /// For the call sites that previously cloned the `Arc<String>` singleton
@@ -1902,6 +1918,38 @@ mod tests {
             }),
             mediator_did: None,
         }
+    }
+
+    /// A did:scid persona speaks as its DID URL with `src`; a did:webvh persona,
+    /// or one the config does not know, as its identity.
+    #[test]
+    fn a_did_scid_persona_speaks_as_its_locator() {
+        use crate::config::account::{PersonaId, PersonaRecord};
+
+        let mut config = test_config(BTreeMap::new());
+        let pid = PersonaId::new();
+        let did = "did:scid:vh:1:QmS";
+        let locator = "did:scid:vh:1:QmS?src=example.com/alice";
+        config.account.personas.insert(
+            pid,
+            PersonaRecord {
+                extra: serde_json::Map::new(),
+                persona_id: pid,
+                did: did.into(),
+                did_document: None,
+                did_locator: Some(locator.into()),
+                key_refs: vec![],
+                mediator_did: None,
+                origin_context_id: "openvtc/alice".into(),
+                created_at: chrono::Utc::now(),
+                label: None,
+            },
+        );
+        assert_eq!(config.presented_did(pid, did), locator);
+        assert_eq!(
+            config.presented_did(PersonaId::new(), "did:webvh:Qm:example.com"),
+            "did:webvh:Qm:example.com"
+        );
     }
 
     /// A persona DID with no cache entry is a refresh target; once a lookup is

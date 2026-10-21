@@ -144,17 +144,17 @@ pub(crate) async fn mint_standalone_persona(
         presentation,
     )
     .await
-            // A path the operator typed is the likeliest thing to be refused
-            // here, and the refusal is theirs to act on: the name may simply be
-            // taken. Say which path, since the overlay is closing on this
-            // message and it is the only place the answer survives.
-            .map_err(|e| match path_mode.to_request_path() {
-                Some(path) => anyhow::anyhow!(
-                    "{e}\nThe path was \u{201c}{path}\u{201d}. If it is already in use, create \
+    // A path the operator typed is the likeliest thing to be refused
+    // here, and the refusal is theirs to act on: the name may simply be
+    // taken. Say which path, since the overlay is closing on this
+    // message and it is the only place the answer survives.
+    .map_err(|e| match path_mode.to_request_path() {
+        Some(path) => anyhow::anyhow!(
+            "{e}\nThe path was \u{201c}{path}\u{201d}. If it is already in use, create \
                      the persona again with another path, or let the server assign one."
-                ),
-                None => e,
-            })?;
+        ),
+        None => e,
+    })?;
 
     // The VTA may have declined the `#tsp` service we asked for. Report it
     // through the same progress channel the caller is already showing, so a

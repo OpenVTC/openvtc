@@ -288,7 +288,10 @@ mod tests {
     fn a_did_scid_is_shortened_at_its_scid() {
         let scid = "QmUFMgMsbGpei5bGSx6yXT8ZTkmKUT7sQMGWFkx28aFtL3";
         assert_eq!(
-            shorten_webvh(&format!("did:scid:vh:1:{scid}?src=webvh.storm.ws/kid-long"), 4),
+            shorten_webvh(
+                &format!("did:scid:vh:1:{scid}?src=webvh.storm.ws/kid-long"),
+                4
+            ),
             "did:scid:vh:1:QmUF…FtL3?src=webvh.storm.ws/kid-long"
         );
         assert_eq!(

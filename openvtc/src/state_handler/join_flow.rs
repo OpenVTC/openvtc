@@ -2701,7 +2701,9 @@ impl StateHandler {
                         o.messages.push("Persona created.".to_string());
                     }
                     state.main_page.sync_from_config(config);
-                    state.main_page.log(format!("Created persona DID {shareable}"));
+                    state
+                        .main_page
+                        .log(format!("Created persona DID {shareable}"));
                     // Bring it online — in the background. The join is about to
                     // offer it as a way in, and a persona that cannot send is
                     // not one; but this loop reads no keys while it awaits, so
@@ -7112,7 +7114,10 @@ mod did_method_choice_tests {
     #[test]
     fn the_choice_cycles_through_the_account_default() {
         assert_eq!(next_did_method(None), Some(DidMethod::Webvh));
-        assert_eq!(next_did_method(Some(DidMethod::Webvh)), Some(DidMethod::Scid));
+        assert_eq!(
+            next_did_method(Some(DidMethod::Webvh)),
+            Some(DidMethod::Scid)
+        );
         assert_eq!(next_did_method(Some(DidMethod::Scid)), None);
     }
 }
