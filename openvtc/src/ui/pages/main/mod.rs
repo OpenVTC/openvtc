@@ -5794,7 +5794,10 @@ mod key_handler_tests {
             });
         });
         page.handle_key_event(press(KeyCode::Char('m')));
-        assert!(matches!(rx.try_recv(), Ok(Action::CreatePersonaMethodCycle)));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::CreatePersonaMethodCycle)
+        ));
 
         let (mut page, mut rx) = page_for(MainMenu::Identity, |s: &mut State| {
             s.main_page.create_persona = Some(CreatePersonaState {

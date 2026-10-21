@@ -1479,7 +1479,10 @@ fn check_vrc_issuer_binding(
         .verification_method
         .split_once('#')
         .map_or(proof.verification_method.as_str(), |(did, _)| did);
-    if vm_did != vrc.issuer() {
+    // By DID: a did:scid issuer may name itself, or its key, with the `?src=`
+    // locator it is resolved through (VTI-KEY-163). A did:webvh and a did:scid
+    // are never the same issuer (VTI-KEY-164).
+    if !vta_sdk::did_scid::same_reference(vm_did, vrc.issuer()) {
         return Err(format!(
             "proof verification method ({}) does not belong to the issuer ({})",
             proof.verification_method,

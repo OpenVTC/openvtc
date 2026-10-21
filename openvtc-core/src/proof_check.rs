@@ -185,6 +185,10 @@ pub fn verify_proofs(
     signer_doc: &Document,
     purposes: &[Purpose],
 ) -> Result<(), ProofError> {
+    // A did:scid signer may be named with the `?src=` locator its document
+    // was fetched through; its document, and the keys in it, are under the
+    // bare DID (VTI-KEY-161, VTI-KEY-163). Every other DID compares exactly.
+    let signer = &*vta_sdk::did_scid::strip_src(signer);
     if signer_doc.id.as_str() != signer {
         return Err(ProofError::DocumentMismatch);
     }
@@ -224,8 +228,10 @@ fn verify_one(
     }
 
     // The method's DID must be the signer's, exactly — `did:x:signer-evil#k`
-    // shares a prefix with `did:x:signer` and is somebody else.
-    let vm = proof.verification_method.as_str();
+    // shares a prefix with `did:x:signer` and is somebody else. A did:scid
+    // method may carry the `src` it was resolved through; it names the key
+    // under the bare DID all the same.
+    let vm = &*vta_sdk::did_scid::strip_src(proof.verification_method.as_str());
     let (vm_did, fragment) = vm
         .split_once('#')
         .ok_or(ProofError::ForeignVerificationMethod(i))?;
@@ -522,6 +528,37 @@ mod tests {
         assert_eq!(
             verify_proofs(&signed, SIGNER, &doc, ASSERT),
             Err(ProofError::ForeignVerificationMethod(0))
+        );
+    }
+
+    /// A did:scid signer's document and keys are under the bare DID. Named
+    /// with the `?src=` it was resolved through, as the signer or in its
+    /// verificationMethod, it is the same signer and the same key
+    /// (VTI-KEY-163). Another SCID is still someone else.
+    #[tokio::test]
+    async fn a_did_scid_signer_named_with_its_locator_is_accepted() {
+        const SCID: &str = "did:scid:vh:1:QmScid";
+        const LOCATED: &str = "did:scid:vh:1:QmScid?src=vtc.example.com";
+        let key = ed_key(SCID, "key-0", 1);
+        let doc = document(SCID, &[("key-0", &key)], &[]);
+        let signed = sign(json!({ "issuer": SCID, "claim": {} }), &[&key]).await;
+        assert_eq!(verify_proofs(&signed, SCID, &doc, ASSERT), Ok(()));
+        assert_eq!(verify_proofs(&signed, LOCATED, &doc, ASSERT), Ok(()));
+
+        let located = ed_key(LOCATED, "key-0", 1);
+        let signed = sign(json!({ "issuer": LOCATED, "claim": {} }), &[&located]).await;
+        assert_eq!(verify_proofs(&signed, LOCATED, &doc, ASSERT), Ok(()));
+
+        let other = "did:scid:vh:1:QmOther?src=vtc.example.com";
+        assert_eq!(
+            verify_proofs(&signed, other, &doc, ASSERT),
+            Err(ProofError::DocumentMismatch)
+        );
+        // Nor is the did:webvh of the same log the did:scid (VTI-KEY-164).
+        let webvh = "did:webvh:QmScid:vtc.example.com";
+        assert_eq!(
+            verify_proofs(&signed, webvh, &doc, ASSERT),
+            Err(ProofError::DocumentMismatch)
         );
     }
 

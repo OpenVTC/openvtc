@@ -329,7 +329,11 @@ mod tests {
             fallback_token("did:scid:vh:1:QmAbCdEf?src=vtc.example.com").unwrap(),
             fallback_token("did:scid:vh:1:QmAbCdEf").unwrap(),
         );
-        assert!(fallback_token("did:scid:vh:1:QmAbCdEf").unwrap().starts_with("qmabcd"));
+        assert!(
+            fallback_token("did:scid:vh:1:QmAbCdEf")
+                .unwrap()
+                .starts_with("qmabcd")
+        );
         assert!(fallback_token("not-a-did").is_err());
     }
 

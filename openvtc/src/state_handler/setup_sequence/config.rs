@@ -340,7 +340,9 @@ impl ConfigExtension for Config {
         // holds no source for it can resolve it on first contact (VTI-KEY-163);
         // its identity, keys and records stay under the bare DID.
         let did_locator = state.webvh_address.locator.clone();
-        let presented_did = did_locator.clone().unwrap_or_else(|| persona_did_str.clone());
+        let presented_did = did_locator
+            .clone()
+            .unwrap_or_else(|| persona_did_str.clone());
         let atm = tdk
             .atm
             .as_ref()

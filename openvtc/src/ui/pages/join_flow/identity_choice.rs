@@ -296,7 +296,10 @@ mod tests {
     fn m_on_the_mint_row_changes_how_the_new_persona_is_presented() {
         let (mut flow, mut rx) = flow_with(|js| js.identity_selected = js.mint_row());
         IdentityChoice::handle_key_event(&mut flow, press(KeyCode::Char('m')));
-        assert!(matches!(rx.try_recv(), Ok(Action::JoinNewPersonaMethodCycle)));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::JoinNewPersonaMethodCycle)
+        ));
 
         // On a reuse row it is not a choice that applies.
         let (mut flow, mut rx) = flow_with(|js| js.identity_selected = 0);

@@ -307,7 +307,10 @@ mod tests {
 
     #[test]
     fn a_did_scid_community_names_its_sub_context_by_its_scid() {
-        assert_eq!(short_tail("did:scid:vh:1:QmV?src=vtc.example.com/acme"), "QmV");
+        assert_eq!(
+            short_tail("did:scid:vh:1:QmV?src=vtc.example.com/acme"),
+            "QmV"
+        );
         assert_eq!(short_tail("did:scid:vh:1:QmV"), "QmV");
         assert_eq!(short_tail(VTC), "acme");
     }
