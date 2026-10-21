@@ -230,6 +230,7 @@ pub fn apply(plan: &RebuildPlan, keys: &[KeyCandidate], now: DateTime<Utc>) -> R
                 // path already falls back to a network resolve when absent,
                 // and a wrong cached document is worse than none.
                 did_document: None,
+                did_locator: None,
                 key_refs: Vec::new(),
                 mediator_did: persona.mediator_did.clone(),
                 origin_context_id: persona.context_id.clone(),

@@ -269,6 +269,7 @@ fn persona(label: &str) -> PersonaRecord {
         persona_id: PersonaId::new(),
         did: format!("did:webvh:scid:example.com:{label}"),
         did_document: None,
+        did_locator: None,
         key_refs: vec![KeyRef {
             key_id: format!("key-{label}"),
             purpose: KeyTypes::PersonaSigning,

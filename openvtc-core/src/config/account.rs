@@ -69,13 +69,16 @@ pub struct KeyRef {
     pub created_at: DateTime<Utc>,
 }
 
-/// An account-level persona — a self-contained `did:webvh` identity that one or
-/// more communities may present (D6: context-independent; D1: reusable).
+/// An account-level persona — a self-contained durable identity, a `did:webvh`
+/// or a `did:scid:vh:1`, that one or more communities may present (D6:
+/// context-independent; D1: reusable).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersonaRecord {
     /// Stable identifier (rotation-safe).
     pub persona_id: PersonaId,
-    /// The persona's `did:webvh`.
+    /// The persona's identity: its `did:webvh`, or the bare
+    /// `did:scid:vh:1:<scid>` of a persona presented as did:scid (VTI-KEY-160).
+    /// Key ids are `{did}#key-N` either way, matching its own document.
     pub did: String,
     /// Cached resolved DID document (PERF #3: startup uses this instead of a
     /// fresh network resolve when present — did:webvh documents change rarely
@@ -85,6 +88,14 @@ pub struct PersonaRecord {
     /// field existed, in which case load falls back to a network resolve.
     #[serde(default)]
     pub did_document: Option<affinidi_tdk::did_common::Document>,
+    /// For a did:scid persona, its DID URL with the `?src=` locator
+    /// (`did:scid:vh:1:<scid>?src=host/path`): what it gives out where a peer
+    /// may hold no source for the bare DID (VTI-KEY-163), and the source the
+    /// resolver is seeded with at load so the bare DID resolves after a
+    /// restart (VTI-KEY-162). Its `src` also names the did:webvh log the VTA
+    /// manages. `None` for a did:webvh persona.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub did_locator: Option<String>,
     /// Non-secret references to this persona's VTA-managed keys.
     pub key_refs: Vec<KeyRef>,
     /// Mediator DID; defaults to the VTA mediator, optional override at mint (D7).
@@ -1135,6 +1146,17 @@ pub struct Account {
     /// record) into the grouped form on load.
     #[serde(default, deserialize_with = "de_communities")]
     pub communities: HashMap<VtcDid, Vec<CommunityRecord>>,
+    /// How new personas are presented: as their `did:webvh` or their
+    /// `did:scid:vh:1` identity (VTI-KEY-165). `None` leaves it to the VTA's
+    /// `[dids]` configuration, which presents did:webvh unless configured
+    /// otherwise; a persona mint may override either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_did_method: Option<vta_sdk::did_scid::DidMethod>,
+    /// Whether new personas' logs list their did:scid alias in `alsoKnownAs`
+    /// (VTI-KEY-166). `None` leaves it to the VTA, which lists it unless
+    /// configured otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scid_also_known_as: Option<bool>,
 
     /// Fields written by a build newer than this one, preserved verbatim.
     ///
@@ -1149,6 +1171,24 @@ pub struct Account {
     /// when empty so existing configs are byte-identical.
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The presentation a new persona is minted with: `choice`, the operator's
+/// pick for this persona, where given; else the account's preferences
+/// (VTI-VTA-036). Nothing stated leaves both to the VTA, whose defaults are
+/// did:webvh with the did:scid alias listed.
+pub fn persona_presentation(
+    account: &Account,
+    choice: Option<vta_sdk::did_scid::DidMethod>,
+) -> vta_sdk::client::DidPresentation {
+    let mut presentation = vta_sdk::client::DidPresentation::default();
+    if let Some(method) = choice.or(account.preferred_did_method) {
+        presentation = presentation.did_method(method);
+    }
+    if let Some(listed) = account.scid_also_known_as {
+        presentation = presentation.scid_also_known_as(listed);
+    }
+    presentation
 }
 
 /// Deserialize [`Account::communities`] tolerantly: each VTC's value may be a
@@ -1520,6 +1560,7 @@ mod tests {
             persona_id: PersonaId::new(),
             did: format!("did:webvh:example.com:{label}"),
             did_document: None,
+            did_locator: None,
             key_refs: vec![KeyRef {
                 key_id: format!("key-{label}"),
                 purpose: KeyTypes::PersonaSigning,
@@ -1530,6 +1571,84 @@ mod tests {
             created_at: Utc::now(),
             label: Some(label.to_string()),
         }
+    }
+
+    /// A record written before did:scid personas has no `did_locator`; it
+    /// loads as a did:webvh persona, and writes back without the key.
+    #[test]
+    fn persona_without_did_locator_loads_and_round_trips_unchanged() {
+        let legacy = serde_json::json!({
+            "persona_id": PersonaId::new().0,
+            "did": "did:webvh:Qm:example.com:dave",
+            "key_refs": [],
+            "mediator_did": null,
+            "origin_context_id": "openvtc/dave",
+            "created_at": Utc::now(),
+            "label": "Dave",
+        });
+        let record: PersonaRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(record.did_locator, None);
+        let written = serde_json::to_value(&record).unwrap();
+        assert!(written.get("did_locator").is_none(), "{written}");
+    }
+
+    #[test]
+    fn a_did_scid_persona_keeps_its_locator() {
+        let mut record = persona("scid");
+        record.did = "did:scid:vh:1:Qm".into();
+        record.did_locator = Some("did:scid:vh:1:Qm?src=example.com/scid".into());
+        let back: PersonaRecord =
+            serde_json::from_value(serde_json::to_value(&record).unwrap()).unwrap();
+        assert_eq!(back.did, "did:scid:vh:1:Qm");
+        assert_eq!(
+            back.did_locator.as_deref(),
+            Some("did:scid:vh:1:Qm?src=example.com/scid")
+        );
+    }
+
+    fn account() -> Account {
+        serde_json::from_value(serde_json::json!({
+            "vta_did": "did:webvh:Qm:vta.example.com",
+            "vta_url": "",
+            "top_context_id": "openvtc",
+        }))
+        .unwrap()
+    }
+
+    /// An account that states nothing sends nothing: the VTA's `[dids]` decides,
+    /// and the mint stays on `create/1.1`.
+    #[test]
+    fn an_account_with_no_preference_states_nothing() {
+        let account = account();
+        assert_eq!(account.preferred_did_method, None);
+        assert_eq!(account.scid_also_known_as, None);
+        assert!(!persona_presentation(&account, None).is_stated());
+        let written = serde_json::to_value(&account).unwrap();
+        assert!(written.get("preferred_did_method").is_none(), "{written}");
+        assert!(written.get("scid_also_known_as").is_none(), "{written}");
+    }
+
+    /// The operator's choice for this persona, then the account's preference.
+    #[test]
+    fn a_persona_choice_overrides_the_account_preference() {
+        use vta_sdk::did_scid::DidMethod;
+        let mut account = account();
+        account.preferred_did_method = Some(DidMethod::Scid);
+        account.scid_also_known_as = Some(true);
+
+        let from_account = persona_presentation(&account, None);
+        assert_eq!(from_account.did_method, Some(DidMethod::Scid));
+        assert_eq!(from_account.scid_also_known_as, Some(true));
+
+        let chosen = persona_presentation(&account, Some(DidMethod::Webvh));
+        assert_eq!(chosen.did_method, Some(DidMethod::Webvh));
+        assert_eq!(chosen.scid_also_known_as, Some(true));
+
+        // The preferences round-trip in the config.
+        let back: Account =
+            serde_json::from_value(serde_json::to_value(&account).unwrap()).unwrap();
+        assert_eq!(back.preferred_did_method, Some(DidMethod::Scid));
+        assert_eq!(back.scid_also_known_as, Some(true));
     }
 
     /// `PersonaRecord.did_document` persists a whole DID Document into the
@@ -2598,6 +2717,7 @@ mod forward_compat_tests {
                     persona_id: id,
                     did: "did:webvh:Qm:example.com:alice".to_string(),
                     did_document: None,
+                    did_locator: None,
                     key_refs: Vec::new(),
                     mediator_did: None,
                     origin_context_id: "top".to_string(),

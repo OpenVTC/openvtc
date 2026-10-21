@@ -358,6 +358,7 @@ mod tests {
                 persona_id: pid,
                 did: did.to_string(),
                 did_document: None,
+                did_locator: None,
                 key_refs: vec![],
                 mediator_did: Some(PERSISTED_MEDIATOR.to_string()),
                 origin_context_id: "openvtc/alice".into(),

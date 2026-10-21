@@ -86,6 +86,7 @@ pub(crate) async fn mint_standalone_persona(
         context_id,
         custom_mediator,
         path_mode,
+        presentation,
     } = inputs;
     if top_context_id.is_empty() {
         anyhow::bail!("No account context yet — finish setup before creating a persona.");
@@ -129,9 +130,20 @@ pub(crate) async fn mint_standalone_persona(
         Some(path) => progress(&format!("Creating persona DID at /{path} via {server_id}…")),
         None => progress(&format!("Creating persona DID via {server_id}…")),
     }
-    let (keys, did, document, _mnemonic) =
-        vta::create_did_via_server(admin_vta, tdk, &context_id, &server_id, path_mode.clone())
-            .await
+    let vta::MintedDid {
+        keys,
+        did,
+        document,
+        locator,
+    } = vta::create_did_via_server(
+        admin_vta,
+        tdk,
+        &context_id,
+        &server_id,
+        path_mode.clone(),
+        presentation,
+    )
+    .await
             // A path the operator typed is the likeliest thing to be refused
             // here, and the refusal is theirs to act on: the name may simply be
             // taken. Say which path, since the overlay is closing on this
@@ -162,6 +174,7 @@ pub(crate) async fn mint_standalone_persona(
         webvh_address: crate::state_handler::setup_sequence::WebVHAddress {
             did: did.clone(),
             document,
+            locator,
         },
         ..Default::default()
     };
@@ -189,6 +202,10 @@ pub(crate) struct MintInputs {
     /// (the default, a fresh mnemonic) or one the operator typed. Already
     /// checked against the host's naming rules by the time it gets here.
     pub(crate) path_mode: WebvhPathMode,
+    /// How the persona is presented, and whether its log lists the did:scid
+    /// alias: the operator's choice for this persona, else the account's
+    /// preference, else nothing stated (the VTA decides).
+    pub(crate) presentation: vta_sdk::client::DidPresentation,
 }
 
 impl MintInputs {
@@ -204,6 +221,10 @@ impl MintInputs {
             context_id,
             custom_mediator: vta_mediator(config),
             path_mode,
+            presentation: openvtc_core::config::account::persona_presentation(
+                &config.account,
+                None,
+            ),
         }
     }
 }
@@ -412,6 +433,7 @@ mod context_choice_tests {
                 persona_id,
                 did: "did:webvh:scid:example.com:work".into(),
                 did_document: None,
+                did_locator: None,
                 key_refs: vec![],
                 mediator_did: None,
                 origin_context_id: "openvtc/work".into(),
