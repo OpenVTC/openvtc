@@ -33,6 +33,7 @@ mod colors;
 mod env_overrides;
 mod health_cmd;
 mod holder_grant;
+mod setup_cmd;
 mod signing_cmd;
 mod state_handler;
 mod theme;
@@ -591,6 +592,15 @@ async fn main() -> Result<()> {
 
     // Check if profile is currently active elsewhere?
     let lock_file = check_duplicate_instance(&profile)?;
+
+    // `setup --vta-did …`: headless setup, no TUI.
+    if let Some(("setup", setup_args)) = matches.subcommand()
+        && setup_cmd::requested(setup_args)
+    {
+        let result = setup_cmd::run(setup_args, &profile).await;
+        remove_lock_file(&lock_file);
+        return result;
+    }
 
     let mut starting_mode = StartingMode::NotSet;
 

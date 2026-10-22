@@ -291,7 +291,7 @@ mod session_manager;
 mod settings_actions;
 pub mod setup_sequence;
 mod setup_token_actions;
-mod setup_vta_actions;
+pub(crate) mod setup_vta_actions;
 mod setup_wizard;
 pub mod state;
 mod verify_queue;

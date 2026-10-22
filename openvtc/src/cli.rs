@@ -58,7 +58,11 @@ pub fn cli() -> Command {
                      refers the request for review, as its join criteria say.",
                 ),
         ])
-        .subcommand(Command::new("setup").about("Initial configuration of the openvtc tool"))
+        .subcommand(
+            Command::new("setup")
+                .about("Initial configuration of the openvtc tool")
+                .args(crate::setup_cmd::args()),
+        )
         .subcommand(
             Command::new("health")
                 .about(
