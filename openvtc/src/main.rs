@@ -612,8 +612,14 @@ async fn main() -> Result<()> {
 
     // Headless join: holds the profile lock like the TUI, then runs to its verdict.
     if let Some(("join", join_args)) = matches.subcommand() {
-        let deferred = load_fast(&profile, unlock_code_arg.as_ref())?;
-        return state_handler::join_cmd::run(join_args, deferred, invitation_credential).await;
+        let result = match load_fast(&profile, unlock_code_arg.as_ref()) {
+            Ok(deferred) => {
+                state_handler::join_cmd::run(join_args, deferred, invitation_credential).await
+            }
+            Err(e) => Err(e.into()),
+        };
+        remove_lock_file(&lock_file);
+        return result;
     }
 
     let mut starting_mode = StartingMode::NotSet;
