@@ -33,6 +33,7 @@ mod colors;
 mod env_overrides;
 mod health_cmd;
 mod holder_grant;
+mod repos_cmd;
 mod setup_cmd;
 mod signing_cmd;
 mod state_handler;
@@ -598,6 +599,13 @@ async fn main() -> Result<()> {
         && setup_cmd::requested(setup_args)
     {
         let result = setup_cmd::run(setup_args, &profile).await;
+        remove_lock_file(&lock_file);
+        return result;
+    }
+
+    // `repos` opens the persona's mediator socket, so it holds the lock too.
+    if let Some(("repos", repos_args)) = matches.subcommand() {
+        let result = repos_cmd::run(repos_args, &profile, unlock_code_arg.as_ref()).await;
         remove_lock_file(&lock_file);
         return result;
     }

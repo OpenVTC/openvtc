@@ -120,6 +120,7 @@ pub fn cli() -> Command {
         )
         .subcommand(crate::theme_cmd::command())
         .subcommand(crate::signing_cmd::command())
+        .subcommand(crate::repos_cmd::command())
 }
 
 /// Read an unlock passphrase from `path`, or from standard input when `path` is
