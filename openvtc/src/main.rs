@@ -610,6 +610,12 @@ async fn main() -> Result<()> {
         return result;
     }
 
+    // Headless join: holds the profile lock like the TUI, then runs to its verdict.
+    if let Some(("join", join_args)) = matches.subcommand() {
+        let deferred = load_fast(&profile, unlock_code_arg.as_ref())?;
+        return state_handler::join_cmd::run(join_args, deferred, invitation_credential).await;
+    }
+
     let mut starting_mode = StartingMode::NotSet;
 
     // Is there a CLI command to force setup wizard?

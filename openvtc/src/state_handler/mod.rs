@@ -280,6 +280,7 @@ mod hidden_vetting_poll;
 mod hidden_vetting_vta;
 mod inbox_actions;
 pub mod join;
+pub(crate) mod join_cmd;
 mod join_flow;
 mod join_status_poll;
 pub mod main_page;
