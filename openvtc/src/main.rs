@@ -33,6 +33,7 @@ mod colors;
 mod env_overrides;
 mod health_cmd;
 mod holder_grant;
+mod signing_cmd;
 mod state_handler;
 mod theme;
 mod theme_cmd;
@@ -582,6 +583,10 @@ async fn main() -> Result<()> {
             allow_private_probes,
         )
         .await;
+    }
+
+    if let Some(("signing", signing_args)) = matches.subcommand() {
+        return signing_cmd::run(signing_args, &profile, unlock_code_arg.as_ref()).await;
     }
 
     // Check if profile is currently active elsewhere?
