@@ -1063,6 +1063,18 @@ pub async fn add_listener(service: &Messaging, spec: &ListenerSpec) -> Result<()
         }
     };
 
+    // A closed (ExplicitAllow) mediator refuses every message to this DID until
+    // its own access list is opened; same allow-all helper as the VTA client.
+    // Bounded and non-fatal: failures are logged, the listener still starts.
+    vta_sdk::acl_setup::set_client_acl_with_profile(
+        &atm,
+        &profile,
+        &spec.did,
+        "listener",
+        &spec.label,
+    )
+    .await;
+
     service
         .inner
         .service
