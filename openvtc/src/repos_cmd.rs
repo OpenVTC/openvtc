@@ -11,29 +11,26 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use clap::{Arg, ArgMatches, Command};
 use console::style;
 use openvtc_core::capabilities::{correlation_thread, parse_envelope_document};
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
-use openvtc_core::didcomm::{self, DIDCommEvent, Messaging};
+use openvtc_core::didcomm::{self, DIDCommEvent};
 use openvtc_core::git_ns::{self, GitRight, Reply, Request};
 use openvtc_core::git_workspace::{self, CLONE_TIMEOUT, RepoCoords, WorkspaceSettings};
-use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::SuppliedUnlockCode;
-use crate::colors::{CLI_CAUTION, CLI_ERROR, CLI_INFO, Themed};
+use crate::colors::{CLI_ERROR, CLI_INFO, Themed};
+use crate::headless::{self, Admin, progress, warn};
+use crate::state_handler::DeferredLoad;
 
 /// How long a request waits for the community's answer (as the panel does).
 const REPLY_WINDOW: Duration = Duration::from_secs(30);
 
 /// How long the persona's mediator socket may take to come up.
 const CONNECT_WINDOW: Duration = Duration::from_secs(30);
-
-/// Most segments in a repository path under its owner (GitLab subgroups).
-const MAX_REPO_PATH_SEGMENTS: usize = 21;
 
 pub fn command() -> Command {
     let community = Arg::new("community")
@@ -69,14 +66,10 @@ pub fn command() -> Command {
         )
 }
 
-pub async fn run(
-    matches: &ArgMatches,
-    profile: &str,
-    unlock: Option<&SuppliedUnlockCode>,
-) -> Result<()> {
+pub async fn run(matches: &ArgMatches, deferred: DeferredLoad) -> Result<()> {
     match matches.subcommand() {
-        Some(("list", args)) => list(args, profile, unlock).await,
-        Some(("clone", args)) => clone(args, profile, unlock).await,
+        Some(("list", args)) => list(args, deferred).await,
+        Some(("clone", args)) => clone(args, deferred).await,
         _ => bail!("unknown repos subcommand"),
     }
 }
@@ -85,14 +78,15 @@ pub async fn run(
 // Subcommands
 // ****************************************************************************
 
-async fn list(args: &ArgMatches, profile: &str, unlock: Option<&SuppliedUnlockCode>) -> Result<()> {
-    let (config, tdk) = load(profile, unlock).await?;
+async fn list(args: &ArgMatches, deferred: DeferredLoad) -> Result<()> {
+    let profile = deferred.profile.clone();
+    let (config, tdk) = load(deferred).await?;
     let target = pick(
         &config,
         args.get_one::<String>("community").map(String::as_str),
     )?;
     let rows = fetch_my_repos(&config, &tdk, &target).await?;
-    let settings = workspace_settings(profile);
+    let settings = workspace_settings(&profile);
     if rows.is_empty() {
         println!("You hold no right on any repository in {}.", target.label);
         return Ok(());
@@ -103,7 +97,7 @@ async fn list(args: &ArgMatches, profile: &str, unlock: Option<&SuppliedUnlockCo
         "RESOURCE", "RIGHT", "STATUS"
     );
     for r in &rows {
-        let local = coords_of(&r.resource)
+        let local = RepoCoords::parse(&r.resource)
             .ok()
             .and_then(|c| settings.locate(&c))
             .map(|p| git_workspace::display_path(&p))
@@ -118,23 +112,20 @@ async fn list(args: &ArgMatches, profile: &str, unlock: Option<&SuppliedUnlockCo
     Ok(())
 }
 
-async fn clone(
-    args: &ArgMatches,
-    profile: &str,
-    unlock: Option<&SuppliedUnlockCode>,
-) -> Result<()> {
+async fn clone(args: &ArgMatches, deferred: DeferredLoad) -> Result<()> {
+    let profile = deferred.profile.clone();
     let resource = args
         .get_one::<String>("resource")
         .map(String::as_str)
         .unwrap_or_default()
         .trim_end_matches('/');
     // Refused before anything is loaded or sent.
-    let coords = coords_of(resource)?;
+    let coords = RepoCoords::parse(resource)?;
     let dir = args
         .get_one::<String>("dir")
         .map(|d| git_workspace::expand_tilde(d));
 
-    let (config, tdk) = load(profile, unlock).await?;
+    let (config, tdk) = load(deferred).await?;
     let target = pick(
         &config,
         args.get_one::<String>("community").map(String::as_str),
@@ -147,13 +138,13 @@ async fn clone(
             target.label
         );
     };
-    progress(&format!(
+    progress(format!(
         "You are {} on {}.",
         row.right.label(),
         row.resource
     ));
 
-    let mut settings = workspace_settings(profile);
+    let mut settings = workspace_settings(&profile);
     if dir.is_none()
         && let Some(path) = settings.locate(&coords)
     {
@@ -168,7 +159,7 @@ async fn clone(
         .clone()
         .unwrap_or_else(|| coords.default_path(&settings.root));
     let credential = settings.credential_for(&target.vtc_did, &coords).credential;
-    progress(&format!(
+    progress(format!(
         "Cloning into {} ({})…",
         git_workspace::display_path(&dest),
         credential.label()
@@ -211,8 +202,8 @@ async fn clone(
     {
         let abs = std::path::absolute(&path).unwrap_or(path);
         settings.checkouts.insert(coords.resource(), abs);
-        if let Err(e) = WorkspaceSettings::path(profile).and_then(|p| settings.save_to(&p)) {
-            warn(&format!(
+        if let Err(e) = WorkspaceSettings::path(&profile).and_then(|p| settings.save_to(&p)) {
+            warn(format!(
                 "couldn't record the checkout in the workspace settings: {e}"
             ));
         }
@@ -220,8 +211,9 @@ async fn clone(
     println!(
         "{}",
         style(format!(
-            "Cloned {} into {}. Commit signing is not set up: open the Repos panel and press e on it.",
+            "Cloned {} into {}. Commit signing is not set up: run `openvtc signing enable {}`.",
             row.resource,
+            git_workspace::display_path(&dest),
             git_workspace::display_path(&dest)
         ))
         .themed(CLI_INFO)
@@ -233,52 +225,10 @@ async fn clone(
 // Account and community
 // ****************************************************************************
 
-/// Unlock and load the full account, failing loudly (cf. `health`'s soft load).
-async fn load(
-    profile: &str,
-    unlock: Option<&SuppliedUnlockCode>,
-) -> Result<(Config, affinidi_tdk::TDK)> {
-    let deferred = crate::load_fast(profile, unlock)
-        .map_err(|e| anyhow!("couldn't open profile '{profile}': {e}"))?;
+/// The account, without an admin VTA session: this command never needs one.
+async fn load(deferred: DeferredLoad) -> Result<(Config, affinidi_tdk::TDK)> {
     progress("Loading the account…");
-    let mut tdk = affinidi_tdk::TDK::new(
-        affinidi_tdk::common::config::TDKConfig::builder()
-            .with_load_environment(false)
-            .build()?,
-        None,
-    )
-    .await
-    .context("TDK init failed")?;
-
-    #[cfg(feature = "openpgp-card")]
-    struct TouchPrompt;
-    #[cfg(feature = "openpgp-card")]
-    impl openvtc_core::config::TokenInteractions for TouchPrompt {
-        fn touch_notify(&self) {
-            eprintln!("Touch your security token to continue…");
-        }
-        fn touch_completed(&self) {}
-    }
-    #[cfg(feature = "openpgp-card")]
-    let no_token_pin = secrecy::SecretString::new(String::new().into());
-
-    let (config, admin_session) = Config::load_step2(
-        &mut tdk,
-        profile,
-        deferred.public_config,
-        deferred.unlock_passphrase.as_ref(),
-        #[cfg(feature = "openpgp-card")]
-        deferred.user_pin.as_ref().unwrap_or(&no_token_pin),
-        #[cfg(feature = "openpgp-card")]
-        &TouchPrompt,
-        None,
-    )
-    .await
-    .map_err(|e| anyhow!("couldn't load the account: {e}"))?;
-    // This command never talks to the VTA as admin.
-    if let Some(session) = admin_session {
-        session.shutdown().await;
-    }
+    let (config, tdk, _) = headless::load_account(deferred, Admin::Drop).await?;
     Ok((config, tdk))
 }
 
@@ -311,7 +261,7 @@ fn pick(config: &Config, wanted: Option<&str>) -> Result<Target> {
         .collect();
     let i = match_community(&keys, wanted).map_err(|e| anyhow!(e))?;
     let target = active.into_iter().nth(i).expect("index from the same list");
-    progress(&format!("Community: {} ({})", target.label, target.vtc_did));
+    progress(format!("Community: {} ({})", target.label, target.vtc_did));
     Ok(target)
 }
 
@@ -363,7 +313,7 @@ fn workspace_settings(profile: &str) -> WorkspaceSettings {
     WorkspaceSettings::path(profile)
         .and_then(|p| WorkspaceSettings::load_from(&p))
         .unwrap_or_else(|e| {
-            warn(&format!(
+            warn(format!(
                 "couldn't read the workspace settings, using the defaults: {e}"
             ));
             WorkspaceSettings::default()
@@ -394,8 +344,7 @@ async fn fetch_my_repos(
         .ok_or_else(|| anyhow!("this community's persona has no messaging identity"))?
         .persona_did()
         .to_string();
-    let (doc, reply) = ask(config, tdk, target, Request::View { resource: None }).await?;
-    match reply {
+    match ask(config, tdk, target, Request::View { resource: None }).await? {
         Reply::View(data) => Ok(git_ns::my_repos(&data, &me)
             .into_iter()
             .map(|r| Row {
@@ -404,12 +353,6 @@ async fn fetch_my_repos(
                 status: r.status.label(),
             })
             .collect()),
-        // A view newer than this client's schema (nested project paths, say):
-        // read the fields the list needs straight from the payload.
-        Reply::Unreadable { task, detail } if task == "git-ns/view" => {
-            tracing::debug!("typed git-ns/view unreadable, reading leniently: {detail}");
-            Ok(lenient_my_repos(&doc, &me))
-        }
         Reply::Refused(r) => {
             eprintln!("{}", style(r.explain()).themed(CLI_ERROR));
             bail!("the community refused the request ({})", r.code)
@@ -422,13 +365,12 @@ async fn fetch_my_repos(
 }
 
 /// Sign and send `request` as the persona, and wait for the community's answer.
-/// Returns the reply's payload alongside its typed reading.
 async fn ask(
     config: &Config,
     tdk: &affinidi_tdk::TDK,
     target: &Target,
     request: Request,
-) -> Result<(Value, Reply)> {
+) -> Result<Reply> {
     let id = config
         .identities
         .get(&target.persona)
@@ -441,29 +383,16 @@ async fn ask(
         .is_some_and(|c| c.joined_over_tsp());
 
     // Listen first, so a fast answer is not stored unread at the mediator.
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    let service =
-        didcomm::start_empty_service(event_tx, tokio_util::sync::CancellationToken::new());
+    let (service, mut event_rx) = headless::start_messaging(config).await;
     let result = async {
-        service
-            .tsp_store()
-            .hydrate(&config.private.tsp_relationships)
-            .await;
         // Outbound TSP must share the listener's relationship store.
         let tdk = service
             .tsp_store()
             .adopt_into(tdk.clone())
             .await
             .unwrap_or_else(|_| tdk.clone());
-        let spec = didcomm::persona_listener_config_for(config, &tdk, target.persona)
-            .await
-            .ok_or_else(|| anyhow!("this community's persona has no identity to listen as"))?;
         progress("Connecting to the mediator…");
-        didcomm::add_listener(&service, &spec).await?;
-        service
-            .wait_connected(&spec.id, CONNECT_WINDOW)
-            .await
-            .map_err(|e| anyhow!("the persona's mediator socket did not come up: {e}"))?;
+        headless::connect_persona(&service, config, &tdk, target.persona, CONNECT_WINDOW).await?;
 
         let atm = tdk
             .atm
@@ -478,7 +407,7 @@ async fn ask(
         openvtc_core::capabilities::sign_document(&mut doc, &keys.authentication.secret).await?;
         let tsp_mediator =
             openvtc_core::community_send::tsp_mediator_for(over_tsp, &target.vtc_did).await;
-        progress(&format!(
+        progress(format!(
             "Asking the community ({} over {})…",
             request.type_uri().trim_start_matches(git_ns::TYPE_PREFIX),
             if tsp_mediator.is_some() {
@@ -504,7 +433,7 @@ async fn ask(
         await_reply(&mut event_rx, &tdk, &target.vtc_did, &persona_did, &thid).await
     }
     .await;
-    shutdown(&service).await;
+    service.shutdown().await;
     result
 }
 
@@ -515,7 +444,7 @@ async fn await_reply(
     vtc_did: &str,
     persona_did: &str,
     thid: &str,
-) -> Result<(Value, Reply)> {
+) -> Result<Reply> {
     let deadline = tokio::time::Instant::now() + REPLY_WINDOW;
     // Why a reply on our thread was not taken, for the timeout message.
     let mut rejected: Option<String> = None;
@@ -558,7 +487,7 @@ async fn take_reply(
     vtc_did: &str,
     persona_did: &str,
     thid: &str,
-) -> Option<Result<(Value, Reply), String>> {
+) -> Option<Result<Reply, String>> {
     let opened = didcomm::open_didcomm_envelope(message);
     let message = opened.as_ref().unwrap_or(message);
     if !git_ns::is_reply_type(&message.typ) {
@@ -589,147 +518,11 @@ async fn take_reply(
     {
         return Some(Err(format!("signature or envelope check failed: {e}")));
     }
-    Some(Ok((doc.payload, reply)))
-}
-
-async fn shutdown(service: &Messaging) {
-    service.shutdown().await;
+    Some(Ok(reply))
 }
 
 fn did_part(did: &str) -> &str {
     did.split('#').next().unwrap_or(did)
-}
-
-/// [`git_ns::my_repos`] over a raw `git-ns/view` payload: the strongest right
-/// `me` holds on each repository, strongest first then by name.
-fn lenient_my_repos(payload: &Value, me: &str) -> Vec<Row> {
-    let str_of = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
-    let empty = Vec::new();
-    let rights = payload
-        .get("rights")
-        .and_then(Value::as_array)
-        .unwrap_or(&empty);
-    let mut out: Vec<Row> = payload
-        .get("repos")
-        .and_then(Value::as_array)
-        .unwrap_or(&empty)
-        .iter()
-        .filter_map(|repo| {
-            let resource = str_of(repo, "resource")?;
-            let mut best = repo
-                .get("owners")
-                .and_then(Value::as_array)
-                .is_some_and(|o| o.iter().any(|d| d.as_str() == Some(me)))
-                .then_some(GitRight::RepoOwn);
-            for r in rights
-                .iter()
-                .filter(|r| str_of(r, "subject").as_deref() == Some(me))
-            {
-                let (Some(right), Some(on)) = (
-                    str_of(r, "right").as_deref().and_then(GitRight::parse),
-                    str_of(r, "resource"),
-                ) else {
-                    continue;
-                };
-                if right == GitRight::RepoCreate || !git_ns::contains(&on, &resource) {
-                    continue;
-                }
-                best = best.max(Some(right));
-            }
-            let state = str_of(repo, "state").unwrap_or_else(|| "unknown".into());
-            let status = if state == "active" {
-                repo.pointer("/sync/state")
-                    .and_then(Value::as_str)
-                    .map_or(state.clone(), str::to_owned)
-            } else {
-                state
-            };
-            Some(Row {
-                resource,
-                right: best?,
-                status,
-            })
-        })
-        .collect();
-    out.sort_by(|a, b| {
-        b.right
-            .cmp(&a.right)
-            .then_with(|| a.resource.cmp(&b.resource))
-    });
-    out
-}
-
-// ****************************************************************************
-// Repository coordinates
-// ****************************************************************************
-
-/// [`RepoCoords::parse`], also taking a nested project path
-/// (`gitlab.com/group/sub/repo`), whose parts after the owner become `repo`.
-fn coords_of(resource: &str) -> Result<RepoCoords> {
-    if let Ok(c) = RepoCoords::parse(resource) {
-        return Ok(c);
-    }
-    let parts: Vec<&str> = resource.split('/').collect();
-    let refuse = || {
-        anyhow!(
-            "'{resource}' is not a repository openvtc will use on disk or on a command line \
-             (expected <forge>/<owner>/<repo>, the repo part possibly nested)"
-        )
-    };
-    let [host, owner, repo @ ..] = parts.as_slice() else {
-        return Err(refuse());
-    };
-    if repo.is_empty()
-        || repo.len() > MAX_REPO_PATH_SEGMENTS
-        || !valid_host(host)
-        || !valid_segment(owner)
-        || !repo.iter().all(|s| valid_segment(s))
-    {
-        return Err(refuse());
-    }
-    Ok(RepoCoords {
-        host: (*host).to_string(),
-        owner: (*owner).to_string(),
-        repo: repo.join("/"),
-    })
-}
-
-/// Lowercase DNS labels, at least two.
-fn valid_host(host: &str) -> bool {
-    let labels: Vec<&str> = host.split('.').collect();
-    host.len() <= 253
-        && labels.len() >= 2
-        && labels.iter().all(|l| {
-            !l.is_empty()
-                && l.len() <= 63
-                && !l.starts_with('-')
-                && !l.ends_with('-')
-                && l.chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        })
-}
-
-/// Never an option, never a path step.
-fn valid_segment(segment: &str) -> bool {
-    !segment.is_empty()
-        && segment.len() <= 255
-        && !segment.starts_with('-')
-        && !segment.starts_with('.')
-        && segment
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-}
-
-// ****************************************************************************
-// Output
-// ****************************************************************************
-
-fn progress(line: &str) {
-    eprintln!("{}", style(line).dim());
-}
-
-fn warn(line: &str) {
-    eprintln!("{}", style(line).themed(CLI_CAUTION));
 }
 
 #[cfg(test)]
@@ -737,8 +530,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use serde_json::json;
-    use std::path::Path;
 
     #[test]
     fn repos_subcommands_parse() {
@@ -775,34 +566,6 @@ mod tests {
     }
 
     #[test]
-    fn nested_project_paths_parse_and_bad_ones_are_refused() {
-        let c = coords_of("gitlab.com/group/sub/repo").unwrap();
-        assert_eq!(
-            (c.host.as_str(), c.owner.as_str(), c.repo.as_str()),
-            ("gitlab.com", "group", "sub/repo")
-        );
-        assert_eq!(c.resource(), "gitlab.com/group/sub/repo");
-        assert_eq!(
-            c.default_path(Path::new("/r")),
-            Path::new("/r/gitlab.com/group/sub/repo")
-        );
-        assert_eq!(
-            coords_of("github.com/acme/widgets").unwrap().repo,
-            "widgets"
-        );
-        for bad in [
-            "github.com/acme",
-            "gitlab.com/group//repo",
-            "gitlab.com/group/../repo",
-            "gitlab.com/group/sub/-x",
-            "gitlab.com/group/--upload-pack=x",
-            "localhost/group/repo",
-        ] {
-            assert!(coords_of(bad).is_err(), "{bad:?} should be refused");
-        }
-    }
-
-    #[test]
     fn a_community_is_picked_by_did_name_or_being_the_only_one() {
         let one = [("did:web:a", "Alpha")];
         assert_eq!(match_community(&one, None), Ok(0));
@@ -814,39 +577,5 @@ mod tests {
         let dup = [("did:web:a", "Same"), ("did:web:b", "Same")];
         assert!(match_community(&dup, Some("same")).is_err());
         assert!(match_community(&[], None).is_err());
-    }
-
-    #[test]
-    fn the_lenient_reading_matches_the_typed_rules() {
-        let me = "did:web:me";
-        let payload = json!({
-            "repos": [
-                {"resource": "gitlab.com/g/sub/a", "owners": [me], "state": "active",
-                 "sync": {"state": "inSync"}},
-                {"resource": "gitlab.com/g/sub/b", "owners": [], "state": "archived"},
-                {"resource": "gitlab.com/other/c", "owners": [], "state": "active"},
-            ],
-            "rights": [
-                {"subject": me, "right": "git.commit.sign", "resource": "gitlab.com/g"},
-                {"subject": me, "right": "git.repo.create", "resource": "gitlab.com/other"},
-                {"subject": "did:web:else", "right": "git.ns.admin", "resource": "gitlab.com/other"},
-            ],
-        });
-        let rows = lenient_my_repos(&payload, me);
-        assert_eq!(
-            rows,
-            vec![
-                Row {
-                    resource: "gitlab.com/g/sub/a".into(),
-                    right: GitRight::RepoOwn,
-                    status: "inSync".into()
-                },
-                Row {
-                    resource: "gitlab.com/g/sub/b".into(),
-                    right: GitRight::CommitSign,
-                    status: "archived".into()
-                },
-            ]
-        );
     }
 }

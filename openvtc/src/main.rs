@@ -31,6 +31,7 @@ mod cli;
 mod clipboard;
 mod colors;
 mod env_overrides;
+mod headless;
 mod health_cmd;
 mod holder_grant;
 mod repos_cmd;
@@ -587,37 +588,30 @@ async fn main() -> Result<()> {
         .await;
     }
 
-    if let Some(("signing", signing_args)) = matches.subcommand() {
-        return signing_cmd::run(signing_args, &profile, unlock_code_arg.as_ref()).await;
-    }
-
     // Check if profile is currently active elsewhere?
     let lock_file = check_duplicate_instance(&profile)?;
 
-    // `setup --vta-did …`: headless setup, no TUI.
-    if let Some(("setup", setup_args)) = matches.subcommand()
-        && setup_cmd::requested(setup_args)
-    {
-        let result = setup_cmd::run(setup_args, &profile).await;
-        remove_lock_file(&lock_file);
-        return result;
-    }
-
-    // `repos` opens the persona's mediator socket, so it holds the lock too.
-    if let Some(("repos", repos_args)) = matches.subcommand() {
-        let result = repos_cmd::run(repos_args, &profile, unlock_code_arg.as_ref()).await;
-        remove_lock_file(&lock_file);
-        return result;
-    }
-
-    // Headless join: holds the profile lock like the TUI, then runs to its verdict.
-    if let Some(("join", join_args)) = matches.subcommand() {
-        let result = match load_fast(&profile, unlock_code_arg.as_ref()) {
-            Ok(deferred) => {
-                state_handler::join_cmd::run(join_args, deferred, invitation_credential).await
-            }
-            Err(e) => Err(e.into()),
-        };
+    // Headless subcommands: no TUI, the profile lock held like the TUI holds it.
+    let headless = match matches.subcommand() {
+        Some(("setup", args)) if setup_cmd::requested(args) => {
+            Some(setup_cmd::run(args, &profile).await)
+        }
+        Some((name @ ("join" | "repos" | "signing"), args)) => {
+            Some(match load_fast(&profile, unlock_code_arg.as_ref()) {
+                Err(e) => Err(anyhow::anyhow!("{}", redact_paths(&e.to_string()))),
+                Ok(deferred) => match name {
+                    "join" => {
+                        state_handler::join_cmd::run(args, deferred, invitation_credential.clone())
+                            .await
+                    }
+                    "repos" => repos_cmd::run(args, deferred).await,
+                    _ => signing_cmd::run(args, deferred).await,
+                },
+            })
+        }
+        _ => None,
+    };
+    if let Some(result) = headless {
         remove_lock_file(&lock_file);
         return result;
     }

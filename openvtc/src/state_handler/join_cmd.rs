@@ -9,7 +9,6 @@
 use std::time::Duration;
 
 use affinidi_tdk::TDK;
-use affinidi_tdk::common::config::TDKConfig;
 use affinidi_tdk::didcomm::Message;
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
@@ -32,6 +31,8 @@ use tracing::{debug, warn};
 use vta_sdk::client::VtaClient;
 use vta_sdk::protocols::did_management::create::WebvhPathMode;
 
+use crate::headless::{self, Admin, progress, save, step};
+
 use super::main_page::shorten_did;
 use super::message_dispatch::{Arrival, InboundEffects, process_inbound_message};
 use super::{DeferredLoad, create_persona, join_flow, join_status_poll};
@@ -53,8 +54,8 @@ pub fn command() -> Command {
         .long_about(
             "Send a join request to a community and wait, headless, for an \
              administrator's verdict.\n\n\
-             With --invitation the invitation credential (VIC) is presented; without \
-             one this is an open request the community's moderators decide. The \
+             With --invitation (before or after `join`) the invitation credential \
+             (VIC) is presented; without one this is an open request the community's moderators decide. The \
              persona is --persona, else the only persona in the account, else a new \
              one (named by --new-persona). On admission the membership credentials \
              are stored and the account saved. Exits non-zero on rejection, timeout \
@@ -69,104 +70,38 @@ pub fn command() -> Command {
                 .long("persona")
                 .value_name("NAME")
                 .conflicts_with("new-persona")
-                .help("Join as this persona: its label, agent name or DID"),
+                .help("Join as this persona: its DID, label or agent name"),
             Arg::new("new-persona")
                 .long("new-persona")
                 .value_name("NAME")
                 .help("Create a new persona with this label and join as it"),
-            Arg::new("invitation")
-                .long("invitation")
-                .value_name("FILE")
-                .help("Present this invitation credential (VIC) JSON file"),
             Arg::new("wait")
                 .long("wait")
                 .value_name("DURATION")
                 .default_value("30m")
-                .value_parser(parse_wait)
+                .value_parser(headless::parse_wait)
                 .help("How long to wait for the verdict, e.g. 90s, 30m, 2h"),
         ])
 }
 
-/// Parse `90`, `90s`, `30m` or `2h` into a duration.
-fn parse_wait(raw: &str) -> Result<Duration, String> {
-    let raw = raw.trim();
-    let (digits, unit) = match raw.find(|c: char| !c.is_ascii_digit()) {
-        Some(i) => raw.split_at(i),
-        None => (raw, "s"),
-    };
-    let n: u64 = digits
-        .parse()
-        .map_err(|_| format!("`{raw}` is not a duration (try 90s, 30m or 2h)"))?;
-    let secs = match unit {
-        "s" => n,
-        "m" => n.saturating_mul(60),
-        "h" => n.saturating_mul(3600),
-        _ => return Err(format!("`{raw}`: unit must be s, m or h")),
-    };
-    if secs == 0 {
-        return Err("the wait must be longer than zero".to_string());
-    }
-    Ok(Duration::from_secs(secs))
-}
-
-/// A well-formed DID, or why not. Agent names are not resolved here.
-fn validate_vtc_did(raw: &str) -> Result<String> {
-    let did = raw.trim();
-    let ok = did
-        .strip_prefix("did:")
-        .and_then(|rest| rest.split_once(':'))
-        .is_some_and(|(method, id)| {
-            !method.is_empty()
-                && !id.is_empty()
-                && method
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        });
-    if !ok {
-        bail!("`{did}` is not a DID; pass the community's VTC DID (did:webvh:…)");
-    }
-    Ok(did.to_string())
-}
-
-fn progress(line: impl AsRef<str>) {
-    eprintln!("  {}", line.as_ref());
-}
-
-/// Run `openvtc join`. `global_vic` is the top-level `--invitation`, already
-/// verified by `main`.
-pub async fn run(
-    args: &ArgMatches,
-    deferred: DeferredLoad,
-    global_vic: Option<Value>,
-) -> Result<()> {
-    let vtc_did = validate_vtc_did(args.get_one::<String>("vtc").expect("required"))?;
+/// Run `openvtc join`. `vic` is the global `--invitation`, already verified
+/// by `main`.
+pub async fn run(args: &ArgMatches, deferred: DeferredLoad, vic: Option<Value>) -> Result<()> {
+    let vtc_did = args
+        .get_one::<String>("vtc")
+        .expect("required")
+        .trim()
+        .to_string();
     let wait = *args.get_one::<Duration>("wait").expect("defaulted");
-    let local_vic = match args.get_one::<String>("invitation") {
-        Some(path) => Some(read_vic(path)?),
-        None => None,
-    };
-    let local_vic_given = local_vic.is_some();
-    let vic = local_vic.or(global_vic);
     let profile = deferred.profile.clone();
 
-    eprintln!("Loading account `{profile}`…");
-    let (tdk, mut config, admin) = load(deferred).await?;
-    if local_vic_given && let Some(vic) = &vic {
-        openvtc_core::join::verify_invitation_credential(vic, tdk.did_resolver(), Utc::now())
-            .await
-            .map_err(|e| anyhow!("invitation: {e}"))?;
+    step(format!("Loading account `{profile}`"));
+    let (mut config, tdk, admin) = headless::load_account(deferred, Admin::Open).await?;
+    let admin = admin.context("no VTA session: joining needs the account's VTA")?;
+    if tdk.atm.is_none() {
+        bail!("messaging (ATM) is unavailable; cannot send a join request");
     }
-
-    let (event_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
-    // Shut down explicitly below; the token is never cancelled.
-    let messaging = openvtc_core::didcomm::start_empty_service(
-        event_tx,
-        tokio_util::sync::CancellationToken::new(),
-    );
-    messaging
-        .tsp_store()
-        .hydrate(&config.private.tsp_relationships)
-        .await;
+    let (messaging, mut events) = headless::start_messaging(&config).await;
 
     let job = Job {
         tdk: &tdk,
@@ -191,73 +126,6 @@ pub async fn run(
     result
 }
 
-fn read_vic(path: &str) -> Result<Value> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read invitation file `{path}`"))?;
-    serde_json::from_str(&raw).with_context(|| format!("invitation file `{path}` is not JSON"))
-}
-
-/// Decrypt the account and open the admin VTA session (as `main` does for
-/// `health`, but failing hard).
-async fn load(deferred: DeferredLoad) -> Result<(TDK, Config, VtaClient)> {
-    let mut tdk = TDK::new(
-        TDKConfig::builder()
-            .with_load_environment(false)
-            .build()
-            .map_err(|e| anyhow!("TDK config failed: {e}"))?,
-        None,
-    )
-    .await
-    .map_err(|e| anyhow!("TDK init failed: {e}"))?;
-
-    #[cfg(feature = "openpgp-card")]
-    struct TouchPrompt;
-    #[cfg(feature = "openpgp-card")]
-    impl openvtc_core::config::TokenInteractions for TouchPrompt {
-        fn touch_notify(&self) {
-            eprintln!("Touch your security token to continue…");
-        }
-        fn touch_completed(&self) {}
-    }
-    #[cfg(feature = "openpgp-card")]
-    let no_token_pin = secrecy::SecretString::new(String::new().into());
-
-    let (mut config, admin) = Config::load_step2(
-        &mut tdk,
-        &deferred.profile,
-        deferred.public_config,
-        deferred.unlock_passphrase.as_ref(),
-        #[cfg(feature = "openpgp-card")]
-        deferred.user_pin.as_ref().unwrap_or(&no_token_pin),
-        #[cfg(feature = "openpgp-card")]
-        &TouchPrompt,
-        None,
-    )
-    .await
-    .context("could not load the account")?;
-    let _ = crate::env_overrides::apply_env_overrides(&mut config);
-    let admin = match admin {
-        Some(admin) => admin,
-        None => openvtc_core::config::build_runtime_vta_client(&config.key_backend)
-            .await
-            .context("no VTA session: joining needs the account's VTA")?,
-    };
-    if tdk.atm.is_none() {
-        bail!("messaging (ATM) is unavailable; cannot send a join request");
-    }
-    Ok((tdk, config, admin))
-}
-
-fn save(config: &Config, profile: &str) -> Result<()> {
-    config
-        .save(
-            profile,
-            #[cfg(feature = "openpgp-card")]
-            &|| eprintln!("Touch confirmation needed for decryption"),
-        )
-        .context("failed to save the account")
-}
-
 /// What a join needs that does not change while it runs.
 struct Job<'a> {
     tdk: &'a TDK,
@@ -278,7 +146,7 @@ impl Job<'_> {
         wait: Duration,
     ) -> Result<()> {
         let vtc_did = self.vtc_did;
-        eprintln!("Reading {vtc_did}'s requirements…");
+        step(format!("Reading {vtc_did}'s requirements"));
         self.learn_requirements(config).await?;
 
         let persona_id = self
@@ -290,7 +158,7 @@ impl Job<'_> {
             .get(&persona_id)
             .map(|p| p.did.clone())
             .ok_or_else(|| anyhow!("the chosen persona is not in the account"))?;
-        eprintln!("Persona: {persona_did}");
+        step(format!("Persona {persona_did}"));
 
         let status = config
             .account
@@ -302,8 +170,8 @@ impl Job<'_> {
                 return Ok(());
             }
             Some(CommunityStatus::Pending { .. }) => {
-                eprintln!("A join request is already pending as this persona; waiting on it.");
-                self.start_listener(config, persona_id, &persona_did).await;
+                progress("a join request is already pending as this persona; waiting on it");
+                self.start_listener(config, persona_id).await;
             }
             // One record per (community, persona): a finished one would be
             // read in place of the new request's.
@@ -368,8 +236,7 @@ impl Job<'_> {
             return self.mint_persona(config, label).await;
         }
         if let Some(name) = persona_arg {
-            return find_persona(config, name)
-                .ok_or_else(|| anyhow!("no persona named `{name}` (label, agent name or DID)"));
+            return headless::find_persona(config, name);
         }
         if let Some(subject) = vic.and_then(openvtc_core::join::invitation_subject) {
             return config.account.persona_id_for_did(subject).ok_or_else(|| {
@@ -383,12 +250,12 @@ impl Job<'_> {
         match (ids.next(), ids.next()) {
             (Some(only), None) => Ok(only),
             (None, _) => {
-                eprintln!("No persona yet; creating one.");
+                progress("no persona yet; creating one");
                 self.mint_persona(config, DEFAULT_PERSONA_LABEL).await
             }
             (Some(_), Some(_)) => bail!(
-                "this account has several personas; choose one with --persona ({})",
-                persona_names(config).join(", ")
+                "this account has several personas; choose one with --persona. {}",
+                headless::persona_listing(config)
             ),
         }
     }
@@ -404,7 +271,7 @@ impl Job<'_> {
             bail!("no account context yet; finish setup before creating a persona");
         }
         let context_id = create_persona::auto_context(config, label).map_err(|e| anyhow!(e))?;
-        eprintln!("Creating persona “{label}” in {context_id}…");
+        step(format!("Creating persona “{label}” in {context_id}"));
         let inputs = create_persona::MintInputs::from_config(
             config,
             context_id,
@@ -428,33 +295,22 @@ impl Job<'_> {
         Ok(persona_id)
     }
 
-    /// Bring the persona's mediator socket up so the verdict is streamed.
-    async fn start_listener(&self, config: &Config, persona_id: PersonaId, did: &str) {
-        let listener_id = openvtc_core::didcomm::persona_listener_id(did);
-        if self.messaging.has_listener(&listener_id).await {
-            return;
-        }
-        let Some(spec) =
-            openvtc_core::didcomm::persona_listener_config_for(config, self.tdk, persona_id).await
-        else {
-            progress("no listener config for this persona; the reply is collected later");
-            return;
-        };
-        if let Err(e) = openvtc_core::didcomm::add_listener(self.messaging, &spec).await {
-            progress(format!(
-                "couldn't open the persona's mediator session ({e})"
-            ));
-            return;
-        }
-        match self
-            .messaging
-            .wait_connected(&listener_id, PERSONA_CONNECT_TIMEOUT)
-            .await
+    /// Bring the persona's mediator socket up so the verdict is streamed;
+    /// without it the status poll still collects the reply.
+    async fn start_listener(&self, config: &Config, persona_id: PersonaId) {
+        match headless::connect_persona(
+            self.messaging,
+            config,
+            self.tdk,
+            persona_id,
+            PERSONA_CONNECT_TIMEOUT,
+        )
+        .await
         {
             Ok(()) => progress("persona connected to its mediator"),
             Err(e) => {
-                debug!(error = %e, "persona not connected yet");
-                progress("persona's mediator session still connecting");
+                debug!(error = %e, "persona not connected");
+                progress(format!("{e}; the reply is collected by polling"));
             }
         }
     }
@@ -509,7 +365,7 @@ impl Job<'_> {
             ),
             None => bail!("the persona has no runtime identity; cannot send as it"),
         };
-        self.start_listener(config, persona_id, persona_did).await;
+        self.start_listener(config, persona_id).await;
 
         // The invitation, if any. Explicit, so a mismatch is an error rather
         // than the TUI's quiet fall-back to an open request.
@@ -638,7 +494,9 @@ impl Job<'_> {
             ),
         );
         save(config, self.profile)?;
-        eprintln!("Join request sent over {submit_transport} (request {request_id}).");
+        step(format!(
+            "Join request sent over {submit_transport} (request {request_id})"
+        ));
         Ok(())
     }
 
@@ -723,7 +581,7 @@ impl Job<'_> {
             }
         }
 
-        eprintln!("Admitted. Storing membership credentials at the VTA…");
+        step("Admitted. Storing membership credentials at the VTA");
         let report = openvtc_core::credential_sync::sync_membership_credentials(
             config,
             self.admin,
@@ -799,31 +657,6 @@ fn note_verdict(message: &Message) {
     }
 }
 
-/// A persona by label, verified agent name or DID.
-fn find_persona(config: &Config, name: &str) -> Option<PersonaId> {
-    config
-        .account
-        .personas
-        .values()
-        .find(|p| {
-            p.did == name
-                || p.label.as_deref() == Some(name)
-                || config.agent_name_for(&p.did) == Some(name)
-        })
-        .map(|p| p.persona_id)
-}
-
-fn persona_names(config: &Config) -> Vec<String> {
-    let mut names: Vec<String> = config
-        .account
-        .personas
-        .values()
-        .map(|p| p.label.clone().unwrap_or_else(|| p.did.clone()))
-        .collect();
-    names.sort();
-    names
-}
-
 enum NotLearned {
     Unresolvable(String),
     Unanswered(String),
@@ -878,27 +711,6 @@ async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wait_durations_parse() {
-        assert_eq!(parse_wait("90"), Ok(Duration::from_secs(90)));
-        assert_eq!(parse_wait("90s"), Ok(Duration::from_secs(90)));
-        assert_eq!(parse_wait("30m"), Ok(Duration::from_secs(1800)));
-        assert_eq!(parse_wait("2h"), Ok(Duration::from_secs(7200)));
-        assert!(parse_wait("0").is_err());
-        assert!(parse_wait("5d").is_err());
-        assert!(parse_wait("m").is_err());
-        assert!(parse_wait("").is_err());
-    }
-
-    #[test]
-    fn only_dids_are_accepted() {
-        assert!(validate_vtc_did("did:webvh:abc:example.com").is_ok());
-        assert!(validate_vtc_did(" did:key:z6Mk ").is_ok());
-        assert!(validate_vtc_did("example.com/@acme").is_err());
-        assert!(validate_vtc_did("did:").is_err());
-        assert!(validate_vtc_did("did:Web:x").is_err());
-    }
 
     #[test]
     fn join_command_parses() {

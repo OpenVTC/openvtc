@@ -137,6 +137,14 @@ impl RepoCoords {
                 && path.eq_ignore_ascii_case(&format!("{}/{}", self.owner, self.repo))
         })
     }
+
+    /// The repository a remote URL names, in the forms [`Self::matches_remote`]
+    /// accepts; `None` when it names none openvtc would use.
+    #[must_use]
+    pub fn from_remote(url: &str) -> Option<Self> {
+        let (host, path) = remote_coords(url)?;
+        Self::parse(&format!("{}/{path}", host.to_ascii_lowercase())).ok()
+    }
 }
 
 /// A remote URL as `(host, owner/repo)`, with any `.git` and trailing slash gone.
@@ -988,6 +996,27 @@ mod tests {
         ] {
             assert!(RepoCoords::parse(bad).is_err(), "{bad:?} should be refused");
         }
+    }
+
+    #[test]
+    fn a_remote_names_its_repository() {
+        for url in [
+            "https://github.com/acme/widgets.git",
+            "https://user@GitHub.com/acme/widgets/",
+            "ssh://git@github.com:22/acme/widgets.git",
+            "git@github.com:acme/widgets.git",
+        ] {
+            assert_eq!(
+                RepoCoords::from_remote(url)
+                    .map(|c| c.resource())
+                    .as_deref(),
+                Some("github.com/acme/widgets"),
+                "{url}"
+            );
+        }
+        assert!(RepoCoords::from_remote("/srv/git/widgets").is_none());
+        assert!(RepoCoords::from_remote("file:///srv/acme/widgets").is_none());
+        assert!(RepoCoords::from_remote("https://github.com/acme").is_none());
     }
 
     #[test]

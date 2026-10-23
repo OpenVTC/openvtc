@@ -51,6 +51,7 @@ pub fn cli() -> Command {
             Arg::new("invitation")
                 .long("invitation")
                 .value_name("FILE")
+                .global(true)
                 .help(
                     "Path to a Verifiable Invitation Credential (VIC) JSON file \
                      to present when joining a community. The community verifies \

@@ -6,7 +6,9 @@
  * create the State-A account, then re-load it to prove it was saved.
  */
 
+use crate::headless::{self, Admin, progress, step, warn};
 use crate::state_handler::{
+    DeferredLoad,
     setup_sequence::{
         Completion, ConfigProtection, MessageType,
         config::ConfigExtension,
@@ -26,11 +28,9 @@ use secrecy::SecretBox;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
-use vta_sdk::provision_client::Protocol;
 
 /// The wizard's default context id (`vta_acl_instructions.rs`).
 const DEFAULT_CONTEXT_ID: &str = "openvtc";
-const DEFAULT_WAIT: &str = "30m";
 /// Pause between provisioning attempts while the grant is missing: starts
 /// short, doubles, capped.
 const POLL_FIRST: Duration = Duration::from_secs(5);
@@ -62,21 +62,12 @@ pub fn args() -> Vec<Arg> {
             .requires("vta-did")
             .default_value(DEFAULT_CONTEXT_ID)
             .help("Headless setup: the VTA Trust Context to provision into"),
-        Arg::new("transport")
-            .long("transport")
-            .value_name("TRANSPORT")
-            .requires("vta-did")
-            .value_parser(["auto", "tsp", "didcomm", "rest"])
-            .default_value("auto")
-            .help(
-                "Headless setup: force one transport the VTA advertises instead of \
-                 the automatic TSP > DIDComm > REST choice",
-            ),
         Arg::new("wait")
             .long("wait")
             .value_name("DURATION")
             .requires("vta-did")
-            .default_value(DEFAULT_WAIT)
+            .default_value("30m")
+            .value_parser(headless::parse_wait)
             .help(
                 "Headless setup: how long to wait for the VTA grant, e.g. 90s, \
                  30m, 1h (the grant itself lasts 1h)",
@@ -86,7 +77,7 @@ pub fn args() -> Vec<Arg> {
 
 /// True when `setup` was given the headless flags.
 pub fn requested(args: &ArgMatches) -> bool {
-    args.contains_id("vta-did") && args.get_one::<String>("vta-did").is_some()
+    args.get_one::<String>("vta-did").is_some()
 }
 
 /// Run the headless setup. The caller holds the profile lock.
@@ -96,20 +87,15 @@ pub async fn run(args: &ArgMatches, profile: &str) -> Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .context("--vta-did is empty")?;
-    let context_id = context_or_default(args.get_one::<String>("context").map(String::as_str));
-    let transport = parse_transport(
-        args.get_one::<String>("transport")
-            .map(String::as_str)
-            .unwrap_or("auto"),
-    )?;
-    let wait = parse_wait(
-        args.get_one::<String>("wait")
-            .map(String::as_str)
-            .unwrap_or(DEFAULT_WAIT),
-    )?;
+    let context_id = args
+        .get_one::<String>("context")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .context("--context is empty")?;
+    let wait = *args.get_one::<Duration>("wait").expect("defaulted");
     let unlock_path = args
         .get_one::<String>("unlock-code-file")
-        .context("--unlock-code-file is required with --vta-did")?;
+        .expect("required with --vta-did");
 
     refuse_existing_profile(profile)?;
 
@@ -129,7 +115,7 @@ pub async fn run(args: &ArgMatches, profile: &str) -> Result<()> {
     let (state_tx, _) = watch::channel(State::default());
 
     // 2. Resolve the VTA and mint the setup DID.
-    step("Resolving VTA", &vta_did);
+    step(format!("Resolving VTA {vta_did}"));
     setup_vta_actions::handle_vta_submit_did(&mut state, &state_tx, vta_did.clone()).await?;
     print_messages(&state.setup.vta.messages);
     if !matches!(state.setup.vta.completed, Completion::CompletedOK) {
@@ -159,10 +145,7 @@ pub async fn run(args: &ArgMatches, profile: &str) -> Result<()> {
     println!();
 
     // 4. Poll provisioning until the grant appears (the wizard's step-2 retry).
-    step(
-        "Waiting for the grant",
-        &format!("up to {}", format_wait(wait)),
-    );
+    step(format!("Waiting up to {}s for the grant", wait.as_secs()));
     let deadline = Instant::now() + wait;
     let mut pause = POLL_FIRST;
     let client = loop {
@@ -171,7 +154,7 @@ pub async fn run(args: &ArgMatches, profile: &str) -> Result<()> {
             &mut state,
             &state_tx,
             context_id.clone(),
-            transport,
+            None,
         )
         .await?;
         if let Some(client) = attempt {
@@ -183,9 +166,9 @@ pub async fn run(args: &ArgMatches, profile: &str) -> Result<()> {
                 if Instant::now() + pause > deadline {
                     print_messages(&state.setup.vta.messages);
                     bail!(
-                        "timed out after {} waiting for the VTA grant. Re-run `openvtc setup \
+                        "timed out after {}s waiting for the VTA grant. Re-run `openvtc setup \
                          --vta-did …` — a new setup DID is minted, so the admin must grant that one.",
-                        format_wait(wait)
+                        wait.as_secs()
                     );
                 }
                 let why = if failure == ProvisionFailure::Unreachable {
@@ -193,7 +176,7 @@ pub async fn run(args: &ArgMatches, profile: &str) -> Result<()> {
                 } else {
                     "not granted yet"
                 };
-                eprintln!("  … {why}; retrying in {}s", pause.as_secs());
+                progress(format!("{why}; retrying in {}s", pause.as_secs()));
                 tokio::time::sleep(pause).await;
                 pause = (pause * 2).min(POLL_MAX);
             }
@@ -225,14 +208,14 @@ pub async fn run(args: &ArgMatches, profile: &str) -> Result<()> {
 
     // The account is State A: VTA admin + top-level context. A persona is
     // minted later by the join flow, as in the wizard.
-    step("Saving account", profile);
-    eprintln!("  Your OS may ask to allow access to its secure storage.");
+    step(format!("Saving account `{profile}`"));
+    progress("Your OS may ask to allow access to its secure storage.");
     let created = Config::create_account(&state.setup, profile).await;
     client.shutdown().await;
     created.context("couldn't create the OpenVTC account")?;
 
     // 6. Prove it was saved: load it back the way the app does.
-    step("Verifying saved account", profile);
+    step("Verifying the saved account");
     let loaded = reload(profile, &passphrase).await?;
     let admin_did = state
         .setup
@@ -279,104 +262,27 @@ fn refuse_existing_profile(profile: &str) -> Result<()> {
     }
 }
 
-/// Load the account back exactly as startup does (public config, secured
-/// config, then the full account).
+/// Load the account back exactly as startup does.
 async fn reload(profile: &str, passphrase: &str) -> Result<Config> {
-    let public_config = Config::load_step1(profile).context("saved account not found")?;
-    let unlock = UnlockCode::from_string(passphrase)?;
-    let mut tdk = affinidi_tdk::TDK::new(
-        affinidi_tdk::common::config::TDKConfig::builder()
-            .with_load_environment(false)
-            .build()?,
-        None,
-    )
-    .await?;
-
-    #[cfg(feature = "openpgp-card")]
-    struct NoToken;
-    #[cfg(feature = "openpgp-card")]
-    impl openvtc_core::config::TokenInteractions for NoToken {
-        fn touch_notify(&self) {}
-        fn touch_completed(&self) {}
-    }
-    #[cfg(feature = "openpgp-card")]
-    let no_token_pin = secrecy::SecretString::new(String::new().into());
-
-    let (config, session) = Config::load_step2(
-        &mut tdk,
-        profile,
-        public_config,
-        Some(&unlock),
+    let deferred = DeferredLoad {
+        profile: profile.to_string(),
+        public_config: Config::load_step1(profile).context("saved account not found")?,
+        unlock_passphrase: Some(UnlockCode::from_string(passphrase)?),
         #[cfg(feature = "openpgp-card")]
-        &no_token_pin,
-        #[cfg(feature = "openpgp-card")]
-        &NoToken,
-        None,
-    )
-    .await
-    .context("the saved account could not be loaded back")?;
-    if let Some(session) = session {
-        session.shutdown().await;
-    }
+        user_pin: None,
+    };
+    let (config, _, _) = headless::load_account(deferred, Admin::Drop)
+        .await
+        .context("the saved account could not be loaded back")?;
     Ok(config)
-}
-
-fn step(what: &str, detail: &str) {
-    eprintln!("==> {what}: {detail}");
 }
 
 fn print_messages(messages: &[MessageType]) {
     for m in messages {
         match m {
-            MessageType::Info(s) => eprintln!("  {s}"),
-            MessageType::Error(s) => eprintln!("  error: {s}"),
+            MessageType::Info(s) => progress(s),
+            MessageType::Error(s) => warn(s),
         }
-    }
-}
-
-fn context_or_default(raw: Option<&str>) -> String {
-    match raw.map(str::trim) {
-        Some(s) if !s.is_empty() => s.to_string(),
-        _ => DEFAULT_CONTEXT_ID.to_string(),
-    }
-}
-
-fn parse_transport(raw: &str) -> Result<Option<Protocol>> {
-    Ok(match raw {
-        "auto" => None,
-        "tsp" => Some(Protocol::Tsp),
-        "didcomm" => Some(Protocol::DidComm),
-        "rest" => Some(Protocol::Rest),
-        other => bail!("unknown transport `{other}` (auto, tsp, didcomm, rest)"),
-    })
-}
-
-/// `90`, `90s`, `30m`, `1h`.
-fn parse_wait(raw: &str) -> Result<Duration> {
-    let raw = raw.trim();
-    let (num, mult) = match raw.char_indices().last() {
-        Some((i, 's')) => (&raw[..i], 1),
-        Some((i, 'm')) => (&raw[..i], 60),
-        Some((i, 'h')) => (&raw[..i], 3600),
-        _ => (raw, 1),
-    };
-    let n: u64 = num
-        .trim()
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid --wait `{raw}` (use e.g. 90s, 30m, 1h)"))?;
-    let secs = n
-        .checked_mul(mult)
-        .filter(|s| *s > 0)
-        .ok_or_else(|| anyhow::anyhow!("invalid --wait `{raw}`"))?;
-    Ok(Duration::from_secs(secs))
-}
-
-fn format_wait(d: Duration) -> String {
-    let s = d.as_secs();
-    match s {
-        s if s % 3600 == 0 => format!("{}h", s / 3600),
-        s if s % 60 == 0 => format!("{}m", s / 60),
-        s => format!("{s}s"),
     }
 }
 
@@ -399,42 +305,6 @@ fn grant_existing_context(setup_did: &str, ctx: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wait_parses_units() {
-        assert_eq!(parse_wait("90").unwrap(), Duration::from_secs(90));
-        assert_eq!(parse_wait("90s").unwrap(), Duration::from_secs(90));
-        assert_eq!(parse_wait("30m").unwrap(), Duration::from_secs(1800));
-        assert_eq!(parse_wait(" 1h ").unwrap(), Duration::from_secs(3600));
-        assert!(parse_wait("").is_err());
-        assert!(parse_wait("0m").is_err());
-        assert!(parse_wait("m").is_err());
-        assert!(parse_wait("5d").is_err());
-        assert!(parse_wait("-1m").is_err());
-    }
-
-    #[test]
-    fn wait_formats_back() {
-        assert_eq!(format_wait(Duration::from_secs(1800)), "30m");
-        assert_eq!(format_wait(Duration::from_secs(7200)), "2h");
-        assert_eq!(format_wait(Duration::from_secs(90)), "90s");
-    }
-
-    #[test]
-    fn context_defaults_like_the_wizard() {
-        assert_eq!(context_or_default(None), "openvtc");
-        assert_eq!(context_or_default(Some("  ")), "openvtc");
-        assert_eq!(context_or_default(Some(" my-ctx ")), "my-ctx");
-    }
-
-    #[test]
-    fn transport_choices() {
-        assert_eq!(parse_transport("auto").unwrap(), None);
-        assert_eq!(parse_transport("tsp").unwrap(), Some(Protocol::Tsp));
-        assert_eq!(parse_transport("didcomm").unwrap(), Some(Protocol::DidComm));
-        assert_eq!(parse_transport("rest").unwrap(), Some(Protocol::Rest));
-        assert!(parse_transport("ws").is_err());
-    }
 
     #[test]
     fn grant_commands_match_the_wizard() {
@@ -465,7 +335,10 @@ mod tests {
         let (_, setup) = m.subcommand().expect("setup");
         assert!(requested(setup));
         assert_eq!(setup.get_one::<String>("context").unwrap(), "openvtc");
-        assert_eq!(setup.get_one::<String>("wait").unwrap(), "30m");
+        assert_eq!(
+            setup.get_one::<Duration>("wait"),
+            Some(&Duration::from_secs(1800))
+        );
 
         let m = crate::cli::cli()
             .try_get_matches_from(["openvtc", "setup"])
