@@ -96,7 +96,7 @@ pub async fn run(args: &ArgMatches, deferred: DeferredLoad, vic: Option<Value>) 
     let (mut config, tdk, admin) = headless::load_account(deferred, Admin::Open).await?;
     let admin = admin.context("no VTA session: joining needs the account's VTA")?;
     if tdk.atm.is_none() {
-        bail!("messaging (ATM) is unavailable; cannot send a join request");
+        bail!("messaging is unavailable, so the join request cannot be sent");
     }
     let (messaging, mut events) = headless::start_messaging(&config).await;
 
@@ -353,7 +353,7 @@ impl Job<'_> {
         match community_context::ensure_context(admin, &top, &context_id, &context_name).await {
             Ok(true) => progress(format!("created context {context_id}")),
             Ok(false) => progress(format!("using context {context_id}")),
-            Err(e) => bail!("could not prepare context {context_id}: {e}"),
+            Err(e) => bail!("couldn't prepare context {context_id}: {e}"),
         }
 
         let (profile, mediator) = match config.identities.get(&persona_id) {
@@ -361,7 +361,7 @@ impl Job<'_> {
                 ident.profile().clone(),
                 ident.mediator_did.clone().unwrap_or_default(),
             ),
-            None => bail!("the persona has no runtime identity; cannot send as it"),
+            None => bail!("the persona has no messaging identity"),
         };
         self.start_listener(config, persona_id).await;
 

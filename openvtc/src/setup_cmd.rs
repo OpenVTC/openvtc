@@ -119,7 +119,7 @@ pub async fn run(args: &ArgMatches, profile: &str) -> Result<()> {
     setup_vta_actions::handle_vta_submit_did(&mut state, &state_tx, vta_did.clone()).await?;
     print_messages(&state.setup.vta.messages);
     if !matches!(state.setup.vta.completed, Completion::CompletedOK) {
-        bail!("could not resolve the VTA or mint a setup DID");
+        bail!("couldn't resolve the VTA or mint a setup DID");
     }
     let setup_did = state
         .setup

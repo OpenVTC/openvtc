@@ -248,7 +248,7 @@ fn pick<'a>(config: &'a Config, wanted: Option<&str>) -> Result<Target<'a>> {
     let id = config
         .identities
         .get(&m.persona)
-        .ok_or_else(|| anyhow!("this community's persona has no messaging identity"))?;
+        .ok_or_else(|| anyhow!("the persona has no messaging identity"))?;
     progress(format!("Community: {} ({})", m.label, m.vtc_did));
     Ok(Target {
         vtc_did: m.vtc_did,
@@ -338,7 +338,7 @@ async fn ask(
         let atm = tdk
             .atm
             .as_ref()
-            .ok_or_else(|| anyhow!("messaging is unavailable"))?;
+            .ok_or_else(|| anyhow!("messaging is unavailable, so the request cannot be sent"))?;
         let keys = config
             .get_persona_keys_for(target.persona, &tdk)
             .await
