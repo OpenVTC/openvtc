@@ -19,11 +19,9 @@ use openvtc_core::config::{
     community_context,
 };
 use openvtc_core::didcomm::{DIDCommEvent, Messaging, MessagingTransport};
-use openvtc_core::health::ProbePolicy;
 use openvtc_core::logs::LogFamily;
 use openvtc_core::messaging::SeenMessages;
 use openvtc_core::vetting::disclosure::DirectoryStatement;
-use openvtc_core::vetting::discover;
 use openvtc_core::vetting::protocol::JoinProtocol;
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -38,7 +36,6 @@ use super::message_dispatch::{Arrival, InboundEffects, process_inbound_message};
 use super::{DeferredLoad, create_persona, join_flow, join_status_poll};
 
 /// Bound on resolving the community's DID (same as the TUI's).
-const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the submit waits for the persona's mediator socket.
 const PERSONA_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// First status poll after the submit, then how often the pacer is asked.
@@ -190,11 +187,12 @@ impl Job<'_> {
     /// Read the manifest over HTTP and refuse what this command cannot answer.
     async fn learn_requirements(&self, config: &mut Config) -> Result<()> {
         let vtc_did = self.vtc_did;
-        match learn_over_http(config, self.tdk, vtc_did).await {
+        match join_flow::learn_over_http(config, self.tdk, vtc_did).await {
             Ok(()) => {}
-            Err(NotLearned::Unresolvable(why)) => bail!("{vtc_did}: {why}"),
-            Err(NotLearned::Unanswered(why)) => progress(format!(
-                "requirements not read ({why}); continuing without them"
+            Err(e) if !e.resolvable() => bail!("{vtc_did}: {}", e.reason()),
+            Err(e) => progress(format!(
+                "requirements not read ({}); continuing without them",
+                e.reason()
             )),
         }
         if let Some(DirectoryStatement::Malformed(why)) = config.private.vetting.directory(vtc_did)
@@ -655,57 +653,6 @@ fn note_verdict(message: &Message) {
             openvtc_core::messaging::describe_join_needs(&needs, false)
         ));
     }
-}
-
-enum NotLearned {
-    Unresolvable(String),
-    Unanswered(String),
-}
-
-/// `join_flow::learn_over_http`, minus the UI: resolve the community, fetch
-/// its manifest, and record what it asks.
-async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Result<(), NotLearned> {
-    let resolver = tdk.did_resolver();
-    let resolved = tokio::time::timeout(RESOLVE_TIMEOUT, resolver.resolve(vtc_did))
-        .await
-        .map_err(|_| {
-            NotLearned::Unanswered(format!(
-                "not resolved within {}s",
-                RESOLVE_TIMEOUT.as_secs()
-            ))
-        })?
-        .map_err(|e| NotLearned::Unresolvable(format!("could not be resolved ({e})")))?;
-    let doc = serde_json::to_value(&resolved.doc)
-        .map_err(|e| NotLearned::Unanswered(format!("DID document unreadable ({e})")))?;
-    let discover::FetchedManifest {
-        manifest,
-        raw,
-        protocol,
-        meta,
-    } = discover::fetch_manifest(&doc, vtc_did, resolver, ProbePolicy::PublicOnly)
-        .await
-        .map_err(|e| NotLearned::Unanswered(e.to_string()))?;
-
-    let now = Utc::now();
-    let book = &mut config.private.vetting;
-    let before = book.vetter_mode(vtc_did).mode();
-    book.learn_manifest_in(vtc_did, &manifest, Some(protocol), &meta, now);
-    book.learn_directory(vtc_did, &raw);
-    book.learn_mode(vtc_did, &raw, before, now);
-    book.note_post_quantum_key(
-        vtc_did,
-        openvtc_core::proof_check::publishes_post_quantum_key(&resolved.doc),
-    );
-    for application in book
-        .applications
-        .iter_mut()
-        .filter(|a| a.community == vtc_did)
-    {
-        if let Err(e) = application.adopt_manifest(&manifest, &raw) {
-            warn!(community = %vtc_did, error = %e, "community manifest not adopted");
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
