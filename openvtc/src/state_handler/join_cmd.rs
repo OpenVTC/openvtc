@@ -14,14 +14,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use clap::{Arg, ArgMatches, Command};
 use openvtc_core::config::{
-    Config, PeerTransports,
+    Config, PeerTransports, PersonaDIDKeys,
     account::{CommunityRecord, CommunityStatus, PersonaId},
     community_context,
 };
 use openvtc_core::didcomm::{DIDCommEvent, Messaging, MessagingTransport};
 use openvtc_core::logs::LogFamily;
 use openvtc_core::messaging::SeenMessages;
-use openvtc_core::vetting::disclosure::DirectoryStatement;
+use openvtc_core::vetting::disclosure::{Describe, DirectoryStatement};
 use openvtc_core::vetting::protocol::JoinProtocol;
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -31,7 +31,7 @@ use vta_sdk::protocols::did_management::create::WebvhPathMode;
 
 use crate::headless::{self, Admin, progress, save, step};
 
-use super::main_page::shorten_did;
+use super::main_page::{sanitize_display, shorten_did};
 use super::message_dispatch::{Arrival, InboundEffects, process_inbound_message};
 use super::{DeferredLoad, create_persona, join_flow, join_status_poll};
 
@@ -55,8 +55,10 @@ pub fn command() -> Command {
              (VIC) is presented; without one this is an open request the community's moderators decide. The \
              persona is --persona, else the only persona in the account, else a new \
              one (named by --new-persona). On admission the membership credentials \
-             are stored and the account saved. Exits non-zero on rejection, timeout \
-             or any failure.",
+             are stored and the account saved. A community that publishes what its \
+             member directory shows about members has it printed first; the request \
+             is only sent with --accept-directory naming that statement's digest. \
+             Exits non-zero on rejection, timeout or any failure.",
         )
         .args([
             Arg::new("vtc")
@@ -72,6 +74,13 @@ pub fn command() -> Command {
                 .long("new-persona")
                 .value_name("NAME")
                 .help("Create a new persona with this label and join as it"),
+            Arg::new("accept-directory")
+                .long("accept-directory")
+                .value_name("DIGEST")
+                .help(
+                    "Accept the community's member-directory statement with this digest \
+                     (printed when it is needed)",
+                ),
             Arg::new("wait")
                 .long("wait")
                 .value_name("DURATION")
@@ -114,6 +123,8 @@ pub async fn run(args: &ArgMatches, deferred: DeferredLoad, vic: Option<Value>) 
             vic,
             args.get_one::<String>("persona").map(String::as_str),
             args.get_one::<String>("new-persona").map(String::as_str),
+            args.get_one::<String>("accept-directory")
+                .map(String::as_str),
             wait,
         )
         .await;
@@ -133,6 +144,7 @@ struct Job<'a> {
 }
 
 impl Job<'_> {
+    #[allow(clippy::too_many_arguments)]
     async fn join(
         &self,
         config: &mut Config,
@@ -140,43 +152,94 @@ impl Job<'_> {
         vic: Option<Value>,
         persona_arg: Option<&str>,
         new_persona: Option<&str>,
+        accepted_directory: Option<&str>,
         wait: Duration,
     ) -> Result<()> {
         let vtc_did = self.vtc_did;
         step(format!("Reading {vtc_did}'s requirements"));
         self.learn_requirements(config).await?;
 
-        let persona_id = self
-            .pick_persona(config, vic.as_ref(), persona_arg, new_persona)
-            .await?;
-        let persona_did = config
-            .account
-            .personas
-            .get(&persona_id)
-            .map(|p| p.did.clone())
-            .ok_or_else(|| anyhow!("the chosen persona is not in the account"))?;
+        let pick = self.pick_persona(config, vic.as_ref(), persona_arg, new_persona)?;
+        if let Pick::Existing(persona_id) = pick {
+            let persona_did = persona_did(config, persona_id)?;
+            let status = config
+                .account
+                .membership(vtc_did, persona_id)
+                .map(|r| r.status.clone());
+            match status {
+                Some(CommunityStatus::Active) => {
+                    println!("membership: Active (already a member of {vtc_did} as {persona_did})");
+                    return Ok(());
+                }
+                Some(CommunityStatus::Pending { .. }) => {
+                    step(format!("Persona {persona_did}"));
+                    progress("a join request is already pending as this persona; waiting on it");
+                    self.start_listener(config, persona_id).await;
+                    println!("waiting for an administrator to admit {persona_did}");
+                    return self
+                        .wait_for_verdict(config, events, persona_id, &persona_did, wait)
+                        .await;
+                }
+                // One record per (community, persona): a finished one would be
+                // read in place of the new request's.
+                Some(other) => bail!(
+                    "this persona's earlier membership of {vtc_did} is {other:?}; join as \
+                     another persona (--new-persona <name>)"
+                ),
+                None => {}
+            }
+        }
+
+        // A request goes out from here. What would stop it is checked before a
+        // persona is minted for it, as the TUI's join does.
+        let transports = openvtc_core::config::peer_messaging_transports(vtc_did).await;
+        let Some(preferred) = transports.preferred() else {
+            bail!("the community advertises no messaging transport (neither TSP nor DIDComm)");
+        };
+        progress(format!("community reachable over {preferred}"));
+        let directory_digest = self.accept_directory(config, accepted_directory)?;
+
+        let (persona_id, minted) = match pick {
+            Pick::Existing(persona_id) => (persona_id, None),
+            Pick::New(label) => {
+                let prior_friendly_name = config.public.friendly_name.clone();
+                let (persona_id, keys) = self.mint_persona(config, &label).await?;
+                (persona_id, Some((keys, prior_friendly_name)))
+            }
+        };
+        let persona_did = persona_did(config, persona_id)?;
         step(format!("Persona {persona_did}"));
 
-        let status = config
-            .account
-            .membership(vtc_did, persona_id)
-            .map(|r| r.status.clone());
-        match status {
-            Some(CommunityStatus::Active) => {
-                println!("membership: Active (already a member of {vtc_did} as {persona_did})");
-                return Ok(());
+        let submitted = self
+            .submit(
+                config,
+                persona_id,
+                &persona_did,
+                vic,
+                &transports,
+                directory_digest,
+            )
+            .await;
+        if let Err(e) = submitted {
+            // A persona minted for this join and left unreferenced by a
+            // membership is taken back out, as `rollback_minted_persona` does.
+            if let Some((keys, prior_friendly_name)) = minted
+                && config.account.membership(vtc_did, persona_id).is_none()
+            {
+                join_flow::forget_minted_persona(
+                    config,
+                    persona_id,
+                    keys.as_ref(),
+                    &prior_friendly_name,
+                );
+                match save(config, self.profile) {
+                    Ok(()) => progress(format!(
+                        "persona {persona_did}, created for this join, was removed from the account"
+                    )),
+                    Err(se) => warn!(error = %se, "persona rollback not saved"),
+                }
             }
-            Some(CommunityStatus::Pending { .. }) => {
-                progress("a join request is already pending as this persona; waiting on it");
-                self.start_listener(config, persona_id).await;
-            }
-            // One record per (community, persona): a finished one would be
-            // read in place of the new request's.
-            Some(other) => bail!(
-                "this persona's earlier membership of {vtc_did} is {other:?}; join as another \
-                 persona (--new-persona <name>)"
-            ),
-            None => self.submit(config, persona_id, &persona_did, vic).await?,
+            return Err(e);
         }
 
         println!("waiting for an administrator to admit {persona_did}");
@@ -194,13 +257,6 @@ impl Job<'_> {
                 "requirements not read ({}); continuing without them",
                 e.reason()
             )),
-        }
-        if let Some(DirectoryStatement::Malformed(why)) = config.private.vetting.directory(vtc_did)
-        {
-            bail!(
-                "the community's member-directory statement could not be read ({why}); \
-                 nothing was sent"
-            );
         }
         let asked = config.private.vetting.requested_attributes(vtc_did);
         let required: Vec<&str> = asked
@@ -221,35 +277,73 @@ impl Job<'_> {
         Ok(())
     }
 
-    /// `--persona`, else the invitation's subject, else the only persona, else
-    /// a new one.
-    async fn pick_persona(
+    /// The community's member-directory statement (`manifest/0.4`), printed
+    /// before anything is sent. The request goes out only when `accepted`
+    /// names the statement's digest, which is returned to be kept with the
+    /// join so a later change to the terms can be told apart.
+    fn accept_directory(&self, config: &Config, accepted: Option<&str>) -> Result<Option<String>> {
+        let vtc_did = self.vtc_did;
+        let stated = match config.private.vetting.directory(vtc_did) {
+            None => return Ok(None),
+            Some(DirectoryStatement::Malformed(why)) => bail!(
+                "the community's member-directory statement could not be read ({}); \
+                 nothing was sent",
+                sanitize_display(why, 200)
+            ),
+            Some(DirectoryStatement::Stated(d)) => d,
+        };
+        let digest = stated.statement_digest.to_string();
+        println!("If you join, {vtc_did}'s member directory would show about you:");
+        for line in stated.describe(|label| sanitize_display(label, 64)) {
+            println!("  {line}");
+        }
+        println!("statement digest: {digest}");
+        match accepted {
+            Some(given) if given.trim() == digest => Ok(Some(digest)),
+            Some(_) => bail!(
+                "--accept-directory names another statement than the one above; read it and \
+                 pass its digest. Nothing was sent"
+            ),
+            None => bail!(
+                "joining is offered only once the statement above is accepted: run again with \
+                 --accept-directory {digest}. Nothing was sent"
+            ),
+        }
+    }
+
+    /// `--new-persona`, `--persona`, else the invitation's subject, else the
+    /// only persona, else a new one. Nothing is minted here.
+    fn pick_persona(
         &self,
-        config: &mut Config,
+        config: &Config,
         vic: Option<&Value>,
         persona_arg: Option<&str>,
         new_persona: Option<&str>,
-    ) -> Result<PersonaId> {
+    ) -> Result<Pick> {
         if let Some(label) = new_persona {
-            return self.mint_persona(config, label).await;
+            return Ok(Pick::New(label.to_string()));
         }
         if let Some(name) = persona_arg {
-            return headless::find_persona(config, name);
+            return headless::find_persona(config, name).map(Pick::Existing);
         }
         if let Some(subject) = vic.and_then(openvtc_core::join::invitation_subject) {
-            return config.account.persona_id_for_did(subject).ok_or_else(|| {
-                anyhow!(
-                    "the invitation names {subject}, which is not one of your personas; \
-                     only that DID can present it"
-                )
-            });
+            return config
+                .account
+                .persona_id_for_did(subject)
+                .map(Pick::Existing)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "the invitation names {subject}, which is not one of your personas; \
+                         only that DID can present it"
+                    )
+                });
         }
         let mut ids = config.account.personas.keys().copied();
         match (ids.next(), ids.next()) {
-            (Some(only), None) => Ok(only),
+            (Some(only), None) => Ok(Pick::Existing(only)),
             (None, _) => {
-                progress("no persona yet; creating one");
-                self.mint_persona(config, DEFAULT_PERSONA_LABEL).await
+                progress("no persona yet; one is created for the join");
+                Ok(Pick::New(DEFAULT_PERSONA_LABEL.to_string()))
             }
             (Some(_), Some(_)) => bail!(
                 "this account has several personas; choose one with --persona. {}",
@@ -260,7 +354,12 @@ impl Job<'_> {
 
     /// The TUI's create-persona overlay, headless: a context of its own, a
     /// server-assigned path.
-    async fn mint_persona(&self, config: &mut Config, label: &str) -> Result<PersonaId> {
+    /// Returns the persona and its keys, for a rollback should the join fail.
+    async fn mint_persona(
+        &self,
+        config: &mut Config,
+        label: &str,
+    ) -> Result<(PersonaId, Option<PersonaDIDKeys>)> {
         let label = label.trim();
         if label.is_empty() {
             bail!("a persona label cannot be empty");
@@ -276,7 +375,7 @@ impl Job<'_> {
             WebvhPathMode::AutoAssign,
             None,
         );
-        let minted = create_persona::mint_standalone_persona(
+        let mut minted = create_persona::mint_standalone_persona(
             self.admin,
             self.tdk,
             inputs,
@@ -290,7 +389,7 @@ impl Job<'_> {
             .with_context(|| format!("persona {} minted but not saved", minted.did))?;
         save(config, self.profile)?;
         progress(format!("persona created: {}", minted.did));
-        Ok(persona_id)
+        Ok((persona_id, minted.setup.did_keys.take()))
     }
 
     /// Bring the persona's mediator socket up so the verdict is streamed;
@@ -321,17 +420,13 @@ impl Job<'_> {
         persona_id: PersonaId,
         persona_did: &str,
         vic: Option<Value>,
+        transports: &PeerTransports,
+        directory_statement_digest: Option<String>,
     ) -> Result<()> {
         let vtc_did = self.vtc_did;
         let display_name =
             openvtc_core::agent_name::resolve_verified_name(self.tdk.did_resolver(), vtc_did).await;
         config.set_cached_agent_name(vtc_did, display_name.clone(), Utc::now());
-
-        let transports = openvtc_core::config::peer_messaging_transports(vtc_did).await;
-        let Some(preferred) = transports.preferred() else {
-            bail!("the community advertises no messaging transport (neither TSP nor DIDComm)");
-        };
-        progress(format!("community reachable over {preferred}"));
 
         let context_id = self
             .prepare_context(config, persona_id, display_name.as_deref())
@@ -342,7 +437,7 @@ impl Job<'_> {
             .build_presentation(config, persona_id, persona_did, vic.as_ref())
             .await?;
         let (request_id, submit_transport) = self
-            .send(config, persona_id, persona_did, &transports, presentation)
+            .send(config, persona_id, persona_did, transports, presentation)
             .await?;
 
         let mut record = CommunityRecord::new_pending(
@@ -354,6 +449,7 @@ impl Job<'_> {
             Utc::now(),
         );
         record.submit_transport = Some(submit_transport);
+        record.directory_statement_digest = directory_statement_digest;
         config.account.add_membership(record);
         config.public.logs.insert(
             LogFamily::Community,
@@ -630,43 +726,71 @@ impl Job<'_> {
         Ok(())
     }
 
-    /// The runtime loop's inbound handling: dispatch, run any deferred check
-    /// inline, dispatch again with its result. `true` when the config changed.
     async fn dispatch(
         &self,
         config: &mut Config,
         seen: &mut SeenMessages,
         message: &Message,
     ) -> bool {
-        let nobody = |_: &str| false;
-        let mut arrival = Arrival::New { waiting: &nobody };
-        let mut message = message.clone();
-        let mut changed = false;
-        // Bounded: a returning message is handled, not set aside again.
-        for _ in 0..3 {
-            let mut effects = InboundEffects::default();
-            match process_inbound_message(
-                config,
-                self.tdk,
-                self.messaging,
-                seen,
-                &message,
-                &mut effects,
-                arrival,
-            )
-            .await
-            {
-                Ok(c) => changed |= c,
-                Err(e) => warn!(error = %e, "inbound message not handled"),
-            }
-            let Some(deferred) = effects.deferred else {
-                break;
-            };
-            arrival = Arrival::Returning(deferred.job.run(self.tdk.clone()).await);
-            message = deferred.message;
-        }
-        changed
+        apply_inbound(config, self.tdk, self.messaging, seen, message).await
     }
+}
+
+/// The runtime loop's inbound handling: dispatch, run any deferred check
+/// inline, dispatch again with its result. `true` when the config changed.
+/// Shared by every headless command that listens as a persona, so a message
+/// it was not waiting for is applied rather than lost.
+pub(crate) async fn apply_inbound(
+    config: &mut Config,
+    tdk: &TDK,
+    messaging: &Messaging,
+    seen: &mut SeenMessages,
+    message: &Message,
+) -> bool {
+    let nobody = |_: &str| false;
+    let mut arrival = Arrival::New { waiting: &nobody };
+    let mut message = message.clone();
+    let mut changed = false;
+    // Bounded: a returning message is handled, not set aside again.
+    for _ in 0..3 {
+        let mut effects = InboundEffects::default();
+        match process_inbound_message(
+            config,
+            tdk,
+            messaging,
+            seen,
+            &message,
+            &mut effects,
+            arrival,
+        )
+        .await
+        {
+            Ok(c) => changed |= c,
+            Err(e) => warn!(error = %e, "inbound message not handled"),
+        }
+        let Some(deferred) = effects.deferred else {
+            break;
+        };
+        arrival = Arrival::Returning(deferred.job.run(tdk.clone()).await);
+        message = deferred.message;
+    }
+    changed
+}
+
+/// The persona a join goes out as.
+enum Pick {
+    Existing(PersonaId),
+    /// One to mint, with this label, once nothing else stops the join.
+    New(String),
+}
+
+fn persona_did(config: &Config, persona_id: PersonaId) -> Result<String> {
+    config
+        .account
+        .personas
+        .get(&persona_id)
+        .map(|p| p.did.clone())
+        .ok_or_else(|| anyhow!("the chosen persona is not in the account"))
 }
 
 /// TSP only when both ends carry it, as the TUI decides.

@@ -7,7 +7,9 @@
 //! The request goes out exactly as the panel sends it; the answer is awaited
 //! on a persona listener of our own, the way the TUI's state handler receives
 //! it, and is taken only when it threads on our request, comes from the
-//! community, and carries the community's valid signature.
+//! community, and carries the community's valid signature. Anything else the
+//! listener receives meanwhile is applied as the TUI would apply it, and the
+//! account saved, since the mediator does not deliver it twice.
 
 use std::time::Duration;
 
@@ -16,13 +18,15 @@ use clap::{Arg, ArgMatches, Command};
 use console::style;
 use openvtc_core::capabilities::{correlation_thread, parse_envelope_document};
 use openvtc_core::config::Config;
-use openvtc_core::didcomm::{self, DIDCommEvent};
+use openvtc_core::didcomm::{self, DIDCommEvent, Messaging};
 use openvtc_core::git_ns::{self, GitRight, Reply, Request};
 use openvtc_core::git_workspace::{self, CLONE_TIMEOUT, RepoCoords, WorkspaceSettings};
+use openvtc_core::messaging::SeenMessages;
 use tokio::sync::mpsc;
 
 use crate::colors::{CLI_ERROR, CLI_INFO, Themed};
-use crate::headless::{self, Admin, Membership, progress, warn};
+use crate::headless::{self, Admin, Membership, progress, save, warn};
+use crate::state_handler::join_cmd::apply_inbound;
 use crate::state_handler::{DeferredLoad, repos_actions};
 
 /// How long a request waits for the community's answer (as the panel does).
@@ -81,12 +85,12 @@ pub async fn run(matches: &ArgMatches, deferred: DeferredLoad) -> Result<()> {
 
 async fn list(args: &ArgMatches, deferred: DeferredLoad) -> Result<()> {
     let profile = deferred.profile.clone();
-    let (config, tdk) = load(deferred).await?;
+    let (mut config, tdk) = load(deferred).await?;
     let target = pick(
         &config,
         args.get_one::<String>("community").map(String::as_str),
     )?;
-    let rows = fetch_my_repos(&config, &tdk, &target).await?;
+    let rows = fetch_my_repos(&mut config, &tdk, &profile, &target).await?;
     let settings = workspace_settings(&profile);
     if rows.is_empty() {
         println!("You hold no right on any repository in {}.", target.label);
@@ -126,12 +130,12 @@ async fn clone(args: &ArgMatches, deferred: DeferredLoad) -> Result<()> {
         .get_one::<String>("dir")
         .map(|d| git_workspace::expand_tilde(d));
 
-    let (config, tdk) = load(deferred).await?;
+    let (mut config, tdk) = load(deferred).await?;
     let target = pick(
         &config,
         args.get_one::<String>("community").map(String::as_str),
     )?;
-    let rows = fetch_my_repos(&config, &tdk, &target).await?;
+    let rows = fetch_my_repos(&mut config, &tdk, &profile, &target).await?;
     let Some(row) = rows.iter().find(|r| r.resource == coords.resource()) else {
         bail!(
             "you hold no right on {} in {} (`openvtc repo list` shows the ones you do)",
@@ -264,11 +268,19 @@ struct Row {
 
 /// Ask the community for `git-ns/view` and read the persona's repositories.
 async fn fetch_my_repos(
-    config: &Config,
+    config: &mut Config,
     tdk: &affinidi_tdk::TDK,
+    profile: &str,
     target: &Membership,
 ) -> Result<Vec<Row>> {
-    let (me, reply) = ask(config, tdk, target, Request::View { resource: None }).await?;
+    let (me, reply) = ask(
+        config,
+        tdk,
+        profile,
+        target,
+        Request::View { resource: None },
+    )
+    .await?;
     match reply {
         Reply::View(data) => Ok(git_ns::my_repos(&data, &me)
             .into_iter()
@@ -292,8 +304,9 @@ async fn fetch_my_repos(
 /// Send `request` as the persona, as the Repos panel does, and wait for the
 /// community's answer. Returns the persona DID it was asked as, and the answer.
 async fn ask(
-    config: &Config,
+    config: &mut Config,
     tdk: &affinidi_tdk::TDK,
+    profile: &str,
     target: &Membership,
     request: Request,
 ) -> Result<(String, Reply)> {
@@ -323,28 +336,57 @@ async fn ask(
             .await
             .map_err(|e| anyhow!("couldn't send the request: {e}"))?;
 
+        let mut others = Others::default();
         let reply = await_reply(
             &mut event_rx,
             &tdk,
             &target.vtc_did,
             &sender.persona_did,
             &thid,
+            &mut others,
+            config,
+            &service,
         )
-        .await?;
-        Ok((sender.persona_did, reply))
+        .await;
+        if others.handled > 0 {
+            config.private.tsp_relationships = service.tsp_store().snapshot().await;
+            match save(config, profile) {
+                Ok(()) => progress(format!(
+                    "{} other message(s) arrived meanwhile and were applied",
+                    others.handled
+                )),
+                Err(e) => warn(format!(
+                    "{} other message(s) arrived meanwhile but the account was not saved: {e}",
+                    others.handled
+                )),
+            }
+        }
+        Ok((sender.persona_did, reply?))
     }
     .await;
     service.shutdown().await;
     result
 }
 
-/// Wait out [`REPLY_WINDOW`] for the answer threaded on `thid`.
+/// Messages that arrived while waiting and were not the answer.
+#[derive(Default)]
+struct Others {
+    seen: SeenMessages,
+    handled: usize,
+}
+
+/// Wait out [`REPLY_WINDOW`] for the answer threaded on `thid`, applying
+/// anything else that arrives to `config`.
+#[allow(clippy::too_many_arguments)]
 async fn await_reply(
     event_rx: &mut mpsc::UnboundedReceiver<DIDCommEvent>,
     tdk: &affinidi_tdk::TDK,
     vtc_did: &str,
     persona_did: &str,
     thid: &str,
+    others: &mut Others,
+    config: &mut Config,
+    messaging: &Messaging,
 ) -> Result<Reply> {
     let deadline = tokio::time::Instant::now() + REPLY_WINDOW;
     // Why a reply on our thread was not taken, for the timeout message.
@@ -375,7 +417,10 @@ async fn await_reply(
                 tracing::warn!("git-ns reply on our thread refused: {why}");
                 rejected = Some(why);
             }
-            None => {}
+            None => {
+                apply_inbound(config, tdk, messaging, &mut others.seen, &message).await;
+                others.handled += 1;
+            }
         }
     }
 }
