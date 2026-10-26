@@ -1,4 +1,4 @@
-//! `openvtc join` — join a community without the TUI.
+//! `openvtc community join` — join a community without the TUI.
 //!
 //! Covers the two ways in that need no questions answered: presenting an
 //! invitation, or sending an open request. The submit mirrors
@@ -47,7 +47,7 @@ const POLL_EVERY: Duration = Duration::from_secs(20);
 /// Label for a persona created when the account has none.
 const DEFAULT_PERSONA_LABEL: &str = "member";
 
-/// The `join` subcommand's definition.
+/// The `community join` subcommand's definition.
 pub fn command() -> Command {
     Command::new("join")
         .about("Join a community without the TUI, then wait for the verdict")
@@ -84,7 +84,7 @@ pub fn command() -> Command {
         ])
 }
 
-/// Run `openvtc join`. `vic` is the global `--invitation`, already verified
+/// Run `openvtc community join`. `vic` is the global `--invitation`, already verified
 /// by `main`.
 pub async fn run(args: &ArgMatches, deferred: DeferredLoad, vic: Option<Value>) -> Result<()> {
     let vtc_did = args
@@ -740,6 +740,13 @@ mod tests {
                 ])
                 .is_err(),
             "--persona and --new-persona conflict"
+        );
+        let m = crate::cli::cli()
+            .try_get_matches_from(["openvtc", "community", "join", "did:webvh:x:y"])
+            .expect("valid");
+        assert_eq!(
+            m.subcommand().and_then(|(_, c)| c.subcommand_name()),
+            Some("join")
         );
     }
 }

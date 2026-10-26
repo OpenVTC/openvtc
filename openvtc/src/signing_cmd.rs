@@ -1,4 +1,4 @@
-//! `openvtc signing enable [<repo-path>]`: the headless form of pressing `e`
+//! `openvtc repo sign [<repo-path>]`: the headless form of pressing `e`
 //! ("sign here") in the Repos panel.
 //!
 //! Sets did-git-sign up for the persona if it is not (a fresh `did:key`,
@@ -28,47 +28,36 @@ use vta_sdk::client::VtaClient;
 use crate::headless::{self, Admin, step, warn};
 use crate::state_handler::DeferredLoad;
 
-/// The `signing` subcommand's definition.
+/// The `repo sign` subcommand's definition.
 pub fn command() -> Command {
-    Command::new("signing")
-        .about("Set up did-git-sign commit signing without the TUI")
-        .subcommand_required(true)
-        .arg_required_else_help(true)
-        .subcommand(
-            Command::new("enable")
-                .about("Make a checkout sign commits as your persona (the TUI's `e` in Repos)")
-                .long_about(
-                    "Make a checkout sign commits as your persona: the headless form of \
+    Command::new("sign")
+        .about("Make a checkout sign commits as your persona (the TUI's `e` in Repos)")
+        .long_about(
+            "Make a checkout sign commits as your persona: the headless form of \
                      pressing e in the TUI's Repos panel.\n\n\
                      If did-git-sign holds no working identity for the persona, a fresh \
                      signing credential is granted the persona's own VTA context, proven, \
                      and stored as a did-git-sign profile. Then `did-git-sign enable \
                      --profile` runs in the checkout, so `git commit -S` signs there with a \
                      Signed-by-DID claim. Needs did-git-sign on PATH and the VTA reachable.",
-                )
-                .args([
-                    Arg::new("path")
-                        .value_name("REPO_PATH")
-                        .default_value(".")
-                        .help("The checkout to sign in (default: the current directory)"),
-                    Arg::new("persona").long("persona").value_name("NAME").help(
-                        "The persona to sign as: its DID, label or agent name. Needed \
-                         only when more than one persona holds an active membership.",
-                    ),
-                ]),
         )
+        .args([
+            Arg::new("path")
+                .value_name("REPO_PATH")
+                .default_value(".")
+                .help("The checkout to sign in (default: the current directory)"),
+            Arg::new("persona").long("persona").value_name("NAME").help(
+                "The persona to sign as: its DID, label or agent name. Needed \
+                         only when more than one persona holds an active membership.",
+            ),
+        ])
 }
 
-/// Run `openvtc signing <sub>`.
-pub async fn run(args: &ArgMatches, deferred: DeferredLoad) -> Result<()> {
-    match args.subcommand() {
-        Some(("enable", m)) => {
-            let path = m.get_one::<String>("path").map_or(".", String::as_str);
-            let persona = m.get_one::<String>("persona").map(String::as_str);
-            enable(Path::new(path), persona, deferred).await
-        }
-        _ => bail!("unknown `signing` subcommand"),
-    }
+/// Run `openvtc repo sign`.
+pub async fn run(m: &ArgMatches, deferred: DeferredLoad) -> Result<()> {
+    let path = m.get_one::<String>("path").map_or(".", String::as_str);
+    let persona = m.get_one::<String>("persona").map(String::as_str);
+    enable(Path::new(path), persona, deferred).await
 }
 
 async fn enable(path: &Path, persona_arg: Option<&str>, deferred: DeferredLoad) -> Result<()> {

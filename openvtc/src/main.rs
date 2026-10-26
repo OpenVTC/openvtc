@@ -596,16 +596,16 @@ async fn main() -> Result<()> {
         Some(("setup", args)) if setup_cmd::requested(args) => {
             Some(setup_cmd::run(args, &profile).await)
         }
-        Some((name @ ("join" | "repos" | "signing"), args)) => {
+        Some((name @ ("community" | "repo"), args)) => {
             Some(match load_fast(&profile, unlock_code_arg.as_ref()) {
                 Err(e) => Err(anyhow::anyhow!("{}", redact_paths(&e.to_string()))),
-                Ok(deferred) => match name {
-                    "join" => {
-                        state_handler::join_cmd::run(args, deferred, invitation_credential.clone())
+                Ok(deferred) => match (name, args.subcommand()) {
+                    ("community", Some(("join", join))) => {
+                        state_handler::join_cmd::run(join, deferred, invitation_credential.clone())
                             .await
                     }
-                    "repos" => repos_cmd::run(args, deferred).await,
-                    _ => signing_cmd::run(args, deferred).await,
+                    ("repo", _) => repos_cmd::run(args, deferred).await,
+                    _ => Err(anyhow::anyhow!("unknown `{name}` subcommand")),
                 },
             })
         }

@@ -120,9 +120,14 @@ pub fn cli() -> Command {
                 ]),
         )
         .subcommand(crate::theme_cmd::command())
-        .subcommand(crate::signing_cmd::command())
+        .subcommand(
+            Command::new("community")
+                .about("The Communities panel without the TUI: join a community")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(crate::state_handler::join_cmd::command()),
+        )
         .subcommand(crate::repos_cmd::command())
-        .subcommand(crate::state_handler::join_cmd::command())
 }
 
 /// Read an unlock passphrase from `path`, or from standard input when `path` is

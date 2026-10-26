@@ -1,4 +1,4 @@
-//! `openvtc repos` — the Repos panel without the TUI.
+//! `openvtc repo` — the Repos panel without the TUI.
 //!
 //! `list` sends one signed `git-ns/view` to the community's VTC and prints the
 //! repositories the persona holds a right on; `clone` does the same, then
@@ -40,8 +40,8 @@ pub fn command() -> Command {
             "The community, by VTC DID or name. Optional when the account holds \
              exactly one active membership.",
         );
-    Command::new("repos")
-        .about("List or clone the git repositories a community governs for this persona")
+    Command::new("repo")
+        .about("The Repos panel without the TUI: list, clone and sign repositories")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
@@ -64,13 +64,15 @@ pub fn command() -> Command {
                     community,
                 ]),
         )
+        .subcommand(crate::signing_cmd::command())
 }
 
 pub async fn run(matches: &ArgMatches, deferred: DeferredLoad) -> Result<()> {
     match matches.subcommand() {
         Some(("list", args)) => list(args, deferred).await,
         Some(("clone", args)) => clone(args, deferred).await,
-        _ => bail!("unknown repos subcommand"),
+        Some(("sign", args)) => crate::signing_cmd::run(args, deferred).await,
+        _ => bail!("unknown repo subcommand"),
     }
 }
 
@@ -133,7 +135,7 @@ async fn clone(args: &ArgMatches, deferred: DeferredLoad) -> Result<()> {
     let rows = fetch_my_repos(&config, &tdk, &target).await?;
     let Some(row) = rows.iter().find(|r| r.resource == coords.resource()) else {
         bail!(
-            "you hold no right on {} in {} (`openvtc repos list` shows the ones you do)",
+            "you hold no right on {} in {} (`openvtc repo list` shows the ones you do)",
             coords.resource(),
             target.label
         );
@@ -211,7 +213,7 @@ async fn clone(args: &ArgMatches, deferred: DeferredLoad) -> Result<()> {
     println!(
         "{}",
         style(format!(
-            "Cloned {} into {}. Commit signing is not set up: run `openvtc signing enable {}`.",
+            "Cloned {} into {}. Commit signing is not set up: run `openvtc repo sign {}`.",
             row.resource,
             git_workspace::display_path(&dest),
             git_workspace::display_path(&dest)
@@ -536,7 +538,7 @@ mod tests {
         let m = crate::cli::cli()
             .try_get_matches_from([
                 "openvtc",
-                "repos",
+                "repo",
                 "clone",
                 "gitlab.com/group/sub/repo",
                 "--dir",
@@ -554,14 +556,24 @@ mod tests {
         );
         assert!(
             crate::cli::cli()
-                .try_get_matches_from(["openvtc", "repos", "list"])
+                .try_get_matches_from(["openvtc", "repo", "list"])
                 .is_ok()
         );
         assert!(
             crate::cli::cli()
-                .try_get_matches_from(["openvtc", "repos", "clone"])
+                .try_get_matches_from(["openvtc", "repo", "clone"])
                 .is_err(),
             "clone needs a resource"
+        );
+        let m = crate::cli::cli()
+            .try_get_matches_from(["openvtc", "repo", "sign", "/tmp/x", "--persona", "alice"])
+            .unwrap();
+        let (_, repo) = m.subcommand().unwrap();
+        let (sub, sign) = repo.subcommand().unwrap();
+        assert_eq!(sub, "sign");
+        assert_eq!(
+            sign.get_one::<String>("path").map(String::as_str),
+            Some("/tmp/x")
         );
     }
 
