@@ -14,7 +14,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use clap::{Arg, ArgMatches, Command};
 use openvtc_core::config::{
-    Config,
+    Config, PeerTransports,
     account::{CommunityRecord, CommunityStatus, PersonaId},
     community_context,
 };
@@ -322,10 +322,9 @@ impl Job<'_> {
         persona_did: &str,
         vic: Option<Value>,
     ) -> Result<()> {
-        let (tdk, admin, vtc_did) = (self.tdk, self.admin, self.vtc_did);
-
+        let vtc_did = self.vtc_did;
         let display_name =
-            openvtc_core::agent_name::resolve_verified_name(tdk.did_resolver(), vtc_did).await;
+            openvtc_core::agent_name::resolve_verified_name(self.tdk.did_resolver(), vtc_did).await;
         config.set_cached_agent_name(vtc_did, display_name.clone(), Utc::now());
 
         let transports = openvtc_core::config::peer_messaging_transports(vtc_did).await;
@@ -334,8 +333,100 @@ impl Job<'_> {
         };
         progress(format!("community reachable over {preferred}"));
 
-        // The membership's context: the persona's own, or a new one named
-        // after the community (the TUI's default choice).
+        let context_id = self
+            .prepare_context(config, persona_id, display_name.as_deref())
+            .await?;
+        self.start_listener(config, persona_id).await;
+
+        let presentation = self
+            .build_presentation(config, persona_id, persona_did, vic.as_ref())
+            .await?;
+        let (request_id, submit_transport) = self
+            .send(config, persona_id, persona_did, &transports, presentation)
+            .await?;
+
+        let mut record = CommunityRecord::new_pending(
+            vtc_did.to_string(),
+            display_name,
+            context_id,
+            persona_id,
+            request_id,
+            Utc::now(),
+        );
+        record.submit_transport = Some(submit_transport);
+        config.account.add_membership(record);
+        config.public.logs.insert(
+            LogFamily::Community,
+            format!(
+                "Join request sent to ({vtc_did}) as persona ({persona_did}) over \
+                 {submit_transport} from the command line — Pending."
+            ),
+        );
+        save(config, self.profile)?;
+        step(format!(
+            "Join request sent over {submit_transport} (request {request_id})"
+        ));
+        Ok(())
+    }
+
+    /// Sign and send the join request as the persona, over TSP when both
+    /// ends carry it. Returns the request id and the transport used.
+    async fn send(
+        &self,
+        config: &Config,
+        persona_id: PersonaId,
+        persona_did: &str,
+        transports: &PeerTransports,
+        presentation: openvtc_core::join::JoinPresentation,
+    ) -> Result<(uuid::Uuid, MessagingTransport)> {
+        let vtc_did = self.vtc_did;
+        let (profile, mediator) = match config.identities.get(&persona_id) {
+            Some(ident) => (
+                ident.profile().clone(),
+                ident.mediator_did.clone().unwrap_or_default(),
+            ),
+            None => bail!("the persona has no messaging identity"),
+        };
+        let tsp_mediator =
+            tsp_mediator(vtc_did, &mediator, transports.didcomm_mediator.is_some()).await;
+        let submit_transport = if tsp_mediator.is_some() {
+            MessagingTransport::Tsp
+        } else {
+            MessagingTransport::DidComm
+        };
+
+        let signer = config
+            .get_persona_keys_for(persona_id, self.tdk)
+            .await
+            .context("couldn't read the persona's signing key")?
+            .authentication
+            .secret
+            .clone();
+        let route = openvtc_core::join::Applicant {
+            atm: self.tdk.atm.as_ref().expect("checked at load"),
+            profile: &profile,
+            persona_did,
+            signer: &signer,
+            vtc_did,
+            mediator_did: &mediator,
+            tsp_mediator_did: tsp_mediator.as_deref(),
+        };
+        let request_id = openvtc_core::join::submit_join_request(&route, presentation)
+            .await
+            .context("failed to submit the join request")?;
+
+        Ok((request_id, submit_transport))
+    }
+
+    /// The membership's context: the persona's own, or a new one named after
+    /// the community (the TUI's default choice).
+    async fn prepare_context(
+        &self,
+        config: &Config,
+        persona_id: PersonaId,
+        display_name: Option<&str>,
+    ) -> Result<String> {
+        let vtc_did = self.vtc_did;
         let top = config.account.top_context_id.clone();
         let suggested = join_flow::suggested_context(config, vtc_did);
         let context_id = community_context::context_options(
@@ -347,28 +438,30 @@ impl Job<'_> {
         .next()
         .map(|o| o.context_id)
         .unwrap_or(suggested);
-        let context_name = display_name
-            .clone()
-            .unwrap_or_else(|| shorten_did(vtc_did, 48));
-        match community_context::ensure_context(admin, &top, &context_id, &context_name).await {
+        let context_name = display_name.map_or_else(|| shorten_did(vtc_did, 48), str::to_string);
+        match community_context::ensure_context(self.admin, &top, &context_id, &context_name).await
+        {
             Ok(true) => progress(format!("created context {context_id}")),
             Ok(false) => progress(format!("using context {context_id}")),
             Err(e) => bail!("couldn't prepare context {context_id}: {e}"),
         }
+        Ok(context_id)
+    }
 
-        let (profile, mediator) = match config.identities.get(&persona_id) {
-            Some(ident) => (
-                ident.profile().clone(),
-                ident.mediator_did.clone().unwrap_or_default(),
-            ),
-            None => bail!("the persona has no messaging identity"),
-        };
-        self.start_listener(config, persona_id).await;
-
+    /// The join presentation: the invitation if any, then the vetting
+    /// statements gathered for this community.
+    async fn build_presentation(
+        &self,
+        config: &mut Config,
+        persona_id: PersonaId,
+        persona_did: &str,
+        vic: Option<&Value>,
+    ) -> Result<openvtc_core::join::JoinPresentation> {
+        let (admin, vtc_did) = (self.admin, self.vtc_did);
         // The invitation, if any. Explicit, so a mismatch is an error rather
         // than the TUI's quiet fall-back to an open request.
         let mut linkage = None;
-        if let Some(vic) = &vic {
+        if let Some(vic) = vic {
             if let Err(e) = admin.cred_vault_receive(vic.clone(), None).await {
                 debug!(error = %e, "storing invitation in the VTA vault failed (continuing)");
             }
@@ -390,7 +483,7 @@ impl Job<'_> {
                     config
                         .build_subject_linkage(subject, Some(admin), vic_id, persona_did)
                         .await
-                        .context("could not link the invited persona to this one")?,
+                        .context("couldn't link the invited persona to this one")?,
                 );
                 progress(format!(
                     "the invitation names {subject}; the community will see the two linked"
@@ -400,7 +493,7 @@ impl Job<'_> {
         } else {
             progress("no invitation: sending an open request for the moderators to decide");
         }
-        let mut vp = openvtc_core::join::build_join_vp(persona_did, vic.as_ref(), linkage.as_ref());
+        let mut vp = openvtc_core::join::build_join_vp(persona_did, vic, linkage.as_ref());
 
         // Vetting statements this persona gathered for the community go with
         // it, as in the TUI. A hidden-vetting proof needs the TUI.
@@ -437,65 +530,7 @@ impl Job<'_> {
                 ..vp.into()
             },
         };
-
-        // TSP only when both ends carry it, as the TUI decides.
-        let tsp_mediator = match openvtc_core::config::peer_tsp_mediator(vtc_did).await {
-            None => None,
-            Some(peer) => match openvtc_core::config::our_mediator_carries_tsp(&mediator).await {
-                Some(true) => Some(peer),
-                Some(false) | None if transports.didcomm_mediator.is_some() => None,
-                _ => Some(peer),
-            },
-        };
-        let submit_transport = if tsp_mediator.is_some() {
-            MessagingTransport::Tsp
-        } else {
-            MessagingTransport::DidComm
-        };
-
-        let signer = config
-            .get_persona_keys_for(persona_id, tdk)
-            .await
-            .context("couldn't read the persona's signing key")?
-            .authentication
-            .secret
-            .clone();
-        let atm = tdk.atm.as_ref().expect("checked at load");
-        let route = openvtc_core::join::Applicant {
-            atm,
-            profile: &profile,
-            persona_did,
-            signer: &signer,
-            vtc_did,
-            mediator_did: &mediator,
-            tsp_mediator_did: tsp_mediator.as_deref(),
-        };
-        let request_id = openvtc_core::join::submit_join_request(&route, presentation)
-            .await
-            .context("failed to submit the join request")?;
-
-        let mut record = CommunityRecord::new_pending(
-            vtc_did.to_string(),
-            display_name,
-            context_id,
-            persona_id,
-            request_id,
-            Utc::now(),
-        );
-        record.submit_transport = Some(submit_transport);
-        config.account.add_membership(record);
-        config.public.logs.insert(
-            LogFamily::Community,
-            format!(
-                "Join request sent to ({vtc_did}) as persona ({persona_did}) over \
-                 {submit_transport} from the command line — Pending."
-            ),
-        );
-        save(config, self.profile)?;
-        step(format!(
-            "Join request sent over {submit_transport} (request {request_id})"
-        ));
-        Ok(())
+        Ok(presentation)
     }
 
     /// Apply inbound messages and poll the community until the membership
@@ -631,6 +666,16 @@ impl Job<'_> {
             message = deferred.message;
         }
         changed
+    }
+}
+
+/// TSP only when both ends carry it, as the TUI decides.
+async fn tsp_mediator(vtc_did: &str, mediator: &str, didcomm_fallback: bool) -> Option<String> {
+    let peer = openvtc_core::config::peer_tsp_mediator(vtc_did).await?;
+    match openvtc_core::config::our_mediator_carries_tsp(mediator).await {
+        Some(true) => Some(peer),
+        Some(false) | None if didcomm_fallback => None,
+        _ => Some(peer),
     }
 }
 
