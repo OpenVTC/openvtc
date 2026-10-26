@@ -336,6 +336,13 @@ impl ConfigExtension for Config {
         // or from a load.
         let persona_did_str = state.webvh_address.did.to_string();
         let document = state.webvh_address.document.clone();
+        // A did:scid persona sends as its DID URL with `src`, so a peer that
+        // holds no source for it can resolve it on first contact (VTI-KEY-163);
+        // its identity, keys and records stay under the bare DID.
+        let did_locator = state.webvh_address.locator.clone();
+        let presented_did = did_locator
+            .clone()
+            .unwrap_or_else(|| persona_did_str.clone());
         let atm = tdk
             .atm
             .as_ref()
@@ -343,7 +350,7 @@ impl ConfigExtension for Config {
         let persona_profile = ATMProfile::new(
             atm,
             Some("Persona DID".to_string()),
-            persona_did_str.clone(),
+            presented_did,
             Some(mediator_did.clone()),
         )
         .await?;
@@ -373,6 +380,7 @@ impl ConfigExtension for Config {
             did: persona_did_str.clone(),
             // Cache the minted document so the next startup skips the resolve.
             did_document: Some(document.clone()),
+            did_locator,
             key_refs: key_info
                 .iter()
                 .map(|(id, info)| KeyRef {

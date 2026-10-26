@@ -230,6 +230,7 @@ pub fn apply(plan: &RebuildPlan, keys: &[KeyCandidate], now: DateTime<Utc>) -> R
                 // path already falls back to a network resolve when absent,
                 // and a wrong cached document is worse than none.
                 did_document: None,
+                did_locator: None,
                 key_refs: Vec::new(),
                 mediator_did: persona.mediator_did.clone(),
                 origin_context_id: persona.context_id.clone(),
@@ -291,14 +292,28 @@ pub fn apply(plan: &RebuildPlan, keys: &[KeyCandidate], now: DateTime<Utc>) -> R
 }
 
 /// Last path segment of a DID, used to name a sub-context.
+///
+/// A did:scid names a sub-context by its SCID: the identity, never its `?src=`
+/// locator, whose `?` and `/` have no place in a context id (VTI-KEY-160).
 fn short_tail(did: &str) -> String {
-    did.rsplit(':').next().unwrap_or(did).to_string()
+    let did = vta_sdk::did_scid::identity(did);
+    did.rsplit(':').next().unwrap_or(&did).to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rebuild::{RebuiltMembership, RebuiltPersona};
+
+    #[test]
+    fn a_did_scid_community_names_its_sub_context_by_its_scid() {
+        assert_eq!(
+            short_tail("did:scid:vh:1:QmV?src=vtc.example.com/acme"),
+            "QmV"
+        );
+        assert_eq!(short_tail("did:scid:vh:1:QmV"), "QmV");
+        assert_eq!(short_tail(VTC), "acme");
+    }
 
     const ALICE: &str = "did:webvh:QmA:example.com:alice";
     const BOB: &str = "did:webvh:QmB:example.com:bob";

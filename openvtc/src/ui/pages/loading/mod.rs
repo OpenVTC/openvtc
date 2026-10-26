@@ -41,6 +41,7 @@ const TIPS: &[&str] = &[
     "Did you know? Verifiable credentials are cryptographically tamper-evident.",
     "Tip: Your keys never leave your device — trust is proven, not surrendered.",
     "Did you know? did:webvh anchors your DID to a verifiable history log.",
+    "Did you know? A did:scid keeps its identity when its log moves to another host.",
     "Tip: DIDComm messages are end-to-end encrypted between peers.",
     "Tip: A relationship is mutual — both parties prove who they are.",
 ];

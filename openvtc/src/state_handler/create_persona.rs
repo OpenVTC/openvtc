@@ -86,6 +86,7 @@ pub(crate) async fn mint_standalone_persona(
         context_id,
         custom_mediator,
         path_mode,
+        presentation,
     } = inputs;
     if top_context_id.is_empty() {
         anyhow::bail!("No account context yet — finish setup before creating a persona.");
@@ -129,20 +130,31 @@ pub(crate) async fn mint_standalone_persona(
         Some(path) => progress(&format!("Creating persona DID at /{path} via {server_id}…")),
         None => progress(&format!("Creating persona DID via {server_id}…")),
     }
-    let (keys, did, document, _mnemonic) =
-        vta::create_did_via_server(admin_vta, tdk, &context_id, &server_id, path_mode.clone())
-            .await
-            // A path the operator typed is the likeliest thing to be refused
-            // here, and the refusal is theirs to act on: the name may simply be
-            // taken. Say which path, since the overlay is closing on this
-            // message and it is the only place the answer survives.
-            .map_err(|e| match path_mode.to_request_path() {
-                Some(path) => anyhow::anyhow!(
-                    "{e}\nThe path was \u{201c}{path}\u{201d}. If it is already in use, create \
+    let vta::MintedDid {
+        keys,
+        did,
+        document,
+        locator,
+    } = vta::create_did_via_server(
+        admin_vta,
+        tdk,
+        &context_id,
+        &server_id,
+        path_mode.clone(),
+        presentation,
+    )
+    .await
+    // A path the operator typed is the likeliest thing to be refused
+    // here, and the refusal is theirs to act on: the name may simply be
+    // taken. Say which path, since the overlay is closing on this
+    // message and it is the only place the answer survives.
+    .map_err(|e| match path_mode.to_request_path() {
+        Some(path) => anyhow::anyhow!(
+            "{e}\nThe path was \u{201c}{path}\u{201d}. If it is already in use, create \
                      the persona again with another path, or let the server assign one."
-                ),
-                None => e,
-            })?;
+        ),
+        None => e,
+    })?;
 
     // The VTA may have declined the `#tsp` service we asked for. Report it
     // through the same progress channel the caller is already showing, so a
@@ -162,6 +174,7 @@ pub(crate) async fn mint_standalone_persona(
         webvh_address: crate::state_handler::setup_sequence::WebVHAddress {
             did: did.clone(),
             document,
+            locator,
         },
         ..Default::default()
     };
@@ -189,6 +202,10 @@ pub(crate) struct MintInputs {
     /// (the default, a fresh mnemonic) or one the operator typed. Already
     /// checked against the host's naming rules by the time it gets here.
     pub(crate) path_mode: WebvhPathMode,
+    /// How the persona is presented, and whether its log lists the did:scid
+    /// alias: the operator's choice for this persona, else the account's
+    /// preference, else nothing stated (the VTA decides).
+    pub(crate) presentation: vta_sdk::client::DidPresentation,
 }
 
 impl MintInputs {
@@ -198,12 +215,17 @@ impl MintInputs {
         config: &Config,
         context_id: String,
         path_mode: WebvhPathMode,
+        did_method: Option<vta_sdk::did_scid::DidMethod>,
     ) -> Self {
         Self {
             top_context_id: config.account.top_context_id.clone(),
             context_id,
             custom_mediator: vta_mediator(config),
             path_mode,
+            presentation: openvtc_core::config::account::persona_presentation(
+                &config.account,
+                did_method,
+            ),
         }
     }
 }
@@ -226,6 +248,17 @@ pub(crate) struct MintedPersona {
 }
 
 impl MintedPersona {
+    /// The DID to hand to someone: the persona's `did:webvh`, or a did:scid's
+    /// DID URL with `?src=`, without which a recipient that holds no source
+    /// for it cannot resolve the bare DID (VTI-KEY-163).
+    pub(crate) fn shareable_did(&self) -> String {
+        self.setup
+            .webvh_address
+            .locator
+            .clone()
+            .unwrap_or_else(|| self.did.clone())
+    }
+
     /// Write the persona into the config, recording the context it was minted
     /// in as its origin. Runs on the loop thread, from whichever loop is live —
     /// a first persona is minted in State A.
@@ -412,6 +445,7 @@ mod context_choice_tests {
                 persona_id,
                 did: "did:webvh:scid:example.com:work".into(),
                 did_document: None,
+                did_locator: None,
                 key_refs: vec![],
                 mediator_did: None,
                 origin_context_id: "openvtc/work".into(),

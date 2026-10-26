@@ -334,8 +334,11 @@ pub struct TokenSetCardholderName {
 /// by the join flow / standalone mint, read by `Config::mint_persona_into`.
 #[derive(Clone, Default, Debug)]
 pub struct WebVHAddress {
+    /// The persona's identity: its did:webvh, or its bare did:scid:vh:1.
     pub did: String,
     pub document: Document,
+    /// For a did:scid identity, its DID URL with `?src=` (VTI-KEY-163).
+    pub locator: Option<String>,
 }
 
 /// Final Setup Page State

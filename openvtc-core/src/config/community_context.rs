@@ -910,6 +910,7 @@ mod tests {
             persona_id,
             did: format!("did:webvh:scid:example.com:{persona_id}"),
             did_document: None,
+            did_locator: None,
             key_refs: vec![],
             mediator_did: None,
             origin_context_id: origin.to_string(),

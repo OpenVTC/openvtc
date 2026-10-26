@@ -153,6 +153,10 @@ impl VtaEnterDid {
                     Style::new().fg(COLOR_ORANGE).italic(),
                 ),
                 Line::styled(
+                    "  • did:scid:vh:1:QmRoot…?src=vta.example.com",
+                    Style::new().fg(COLOR_ORANGE).italic(),
+                ),
+                Line::styled(
                     "  • did:web:vta.example.com",
                     Style::new().fg(COLOR_ORANGE).italic(),
                 ),

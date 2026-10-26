@@ -537,6 +537,22 @@ impl Config {
         self.active_identity().map(|i| i.did.as_str()).unwrap_or("")
     }
 
+    /// The DID `persona_id` speaks as: its identity, or for a did:scid persona
+    /// its DID URL with `?src=`, so a peer that holds no source for it can
+    /// resolve it on first contact (VTI-KEY-163). `identity` is returned when
+    /// the persona records no locator.
+    pub fn presented_did<'a>(
+        &'a self,
+        persona_id: crate::config::account::PersonaId,
+        identity: &'a str,
+    ) -> &'a str {
+        self.account
+            .personas
+            .get(&persona_id)
+            .and_then(|p| p.did_locator.as_deref())
+            .unwrap_or(identity)
+    }
+
     /// The active persona's `did:webvh` as an owned `Arc<String>`.
     ///
     /// For the call sites that previously cloned the `Arc<String>` singleton
@@ -1525,40 +1541,30 @@ mod tsp_discovery_tests {
         ));
     }
 
-    /// **An unresolvable `did:web` reports `NotAdvertised`, not `Unavailable`** —
-    /// surprising, and worth pinning rather than discovering again.
+    /// **An unresolvable `did:web` reports `Unavailable`.** Until `vta-sdk` 0.73,
+    /// `resolve_vta_endpoint` synthesized `https://<domain>` from the DID when
+    /// resolution failed and returned that as a REST endpoint, so discovery
+    /// "succeeded" with no `#tsp` and this reported `NotAdvertised`. 0.73
+    /// resolves with `OnUnresolved::Refuse`: a DID that does not resolve is an
+    /// error, and the failure is no longer hidden. Both outcomes degrade to
+    /// DIDComm, so the connect behaves the same; this pins which one we get.
     ///
-    /// `resolve_vta_endpoint` falls back to synthesizing `https://<domain>` from
-    /// the DID itself when resolution fails, and returns that as a REST endpoint.
-    /// So discovery succeeds, reports no `#tsp`, and we degrade to DIDComm — the
-    /// right outcome, reached by a route that hides the resolution failure.
-    ///
-    /// Only `did:web` and `did:webvh` have a domain to synthesize from, which is
-    /// why the test above needs a method that does not.
-    ///
-    /// **The address is loopback with a closed port on purpose, and must stay
-    /// that way.** This asserts what the fallback does when resolution fails,
-    /// so it needs resolution to fail *quickly*: the call is wrapped in
-    /// [`TSP_DISCOVERY_TIMEOUT`], and a timeout reports `Unavailable` — the
-    /// other outcome, which flips the assertion.
-    ///
-    /// It named `nothing-seeded.example` until this bump, which made a real DNS
-    /// query. A resolver that answers NXDOMAIN instantly gives `NotAdvertised`;
-    /// one that hangs on an unknown TLD gives a 5s timeout and `Unavailable`.
-    /// So the test asserted a property of the environment's DNS as much as of
-    /// this code, and duly failed on a macOS runner while passing everywhere
-    /// else. Port 1 on 127.0.0.1 is refused by the kernel, with no name to look
-    /// up, so every machine reaches the same branch the same way.
+    /// The address is loopback with a closed port, so no DNS lookup is made and
+    /// every machine reaches the same branch quickly (the resolver's host
+    /// policy refuses it before any request), well inside
+    /// [`TSP_DISCOVERY_TIMEOUT`].
     #[tokio::test]
-    async fn an_unresolvable_did_web_falls_back_rather_than_failing() {
+    async fn an_unresolvable_did_web_is_unavailable() {
         let resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build())
             .await
             .expect("local DID cache");
 
-        assert_eq!(
-            discover_tsp_mediator("did:web:127.0.0.1%3A1", &resolver).await,
-            TspDiscovery::NotAdvertised,
-            "the URL fallback makes this look resolved"
+        assert!(
+            matches!(
+                discover_tsp_mediator("did:web:127.0.0.1%3A1", &resolver).await,
+                TspDiscovery::Unavailable(ref reason) if !reason.starts_with("timed out")
+            ),
+            "an unresolvable did:web is refused, not synthesized into a REST endpoint"
         );
     }
 
@@ -1904,6 +1910,38 @@ mod tests {
         }
     }
 
+    /// A did:scid persona speaks as its DID URL with `src`; a did:webvh persona,
+    /// or one the config does not know, as its identity.
+    #[test]
+    fn a_did_scid_persona_speaks_as_its_locator() {
+        use crate::config::account::{PersonaId, PersonaRecord};
+
+        let mut config = test_config(BTreeMap::new());
+        let pid = PersonaId::new();
+        let did = "did:scid:vh:1:QmS";
+        let locator = "did:scid:vh:1:QmS?src=example.com/alice";
+        config.account.personas.insert(
+            pid,
+            PersonaRecord {
+                extra: serde_json::Map::new(),
+                persona_id: pid,
+                did: did.into(),
+                did_document: None,
+                did_locator: Some(locator.into()),
+                key_refs: vec![],
+                mediator_did: None,
+                origin_context_id: "openvtc/alice".into(),
+                created_at: chrono::Utc::now(),
+                label: None,
+            },
+        );
+        assert_eq!(config.presented_did(pid, did), locator);
+        assert_eq!(
+            config.presented_did(PersonaId::new(), "did:webvh:Qm:example.com"),
+            "did:webvh:Qm:example.com"
+        );
+    }
+
     /// A persona DID with no cache entry is a refresh target; once a lookup is
     /// recorded it drops out until it goes stale, and a positive lookup reads
     /// back through `agent_name_for` while a negative one does not.
@@ -1923,6 +1961,7 @@ mod tests {
                 persona_id: pid,
                 did: did.clone(),
                 did_document: None,
+                did_locator: None,
                 key_refs: vec![],
                 mediator_did: None,
                 origin_context_id: "openvtc/alice".into(),
@@ -1969,6 +2008,7 @@ mod tests {
                 persona_id: pid,
                 did: "did:webvh:example.com:alice".into(),
                 did_document: None,
+                did_locator: None,
                 key_refs: vec![],
                 mediator_did: Some(mediator.clone()),
                 origin_context_id: "openvtc/alice".into(),
@@ -2008,6 +2048,7 @@ mod tests {
                 persona_id: pid,
                 did: "did:webvh:example.com:alice".into(),
                 did_document: None,
+                did_locator: None,
                 key_refs: vec![],
                 mediator_did: Some(String::new()),
                 origin_context_id: "openvtc/alice".into(),
@@ -2080,6 +2121,7 @@ mod tests {
                 persona_id: pid,
                 did: "did:example:persona".to_string(),
                 did_document: None,
+                did_locator: None,
                 key_refs: Vec::new(),
                 mediator_did: None,
                 origin_context_id: "openvtc/test".to_string(),
@@ -2116,6 +2158,7 @@ mod tests {
                 persona_id: pid,
                 did: "did:example:persona".to_string(),
                 did_document: None,
+                did_locator: None,
                 key_refs: Vec::new(),
                 mediator_did: Some("did:example:persisted-mediator".to_string()),
                 origin_context_id: "openvtc/test".to_string(),

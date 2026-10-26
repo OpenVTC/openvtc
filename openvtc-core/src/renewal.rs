@@ -615,6 +615,7 @@ mod tests {
                 persona_id: pid,
                 did: MEMBER.to_string(),
                 did_document: None,
+                did_locator: None,
                 key_refs: Vec::new(),
                 mediator_did: None,
                 origin_context_id: String::new(),

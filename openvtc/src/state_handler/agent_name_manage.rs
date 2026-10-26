@@ -56,10 +56,18 @@ fn decode_payload<T: DeserializeOwned>(value: serde_json::Value, what: &str) -> 
 /// The host a `did:webvh` is served from (`example.com`, or `example.com:8443`
 /// for a custom port) — the authority half of any agent name on it. Derived via
 /// `didwebvh-rs` per the repo's did:webvh rule; `None` if the DID does not
-/// parse. Used only to build the scheme-less name (`host/@local`) for the local
-/// display cache; the VTA derives the domain itself for the actual operations.
+/// parse. A did:scid DID URL is served from the host of its `src`, through the
+/// did:webvh log it names (VTI-KEY-160); a bare did:scid names no host, so a
+/// caller passes the persona's locator. Used only to build the scheme-less name
+/// (`host/@local`) for the local display cache; the VTA derives the domain
+/// itself for the actual operations.
 pub(crate) fn derive_host(did: &str) -> Option<String> {
-    let url = didwebvh_rs::url::WebVHURL::parse_did_url(did).ok()?;
+    let webvh = if vta_sdk::did_scid::is_scid(did) {
+        vta_sdk::did_scid::webvh_did(did)?
+    } else {
+        did.to_string()
+    };
+    let url = didwebvh_rs::url::WebVHURL::parse_did_url(&webvh).ok()?;
     Some(match url.port {
         Some(port) => format!("{}:{port}", url.domain),
         None => url.domain,
@@ -203,6 +211,20 @@ mod tests {
     #[test]
     fn derive_host_rejects_a_non_webvh_did() {
         assert_eq!(derive_host("did:key:z6Mk"), None);
+    }
+
+    #[test]
+    fn a_did_scid_is_served_from_its_src_host() {
+        assert_eq!(
+            derive_host("did:scid:vh:1:QmScid?src=example.com/alice").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            derive_host("did:scid:vh:1:QmScid?src=example.com%3A8443").as_deref(),
+            Some("example.com:8443")
+        );
+        // A bare did:scid names no host.
+        assert_eq!(derive_host("did:scid:vh:1:QmScid"), None);
     }
 
     #[test]

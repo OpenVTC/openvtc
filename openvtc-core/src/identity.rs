@@ -175,6 +175,7 @@ mod tests {
             persona_id: PersonaId::new(),
             did: "did:webvh:example:p".into(),
             did_document: None,
+            did_locator: None,
             key_refs: Vec::<KeyRef>::new(),
             mediator_did: Some("did:webvh:mediator".into()),
             origin_context_id: "openvtc/p".into(),

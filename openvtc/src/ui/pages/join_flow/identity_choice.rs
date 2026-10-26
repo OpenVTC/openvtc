@@ -73,6 +73,10 @@ impl IdentityChoice {
             KeyCode::Enter => {
                 let _ = state.action_tx.send(Action::JoinIdentityChoose);
             }
+            // How the new persona is presented; meaningful on the mint row only.
+            KeyCode::Char('m') if selected == mint_row => {
+                let _ = state.action_tx.send(Action::JoinNewPersonaMethodCycle);
+            }
             KeyCode::Esc => {
                 let _ = state.action_tx.send(Action::JoinCancel);
             }
@@ -199,7 +203,15 @@ impl IdentityChoice {
             style,
         )));
         lines.push(Line::styled(
-            "    A fresh did:webvh — nothing links it to your other communities",
+            "    A fresh persona DID — nothing links it to your other communities",
+            Style::new().fg(COLOR_DARK_GRAY),
+        ));
+        let presented = match state.new_persona_did_method {
+            None => "your account's default".to_string(),
+            Some(method) => format!("did:{method}"),
+        };
+        lines.push(Line::styled(
+            format!("    Presented as {presented}  [m] change"),
             Style::new().fg(COLOR_DARK_GRAY),
         ));
         lines.push(Line::default());
@@ -278,6 +290,21 @@ mod tests {
             Ok(Action::JoinIdentitySelect(1)) => {}
             _ => panic!("expected JoinIdentitySelect(1)"),
         }
+    }
+
+    #[test]
+    fn m_on_the_mint_row_changes_how_the_new_persona_is_presented() {
+        let (mut flow, mut rx) = flow_with(|js| js.identity_selected = js.mint_row());
+        IdentityChoice::handle_key_event(&mut flow, press(KeyCode::Char('m')));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::JoinNewPersonaMethodCycle)
+        ));
+
+        // On a reuse row it is not a choice that applies.
+        let (mut flow, mut rx) = flow_with(|js| js.identity_selected = 0);
+        IdentityChoice::handle_key_event(&mut flow, press(KeyCode::Char('m')));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

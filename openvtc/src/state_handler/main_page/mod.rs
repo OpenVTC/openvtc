@@ -586,6 +586,7 @@ impl MainPageState {
                     .agent_name_for(&p.did)
                     .map(|n| sanitize_display(n, 256)),
                 did: p.did.clone(),
+                did_locator: p.did_locator.clone(),
                 label: p.label.clone().unwrap_or_default(),
                 bound_communities: config
                     .account
@@ -1794,6 +1795,7 @@ mod tests {
                 persona_id,
                 did: persona_did.to_string(),
                 did_document: None,
+                did_locator: None,
                 key_refs: vec![],
                 mediator_did: None,
                 origin_context_id: String::new(),
