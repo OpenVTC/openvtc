@@ -17,6 +17,7 @@ use crate::state_handler::{
     setup_vta_actions,
     state::State,
 };
+use crate::ui::pages::setup_flow::vta_acl_instructions::{DEFAULT_CONTEXT_ID, PnmCommands};
 use anyhow::{Context, Result, bail};
 use clap::{Arg, ArgMatches};
 use openvtc_core::{
@@ -30,7 +31,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 /// The wizard's default context id (`vta_acl_instructions.rs`).
-const DEFAULT_CONTEXT_ID: &str = "openvtc";
 /// Pause between provisioning attempts while the grant is missing: starts
 /// short, doubles, capped.
 const POLL_FIRST: Duration = Duration::from_secs(5);
@@ -133,13 +133,14 @@ pub async fn run(args: &ArgMatches, profile: &str) -> Result<()> {
     println!();
     println!("Setup DID: {setup_did}");
     println!();
+    let pnm = PnmCommands::for_did(&setup_did, &context_id);
     println!("Ask the VTA admin to run this in their PNM session (new context):");
     println!();
-    println!("{}", grant_new_context(&setup_did, &context_id));
+    println!("{}", pnm.create_context);
     println!();
     println!("If context `{context_id}` already exists, use instead:");
     println!();
-    println!("{}", grant_existing_context(&setup_did, &context_id));
+    println!("{}", pnm.grant_existing);
     println!();
     println!("The grant lasts 1 hour and the setup DID can use it once.");
     println!();
@@ -286,39 +287,9 @@ fn print_messages(messages: &[MessageType]) {
     }
 }
 
-/// The wizard's `[F2]` command (`vta_acl_instructions.rs`, `PnmCommands`).
-fn grant_new_context(setup_did: &str, ctx: &str) -> String {
-    format!(
-        "pnm contexts create --id {ctx} --name \"OpenVTC\" \\\n  \
-         --admin-did {setup_did} --admin-expires 1h --admin-holder --admin-handoff",
-    )
-}
-
-/// The wizard's `[F3]` command.
-fn grant_existing_context(setup_did: &str, ctx: &str) -> String {
-    format!(
-        "pnm acl create --did {setup_did} --role admin --contexts {ctx} \\\n  \
-         --expires 1h --handoff --capabilities persona-holder",
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn grant_commands_match_the_wizard() {
-        let did = "did:key:z6MkTest";
-        assert_eq!(
-            grant_new_context(did, "openvtc"),
-            "pnm contexts create --id openvtc --name \"OpenVTC\" \\\n  \
-             --admin-did did:key:z6MkTest --admin-expires 1h --admin-holder --admin-handoff"
-        );
-        assert!(
-            grant_existing_context(did, "c1")
-                .starts_with("pnm acl create --did did:key:z6MkTest --role admin --contexts c1 ")
-        );
-    }
 
     #[test]
     fn headless_flags_parse() {

@@ -82,7 +82,7 @@ use crate::{
 };
 
 /// Default value seeded into the context-id input.
-const DEFAULT_CONTEXT_ID: &str = "openvtc";
+pub(crate) const DEFAULT_CONTEXT_ID: &str = "openvtc";
 
 /// What PNM prints when the grant landed. `pnm contexts create` prints
 /// `Admin ACL entry created:` after `Context created:`; `pnm acl create` prints
@@ -614,15 +614,15 @@ fn wrapped_height(lines: &[Line<'_>], width: u16) -> u16 {
 /// Flags verified against `pnm-cli`'s `ContextsCommands::Create` and
 /// `AclCommands::{Create, Delete}`: `acl delete` takes the DID positionally —
 /// there is no `--did` flag on it, unlike `acl create`.
-struct PnmCommands {
+pub(crate) struct PnmCommands {
     /// `pnm contexts create` — a new context and its setup entry in one step.
-    create_context: String,
+    pub(crate) create_context: String,
     /// `pnm acl delete` — clears a previous entry for the setup DID so it can
     /// be re-created with the hand-off.
     delete_existing: String,
     /// `pnm acl create` — the same grant as `create_context`, onto a context
     /// that already exists.
-    grant_existing: String,
+    pub(crate) grant_existing: String,
 }
 
 impl PnmCommands {
@@ -633,6 +633,11 @@ impl PnmCommands {
             .as_ref()
             .map(|k| k.did.as_str())
             .unwrap_or("<setup key not yet generated>");
+        Self::for_did(setup_did, typed_ctx)
+    }
+
+    /// The commands for `setup_did`; the headless setup prints the same ones.
+    pub(crate) fn for_did(setup_did: &str, typed_ctx: &str) -> Self {
         let trimmed = typed_ctx.trim();
         let ctx = if trimmed.is_empty() {
             DEFAULT_CONTEXT_ID
