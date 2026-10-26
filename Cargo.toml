@@ -658,6 +658,9 @@ vta-sdk = { version = "0.72.0", features = [
   # apple-native / windows-native / dbus-secret-service store crates.
   "keyring",
   "didcomm",
+  # Opens this client's own mediator inbox on connect (allow-all, as pnm
+  # does); without it a closed (ExplicitAllow) mediator drops every VTA reply.
+  "acl-setup",
   "provision-client",
   # Peer identity vetting: the Vetting Card and Statement, their verification,
   # requirement evaluation and the session match code
