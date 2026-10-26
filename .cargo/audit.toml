@@ -45,4 +45,9 @@ ignore = [
     # vta-service bump.
     "RUSTSEC-2026-0330",
     "RUSTSEC-2026-0331",
+
+    # crypto-bigint 0.5.5: timing variability, fixed only in 0.7.6 (0.7 is
+    # updated). 0.5 is reached only through pgp 0.20 (elliptic-curve 0.13,
+    # cx448); no 0.5.x patch exists. Re-check on the next pgp bump.
+    "RUSTSEC-2026-0387",
 ]

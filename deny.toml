@@ -39,6 +39,12 @@ ignore = [
     # when vta-service grew the rooms crates; it falls off when hax-lib
     # migrates off the macro.
     "RUSTSEC-2026-0173",
+    # RUSTSEC-2026-0387: crypto-bigint timing variability, fixed in 0.7.6.
+    # The 0.7 line is updated; what remains is crypto-bigint 0.5.5, reached
+    # only through pgp 0.20 (and openpgp-card-rpgp on top of it) via
+    # elliptic-curve 0.13 and cx448. No 0.5.x patch exists. Falls off when
+    # pgp moves to elliptic-curve 0.14 — re-check on the next pgp bump.
+    "RUSTSEC-2026-0387",
 ]
 # Removed with the vta-sdk 0.34 refresh: RUSTSEC-2025-0134 (rustls-pemfile
 # unmaintained) no longer matches anything in the graph, and cargo-deny warns
