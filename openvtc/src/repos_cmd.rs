@@ -16,15 +16,13 @@ use clap::{Arg, ArgMatches, Command};
 use console::style;
 use openvtc_core::capabilities::{correlation_thread, parse_envelope_document};
 use openvtc_core::config::Config;
-use openvtc_core::config::account::PersonaId;
 use openvtc_core::didcomm::{self, DIDCommEvent};
 use openvtc_core::git_ns::{self, GitRight, Reply, Request};
 use openvtc_core::git_workspace::{self, CLONE_TIMEOUT, RepoCoords, WorkspaceSettings};
-use openvtc_core::identity::IdentityContext;
 use tokio::sync::mpsc;
 
 use crate::colors::{CLI_ERROR, CLI_INFO, Themed};
-use crate::headless::{self, Admin, progress, warn};
+use crate::headless::{self, Admin, Membership, progress, warn};
 use crate::state_handler::{DeferredLoad, repos_actions};
 
 /// How long a request waits for the community's answer (as the panel does).
@@ -235,27 +233,10 @@ async fn load(deferred: DeferredLoad) -> Result<(Config, affinidi_tdk::TDK)> {
     Ok((config, tdk))
 }
 
-/// The community a run acts in, and the persona's identity there.
-struct Target<'a> {
-    vtc_did: String,
-    persona: PersonaId,
-    label: String,
-    id: &'a IdentityContext,
-}
-
-fn pick<'a>(config: &'a Config, wanted: Option<&str>) -> Result<Target<'a>> {
+fn pick(config: &Config, wanted: Option<&str>) -> Result<Membership> {
     let m = headless::pick_community(config, wanted)?;
-    let id = config
-        .identities
-        .get(&m.persona)
-        .ok_or_else(|| anyhow!("the persona has no messaging identity"))?;
     progress(format!("Community: {} ({})", m.label, m.vtc_did));
-    Ok(Target {
-        vtc_did: m.vtc_did,
-        persona: m.persona,
-        label: m.label,
-        id,
-    })
+    Ok(m)
 }
 
 fn workspace_settings(profile: &str) -> WorkspaceSettings {
@@ -285,11 +266,11 @@ struct Row {
 async fn fetch_my_repos(
     config: &Config,
     tdk: &affinidi_tdk::TDK,
-    target: &Target<'_>,
+    target: &Membership,
 ) -> Result<Vec<Row>> {
-    let me = target.id.persona_did();
-    match ask(config, tdk, target, Request::View { resource: None }).await? {
-        Reply::View(data) => Ok(git_ns::my_repos(&data, me)
+    let (me, reply) = ask(config, tdk, target, Request::View { resource: None }).await?;
+    match reply {
+        Reply::View(data) => Ok(git_ns::my_repos(&data, &me)
             .into_iter()
             .map(|r| Row {
                 resource: r.resource,
@@ -308,21 +289,14 @@ async fn fetch_my_repos(
     }
 }
 
-/// Sign and send `request` as the persona, and wait for the community's answer.
+/// Send `request` as the persona, as the Repos panel does, and wait for the
+/// community's answer. Returns the persona DID it was asked as, and the answer.
 async fn ask(
     config: &Config,
     tdk: &affinidi_tdk::TDK,
-    target: &Target<'_>,
+    target: &Membership,
     request: Request,
-) -> Result<Reply> {
-    let id = target.id;
-    let persona_did = id.persona_did().to_string();
-    let mediator = id.mediator_did.clone().unwrap_or_default();
-    let over_tsp = config
-        .account
-        .membership(&target.vtc_did, target.persona)
-        .is_some_and(|c| c.joined_over_tsp());
-
+) -> Result<(String, Reply)> {
     // Listen first, so a fast answer is not stored unread at the mediator.
     let (service, mut event_rx) = headless::start_messaging(config).await;
     let result = async {
@@ -335,43 +309,29 @@ async fn ask(
         progress("Connecting to the mediator…");
         headless::connect_persona(&service, config, &tdk, target.persona, CONNECT_WINDOW).await?;
 
-        let atm = tdk
-            .atm
-            .as_ref()
-            .ok_or_else(|| anyhow!("messaging is unavailable, so the request cannot be sent"))?;
-        let keys = config
-            .get_persona_keys_for(target.persona, &tdk)
+        let sender = repos_actions::sender(config, &tdk, target.persona, &target.vtc_did)
             .await
-            .map_err(|e| anyhow!("couldn't read this persona's signing key: {e}"))?;
-        let mut doc = git_ns::build(&request, &persona_did, &target.vtc_did)?;
+            .map_err(|e| anyhow!(e))?;
+        let mut doc = git_ns::build(&request, &sender.persona_did, &target.vtc_did)?;
         let thid = correlation_thread(&doc).to_string();
-        openvtc_core::capabilities::sign_document(&mut doc, &keys.authentication.secret).await?;
-        let tsp_mediator =
-            openvtc_core::community_send::tsp_mediator_for(over_tsp, &target.vtc_did).await;
         progress(format!(
             "Asking the community ({} over {})…",
             request.type_uri().trim_start_matches(git_ns::TYPE_PREFIX),
-            if tsp_mediator.is_some() {
-                "TSP"
-            } else {
-                "DIDComm"
-            }
+            if sender.over_tsp { "TSP" } else { "DIDComm" }
         ));
-        openvtc_core::capabilities::send_capability_document(
-            &openvtc_core::community_send::Delivery {
-                atm,
-                profile: id.profile(),
-                member_did: &persona_did,
-                vtc_did: &target.vtc_did,
-                mediator_did: &mediator,
-                tsp_mediator_did: tsp_mediator.as_deref(),
-            },
-            &doc,
-        )
-        .await
-        .map_err(|e| anyhow!("couldn't send the request: {e}"))?;
+        repos_actions::sign_and_send(&sender, &target.vtc_did, &mut doc)
+            .await
+            .map_err(|e| anyhow!("couldn't send the request: {e}"))?;
 
-        await_reply(&mut event_rx, &tdk, &target.vtc_did, &persona_did, &thid).await
+        let reply = await_reply(
+            &mut event_rx,
+            &tdk,
+            &target.vtc_did,
+            &sender.persona_did,
+            &thid,
+        )
+        .await?;
+        Ok((sender.persona_did, reply))
     }
     .await;
     service.shutdown().await;

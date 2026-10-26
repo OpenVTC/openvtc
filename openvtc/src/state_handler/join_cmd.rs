@@ -385,7 +385,7 @@ impl Job<'_> {
                 ident.profile().clone(),
                 ident.mediator_did.clone().unwrap_or_default(),
             ),
-            None => bail!("the persona has no messaging identity"),
+            None => bail!("this persona has no messaging identity"),
         };
         let tsp_mediator =
             tsp_mediator(vtc_did, &mediator, transports.didcomm_mediator.is_some()).await;

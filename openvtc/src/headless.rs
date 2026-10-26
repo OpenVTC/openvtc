@@ -117,7 +117,7 @@ pub async fn connect_persona(
 ) -> Result<()> {
     let spec = didcomm::persona_listener_config_for(config, tdk, persona)
         .await
-        .ok_or_else(|| anyhow!("the persona has no messaging identity"))?;
+        .ok_or_else(|| anyhow!("this persona has no messaging identity"))?;
     if !messaging.has_listener(&spec.id).await {
         didcomm::add_listener(messaging, &spec).await?;
     }

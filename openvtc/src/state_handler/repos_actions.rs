@@ -590,6 +590,35 @@ pub(crate) async fn sender(
     })
 }
 
+/// Sign `doc` as the persona and send it to `vtc_did`, over TSP when the
+/// membership was joined over it.
+pub(crate) async fn sign_and_send(
+    s: &Sender,
+    vtc_did: &str,
+    doc: &mut RequestDocument,
+) -> Result<(), String> {
+    async {
+        openvtc_core::capabilities::sign_document(doc, &s.signer).await?;
+        let tsp_mediator =
+            openvtc_core::community_send::tsp_mediator_for(s.over_tsp, vtc_did).await;
+        openvtc_core::capabilities::send_capability_document(
+            &openvtc_core::community_send::Delivery {
+                atm: &s.atm,
+                profile: &s.profile,
+                member_did: &s.persona_did,
+                vtc_did,
+                mediator_did: &s.mediator,
+                tsp_mediator_did: tsp_mediator.as_deref(),
+            },
+            doc,
+        )
+        .await
+    }
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 /// One `git-ns/*` send, off the loop.
 pub(crate) struct ReposJob {
     sender: Sender,
@@ -605,27 +634,7 @@ impl ReposJob {
     /// Sign and send. I/O only.
     pub(crate) async fn run(mut self) -> ReposOutcome {
         let thid = correlation_thread(&self.doc).to_string();
-        let s = &self.sender;
-        let result = async {
-            openvtc_core::capabilities::sign_document(&mut self.doc, &s.signer).await?;
-            let tsp_mediator =
-                openvtc_core::community_send::tsp_mediator_for(s.over_tsp, &self.vtc_did).await;
-            openvtc_core::capabilities::send_capability_document(
-                &openvtc_core::community_send::Delivery {
-                    atm: &s.atm,
-                    profile: &s.profile,
-                    member_did: &s.persona_did,
-                    vtc_did: &self.vtc_did,
-                    mediator_did: &s.mediator,
-                    tsp_mediator_did: tsp_mediator.as_deref(),
-                },
-                &self.doc,
-            )
-            .await
-        }
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string());
+        let result = sign_and_send(&self.sender, &self.vtc_did, &mut self.doc).await;
         ReposOutcome {
             vtc_did: self.vtc_did,
             persona: self.persona,
