@@ -47,6 +47,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # On vta-sdk 0.73 / affinidi-tdk 0.32 / trust-tasks 0.34, the build
+      # outgrows the runner's memory: vta-sdk turns on all of trust-tasks-rs's
+      # generated specs, and the OOM killer ends the job with exit code 143
+      # and no compiler error. Swap lets the peaks spill to disk. The jobs
+      # below that build the workspace carry the same step.
+      - name: Add swap
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build > /dev/null
+          sudo swapon /swapfile-build
+          free -h
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --component clippy
@@ -66,6 +79,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Swap: see the clippy job.
+      - name: Add swap
+        if: runner.os == 'Linux'
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build > /dev/null
+          sudo swapon /swapfile-build
+          free -h
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -88,6 +111,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Swap: see the clippy job.
+      - name: Add swap
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build > /dev/null
+          sudo swapon /swapfile-build
+          free -h
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -113,6 +145,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Swap: see the clippy job.
+      - name: Add swap
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build > /dev/null
+          sudo swapon /swapfile-build
+          free -h
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --component clippy
@@ -132,6 +173,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Swap: see the clippy job.
+      - name: Add swap
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build > /dev/null
+          sudo swapon /swapfile-build
+          free -h
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -150,6 +200,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Swap: see the clippy job.
+      - name: Add swap
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build > /dev/null
+          sudo swapon /swapfile-build
+          free -h
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -166,6 +225,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Swap: see the clippy job.
+      - name: Add swap
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build > /dev/null
+          sudo swapon /swapfile-build
+          free -h
       # Pinned to the workspace's `rust-version`; move both together.
       - name: Install Rust toolchain
         run: |
@@ -207,6 +275,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # Swap: see the clippy job.
+      - name: Add swap
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build > /dev/null
+          sudo swapon /swapfile-build
+          free -h
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -264,6 +341,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Swap: see the clippy job.
+      - name: Add swap
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build > /dev/null
+          sudo swapon /swapfile-build
+          free -h
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --component llvm-tools-preview
