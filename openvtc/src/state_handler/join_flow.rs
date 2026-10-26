@@ -1200,7 +1200,7 @@ fn show_unknown(
 /// route, so a join request addressed to it goes nowhere and waits for an
 /// answer nobody can send. Offering the same key for both told someone who had
 /// mistyped a DID that joining was "the way forward here" (rule R6.4).
-enum NotLearned {
+pub(super) enum NotLearned {
     /// The identifier did not resolve to a DID document.
     Unresolvable(String),
     /// It resolved; the manifest could not be read from it.
@@ -1209,14 +1209,14 @@ enum NotLearned {
 
 impl NotLearned {
     /// The sentence the page shows.
-    fn reason(&self) -> &str {
+    pub(super) fn reason(&self) -> &str {
         match self {
             NotLearned::Unresolvable(why) | NotLearned::Unanswered(why) => why,
         }
     }
 
     /// Whether there is something at this DID to send a join request to.
-    fn resolvable(&self) -> bool {
+    pub(super) fn resolvable(&self) -> bool {
         matches!(self, NotLearned::Unanswered(_))
     }
 }
@@ -1233,7 +1233,11 @@ impl NotLearned {
 /// ([`openvtc_core::vetting::inbound`]): the book learns the manifest, and any
 /// application to this community adopts it, so a change to the requirements
 /// mid-application is detectable from either route rather than only from one.
-async fn learn_over_http(config: &mut Config, tdk: &TDK, vtc_did: &str) -> Result<(), NotLearned> {
+pub(super) async fn learn_over_http(
+    config: &mut Config,
+    tdk: &TDK,
+    vtc_did: &str,
+) -> Result<(), NotLearned> {
     let resolver = tdk.did_resolver();
     let resolved = tokio::time::timeout(RESOLVE_TIMEOUT, resolver.resolve(vtc_did))
         .await
@@ -5016,9 +5020,28 @@ fn rollback_minted_persona(
     profile: &str,
     prior_friendly_name: &str,
 ) {
+    forget_minted_persona(
+        config,
+        persona_id,
+        state.setup.did_keys.as_ref(),
+        prior_friendly_name,
+    );
+    if let Err(e) = save_config(config, profile) {
+        debug!("persona rollback re-save failed after a failed join: {e}");
+    }
+}
+
+/// Remove a persona minted for a join that then failed, from the config only
+/// (the caller saves). Shared with `community join`.
+pub(crate) fn forget_minted_persona(
+    config: &mut Config,
+    persona_id: PersonaId,
+    keys: Option<&openvtc_core::config::PersonaDIDKeys>,
+    prior_friendly_name: &str,
+) {
     config.account.personas.remove(&persona_id);
     config.identities.remove(&persona_id);
-    if let Some(keys) = &state.setup.did_keys {
+    if let Some(keys) = keys {
         config.key_info.remove(&keys.signing.secret.id);
         config.key_info.remove(&keys.authentication.secret.id);
         config.key_info.remove(&keys.decryption.secret.id);
@@ -5027,9 +5050,6 @@ fn rollback_minted_persona(
     // persona name; restore the pre-mint value so a failed/cancelled join doesn't
     // leave the self-display name pointing at a community we never joined.
     config.public.friendly_name = prior_friendly_name.to_string();
-    if let Err(e) = save_config(config, profile) {
-        debug!("persona rollback re-save failed after a failed join: {e}");
-    }
 }
 
 fn save_config(config: &Config, profile: &str) -> Result<(), openvtc_core::errors::OpenVTCError> {
