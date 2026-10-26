@@ -1021,6 +1021,12 @@ mod tests {
         );
         assert!(c.matches_remote("https://gitlab.com/Acme/Platform/Tools/CLI.git"));
         assert!(!c.matches_remote("https://gitlab.com/acme/platform/cli.git"));
+        // Any host: a forge is not known by its name (self-hosted GitLab).
+        let c = RepoCoords::parse("github.com/acme/widgets/extra").unwrap();
+        assert_eq!(
+            (c.owner.as_str(), c.repo.as_str()),
+            ("acme", "widgets/extra")
+        );
         assert_eq!(
             https_remote_to_ssh("https://gitlab.com/acme/platform/tools/cli.git").as_deref(),
             Some("git@gitlab.com:acme/platform/tools/cli.git")

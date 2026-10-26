@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Repositories in nested GitLab groups.** A repository may now be named
+  `<forge>/<owner>/<group>/…/<repo>` (up to GitLab's 20 levels of subgroups), so
+  cloning, the workspace layout, remote matching and signing set-up work for
+  `gitlab.com/group/sub/repo`. Listing them in the Repos panel needs a community
+  that answers `git-ns/view/0.6`.
 - **A community's data rooms, the same everywhere you reach them.** Press `o` on an
   active community to see every data room it has offered this persona, and where
   each stands: offered, joined, accepted but not finished, needing re-admission, or
