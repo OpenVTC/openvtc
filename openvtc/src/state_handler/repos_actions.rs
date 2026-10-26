@@ -75,6 +75,14 @@ fn did_part(did: &str) -> &str {
     did.split('#').next().unwrap_or(did)
 }
 
+/// Whether a `git-ns` answer is the community's own: sent by `vtc` and issued
+/// by it. A thread id is a correlation key, not a credential. Compared by DID:
+/// a did:scid community may name itself with the `?src=` it is resolved through.
+pub(crate) fn answered_by(vtc: &str, from: &str, issuer: Option<&str>) -> bool {
+    let is_vtc = |did: &str| vta_sdk::did_scid::same_reference(did_part(did), vtc);
+    is_vtc(from) && issuer.is_some_and(is_vtc)
+}
+
 /// Longest text kept in a form field. Past every schema limit (a repository
 /// name is 100, a DID 2048, a reason 1024), so an over-long paste is refused
 /// by the schema with a reason rather than trimmed into something else.
@@ -1179,15 +1187,7 @@ pub(crate) fn apply_replies(
         else {
             continue;
         };
-        // By DID: a did:scid community may name itself with the `?src=` it is
-        // resolved through (VTI-KEY-163).
-        let from_vtc = vta_sdk::did_scid::same_reference(did_part(&inbound.from), &vtc);
-        let issued_by_vtc = inbound
-            .issuer
-            .as_deref()
-            .map(did_part)
-            .is_some_and(|issuer| vta_sdk::did_scid::same_reference(issuer, &vtc));
-        if !(from_vtc && issued_by_vtc) {
+        if !answered_by(&vtc, &inbound.from, inbound.issuer.as_deref()) {
             tracing::warn!(
                 from = %inbound.from,
                 issuer = ?inbound.issuer,

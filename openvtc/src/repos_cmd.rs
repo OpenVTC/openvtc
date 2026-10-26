@@ -20,11 +20,12 @@ use openvtc_core::config::account::PersonaId;
 use openvtc_core::didcomm::{self, DIDCommEvent};
 use openvtc_core::git_ns::{self, GitRight, Reply, Request};
 use openvtc_core::git_workspace::{self, CLONE_TIMEOUT, RepoCoords, WorkspaceSettings};
+use openvtc_core::identity::IdentityContext;
 use tokio::sync::mpsc;
 
 use crate::colors::{CLI_ERROR, CLI_INFO, Themed};
 use crate::headless::{self, Admin, progress, warn};
-use crate::state_handler::DeferredLoad;
+use crate::state_handler::{DeferredLoad, repos_actions};
 
 /// How long a request waits for the community's answer (as the panel does).
 const REPLY_WINDOW: Duration = Duration::from_secs(30);
@@ -234,81 +235,27 @@ async fn load(deferred: DeferredLoad) -> Result<(Config, affinidi_tdk::TDK)> {
     Ok((config, tdk))
 }
 
-/// The community a run acts in.
-struct Target {
+/// The community a run acts in, and the persona's identity there.
+struct Target<'a> {
     vtc_did: String,
     persona: PersonaId,
     label: String,
+    id: &'a IdentityContext,
 }
 
-fn pick(config: &Config, wanted: Option<&str>) -> Result<Target> {
-    let active: Vec<Target> = config
-        .account
-        .memberships()
-        .filter(|c| c.status.is_active())
-        .map(|c| Target {
-            vtc_did: c.vtc_did.clone(),
-            persona: c.persona_ref,
-            label: crate::state_handler::community_label(
-                config,
-                &c.vtc_did,
-                c.display_name.as_deref(),
-                256,
-            ),
-        })
-        .collect();
-    let keys: Vec<(&str, &str)> = active
-        .iter()
-        .map(|t| (t.vtc_did.as_str(), t.label.as_str()))
-        .collect();
-    let i = match_community(&keys, wanted).map_err(|e| anyhow!(e))?;
-    let target = active.into_iter().nth(i).expect("index from the same list");
-    progress(format!("Community: {} ({})", target.label, target.vtc_did));
-    Ok(target)
-}
-
-/// Which of `(vtc_did, label)` a `--community` names; with none, the only one.
-fn match_community(active: &[(&str, &str)], wanted: Option<&str>) -> Result<usize, String> {
-    let names = || {
-        active
-            .iter()
-            .map(|(did, label)| format!("  {label}  ({did})"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    if active.is_empty() {
-        return Err("this account holds no active community membership".into());
-    }
-    let Some(wanted) = wanted.map(str::trim) else {
-        return if active.len() == 1 {
-            Ok(0)
-        } else {
-            Err(format!(
-                "this account is in several communities; choose one with --community:\n{}",
-                names()
-            ))
-        };
-    };
-    if let Some(i) = active.iter().position(|(did, _)| *did == wanted) {
-        return Ok(i);
-    }
-    let by_name: Vec<usize> = active
-        .iter()
-        .enumerate()
-        .filter(|(_, (_, label))| label.eq_ignore_ascii_case(wanted))
-        .map(|(i, _)| i)
-        .collect();
-    match by_name.as_slice() {
-        [i] => Ok(*i),
-        [] => Err(format!(
-            "no active community is called '{wanted}'. Active communities:\n{}",
-            names()
-        )),
-        _ => Err(format!(
-            "several communities are called '{wanted}'; name one by its VTC DID:\n{}",
-            names()
-        )),
-    }
+fn pick<'a>(config: &'a Config, wanted: Option<&str>) -> Result<Target<'a>> {
+    let m = headless::pick_community(config, wanted)?;
+    let id = config
+        .identities
+        .get(&m.persona)
+        .ok_or_else(|| anyhow!("this community's persona has no messaging identity"))?;
+    progress(format!("Community: {} ({})", m.label, m.vtc_did));
+    Ok(Target {
+        vtc_did: m.vtc_did,
+        persona: m.persona,
+        label: m.label,
+        id,
+    })
 }
 
 fn workspace_settings(profile: &str) -> WorkspaceSettings {
@@ -338,16 +285,11 @@ struct Row {
 async fn fetch_my_repos(
     config: &Config,
     tdk: &affinidi_tdk::TDK,
-    target: &Target,
+    target: &Target<'_>,
 ) -> Result<Vec<Row>> {
-    let me = config
-        .identities
-        .get(&target.persona)
-        .ok_or_else(|| anyhow!("this community's persona has no messaging identity"))?
-        .persona_did()
-        .to_string();
+    let me = target.id.persona_did();
     match ask(config, tdk, target, Request::View { resource: None }).await? {
-        Reply::View(data) => Ok(git_ns::my_repos(&data, &me)
+        Reply::View(data) => Ok(git_ns::my_repos(&data, me)
             .into_iter()
             .map(|r| Row {
                 resource: r.resource,
@@ -370,13 +312,10 @@ async fn fetch_my_repos(
 async fn ask(
     config: &Config,
     tdk: &affinidi_tdk::TDK,
-    target: &Target,
+    target: &Target<'_>,
     request: Request,
 ) -> Result<Reply> {
-    let id = config
-        .identities
-        .get(&target.persona)
-        .ok_or_else(|| anyhow!("this community's persona has no messaging identity"))?;
+    let id = target.id;
     let persona_did = id.persona_did().to_string();
     let mediator = id.mediator_did.clone().unwrap_or_default();
     let over_tsp = config
@@ -500,9 +439,8 @@ async fn take_reply(
     if reply_thid != thid {
         return None;
     }
-    // A thread id is a correlation key, not a credential.
     let from = message.from.as_deref().unwrap_or_default();
-    if did_part(from) != vtc_did || doc.issuer.as_deref().map(did_part) != Some(vtc_did) {
+    if !repos_actions::answered_by(vtc_did, from, doc.issuer.as_deref()) {
         return Some(Err(format!(
             "sent by {from}, not the community it was asked of"
         )));
@@ -523,15 +461,9 @@ async fn take_reply(
     Some(Ok(reply))
 }
 
-fn did_part(did: &str) -> &str {
-    did.split('#').next().unwrap_or(did)
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-    use super::*;
 
     #[test]
     fn repos_subcommands_parse() {
@@ -575,19 +507,5 @@ mod tests {
             sign.get_one::<String>("path").map(String::as_str),
             Some("/tmp/x")
         );
-    }
-
-    #[test]
-    fn a_community_is_picked_by_did_name_or_being_the_only_one() {
-        let one = [("did:web:a", "Alpha")];
-        assert_eq!(match_community(&one, None), Ok(0));
-        let two = [("did:web:a", "Alpha"), ("did:web:b", "Beta")];
-        assert!(match_community(&two, None).is_err());
-        assert_eq!(match_community(&two, Some("did:web:b")), Ok(1));
-        assert_eq!(match_community(&two, Some("alpha")), Ok(0));
-        assert!(match_community(&two, Some("Gamma")).is_err());
-        let dup = [("did:web:a", "Same"), ("did:web:b", "Same")];
-        assert!(match_community(&dup, Some("same")).is_err());
-        assert!(match_community(&[], None).is_err());
     }
 }

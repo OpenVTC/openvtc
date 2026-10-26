@@ -260,7 +260,7 @@ mod create_persona;
 mod credential_actions;
 mod persona_actions;
 mod persona_binding_refresh;
-mod repos_actions;
+pub(crate) mod repos_actions;
 pub(crate) mod repos_workspace;
 mod rooms_actions;
 mod signing_health;

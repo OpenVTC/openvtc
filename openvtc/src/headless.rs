@@ -174,6 +174,103 @@ pub fn persona_listing(config: &Config) -> String {
     format!("Personas:{}", rows.concat())
 }
 
+/// An active membership a command acts in.
+pub struct Membership {
+    pub vtc_did: String,
+    pub persona: PersonaId,
+    pub label: String,
+}
+
+fn active_memberships(config: &Config) -> Vec<Membership> {
+    config
+        .account
+        .memberships()
+        .filter(|c| c.status.is_active())
+        .map(|c| Membership {
+            vtc_did: c.vtc_did.clone(),
+            persona: c.persona_ref,
+            label: crate::state_handler::community_label(
+                config,
+                &c.vtc_did,
+                c.display_name.as_deref(),
+                256,
+            ),
+        })
+        .collect()
+}
+
+/// `--community`: an active membership by VTC DID or name; with none, the only one.
+pub fn pick_community(config: &Config, wanted: Option<&str>) -> Result<Membership> {
+    let active = active_memberships(config);
+    let keys: Vec<(&str, &str)> = active
+        .iter()
+        .map(|m| (m.vtc_did.as_str(), m.label.as_str()))
+        .collect();
+    let i = match_community(&keys, wanted).map_err(|e| anyhow!(e))?;
+    Ok(active.into_iter().nth(i).expect("index from the same list"))
+}
+
+/// The persona holding the account's active memberships, when only one does.
+pub fn only_member(config: &Config) -> Result<PersonaId> {
+    let mut members: Vec<PersonaId> = active_memberships(config)
+        .into_iter()
+        .map(|m| m.persona)
+        .collect();
+    members.sort();
+    members.dedup();
+    match members.as_slice() {
+        [one] => Ok(*one),
+        [] => bail!("{NO_MEMBERSHIP}"),
+        _ => bail!(
+            "several personas hold an active membership; choose one with --persona. {}",
+            persona_listing(config)
+        ),
+    }
+}
+
+const NO_MEMBERSHIP: &str = "this account holds no active community membership";
+
+/// Which of `(vtc_did, label)` a `--community` names; with none, the only one.
+fn match_community(active: &[(&str, &str)], wanted: Option<&str>) -> Result<usize, String> {
+    let names = || {
+        active
+            .iter()
+            .map(|(did, label)| format!("\n  {label}  {did}"))
+            .collect::<String>()
+    };
+    if active.is_empty() {
+        return Err(NO_MEMBERSHIP.into());
+    }
+    let Some(wanted) = wanted.map(str::trim) else {
+        return if active.len() == 1 {
+            Ok(0)
+        } else {
+            Err(format!(
+                "this account is in several communities; choose one with --community. \
+                 Communities:{}",
+                names()
+            ))
+        };
+    };
+    if let Some(i) = active.iter().position(|(did, _)| *did == wanted) {
+        return Ok(i);
+    }
+    let by_name: Vec<usize> = active
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, label))| label.eq_ignore_ascii_case(wanted))
+        .map(|(i, _)| i)
+        .collect();
+    match by_name.as_slice() {
+        [i] => Ok(*i),
+        [] => Err(format!("no community '{wanted}'. Communities:{}", names())),
+        _ => Err(format!(
+            "more than one community is called '{wanted}'; name it by VTC DID. Communities:{}",
+            names()
+        )),
+    }
+}
+
 /// `--wait`: `90`, `90s`, `30m` or `2h`.
 pub fn parse_wait(raw: &str) -> Result<Duration, String> {
     let raw = raw.trim();
@@ -237,5 +334,19 @@ mod tests {
         assert!(parse_wait("m").is_err());
         assert!(parse_wait("-1m").is_err());
         assert!(parse_wait("").is_err());
+    }
+
+    #[test]
+    fn a_community_is_picked_by_did_name_or_being_the_only_one() {
+        let one = [("did:web:a", "Alpha")];
+        assert_eq!(match_community(&one, None), Ok(0));
+        let two = [("did:web:a", "Alpha"), ("did:web:b", "Beta")];
+        assert!(match_community(&two, None).is_err());
+        assert_eq!(match_community(&two, Some("did:web:b")), Ok(1));
+        assert_eq!(match_community(&two, Some("alpha")), Ok(0));
+        assert!(match_community(&two, Some("Gamma")).is_err());
+        let dup = [("did:web:a", "Same"), ("did:web:b", "Same")];
+        assert!(match_community(&dup, Some("same")).is_err());
+        assert!(match_community(&[], None).is_err());
     }
 }

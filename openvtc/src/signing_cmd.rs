@@ -16,7 +16,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Arg, ArgMatches, Command};
 use did_git_sign::profiles::Profiles;
 use openvtc_core::config::Config;
-use openvtc_core::config::account::PersonaId;
 use openvtc_core::git_signing::{self, BinaryStatus, CheckoutSigning, VtaEndpoint};
 use openvtc_core::git_workspace::{self, RepoCoords};
 use vta_sdk::client::VtaClient;
@@ -105,7 +104,7 @@ async fn sign(
 
     let persona = match persona_arg {
         Some(name) => headless::find_persona(config, name)?,
-        None => only_member(config)?,
+        None => headless::only_member(config)?,
     };
 
     let signer = repos_workspace::persona_signer(config, tdk, persona)
@@ -166,29 +165,6 @@ async fn sign(
         git_workspace::display_path(repo),
         signer.did_key_id
     ))
-}
-
-/// The only persona holding an active membership.
-fn only_member(config: &Config) -> Result<PersonaId> {
-    let mut members: Vec<PersonaId> = config
-        .account
-        .memberships()
-        .filter(|c| c.status.is_active())
-        .map(|c| c.persona_ref)
-        .collect();
-    members.sort();
-    members.dedup();
-    match members.as_slice() {
-        [one] => Ok(*one),
-        [] => bail!(
-            "no persona holds an active community membership; choose one with --persona. {}",
-            headless::persona_listing(config)
-        ),
-        _ => bail!(
-            "more than one persona holds an active membership; choose one with --persona. {}",
-            headless::persona_listing(config)
-        ),
-    }
 }
 
 // ****************************************************************************
