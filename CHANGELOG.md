@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Onboarding without the TUI.** Four subcommands take an account from nothing to
+  signed commits in a script: `setup --vta-did` creates the account against a VTA
+  (`--context`, `--wait`, `--unlock-code-file`); `join <vtc>` joins a community and
+  waits for the verdict (`--persona` or `--new-persona`, `--wait`, `--invitation`);
+  `repos list` and `repos clone <resource> [--dir]` list and clone the repositories
+  a persona may see (`--community`); `signing enable [path]` makes a checkout sign
+  its commits as a persona (`--persona`). Each holds the profile lock as the TUI
+  does. Repository coordinates now accept nested GitLab group paths.
 - **A community's data rooms, the same everywhere you reach them.** Press `o` on an
   active community to see every data room it has offered this persona, and where
   each stands: offered, joined, accepted but not finished, needing re-admission, or
