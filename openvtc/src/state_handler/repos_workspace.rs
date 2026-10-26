@@ -217,7 +217,7 @@ pub(crate) fn reduce(state: &mut State, action: &W) -> bool {
 /// The persona's signing key as did-git-sign needs it, from what openvtc
 /// already holds: the DID document's assertion method, its VTA key id, and the
 /// context the persona's keys live in.
-async fn persona_signer(
+pub(crate) async fn persona_signer(
     config: &Config,
     tdk: &TDK,
     persona: PersonaId,
@@ -566,10 +566,86 @@ pub(crate) fn job_lost(state: &mut State, why: &str) {
 }
 
 /// Blocking work on the job's thread.
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+pub(crate) async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| format!("the job stopped unexpectedly: {e}"))
+}
+
+/// Make sure did-git-sign holds a working identity for this persona, and
+/// return its profile name. `repair` also re-proves a stored credential
+/// against the VTA and rewrites the hooks.
+pub(crate) async fn set_up_identity(
+    signer: &PersonaSigner,
+    endpoint: &VtaEndpoint,
+    client: Option<&VtaClient>,
+    top_context_id: &str,
+    own_did: &str,
+    repair: bool,
+) -> Result<String, String> {
+    let did = signer.did_key_id.clone();
+    let status: IdentityStatus = blocking({
+        let did = did.clone();
+        move || git_signing::identity_status(&did)
+    })
+    .await?;
+    let mut proven = status.ready() && !repair;
+    if status.ready() && repair {
+        let stored = blocking({
+            let did = did.clone();
+            move || git_signing::stored_credential(&did)
+        })
+        .await?;
+        if let Some(cred) = stored {
+            match git_signing::verify_signer(&cred, signer, endpoint).await {
+                Ok(()) => proven = true,
+                Err(e) => tracing::info!("did-git-sign's credential no longer works: {e}"),
+            }
+        }
+    }
+    if proven {
+        blocking(git_signing::refresh_hooks)
+            .await?
+            .map_err(|e| e.to_string())?;
+        return status
+            .profile
+            .ok_or_else(|| "did-git-sign's profile went missing".into());
+    }
+    // A new credential: granted, proven, then stored.
+    let client = client.ok_or(
+        "openvtc has no session with its VTA right now, so it cannot grant did-git-sign a \
+         credential — try again once it reconnects",
+    )?;
+    let cred = SignerCredential::generate().map_err(|e| e.to_string())?;
+    git_signing::grant_signer(client, &cred, signer, endpoint, top_context_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let new_did = cred.did.clone();
+    let installed = blocking({
+        let signer = signer.clone();
+        let endpoint = endpoint.clone();
+        move || git_signing::install_identity(&signer, &endpoint, &cred)
+    })
+    .await
+    .and_then(|r| r.map_err(|e| e.to_string()));
+    let installed = match installed {
+        Ok(i) => i,
+        Err(e) => {
+            // Stored nowhere, so take the grant back.
+            if let Err(r) = git_signing::revoke_signer(client, &new_did, own_did).await {
+                tracing::warn!("couldn't revoke an unstored signer grant: {r}");
+            }
+            return Err(e);
+        }
+    };
+    if let Some(old) = &installed.replaced_credential
+        && let Err(e) = git_signing::revoke_signer(client, old, own_did).await
+    {
+        tracing::warn!("couldn't revoke did-git-sign's previous credential: {e}");
+    }
+    Ok(installed.profile)
 }
 
 /// Why signing cannot be enabled until the binary is installed.
@@ -738,76 +814,20 @@ impl WorkspaceJob {
         self.signer.as_ref().map_err(Clone::clone)
     }
 
-    /// Make sure did-git-sign holds a working identity for this persona, and
-    /// return its profile name. `repair` also re-proves a stored credential
-    /// against the VTA and rewrites the hooks.
     async fn set_up(&self, repair: bool) -> Result<String, String> {
-        let signer = self.signer()?.clone();
-        let did = signer.did_key_id.clone();
-        let status: IdentityStatus = blocking({
-            let did = did.clone();
-            move || git_signing::identity_status(&did)
-        })
-        .await?;
         let endpoint = self
             .endpoint
-            .clone()
+            .as_ref()
             .ok_or("openvtc's keys are not held by a VTA, so there is no key for did-git-sign")?;
-        let mut proven = status.ready() && !repair;
-        if status.ready() && repair {
-            let stored = blocking({
-                let did = did.clone();
-                move || git_signing::stored_credential(&did)
-            })
-            .await?;
-            if let Some(cred) = stored {
-                match git_signing::verify_signer(&cred, &signer, &endpoint).await {
-                    Ok(()) => proven = true,
-                    Err(e) => tracing::info!("did-git-sign's credential no longer works: {e}"),
-                }
-            }
-        }
-        if proven {
-            blocking(git_signing::refresh_hooks)
-                .await?
-                .map_err(|e| e.to_string())?;
-            return status
-                .profile
-                .ok_or_else(|| "did-git-sign's profile went missing".into());
-        }
-        // A new credential: granted, proven, then stored.
-        let client = self.client.as_ref().ok_or(
-            "openvtc has no session with its VTA right now, so it cannot grant did-git-sign a \
-             credential — try again once it reconnects",
-        )?;
-        let cred = SignerCredential::generate().map_err(|e| e.to_string())?;
-        git_signing::grant_signer(client, &cred, &signer, &endpoint, &self.top_context_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let new_did = cred.did.clone();
-        let installed = blocking({
-            let signer = signer.clone();
-            let endpoint = endpoint.clone();
-            move || git_signing::install_identity(&signer, &endpoint, &cred)
-        })
+        set_up_identity(
+            self.signer()?,
+            endpoint,
+            self.client.as_ref(),
+            &self.top_context_id,
+            &self.own_did,
+            repair,
+        )
         .await
-        .and_then(|r| r.map_err(|e| e.to_string()));
-        let installed = match installed {
-            Ok(i) => i,
-            Err(e) => {
-                // Stored nowhere, so take the grant back.
-                if let Err(r) = git_signing::revoke_signer(client, &new_did, &self.own_did).await {
-                    tracing::warn!("couldn't revoke an unstored signer grant: {r}");
-                }
-                return Err(e);
-            }
-        };
-        if let Some(old) = &installed.replaced_credential
-            && let Err(e) = git_signing::revoke_signer(client, old, &self.own_did).await
-        {
-            tracing::warn!("couldn't revoke did-git-sign's previous credential: {e}");
-        }
-        Ok(installed.profile)
     }
 
     /// Set up if needed, then `did-git-sign enable` in the checkout.
@@ -1068,7 +1088,7 @@ fn git_ns_short(resource: &str) -> &str {
 }
 
 /// openvtc's own DID at the VTA — never revoked.
-fn own_did(config: &Config) -> String {
+pub(crate) fn own_did(config: &Config) -> String {
     match &config.key_backend {
         KeyBackend::Vta { credential_did, .. } => credential_did.clone(),
         _ => String::new(),

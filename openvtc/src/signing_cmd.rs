@@ -15,18 +15,15 @@ use std::process::{Command as Process, Stdio};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Arg, ArgMatches, Command};
 use did_git_sign::profiles::Profiles;
+use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
-use openvtc_core::config::community_context::persona_context;
-use openvtc_core::config::secured_config::KeySourceMaterial;
-use openvtc_core::config::{Config, KeyBackend};
-use openvtc_core::git_signing::{
-    self, BinaryStatus, CheckoutSigning, PersonaSigner, SignerCredential, VtaEndpoint,
-};
+use openvtc_core::git_signing::{self, BinaryStatus, CheckoutSigning, VtaEndpoint};
 use openvtc_core::git_workspace::{self, RepoCoords};
 use vta_sdk::client::VtaClient;
 
 use crate::headless::{self, Admin, step, warn};
 use crate::state_handler::DeferredLoad;
+use crate::state_handler::repos_workspace;
 
 /// The `repo sign` subcommand's definition.
 pub fn command() -> Command {
@@ -111,7 +108,7 @@ async fn sign(
         None => only_member(config)?,
     };
 
-    let signer = persona_signer(config, tdk, persona)
+    let signer = repos_workspace::persona_signer(config, tdk, persona)
         .await
         .map_err(|e| anyhow!(e))?;
     step(format!(
@@ -119,7 +116,17 @@ async fn sign(
         signer.label, signer.did_key_id
     ));
 
-    let profile_name = set_up(&signer, &endpoint, client, config).await?;
+    step("Setting up did-git-sign for the persona…");
+    let profile_name = repos_workspace::set_up_identity(
+        &signer,
+        &endpoint,
+        client,
+        &config.account.top_context_id,
+        &repos_workspace::own_did(config),
+        false,
+    )
+    .await
+    .map_err(|e| anyhow!(e))?;
 
     match blocking(git_signing::binary_status).await? {
         BinaryStatus::Found { .. } => {}
@@ -159,119 +166,6 @@ async fn sign(
         git_workspace::display_path(repo),
         signer.did_key_id
     ))
-}
-
-/// The TUI's `set_up(false)`: reuse a ready identity, else grant, prove and
-/// store a new credential. Returns the did-git-sign profile name.
-async fn set_up(
-    signer: &PersonaSigner,
-    endpoint: &VtaEndpoint,
-    client: Option<&VtaClient>,
-    config: &Config,
-) -> Result<String> {
-    let did = signer.did_key_id.clone();
-    let status = blocking(move || git_signing::identity_status(&did)).await?;
-    if status.ready() {
-        step("did-git-sign already holds this persona's identity");
-        blocking(git_signing::refresh_hooks).await??;
-        return status
-            .profile
-            .ok_or_else(|| anyhow!("did-git-sign's profile went missing"));
-    }
-
-    let client = client.ok_or_else(|| {
-        anyhow!("no admin session with the VTA, so did-git-sign cannot be granted a credential")
-    })?;
-    let top_context_id = &config.account.top_context_id;
-    git_signing::check_context(&signer.context, top_context_id)?;
-    step(format!(
-        "Granting a new signing credential the persona's context '{}'…",
-        signer.context
-    ));
-    let cred = SignerCredential::generate()?;
-    git_signing::grant_signer(client, &cred, signer, endpoint, top_context_id).await?;
-    let new_did = cred.did.clone();
-    let own = own_did(config);
-
-    step("Storing the identity for did-git-sign…");
-    let installed = {
-        let (s, e) = (signer.clone(), endpoint.clone());
-        blocking(move || git_signing::install_identity(&s, &e, &cred)).await?
-    };
-    let installed = match installed {
-        Ok(i) => i,
-        Err(e) => {
-            // Stored nowhere, so take the grant back.
-            if let Err(r) = git_signing::revoke_signer(client, &new_did, &own).await {
-                tracing::warn!("couldn't revoke an unstored signer grant: {r}");
-            }
-            return Err(e.into());
-        }
-    };
-    if let Some(old) = &installed.replaced_credential
-        && let Err(e) = git_signing::revoke_signer(client, old, &own).await
-    {
-        warn(format!(
-            "couldn't revoke did-git-sign's previous credential {old}: {e}"
-        ));
-    }
-    Ok(installed.profile)
-}
-
-fn own_did(config: &Config) -> String {
-    match &config.key_backend {
-        KeyBackend::Vta { credential_did, .. } => credential_did.clone(),
-        _ => String::new(),
-    }
-}
-
-/// The persona's signing key as did-git-sign needs it. Mirrors the Repos
-/// panel's `persona_signer`.
-async fn persona_signer(
-    config: &Config,
-    tdk: &affinidi_tdk::TDK,
-    persona: PersonaId,
-) -> Result<PersonaSigner, String> {
-    let keys = config
-        .get_persona_keys_for(persona, tdk)
-        .await
-        .map_err(|e| format!("couldn't read this persona's signing key: {e}"))?;
-    let did_key_id = keys.signing.secret.id.clone();
-    if !did_key_id.contains('#') {
-        return Err(format!(
-            "this persona's signing key has no verification method id ({did_key_id})"
-        ));
-    }
-    let KeySourceMaterial::VtaManaged { key_id } = &keys.signing.source else {
-        return Err(
-            "this persona's signing key is not held by a VTA, so did-git-sign has nowhere to \
-             fetch it from"
-                .into(),
-        );
-    };
-    let public = keys.signing.secret.get_public_bytes();
-    let verifying_key: [u8; 32] = public.try_into().map_err(|_| {
-        format!(
-            "this persona's signing key is {} bytes; did-git-sign signs with Ed25519 only",
-            public.len()
-        )
-    })?;
-    let record = config
-        .account
-        .personas
-        .get(&persona)
-        .ok_or_else(|| "this persona is not in the account".to_string())?;
-    Ok(PersonaSigner {
-        did_key_id,
-        vta_key_id: key_id.clone(),
-        verifying_key,
-        context: persona_context(record, &config.account.top_context_id).to_string(),
-        label: record
-            .label
-            .clone()
-            .filter(|l| !l.trim().is_empty())
-            .unwrap_or_else(|| "persona".into()),
-    })
 }
 
 /// The only persona holding an active membership.
@@ -331,7 +225,5 @@ fn origin(repo: &Path) -> Option<String> {
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T> {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| anyhow!("background task failed: {e}"))
+    repos_workspace::blocking(f).await.map_err(|e| anyhow!(e))
 }
