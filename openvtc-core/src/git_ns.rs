@@ -880,15 +880,18 @@ impl Refusal {
 // Reading a view
 // ****************************************************************************
 
-/// Whether `outer` contains `inner` by whole path segment — `github.com/acme`
-/// contains `github.com/acme/widgets` and itself, and not
-/// `github.com/acme-labs/x`.
+/// Whether `outer` contains `inner` — `github.com/acme` contains
+/// `github.com/acme/widgets` and itself, and not `github.com/acme-labs/x`.
+/// Only a namespace, `<forge>/<owner>`, contains anything but itself: a
+/// repository in a nested GitLab group is not inside the repository whose
+/// path is a prefix of its own.
 #[must_use]
 pub fn contains(outer: &str, inner: &str) -> bool {
     inner == outer
-        || inner
-            .strip_prefix(outer)
-            .is_some_and(|rest| rest.starts_with('/'))
+        || (outer.matches('/').count() == 1
+            && inner
+                .strip_prefix(outer)
+                .is_some_and(|rest| rest.starts_with('/')))
 }
 
 /// A namespace's resource, `<forge>/<owner>`.
@@ -2329,6 +2332,11 @@ mod tests {
         assert!(contains("github.com/acme", "github.com/acme"));
         assert!(!contains("github.com/acme", "github.com/acme-labs/x"));
         assert!(!contains("github.com/acme", "codeberg.org/acme/widgets"));
+        assert!(contains("gitlab.com/acme", "gitlab.com/acme/platform/cli"));
+        assert!(!contains(
+            "gitlab.com/acme/platform",
+            "gitlab.com/acme/platform/cli"
+        ));
     }
 
     /// Bob owns gadgets and sprockets; on widgets he holds nothing he can
