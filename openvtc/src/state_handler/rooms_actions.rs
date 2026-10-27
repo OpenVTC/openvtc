@@ -841,7 +841,6 @@ impl RoomsVtaOutcome {
                     Ok(Prepared::KeyPackage {
                         key_package,
                         already_minted,
-                        resumable,
                     }) => {
                         if let Some(flow) = view.accept.as_mut() {
                             flow.step = AcceptStep::Accepting;
@@ -850,9 +849,6 @@ impl RoomsVtaOutcome {
                             Severity::Progress,
                             if already_minted {
                                 "Finishing an acceptance begun on another surface…"
-                            } else if !resumable {
-                                "Accepting… (your VTA is older: if this is interrupted, another \
-                                 surface can't finish it)"
                             } else {
                                 "Accepting…"
                             },

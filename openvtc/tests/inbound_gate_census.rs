@@ -64,15 +64,15 @@ fn routed_types() -> Vec<&'static str> {
         // TSP opens the binding envelope before the gate, so these arrive
         // typed as the task; missing from the gate, every Repos answer to a
         // TSP-joined member was dropped and the view timed out.
-        "https://trusttasks.org/spec/git-ns/view/0.4#response",
-        "https://trusttasks.org/spec/git-ns/repo/create/0.3#response",
-        "https://trusttasks.org/spec/git-ns/right/grant/0.3#response",
+        "https://trusttasks.org/spec/git-ns/view/0.6#response",
+        "https://trusttasks.org/spec/git-ns/repo/create/0.4#response",
+        "https://trusttasks.org/spec/git-ns/right/grant/0.4#response",
         "https://trusttasks.org/spec/git-ns/account/link/0.1#response",
-        "https://trusttasks.org/spec/git-ns/drift/resolve/0.1#response",
+        "https://trusttasks.org/spec/git-ns/drift/resolve/0.4#response",
         // Data-room replies for the Rooms panel, routed by prefix
         // (`community_rooms::is_reply_type`).
         "https://trusttasks.org/spec/vtc/rooms/memberships/list/0.1#response",
-        "https://trusttasks.org/spec/vtc/rooms/offers/list/0.1#response",
+        "https://trusttasks.org/spec/vtc/rooms/offers/list/0.4#response",
         "https://trusttasks.org/spec/vtc/rooms/offers/accept/0.1#response",
         // A witness's answers, routed by `witness::is_reply_type`.
         "https://trusttasks.org/spec/witness/session/0.2#response",

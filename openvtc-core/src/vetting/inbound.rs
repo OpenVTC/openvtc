@@ -35,9 +35,8 @@ use vta_sdk::protocols::credential_exchange::ISSUE as CREDENTIAL_ISSUE_TYPE;
 use vta_sdk::protocols::vetting::{
     VETTER_ROLE, VETTING_DECLINE_TYPE, VETTING_REQUEST_RESPONSE_TYPE, VETTING_REQUEST_TYPE,
     VETTING_REVOKE_STATEMENT_RESPONSE_TYPE, VETTING_SESSION_RESPONSE_TYPE, VETTING_SESSION_TYPE,
-    VETTING_VETTER_LIST_RESPONSE_TYPE, VETTING_VETTER_PROFILE_RESPONSE_TYPE,
-    VETTING_VETTER_RESEND_RESPONSE_TYPE, decline, request, revoke_statement, role_matches, session,
-    vetters,
+    VETTING_VETTER_LIST_RESPONSE_TYPE, VETTING_VETTER_PROFILE_RESPONSE_TYPE, decline, request,
+    revoke_statement, role_matches, session, vetters,
 };
 use vta_sdk::trust_task_proof::TrustTaskVmResolver;
 use vta_sdk::vetting::eligibility::{
@@ -532,7 +531,7 @@ pub fn may_claim(typ: &str) -> bool {
             VETTING_REVOKE_STATEMENT_RESPONSE_TYPE
                 | VETTING_VETTER_LIST_RESPONSE_TYPE
                 | VETTING_VETTER_PROFILE_RESPONSE_TYPE
-                | VETTING_VETTER_RESEND_RESPONSE_TYPE
+                | super::wire::VETTER_RESEND_RESPONSE_TYPE
                 | CREDENTIAL_ISSUE_TYPE
                 | PROBLEM_REPORT_TYPE
         )
@@ -609,7 +608,7 @@ pub async fn handle(
         VETTING_REVOKE_STATEMENT_RESPONSE_TYPE => withdrawal_recorded(book, message, sender),
         VETTING_VETTER_LIST_RESPONSE_TYPE => vetter_list(book, message, sender),
         VETTING_VETTER_PROFILE_RESPONSE_TYPE => profile_stored(book, message, sender),
-        VETTING_VETTER_RESEND_RESPONSE_TYPE => resent(book, message, sender),
+        super::wire::VETTER_RESEND_RESPONSE_TYPE => resent(book, message, sender),
         t if super::protocol::JoinProtocol::from_manifest_response(t).is_some() => {
             manifest(book, ctx, message, sender)
         }
@@ -669,7 +668,7 @@ pub fn is_community_answer_type(typ: &str) -> bool {
         VETTING_REVOKE_STATEMENT_RESPONSE_TYPE
             | VETTING_VETTER_LIST_RESPONSE_TYPE
             | VETTING_VETTER_PROFILE_RESPONSE_TYPE
-            | VETTING_VETTER_RESEND_RESPONSE_TYPE
+            | super::wire::VETTER_RESEND_RESPONSE_TYPE
     ) || super::protocol::JoinProtocol::from_manifest_response(typ).is_some()
 }
 
@@ -1407,7 +1406,7 @@ fn challenge_issued(book: &mut VettingBook, message: &Message, sender: &str) -> 
 /// `vtc/join-requests/wallet-session/start/0.1#response` — what the wallet is
 /// to scan. Nothing is kept: the join waiting on it holds the session.
 fn wallet_session_started(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
-    use trust_tasks_rs::specs::vtc::join_requests::wallet_session::start::v0_1 as start;
+    use crate::specs::vtc::join_requests::wallet_session::start::v0_1 as start;
     let Some((query, body)) =
         answer_to::<start::Response>(book, message, sender, QueryKind::WalletSessionStart)
     else {
@@ -1429,7 +1428,7 @@ fn wallet_session_started(book: &mut VettingBook, message: &Message, sender: &st
 /// `vtc/join-requests/wallet-session/status/0.1#response` — where the session
 /// stands.
 fn wallet_session_status(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
-    use trust_tasks_rs::specs::vtc::join_requests::wallet_session::status::v0_1 as status;
+    use crate::specs::vtc::join_requests::wallet_session::status::v0_1 as status;
     let Some((query, body)) =
         answer_to::<status::Response>(book, message, sender, QueryKind::WalletSessionStatus)
     else {
@@ -1637,48 +1636,6 @@ fn problem_reported(
     refusal_of(book, ctx, thread, sender, code, detail)
 }
 
-/// Re-ask `query`, a manifest question `community` refused as an unsupported
-/// version, in the version before the one asked. `None` when there is nothing
-/// older to ask in, or the persona that asked no longer has a DID — the refusal
-/// is then reported like any other.
-fn retry_manifest_in_older_version(
-    book: &mut VettingBook,
-    ctx: &Context<'_>,
-    query: &super::queries::CommunityQuery,
-    community: &str,
-) -> Option<Handled> {
-    let asked = book.manifest_protocol_for(community);
-    let applicant_did = ctx.account.personas.get(&query.persona)?.did.clone();
-    let next = book.fall_back_from(community, asked)?;
-    let document = match wire::manifest_request(&applicant_did, community, next) {
-        Ok(d) => d,
-        Err(e) => {
-            warn!(%community, error = %e, "could not build the older manifest request");
-            return None;
-        }
-    };
-    info!(
-        %community, ?asked, ?next,
-        "community does not serve this join-requests version; asking in the older one"
-    );
-    book.ask(super::queries::CommunityQuery {
-        document_id: document.id.clone(),
-        community: community.to_string(),
-        persona: query.persona,
-        kind: QueryKind::Manifest,
-        sent_at: ctx.now,
-    });
-    Some(Handled {
-        changed: true,
-        reply: Some(Reply {
-            persona: query.persona,
-            document,
-            eligibility: None,
-        }),
-        ..Handled::default()
-    })
-}
-
 /// Apply a refusal of whatever vetting sent on `thread`: an application's
 /// request to a vetter, a question to a community, or a statement withdrawal.
 fn refusal_of(
@@ -1709,16 +1666,6 @@ fn refusal_of(
         );
     }
     if let Some(query) = book.take_query(sender, thread, None) {
-        // A manifest question refused as a version the community does not
-        // serve is asked again in the older one, and the person waiting keeps
-        // waiting: this is not an answer, it is the community saying which
-        // language to ask in ([`super::protocol`]).
-        if query.kind == QueryKind::Manifest
-            && super::protocol::is_version_refusal(&code)
-            && let Some(retry) = retry_manifest_in_older_version(book, ctx, &query, sender)
-        {
-            return Some(retry);
-        }
         info!(community = %sender, %code, kind = ?query.kind, "community refused a question of ours");
         let (changed, notice) = match query.kind {
             QueryKind::VetterProfile => (
@@ -2076,7 +2023,7 @@ fn profile_stored(book: &mut VettingBook, message: &Message, sender: &str) -> Ha
 }
 
 fn resent(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
-    let Some((_, body)) = answer_to::<vetters::resend::v0_1::Response>(
+    let Some((_, body)) = answer_to::<crate::specs::vtc::vetting::vetters::resend::v0_2::Response>(
         book,
         message,
         sender,

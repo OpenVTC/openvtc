@@ -61,6 +61,13 @@ pub mod rebuild_apply;
 pub mod relationships;
 pub mod renewal;
 pub mod secure_store;
+/// The Trust Task specifications this crate speaks, generated at build time by
+/// `trust-tasks-build` from the versions pinned in `trust-tasks.lock` — the same
+/// module paths `crate::specs` used (`specs::vtc::members::renew::v0_1`).
+#[allow(clippy::all, missing_docs)]
+pub mod specs {
+    include!(concat!(env!("OUT_DIR"), "/trust_tasks_generated.rs"));
+}
 pub mod status_list;
 pub mod tasks;
 /// Building a Trust Task document — once, for every verb that sends one.
@@ -74,6 +81,7 @@ pub mod vrc;
 pub mod vta_receive;
 pub mod vta_receive_leg;
 pub mod vta_sync;
+pub mod vta_task;
 pub mod witness;
 
 /// Packs a DIDComm message with authenticated encryption and forwards it

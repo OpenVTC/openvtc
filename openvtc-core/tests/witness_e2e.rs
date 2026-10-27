@@ -22,13 +22,13 @@ use affinidi_tdk::dids::{DID, PeerKeyRole};
 use async_trait::async_trait;
 use chrono::{TimeDelta, Utc};
 use dtg_credentials::{DTGCredential, IssuerScope};
+use openvtc_core::specs::witness::session;
 use openvtc_core::witness::{
     self, Carrier, MembershipEvidence, ReplyRouter, Round, WitnessError, WitnessRefusal,
     WitnessRequest,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use trust_tasks_rs::specs::witness::session;
 use trust_tasks_rs::{ErrorPayload, TrustTask};
 use vta_sdk::client::{ClientIdentity, CreateContextRequest, CreateKeyRequest, VtaClient};
 use vta_sdk::keys::KeyType;

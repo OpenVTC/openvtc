@@ -21,7 +21,7 @@ use vta_sdk::protocols::vetting::{
 };
 
 /// The generated `wallet-session` wire types the answers carry.
-pub use trust_tasks_rs::specs::vtc::join_requests::wallet_session;
+pub use crate::specs::vtc::join_requests::wallet_session;
 
 use super::book::VettingBook;
 use crate::config::account::PersonaId;
@@ -39,7 +39,7 @@ pub enum QueryKind {
     VetterList,
     /// `vtc/vetting/vetters/profile/0.1`.
     VetterProfile,
-    /// `vtc/vetting/vetters/resend/0.1`.
+    /// `vtc/vetting/vetters/resend/0.2`.
     VetterResend,
     /// `vtc/vetting/vetters/pcs-root/0.1` — hidden-vetting enrolment.
     PcsRoot,

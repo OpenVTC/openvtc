@@ -40,13 +40,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::specs::vta::witness as vta_witness;
+use crate::specs::witness::session;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use trust_tasks_rs::specs::vta::witness as vta_witness;
-use trust_tasks_rs::specs::witness::session;
 use trust_tasks_rs::{ErrorPayload, Payload, TrustTask};
 use vta_sdk::client::VtaClient;
 use vta_sdk::error::VtaError;
@@ -200,6 +200,18 @@ fn witness_refusal_text(refusal: &WitnessRefusal, code: &str, message: &Option<S
     }
 }
 
+/// Round-trip budget for one `vta/witness/*` call, in seconds. Each step resolves the witness's
+/// DID to verify its proofs.
+const WITNESS_TIMEOUT_SECS: u64 = 30;
+
+/// One `vta/witness/*` call with this crate's generated types ([`crate::vta_task::call`]).
+async fn witness_call<P: Payload + Serialize, R: serde::de::DeserializeOwned>(
+    vta: &VtaClient,
+    payload: &P,
+) -> Result<R, VtaError> {
+    crate::vta_task::call(vta, payload, WITNESS_TIMEOUT_SECS).await
+}
+
 /// Map a VTA failure at `step` to a [`WitnessError`], keeping the rejection's code.
 fn vta_failure(step: &'static str, e: VtaError) -> WitnessError {
     match e {
@@ -226,8 +238,8 @@ fn vta_failure(step: &'static str, e: VtaError) -> WitnessError {
             message,
         },
         VtaError::UnsupportedTaskType { type_uri, .. } => WitnessError::Unsupported(format!(
-            "your VTA does not serve `{type_uri}`: it predates witnessing. Upgrade the VTA to a \
-             release that serves `vta/witness/*`"
+            "your VTA does not serve `{type_uri}`: it predates witnessing, or this version of it. \
+             Upgrade the VTA to a release that serves it"
         )),
         other => WitnessError::Vta {
             step,
@@ -857,9 +869,7 @@ pub async fn run(
     }
     let open_payload: vta_witness::open::v0_2::Payload = serde_json::from_value(open_payload)
         .map_err(|e| WitnessError::Document(format!("the witnessing request is not valid: {e}")))?;
-    let opened = round
-        .vta
-        .witness_open(&open_payload)
+    let opened: vta_witness::open::v0_2::Response = witness_call(round.vta, &open_payload)
         .await
         .map_err(|e| vta_failure("open a witnessed session", e))?;
     let session_id = opened.session_id.to_string();
@@ -889,9 +899,7 @@ pub async fn run(
     let present_payload: vta_witness::present::v0_2::Payload =
         serde_json::from_value(json!({ "sessionId": session_id, "response": session_answer }))
             .map_err(|e| WitnessError::Document(format!("the witness's answer: {e}")))?;
-    let presented = round
-        .vta
-        .witness_present(&present_payload)
+    let presented: vta_witness::present::v0_2::Response = witness_call(round.vta, &present_payload)
         .await
         .map_err(|e| vta_failure("present your credentials", e))?;
     let submit_document = Value::Object(presented.document.0);
@@ -921,9 +929,7 @@ pub async fn run(
     let accept_payload: vta_witness::accept::v0_2::Payload =
         serde_json::from_value(json!({ "sessionId": session_id, "response": outcome }))
             .map_err(|e| WitnessError::Document(format!("the witness's answer: {e}")))?;
-    let accepted = round
-        .vta
-        .witness_accept(&accept_payload)
+    let accepted: vta_witness::accept::v0_2::Response = witness_call(round.vta, &accept_payload)
         .await
         .map_err(|e| vta_failure("store the witness's credential", e))?;
 
@@ -1068,29 +1074,29 @@ pub fn personhood_evidence<'a>(
 const LIST_PAGE_SIZE: u64 = 100;
 
 /// At most this many pages are read in one reconciliation (10 000 witnessings), so a VTA that
-/// kept answering `truncated` could not hold the caller forever.
+/// kept answering with a `nextCursor` could not hold the caller forever.
 const LIST_MAX_PAGES: usize = 100;
 
 /// Every witnessing the VTA stored that this account may read, oldest first
-/// (`vta/witness/list/0.1`, every page).
+/// (`vta/witness/list/0.2`, every page).
 ///
 /// A cursor the VTA cannot honour (`cursorInvalid`) restarts the listing once from the start;
 /// a second is a failure.
 pub async fn list_stored(
     vta: &VtaClient,
-) -> Result<Vec<vta_witness::list::v0_1::StoredWitnessing>, WitnessError> {
+) -> Result<Vec<vta_witness::list::v0_2::StoredWitnessing>, WitnessError> {
     let mut stored = Vec::new();
     let mut cursor: Option<String> = None;
     let mut restarted = false;
     let mut pages = 0;
     loop {
-        let mut payload = json!({ "pageSize": LIST_PAGE_SIZE });
+        let mut payload = json!({ "limit": LIST_PAGE_SIZE });
         if let Some(c) = &cursor {
             payload["cursor"] = json!(c);
         }
-        let payload: vta_witness::list::v0_1::Payload = serde_json::from_value(payload)
+        let payload: vta_witness::list::v0_2::Payload = serde_json::from_value(payload)
             .map_err(|e| WitnessError::Document(format!("the listing request: {e}")))?;
-        let page = match vta.witness_list(&payload).await {
+        let page: vta_witness::list::v0_2::Response = match witness_call(vta, &payload).await {
             Ok(page) => page,
             Err(VtaError::Rejected { code, .. })
                 if local_code(&code) == "cursorInvalid" && !restarted =>
@@ -1105,8 +1111,8 @@ pub async fn list_stored(
         };
         stored.extend(page.witnessings);
         pages += 1;
-        match page.cursor {
-            Some(next) if page.truncated && pages < LIST_MAX_PAGES => {
+        match page.next_cursor {
+            Some(next) if pages < LIST_MAX_PAGES => {
                 cursor = Some(next.to_string());
             }
             _ => break,
@@ -1129,7 +1135,7 @@ pub async fn list_stored(
 /// the picker opens with none chosen.
 pub fn recover_records(
     local: &Witnessings,
-    stored: Vec<vta_witness::list::v0_1::StoredWitnessing>,
+    stored: Vec<vta_witness::list::v0_2::StoredWitnessing>,
     relationship_for: impl Fn(&str, &[String]) -> Option<String>,
 ) -> Vec<WitnessRecord> {
     let mut recovered: Vec<WitnessRecord> = Vec::new();
@@ -1494,7 +1500,7 @@ mod tests {
     const OTHER_PARTY: &str = "did:peer:2.Vz6MkOtherParty";
 
     /// One `vta/witness/list` entry, as the VTA answers it.
-    fn stored(at: i64, relationship_did: &str) -> vta_witness::list::v0_1::StoredWitnessing {
+    fn stored(at: i64, relationship_did: &str) -> vta_witness::list::v0_2::StoredWitnessing {
         serde_json::from_value(json!({
             "acceptedAt": DateTime::from_timestamp(at, 0).unwrap(),
             "credentialId": format!("vwc-{at}"),

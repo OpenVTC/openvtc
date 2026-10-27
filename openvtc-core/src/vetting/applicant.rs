@@ -18,7 +18,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use uuid::Uuid;
 use vta_sdk::protocols::join_requests::manifest;
 use vta_sdk::protocols::vetting::{
@@ -31,9 +31,7 @@ use vta_sdk::vetting::card::{
     CardDraft, CardExpectations, MAX_CARD_VALIDITY, new_commitment_salt, verify_card,
 };
 use vta_sdk::vetting::match_code::vetting_match_code;
-use vta_sdk::vetting::requirements::{
-    Evaluation, REQUIREMENTS_DIGEST_MEMBER, StatementFacts, evaluate,
-};
+use vta_sdk::vetting::requirements::{Evaluation, StatementFacts, evaluate};
 use vta_sdk::vetting::statement::verify_statement;
 use vta_sdk::vetting::status::StatusCheck;
 use vta_sdk::vetting::ticket_uri::{self, TicketUri};
@@ -579,9 +577,12 @@ impl Application {
     /// than from `manifest`, because a generated type drops the members it does not name and
     /// `vetting.ext` is where a community publishes what this version does not enumerate
     /// ([`super::hidden`]).
+    // The kept manifest is the SDK's 0.2-shaped vetting model (`vetting::protocol::Manifest`),
+    // deprecated in favour of the 0.4 wire shape it is read from; it moves when the SDK's does.
+    #[allow(deprecated)]
     pub fn adopt_manifest(
         &mut self,
-        manifest: &manifest::v0_2::Response,
+        manifest: &super::protocol::Manifest,
         raw: &Value,
     ) -> Result<bool, ApplicantError> {
         let raw_criterion = |id: &str| {
@@ -1504,20 +1505,12 @@ impl Application {
             .collect()
     }
 
-    /// The join submission's `extensions`: the digest of the requirements the
-    /// statements were gathered against, so the community applies the same
-    /// criterion, and — under a hidden-vetting criterion — the proof that `k`
-    /// distinct vetters vetted this applicant.
+    /// The join submission's `extensions`: under a hidden-vetting criterion, the
+    /// proof that `k` distinct vetters vetted this applicant. The criterion itself
+    /// is named by the submit's own `criterion` member (`submit/0.3`).
     #[must_use]
-    pub fn join_extensions(&self, protocol: super::protocol::JoinProtocol) -> Value {
+    pub fn join_extensions(&self) -> Value {
         let mut members = serde_json::Map::new();
-        // 0.2 names the criterion here. 0.3 names it in the submit's own
-        // `criterion` member and no longer reads this one.
-        if protocol == super::protocol::JoinProtocol::V0_2
-            && let Some(digest) = &self.requirements_digest
-        {
-            members.insert(REQUIREMENTS_DIGEST_MEMBER.into(), json!(digest));
-        }
         if let Some(hidden) = &self.hidden_submission {
             members.insert(super::hidden::EXTENSIONS_MEMBER.into(), hidden.clone());
         }

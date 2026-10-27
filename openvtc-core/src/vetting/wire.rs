@@ -27,6 +27,7 @@ use vta_sdk::trust_task_proof::{TrustTaskVmResolver, verify_trust_task_proof_wit
 
 use crate::errors::OpenVTCError;
 use crate::messaging::{MESSAGE_EXPIRY_SECS, build_didcomm_message, unix_now};
+use crate::specs::vtc::vetting::vetters::resend::v0_2 as resend;
 
 /// Why an inbound vetting document was not accepted.
 #[derive(Debug, thiserror::Error)]
@@ -124,7 +125,7 @@ pub async fn sign(doc: &mut TrustTask<Value>, signer: &Secret) -> Result<(), Ope
 pub fn is_community_bound(type_uri: &str) -> bool {
     use vta_sdk::protocols::vetting::{
         VETTING_REVOKE_STATEMENT_TYPE, VETTING_VETTER_GRANT_TYPE, VETTING_VETTER_LIST_TYPE,
-        VETTING_VETTER_PROFILE_TYPE, VETTING_VETTER_RESEND_TYPE,
+        VETTING_VETTER_PROFILE_TYPE,
     };
     if super::protocol::JoinProtocol::from_manifest_request(type_uri).is_some() {
         return true;
@@ -135,7 +136,7 @@ pub fn is_community_bound(type_uri: &str) -> bool {
             | VETTING_VETTER_GRANT_TYPE
             | VETTING_VETTER_LIST_TYPE
             | VETTING_VETTER_PROFILE_TYPE
-            | VETTING_VETTER_RESEND_TYPE
+            | VETTER_RESEND_TYPE
             | pcs::ROOT_TYPE
             | pcs::TOKENS_TYPE
             | pcs::EVENT_MODE_TYPE
@@ -332,7 +333,7 @@ pub fn vetter_profile_request(
 /// The three Trust Tasks hidden vetting's community half serves.
 ///
 /// Published specifications (`dtgwg-trust-tasks-tf`, branch `hidden-vetting-tasks`); the payload
-/// types are written here rather than taken from `trust_tasks_rs::specs` because the generated
+/// types are written here rather than taken from `crate::specs` because the generated
 /// bindings are 0.22 and this workspace pins `^0.21`. `vetting::hidden::tests` validates each of
 /// them against the published schema, which is the check the generated type would have carried.
 pub mod pcs {
@@ -539,10 +540,10 @@ pub fn pcs_challenge_request(
 
 /// `vtc/join-requests/wallet-session/start/0.1`.
 pub const WALLET_SESSION_START_TYPE: &str =
-    <trust_tasks_rs::specs::vtc::join_requests::wallet_session::start::v0_1::Payload as trust_tasks_rs::Payload>::TYPE_URI;
+    <crate::specs::vtc::join_requests::wallet_session::start::v0_1::Payload as trust_tasks_rs::Payload>::TYPE_URI;
 /// `vtc/join-requests/wallet-session/status/0.1`.
 pub const WALLET_SESSION_STATUS_TYPE: &str =
-    <trust_tasks_rs::specs::vtc::join_requests::wallet_session::status::v0_1::Payload as trust_tasks_rs::Payload>::TYPE_URI;
+    <crate::specs::vtc::join_requests::wallet_session::status::v0_1::Payload as trust_tasks_rs::Payload>::TYPE_URI;
 
 /// A `vtc/join-requests/wallet-session/start/0.1` request: ask `community_did`
 /// for an OpenID4VP session that collects, from the applicant's wallet, the
@@ -558,7 +559,7 @@ pub fn wallet_session_start_request(
     community_did: &str,
     requirements_digest: &str,
 ) -> Result<TrustTask<Value>, OpenVTCError> {
-    use trust_tasks_rs::specs::vtc::join_requests::wallet_session::start::v0_1 as start;
+    use crate::specs::vtc::join_requests::wallet_session::start::v0_1 as start;
     let payload: start::Payload =
         serde_json::from_value(serde_json::json!({ "criterion": requirements_digest }))
             .map_err(|e| OpenVTCError::Config(format!("wallet-session/start: {e}")))?;
@@ -581,7 +582,7 @@ pub fn wallet_session_status_request(
     community_did: &str,
     session_id: &str,
 ) -> Result<TrustTask<Value>, OpenVTCError> {
-    use trust_tasks_rs::specs::vtc::join_requests::wallet_session::status::v0_1 as status;
+    use crate::specs::vtc::join_requests::wallet_session::status::v0_1 as status;
     let payload: status::Payload =
         serde_json::from_value(serde_json::json!({ "sessionId": session_id }))
             .map_err(|e| OpenVTCError::Config(format!("wallet-session/status: {e}")))?;
@@ -594,18 +595,25 @@ pub fn wallet_session_status_request(
     )
 }
 
-/// A `vtc/vetting/vetters/resend/0.1` request asking `community_did` to
-/// deliver our live vetter grant credential again.
+/// `vtc/vetting/vetters/resend/0.2` — the request type.
+pub const VETTER_RESEND_TYPE: &str = <resend::Payload as trust_tasks_rs::Payload>::TYPE_URI;
+/// `vtc/vetting/vetters/resend/0.2` — the response type.
+pub const VETTER_RESEND_RESPONSE_TYPE: &str =
+    <resend::Response as trust_tasks_rs::Payload>::TYPE_URI;
+
+/// A `vtc/vetting/vetters/resend/0.2` request asking `community_did` to
+/// deliver our live vetter grant credential again. `memberDid` stays absent: the
+/// grant asked for is the requester's own.
 pub fn vetter_resend_request(
     vetter_did: &str,
     community_did: &str,
 ) -> Result<TrustTask<Value>, OpenVTCError> {
     document(
-        vta_sdk::protocols::vetting::VETTING_VETTER_RESEND_TYPE,
+        VETTER_RESEND_TYPE,
         vetter_did,
         community_did,
         new_id(),
-        &vta_sdk::protocols::vetting::vetters::resend::v0_1::Payload::default(),
+        &resend::Payload::default(),
     )
 }
 
@@ -906,7 +914,7 @@ pub(crate) mod tests {
         ));
     }
 
-    /// `vtc/vetting/vetters/resend/0.1` declares `proof` REQUIRED
+    /// `vtc/vetting/vetters/resend/0.2` declares `proof` REQUIRED
     /// (trust-tasks 0.23), and is signed the same way as a personhood
     /// challenge or assertion: with the authentication key, under
     /// `proofPurpose: authentication` — both are the persona acting on their
@@ -933,7 +941,7 @@ pub(crate) mod tests {
             manifest_request(
                 "did:key:zApplicant",
                 "did:key:zVtc",
-                crate::vetting::protocol::JoinProtocol::V0_2,
+                crate::vetting::protocol::JoinProtocol::V0_4,
             )
             .unwrap(),
             vetter_resend_request("did:key:zVetter", "did:key:zVtc").unwrap(),
@@ -1008,7 +1016,7 @@ pub(crate) mod tests {
         let request = manifest_request(
             "did:key:zApplicant",
             "did:key:zVtc",
-            crate::vetting::protocol::JoinProtocol::V0_2,
+            crate::vetting::protocol::JoinProtocol::V0_4,
         )
         .unwrap();
         let reply = response(&request, &json!({})).unwrap();

@@ -52,10 +52,23 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 use vta_sdk::protocols::join_requests::manifest;
 
-/// The `manifest/0.2` `#response` type a pre-0.3 community answers with;
-/// `vta-sdk` 0.63 dropped its constant when it moved to `manifest/0.3`.
-const JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE: &str =
-    <manifest::v0_2::Response as trust_tasks_rs::Payload>::TYPE_URI;
+/// The `manifest/0.4` `#response` type a community answers with.
+const MANIFEST_RESPONSE_TYPE: &str =
+    <openvtc_core::specs::vtc::join_requests::manifest::v0_4::Response as trust_tasks_rs::Payload>::TYPE_URI;
+
+/// `body`, built in the 0.2 shape the client keeps, as `manifest/0.4` carries it: each
+/// criterion names its `admission`, which 0.4 requires and 0.2 lacks.
+fn as_v0_4(body: impl serde::Serialize) -> Value {
+    let mut wire = serde_json::to_value(body).expect("a manifest");
+    if let Some(criteria) = wire["criteria"].as_array_mut() {
+        for criterion in criteria.iter_mut().filter_map(Value::as_object_mut) {
+            criterion
+                .entry("admission")
+                .or_insert_with(|| json!("review"));
+        }
+    }
+    wire
+}
 use vta_sdk::protocols::vetting::{
     VETTED_PREDICATE, VETTER_ROLE, VETTING_REQUEST_RESPONSE_TYPE, VETTING_REQUEST_TYPE,
     VETTING_SESSION_RESPONSE_TYPE, VETTING_SESSION_TYPE, VettingMethod, VettingRelationship,
@@ -228,8 +241,8 @@ async fn manifest_reply(community: &str, to: &str, signer: &Secret) -> Message {
             )),
     )
     .expect("criterion");
-    let body = manifest::v0_2::Response::try_from(
-        manifest::v0_2::Response::builder()
+    let body = openvtc_core::vetting::protocol::Manifest::try_from(
+        openvtc_core::vetting::protocol::Manifest::builder()
             .community_did(community)
             .criteria(vec![criterion])
             .branding(None),
@@ -241,11 +254,11 @@ async fn manifest_reply(community: &str, to: &str, signer: &Secret) -> Message {
     // as one kind is not acted on as another.
     let mut document = json!({
         "id": wire::new_id(),
-        "type": JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE,
+        "type": MANIFEST_RESPONSE_TYPE,
         "issuer": community,
         "recipient": to,
         "issuedAt": Utc::now().to_rfc3339(),
-        "payload": body,
+        "payload": as_v0_4(body),
     });
     let proof = affinidi_data_integrity::DataIntegrityProof::sign(
         &document,
@@ -255,14 +268,10 @@ async fn manifest_reply(community: &str, to: &str, signer: &Secret) -> Message {
     .await
     .expect("sign the manifest");
     document["proof"] = serde_json::to_value(proof).expect("proof json");
-    Message::build(
-        wire::new_id(),
-        JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE.to_string(),
-        document,
-    )
-    .from(community.to_string())
-    .thid(wire::new_id())
-    .finalize()
+    Message::build(wire::new_id(), MANIFEST_RESPONSE_TYPE.to_string(), document)
+        .from(community.to_string())
+        .thid(wire::new_id())
+        .finalize()
 }
 
 /// The community's `vetter` role credential for `subject`.
@@ -598,9 +607,12 @@ async fn the_vetting_ceremony_completes_over_the_wire() {
         "one statement from one vetter meets requirements that ask for one"
     );
     assert_eq!(application.presentable_statements(Utc::now()).len(), 1);
-    assert_eq!(
-        application.join_extensions(openvtc_core::vetting::protocol::JoinProtocol::V0_2)["requirementsDigest"],
-        DIGEST
+    assert!(
+        application
+            .join_extensions()
+            .get("requirementsDigest")
+            .is_none(),
+        "the submit names the criterion itself, not in extensions"
     );
 }
 

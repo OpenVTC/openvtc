@@ -47,9 +47,8 @@ use std::time::Duration;
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use serde_json::Value;
 use trust_tasks_rs::TrustTask;
-use vta_sdk::protocols::join_requests::manifest;
 
-use super::protocol::{CriterionMeta, JoinProtocol, is_version_refusal, read_manifest};
+use super::protocol::{CriterionMeta, JoinProtocol, Manifest, read_manifest};
 use vta_sdk::trust_task_proof::{TrustTaskVmResolver, verify_trust_task_proof_with};
 
 use crate::health::ProbePolicy;
@@ -214,40 +213,20 @@ fn anonymous_request(community_did: &str, protocol: JoinProtocol) -> Value {
 /// the version the community answered in, and what that version says per
 /// criterion beyond the 0.2 shape.
 pub struct FetchedManifest {
-    pub manifest: manifest::v0_2::Response,
+    pub manifest: Manifest,
     pub raw: Value,
     pub protocol: JoinProtocol,
     pub meta: Vec<CriterionMeta>,
 }
 
-/// Read `community_did`'s join manifest, asking in 0.3 and, if the community
-/// refuses that version, once more in 0.2.
+/// Read `community_did`'s join manifest (`manifest/0.4`).
 pub async fn fetch_manifest(
     doc: &Value,
     community_did: &str,
     resolver: &DIDCacheClient,
     policy: ProbePolicy,
 ) -> Result<FetchedManifest, DiscoverError> {
-    let mut protocol = JoinProtocol::default();
-    loop {
-        match fetch_manifest_in(doc, community_did, resolver, policy, protocol).await {
-            Err(DiscoverError::Refused {
-                code: Some(code), ..
-            }) if is_version_refusal(&code) && protocol.fallback().is_some() => {
-                protocol = protocol.fallback().expect("checked above");
-            }
-            other => return other,
-        }
-    }
-}
-
-async fn fetch_manifest_in(
-    doc: &Value,
-    community_did: &str,
-    resolver: &DIDCacheClient,
-    policy: ProbePolicy,
-    protocol: JoinProtocol,
-) -> Result<FetchedManifest, DiscoverError> {
+    let protocol = JoinProtocol::default();
     let endpoint = rest_endpoint(doc).ok_or(DiscoverError::NoEndpoint)?;
     let url = trust_tasks_url(&endpoint, policy)?;
 
@@ -457,13 +436,13 @@ mod tests {
     /// applicants cannot be what tells it who is considering applying.
     #[test]
     fn the_question_carries_no_issuer() {
-        let request = anonymous_request("did:webvh:community", JoinProtocol::V0_3);
+        let request = anonymous_request("did:webvh:community", JoinProtocol::V0_4);
         assert!(
             request.get("issuer").is_none(),
             "a pre-application read must not name the reader"
         );
         assert_eq!(request["recipient"], "did:webvh:community");
-        assert_eq!(request["type"], JoinProtocol::V0_3.manifest_type());
+        assert_eq!(request["type"], JoinProtocol::V0_4.manifest_type());
         assert!(request["payload"].as_object().is_some_and(|p| p.is_empty()));
     }
 

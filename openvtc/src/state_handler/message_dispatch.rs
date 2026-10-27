@@ -2939,7 +2939,7 @@ mod tests {
     }
 
     /// A TSP-joined member's Repos view loads from the community's
-    /// `git-ns/view/0.4` answer, taken the whole way a live one is: sealed in
+    /// `git-ns/view/0.6` answer, taken the whole way a live one is: sealed in
     /// the TSP binding envelope, mapped and passed through the inbound gate
     /// (`deliver_tsp_document`), checked off the loop and dispatched
     /// (`process_inbound_message`), then correlated by the Repos view
@@ -2956,7 +2956,7 @@ mod tests {
         // The signed document, as the VTC sends it over TSP.
         let mut document = serde_json::from_value(serde_json::json!({
             "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-            "type": "https://trusttasks.org/spec/git-ns/view/0.4#response",
+            "type": "https://trusttasks.org/spec/git-ns/view/0.6#response",
             "issuer": vtc,
             "recipient": PERSONA,
             "issuedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),

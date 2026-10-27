@@ -1169,7 +1169,7 @@ pub struct KnownCommunity {
     pub fetched_at: DateTime<Utc>,
     /// The `join-requests` version it answered its manifest in, which is the
     /// one its submit is sent in. `None` on a record written before this was
-    /// kept, which reads as "ask 0.3 first" ([`super::protocol`]).
+    /// kept, which reads as the current version ([`super::protocol`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<JoinProtocol>,
     /// Every criterion it publishes, vetting or not, in published order: the
@@ -1349,12 +1349,6 @@ pub struct VettingBook {
     /// Communities whose manifests we have read, with their branding.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub communities: Vec<KnownCommunity>,
-    /// The `join-requests` version to ask a community in, learned from a
-    /// refusal before any manifest arrived: a community that refused 0.3 as an
-    /// unsupported version is asked in 0.2 from then on. A manifest's own
-    /// version ([`KnownCommunity::protocol`]) takes precedence.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub protocol_hints: std::collections::BTreeMap<String, JoinProtocol>,
     /// The vetter profile we last sent each community, per persona.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vetter_profiles: Vec<VetterProfileRecord>,
@@ -1901,7 +1895,7 @@ impl VettingBook {
     pub fn learn_manifest(
         &mut self,
         community: &str,
-        manifest: &manifest::v0_2::Response,
+        manifest: &super::protocol::Manifest,
         now: DateTime<Utc>,
     ) -> bool {
         self.learn_manifest_in(community, manifest, None, &[], now)
@@ -1910,10 +1904,13 @@ impl VettingBook {
     /// [`Self::learn_manifest`], recording the version the manifest arrived in
     /// and what that version says about each criterion beyond its 0.2 shape
     /// ([`super::protocol::read_manifest`]).
+    // The kept manifest is the SDK's 0.2-shaped vetting model (`vetting::protocol::Manifest`),
+    // deprecated in favour of the 0.4 wire shape it is read from; it moves when the SDK's does.
+    #[allow(deprecated)]
     pub fn learn_manifest_in(
         &mut self,
         community: &str,
-        manifest: &manifest::v0_2::Response,
+        manifest: &super::protocol::Manifest,
         protocol: Option<JoinProtocol>,
         meta: &[CriterionMeta],
         now: DateTime<Utc>,
@@ -2035,14 +2032,14 @@ impl VettingBook {
     }
 
     /// The `join-requests` version `community` answered in, or the one to ask
-    /// first when it has not answered.
+    /// when it has not answered. Only one is spoken now ([`super::protocol`]), so
+    /// this is that one either way; it stays the one place a version is chosen.
     #[must_use]
     pub fn protocol_for(&self, community: &str) -> JoinProtocol {
         self.communities
             .iter()
             .find(|c| c.community == community)
             .and_then(|c| c.protocol)
-            .or_else(|| self.protocol_hints.get(community).copied())
             .unwrap_or_default()
     }
 
@@ -2072,40 +2069,6 @@ impl VettingBook {
             .iter()
             .find(|c| c.community == community)
             .and_then(|c| c.directory.as_ref())
-    }
-
-    /// The version to ask `community` for its manifest in: the newest it may
-    /// serve. [`Self::protocol_for`] is the version it last answered in, which
-    /// for a community known as 0.3 would never ask it for the 0.4 directory
-    /// statement once it moves. So a 0.3 community is asked in 0.4 again —
-    /// unless it has already refused 0.4, which the fallback records as a hint.
-    #[must_use]
-    pub fn manifest_protocol_for(&self, community: &str) -> JoinProtocol {
-        match self.protocol_for(community) {
-            JoinProtocol::V0_3
-                if self.protocol_hints.get(community) != Some(&JoinProtocol::V0_3) =>
-            {
-                JoinProtocol::V0_4
-            }
-            known => known,
-        }
-    }
-
-    /// `community` refused a request in `asked` as a version it does not
-    /// serve: remember the version to fall back to and return it, or `None`
-    /// when there is nothing older to try.
-    pub fn fall_back_from(&mut self, community: &str, asked: JoinProtocol) -> Option<JoinProtocol> {
-        let next = asked.fallback()?;
-        self.protocol_hints.insert(community.to_string(), next);
-        if let Some(known) = self
-            .communities
-            .iter_mut()
-            .find(|c| c.community == community)
-            && known.protocol == Some(asked)
-        {
-            known.protocol = Some(next);
-        }
-        Some(next)
     }
 
     /// Every criterion `community` publishes, in published order. Empty when
@@ -2844,7 +2807,7 @@ mod tests {
     fn manifest(
         branding: Option<manifest::v0_2::CommunityBranding>,
         vetting: bool,
-    ) -> manifest::v0_2::Response {
+    ) -> crate::vetting::protocol::Manifest {
         let requirements: VettingRequirements = serde_json::from_value(serde_json::json!({
             "version": "0.1",
             "statementType": vta_sdk::protocols::vetting::VETTED_PREDICATE,
@@ -2864,8 +2827,8 @@ mod tests {
                 )),
         )
         .unwrap();
-        manifest::v0_2::Response::try_from(
-            manifest::v0_2::Response::builder()
+        crate::vetting::protocol::Manifest::try_from(
+            crate::vetting::protocol::Manifest::builder()
                 .community_did("did:web:vtc")
                 .criteria(vec![criterion])
                 .branding(branding),

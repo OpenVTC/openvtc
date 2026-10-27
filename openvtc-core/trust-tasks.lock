@@ -1,0 +1,249 @@
+# Written by `trust-tasks`. Do not edit by hand.
+version = 1
+registry = "https://trusttasks.org"
+
+[[task]]
+slug = "git-ns/account/link"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/git-ns/account/link/0.1"
+digest = "sha256:c6b1bcc303857586881a943fc706acfd4baa14f132d68d022e6885787410c22e"
+
+[[task]]
+slug = "git-ns/account/link-status"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/git-ns/account/link-status/0.1"
+digest = "sha256:7fe195b1e7632a1c3c04969c73070cd2f77324de190b42bf170d3b3b6a4a7882"
+
+[[task]]
+slug = "git-ns/drift/resolve"
+version = "0.4"
+type_uri = "https://trusttasks.org/spec/git-ns/drift/resolve/0.4"
+digest = "sha256:26487eb6fc9eb99af3512a43fc1748dfb0f479d04ee56dc87da68010419ec882"
+
+[[task]]
+slug = "git-ns/repo/archive"
+version = "0.3"
+type_uri = "https://trusttasks.org/spec/git-ns/repo/archive/0.3"
+digest = "sha256:3eccc7dc807278782ac10fdd7bfd64ca5d3a3761bb18acb6d294e08cb879b350"
+
+[[task]]
+slug = "git-ns/repo/create"
+version = "0.4"
+type_uri = "https://trusttasks.org/spec/git-ns/repo/create/0.4"
+digest = "sha256:85a481d4a59f330defbb71229367e2fde9c890d5d81d36f6f51f7c373973c912"
+
+[[task]]
+slug = "git-ns/repo/transfer"
+version = "0.3"
+type_uri = "https://trusttasks.org/spec/git-ns/repo/transfer/0.3"
+digest = "sha256:cc0c9e8f91501829113f1e830df9bfad1cf26420be48f3f439af1d3630975a75"
+
+[[task]]
+slug = "git-ns/right/grant"
+version = "0.4"
+type_uri = "https://trusttasks.org/spec/git-ns/right/grant/0.4"
+digest = "sha256:a519c61646f2d6db2ab602ff43004a29e43eb7ab8c6ec70be510eb5b997178c4"
+
+[[task]]
+slug = "git-ns/right/revoke"
+version = "0.4"
+type_uri = "https://trusttasks.org/spec/git-ns/right/revoke/0.4"
+digest = "sha256:27d61d2ad8565f75a384829cd3cc19ce71ad18ba29a2ad5042c2637e31e6f670"
+
+[[task]]
+slug = "git-ns/view"
+version = "0.6"
+type_uri = "https://trusttasks.org/spec/git-ns/view/0.6"
+digest = "sha256:eb4ef32787f0ed5a0840341903c237e24b2662d036bd29498b993d8865cc474d"
+
+[[task]]
+slug = "persona/attribute/promote"
+version = "1.1"
+type_uri = "https://trusttasks.org/spec/persona/attribute/promote/1.1"
+digest = "sha256:9ad2d52ef72043ece9d23a43543d6e83d24eedd41758ee9a303db6c53398c7a7"
+
+[[task]]
+slug = "persona/profile/compose"
+version = "1.1"
+type_uri = "https://trusttasks.org/spec/persona/profile/compose/1.1"
+digest = "sha256:f423876290a5884cd825ed9b2434bc1b94a1f8f077b26a975ebcd278e399ce1d"
+
+[[task]]
+slug = "vta/pcs/applications/create"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/applications/create/0.1"
+digest = "sha256:1b9e5768031dda975187bf32a5c285aa80328e77a522cdbbefe372b45890086c"
+
+[[task]]
+slug = "vta/pcs/applications/delete"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/applications/delete/0.1"
+digest = "sha256:10cf2875b658711f08110eb2eabee288015e184cd204e408753431f4d2a56cbd"
+
+[[task]]
+slug = "vta/pcs/applications/show"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/applications/show/0.1"
+digest = "sha256:42c6e9f0d55821b276817e7fcadfb784e41e3d2ac8e2204b8fa0b034bbf2cfee"
+
+[[task]]
+slug = "vta/pcs/attest"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/attest/0.1"
+digest = "sha256:622f71bc61a1d3e06fad4e18196c4ff99408e4a4d8155088144b6a09dd6ab914"
+
+[[task]]
+slug = "vta/pcs/prove"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/prove/0.1"
+digest = "sha256:8eef21cd671497715ab71295dfc970d1af9193d74c1273abe4e1fa84d2b443e5"
+
+[[task]]
+slug = "vta/pcs/root-accept"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/root-accept/0.1"
+digest = "sha256:0911779f7834259d84bf419cf8e8c3131135f3ed2c436b7da25a1911783de68b"
+
+[[task]]
+slug = "vta/pcs/root-request"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/root-request/0.1"
+digest = "sha256:5c81594089f2e4a9237a439bd6b5535cd8d85ffbd6ec2ca896fc42ba1bda5d6b"
+
+[[task]]
+slug = "vta/pcs/tokens/abandon"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/tokens/abandon/0.1"
+digest = "sha256:f2bccce94ebaf7070141efb4d65a024663780a7add33b983944a7595f5f04d24"
+
+[[task]]
+slug = "vta/pcs/tokens/accept"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/tokens/accept/0.1"
+digest = "sha256:5eb0801321302bc6cd3b84e07c2ca520e0da1a483423c7f016944da1bf80b627"
+
+[[task]]
+slug = "vta/pcs/tokens/request"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/tokens/request/0.1"
+digest = "sha256:ed3714cd1a3dae09361adeee2030ee04a91efd33714decac00115b63e79fa78a"
+
+[[task]]
+slug = "vta/pcs/verify-attestation"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/verify-attestation/0.1"
+digest = "sha256:851da0ac0d05e7b0236527935ce46e28a7c7ac388c93dd2d5338a702b0755204"
+
+[[task]]
+slug = "vta/pcs/vetter/show"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/vetter/show/0.1"
+digest = "sha256:32411c65181d5081793fbed8f6c5defb720a285788c06f899aea03e364ee031d"
+
+[[task]]
+slug = "vta/witness/accept"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/vta/witness/accept/0.2"
+digest = "sha256:238759cef02d7249ca96053e2830dc0d753e1b1a71322bb55d0a7c8bbbce5ff6"
+
+[[task]]
+slug = "vta/witness/list"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/vta/witness/list/0.2"
+digest = "sha256:226749d6e97284915a4a2eca83ded059c928803a3a12119169fd290174819c1f"
+
+[[task]]
+slug = "vta/witness/open"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/vta/witness/open/0.2"
+digest = "sha256:ea3b64169e4c017bcadc3456c5506f8df1c2113693dfbafa3586df174713e0b5"
+
+[[task]]
+slug = "vta/witness/present"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/vta/witness/present/0.2"
+digest = "sha256:5a0f28f13d4d15fc0f19d66433de7425bcfb46745abceb6b978bf1c42ed385bf"
+
+[[task]]
+slug = "vtc/community/profile/show"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vtc/community/profile/show/0.1"
+digest = "sha256:2d80d2a3e329f8839fe034fa7b7c2c00fa3540b092e23c109369768df632e259"
+
+[[task]]
+slug = "vtc/join-requests/manifest"
+version = "0.4"
+type_uri = "https://trusttasks.org/spec/vtc/join-requests/manifest/0.4"
+digest = "sha256:fee773f63e837fc07aab487d6b1ecd121ba7f8b116c9dd93ba4770059879e03a"
+
+[[task]]
+slug = "vtc/join-requests/submit"
+version = "0.3"
+type_uri = "https://trusttasks.org/spec/vtc/join-requests/submit/0.3"
+digest = "sha256:d0b34745253ba1d9997886de8e3c2af39ca5c7c0fdd59b24101ae496f14fe5ee"
+
+[[task]]
+slug = "vtc/join-requests/wallet-session/start"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vtc/join-requests/wallet-session/start/0.1"
+digest = "sha256:78f362dd09d9a765705896d3be537c15d522d63ae300cba5762e838a6566c5c8"
+
+[[task]]
+slug = "vtc/join-requests/wallet-session/status"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vtc/join-requests/wallet-session/status/0.1"
+digest = "sha256:285483423318884026d2e7c5b8d3410f21ee5172b74a5bba141e29cac40c1081"
+
+[[task]]
+slug = "vtc/members/personhood/assert"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/vtc/members/personhood/assert/0.2"
+digest = "sha256:3b1060695a33764ebdb657fbf5a18330b3aefa41ad4fcc6a020184e500e8da64"
+
+[[task]]
+slug = "vtc/members/renew"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vtc/members/renew/0.1"
+digest = "sha256:bacc4292668ab09cae4ba8c90ffcfbed85a855096d882cd132c7da596003cbf0"
+
+[[task]]
+slug = "vtc/rooms/memberships/list"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vtc/rooms/memberships/list/0.1"
+digest = "sha256:e9f3391572fea47054b34bc4e14bd0cb1ea1c620ed66c3084e91cb791d8dd814"
+
+[[task]]
+slug = "vtc/rooms/offers/accept"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vtc/rooms/offers/accept/0.1"
+digest = "sha256:6ce811c6e2cd87f931c7b544d3523746b0313543a9d4bd6b3925b4e1a53c47e1"
+
+[[task]]
+slug = "vtc/rooms/offers/list"
+version = "0.4"
+type_uri = "https://trusttasks.org/spec/vtc/rooms/offers/list/0.4"
+digest = "sha256:aa3618469b8bcfeda1084a4868a170743c3b3c762411f610e2617b11234cf65d"
+
+[[task]]
+slug = "vtc/vetting/vetters/pcs-tokens"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vtc/vetting/vetters/pcs-tokens/0.1"
+digest = "sha256:813ac90f4ee802cdb14e643f8c96c13063ab32b3c5581b59898f51ac69319120"
+
+[[task]]
+slug = "vtc/vetting/vetters/resend"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/vtc/vetting/vetters/resend/0.2"
+digest = "sha256:88bef14d7491323467b1440af1f757d7724dc0cf5118b072f6bf8031e2434915"
+
+[[task]]
+slug = "witness/session"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/witness/session/0.2"
+digest = "sha256:888592eb20bcdc28d5288d233d1da390c1ae76ada2676a23c97f188a868d09ca"
+
+[[task]]
+slug = "witness/session/submit"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/witness/session/submit/0.2"
+digest = "sha256:4b08f4ca5218d75dbf49f3f7759eff37b4fc95c83899450c5ec1eaf2ad6c7ff9"

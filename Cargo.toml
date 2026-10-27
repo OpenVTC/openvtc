@@ -83,8 +83,10 @@ argon2 = "0.6"
 # 0.18 -> 0.20 follows `vta-sdk` 0.53 -> 0.56 below, the release that declares
 # `affinidi-tdk ^0.20`. 0.23 -> 0.24 follows `vta-sdk` 0.63 -> 0.65 the same way,
 # and 0.24 -> 0.26 follows 0.65 -> 0.68. 0.27 -> 0.32 follows 0.72 -> 0.73
-# (TSP 1.0, VTI #2282).
-affinidi-tdk = "0.32"
+# (TSP 1.0, VTI #2282). 0.32 -> 0.33 is the trust-tasks 0.35 line (messaging-sdk
+# 0.41), the one `affinidi-messaging-test-mediator` 0.46 and the VTI trust-tasks
+# 0.35 move are on. 0.34 / 0.35 exist, but nothing that dev-tests against them does.
+affinidi-tdk = "0.33"
 affinidi-data-integrity = "0.8"
 # Decodes a community's Bitstring Status List. Already in the graph through
 # `vta-sdk`, whose status reader cannot verify a list signed with a proof set;
@@ -150,8 +152,9 @@ affinidi-messaging-core = "0.1.11"
 # their sender's quota (a frame for a key this app has not loaded is kept).
 #
 # **0.34.1** follows `vta-sdk` 0.65, which declares it; **0.36** follows 0.68;
-# **0.40** follows 0.73 (TSP 1.0).
-affinidi-messaging-sdk = "0.40.0"
+# **0.40** follows 0.73 (TSP 1.0). **0.41** is the trust-tasks 0.35 line, with
+# `affinidi-tdk` 0.33 above.
+affinidi-messaging-sdk = "0.41.0"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
@@ -276,7 +279,7 @@ dialoguer = { version = "0.12", features = ["password"] }
 #
 # **0.8.1** mints a did:webvh with its did:scid presentation
 # (decentralized-identity/didwebvh-rs #56), which a did:scid persona is.
-didwebvh-rs = "0.8.1"
+didwebvh-rs = "0.8.2"
 ed25519-dalek-bip32 = "0.3"
 hkdf = "0.13"
 hex = "0.4"
@@ -448,8 +451,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 #
 # **0.34.2**, following `vta-sdk` 0.73: persona create/1.2 carries the did:scid
 # choice (trust-tasks-tf #862, #863); `trust-tasks-capability-client` with it.
-trust-tasks-rs = { version = "0.34.2", features = ["git-ns"] }
-trust-tasks-capability-client = "0.34.2"
+#
+# **0.35.3, runtime only.** The specifications this workspace speaks are no longer
+# the crate's prebuilt modules (deprecated from 0.35): `openvtc-core`'s build.rs
+# generates exactly the versions pinned in `openvtc-core/trust-tasks.lock` with
+# `trust-tasks-build`, as `openvtc_core::specs`. `default-features = false`
+# leaves out every prebuilt family; a spec version reached through `vta-sdk`'s
+# re-exports is still vta-sdk's to choose.
+trust-tasks-rs = { version = "0.35.3", default-features = false }
+trust-tasks-capability-client = "0.35.3"
+# Build dependency of `openvtc-core`: generates `openvtc_core::specs` from the
+# vendored bundles. `trust-tasks check` (trust-tasks-cli) verifies them.
+trust-tasks-build = "0.1.2"
 tui-input = "0.15"
 url = "2.5"
 uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }

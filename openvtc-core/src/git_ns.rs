@@ -9,7 +9,7 @@
 //! - [`Request`]: one variant per task a member sends — `view`,
 //!   `repo/create`, `right/grant`, `right/revoke`, `repo/transfer`,
 //!   `repo/archive`, `drift/resolve`, `account/link`, `account/link-status`. Every payload is
-//!   built through the generated `trust_tasks_rs::specs::git_ns` types, so a
+//!   built through the generated `crate::specs::git_ns` types, so a
 //!   value the schema refuses (a DID without a method, an uppercase resource,
 //!   a reason over 1024 characters) fails here, before anything is sent.
 //! - [`build_signed`]: the addressed, dated, **signed** document. Seven of the
@@ -35,28 +35,26 @@
 //! `git-ns/*` dispatcher is reached through its ordinary Trust Task spine
 //! (VTI #1694), which verifies the proof before a handler runs.
 
+use crate::specs::git_ns::account::{link::v0_1 as link, link_status::v0_1 as link_status};
+use crate::specs::git_ns::drift::resolve::v0_4 as resolve;
+use crate::specs::git_ns::repo::{
+    archive::v0_3 as archive, create::v0_4 as create, transfer::v0_3 as transfer,
+};
+use crate::specs::git_ns::right::{grant::v0_4 as grant, revoke::v0_4 as revoke};
 use affinidi_tdk::secrets_resolver::secrets::Secret;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use trust_tasks_rs::TrustTask;
-use trust_tasks_rs::specs::git_ns::account::{
-    link::v0_1 as link, link_status::v0_1 as link_status,
-};
-use trust_tasks_rs::specs::git_ns::drift::resolve::v0_1 as resolve;
-use trust_tasks_rs::specs::git_ns::repo::{
-    archive::v0_1 as archive, create::v0_3 as create, transfer::v0_1 as transfer,
-};
-use trust_tasks_rs::specs::git_ns::right::{grant::v0_3 as grant, revoke::v0_3 as revoke};
 use uuid::Uuid;
 
 use crate::errors::OpenVTCError;
 
+/// The generated `git-ns/view/0.6` types, which the panel renders from. They
+/// carry each right record's `breakGlass` record (stamped `recordedAt`), and show
+/// every unratified break-glass record to the administrators it concerns.
+pub use crate::specs::git_ns::view::v0_6 as view;
 /// The generated `git-ns/account/link-status/0.1` types.
 pub use link_status::ResponseState as LinkState;
-/// The generated `git-ns/view/0.4` types, which the panel renders from. 0.4
-/// carries each right record's `breakGlass` flag, and shows every unratified
-/// break-glass record to the administrators it concerns.
-pub use trust_tasks_rs::specs::git_ns::view::v0_4 as view;
 
 /// Every `git-ns` task URI starts with this.
 pub const TYPE_PREFIX: &str = "https://trusttasks.org/spec/git-ns/";
@@ -221,9 +219,9 @@ impl Visibility {
 /// One `git-ns/*` task a member sends to their community.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
-    /// `git-ns/view/0.4` — what the caller may see, optionally narrowed.
+    /// `git-ns/view/0.6` — what the caller may see, optionally narrowed.
     View { resource: Option<String> },
-    /// `git-ns/repo/create/0.3`.
+    /// `git-ns/repo/create/0.4`.
     Create {
         namespace: String,
         name: String,
@@ -238,7 +236,7 @@ pub enum Request {
         /// authority to grant it (`git-ns:escalation` otherwise).
         owners: Option<Vec<String>>,
     },
-    /// `git-ns/right/grant/0.3` — the only version the VTC serves.
+    /// `git-ns/right/grant/0.4`.
     Grant {
         subject: String,
         right: GitRight,
@@ -246,18 +244,18 @@ pub enum Request {
         expires_at: Option<DateTime<Utc>>,
         reason: Option<String>,
     },
-    /// `git-ns/right/revoke/0.3` — the only version the VTC serves.
+    /// `git-ns/right/revoke/0.4`.
     Revoke {
         subject: String,
         right: GitRight,
         resource: String,
         reason: Option<String>,
     },
-    /// `git-ns/repo/transfer/0.1` — hand the caller's ownership to `to`.
+    /// `git-ns/repo/transfer/0.3` — hand the caller's ownership to `to`.
     Transfer { resource: String, to: String },
-    /// `git-ns/repo/archive/0.1`.
+    /// `git-ns/repo/archive/0.3`.
     Archive { resource: String },
-    /// `git-ns/drift/resolve/0.1` — answer one drift item the bridge
+    /// `git-ns/drift/resolve/0.4` — answer one drift item the bridge
     /// reported on a repository: adopt the forge-side role as a right, or
     /// have the bridge revert the forge to the VTC's projection.
     DriftResolve {
@@ -739,12 +737,6 @@ impl Refusal {
                  the repository or a namespace admin."
                     .to_string()
             }
-            c if c == resolve::error_codes::ROLE_MAP_UNKNOWN.code => {
-                "The community doesn't yet know how this namespace's rights map to forge \
-                 roles: its bridge hasn't reported its role map. Try again once the bridge has \
-                 connected, or ask a community administrator to check it."
-                    .to_string()
-            }
             c if c == grant::error_codes::MEMBERS_ONLY.code => {
                 "Namespace admin and repo creator go only to current members, and that DID is \
                  not one. Repository rights for outside contributors are the community's policy."
@@ -806,6 +798,11 @@ impl Refusal {
                 "That drift cannot be adopted{detail}. Revert it (v) instead, or — to accept a \
                  lowered role — revoke the right (x)."
             ),
+            c if c == resolve::error_codes::SUBJECT_CHANGED.code => {
+                "That forge account is now linked to a different member than when you read it, \
+                 so nothing was adopted. Refresh (r) and decide about the member it names now."
+                    .to_string()
+            }
             c if c == resolve::error_codes::ACCOUNT_NOT_LINKED.code => {
                 "That forge account is not linked to a current member, so there is nobody to \
                  grant the role to. Revert it (v), or have the person link their account first."
@@ -1484,7 +1481,7 @@ pub fn unratified_break_glass(
                 subject: r.subject.to_string(),
                 right: to_wire_string(&r.right),
                 resource: r.resource.to_string(),
-                at: bg.at,
+                at: bg.recorded_at,
                 justification: bg.justification.to_string(),
                 pending_until: bg.effective_at.filter(|e| *e > now),
                 mine: *r.subject == *me,
@@ -1637,7 +1634,7 @@ mod tests {
         );
         assert_eq!(
             req.type_uri(),
-            "https://trusttasks.org/spec/git-ns/right/grant/0.3"
+            "https://trusttasks.org/spec/git-ns/right/grant/0.4"
         );
         assert!(req.proof_required());
     }
@@ -1646,7 +1643,7 @@ mod tests {
     /// generated round trip is the proof — and names the right task.
     #[test]
     fn every_request_builds_a_payload_its_task_accepts() {
-        // `git-ns/view/0.4` declares `proof` REQUIRED again as of trust-tasks-rs
+        // `git-ns/view` declares `proof` REQUIRED again as of trust-tasks-rs
         // 0.24 (0.1–0.3 always did; the 0.23 line's codegen had it relaxed).
         // The view is signed all the same either way, like every request
         // (`build_signed`), so this is a spec-generated constant this test
@@ -1970,7 +1967,7 @@ mod tests {
         );
         assert_eq!(
             revert.type_uri(),
-            "https://trusttasks.org/spec/git-ns/drift/resolve/0.1"
+            "https://trusttasks.org/spec/git-ns/drift/resolve/0.4"
         );
         assert!(revert.proof_required());
 
@@ -2076,7 +2073,7 @@ mod tests {
     #[test]
     fn a_drift_resolve_response_is_read_typed() {
         let doc = reply_doc(
-            "https://trusttasks.org/spec/git-ns/drift/resolve/0.1#response",
+            "https://trusttasks.org/spec/git-ns/drift/resolve/0.4#response",
             json!({"action": "revert", "sync": {"state": "pending", "drift": []}}),
         );
         let (thid, reply) = parse_reply(&doc).unwrap();
@@ -2107,7 +2104,7 @@ mod tests {
     fn a_view_response_is_read_typed() {
         let payload = serde_json::to_value(bob_view()).unwrap();
         let (thid, reply) = parse_reply(&reply_doc(
-            "https://trusttasks.org/spec/git-ns/view/0.4#response",
+            "https://trusttasks.org/spec/git-ns/view/0.6#response",
             payload,
         ))
         .unwrap();
@@ -2137,7 +2134,7 @@ mod tests {
     #[test]
     fn a_response_off_contract_is_unreadable_not_dropped() {
         let (_, reply) = parse_reply(&reply_doc(
-            "https://trusttasks.org/spec/git-ns/right/grant/0.3#response",
+            "https://trusttasks.org/spec/git-ns/right/grant/0.4#response",
             json!({"right": {"subject": "nobody"}}),
         ))
         .unwrap();
@@ -2148,7 +2145,7 @@ mod tests {
     fn a_request_or_a_foreign_family_is_not_a_reply() {
         assert!(
             parse_reply(&reply_doc(
-                "https://trusttasks.org/spec/git-ns/view/0.4",
+                "https://trusttasks.org/spec/git-ns/view/0.6",
                 json!({})
             ))
             .is_none()
@@ -2161,7 +2158,7 @@ mod tests {
             .is_none()
         );
         assert!(is_reply_type(
-            "https://trusttasks.org/spec/git-ns/view/0.4#response"
+            "https://trusttasks.org/spec/git-ns/view/0.6#response"
         ));
         assert!(!is_reply_type(
             "https://trusttasks.org/spec/governance/capability/list/0.1"
@@ -2454,7 +2451,7 @@ mod tests {
             "subject": CAROL, "right": "git.repo.own", "resource": "github.com/acme/widgets",
             "grantedBy": CAROL, "grantedAt": "2026-09-25T02:10:31Z",
             "breakGlass": {
-                "by": CAROL, "at": "2026-09-25T02:10:31Z",
+                "by": CAROL, "recordedAt": "2026-09-25T02:10:31Z",
                 "justification": "CVE-2026-4411 fix must ship tonight; both owners unreachable."
             }
         }));
@@ -2462,7 +2459,7 @@ mod tests {
             "subject": BOB, "right": "git.ns.admin", "resource": "github.com/acme",
             "grantedBy": BOB, "grantedAt": "2026-09-20T08:00:00Z",
             "breakGlass": {
-                "by": BOB, "at": "2026-09-20T08:00:00Z", "justification": "Namespace was headless",
+                "by": BOB, "recordedAt": "2026-09-20T08:00:00Z", "justification": "Namespace was headless",
                 "ratifiedBy": ALICE, "ratifiedAt": "2026-09-21T09:00:00Z"
             }
         }));

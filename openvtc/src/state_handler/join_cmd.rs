@@ -614,7 +614,7 @@ impl Job<'_> {
                 openvtc_core::join::attach_credentials(&mut vp, statements);
                 openvtc_core::join::JoinPresentation {
                     vp,
-                    extensions: application.join_extensions(protocol),
+                    extensions: application.join_extensions(),
                     attributes: Vec::new(),
                     protocol,
                     criterion: application.requirements_digest.clone(),

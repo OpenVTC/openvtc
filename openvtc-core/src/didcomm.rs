@@ -3042,7 +3042,7 @@ mod tsp_carriage_tests {
         }
     }
 
-    /// The exact reply a live VTC sent a TSP-joined member — `git-ns/view/0.4`
+    /// The exact reply a live VTC sent a TSP-joined member — `git-ns/view/0.6`
     /// in the binding envelope — passes the inbound gate and is delivered to
     /// the state handler, and so does every other `git-ns` reply and a
     /// refusal. Before the gate admitted `git-ns/*`, this one was logged
@@ -3051,8 +3051,8 @@ mod tsp_carriage_tests {
     #[test]
     fn a_tsp_git_ns_reply_is_delivered_through_the_inbound_gate() {
         for type_uri in [
-            "https://trusttasks.org/spec/git-ns/view/0.4#response",
-            "https://trusttasks.org/spec/git-ns/repo/create/0.3#response",
+            "https://trusttasks.org/spec/git-ns/view/0.6#response",
+            "https://trusttasks.org/spec/git-ns/repo/create/0.4#response",
             "https://trusttasks.org/spec/git-ns/account/link-status/0.1#response",
             "https://trusttasks.org/spec/trust-task-error/0.1",
             "https://trusttasks.org/spec/governance/capability/list/0.1#response",

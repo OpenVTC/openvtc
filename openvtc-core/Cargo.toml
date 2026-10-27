@@ -103,6 +103,9 @@ openpgp-card = { workspace = true, optional = true }
 card-backend-pcsc = { workspace = true, optional = true }
 openpgp-card-rpgp = { workspace = true, optional = true }
 
+[build-dependencies]
+trust-tasks-build.workspace = true
+
 [dev-dependencies]
 # Scratch directories for the git-workspace tests (a real clone, read back).
 tempfile = "3"
@@ -132,8 +135,9 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # `affinidi-tdk` 0.24 / messaging-sdk 0.34, matching `vta-sdk` 0.65. 0.22.0 is on
 # `affinidi-tdk` 0.26 / messaging-sdk 0.36, matching `vta-sdk` 0.68. 0.42 is the
 # line `vta-service` 0.61's `transport-harness` declares (VTI #2089). 0.45 is on
-# `affinidi-tdk` 0.32 / messaging-sdk 0.40, matching `vta-sdk` 0.73.
-affinidi-messaging-test-mediator = "0.45"
+# `affinidi-tdk` 0.32 / messaging-sdk 0.40, matching `vta-sdk` 0.73. 0.46 is on
+# `affinidi-tdk` 0.33 / messaging-sdk 0.41 / trust-tasks 0.35.
+affinidi-messaging-test-mediator = "0.46"
 # In-process MockVta for the bootstrap e2e (VTI#406/#427 test-support seams).
 # `vta-service` is the VTA server crate; it carries the credential-vault
 # lifecycle tasks (receive/query/archive/delete/restore/purge) + the

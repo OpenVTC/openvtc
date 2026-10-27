@@ -45,6 +45,9 @@ pub struct Composed {
     pub reused: usize,
 }
 
+/// Round-trip budget for a `persona/*` task sent here, in seconds (the SDK's persona budget).
+const PERSONA_TIMEOUT_SECS: u64 = 30;
+
 /// Make a face for one context and wear it there as `persona_did`.
 pub async fn compose(
     client: &VtaClient,
@@ -65,7 +68,7 @@ pub async fn compose(
             claim
         })
         .collect();
-    let payload: trust_tasks_rs::specs::persona::profile::compose::v1_0::Payload =
+    let payload: crate::specs::persona::profile::compose::v1_1::Payload =
         serde_json::from_value(json!({
             "contextId": context_id,
             "name": name,
@@ -73,14 +76,14 @@ pub async fn compose(
             "personaDid": persona_did,
         }))
         .map_err(|e| OpenVTCError::Vta(format!("not a face this build can make: {e}")))?;
-    let out = client
-        .persona_profile_compose(&payload)
-        .await
-        .map_err(|e| OpenVTCError::Vta(format!("could not make the face: {e}")))?;
+    let out: crate::specs::persona::profile::compose::v1_1::Response =
+        crate::vta_task::call(client, &payload, PERSONA_TIMEOUT_SECS)
+            .await
+            .map_err(|e| OpenVTCError::Vta(format!("could not make the face: {e}")))?;
     Ok(Composed {
         profile_id: out.profile_id.to_string(),
         local: out.scope.to_string() == "local",
-        reused: out.pooled.iter().filter(|p| !p.created).count(),
+        reused: out.pooled.iter().filter(|p| !p.was_created).count(),
     })
 }
 
@@ -425,12 +428,19 @@ pub async fn promote(
     positions: &[u64],
     expected_version: u64,
 ) -> Result<Promoted, OpenVTCError> {
-    let out = client
-        .persona_attribute_promote(context_id, profile_id, positions, expected_version)
+    use crate::specs::persona::attribute::promote::v1_1 as promote;
+    let payload: promote::Payload = serde_json::from_value(json!({
+        "contextId": context_id,
+        "profileId": profile_id,
+        "entries": positions,
+        "expectedVersion": expected_version,
+    }))
+    .map_err(|e| OpenVTCError::Vta(format!("not a request this build can make: {e}")))?;
+    let out: promote::Response = crate::vta_task::call(client, &payload, PERSONA_TIMEOUT_SECS)
         .await
         .map_err(|e| OpenVTCError::Vta(format!("could not make the values reusable: {e}")))?;
     Ok(Promoted {
-        reused: out.promoted.iter().filter(|p| !p.created).count(),
+        reused: out.promoted.iter().filter(|p| !p.was_created).count(),
         rebound: out.rebound_persona_dids.len(),
     })
 }

@@ -28,11 +28,11 @@
 //! **Nothing here is persisted.** The community is the record and the VTA the custody;
 //! a client that kept its own copy would be the one place the three disagree.
 
+use crate::specs::vtc::rooms::memberships::list::v0_1 as memberships;
+use crate::specs::vtc::rooms::offers::{accept::v0_1 as accept, list::v0_4 as offers};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use trust_tasks_rs::TrustTask;
-use trust_tasks_rs::specs::vtc::rooms::memberships::list::v0_1 as memberships;
-use trust_tasks_rs::specs::vtc::rooms::offers::{accept::v0_1 as accept, list::v0_1 as offers};
 use uuid::Uuid;
 use vta_sdk::client::VtaClient;
 use vta_sdk::error::VtaError;
@@ -41,8 +41,9 @@ use crate::errors::OpenVTCError;
 
 /// The generated `vtc/rooms/memberships/list/0.1` types.
 pub use memberships::RoomMembership;
-/// The generated `vtc/rooms/offers/list/0.1` types.
-pub use offers::Offer;
+/// The generated `vtc/rooms/offers/list/0.4` types. 0.4 also lists the renewals of
+/// admissions the member already holds (`renewals`), which this module does not read.
+pub use offers::OfferV2 as Offer;
 
 /// Every type this module sends or reads starts with this.
 const TYPE_PREFIX: &str = "https://trusttasks.org/spec/vtc/rooms/";
@@ -60,7 +61,7 @@ pub enum Request {
     /// `vtc/rooms/memberships/list/0.1`: the community's record of every room it offered
     /// the member, and where each stands.
     Memberships { cursor: Option<String> },
-    /// `vtc/rooms/offers/list/0.1`: the open offers, with the credentials an acceptance
+    /// `vtc/rooms/offers/list/0.4`: the open offers, with the credentials an acceptance
     /// stores with the key holder.
     Offers { cursor: Option<String> },
     /// `vtc/rooms/offers/accept/0.1`: take up an offer — with the KeyPackage the member's
@@ -319,8 +320,6 @@ impl Standing {
                 Standing::Unfinished
             }
             (S::Admitted, Some(false)) => Standing::NeedsReadmission,
-            // A state a later version adds: shown without offering anything to do.
-            _ => Standing::Admitted,
         }
     }
 
@@ -384,12 +383,10 @@ pub enum Prepared {
     /// An `open` room: accept with no KeyPackage.
     Open,
     /// A sealed room: accept with this KeyPackage. `already_minted` says another surface
-    /// may already have sent it (key-package 0.2); `resumable` is false when the VTA
-    /// serves only key-package 0.1, which replaced any KeyPackage it held.
+    /// may already have sent it (key-package 0.2).
     KeyPackage {
         key_package: String,
         already_minted: bool,
-        resumable: bool,
     },
 }
 
@@ -430,19 +427,7 @@ pub async fn prepare_acceptance(
         Ok(kp) => Ok(Prepared::KeyPackage {
             key_package: kp.key_package.to_string(),
             already_minted: kp.already_minted,
-            resumable: true,
         }),
-        Err(VtaError::UnsupportedTaskType { .. }) => {
-            let minted = vta
-                .idempotent(|| vta.room_key_package(room_id, invitation))
-                .await
-                .map_err(|e| format!("your VTA could not mint a KeyPackage: {e}"))?;
-            Ok(Prepared::KeyPackage {
-                key_package: minted.key_package.to_string(),
-                already_minted: false,
-                resumable: false,
-            })
-        }
         Err(e) => Err(format!("your VTA could not give a KeyPackage: {e}")),
     }
 }
@@ -597,7 +582,7 @@ mod tests {
             "https://trusttasks.org/spec/vtc/rooms/offers/accept/0.1#response"
         ));
         assert!(!is_reply_type(
-            "https://trusttasks.org/spec/git-ns/view/0.4#response"
+            "https://trusttasks.org/spec/git-ns/view/0.6#response"
         ));
     }
 }
