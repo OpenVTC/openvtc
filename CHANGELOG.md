@@ -14,6 +14,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `gitlab.com/group/sub/repo`. github.com, bitbucket.org and codeberg.org, which
   have no nested groups, still take exactly `<owner>/<repo>`. Listing them in the
   Repos panel needs a community that answers `git-ns/view/0.6`.
+- **Onboarding without the TUI.** Subcommands named after the TUI's panels take an
+  account from nothing to signed commits in a script: `setup --vta-did` creates the
+  account against a VTA (`--context`, `--wait`, `--unlock-code-file`);
+  `community join <vtc>` joins a community and waits for the verdict (`--persona` or
+  `--new-persona`, `--wait`, `--invitation`); `repo list`, `repo clone <resource>
+  [--dir]` and `repo sign [path] [--persona]` list and clone the repositories a
+  persona may see (`--community`) and make a checkout sign its commits as the
+  persona. Each holds the profile lock as the TUI does.
 - **A community's data rooms, the same everywhere you reach them.** Press `o` on an
   active community to see every data room it has offered this persona, and where
   each stands: offered, joined, accepted but not finished, needing re-admission, or

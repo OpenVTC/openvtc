@@ -51,6 +51,7 @@ pub fn cli() -> Command {
             Arg::new("invitation")
                 .long("invitation")
                 .value_name("FILE")
+                .global(true)
                 .help(
                     "Path to a Verifiable Invitation Credential (VIC) JSON file \
                      to present when joining a community. The community verifies \
@@ -58,7 +59,11 @@ pub fn cli() -> Command {
                      refers the request for review, as its join criteria say.",
                 ),
         ])
-        .subcommand(Command::new("setup").about("Initial configuration of the openvtc tool"))
+        .subcommand(
+            Command::new("setup")
+                .about("Initial configuration of the openvtc tool")
+                .args(crate::setup_cmd::args()),
+        )
         .subcommand(
             Command::new("health")
                 .about(
@@ -115,6 +120,14 @@ pub fn cli() -> Command {
                 ]),
         )
         .subcommand(crate::theme_cmd::command())
+        .subcommand(
+            Command::new("community")
+                .about("The Communities panel without the TUI: join a community")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(crate::state_handler::join_cmd::command()),
+        )
+        .subcommand(crate::repos_cmd::command())
 }
 
 /// Read an unlock passphrase from `path`, or from standard input when `path` is

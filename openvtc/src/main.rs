@@ -31,8 +31,12 @@ mod cli;
 mod clipboard;
 mod colors;
 mod env_overrides;
+mod headless;
 mod health_cmd;
 mod holder_grant;
+mod repos_cmd;
+mod setup_cmd;
+mod signing_cmd;
 mod state_handler;
 mod theme;
 mod theme_cmd;
@@ -586,6 +590,31 @@ async fn main() -> Result<()> {
 
     // Check if profile is currently active elsewhere?
     let lock_file = check_duplicate_instance(&profile)?;
+
+    // Headless subcommands: no TUI, the profile lock held like the TUI holds it.
+    let headless = match matches.subcommand() {
+        Some(("setup", args)) if setup_cmd::requested(args) => {
+            Some(setup_cmd::run(args, &profile).await)
+        }
+        Some((name @ ("community" | "repo"), args)) => {
+            Some(match load_fast(&profile, unlock_code_arg.as_ref()) {
+                Err(e) => Err(anyhow::anyhow!("{}", redact_paths(&e.to_string()))),
+                Ok(deferred) => match (name, args.subcommand()) {
+                    ("community", Some(("join", join))) => {
+                        state_handler::join_cmd::run(join, deferred, invitation_credential.clone())
+                            .await
+                    }
+                    ("repo", _) => repos_cmd::run(args, deferred).await,
+                    _ => Err(anyhow::anyhow!("unknown `{name}` subcommand")),
+                },
+            })
+        }
+        _ => None,
+    };
+    if let Some(result) = headless {
+        remove_lock_file(&lock_file);
+        return result;
+    }
 
     let mut starting_mode = StartingMode::NotSet;
 

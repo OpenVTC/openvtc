@@ -75,6 +75,14 @@ fn did_part(did: &str) -> &str {
     did.split('#').next().unwrap_or(did)
 }
 
+/// Whether a `git-ns` answer is the community's own: sent by `vtc` and issued
+/// by it. A thread id is a correlation key, not a credential. Compared by DID:
+/// a did:scid community may name itself with the `?src=` it is resolved through.
+pub(crate) fn answered_by(vtc: &str, from: &str, issuer: Option<&str>) -> bool {
+    let is_vtc = |did: &str| vta_sdk::did_scid::same_reference(did_part(did), vtc);
+    is_vtc(from) && issuer.is_some_and(is_vtc)
+}
+
 /// Longest text kept in a form field. Past every schema limit (a repository
 /// name is 100, a DID 2048, a reason 1024), so an over-long paste is refused
 /// by the schema with a reason rather than trimmed into something else.
@@ -582,6 +590,35 @@ pub(crate) async fn sender(
     })
 }
 
+/// Sign `doc` as the persona and send it to `vtc_did`, over TSP when the
+/// membership was joined over it.
+pub(crate) async fn sign_and_send(
+    s: &Sender,
+    vtc_did: &str,
+    doc: &mut RequestDocument,
+) -> Result<(), String> {
+    async {
+        openvtc_core::capabilities::sign_document(doc, &s.signer).await?;
+        let tsp_mediator =
+            openvtc_core::community_send::tsp_mediator_for(s.over_tsp, vtc_did).await;
+        openvtc_core::capabilities::send_capability_document(
+            &openvtc_core::community_send::Delivery {
+                atm: &s.atm,
+                profile: &s.profile,
+                member_did: &s.persona_did,
+                vtc_did,
+                mediator_did: &s.mediator,
+                tsp_mediator_did: tsp_mediator.as_deref(),
+            },
+            doc,
+        )
+        .await
+    }
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 /// One `git-ns/*` send, off the loop.
 pub(crate) struct ReposJob {
     sender: Sender,
@@ -597,27 +634,7 @@ impl ReposJob {
     /// Sign and send. I/O only.
     pub(crate) async fn run(mut self) -> ReposOutcome {
         let thid = correlation_thread(&self.doc).to_string();
-        let s = &self.sender;
-        let result = async {
-            openvtc_core::capabilities::sign_document(&mut self.doc, &s.signer).await?;
-            let tsp_mediator =
-                openvtc_core::community_send::tsp_mediator_for(s.over_tsp, &self.vtc_did).await;
-            openvtc_core::capabilities::send_capability_document(
-                &openvtc_core::community_send::Delivery {
-                    atm: &s.atm,
-                    profile: &s.profile,
-                    member_did: &s.persona_did,
-                    vtc_did: &self.vtc_did,
-                    mediator_did: &s.mediator,
-                    tsp_mediator_did: tsp_mediator.as_deref(),
-                },
-                &self.doc,
-            )
-            .await
-        }
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string());
+        let result = sign_and_send(&self.sender, &self.vtc_did, &mut self.doc).await;
         ReposOutcome {
             vtc_did: self.vtc_did,
             persona: self.persona,
@@ -1179,15 +1196,7 @@ pub(crate) fn apply_replies(
         else {
             continue;
         };
-        // By DID: a did:scid community may name itself with the `?src=` it is
-        // resolved through (VTI-KEY-163).
-        let from_vtc = vta_sdk::did_scid::same_reference(did_part(&inbound.from), &vtc);
-        let issued_by_vtc = inbound
-            .issuer
-            .as_deref()
-            .map(did_part)
-            .is_some_and(|issuer| vta_sdk::did_scid::same_reference(issuer, &vtc));
-        if !(from_vtc && issued_by_vtc) {
+        if !answered_by(&vtc, &inbound.from, inbound.issuer.as_deref()) {
             tracing::warn!(
                 from = %inbound.from,
                 issuer = ?inbound.issuer,
