@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Repositories in nested GitLab groups.** A repository may now be named
+  `<forge>/<owner>/<group>/…/<repo>` (up to GitLab's 20 levels of subgroups), so
+  cloning, the workspace layout, remote matching and signing set-up work for
+  `gitlab.com/group/sub/repo`. github.com, bitbucket.org and codeberg.org, which
+  have no nested groups, still take exactly `<owner>/<repo>`. Listing them in the
+  Repos panel needs a community that answers `git-ns/view/0.6`.
 - **Onboarding without the TUI.** Subcommands named after the TUI's panels take an
   account from nothing to signed commits in a script: `setup --vta-did` creates the
   account against a VTA (`--context`, `--wait`, `--unlock-code-file`);

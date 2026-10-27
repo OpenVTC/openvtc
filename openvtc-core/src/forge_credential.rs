@@ -733,7 +733,9 @@ fn parse_gh_user(text: &str, host: &str, login: &str) -> Result<CommitAuthor, St
 /// told. The token is passed to that one gh call in its environment only.
 #[must_use]
 pub fn gh_can_push(coords: &RepoCoords, login: &str, timeout: Duration) -> Option<bool> {
-    if !valid_login(login) {
+    // GitHub has no nested repositories; `repos/<owner>/<a>/<b>` would ask a
+    // different endpoint.
+    if !valid_login(login) || coords.repo.contains('/') {
         return None;
     }
     let mut cmd = Command::new("gh");

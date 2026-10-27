@@ -44,12 +44,26 @@ use crate::forge_credential::{self, ForgeCredential};
 pub const CLONE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// A repository's place on its forge: `github.com/acme/widgets` as its parts.
+/// On a forge with nested groups (GitLab) `repo` is the project's path under
+/// the top-level owner: `platform/tools/cli`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoCoords {
     pub host: String,
     pub owner: String,
     pub repo: String,
 }
+
+/// Most segments in a repository path: GitLab's 20 subgroup levels under a
+/// top-level group, plus the project.
+const MAX_REPO_PATH_SEGMENTS: usize = 21;
+
+/// The longest resource openvtc accepts, so the default checkout path stays
+/// well inside the filesystem's path limit (1024 bytes on macOS).
+const MAX_RESOURCE_LEN: usize = 512;
+
+/// Forges whose repositories are always `<owner>/<repo>`, with no nested
+/// groups. Any other host may be a (self-hosted) GitLab.
+const FLAT_FORGES: [&str; 3] = ["github.com", "bitbucket.org", "codeberg.org"];
 
 /// A host the `git-ns` schema admits: lowercase DNS labels, at least two.
 fn valid_host(host: &str) -> bool {
@@ -66,32 +80,56 @@ fn valid_host(host: &str) -> bool {
         })
 }
 
-/// An owner or repository name: never an option, never a path step.
+/// An owner or repository name: never an option, never a path step, and
+/// never ending in `.git`, which a remote URL would read as its suffix.
 fn valid_segment(segment: &str) -> bool {
     !segment.is_empty()
-        && segment.len() <= 100
+        && segment.len() <= 255
         && !segment.starts_with('-')
         && !segment.starts_with('.')
+        && !segment.to_ascii_lowercase().ends_with(".git")
         && segment
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 impl RepoCoords {
-    /// Parse a forge-qualified resource, `<host>/<owner>/<repo>`.
+    /// Parse a forge-qualified resource, `<host>/<owner>/<repo>`, where
+    /// `<repo>` may be a nested project path.
     ///
     /// # Errors
     ///
-    /// When the resource is not exactly three parts, or a part is one git or
-    /// the filesystem could misread.
+    /// When the resource has no repository part, a nested one on a forge
+    /// without nested groups, too deep or too long a one, or a part is one git
+    /// or the filesystem could misread.
     pub fn parse(resource: &str) -> Result<Self, OpenVTCError> {
         let parts: Vec<&str> = resource.split('/').collect();
-        let [host, owner, repo] = parts.as_slice() else {
-            return Err(OpenVTCError::Config(format!(
-                "'{resource}' is not a repository (expected <forge>/<owner>/<repo>)"
-            )));
+        let [host, owner, repo @ ..] = parts.as_slice() else {
+            return Err(not_a_repository(resource));
         };
-        if !valid_host(host) || !valid_segment(owner) || !valid_segment(repo) {
+        if repo.is_empty() {
+            return Err(not_a_repository(resource));
+        }
+        if repo.len() > 1 && FLAT_FORGES.contains(host) {
+            return Err(OpenVTCError::Config(format!(
+                "'{resource}' is not a repository ({host} has no nested groups: expected \
+                 {host}/<owner>/<repo>)"
+            )));
+        }
+        if repo.len() > MAX_REPO_PATH_SEGMENTS {
+            return Err(OpenVTCError::Config(format!(
+                "'{resource}' is nested too deeply (at most {} groups and a repository \
+                 under the owner)",
+                MAX_REPO_PATH_SEGMENTS - 1
+            )));
+        }
+        if resource.len() > MAX_RESOURCE_LEN {
+            return Err(OpenVTCError::Config(format!(
+                "'{resource}' is too long for a repository name (at most \
+                 {MAX_RESOURCE_LEN} characters)"
+            )));
+        }
+        if !valid_host(host) || !valid_segment(owner) || !repo.iter().all(|s| valid_segment(s)) {
             return Err(OpenVTCError::Config(format!(
                 "'{resource}' is not a repository name openvtc will use on disk or on a \
                  command line"
@@ -100,7 +138,7 @@ impl RepoCoords {
         Ok(Self {
             host: (*host).to_string(),
             owner: (*owner).to_string(),
-            repo: (*repo).to_string(),
+            repo: repo.join("/"),
         })
     }
 
@@ -145,6 +183,12 @@ impl RepoCoords {
         let (host, path) = remote_coords(url)?;
         Self::parse(&format!("{}/{path}", host.to_ascii_lowercase())).ok()
     }
+}
+
+fn not_a_repository(resource: &str) -> OpenVTCError {
+    OpenVTCError::Config(format!(
+        "'{resource}' is not a repository (expected <forge>/<owner>/<repo>)"
+    ))
 }
 
 /// A remote URL as `(host, owner/repo)`, with any `.git` and trailing slash gone.
@@ -759,7 +803,17 @@ pub fn inspect(path: &Path, coords: &RepoCoords) -> CheckoutFacts {
         path: path.to_path_buf(),
         ..CheckoutFacts::default()
     };
-    if git_read(path, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
+    // The top of a work tree, not a directory inside another repository's
+    // (a nested project's default path can sit inside its parent's checkout).
+    let top = git_read(path, &["rev-parse", "--show-toplevel"]);
+    let is_top =
+        top.is_some_and(
+            |t| match (std::fs::canonicalize(t), std::fs::canonicalize(path)) {
+                (Ok(t), Ok(p)) => t == p,
+                _ => false,
+            },
+        );
+    if !is_top {
         return facts;
     }
     facts.is_repo = true;
@@ -999,6 +1053,63 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_project_path_is_one_repository() {
+        let c = RepoCoords::parse("gitlab.com/acme/platform/tools/cli").unwrap();
+        assert_eq!(
+            (c.owner.as_str(), c.repo.as_str()),
+            ("acme", "platform/tools/cli")
+        );
+        assert_eq!(c.resource(), "gitlab.com/acme/platform/tools/cli");
+        assert_eq!(
+            c.clone_url(CloneProtocol::Ssh),
+            "git@gitlab.com:acme/platform/tools/cli.git"
+        );
+        assert_eq!(
+            c.default_path(Path::new("/r")),
+            Path::new("/r/gitlab.com/acme/platform/tools/cli")
+        );
+        assert!(c.matches_remote("https://gitlab.com/Acme/Platform/Tools/CLI.git"));
+        assert!(!c.matches_remote("https://gitlab.com/acme/platform/cli.git"));
+        // Any host but a known flat forge: a self-hosted GitLab is not known
+        // by its name.
+        let c = RepoCoords::parse("git.example.org/acme/widgets/extra").unwrap();
+        assert_eq!(
+            (c.owner.as_str(), c.repo.as_str()),
+            ("acme", "widgets/extra")
+        );
+        let err = RepoCoords::parse("github.com/acme/widgets/extra")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no nested groups"), "{err}");
+        assert_eq!(
+            https_remote_to_ssh("https://gitlab.com/acme/platform/tools/cli.git").as_deref(),
+            Some("git@gitlab.com:acme/platform/tools/cli.git")
+        );
+        for bad in [
+            "gitlab.com/acme/platform//cli",
+            "gitlab.com/acme/platform/../cli",
+            "gitlab.com/acme/platform/",
+            "gitlab.com/acme/platform/-x",
+            "gitlab.com/acme/foo.git/bar",
+            "gitlab.com/acme/platform/cli.GIT",
+        ] {
+            assert!(RepoCoords::parse(bad).is_err(), "{bad:?} should be refused");
+        }
+        let deepest = format!(
+            "gitlab.com/acme/{}",
+            ["g"; MAX_REPO_PATH_SEGMENTS].join("/")
+        );
+        assert!(RepoCoords::parse(&deepest).is_ok());
+        let err = RepoCoords::parse(&format!("{deepest}/x"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nested too deeply"), "{err}");
+        let long = format!("gitlab.com/acme/{}", vec!["g".repeat(100); 5].join("/"));
+        let err = RepoCoords::parse(&long).unwrap_err().to_string();
+        assert!(err.contains("too long"), "{err}");
+    }
+
+    #[test]
     fn a_remote_names_its_repository() {
         for url in [
             "https://github.com/acme/widgets.git",
@@ -1130,6 +1241,8 @@ mod tests {
             "ssh://git@github.com/acme/widgets.git",
             "https://github.com/acme",
             "https://github.com/acme/widgets/extra",
+            "https://github.com/acme/widgets/tree/main",
+            "https://gitlab.com/acme/widgets/-/tree/main",
             "https://github.com/-acme/widgets.git",
             "https://github.com/acme/--upload-pack=x",
             "file:///tmp/acme/widgets",
@@ -1496,6 +1609,11 @@ mod tests {
 
         let missing = inspect(&dir.path().join("nope"), &widgets());
         assert!(!missing.is_repo);
+
+        // A folder inside a checkout is not a checkout of its own.
+        let inner = dest.join("src");
+        std::fs::create_dir(&inner).unwrap();
+        assert!(!inspect(&inner, &widgets()).is_repo);
     }
 
     #[test]
