@@ -384,7 +384,7 @@ pub async fn put(client: &VtaClient, draft: WorldDraft) -> Result<WorldWrite, Op
 
     let value = client
         .dispatch_trust_task(
-            trust_tasks::TASK_PERSONA_WORLD_PUT_1_0,
+            trust_tasks::TASK_PERSONA_WORLD_PUT_1_1,
             payload,
             WORLD_TIMEOUT,
         )
@@ -399,7 +399,7 @@ pub async fn put(client: &VtaClient, draft: WorldDraft) -> Result<WorldWrite, Op
             .to_string(),
         version: value.get("version").and_then(Value::as_u64).unwrap_or(0),
         created: value
-            .get("created")
+            .get("wasCreated")
             .and_then(Value::as_bool)
             .unwrap_or(false),
     })

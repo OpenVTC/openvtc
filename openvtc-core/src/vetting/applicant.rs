@@ -577,8 +577,8 @@ impl Application {
     /// than from `manifest`, because a generated type drops the members it does not name and
     /// `vetting.ext` is where a community publishes what this version does not enumerate
     /// ([`super::hidden`]).
-    // The kept manifest is the SDK's 0.2-shaped vetting model (`vetting::protocol::Manifest`),
-    // deprecated in favour of the 0.4 wire shape it is read from; it moves when the SDK's does.
+    // The kept manifest is the SDK's `manifest/0.4` type (`vetting::protocol::Manifest`), from
+    // trust-tasks-rs's deprecated prebuilt modules; it moves when the SDK's does.
     #[allow(deprecated)]
     pub fn adopt_manifest(
         &mut self,
@@ -593,12 +593,12 @@ impl Application {
                         .find(|c| c.get("id").and_then(Value::as_str) == Some(id))
                 })
         };
-        let with_vetting: Vec<&manifest::v0_2::Criterion> = manifest
+        let with_vetting: Vec<&manifest::v0_4::Criterion> = manifest
             .criteria
             .iter()
             .filter(|c| c.vetting.is_some())
             .collect();
-        let offers_hidden = |c: &&&manifest::v0_2::Criterion| {
+        let offers_hidden = |c: &&&manifest::v0_4::Criterion| {
             raw_criterion(c.id.as_str()).is_some_and(|raw| {
                 matches!(
                     super::hidden::read_mode(raw),
@@ -621,10 +621,7 @@ impl Application {
             .or_else(|| with_vetting.first())
             .ok_or(ApplicantError::NoVettingCriterion)?;
         let requirements = chosen.vetting.clone().expect("filtered on vetting");
-        let digest = chosen
-            .requirements_digest
-            .as_ref()
-            .map(|d| d.as_str().to_string());
+        let digest = Some(chosen.requirements_digest.as_str().to_string());
         let id = chosen.id.as_str().to_string();
         self.adopt_criterion(&id, requirements, digest, raw_criterion(&id))
     }

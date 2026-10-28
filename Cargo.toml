@@ -675,7 +675,9 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # `vtc/join-requests/manifest/0.4`. did-git-sign 0.24 (VGI #167) is on it.
 # **0.73** is `vta-service` 0.65's line: did:scid personas (`vta_sdk::did_scid`,
 # VTI #2257) on trust-tasks 0.34 / TDK 0.32 / messaging-sdk 0.40.
-vta-sdk = { version = "0.73.0", features = [
+# **0.74** is `vta-service` 0.66's line (VTI #2300): trust-tasks 0.35 / TDK 0.33 /
+# messaging-sdk 0.41; `room_key_package_v0_2` is now `room_key_package`.
+vta-sdk = { version = "0.74.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses

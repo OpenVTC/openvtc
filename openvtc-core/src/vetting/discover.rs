@@ -209,9 +209,9 @@ fn anonymous_request(community_did: &str, protocol: JoinProtocol) -> Value {
 /// does not enumerate, and marks what a client must honour — is readable only from these bytes
 /// (`vetting::hidden`). Re-serialising the parse gives a criterion with those members missing,
 /// and a `requirementsDigest` that no longer matches.
-/// A manifest read over REST: the 0.2-shaped manifest, the payload as received,
-/// the version the community answered in, and what that version says per
-/// criterion beyond the 0.2 shape.
+/// A manifest read over REST: the manifest, the payload as received, the
+/// version the community answered in, and what that version says per
+/// criterion.
 pub struct FetchedManifest {
     pub manifest: Manifest,
     pub raw: Value,

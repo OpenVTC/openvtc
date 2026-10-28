@@ -297,24 +297,23 @@ fn requirements() -> VettingRequirements {
     .unwrap()
 }
 
-/// The community's manifest 0.2 body.
+/// The community's manifest body.
 fn manifest_body() -> super::protocol::Manifest {
     manifest_with(Some(requirements()), None)
 }
 
-/// A manifest 0.2 body carrying `vetting` and `branding`.
+/// A manifest body carrying `vetting` and `branding`.
 fn manifest_with(
     vetting: Option<VettingRequirements>,
-    branding: Option<manifest::v0_2::CommunityBranding>,
+    branding: Option<manifest::v0_4::CommunityBranding>,
 ) -> super::protocol::Manifest {
-    let criterion = manifest::v0_2::Criterion::try_from(
-        manifest::v0_2::Criterion::builder()
+    let criterion = manifest::v0_4::Criterion::try_from(
+        manifest::v0_4::Criterion::builder()
             .id("vetted")
             .presentation_definition(serde_json::Map::new())
             .vetting(vetting)
-            .requirements_digest(Some(
-                manifest::v0_2::DigestMultibase::try_from(DIGEST).unwrap(),
-            )),
+            .admission(manifest::v0_4::CriterionAdmission::Review)
+            .requirements_digest(manifest::v0_4::DigestMultibase::try_from(DIGEST).unwrap()),
     )
     .unwrap();
     super::protocol::Manifest::try_from(
@@ -326,18 +325,9 @@ fn manifest_with(
     .unwrap()
 }
 
-/// `body`, a manifest in the 0.2 shape the client keeps, as `manifest/0.4` carries
-/// it: each criterion names its `admission`, which 0.4 requires and 0.2 lacks.
+/// `body`, a manifest the client keeps, as `manifest/0.4` carries it.
 fn on_the_wire(body: impl serde::Serialize) -> Value {
-    let mut wire = serde_json::to_value(body).unwrap();
-    if let Some(criteria) = wire["criteria"].as_array_mut() {
-        for criterion in criteria.iter_mut().filter_map(Value::as_object_mut) {
-            criterion
-                .entry("admission")
-                .or_insert_with(|| json!("review"));
-        }
-    }
-    wire
+    serde_json::to_value(body).unwrap()
 }
 
 /// A manifest payload as the wire carries it, with `vetting.ext` / `vetting.extCritical`
@@ -1712,14 +1702,14 @@ async fn a_manifest_answers_whoever_asked_and_brings_the_communitys_branding() {
     applicant
         .book
         .ask(asked(&request, applicant.persona, QueryKind::Manifest));
-    let branding = manifest::v0_2::CommunityBranding::try_from(
-        manifest::v0_2::CommunityBranding::builder()
+    let branding = manifest::v0_4::CommunityBranding::try_from(
+        manifest::v0_4::CommunityBranding::builder()
             .display_name(Some(
-                manifest::v0_2::CommunityBrandingDisplayName::try_from("Kernel Developers")
+                manifest::v0_4::CommunityBrandingDisplayName::try_from("Kernel Developers")
                     .unwrap(),
             ))
             .accent_color(Some(
-                manifest::v0_2::CommunityBrandingAccentColor::try_from("#336699").unwrap(),
+                manifest::v0_4::CommunityBrandingAccentColor::try_from("#336699").unwrap(),
             )),
     )
     .unwrap();
@@ -3253,7 +3243,7 @@ fn hidden_manifest(critical: bool) -> (super::protocol::Manifest, Value) {
     (read_as_kept(&raw), raw)
 }
 
-/// `raw`, a manifest as the wire carries it, in the 0.2 shape the client keeps.
+/// `raw`, a manifest as the wire carries it, as the client keeps it.
 fn read_as_kept(raw: &Value) -> super::protocol::Manifest {
     super::protocol::read_manifest(super::protocol::JoinProtocol::V0_4, raw)
         .unwrap()

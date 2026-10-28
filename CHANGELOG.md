@@ -123,9 +123,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the runtime only. Every task is sent at its latest version: joins as
   `manifest/0.4` and `submit/0.3`, `vta/witness/list/0.2`, `vtc/rooms/offers/list/0.4`,
   git-ns `view/0.6`, `drift/resolve/0.4`, `repo/create/0.4`, `right/{grant,revoke}/0.4`,
-  `persona/profile/compose/1.1`, `persona/attribute/promote/1.1` and
-  `vtc/vetting/vetters/resend/0.2`. Needs a VTA and community on a VTI release that
-  serves them. On `affinidi-tdk` 0.33 and `affinidi-messaging-sdk` 0.41.
+  `persona/profile/compose/1.1`, `persona/attribute/promote/1.1`,
+  `persona/world/put/1.1` and `vtc/vetting/vetters/resend/0.2`. Needs a VTA and
+  community on a VTI release that serves them. On `vta-sdk` 0.74, `vta-service` 0.66,
+  `vti-vetting-pcs` 0.7, `did-git-sign` 0.26, `affinidi-tdk` 0.33 and
+  `affinidi-messaging-sdk` 0.41. A community's manifest is now kept as `vta-sdk`'s
+  `manifest/0.4` type (`vetting::protocol::Manifest`) rather than carried into the
+  0.2 shape; vetting requirements saved by an earlier version still load.
 
 ### Fixed
 

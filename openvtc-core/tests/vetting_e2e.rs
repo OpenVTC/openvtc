@@ -56,18 +56,9 @@ use vta_sdk::protocols::join_requests::manifest;
 const MANIFEST_RESPONSE_TYPE: &str =
     <openvtc_core::specs::vtc::join_requests::manifest::v0_4::Response as trust_tasks_rs::Payload>::TYPE_URI;
 
-/// `body`, built in the 0.2 shape the client keeps, as `manifest/0.4` carries it: each
-/// criterion names its `admission`, which 0.4 requires and 0.2 lacks.
+/// `body`, a manifest the client keeps, as `manifest/0.4` carries it.
 fn as_v0_4(body: impl serde::Serialize) -> Value {
-    let mut wire = serde_json::to_value(body).expect("a manifest");
-    if let Some(criteria) = wire["criteria"].as_array_mut() {
-        for criterion in criteria.iter_mut().filter_map(Value::as_object_mut) {
-            criterion
-                .entry("admission")
-                .or_insert_with(|| json!("review"));
-        }
-    }
-    wire
+    serde_json::to_value(body).expect("a manifest")
 }
 use vta_sdk::protocols::vetting::{
     VETTED_PREDICATE, VETTER_ROLE, VETTING_REQUEST_RESPONSE_TYPE, VETTING_REQUEST_TYPE,
@@ -231,14 +222,15 @@ fn requirements() -> VettingRequirements {
 /// The community's manifest answer, signed as a VTC signs its success
 /// responses — an unsigned one is not acted on.
 async fn manifest_reply(community: &str, to: &str, signer: &Secret) -> Message {
-    let criterion = manifest::v0_2::Criterion::try_from(
-        manifest::v0_2::Criterion::builder()
+    let criterion = manifest::v0_4::Criterion::try_from(
+        manifest::v0_4::Criterion::builder()
             .id("vetted")
             .presentation_definition(serde_json::Map::new())
             .vetting(Some(requirements()))
-            .requirements_digest(Some(
-                manifest::v0_2::DigestMultibase::try_from(DIGEST).expect("digest"),
-            )),
+            .admission(manifest::v0_4::CriterionAdmission::Review)
+            .requirements_digest(
+                manifest::v0_4::DigestMultibase::try_from(DIGEST).expect("digest"),
+            ),
     )
     .expect("criterion");
     let body = openvtc_core::vetting::protocol::Manifest::try_from(

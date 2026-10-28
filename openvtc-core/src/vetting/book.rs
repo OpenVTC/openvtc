@@ -1114,7 +1114,7 @@ impl Branding {
     }
 
     /// What of `branding` this client keeps: nothing, if it breaks its schema.
-    fn from_manifest(branding: &manifest::v0_2::CommunityBranding) -> Self {
+    fn from_manifest(branding: &manifest::v0_4::CommunityBranding) -> Self {
         if branding.check_shape().is_err() {
             return Self::default();
         }
@@ -1902,10 +1902,10 @@ impl VettingBook {
     }
 
     /// [`Self::learn_manifest`], recording the version the manifest arrived in
-    /// and what that version says about each criterion beyond its 0.2 shape
+    /// and what that version says about each criterion
     /// ([`super::protocol::read_manifest`]).
-    // The kept manifest is the SDK's 0.2-shaped vetting model (`vetting::protocol::Manifest`),
-    // deprecated in favour of the 0.4 wire shape it is read from; it moves when the SDK's does.
+    // The kept manifest is the SDK's `manifest/0.4` type (`vetting::protocol::Manifest`), from
+    // trust-tasks-rs's deprecated prebuilt modules; it moves when the SDK's does.
     #[allow(deprecated)]
     pub fn learn_manifest_in(
         &mut self,
@@ -1926,10 +1926,7 @@ impl VettingBook {
                     wallet,
                     wallet_types,
                     description: c.description.as_ref().map(|d| d.to_string()),
-                    requirements_digest: c
-                        .requirements_digest
-                        .as_ref()
-                        .map(|d| d.as_str().to_string()),
+                    requirements_digest: Some(c.requirements_digest.as_str().to_string()),
                     admission: m.and_then(|m| m.admission),
                     invitation_required: m.and_then(|m| m.invitation_required),
                     vetting: c.vetting.is_some(),
@@ -1946,10 +1943,7 @@ impl VettingBook {
                 Some(KnownCriterion {
                     community: community.to_string(),
                     criterion_id: c.id.as_str().to_string(),
-                    requirements_digest: c
-                        .requirements_digest
-                        .as_ref()
-                        .map(|d| d.as_str().to_string()),
+                    requirements_digest: Some(c.requirements_digest.as_str().to_string()),
                     requirements,
                     fetched_at: now,
                     description: c.description.as_ref().map(|d| d.to_string()),
@@ -2805,7 +2799,7 @@ mod tests {
     const DIGEST: &str = "zQmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR";
 
     fn manifest(
-        branding: Option<manifest::v0_2::CommunityBranding>,
+        branding: Option<manifest::v0_4::CommunityBranding>,
         vetting: bool,
     ) -> crate::vetting::protocol::Manifest {
         let requirements: VettingRequirements = serde_json::from_value(serde_json::json!({
@@ -2817,14 +2811,13 @@ mod tests {
             "eligibleVetters": { "role": "vetter" }
         }))
         .unwrap();
-        let criterion = manifest::v0_2::Criterion::try_from(
-            manifest::v0_2::Criterion::builder()
+        let criterion = manifest::v0_4::Criterion::try_from(
+            manifest::v0_4::Criterion::builder()
                 .id("c1")
                 .presentation_definition(serde_json::Map::new())
                 .vetting(vetting.then_some(requirements))
-                .requirements_digest(Some(
-                    manifest::v0_2::DigestMultibase::try_from(DIGEST).unwrap(),
-                )),
+                .admission(manifest::v0_4::CriterionAdmission::Review)
+                .requirements_digest(manifest::v0_4::DigestMultibase::try_from(DIGEST).unwrap()),
         )
         .unwrap();
         crate::vetting::protocol::Manifest::try_from(
@@ -2842,13 +2835,13 @@ mod tests {
         let now = Utc::now();
         assert!(matches!(book.knowledge("did:web:vtc"), Knowledge::Unknown));
 
-        let branding = manifest::v0_2::CommunityBranding::try_from(
-            manifest::v0_2::CommunityBranding::builder()
+        let branding = manifest::v0_4::CommunityBranding::try_from(
+            manifest::v0_4::CommunityBranding::builder()
                 .display_name(Some(
-                    manifest::v0_2::CommunityBrandingDisplayName::try_from("Kernel").unwrap(),
+                    manifest::v0_4::CommunityBrandingDisplayName::try_from("Kernel").unwrap(),
                 ))
                 .accent_color(Some(
-                    manifest::v0_2::CommunityBrandingAccentColor::try_from("#1a2B3c").unwrap(),
+                    manifest::v0_4::CommunityBrandingAccentColor::try_from("#1a2B3c").unwrap(),
                 )),
         )
         .unwrap();
@@ -2876,8 +2869,8 @@ mod tests {
         // what still reaches this client is branding the schema admits and
         // `check_shape` refuses by hand: a `logoUrl` that is not an absolute
         // https URI.
-        assert!(manifest::v0_2::CommunityBrandingAccentColor::try_from("red").is_err());
-        let broken: manifest::v0_2::CommunityBranding = serde_json::from_value(serde_json::json!({
+        assert!(manifest::v0_4::CommunityBrandingAccentColor::try_from("red").is_err());
+        let broken: manifest::v0_4::CommunityBranding = serde_json::from_value(serde_json::json!({
             "displayName": "Elsewhere",
             "logoUrl": "http://vtc.example/logo.png"
         }))

@@ -6152,14 +6152,13 @@ mod vetting_tests {
             "eligibleVetters": { "role": "vetter" }
         }))
         .unwrap();
-        let criterion = manifest::v0_2::Criterion::try_from(
-            manifest::v0_2::Criterion::builder()
+        let criterion = manifest::v0_4::Criterion::try_from(
+            manifest::v0_4::Criterion::builder()
                 .id("vetted")
                 .presentation_definition(serde_json::Map::new())
                 .vetting(vets.then_some(requirements))
-                .requirements_digest(Some(
-                    manifest::v0_2::DigestMultibase::try_from(DIGEST).unwrap(),
-                )),
+                .admission(manifest::v0_4::CriterionAdmission::Review)
+                .requirements_digest(manifest::v0_4::DigestMultibase::try_from(DIGEST).unwrap()),
         )
         .unwrap();
         openvtc_core::vetting::protocol::Manifest::try_from(

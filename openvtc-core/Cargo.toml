@@ -28,7 +28,7 @@ arbitrary = ["dep:arbitrary", "chrono/arbitrary"]
 # library writes the keyring entry, profile and include file exactly as
 # `did-git-sign init --profile` does. Kept on the same release as the
 # `openvtc` crate's dependency, and on this workspace's `vta-sdk` line.
-did-git-sign = "0.25.0"
+did-git-sign = "0.26.0"
 # The SSHSIG encoding did-git-sign signs with, to check the VTA's proof
 # signature (`git_signing::verify_signer`). Same release as did-git-sign.
 vgi-core = "0.25.0"
@@ -201,12 +201,13 @@ affinidi-messaging-test-mediator = "0.46"
 # (VTI #2147). 0.63.0 is on `vta-sdk` 0.71 and serves `rooms/keys/act/0.5` and
 # `rooms/keys/key-package/0.2` (VTI #2186). 0.64.0 is on `vta-sdk` 0.72
 # (trust-tasks 0.32). 0.65.0 is on `vta-sdk` 0.73 (did:scid, trust-tasks 0.34).
-vta-service = { version = "0.65.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
+# 0.66.0 is on `vta-sdk` 0.74 (trust-tasks 0.35, VTI #2300).
+vta-service = { version = "0.66.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
 # The community's half of hidden vetting, in process (`vtc::Vtc`, feature `harness`), for the
 # end-to-end run against `MockVta` (`tests/hidden_vetting_onboarding.rs`). The engine itself is
 # the VTA's: this client holds no PCS key and runs no PCS operation.
-# 0.6 is the release on `vta-sdk` 0.73, so the dev graph keeps one `vta-sdk`.
-vti-vetting-pcs = { version = "0.6", features = ["harness"] }
+# 0.7 is the release on `vta-sdk` 0.74, so the dev graph keeps one `vta-sdk`.
+vti-vetting-pcs = { version = "0.7", features = ["harness"] }
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }

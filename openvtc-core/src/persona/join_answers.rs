@@ -40,8 +40,8 @@ pub struct Asked {
 
 /// What the manifest asks, in its own order. Empty when it asks nothing.
 #[must_use]
-// The kept manifest is the SDK's 0.2-shaped vetting model (`vetting::protocol::Manifest`),
-// deprecated in favour of the 0.4 wire shape it is read from; it moves when the SDK's does.
+// The kept manifest is the SDK's `manifest/0.4` type (`vetting::protocol::Manifest`), from
+// trust-tasks-rs's deprecated prebuilt modules; it moves when the SDK's does.
 #[allow(deprecated)]
 pub fn asked(manifest: &crate::vetting::protocol::Manifest) -> Vec<Asked> {
     manifest

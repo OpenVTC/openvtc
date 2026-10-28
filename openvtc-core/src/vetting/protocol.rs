@@ -9,12 +9,11 @@
 //! nothing older: the 0.2 and 0.3 fallbacks it once carried are gone. A version
 //! saved by a build that still spoke them reads as this one ([`JoinProtocol`]).
 //!
-//! Inside, a manifest is kept in the 0.2 shape ([`Manifest`]) — the SDK's
-//! vetting model, which `vta_sdk::protocols::vetting` reads and the book, the
-//! applicant and the attribute questions all read. A 0.4 manifest is carried
-//! into that shape by [`read_manifest`], and what 0.3 added per criterion —
-//! above all whether meeting it admits or only submits for review — is kept
-//! alongside as [`CriterionMeta`]. That shape moves when the SDK's model does.
+//! Inside, a manifest is kept as the SDK's 0.4 type ([`Manifest`]), the one
+//! `vta_sdk::protocols::vetting` reads and the book, the applicant and the
+//! attribute questions all read. What it says per criterion beyond the
+//! requirements — above all whether meeting it admits or only submits for
+//! review — is also kept alongside as [`CriterionMeta`] ([`read_manifest`]).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,10 +21,11 @@ use trust_tasks_rs::Payload as _;
 
 use crate::specs::vtc::join_requests::{manifest::v0_4 as manifest, submit::v0_3 as submit};
 
-/// The manifest as the rest of the client reads it: the SDK's 0.2-shaped vetting
-/// model (see the module docs).
+/// The manifest as the rest of the client reads it: the SDK's `manifest/0.4`
+/// type (see the module docs). It is trust-tasks-rs's prebuilt module, which
+/// 0.35 deprecates; it moves when the SDK's vetting model does.
 #[allow(deprecated)]
-pub type Manifest = vta_sdk::protocols::join_requests::manifest::v0_2::Response;
+pub type Manifest = vta_sdk::protocols::join_requests::manifest::v0_4::Response;
 
 /// The `vtc/join-requests` version: `manifest/0.4` + `submit/0.3`.
 ///
@@ -87,7 +87,7 @@ pub enum Admission {
     Review,
 }
 
-/// What the manifest says about one criterion beyond its 0.2 shape.
+/// What the manifest says about one criterion beyond its requirements.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CriterionMeta {
@@ -100,30 +100,24 @@ pub struct CriterionMeta {
     pub invitation_required: Option<bool>,
 }
 
-/// The members a 0.2 criterion does not have, removed when a manifest is
-/// carried into the 0.2 shape (which refuses unknown members).
-const NOT_IN_V0_2_CRITERION: [&str; 3] = ["admission", "credentialIssuers", "invitationRequired"];
-
-/// Read a `manifest/0.4` payload into the 0.2 shape the rest of the client
-/// reads, plus what it says per criterion beyond that.
+/// Read a `manifest/0.4` payload, and what it says per criterion.
 ///
-/// The payload is checked against its own generated type first, so a malformed
-/// manifest is refused rather than half-accepted. It is then carried across:
-/// `directoryDisclosure` is read on its own ([`super::disclosure::read`]) and
-/// taken out first, then the criterion members 0.2 lacks, and an absent
-/// `presentationDefinition` — optional now, required in 0.2 — becomes the empty
-/// definition 0.2 means by "nothing to present".
+/// The payload is checked against its type, so a malformed manifest is refused
+/// rather than half-accepted. `directoryDisclosure` is read on its own
+/// ([`super::disclosure::read`]) and taken out first.
+#[allow(deprecated)]
 pub fn read_manifest(
     _protocol: JoinProtocol,
     payload: &Value,
 ) -> Result<(Manifest, Vec<CriterionMeta>), serde_json::Error> {
+    use vta_sdk::protocols::join_requests::manifest::v0_4::CriterionAdmission;
     // The directory statement is read on its own, so a malformed one is reported as
     // such (`DirectoryStatement::Malformed`) without making the criteria unreadable.
     let mut criteria_only = payload.clone();
     if let Some(members) = criteria_only.as_object_mut() {
         members.remove(super::disclosure::MANIFEST_MEMBER);
     }
-    let current: manifest::Response = serde_json::from_value(criteria_only.clone())?;
+    let current: Manifest = serde_json::from_value(criteria_only)?;
     let meta = current
         .criteria
         .iter()
@@ -132,28 +126,17 @@ pub fn read_manifest(
             // An admission this client does not know reads as review: the one
             // claim it must never make wrongly is that meeting a criterion admits.
             admission: Some(match c.admission {
-                manifest::CriterionAdmission::Automatic => Admission::Automatic,
+                CriterionAdmission::Automatic => Admission::Automatic,
                 _ => Admission::Review,
             }),
             invitation_required: c.invitation_required,
         })
         .collect();
-    let mut as_v2 = criteria_only;
-    if let Some(criteria) = as_v2.get_mut("criteria").and_then(Value::as_array_mut) {
-        for criterion in criteria.iter_mut().filter_map(Value::as_object_mut) {
-            for member in NOT_IN_V0_2_CRITERION {
-                criterion.remove(member);
-            }
-            criterion
-                .entry("presentationDefinition")
-                .or_insert_with(|| Value::Object(Default::default()));
-        }
-    }
-    Ok((serde_json::from_value(as_v2)?, meta))
+    Ok((current, meta))
 }
 
 #[cfg(test)]
-// The tests read the kept 0.2-shaped model ([`Manifest`]); see the module docs.
+// The tests read the kept SDK model ([`Manifest`]); see the module docs.
 #[allow(deprecated)]
 mod tests {
     use super::*;
@@ -182,10 +165,10 @@ mod tests {
         })
     }
 
-    /// A manifest reads into the 0.2 shape with every criterion intact, and
-    /// what it adds is kept beside it.
+    /// A manifest reads with every criterion intact, and what it says per
+    /// criterion is kept beside it.
     #[test]
-    fn a_manifest_is_read_into_the_v0_2_shape_with_its_admission() {
+    fn a_manifest_is_read_with_its_admission() {
         let (manifest, meta) = read_manifest(JoinProtocol::V0_4, &v4_manifest()).unwrap();
         assert_eq!(manifest.criteria.len(), 2);
         assert_eq!(meta.len(), 2);
@@ -193,12 +176,7 @@ mod tests {
         assert_eq!(meta[0].admission, Some(Admission::Automatic));
         assert_eq!(meta[0].invitation_required, Some(true));
         assert_eq!(meta[1].admission, Some(Admission::Review));
-        assert!(
-            manifest.criteria[0]
-                .requirements_digest
-                .as_ref()
-                .is_some_and(|d| d.to_string() == DIGEST)
-        );
+        assert_eq!(manifest.criteria[0].requirements_digest.to_string(), DIGEST);
     }
 
     /// A manifest missing what it requires is refused, not carried across.
@@ -213,7 +191,7 @@ mod tests {
     }
 
     /// The directory statement is read on its own: even a malformed one leaves the
-    /// criteria readable, and it does not reach the 0.2 shape.
+    /// criteria readable.
     #[test]
     fn the_directory_statement_is_read_apart() {
         let mut m = v4_manifest();

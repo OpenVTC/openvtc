@@ -423,7 +423,7 @@ pub async fn prepare_acceptance(
         return Ok(Prepared::AlreadyJoined);
     }
     let invitation = offer.credentials.invitation.as_str();
-    match vta.room_key_package_v0_2(room_id, invitation).await {
+    match vta.room_key_package(room_id, invitation).await {
         Ok(kp) => Ok(Prepared::KeyPackage {
             key_package: kp.key_package.to_string(),
             already_minted: kp.already_minted,
