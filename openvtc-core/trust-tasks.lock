@@ -141,6 +141,12 @@ type_uri = "https://trusttasks.org/spec/vta/pcs/vetter/show/0.1"
 digest = "sha256:32411c65181d5081793fbed8f6c5defb720a285788c06f899aea03e364ee031d"
 
 [[task]]
+slug = "vta/webvh/agent-name/list"
+version = "1.1"
+type_uri = "https://trusttasks.org/spec/vta/webvh/agent-name/list/1.1"
+digest = "sha256:8d92d69b80bbb5049fb6df42c86df2883d6c91dca8f1d8fa17c29061a9c8c346"
+
+[[task]]
 slug = "vta/witness/accept"
 version = "0.2"
 type_uri = "https://trusttasks.org/spec/vta/witness/accept/0.2"

@@ -643,12 +643,8 @@ pub(crate) async fn handle_recover_plan_context(
         Ok(plan) => {
             // Narrow the SDK key records to what the mapping needs. Only
             // active keys: a revoked key cannot back a working persona.
-            let keys = match client
-                .list_keys(0, 500, Some("active"), Some(&context_id))
-                .await
-            {
-                Ok(resp) => resp
-                    .keys
+            let keys = match openvtc_core::rebuild::active_keys(client, &context_id).await {
+                Ok(keys) => keys
                     .into_iter()
                     .filter_map(|k| {
                         let key_type = match k.key_type {

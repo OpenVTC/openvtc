@@ -577,9 +577,6 @@ impl Application {
     /// than from `manifest`, because a generated type drops the members it does not name and
     /// `vetting.ext` is where a community publishes what this version does not enumerate
     /// ([`super::hidden`]).
-    // The kept manifest is the SDK's `manifest/0.4` type (`vetting::protocol::Manifest`), from
-    // trust-tasks-rs's deprecated prebuilt modules; it moves when the SDK's does.
-    #[allow(deprecated)]
     pub fn adopt_manifest(
         &mut self,
         manifest: &super::protocol::Manifest,

@@ -3287,7 +3287,9 @@ async fn collect_available_vics(
                 continue;
             }
             if let Ok(got) = vta.cred_vault_get(&summ.id).await
-                && let Some(body) = got.get("credential").cloned()
+                && let Some(body) = serde_json::to_value(got)
+                    .ok()
+                    .and_then(|v| v.get("credential").cloned())
                 && usable(&body).await
                 && let Some(av) = to_available_vic(&body)
             {
@@ -3577,7 +3579,7 @@ async fn load_invitation_from_vault(
         })
         .max_by(|a, b| a.valid_until.cmp(&b.valid_until))?;
     let got = admin_vta.cred_vault_get(&best.id).await.ok()?;
-    got.get("credential").cloned()
+    serde_json::to_value(got).ok()?.get("credential").cloned()
 }
 
 /// #1b: build a subject-linkage proof when the presenting DID differs from the

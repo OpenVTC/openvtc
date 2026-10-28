@@ -64,7 +64,7 @@ pub const NAMESPACE: &str = "openvtc";
 pub const RECORD_SCHEMA_VERSION: u64 = 1;
 
 /// The most change-feed pages one sync reads. A bound, not an expectation —
-/// an account needs a handful — so a VTA that keeps answering `truncated`
+/// an account needs a handful — so a VTA that keeps answering `nextCursor`
 /// cannot keep the sync looping (R1.4).
 const MAX_PAGES: usize = 500;
 
@@ -386,9 +386,9 @@ async fn pull<S: AppStateStore>(store: &S, context_id: &str, since: u64, ex: &mu
             }
             ex.pulled.push(remote(r));
         }
-        match (page.truncated, page.cursor) {
-            (true, Some(c)) => cursor = Some(c),
-            _ => {
+        match page.next_cursor {
+            Some(c) => cursor = Some(c),
+            None => {
                 ex.watermark = first_watermark;
                 if snapshot {
                     ex.snapshot_keys = Some(keys);

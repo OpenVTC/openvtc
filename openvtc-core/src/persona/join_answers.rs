@@ -40,9 +40,6 @@ pub struct Asked {
 
 /// What the manifest asks, in its own order. Empty when it asks nothing.
 #[must_use]
-// The kept manifest is the SDK's `manifest/0.4` type (`vetting::protocol::Manifest`), from
-// trust-tasks-rs's deprecated prebuilt modules; it moves when the SDK's does.
-#[allow(deprecated)]
 pub fn asked(manifest: &crate::vetting::protocol::Manifest) -> Vec<Asked> {
     manifest
         .requested_attributes

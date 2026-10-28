@@ -1904,9 +1904,6 @@ impl VettingBook {
     /// [`Self::learn_manifest`], recording the version the manifest arrived in
     /// and what that version says about each criterion
     /// ([`super::protocol::read_manifest`]).
-    // The kept manifest is the SDK's `manifest/0.4` type (`vetting::protocol::Manifest`), from
-    // trust-tasks-rs's deprecated prebuilt modules; it moves when the SDK's does.
-    #[allow(deprecated)]
     pub fn learn_manifest_in(
         &mut self,
         community: &str,

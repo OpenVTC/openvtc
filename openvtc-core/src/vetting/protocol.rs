@@ -24,7 +24,6 @@ use crate::specs::vtc::join_requests::{manifest::v0_4 as manifest, submit::v0_3 
 /// The manifest as the rest of the client reads it: the SDK's `manifest/0.4`
 /// type (see the module docs). It is trust-tasks-rs's prebuilt module, which
 /// 0.35 deprecates; it moves when the SDK's vetting model does.
-#[allow(deprecated)]
 pub type Manifest = vta_sdk::protocols::join_requests::manifest::v0_4::Response;
 
 /// The `vtc/join-requests` version: `manifest/0.4` + `submit/0.3`.
@@ -105,7 +104,6 @@ pub struct CriterionMeta {
 /// The payload is checked against its type, so a malformed manifest is refused
 /// rather than half-accepted. `directoryDisclosure` is read on its own
 /// ([`super::disclosure::read`]) and taken out first.
-#[allow(deprecated)]
 pub fn read_manifest(
     _protocol: JoinProtocol,
     payload: &Value,
@@ -136,8 +134,6 @@ pub fn read_manifest(
 }
 
 #[cfg(test)]
-// The tests read the kept SDK model ([`Manifest`]); see the module docs.
-#[allow(deprecated)]
 mod tests {
     use super::*;
     use serde_json::json;

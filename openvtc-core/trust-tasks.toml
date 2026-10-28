@@ -27,6 +27,7 @@
 "vta/pcs/tokens/request" = "0.1"
 "vta/pcs/verify-attestation" = "0.1"
 "vta/pcs/vetter/show" = "0.1"
+"vta/webvh/agent-name/list" = "1.1"
 "vta/witness/accept" = "0.2"
 "vta/witness/list" = "0.2"
 "vta/witness/open" = "0.2"

@@ -984,12 +984,8 @@ async fn report_recoverability(config: &Config) {
         }
     };
 
-    let keys = match client
-        .list_keys(0, 500, Some("active"), Some(&context_id))
-        .await
-    {
-        Ok(resp) => resp
-            .keys
+    let keys = match openvtc_core::rebuild::active_keys(&client, &context_id).await {
+        Ok(keys) => keys
             .into_iter()
             .filter_map(|k| {
                 let key_type = match k.key_type {

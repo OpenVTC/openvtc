@@ -61,12 +61,11 @@ fn page(
 ) -> AppStateListResponse {
     let start: usize = cursor.map_or(0, |c| c.parse().expect("cursor"));
     let rest = all.split_off(start.min(all.len()));
-    let truncated = rest.len() > MEM_PAGE;
+    let more = rest.len() > MEM_PAGE;
     let records: Vec<_> = rest.into_iter().take(MEM_PAGE).collect();
     serde_json::from_value(json!({
         "records": records,
-        "truncated": truncated,
-        "cursor": truncated.then(|| (start + MEM_PAGE).to_string()),
+        "nextCursor": more.then(|| (start + MEM_PAGE).to_string()),
         "highWatermark": high_watermark,
     }))
     .expect("page")

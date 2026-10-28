@@ -124,10 +124,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `manifest/0.4` and `submit/0.3`, `vta/witness/list/0.2`, `vtc/rooms/offers/list/0.4`,
   git-ns `view/0.6`, `drift/resolve/0.4`, `repo/create/0.4`, `right/{grant,revoke}/0.4`,
   `persona/profile/compose/1.1`, `persona/attribute/promote/1.1`,
-  `persona/world/put/1.1` and `vtc/vetting/vetters/resend/0.2`. Needs a VTA and
-  community on a VTI release that serves them. On `vta-sdk` 0.74, `vta-service` 0.66,
-  `vti-vetting-pcs` 0.7, `did-git-sign` 0.26, `affinidi-tdk` 0.33 and
-  `affinidi-messaging-sdk` 0.41. A community's manifest is now kept as `vta-sdk`'s
+  `persona/world/put/1.1`, `vta/webvh/agent-name/list/1.1` and
+  `vtc/vetting/vetters/resend/0.2`; through `vta-sdk`, `keys/list/0.2`,
+  `vta/app-state/list/1.1`, `vault/credentials/get/0.2` and the ACL tasks at
+  `acl/*/0.2` and `acl/list/0.3`. Needs a VTA and community on a VTI release that
+  serves them: `vta-service` 0.67 and `vtc-service` 0.15 or later. On `vta-sdk`
+  0.75, `vti-vetting-pcs` 0.8, `did-git-sign` 0.26, `affinidi-tdk` 0.36,
+  `affinidi-messaging-sdk` 0.44 and `trust-tasks-rs` 0.36, which deprecates the
+  prebuilt types `vta-sdk` still hands back (the vetting model, rooms, persona);
+  the workspace allows `deprecated` until the SDK moves. A rebuild and the health
+  check read every page of a context's keys rather than the first 500. A community's manifest is now kept as `vta-sdk`'s
   `manifest/0.4` type (`vetting::protocol::Manifest`) rather than carried into the
   0.2 shape; vetting requirements saved by an earlier version still load.
 

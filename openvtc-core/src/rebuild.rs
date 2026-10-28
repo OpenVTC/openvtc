@@ -291,6 +291,47 @@ pub fn membership_from_credential(
     })
 }
 
+/// The most `keys/list` pages [`active_keys`] reads. A bound, not an
+/// expectation — a context holds a handful of keys — so a VTA that keeps
+/// answering `nextCursor` cannot keep the read looping (R1.4).
+const MAX_KEY_PAGES: usize = 50;
+
+/// Keys asked for per `keys/list` page.
+const KEY_PAGE: u64 = 500;
+
+/// Every active key in `context_id`, read page by page over `keys/list/0.2`.
+///
+/// # Errors
+///
+/// Fails when a page cannot be read, or when the listing has not ended within
+/// 50 pages.
+pub async fn active_keys(
+    client: &VtaClient,
+    context_id: &str,
+) -> Result<Vec<vta_sdk::keys::KeyRecord>, OpenVTCError> {
+    let mut keys = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_KEY_PAGES {
+        let page = client
+            .list_keys(
+                cursor.as_deref(),
+                KEY_PAGE,
+                Some("active"),
+                Some(context_id),
+            )
+            .await
+            .map_err(|e| OpenVTCError::Vta(format!("could not list keys in {context_id}: {e}")))?;
+        keys.extend(page.keys);
+        match page.next_cursor {
+            Some(c) => cursor = Some(c),
+            None => return Ok(keys),
+        }
+    }
+    Err(OpenVTCError::Vta(format!(
+        "the key listing for {context_id} did not end within {MAX_KEY_PAGES} pages"
+    )))
+}
+
 /// Build the plan by reading the VTA. Never writes.
 ///
 /// # Errors
@@ -347,7 +388,7 @@ pub async fn plan(
 
     // `query` returns **body-free descriptors** — id, types, issuer, purpose,
     // status — and a membership is defined by its *subject*, which only the
-    // body carries. So each descriptor is fetched with `get/0.1` before it can
+    // body carries. So each descriptor is fetched with `get/0.2` before it can
     // be verified.
     // Every membership's proof is checked against its issuer's DID document.
     // No resolver means nothing can be checked, so every membership is
@@ -367,7 +408,13 @@ pub async fn plan(
 
     for id in descriptors {
         let credential = match client.cred_vault_get(&id).await {
-            Ok(v) => v.get("credential").cloned().unwrap_or(v),
+            // `get/0.2` carries a JSON credential as `credential` and any other
+            // format as `credentialBase64`; a membership is the former, so the
+            // latter is left whole to fail the shape check below.
+            Ok(v) => {
+                let v = serde_json::to_value(v).unwrap_or_default();
+                v.get("credential").cloned().unwrap_or(v)
+            }
             Err(e) => {
                 warn!(id = %id, "could not fetch a held credential during rebuild: {e}");
                 continue;

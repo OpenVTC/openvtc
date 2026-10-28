@@ -12,10 +12,10 @@
 //! registers *this* install's binding. The VTA's device slice, on the other
 //! hand, is explicitly "the device-facing half of an `AclEntry`" —
 //! `device/register/0.1` refuses a DID that is not already in the ACL. So the
-//! grant is an ordinary `acl/grant/0.1` entry, after which the device can
+//! grant is an ordinary `acl/grant/0.2` entry, after which the device can
 //! authenticate and register its own binding exactly as any enrolled device
-//! does. Listing is `acl/list/0.1` read in the **subtree** direction, and
-//! revocation is `acl/revoke/0.1` (or `acl/update/0.1` to narrow an entry that
+//! does. Listing is `acl/list/0.3` read in the **subtree** direction, and
+//! revocation is `acl/revoke/0.2` (or `acl/update/0.2` to narrow an entry that
 //! also names contexts outside the community).
 //!
 //! # The role: `application`
@@ -183,7 +183,7 @@ pub fn grant_label(device_name: &str, community: &str) -> String {
     }
 }
 
-/// The `acl/grant/0.1` request giving `did` [`DEVICE_ROLE`] in `context_id`
+/// The `acl/grant/0.2` request giving `did` [`DEVICE_ROLE`] in `context_id`
 /// until `expires`.
 pub fn grant_request(
     did: &str,
@@ -538,7 +538,10 @@ mod tests {
         let entry = &wire["entry"];
         assert_eq!(entry["subject"], DEVICE);
         assert_eq!(entry["role"], "application");
-        assert_eq!(entry["scopes"], serde_json::json!([CTX]));
+        assert_eq!(
+            entry["act"],
+            serde_json::json!({ "scope": "contexts", "contexts": [CTX] })
+        );
         assert_eq!(req.expires_at, Some(expires.timestamp() as u64));
     }
 

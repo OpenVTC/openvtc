@@ -455,7 +455,7 @@ async fn a_relationship_is_witnessed_through_the_vta() {
         .cred_vault_get(&witnessed.credential_id)
         .await
         .expect("the VWC is stored at the VTA");
-    assert_eq!(held["credential"], *vwc);
+    assert_eq!(serde_json::to_value(held).unwrap()["credential"], *vwc);
 
     // And it rides a personhood assertion with its evidence.
     let record = witness::WitnessRecord {
