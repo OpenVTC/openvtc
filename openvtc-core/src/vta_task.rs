@@ -26,3 +26,11 @@ pub async fn call<P: Payload + Serialize, R: DeserializeOwned>(
     serde_json::from_value(answer)
         .map_err(|e| VtaError::Protocol(format!("{uri} response does not match its schema: {e}")))
 }
+
+/// Whether `err` says the ACL entry being revoked is not there: `acl/revoke/0.2`
+/// declares it as `subjectNotPresent`, where 0.1 answered not-found.
+#[must_use]
+pub fn acl_subject_absent(err: &VtaError) -> bool {
+    matches!(err, VtaError::NotFound(_))
+        || err.rejection_code() == Some("acl/revoke:subjectNotPresent")
+}

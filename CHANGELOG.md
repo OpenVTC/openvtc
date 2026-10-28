@@ -133,7 +133,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `affinidi-messaging-sdk` 0.44 and `trust-tasks-rs` 0.36, which deprecates the
   prebuilt types `vta-sdk` still hands back (the vetting model, rooms, persona);
   the workspace allows `deprecated` until the SDK moves. A rebuild and the health
-  check read every page of a context's keys rather than the first 500. A community's manifest is now kept as `vta-sdk`'s
+  check read every page of a context's keys rather than the first 500. Device access looks up the DID's
+  existing entry before granting, because `acl/grant/0.2` merges a grant into an existing
+  entry (re-asserting or widening it) rather than refusing it; a revoke of an entry that is
+  already gone (`acl/revoke:subjectNotPresent`) still counts as done. A community's manifest is now kept as `vta-sdk`'s
   `manifest/0.4` type (`vetting::protocol::Manifest`) rather than carried into the
   0.2 shape; vetting requirements saved by an earlier version still load.
 
