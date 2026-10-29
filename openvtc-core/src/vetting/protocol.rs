@@ -1,128 +1,79 @@
-//! Which `vtc/join-requests` version a community speaks: `manifest/0.4` +
-//! `submit/0.3`, `manifest/0.3` + `submit/0.3`, or the `manifest/0.2` +
-//! `submit/0.2` they replaced.
+//! The `vtc/join-requests` version this client speaks: `manifest/0.4` + `submit/0.3`.
 //!
 //! `manifest/0.4` is 0.3 plus one optional member, `directoryDisclosure`: what
 //! the community's member directory would show about the person joining, and
-//! to whom ([`super::disclosure`]). Its submit is still 0.3. A community that
-//! predates it answers `unsupportedType`, and the client asks again in 0.3.
+//! to whom ([`super::disclosure`]). Its submit is 0.3, which names the criterion
+//! a request is decided under.
 //!
-//! A community serves exactly one. VTI-13 dropped 0.2 without a transition, so
-//! a client that spoke one version could not join communities on the other
-//! until every community had moved. This client speaks all three: it asks for
-//! 0.4 first, falls back a version at a time when the community refuses one
-//! ([`is_version_refusal`]), remembers which one the community answered, and
-//! submits in that version.
+//! The VTC serves only the current versions, so this client asks in those and
+//! nothing older: the 0.2 and 0.3 fallbacks it once carried are gone. A version
+//! saved by a build that still spoke them reads as this one ([`JoinProtocol`]).
 //!
-//! Inside, a manifest is kept in its 0.2 shape ([`manifest::v0_2::Response`]),
-//! which the book, the applicant and the attribute questions all read. A 0.3
-//! or 0.4 manifest is carried into that shape by [`read_manifest`], and what 0.3 adds
-//! per criterion — above all whether meeting it admits or only submits for
-//! review — is kept alongside as [`CriterionMeta`].
+//! Inside, a manifest is kept as the SDK's 0.4 type ([`Manifest`]), the one
+//! `vta_sdk::protocols::vetting` reads and the book, the applicant and the
+//! attribute questions all read. What it says per criterion beyond the
+//! requirements — above all whether meeting it admits or only submits for
+//! review — is also kept alongside as [`CriterionMeta`] ([`read_manifest`]).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trust_tasks_rs::Payload as _;
-use trust_tasks_rs::specs::vtc::join_requests::{manifest, submit};
 
-/// Whether a Trust Task error `code` says the community does not serve the
-/// version asked — the refusal that means "ask in the other one".
+use crate::specs::vtc::join_requests::{manifest::v0_4 as manifest, submit::v0_3 as submit};
+
+/// The manifest as the rest of the client reads it: the SDK's `manifest/0.4`
+/// type (see the module docs). It is trust-tasks-rs's prebuilt module, which
+/// 0.35 deprecates; it moves when the SDK's vetting model does.
+pub type Manifest = vta_sdk::protocols::join_requests::manifest::v0_4::Response;
+
+/// The `vtc/join-requests` version: `manifest/0.4` + `submit/0.3`.
 ///
-/// Both codes, because a VTC answers with either: `unsupportedVersion` when it
-/// serves the task at another version (a 0.2 community asked for 0.3, naming
-/// what it serves in `details.servedVersions`), `unsupportedType` when it does
-/// not route the URI at all. Keying on the second alone would never fall back
-/// against a live 0.2 community, which answers the first.
-#[must_use]
-pub fn is_version_refusal(code: &str) -> bool {
-    matches!(code, "unsupportedType" | "unsupportedVersion")
-}
-
-/// A `vtc/join-requests` version.
+/// One version, kept as a type because it is saved with a pending request and
+/// named on every manifest and submit. `v0_3` and `v0_2`, which a build that
+/// still fell back could have saved, read as it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum JoinProtocol {
-    /// `manifest/0.4` + `submit/0.3`: 0.3 with the directory disclosure.
-    /// Asked first.
+    /// `manifest/0.4` + `submit/0.3`.
     #[default]
+    #[serde(alias = "v0_3", alias = "v0_2")]
     V0_4,
-    /// `manifest/0.3` + `submit/0.3` (Keyring VTI-13).
-    V0_3,
-    /// `manifest/0.2` + `submit/0.2`, for a community that has not moved.
-    V0_2,
 }
 
 impl JoinProtocol {
-    /// Every version, newest first.
-    const ALL: [Self; 3] = [Self::V0_4, Self::V0_3, Self::V0_2];
-
     /// The manifest request type.
     pub fn manifest_type(self) -> &'static str {
-        match self {
-            Self::V0_4 => manifest::v0_4::Payload::TYPE_URI,
-            Self::V0_3 => manifest::v0_3::Payload::TYPE_URI,
-            Self::V0_2 => manifest::v0_2::Payload::TYPE_URI,
-        }
+        manifest::Payload::TYPE_URI
     }
 
     /// The manifest response type.
     pub fn manifest_response_type(self) -> &'static str {
-        match self {
-            Self::V0_4 => manifest::v0_4::Response::TYPE_URI,
-            Self::V0_3 => manifest::v0_3::Response::TYPE_URI,
-            Self::V0_2 => manifest::v0_2::Response::TYPE_URI,
-        }
+        manifest::Response::TYPE_URI
     }
 
     /// The submit request type.
     pub fn submit_type(self) -> &'static str {
-        match self {
-            Self::V0_4 | Self::V0_3 => submit::v0_3::Payload::TYPE_URI,
-            Self::V0_2 => submit::v0_2::Payload::TYPE_URI,
-        }
+        submit::Payload::TYPE_URI
     }
 
     /// The submit response type.
     pub fn submit_response_type(self) -> &'static str {
-        match self {
-            Self::V0_4 | Self::V0_3 => submit::v0_3::Response::TYPE_URI,
-            Self::V0_2 => submit::v0_2::Response::TYPE_URI,
-        }
+        submit::Response::TYPE_URI
     }
 
     /// The version a manifest response of type `typ` is in.
     pub fn from_manifest_response(typ: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|p| p.manifest_response_type() == typ)
+        (typ == Self::V0_4.manifest_response_type()).then_some(Self::V0_4)
     }
 
     /// The version a manifest request of type `typ` is in.
     pub fn from_manifest_request(typ: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|p| p.manifest_type() == typ)
+        (typ == Self::V0_4.manifest_type()).then_some(Self::V0_4)
     }
 
-    /// Whether `typ` is a submit response of either version.
+    /// Whether `typ` is a submit response.
     pub fn is_submit_response(typ: &str) -> bool {
-        Self::ALL
-            .into_iter()
-            .any(|p| p.submit_response_type() == typ)
-    }
-
-    /// Whether its submit is `submit/0.3`, which names the criterion it is
-    /// decided under.
-    pub fn names_criterion(self) -> bool {
-        matches!(self, Self::V0_4 | Self::V0_3)
-    }
-
-    /// The version to fall back to when a community refuses this one as
-    /// `unsupportedType`, if any.
-    pub fn fallback(self) -> Option<Self> {
-        match self {
-            Self::V0_4 => Some(Self::V0_3),
-            Self::V0_3 => Some(Self::V0_2),
-            Self::V0_2 => None,
-        }
+        typ == Self::V0_4.submit_response_type()
     }
 }
 
@@ -135,10 +86,7 @@ pub enum Admission {
     Review,
 }
 
-/// What `manifest/0.3` says about one criterion beyond its 0.2 shape.
-///
-/// A 0.2 manifest says none of it: it is `None` throughout, and a 0.2
-/// community's criteria are described as they always were.
+/// What the manifest says about one criterion beyond its requirements.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CriterionMeta {
@@ -151,67 +99,38 @@ pub struct CriterionMeta {
     pub invitation_required: Option<bool>,
 }
 
-/// The 0.3 members a 0.2 criterion does not have, removed when a 0.3 manifest
-/// is carried into the 0.2 shape (which refuses unknown members).
-const V0_3_ONLY_CRITERION_MEMBERS: [&str; 3] =
-    ["admission", "credentialIssuers", "invitationRequired"];
-
-/// Read a manifest payload in `protocol` into the 0.2 shape the rest of the
-/// client reads, plus what 0.3 adds per criterion.
+/// Read a `manifest/0.4` payload, and what it says per criterion.
 ///
-/// A 0.4 payload is a 0.3 one plus `directoryDisclosure`, which is read on its
-/// own ([`super::disclosure::read`]) and taken out here, so the rest is checked
-/// as the 0.3 it is.
-///
-/// A 0.3 payload is checked against its own generated type first, so a
-/// malformed 0.3 manifest is refused as 0.3 rather than half-accepted as 0.2.
-/// It is then carried across: the 0.3-only members are taken out, and an
-/// absent `presentationDefinition` — optional in 0.3, required in 0.2 — becomes
-/// the empty definition 0.2 means by "nothing to present".
+/// The payload is checked against its type, so a malformed manifest is refused
+/// rather than half-accepted. `directoryDisclosure` is read on its own
+/// ([`super::disclosure::read`]) and taken out first.
 pub fn read_manifest(
-    protocol: JoinProtocol,
+    _protocol: JoinProtocol,
     payload: &Value,
-) -> Result<(manifest::v0_2::Response, Vec<CriterionMeta>), serde_json::Error> {
-    match protocol {
-        JoinProtocol::V0_2 => Ok((serde_json::from_value(payload.clone())?, Vec::new())),
-        JoinProtocol::V0_4 => {
-            let mut as_v3 = payload.clone();
-            if let Some(members) = as_v3.as_object_mut() {
-                members.remove(super::disclosure::MANIFEST_MEMBER);
-            }
-            read_manifest(JoinProtocol::V0_3, &as_v3)
-        }
-        JoinProtocol::V0_3 => {
-            let v3: manifest::v0_3::Response = serde_json::from_value(payload.clone())?;
-            let meta = v3
-                .criteria
-                .iter()
-                .map(|c| CriterionMeta {
-                    id: c.id.to_string(),
-                    // An admission this client does not know reads as review:
-                    // the one claim it must never make wrongly is that meeting
-                    // a criterion admits.
-                    admission: Some(match c.admission {
-                        manifest::v0_3::CriterionAdmission::Automatic => Admission::Automatic,
-                        _ => Admission::Review,
-                    }),
-                    invitation_required: c.invitation_required,
-                })
-                .collect();
-            let mut as_v2 = payload.clone();
-            if let Some(criteria) = as_v2.get_mut("criteria").and_then(Value::as_array_mut) {
-                for criterion in criteria.iter_mut().filter_map(Value::as_object_mut) {
-                    for member in V0_3_ONLY_CRITERION_MEMBERS {
-                        criterion.remove(member);
-                    }
-                    criterion
-                        .entry("presentationDefinition")
-                        .or_insert_with(|| Value::Object(Default::default()));
-                }
-            }
-            Ok((serde_json::from_value(as_v2)?, meta))
-        }
+) -> Result<(Manifest, Vec<CriterionMeta>), serde_json::Error> {
+    use vta_sdk::protocols::join_requests::manifest::v0_4::CriterionAdmission;
+    // The directory statement is read on its own, so a malformed one is reported as
+    // such (`DirectoryStatement::Malformed`) without making the criteria unreadable.
+    let mut criteria_only = payload.clone();
+    if let Some(members) = criteria_only.as_object_mut() {
+        members.remove(super::disclosure::MANIFEST_MEMBER);
     }
+    let current: Manifest = serde_json::from_value(criteria_only)?;
+    let meta = current
+        .criteria
+        .iter()
+        .map(|c| CriterionMeta {
+            id: c.id.to_string(),
+            // An admission this client does not know reads as review: the one
+            // claim it must never make wrongly is that meeting a criterion admits.
+            admission: Some(match c.admission {
+                CriterionAdmission::Automatic => Admission::Automatic,
+                _ => Admission::Review,
+            }),
+            invitation_required: c.invitation_required,
+        })
+        .collect();
+    Ok((current, meta))
 }
 
 #[cfg(test)]
@@ -221,7 +140,7 @@ mod tests {
 
     const DIGEST: &str = "zQmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
 
-    fn v3_manifest() -> Value {
+    fn v4_manifest() -> Value {
         json!({
             "communityDid": "did:webvh:example.com:community",
             "criteria": [
@@ -242,82 +161,70 @@ mod tests {
         })
     }
 
-    /// A 0.3 manifest reads into the 0.2 shape with every criterion intact, and
-    /// what 0.3 adds is kept beside it.
+    /// A manifest reads with every criterion intact, and what it says per
+    /// criterion is kept beside it.
     #[test]
-    fn a_v0_3_manifest_is_read_into_the_v0_2_shape_with_its_admission() {
-        let (manifest, meta) = read_manifest(JoinProtocol::V0_3, &v3_manifest()).unwrap();
+    fn a_manifest_is_read_with_its_admission() {
+        let (manifest, meta) = read_manifest(JoinProtocol::V0_4, &v4_manifest()).unwrap();
         assert_eq!(manifest.criteria.len(), 2);
         assert_eq!(meta.len(), 2);
         assert_eq!(meta[0].id, "invited");
         assert_eq!(meta[0].admission, Some(Admission::Automatic));
         assert_eq!(meta[0].invitation_required, Some(true));
         assert_eq!(meta[1].admission, Some(Admission::Review));
-        assert!(
-            manifest.criteria[0]
-                .requirements_digest
-                .as_ref()
-                .is_some_and(|d| d.to_string() == DIGEST)
-        );
+        assert_eq!(manifest.criteria[0].requirements_digest.to_string(), DIGEST);
     }
 
-    /// A 0.3 manifest missing what 0.3 requires is refused, not carried
-    /// across as a 0.2 one.
+    /// A manifest missing what it requires is refused, not carried across.
     #[test]
-    fn a_malformed_v0_3_manifest_is_refused() {
-        let mut m = v3_manifest();
+    fn a_malformed_manifest_is_refused() {
+        let mut m = v4_manifest();
         m["criteria"][0]
             .as_object_mut()
             .unwrap()
             .remove("admission");
-        assert!(read_manifest(JoinProtocol::V0_3, &m).is_err());
+        assert!(read_manifest(JoinProtocol::V0_4, &m).is_err());
     }
 
-    /// A 0.4 manifest is a 0.3 one with the directory statement beside it:
-    /// the criteria read the same, and a 0.3 reading refuses the extra member.
+    /// The directory statement is read on its own: even a malformed one leaves the
+    /// criteria readable.
     #[test]
-    fn a_v0_4_manifest_reads_its_criteria_as_v0_3() {
-        let mut m = v3_manifest();
+    fn the_directory_statement_is_read_apart() {
+        let mut m = v4_manifest();
         m[super::super::disclosure::MANIFEST_MEMBER] = json!({ "anything": true });
         let (manifest, meta) = read_manifest(JoinProtocol::V0_4, &m).unwrap();
         assert_eq!(manifest.criteria.len(), 2);
         assert_eq!(meta[1].admission, Some(Admission::Review));
-        assert!(read_manifest(JoinProtocol::V0_3, &m).is_err());
     }
 
-    /// The versions name the right types and fall back one way only.
+    /// The version names the current types, and a version an older build saved
+    /// reads as it.
     #[test]
-    fn the_versions_name_their_types_and_fall_back_once() {
-        assert!(
-            JoinProtocol::V0_3
-                .manifest_type()
-                .ends_with("/manifest/0.3")
-        );
-        assert!(JoinProtocol::V0_2.submit_type().ends_with("/submit/0.2"));
+    fn the_version_names_its_types_and_reads_older_saved_values() {
+        let p = JoinProtocol::V0_4;
+        assert!(p.manifest_type().ends_with("/manifest/0.4"));
+        assert!(p.submit_type().ends_with("/submit/0.3"));
         assert_eq!(
-            JoinProtocol::from_manifest_response(JoinProtocol::V0_3.manifest_response_type()),
-            Some(JoinProtocol::V0_3)
+            JoinProtocol::from_manifest_response(p.manifest_response_type()),
+            Some(p)
         );
-        assert!(JoinProtocol::is_submit_response(
-            JoinProtocol::V0_2.submit_response_type()
-        ));
-        assert!(
-            JoinProtocol::V0_4
-                .manifest_type()
-                .ends_with("/manifest/0.4")
-        );
-        assert!(JoinProtocol::V0_4.submit_type().ends_with("/submit/0.3"));
-        assert!(JoinProtocol::V0_4.names_criterion() && !JoinProtocol::V0_2.names_criterion());
         assert_eq!(
-            JoinProtocol::from_manifest_response(JoinProtocol::V0_4.manifest_response_type()),
-            Some(JoinProtocol::V0_4)
+            JoinProtocol::from_manifest_request(p.manifest_type()),
+            Some(p)
         );
-        assert_eq!(JoinProtocol::default(), JoinProtocol::V0_4);
-        assert_eq!(JoinProtocol::V0_4.fallback(), Some(JoinProtocol::V0_3));
-        assert_eq!(JoinProtocol::V0_3.fallback(), Some(JoinProtocol::V0_2));
-        assert_eq!(JoinProtocol::V0_2.fallback(), None);
-        assert!(is_version_refusal("unsupportedVersion"));
-        assert!(is_version_refusal("unsupportedType"));
-        assert!(!is_version_refusal("permissionDenied"));
+        assert!(JoinProtocol::is_submit_response(p.submit_response_type()));
+        assert_eq!(
+            JoinProtocol::from_manifest_response(
+                "https://trusttasks.org/spec/vtc/join-requests/manifest/0.3#response"
+            ),
+            None
+        );
+        for saved in ["v0_4", "v0_3", "v0_2"] {
+            assert_eq!(
+                serde_json::from_value::<JoinProtocol>(json!(saved)).unwrap(),
+                JoinProtocol::V0_4
+            );
+        }
+        assert_eq!(serde_json::to_value(p).unwrap(), json!("v0_4"));
     }
 }

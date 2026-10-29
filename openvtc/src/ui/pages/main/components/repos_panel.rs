@@ -2324,7 +2324,7 @@ mod tests {
     const CAROL: &str = "did:webvh:QmCarolScid3:acme-vtc.example:carol";
 
     /// `loaded()`, plus Carol's unratified break-glass ownership of
-    /// `gadgets`, as `git-ns/view` 0.4 returns it to an administrator.
+    /// `gadgets`, as `git-ns/view` 0.6 returns it to an administrator.
     fn with_break_glass(me: &str, justification: &str) -> ReposView {
         let mut v = loaded();
         v.me = me.into();
@@ -2332,7 +2332,7 @@ mod tests {
         data["rights"].as_array_mut().unwrap().push(json!({
             "subject": CAROL, "right": "git.repo.own", "resource": "github.com/acme/gadgets",
             "grantedBy": CAROL, "grantedAt": "2026-09-25T02:10:31Z",
-            "breakGlass": {"by": CAROL, "at": "2026-09-25T02:10:31Z", "justification": justification}
+            "breakGlass": {"by": CAROL, "recordedAt": "2026-09-25T02:10:31Z", "justification": justification}
         }));
         v.data = Some(Arc::new(serde_json::from_value(data).unwrap()));
         v

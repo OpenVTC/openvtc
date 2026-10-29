@@ -47,12 +47,12 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::specs::vtc::members::renew::v0_1 as renew;
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use affinidi_tdk::secrets_resolver::secrets::Secret;
 use chrono::{DateTime, Utc};
 use dtg_credentials::{DTGCredentialType, IssuerScope};
 use serde_json::Value;
-use trust_tasks_rs::specs::vtc::members::renew::v0_1 as renew;
 use uuid::Uuid;
 
 use crate::CredentialKind;

@@ -17,9 +17,9 @@
 //! mutation happens back on the loop in [`AgentNameOutcome::apply`].
 
 use vta_sdk::client::VtaClient;
-use vta_sdk::protocols::did_management::agent_name::AgentNameEntry;
 
 use crate::state_handler::agent_name_manage;
+use crate::state_handler::agent_name_manage::AgentNameEntry;
 use crate::state_handler::main_page::content::{AgentNameManagerPhase, AgentNameRow};
 use crate::state_handler::save_coalesce::SaveScheduler;
 use crate::state_handler::state::State;
@@ -251,11 +251,11 @@ mod tests {
     const DID: &str = "did:webvh:QmScidPersona:example.com:alice";
 
     fn entry(name: &str, enabled: bool) -> AgentNameEntry {
-        AgentNameEntry {
-            name: name.to_string(),
-            enabled,
-            created_at: 0,
-        }
+        AgentNameEntry::builder()
+            .name(name)
+            .enabled(enabled)
+            .try_into()
+            .unwrap()
     }
 
     fn open_overlay(state: &mut State, did: &str) {

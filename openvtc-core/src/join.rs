@@ -43,11 +43,11 @@ pub const MAX_JOIN_SUBMIT_BYTES: usize = 1_048_576;
 
 /// The `vtc/community/profile/show` request type, sourced from the spec crate so
 /// it cannot drift from the schema OpenVTC is built against (issue #241).
-pub const COMMUNITY_PROFILE_SHOW_TYPE: &str = <trust_tasks_rs::specs::vtc::community::profile::show::v0_1::Payload as trust_tasks_rs::Payload>::TYPE_URI;
+pub const COMMUNITY_PROFILE_SHOW_TYPE: &str = <crate::specs::vtc::community::profile::show::v0_1::Payload as trust_tasks_rs::Payload>::TYPE_URI;
 
 /// The correlated `#response` type the VTC replies with, carrying the
 /// `CommunityProfileView` (and its `relationshipIdentifierDefault`).
-pub const COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE: &str = <trust_tasks_rs::specs::vtc::community::profile::show::v0_1::Response as trust_tasks_rs::Payload>::TYPE_URI;
+pub const COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE: &str = <crate::specs::vtc::community::profile::show::v0_1::Response as trust_tasks_rs::Payload>::TYPE_URI;
 
 /// Who is speaking to which community, and over what.
 ///
@@ -362,9 +362,6 @@ async fn build_join_submit_document(
         criterion,
         registry_consent,
     } = presentation.into();
-    // `submit/0.3` is the 0.2 payload plus `criterion`, so a 0.2 submission
-    // never names one, whatever the presentation carried.
-    let criterion = criterion.filter(|_| protocol.names_criterion());
     let body = JoinRequestSubmitBody {
         vp,
         criterion,
@@ -1038,7 +1035,7 @@ mod tests {
         assert_eq!(doc["id"], json!("urn:uuid:submit-1"));
         assert_eq!(
             doc["type"],
-            json!(crate::vetting::protocol::JoinProtocol::V0_3.submit_type())
+            json!(crate::vetting::protocol::JoinProtocol::V0_4.submit_type())
         );
         assert_eq!(doc["issuer"], json!(applicant));
         assert_eq!(doc["recipient"], json!("did:webvh:example.com:community"));
@@ -1156,7 +1153,7 @@ mod tests {
                 vp,
                 extensions: json!({ "requirementsDigest": "zDigest" }),
                 attributes: Vec::new(),
-                protocol: crate::vetting::protocol::JoinProtocol::V0_2,
+                protocol: crate::vetting::protocol::JoinProtocol::V0_4,
                 criterion: None,
                 registry_consent: false,
             },
@@ -1170,13 +1167,12 @@ mod tests {
         );
     }
 
-    /// A 0.3 submit names its criterion in `criterion` and is the generated
-    /// `submit/0.3` payload; a 0.2 one never carries the member, which 0.2's
-    /// schema refuses.
+    /// A submit names its criterion in `criterion` and is the generated
+    /// `submit/0.3` payload.
     #[tokio::test]
-    async fn a_v0_3_submit_names_its_criterion() {
+    async fn a_submit_names_its_criterion() {
+        use crate::specs::vtc::join_requests::submit;
         use crate::vetting::protocol::JoinProtocol;
-        use trust_tasks_rs::specs::vtc::join_requests::submit;
         let (applicant, signer) =
             affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
                 .expect("did:key generates");
@@ -1198,37 +1194,31 @@ mod tests {
             )
         };
 
-        let v3 = build(JoinProtocol::V0_3).await.unwrap();
-        assert_eq!(v3["type"], json!(JoinProtocol::V0_3.submit_type()));
-        assert_eq!(v3["payload"]["criterion"], digest);
-        serde_json::from_value::<submit::v0_3::Payload>(v3["payload"].clone())
+        let doc = build(JoinProtocol::V0_4).await.unwrap();
+        assert_eq!(doc["type"], json!(JoinProtocol::V0_4.submit_type()));
+        assert_eq!(doc["payload"]["criterion"], digest);
+        serde_json::from_value::<submit::v0_3::Payload>(doc["payload"].clone())
             .expect("the payload is the generated submit/0.3 shape");
-
-        let v2 = build(JoinProtocol::V0_2).await.unwrap();
-        assert_eq!(v2["type"], json!(JoinProtocol::V0_2.submit_type()));
-        assert!(v2["payload"].get("criterion").is_none());
-        serde_json::from_value::<submit::v0_2::Payload>(v2["payload"].clone())
-            .expect("the payload is the generated submit/0.2 shape");
     }
 
     /// The applicant's registry choice reaches the wire as they made it, in
-    /// both directions and on both submit versions.
+    /// both directions.
     ///
     /// Asserted three ways, because each catches a different break: the raw
     /// JSON member is `registryConsent` (a rename to snake_case would leave the
     /// community reading its `false` default — silently, since the schema makes
     /// the member optional); no `registry_consent` member rides beside it; and
-    /// the generated `trust_tasks_rs::specs` payload for that version reads the
+    /// the generated `crate::specs` payload for that version reads the
     /// same value back, so the name is checked against the schema rather than
     /// against a string this test spells.
     #[tokio::test]
     async fn the_applicants_registry_consent_reaches_the_wire_as_given() {
+        use crate::specs::vtc::join_requests::submit;
         use crate::vetting::protocol::JoinProtocol;
-        use trust_tasks_rs::specs::vtc::join_requests::submit;
         let (applicant, signer) =
             affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
                 .expect("did:key generates");
-        for protocol in [JoinProtocol::V0_2, JoinProtocol::V0_3, JoinProtocol::V0_4] {
+        for protocol in [JoinProtocol::V0_4] {
             for consent in [false, true] {
                 let doc = build_join_submit_document(
                     &applicant,
@@ -1256,18 +1246,9 @@ mod tests {
                     payload.get("registry_consent").is_none(),
                     "{protocol:?}: no snake_case member alongside it: {payload}"
                 );
-                let read_back = match protocol {
-                    JoinProtocol::V0_2 => {
-                        serde_json::from_value::<submit::v0_2::Payload>(payload.clone())
-                            .expect("the generated submit/0.2 payload")
-                            .registry_consent
-                    }
-                    JoinProtocol::V0_3 | JoinProtocol::V0_4 => {
-                        serde_json::from_value::<submit::v0_3::Payload>(payload.clone())
-                            .expect("the generated submit/0.3 payload")
-                            .registry_consent
-                    }
-                };
+                let read_back = serde_json::from_value::<submit::v0_3::Payload>(payload.clone())
+                    .expect("the generated submit/0.3 payload")
+                    .registry_consent;
                 assert_eq!(
                     read_back,
                     Some(consent),
@@ -1504,7 +1485,7 @@ mod tests {
         assert!(doc.id.starts_with("urn:uuid:"), "document carries an id");
         assert_eq!(
             doc.type_uri.to_string(),
-            crate::vetting::protocol::JoinProtocol::V0_3.submit_type(),
+            crate::vetting::protocol::JoinProtocol::V0_4.submit_type(),
             "type URI is the submit type"
         );
         assert_eq!(doc.issuer.as_deref(), Some(applicant.as_str()));

@@ -402,7 +402,7 @@ pub async fn revoke_signer(
     }
     match tokio::time::timeout(VTA_TIMEOUT, client.delete_acl(credential_did)).await {
         Ok(Ok(())) => Ok(true),
-        Ok(Err(VtaError::NotFound(_))) => Ok(false),
+        Ok(Err(e)) if crate::vta_task::acl_subject_absent(&e) => Ok(false),
         Ok(Err(e)) => Err(OpenVTCError::Config(format!(
             "the VTA refused to revoke the signing credential: {e}"
         ))),

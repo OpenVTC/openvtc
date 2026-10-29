@@ -57,7 +57,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::errors::OpenVTCError;
-use trust_tasks_rs::specs::vtc::members::personhood::assert::v0_2 as pa;
+use crate::specs::vtc::members::personhood::assert::v0_2 as pa;
 
 /// `vtc/members/personhood/challenge/0.1`.
 pub const PERSONHOOD_CHALLENGE_TYPE: &str =

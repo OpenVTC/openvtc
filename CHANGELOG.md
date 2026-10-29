@@ -116,6 +116,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The attestation a vetter sends is now the `vetting/attestation/0.1` shape the
   specification states (`suite`, `token { label, serial, shown }`); the earlier
   flat shape is no longer sent.
+- **Trust Task types are generated from pinned specs, at their latest versions.**
+  `openvtc-core` generates `openvtc_core::specs` at build time (`trust-tasks-build`
+  0.1, from `openvtc-core/trust-tasks.{toml,lock}` and the vendored bundles) instead
+  of using `trust-tasks-rs`'s deprecated prebuilt modules; `trust-tasks-rs` 0.35 is
+  the runtime only. Every task is sent at its latest version: joins as
+  `manifest/0.4` and `submit/0.3`, `vta/witness/list/0.2`, `vtc/rooms/offers/list/0.4`,
+  git-ns `view/0.6`, `drift/resolve/0.4`, `repo/create/0.4`, `right/{grant,revoke}/0.4`,
+  `persona/profile/compose/1.1`, `persona/attribute/promote/1.1`,
+  `persona/world/put/1.1`, `vta/webvh/agent-name/list/1.1` and
+  `vtc/vetting/vetters/resend/0.2`; through `vta-sdk`, `keys/list/0.2`,
+  `vta/app-state/list/1.1`, `vault/credentials/get/0.2` and the ACL tasks at
+  `acl/*/0.2` and `acl/list/0.3`. Needs a VTA and community on a VTI release that
+  serves them: `vta-service` 0.67 and `vtc-service` 0.15 or later. On `vta-sdk`
+  0.75, `vti-vetting-pcs` 0.8, `did-git-sign` 0.26, `affinidi-tdk` 0.36,
+  `affinidi-messaging-sdk` 0.44 and `trust-tasks-rs` 0.36, which deprecates the
+  prebuilt types `vta-sdk` still hands back (the vetting model, rooms, persona);
+  the workspace allows `deprecated` until the SDK moves. A rebuild and the health
+  check read every page of a context's keys rather than the first 500. Device access looks up the DID's
+  existing entry before granting, because `acl/grant/0.2` merges a grant into an existing
+  entry (re-asserting or widening it) rather than refusing it; a revoke of an entry that is
+  already gone (`acl/revoke:subjectNotPresent`) still counts as done. A community's manifest is now kept as `vta-sdk`'s
+  `manifest/0.4` type (`vetting::protocol::Manifest`) rather than carried into the
+  0.2 shape; vetting requirements saved by an earlier version still load.
 
 ### Fixed
 
@@ -138,6 +161,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The `openvtc-vetting-pcs` crate and the `zkp_reference_flow` example. The
   engine lives in VTI (`vti-vetting-pcs`); its end-to-end run is
   `openvtc-core/tests/hidden_vetting_onboarding.rs`, against an in-process VTA.
+- The join's fallback to `manifest/0.3`/`0.2` and `submit/0.2`, and the
+  key-package 0.1 fallback for a room offer. A community or VTA that refuses the
+  current version is reported as such. A pending join saved by an earlier version
+  still loads.
 
 - **Onto the VTI 0.68 stack:** `vta-sdk` 0.68, `trust-tasks-rs` 0.31,
   `affinidi-tdk` 0.26, `affinidi-messaging-sdk` 0.36 and `did-git-sign` 0.20

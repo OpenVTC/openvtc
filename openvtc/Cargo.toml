@@ -106,8 +106,10 @@ anyhow.workspace = true
 # 0.19.0 is the same signer on `vta-sdk` ^0.65 (VGI #155), the line this
 # workspace takes for `vta-service` 0.57. 0.20.0 is the same on `vta-sdk` ^0.68,
 # 0.21.0 on ^0.69 (VGI #157), 0.22.0 on ^0.70, 0.23.0 on ^0.71 (VGI #166).
-# 0.25.0 is on ^0.73 and signs as a did:scid persona (VGI #168).
-did-git-sign = "0.25.0"
+# 0.25.0 is on ^0.73 and signs as a did:scid persona (VGI #168). 0.26.0 is the
+# same signer on ^0.75 (trust-tasks 0.36, VGI #182; it superseded the ^0.74
+# release, which was never published).
+did-git-sign = "0.26.0"
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true
@@ -179,3 +181,6 @@ tokio = { workspace = true, features = ["test-util"] }
 [[bin]]
 name = "openvtc"
 path = "src/main.rs"
+
+[lints]
+workspace = true

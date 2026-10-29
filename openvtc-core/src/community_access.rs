@@ -12,10 +12,10 @@
 //! registers *this* install's binding. The VTA's device slice, on the other
 //! hand, is explicitly "the device-facing half of an `AclEntry`" —
 //! `device/register/0.1` refuses a DID that is not already in the ACL. So the
-//! grant is an ordinary `acl/grant/0.1` entry, after which the device can
+//! grant is an ordinary `acl/grant/0.2` entry, after which the device can
 //! authenticate and register its own binding exactly as any enrolled device
-//! does. Listing is `acl/list/0.1` read in the **subtree** direction, and
-//! revocation is `acl/revoke/0.1` (or `acl/update/0.1` to narrow an entry that
+//! does. Listing is `acl/list/0.3` read in the **subtree** direction, and
+//! revocation is `acl/revoke/0.2` (or `acl/update/0.2` to narrow an entry that
 //! also names contexts outside the community).
 //!
 //! # The role: `application`
@@ -183,7 +183,7 @@ pub fn grant_label(device_name: &str, community: &str) -> String {
     }
 }
 
-/// The `acl/grant/0.1` request giving `did` [`DEVICE_ROLE`] in `context_id`
+/// The `acl/grant/0.2` request giving `did` [`DEVICE_ROLE`] in `context_id`
 /// until `expires`.
 pub fn grant_request(
     did: &str,
@@ -376,6 +376,14 @@ pub async fn grant_device(
     require_community_context(top_context_id, context_id)?;
     let slug = parse_sub_context_id(context_id).map_or(context_id, |(_, slug)| slug);
     ensure_context(client, top_context_id, context_id, slug).await?;
+    // Looked up first: `acl/grant/0.2` merges a grant for a DID that already
+    // holds an entry (a re-assertion or a widening, as `acl/update/0.2` does)
+    // instead of refusing it, so the VTA would not stop the widening.
+    match client.get_acl(did).await {
+        Ok(entry) => return Err(already_granted(did, Some(&entry))),
+        Err(VtaError::NotFound(_)) => {}
+        Err(e) => return Err(vta_failure("check the device's existing access", e)),
+    }
     match client
         .create_acl(grant_request(did, context_id, label, expires))
         .await
@@ -387,22 +395,29 @@ pub async fn grant_device(
                 entry.role, entry.allowed_contexts
             ))
         }),
-        Err(VtaError::Conflict(_)) => {
-            let held = match client.get_acl(did).await {
-                Ok(entry) => match act_scope(&entry) {
-                    ActScope::All => format!("{} everywhere", entry.role),
-                    ActScope::None => format!("{} in no context", entry.role),
-                    ActScope::Contexts(cs) => format!("{} in {}", entry.role, cs.join(", ")),
-                },
-                Err(_) => "an existing entry".to_string(),
-            };
-            Err(OpenVTCError::Config(format!(
-                "{did} already has access at your VTA ({held}). A DID holds one entry, so \
-                 revoke that first or give this community a key of its own."
-            )))
-        }
+        // Created between the lookup and the grant.
+        Err(VtaError::Conflict(_)) => Err(already_granted(
+            did,
+            client.get_acl(did).await.ok().as_ref(),
+        )),
         Err(e) => Err(vta_failure("grant device access", e)),
     }
+}
+
+/// The refusal for a DID that already holds an entry, naming what it holds.
+fn already_granted(did: &str, entry: Option<&AclEntryResponse>) -> OpenVTCError {
+    let held = entry.map_or_else(
+        || "an existing entry".to_string(),
+        |entry| match act_scope(entry) {
+            ActScope::All => format!("{} everywhere", entry.role),
+            ActScope::None => format!("{} in no context", entry.role),
+            ActScope::Contexts(cs) => format!("{} in {}", entry.role, cs.join(", ")),
+        },
+    );
+    OpenVTCError::Config(format!(
+        "{did} already has access at your VTA ({held}). A DID holds one entry, so \
+         revoke that first or give this community a key of its own."
+    ))
 }
 
 /// The grants inside `context_id`, read in the VTA's subtree direction.
@@ -451,7 +466,8 @@ pub async fn revoke_device_grant(
     })?;
     match grant.revocation() {
         Revocation::Delete => match client.delete_acl(did).await {
-            Ok(()) | Err(VtaError::NotFound(_)) => Ok(Revoked::Deleted),
+            Ok(()) => Ok(Revoked::Deleted),
+            Err(e) if crate::vta_task::acl_subject_absent(&e) => Ok(Revoked::Deleted),
             Err(e) => Err(vta_failure("revoke device access", e)),
         },
         Revocation::Narrow(rest) => client
@@ -538,7 +554,10 @@ mod tests {
         let entry = &wire["entry"];
         assert_eq!(entry["subject"], DEVICE);
         assert_eq!(entry["role"], "application");
-        assert_eq!(entry["scopes"], serde_json::json!([CTX]));
+        assert_eq!(
+            entry["act"],
+            serde_json::json!({ "scope": "contexts", "contexts": [CTX] })
+        );
         assert_eq!(req.expires_at, Some(expires.timestamp() as u64));
     }
 

@@ -15,10 +15,9 @@ use trust_tasks_rs::TrustTask;
 use uuid::Uuid;
 use vta_sdk::protocols::join_requests::manifest;
 
-/// The `manifest/0.2` `#response` type a pre-0.3 community answers with;
-/// `vta-sdk` 0.63 dropped its constant when it moved to `manifest/0.3`.
-const JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE: &str =
-    <manifest::v0_2::Response as trust_tasks_rs::Payload>::TYPE_URI;
+/// The `manifest/0.4` `#response` type a community answers with.
+const MANIFEST_RESPONSE_TYPE: &str =
+    <crate::specs::vtc::join_requests::manifest::v0_4::Response as trust_tasks_rs::Payload>::TYPE_URI;
 use vta_sdk::protocols::vetting::{
     VETTED_PREDICATE, VETTER_ROLE, VETTING_DECLINE_TYPE, VETTING_REQUEST_ERR_INVALID_TICKET,
     VETTING_REQUEST_ERR_NOT_ELIGIBLE, VETTING_REQUEST_TYPE, VETTING_SESSION_TYPE,
@@ -298,28 +297,27 @@ fn requirements() -> VettingRequirements {
     .unwrap()
 }
 
-/// The community's manifest 0.2 body.
-fn manifest_body() -> manifest::v0_2::Response {
+/// The community's manifest body.
+fn manifest_body() -> super::protocol::Manifest {
     manifest_with(Some(requirements()), None)
 }
 
-/// A manifest 0.2 body carrying `vetting` and `branding`.
+/// A manifest body carrying `vetting` and `branding`.
 fn manifest_with(
     vetting: Option<VettingRequirements>,
-    branding: Option<manifest::v0_2::CommunityBranding>,
-) -> manifest::v0_2::Response {
-    let criterion = manifest::v0_2::Criterion::try_from(
-        manifest::v0_2::Criterion::builder()
+    branding: Option<manifest::v0_4::CommunityBranding>,
+) -> super::protocol::Manifest {
+    let criterion = manifest::v0_4::Criterion::try_from(
+        manifest::v0_4::Criterion::builder()
             .id("vetted")
             .presentation_definition(serde_json::Map::new())
             .vetting(vetting)
-            .requirements_digest(Some(
-                manifest::v0_2::DigestMultibase::try_from(DIGEST).unwrap(),
-            )),
+            .admission(manifest::v0_4::CriterionAdmission::Review)
+            .requirements_digest(manifest::v0_4::DigestMultibase::try_from(DIGEST).unwrap()),
     )
     .unwrap();
-    manifest::v0_2::Response::try_from(
-        manifest::v0_2::Response::builder()
+    super::protocol::Manifest::try_from(
+        super::protocol::Manifest::builder()
             .community_did(COMMUNITY)
             .criteria(vec![criterion])
             .branding(branding),
@@ -327,11 +325,16 @@ fn manifest_with(
     .unwrap()
 }
 
+/// `body`, a manifest the client keeps, as `manifest/0.4` carries it.
+fn on_the_wire(body: impl serde::Serialize) -> Value {
+    serde_json::to_value(body).unwrap()
+}
+
 /// A manifest payload as the wire carries it, with `vetting.ext` / `vetting.extCritical`
 /// added to the criterion — the members a generated type drops, so the test has to build them
 /// on the raw JSON exactly as a community would send them.
 fn manifest_raw_with_ext(ext: Value, critical: Option<Value>) -> Value {
-    let mut raw = serde_json::to_value(manifest_body()).unwrap();
+    let mut raw = on_the_wire(manifest_body());
     let vetting = raw["criteria"][0]["vetting"].as_object_mut().unwrap();
     vetting.insert("ext".into(), ext);
     if let Some(c) = critical {
@@ -524,23 +527,19 @@ async fn signed_manifest(to: &str, body: impl serde::Serialize) -> Message {
     let document = crate::operational::test_support::sign(
         json!({
             "id": wire::new_id(),
-            "type": JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE,
+            "type": MANIFEST_RESPONSE_TYPE,
             "issuer": COMMUNITY,
             "recipient": to,
             "issuedAt": Utc::now().to_rfc3339(),
-            "payload": body,
+            "payload": on_the_wire(body),
         }),
         &secret(COMMUNITY_SEED),
     )
     .await;
-    Message::build(
-        wire::new_id(),
-        JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE.to_string(),
-        document,
-    )
-    .from(COMMUNITY.to_string())
-    .thid(wire::new_id())
-    .finalize()
+    Message::build(wire::new_id(), MANIFEST_RESPONSE_TYPE.to_string(), document)
+        .from(COMMUNITY.to_string())
+        .thid(wire::new_id())
+        .finalize()
 }
 
 /// An applicant with requirements in hand, and a vetter with a ticket for them.
@@ -743,16 +742,12 @@ async fn an_applicant_is_vetted_end_to_end() {
     let application = applicant.application();
     assert!(application.checklist(Utc::now()).unwrap().satisfied());
     assert_eq!(application.presentable_statements(Utc::now()).len(), 1);
-    assert_eq!(
-        application.join_extensions(super::protocol::JoinProtocol::V0_2)["requirementsDigest"],
-        DIGEST
-    );
     assert!(
         application
-            .join_extensions(super::protocol::JoinProtocol::V0_3)
+            .join_extensions()
             .get("requirementsDigest")
             .is_none(),
-        "0.3 names the criterion in the submit, not in extensions"
+        "the submit names the criterion itself, not in extensions"
     );
 
     // Later, the vetter withdraws it.
@@ -1659,8 +1654,8 @@ async fn a_resend_is_answered_or_refused_in_plain_words() {
     member
         .book
         .ask(asked(&request, member.persona, QueryKind::VetterResend));
-    let resent = vetters::resend::v0_1::Response::try_from(
-        vetters::resend::v0_1::Response::builder()
+    let resent = crate::specs::vtc::vetting::vetters::resend::v0_2::Response::try_from(
+        crate::specs::vtc::vetting::vetters::resend::v0_2::Response::builder()
             .credential_id("urn:uuid:grant")
             .valid_until(Utc::now() + Duration::days(300)),
     )
@@ -1701,26 +1696,29 @@ async fn a_manifest_answers_whoever_asked_and_brings_the_communitys_branding() {
     let request = wire::manifest_request(
         &applicant.did,
         COMMUNITY,
-        super::protocol::JoinProtocol::V0_2,
+        super::protocol::JoinProtocol::V0_4,
     )
     .unwrap();
     applicant
         .book
         .ask(asked(&request, applicant.persona, QueryKind::Manifest));
-    let branding = manifest::v0_2::CommunityBranding::try_from(
-        manifest::v0_2::CommunityBranding::builder()
+    let branding = manifest::v0_4::CommunityBranding::try_from(
+        manifest::v0_4::CommunityBranding::builder()
             .display_name(Some(
-                manifest::v0_2::CommunityBrandingDisplayName::try_from("Kernel Developers")
+                manifest::v0_4::CommunityBrandingDisplayName::try_from("Kernel Developers")
                     .unwrap(),
             ))
             .accent_color(Some(
-                manifest::v0_2::CommunityBrandingAccentColor::try_from("#336699").unwrap(),
+                manifest::v0_4::CommunityBrandingAccentColor::try_from("#336699").unwrap(),
             )),
     )
     .unwrap();
     let body = manifest_with(Some(requirements()), Some(branding));
     let handled = applicant
-        .receive(&community_answer(&request, &body).await, COMMUNITY)
+        .receive(
+            &community_answer(&request, &on_the_wire(&body)).await,
+            COMMUNITY,
+        )
         .await;
     assert!(matches!(
         handled.answer,
@@ -1915,11 +1913,11 @@ async fn an_unsigned_or_altered_community_answer_is_not_acted_on() {
 
     let unsigned = Message::build(
         wire::new_id(),
-        JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE.to_string(),
+        MANIFEST_RESPONSE_TYPE.to_string(),
         json!({
-            "type": JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE,
+            "type": MANIFEST_RESPONSE_TYPE,
             "issuer": COMMUNITY,
-            "payload": manifest_body(),
+            "payload": on_the_wire(manifest_body()),
         }),
     )
     .from(COMMUNITY.to_string())
@@ -2055,22 +2053,18 @@ async fn a_community_answer_is_taken_once_and_only_from_the_operational_key() {
     let asserted = crate::proof_check::test_support::sign(
         json!({
             "id": wire::new_id(),
-            "type": JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE,
+            "type": MANIFEST_RESPONSE_TYPE,
             "issuer": COMMUNITY,
             "recipient": applicant.did,
             "issuedAt": Utc::now().to_rfc3339(),
-            "payload": manifest_body(),
+            "payload": on_the_wire(manifest_body()),
         }),
         &[&secret(COMMUNITY_SEED)],
     )
     .await;
-    let message = Message::build(
-        wire::new_id(),
-        JOIN_REQUEST_MANIFEST_0_2_RESPONSE_TYPE.to_string(),
-        asserted,
-    )
-    .from(COMMUNITY.to_string())
-    .finalize();
+    let message = Message::build(wire::new_id(), MANIFEST_RESPONSE_TYPE.to_string(), asserted)
+        .from(COMMUNITY.to_string())
+        .finalize();
     let handled = applicant.receive(&message, COMMUNITY).await;
     assert!(handled.notice.is_none());
 
@@ -2132,13 +2126,13 @@ impl Party {
     }
 }
 
-/// A 0.3 manifest answer is read into the book with its version and what each
+/// A manifest answer is read into the book with its version and what each
 /// criterion's admission is; a vetting criterion is still known as vetting.
 #[tokio::test]
-async fn a_v0_3_manifest_is_learned_with_its_version_and_admission() {
+async fn a_manifest_is_learned_with_its_version_and_admission() {
     use super::protocol::{Admission, JoinProtocol};
     let mut applicant = Party::new(1);
-    let request = wire::manifest_request(&applicant.did, COMMUNITY, JoinProtocol::V0_3).unwrap();
+    let request = wire::manifest_request(&applicant.did, COMMUNITY, JoinProtocol::V0_4).unwrap();
     applicant
         .book
         .ask(asked(&request, applicant.persona, QueryKind::Manifest));
@@ -2159,7 +2153,7 @@ async fn a_v0_3_manifest_is_learned_with_its_version_and_admission() {
         "{:?}",
         handled.answer
     );
-    assert_eq!(applicant.book.protocol_for(COMMUNITY), JoinProtocol::V0_3);
+    assert_eq!(applicant.book.protocol_for(COMMUNITY), JoinProtocol::V0_4);
     let routes = applicant.book.routes(COMMUNITY);
     assert_eq!(routes.len(), 2);
     assert_eq!(routes[0].admission, Some(Admission::Automatic));
@@ -2171,52 +2165,17 @@ async fn a_v0_3_manifest_is_learned_with_its_version_and_admission() {
     ));
 }
 
-/// A community that does not serve the version asked — answering
-/// `unsupportedVersion`, as an older VTC does — is asked again one version
-/// older, 0.4 then 0.3 then 0.2, and the person waiting keeps waiting instead
-/// of hearing a refusal. A refusal of 0.2 too is reported as one.
+/// A community that does not serve the version asked is answered with a
+/// refusal, reported as one: there is no older version to ask in.
 #[tokio::test]
-async fn a_manifest_refused_as_an_unsupported_version_is_asked_again_one_older() {
+async fn a_manifest_refused_as_an_unsupported_version_is_reported() {
     use super::protocol::JoinProtocol;
     let mut applicant = Party::new(1).with_persona_record();
-    let first = applicant.book.manifest_protocol_for(COMMUNITY);
-    assert_eq!(
-        first,
-        JoinProtocol::V0_4,
-        "a community never read is asked in the newest"
-    );
-    let mut request = wire::manifest_request(&applicant.did, COMMUNITY, first).unwrap();
+    let request =
+        wire::manifest_request(&applicant.did, COMMUNITY, JoinProtocol::default()).unwrap();
     applicant
         .book
         .ask(asked(&request, applicant.persona, QueryKind::Manifest));
-
-    for next in [JoinProtocol::V0_3, JoinProtocol::V0_2] {
-        let handled = applicant
-            .receive(
-                &community_refusal(&request, "unsupportedVersion"),
-                COMMUNITY,
-            )
-            .await;
-        assert!(
-            handled.answer.is_none(),
-            "not an answer: {:?}",
-            handled.answer
-        );
-        let reply = handled.reply.expect("asked again");
-        assert_eq!(reply.document.type_uri.to_string(), next.manifest_type());
-        assert_eq!(reply.persona, applicant.persona);
-        assert_eq!(applicant.book.protocol_for(COMMUNITY), next);
-        assert_eq!(applicant.book.manifest_protocol_for(COMMUNITY), next);
-        assert!(
-            applicant
-                .book
-                .waiting_on(COMMUNITY, QueryKind::Manifest)
-                .is_some_and(|q| q.document_id == reply.document.id),
-            "the new question is the one waited on"
-        );
-        request = reply.document;
-    }
-
     let handled = applicant
         .receive(
             &community_refusal(&request, "unsupportedVersion"),
@@ -2233,9 +2192,7 @@ async fn a_manifest_refused_as_an_unsupported_version_is_asked_again_one_older()
     ));
 }
 
-/// A 0.4 manifest is learned like a 0.3 one, with its directory statement kept
-/// beside it; a community known as 0.3 is asked in 0.4 again, so a move to 0.4
-/// is heard.
+/// A manifest is learned with its directory statement kept beside it.
 #[tokio::test]
 async fn a_v0_4_manifest_is_learned_with_its_directory_statement() {
     use super::disclosure::DirectoryStatement;
@@ -2272,14 +2229,6 @@ async fn a_v0_4_manifest_is_learned_with_its_directory_statement() {
         applicant.book.directory(COMMUNITY),
         Some(DirectoryStatement::Stated(d)) if d.statement_digest.as_str() == DIGEST
     ));
-
-    // The same community answering 0.3 later carries no statement, and is
-    // still asked in 0.4 next time.
-    applicant.book.communities[0].protocol = Some(JoinProtocol::V0_3);
-    assert_eq!(
-        applicant.book.manifest_protocol_for(COMMUNITY),
-        JoinProtocol::V0_4
-    );
 }
 
 /// Both journeys follow the real exchange: the applicant's moves on to the
@@ -3203,7 +3152,7 @@ const FIRST_VTC_MANIFEST: &str = include_str!("../../tests/fixtures/first-vtc-ma
 
 fn first_vtc() -> (
     String,
-    manifest::v0_2::Response,
+    super::protocol::Manifest,
     Vec<super::protocol::CriterionMeta>,
     Value,
 ) {
@@ -3211,7 +3160,7 @@ fn first_vtc() -> (
     let payload = document["payload"].clone();
     let community = payload["communityDid"].as_str().unwrap().to_string();
     let (parsed, meta) =
-        super::protocol::read_manifest(super::protocol::JoinProtocol::V0_3, &payload)
+        super::protocol::read_manifest(super::protocol::JoinProtocol::V0_4, &payload)
             .expect("the live manifest parses");
     (community, parsed, meta, payload)
 }
@@ -3229,7 +3178,7 @@ async fn an_application_started_from_the_book_takes_up_first_vtcs_hidden_vetting
     party.book.learn_manifest_in(
         &community,
         &parsed,
-        Some(super::protocol::JoinProtocol::V0_3),
+        Some(super::protocol::JoinProtocol::V0_4),
         &meta,
         now,
     );
@@ -3267,7 +3216,7 @@ const NAMED_DIGEST: &str = "zQmNamedCriterionDigestAbcdefgh";
 
 /// A community publishing two vetting criteria: `named` (named statements only) first, then
 /// `vetted`, which runs hidden vetting — alongside named vetters, or (`critical`) alone.
-fn mixed_manifest(critical: bool) -> (manifest::v0_2::Response, Value) {
+fn mixed_manifest(critical: bool) -> (super::protocol::Manifest, Value) {
     let hidden = manifest_raw_with_ext(
         json!({ super::hidden::HIDDEN_VETTING_NS: hidden_params() }),
         critical.then(|| json!([super::hidden::HIDDEN_VETTING_NS])),
@@ -3281,21 +3230,28 @@ fn mixed_manifest(critical: bool) -> (manifest::v0_2::Response, Value) {
     vetting.remove("extCritical");
     let mut raw = hidden.clone();
     raw["criteria"] = json!([named, hidden["criteria"][0].clone()]);
-    (serde_json::from_value(raw.clone()).unwrap(), raw)
+    (read_as_kept(&raw), raw)
 }
 
 /// One criterion, `vetted`, running hidden vetting — alongside named vetters, or (`critical`)
 /// alone.
-fn hidden_manifest(critical: bool) -> (manifest::v0_2::Response, Value) {
+fn hidden_manifest(critical: bool) -> (super::protocol::Manifest, Value) {
     let raw = manifest_raw_with_ext(
         json!({ super::hidden::HIDDEN_VETTING_NS: hidden_params() }),
         critical.then(|| json!([super::hidden::HIDDEN_VETTING_NS])),
     );
-    (serde_json::from_value(raw.clone()).unwrap(), raw)
+    (read_as_kept(&raw), raw)
+}
+
+/// `raw`, a manifest as the wire carries it, as the client keeps it.
+fn read_as_kept(raw: &Value) -> super::protocol::Manifest {
+    super::protocol::read_manifest(super::protocol::JoinProtocol::V0_4, raw)
+        .unwrap()
+        .0
 }
 
 /// A book that has read `manifest` for [`COMMUNITY`].
-fn learn(book: &mut VettingBook, manifest: &(manifest::v0_2::Response, Value)) {
+fn learn(book: &mut VettingBook, manifest: &(super::protocol::Manifest, Value)) {
     let now = Utc::now();
     book.learn_manifest_in(COMMUNITY, &manifest.0, None, &[], now);
     book.learn_mode(COMMUNITY, &manifest.1, None, now);

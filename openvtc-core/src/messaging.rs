@@ -798,7 +798,7 @@ fn is_join_denial_code(code: &str) -> bool {
 /// — so a join left `Pending` on them would wait for a decision nobody is
 /// taking.
 fn join_refusal_reason(code: &str) -> Option<&'static str> {
-    use trust_tasks_rs::specs::vtc::join_requests::submit::v0_3::error_codes;
+    use crate::specs::vtc::join_requests::submit::v0_3::error_codes;
     use vta_sdk::protocols::join_requests as jr;
     // A hidden-vetting submission is bound to a single-use challenge, and the
     // community refuses the whole submission when that binding fails — no
@@ -2839,7 +2839,7 @@ mod tests {
     /// `Pending`, such a join waited for a decision nobody was taking.
     #[test]
     fn a_v0_3_submit_refusal_ends_the_join_with_a_reason() {
-        use trust_tasks_rs::specs::vtc::join_requests::submit::v0_3::error_codes;
+        use crate::specs::vtc::join_requests::submit::v0_3::error_codes;
         use vta_sdk::protocols::join_requests as jr;
         for (code, says) in [
             (

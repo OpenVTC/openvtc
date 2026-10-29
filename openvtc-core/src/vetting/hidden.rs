@@ -400,19 +400,18 @@ pub fn statement_meta(
 /// community. Retryable, and not a failure — the client's clock ran ahead of the community's, or
 /// a pass raced the window opening.
 pub const TOKENS_TICK_NOT_YET: &str =
-    trust_tasks_rs::specs::vtc::vetting::vetters::pcs_tokens::v0_1::error_codes::TICK_NOT_YET.code;
+    crate::specs::vtc::vetting::vetters::pcs_tokens::v0_1::error_codes::TICK_NOT_YET.code;
 
 /// The `pcs-tokens` refusal that means "done": this tick was already served. An answer we lost,
 /// or a second client of the same vetter that asked first.
 pub const TOKENS_ALREADY_SERVED: &str =
-    trust_tasks_rs::specs::vtc::vetting::vetters::pcs_tokens::v0_1::error_codes::ALREADY_SERVED
-        .code;
+    crate::specs::vtc::vetting::vetters::pcs_tokens::v0_1::error_codes::ALREADY_SERVED.code;
 
 /// The `pcs-tokens` refusal that means "more than this community issues a tick": the rate this
 /// client holds is not the one the community enforces, so its manifest is read again before
 /// anything more is drawn.
 pub const TOKENS_OVER_QUOTA: &str =
-    trust_tasks_rs::specs::vtc::vetting::vetters::pcs_tokens::v0_1::error_codes::OVER_QUOTA.code;
+    crate::specs::vtc::vetting::vetters::pcs_tokens::v0_1::error_codes::OVER_QUOTA.code;
 
 /// A hidden-vetting refusal in words a vetter can act on.
 ///
@@ -899,9 +898,9 @@ mod tests {
             "joinDid": "did:key:z6Mk",
             "parameters": crate::vetting::pcs_vta::parameters(&params),
         });
-        serde_json::from_value::<
-            trust_tasks_rs::specs::vta::pcs::applications::create::v0_1::Payload,
-        >(payload)
+        serde_json::from_value::<crate::specs::vta::pcs::applications::create::v0_1::Payload>(
+            payload,
+        )
         .expect("the published parameters are what the engine takes");
     }
 

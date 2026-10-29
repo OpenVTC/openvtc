@@ -13,12 +13,12 @@
 //! and the community's own policy can only narrow it, so the sentences say "at
 //! most" and never describe what any member has actually chosen to show.
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-pub use trust_tasks_rs::specs::vtc::join_requests::manifest::v0_4::{
+pub use crate::specs::vtc::join_requests::manifest::v0_4::{
     Audience, DirectoryDisclosure, DisclosedField, FieldSource, Introductions, Listing,
     NewCardDefaultsSearch as Search,
 };
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// An audience as a reader is told it. `public` especially: "public" read as a
 /// word does not say the value leaves the community. An audience this client

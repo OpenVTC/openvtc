@@ -15,13 +15,13 @@
 //! refusal's code is what the caller acts on (`noToken` is a wait, `notFound` is a fresh start)
 //! and the SDK's typed error keeps it only as text.
 
+use crate::specs::vta::pcs;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use trust_tasks_rs::RequestPayload;
-use trust_tasks_rs::specs::vta::pcs;
 
 /// The generated `vta/pcs/*` modules, for matching a refusal against a task's `error_codes`.
-pub use trust_tasks_rs::specs::vta::pcs as tasks;
+pub use crate::specs::vta::pcs as tasks;
 use vta_sdk::client::VtaClient;
 
 use super::hidden::HiddenParams;

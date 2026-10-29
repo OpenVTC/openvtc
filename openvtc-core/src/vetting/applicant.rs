@@ -18,7 +18,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use uuid::Uuid;
 use vta_sdk::protocols::join_requests::manifest;
 use vta_sdk::protocols::vetting::{
@@ -31,9 +31,7 @@ use vta_sdk::vetting::card::{
     CardDraft, CardExpectations, MAX_CARD_VALIDITY, new_commitment_salt, verify_card,
 };
 use vta_sdk::vetting::match_code::vetting_match_code;
-use vta_sdk::vetting::requirements::{
-    Evaluation, REQUIREMENTS_DIGEST_MEMBER, StatementFacts, evaluate,
-};
+use vta_sdk::vetting::requirements::{Evaluation, StatementFacts, evaluate};
 use vta_sdk::vetting::statement::verify_statement;
 use vta_sdk::vetting::status::StatusCheck;
 use vta_sdk::vetting::ticket_uri::{self, TicketUri};
@@ -581,7 +579,7 @@ impl Application {
     /// ([`super::hidden`]).
     pub fn adopt_manifest(
         &mut self,
-        manifest: &manifest::v0_2::Response,
+        manifest: &super::protocol::Manifest,
         raw: &Value,
     ) -> Result<bool, ApplicantError> {
         let raw_criterion = |id: &str| {
@@ -592,12 +590,12 @@ impl Application {
                         .find(|c| c.get("id").and_then(Value::as_str) == Some(id))
                 })
         };
-        let with_vetting: Vec<&manifest::v0_2::Criterion> = manifest
+        let with_vetting: Vec<&manifest::v0_4::Criterion> = manifest
             .criteria
             .iter()
             .filter(|c| c.vetting.is_some())
             .collect();
-        let offers_hidden = |c: &&&manifest::v0_2::Criterion| {
+        let offers_hidden = |c: &&&manifest::v0_4::Criterion| {
             raw_criterion(c.id.as_str()).is_some_and(|raw| {
                 matches!(
                     super::hidden::read_mode(raw),
@@ -620,10 +618,7 @@ impl Application {
             .or_else(|| with_vetting.first())
             .ok_or(ApplicantError::NoVettingCriterion)?;
         let requirements = chosen.vetting.clone().expect("filtered on vetting");
-        let digest = chosen
-            .requirements_digest
-            .as_ref()
-            .map(|d| d.as_str().to_string());
+        let digest = Some(chosen.requirements_digest.as_str().to_string());
         let id = chosen.id.as_str().to_string();
         self.adopt_criterion(&id, requirements, digest, raw_criterion(&id))
     }
@@ -1504,20 +1499,12 @@ impl Application {
             .collect()
     }
 
-    /// The join submission's `extensions`: the digest of the requirements the
-    /// statements were gathered against, so the community applies the same
-    /// criterion, and — under a hidden-vetting criterion — the proof that `k`
-    /// distinct vetters vetted this applicant.
+    /// The join submission's `extensions`: under a hidden-vetting criterion, the
+    /// proof that `k` distinct vetters vetted this applicant. The criterion itself
+    /// is named by the submit's own `criterion` member (`submit/0.3`).
     #[must_use]
-    pub fn join_extensions(&self, protocol: super::protocol::JoinProtocol) -> Value {
+    pub fn join_extensions(&self) -> Value {
         let mut members = serde_json::Map::new();
-        // 0.2 names the criterion here. 0.3 names it in the submit's own
-        // `criterion` member and no longer reads this one.
-        if protocol == super::protocol::JoinProtocol::V0_2
-            && let Some(digest) = &self.requirements_digest
-        {
-            members.insert(REQUIREMENTS_DIGEST_MEMBER.into(), json!(digest));
-        }
         if let Some(hidden) = &self.hidden_submission {
             members.insert(super::hidden::EXTENSIONS_MEMBER.into(), hidden.clone());
         }

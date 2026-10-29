@@ -18,8 +18,12 @@
 use anyhow::{Context, Result, anyhow};
 use serde::de::DeserializeOwned;
 use vta_sdk::client::VtaClient;
+// `vta/webvh/agent-name/list/1.1` has no hand-written type in vta-sdk; its
+// response is generated with this workspace's other pinned specifications.
+pub(crate) use openvtc_core::specs::vta::webvh::agent_name::list::v1_1::AgentNameEntry;
+use openvtc_core::specs::vta::webvh::agent_name::list::v1_1::Response as AgentNameListResultBody;
 use vta_sdk::protocols::did_management::agent_name::{
-    AgentNameCheckResultBody, AgentNameEntry, AgentNameListResultBody, AgentNameResultBody,
+    AgentNameCheckResultBody, AgentNameResultBody,
 };
 use vta_sdk::trust_tasks;
 
@@ -140,7 +144,7 @@ pub(crate) async fn disable_name(
 pub(crate) async fn list_names(vta: &VtaClient, did: &str) -> Result<Vec<AgentNameEntry>> {
     let value = vta
         .dispatch_trust_task(
-            trust_tasks::TASK_WEBVH_AGENT_NAME_LIST_1_0,
+            trust_tasks::TASK_WEBVH_AGENT_NAME_LIST_1_1,
             serde_json::json!({ "did": did }),
             AGENT_NAME_TT_TIMEOUT,
         )
@@ -231,7 +235,7 @@ mod tests {
     fn decode_payload_passes_a_well_formed_result_through() {
         let value = serde_json::json!({
             "did": "did:webvh:QmScid:example.com",
-            "names": [{ "name": "alice", "enabled": true, "createdAt": 1_700_000_000u64 }],
+            "names": [{ "name": "alice", "enabled": true, "createdAt": "2023-11-14T22:13:20Z" }],
         });
         let body: AgentNameListResultBody =
             decode_payload(value, "agent-name list result").expect("should decode");

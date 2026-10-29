@@ -5,6 +5,14 @@ members = [
 ]
 resolver = "3"
 
+[workspace.lints.rust]
+# trust-tasks-rs 0.36 deprecates every prebuilt spec module in favour of
+# trust-tasks-build. The tasks this workspace sends itself are generated
+# (`openvtc_core::specs`), but the types `vta-sdk` hands back or re-exports —
+# the vetting model, rooms, persona — are still those prebuilt modules, and
+# move only when the SDK's do.
+deprecated = "allow"
+
 [workspace.package]
 description = "Open Verifiable Trust Community (OpenVTC) - First Person Protocol"
 version = "0.6.0"
@@ -83,8 +91,11 @@ argon2 = "0.6"
 # 0.18 -> 0.20 follows `vta-sdk` 0.53 -> 0.56 below, the release that declares
 # `affinidi-tdk ^0.20`. 0.23 -> 0.24 follows `vta-sdk` 0.63 -> 0.65 the same way,
 # and 0.24 -> 0.26 follows 0.65 -> 0.68. 0.27 -> 0.32 follows 0.72 -> 0.73
-# (TSP 1.0, VTI #2282).
-affinidi-tdk = "0.32"
+# (TSP 1.0, VTI #2282). 0.32 -> 0.33 is the trust-tasks 0.35 line (messaging-sdk
+# 0.41), the one `affinidi-messaging-test-mediator` 0.46 and the VTI trust-tasks
+# 0.35 move are on. 0.33 -> 0.36 is the trust-tasks 0.36 line (messaging-sdk
+# 0.44) `vta-sdk` 0.75 declares; 0.34 / 0.35 were skipped.
+affinidi-tdk = "0.36"
 affinidi-data-integrity = "0.8"
 # Decodes a community's Bitstring Status List. Already in the graph through
 # `vta-sdk`, whose status reader cannot verify a list signed with a proof set;
@@ -150,8 +161,10 @@ affinidi-messaging-core = "0.1.11"
 # their sender's quota (a frame for a key this app has not loaded is kept).
 #
 # **0.34.1** follows `vta-sdk` 0.65, which declares it; **0.36** follows 0.68;
-# **0.40** follows 0.73 (TSP 1.0).
-affinidi-messaging-sdk = "0.40.0"
+# **0.40** follows 0.73 (TSP 1.0). **0.41** is the trust-tasks 0.35 line, with
+# `affinidi-tdk` 0.33 above. **0.44** is the trust-tasks 0.36 line, with
+# `affinidi-tdk` 0.36 (`vta-sdk` 0.75).
+affinidi-messaging-sdk = "0.44.0"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
@@ -276,7 +289,7 @@ dialoguer = { version = "0.12", features = ["password"] }
 #
 # **0.8.1** mints a did:webvh with its did:scid presentation
 # (decentralized-identity/didwebvh-rs #56), which a did:scid persona is.
-didwebvh-rs = "0.8.1"
+didwebvh-rs = "0.8.2"
 ed25519-dalek-bip32 = "0.3"
 hkdf = "0.13"
 hex = "0.4"
@@ -448,8 +461,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 #
 # **0.34.2**, following `vta-sdk` 0.73: persona create/1.2 carries the did:scid
 # choice (trust-tasks-tf #862, #863); `trust-tasks-capability-client` with it.
-trust-tasks-rs = { version = "0.34.2", features = ["git-ns"] }
-trust-tasks-capability-client = "0.34.2"
+#
+# **0.35.3, runtime only.** The specifications this workspace speaks are no longer
+# the crate's prebuilt modules (deprecated from 0.35): `openvtc-core`'s build.rs
+# generates exactly the versions pinned in `openvtc-core/trust-tasks.lock` with
+# `trust-tasks-build`, as `openvtc_core::specs`. `default-features = false`
+# leaves out every prebuilt family; a spec version reached through `vta-sdk`'s
+# re-exports is still vta-sdk's to choose. **0.36.1** follows `vta-sdk` 0.75.
+trust-tasks-rs = { version = "0.36.1", default-features = false }
+trust-tasks-capability-client = "0.36.1"
+# Build dependency of `openvtc-core`: generates `openvtc_core::specs` from the
+# vendored bundles. `trust-tasks check` (trust-tasks-cli) verifies them.
+trust-tasks-build = "0.1.2"
 tui-input = "0.15"
 url = "2.5"
 uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
@@ -662,7 +685,12 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # `vtc/join-requests/manifest/0.4`. did-git-sign 0.24 (VGI #167) is on it.
 # **0.73** is `vta-service` 0.65's line: did:scid personas (`vta_sdk::did_scid`,
 # VTI #2257) on trust-tasks 0.34 / TDK 0.32 / messaging-sdk 0.40.
-vta-sdk = { version = "0.73.0", features = [
+# **0.74** is `vta-service` 0.66's line (VTI #2300): trust-tasks 0.35 / TDK 0.33 /
+# messaging-sdk 0.41; `room_key_package_v0_2` is now `room_key_package`.
+# **0.75** is `vta-service` 0.67's line: trust-tasks 0.36 / TDK 0.36 /
+# messaging-sdk 0.44, with the services on current task versions only (VTI
+# #2313–#2315, #2321, #2323, #2324). did-git-sign 0.26 (VGI #182) is on it.
+vta-sdk = { version = "0.75.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses

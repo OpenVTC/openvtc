@@ -1349,7 +1349,7 @@ async fn ask_requirements(
             "there is no persona to ask as — create one under My Identity".to_string()
         })?;
         let persona = identity.persona_id;
-        let protocol = config.private.vetting.manifest_protocol_for(vtc_did);
+        let protocol = config.private.vetting.protocol_for(vtc_did);
         let document = wire::manifest_request(identity.persona_did(), vtc_did, protocol)
             .map_err(|e| e.to_string())?;
         match tokio::time::timeout(
@@ -3287,7 +3287,9 @@ async fn collect_available_vics(
                 continue;
             }
             if let Ok(got) = vta.cred_vault_get(&summ.id).await
-                && let Some(body) = got.get("credential").cloned()
+                && let Some(body) = serde_json::to_value(got)
+                    .ok()
+                    .and_then(|v| v.get("credential").cloned())
                 && usable(&body).await
                 && let Some(av) = to_available_vic(&body)
             {
@@ -3577,7 +3579,7 @@ async fn load_invitation_from_vault(
         })
         .max_by(|a, b| a.valid_until.cmp(&b.valid_until))?;
     let got = admin_vta.cred_vault_get(&best.id).await.ok()?;
-    got.get("credential").cloned()
+    serde_json::to_value(got).ok()?.get("credential").cloned()
 }
 
 /// #1b: build a subject-linkage proof when the presenting DID differs from the
@@ -4248,7 +4250,7 @@ async fn run_join_sequence(
             openvtc_core::join::attach_credentials(&mut vp, statements);
             openvtc_core::join::JoinPresentation {
                 vp,
-                extensions: application.join_extensions(protocol),
+                extensions: application.join_extensions(),
                 attributes,
                 protocol,
                 // The vetting criterion this application was made under.
@@ -6141,7 +6143,7 @@ mod vetting_tests {
     /// Base58btc and at least 16 characters, as the published criterion asks.
     const DIGEST: &str = "zQmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR";
 
-    fn manifest(vets: bool) -> manifest::v0_2::Response {
+    fn manifest(vets: bool) -> openvtc_core::vetting::protocol::Manifest {
         let requirements = serde_json::from_value(serde_json::json!({
             "version": "0.1",
             "statementType": vta_sdk::protocols::vetting::VETTED_PREDICATE,
@@ -6152,18 +6154,17 @@ mod vetting_tests {
             "eligibleVetters": { "role": "vetter" }
         }))
         .unwrap();
-        let criterion = manifest::v0_2::Criterion::try_from(
-            manifest::v0_2::Criterion::builder()
+        let criterion = manifest::v0_4::Criterion::try_from(
+            manifest::v0_4::Criterion::builder()
                 .id("vetted")
                 .presentation_definition(serde_json::Map::new())
                 .vetting(vets.then_some(requirements))
-                .requirements_digest(Some(
-                    manifest::v0_2::DigestMultibase::try_from(DIGEST).unwrap(),
-                )),
+                .admission(manifest::v0_4::CriterionAdmission::Review)
+                .requirements_digest(manifest::v0_4::DigestMultibase::try_from(DIGEST).unwrap()),
         )
         .unwrap();
-        manifest::v0_2::Response::try_from(
-            manifest::v0_2::Response::builder()
+        openvtc_core::vetting::protocol::Manifest::try_from(
+            openvtc_core::vetting::protocol::Manifest::builder()
                 .community_did(VTC)
                 .criteria(vec![criterion]),
         )

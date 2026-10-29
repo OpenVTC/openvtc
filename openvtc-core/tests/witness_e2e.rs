@@ -22,13 +22,13 @@ use affinidi_tdk::dids::{DID, PeerKeyRole};
 use async_trait::async_trait;
 use chrono::{TimeDelta, Utc};
 use dtg_credentials::{DTGCredential, IssuerScope};
+use openvtc_core::specs::witness::session;
 use openvtc_core::witness::{
     self, Carrier, MembershipEvidence, ReplyRouter, Round, WitnessError, WitnessRefusal,
     WitnessRequest,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use trust_tasks_rs::specs::witness::session;
 use trust_tasks_rs::{ErrorPayload, TrustTask};
 use vta_sdk::client::{ClientIdentity, CreateContextRequest, CreateKeyRequest, VtaClient};
 use vta_sdk::keys::KeyType;
@@ -455,7 +455,7 @@ async fn a_relationship_is_witnessed_through_the_vta() {
         .cred_vault_get(&witnessed.credential_id)
         .await
         .expect("the VWC is stored at the VTA");
-    assert_eq!(held["credential"], *vwc);
+    assert_eq!(serde_json::to_value(held).unwrap()["credential"], *vwc);
 
     // And it rides a personhood assertion with its evidence.
     let record = witness::WitnessRecord {
