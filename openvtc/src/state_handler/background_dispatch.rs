@@ -117,6 +117,16 @@ pub(crate) enum DispatchDomain {
     /// for a KeyPackage, or to join from a Welcome. Separate from [`Self::Rooms`] so the
     /// two halves of a refresh run together.
     RoomsVta,
+    /// A `vtc/elections/*` request sent to a community from the Elections panel. The answer
+    /// arrives on the inbound channel; this serialises the sends.
+    Elections,
+    /// The Elections panel asking the member's VTA, which holds every voter key: the ticket
+    /// request, taking the ticket, building a cast, keeping a receipt.
+    ElectionsVta,
+    /// A cast on its way to an election's ballot box: resolving it, a random pause of up to
+    /// 20 s, the HTTPS post and the receipt check. Its own domain so the pause never holds up
+    /// a read of the community or the VTA.
+    ElectionsCast,
     /// What each persona presents, for the communities panel.
     PersonaBinding,
     /// The identity pane's own reads and writes — the attribute pool, the
@@ -180,6 +190,9 @@ impl DispatchDomain {
             DispatchDomain::GitWorkspaceProbe => "Checkout check",
             DispatchDomain::Rooms => "Data room request",
             DispatchDomain::RoomsVta => "Data room keys at your VTA",
+            DispatchDomain::Elections => "Election request",
+            DispatchDomain::ElectionsVta => "Voting at your VTA",
+            DispatchDomain::ElectionsCast => "Casting a vote",
             DispatchDomain::PersonaBinding => "Persona binding refresh",
             DispatchDomain::PersonaManage => "Identity request",
             DispatchDomain::Vic => "Invitation credential refresh",
@@ -297,6 +310,12 @@ pub(crate) enum DispatchOutcome {
     Rooms(crate::state_handler::rooms_actions::RoomsOutcome),
     /// The member's VTA answered the Rooms panel.
     RoomsVta(crate::state_handler::rooms_actions::RoomsVtaOutcome),
+    /// A `vtc/elections/*` request was sent to a community (or failed to send).
+    Elections(crate::state_handler::elections_actions::ElectionsOutcome),
+    /// The member's VTA answered the Elections panel.
+    ElectionsVta(crate::state_handler::elections_actions::ElectionsVtaOutcome),
+    /// A cast reached its ballot box (or did not).
+    ElectionsCast(Box<crate::state_handler::elections_actions::ElectionsCastOutcome>),
     PersonaBinding(
         std::collections::HashMap<
             crate::state_handler::persona_binding_refresh::BindingTarget,
@@ -369,6 +388,9 @@ impl DispatchOutcome {
             DispatchOutcome::WorkspaceProbe(_) => DispatchDomain::GitWorkspaceProbe,
             DispatchOutcome::Rooms(_) => DispatchDomain::Rooms,
             DispatchOutcome::RoomsVta(_) => DispatchDomain::RoomsVta,
+            DispatchOutcome::Elections(_) => DispatchDomain::Elections,
+            DispatchOutcome::ElectionsVta(_) => DispatchDomain::ElectionsVta,
+            DispatchOutcome::ElectionsCast(_) => DispatchDomain::ElectionsCast,
             DispatchOutcome::PersonaBinding(_) => DispatchDomain::PersonaBinding,
             DispatchOutcome::PersonaManage(_) => DispatchDomain::PersonaManage,
             DispatchOutcome::Vic(_) => DispatchDomain::Vic,
@@ -589,6 +611,9 @@ pub(crate) fn apply_outcome(
         DispatchOutcome::WorkspaceProbe(outcome) => outcome.apply(state),
         DispatchOutcome::Rooms(outcome) => outcome.apply(state),
         DispatchOutcome::RoomsVta(outcome) => outcome.apply(state),
+        DispatchOutcome::Elections(outcome) => outcome.apply(state),
+        DispatchOutcome::ElectionsVta(outcome) => outcome.apply(state),
+        DispatchOutcome::ElectionsCast(outcome) => outcome.apply(state),
         // Merged, not replaced. A sweep only carries the targets it was given,
         // and replacing the map would blank every row the sweep did not cover
         // — which reads on screen as those personas having stopped presenting
@@ -648,6 +673,14 @@ pub(crate) fn apply_outcome(
             }
             if matches!(domain, DispatchDomain::Rooms | DispatchDomain::RoomsVta) {
                 crate::state_handler::rooms_actions::job_lost(state, &msg);
+            }
+            if matches!(
+                domain,
+                DispatchDomain::Elections
+                    | DispatchDomain::ElectionsVta
+                    | DispatchDomain::ElectionsCast
+            ) {
+                crate::state_handler::elections_actions::job_lost(state, &msg);
             }
             state.main_page.log(msg);
         }

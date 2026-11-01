@@ -5,6 +5,7 @@ pub mod capabilities_panel;
 pub mod communities_panel;
 pub mod content_panel;
 pub mod credentials_panel;
+pub mod elections_panel;
 pub mod identity_panel;
 pub mod inbox_panel;
 pub mod logs_panel;

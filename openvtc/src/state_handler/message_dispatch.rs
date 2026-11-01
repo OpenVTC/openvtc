@@ -147,6 +147,9 @@ pub struct InboundEffects {
     pub git_ns_replies: Vec<crate::state_handler::repos_actions::InboundReply>,
     /// `vtc/rooms/*` replies for the Rooms panel, keyed by the request id they thread on.
     pub rooms_replies: Vec<crate::state_handler::rooms_actions::InboundReply>,
+    /// `vtc/elections/*` replies for the Elections panel, keyed by the request id they thread
+    /// on.
+    pub elections_replies: Vec<crate::state_handler::elections_actions::InboundReply>,
     /// Personhood challenges the community answered with. Display state with a
     /// ten-minute life — never persisted.
     pub personhood_challenges: Vec<openvtc_core::personhood::ChallengeReply>,
@@ -510,6 +513,7 @@ fn verification_job(
     if is_capability_reply_type(typ)
         || openvtc_core::git_ns::is_reply_type(typ)
         || openvtc_core::community_rooms::is_reply_type(typ)
+        || openvtc_core::elections::is_reply_type(typ)
         || JoinProtocol::is_submit_response(typ)
         || [
             MEMBER_REMOVAL_NOTICE_TYPE,
@@ -772,6 +776,7 @@ async fn process_inbound(
         capability_replies,
         git_ns_replies,
         rooms_replies,
+        elections_replies,
         personhood_challenges,
         vetting_answers,
         vetting_grant_checks,
@@ -996,6 +1001,32 @@ async fn process_inbound(
         )
     {
         rooms_replies.push(crate::state_handler::rooms_actions::InboundReply {
+            from: from_did.to_string(),
+            issuer: doc.issuer.clone(),
+            thid,
+            reply,
+        });
+        if !is_trust_task_error_type(&message.typ) {
+            return Ok(false);
+        }
+    }
+
+    // Election replies (vtc/elections/*), in either carriage, for the Elections panel — keyed by
+    // `threadId` and correlated there against the one request the panel has outstanding. A
+    // `trust-task-error` is offered here as well and falls through.
+    if openvtc_core::elections::is_reply_type(&message.typ)
+        && let Some((_, doc)) = openvtc_core::capabilities::parse_envelope_document(&message.body)
+        && let Some((thid, reply)) = openvtc_core::elections::parse_reply(&doc)
+        && community_reply_proven(
+            config,
+            &pre,
+            message,
+            &from_did,
+            &recipient_did,
+            &mut reply_proven,
+        )
+    {
+        elections_replies.push(crate::state_handler::elections_actions::InboundReply {
             from: from_did.to_string(),
             issuer: doc.issuer.clone(),
             thid,

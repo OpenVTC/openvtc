@@ -210,6 +210,11 @@ vta-service = { version = "0.67.0", default-features = false, features = ["test-
 # the VTA's: this client holds no PCS key and runs no PCS operation.
 # 0.8 is the release on `vta-sdk` 0.75, so the dev graph keeps one `vta-sdk`.
 vti-vetting-pcs = { version = "0.8", features = ["harness"] }
+# The community's and the ballot box's halves of an election, in process (`registrar::Registrar`,
+# `service::BallotBox`), for the end-to-end vote against `MockVta` (`tests/elections_vote_e2e.rs`).
+# The voter's keys are the VTA's: this client holds none. 0.4 is the line `vta-service` 0.67
+# itself runs, so the dev graph keeps one.
+vti-voting = "0.4"
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }

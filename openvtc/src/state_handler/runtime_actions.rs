@@ -1134,6 +1134,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         Action::CommunityContext(action) => community_context_actions::dispatch(ctx, action),
         Action::Repos(action) => repos_actions::dispatch(ctx, action).await,
         Action::Rooms(action) => super::rooms_actions::dispatch(ctx, action).await,
+        Action::Elections(action) => super::elections_actions::dispatch(ctx, action).await,
         Action::Settings(sa) => {
             match settings_actions::dispatch(
                 sa,
