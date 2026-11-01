@@ -96,6 +96,8 @@ pub struct ContentPanelState {
     pub repos: super::repos::ReposState,
     /// Per-community data rooms view (opened from Communities with `o`).
     pub rooms: super::rooms::RoomsState,
+    /// Per-community elections view (opened from Communities with `e`).
+    pub elections: super::elections::ElectionsState,
     /// The holder's own identity: personas, pool, profiles, and what each persona
     /// presents where.
     pub identity: IdentityState,

@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Vote in a community's elections.** Press `e` on an active community to see its
+  elections — voting open first, then those issuing tickets, upcoming, and closed — and
+  whether you hold a ticket. Opening one shows what you are told before taking part: the
+  schedule, who runs the ballot box (with a warning when it is the community's own
+  operator), who can read the board, whether a later vote replaces an earlier one, and that
+  a vote can be proven to someone who demands it. **t** takes a ticket: your VTA builds the
+  blinded request (`vta/pcs/voter/register/0.2`), OpenVTC signs it as your persona and sends
+  it to the community (`vtc/elections/tickets/issue/0.1`), and the VTA takes the community's
+  blind signature (`vta/pcs/voter/accept/0.1`). **v** votes: with no ticket held it takes
+  one and stops — come back later, so the ticket and the vote cannot be paired by time — and
+  with one held it opens the ballot (single and multiple choice, ranking, scores, free text,
+  leaving optional questions blank), checks it against the election's rules, and on **y**
+  has your VTA seal it under a key made for that vote alone (`vta/pcs/vote/0.2`, or
+  `vta/pcs/vote-encrypted/0.3` for a sealed or encrypted election). OpenVTC then sends the
+  cast to the ballot box itself, over its advertised HTTPS door after a random pause of up to
+  20 s, checks that the receipt is signed by the ballot box and answers this cast, and has
+  the VTA keep it (`vta/pcs/voter/receipt/0.1`). The community never sees a ballot, a cast
+  or a receipt; the ballot box never sees who you are. A cast whose answer was lost is resent
+  unchanged (**r**), never rebuilt. Needs a VTA serving `vta/pcs/voter/*` (vta-service 0.67)
+  and a community serving `vtc/elections/list/0.3` and `show/0.2`.
 - **Repositories in nested GitLab groups.** A repository may now be named
   `<forge>/<owner>/<group>/…/<repo>` (up to GitLab's 20 levels of subgroups), so
   cloning, the workspace layout, remote matching and signing set-up work for

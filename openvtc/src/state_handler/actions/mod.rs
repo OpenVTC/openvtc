@@ -513,6 +513,49 @@ pub enum RoomsAction {
     Select(usize),
 }
 
+/// The per-community Elections panel, opened from Communities with `e`.
+///
+/// `Open`, `Refresh`, `Show`, `TakeTicket`, `Vote`, `Cast` and `Resend` read the config and
+/// ask the community, the member's VTA or the ballot box, so the runtime loop services them;
+/// the rest move the open view or edit the ballot only.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ElectionsAction {
+    /// Open the panel for the Active community at this display index, and read its elections.
+    Open(usize),
+    /// Read the list (or the open election) again.
+    Refresh,
+    /// Go back a screen; from the list, close the panel.
+    Back,
+    /// Move the list highlight.
+    Select(usize),
+    /// Open the highlighted election.
+    Show,
+    /// Take the open election's ticket, and nothing else.
+    TakeTicket,
+    /// Vote in the open election, or, with no ticket held, take it and stop.
+    Vote,
+    /// Ballot: move to another question.
+    BallotQuestion(isize),
+    /// Ballot: move to another option of the question.
+    BallotOption(isize),
+    /// Ballot: choose / unchoose, or rank / unrank, the focused option.
+    BallotToggle,
+    /// Ballot: raise or lower the focused option's score.
+    BallotAdjust(i64),
+    /// Ballot: a character typed into a text answer.
+    BallotChar(char),
+    /// Ballot: delete the last character of a text answer.
+    BallotBackspace,
+    /// Ballot: leave the focused (optional) question blank, or answer it again.
+    BallotAbstain,
+    /// Ballot: check it and show it for confirmation.
+    Review,
+    /// Confirmed: build the cast and send it.
+    Cast,
+    /// Send the same cast again, after its answer was lost.
+    Resend,
+}
+
 /// The per-community Repos panel (git namespaces), opened from Communities
 /// with `r`.
 ///
@@ -707,6 +750,8 @@ pub enum Action {
     Repos(ReposAction),
     /// Communities panel: a community's data rooms.
     Rooms(RoomsAction),
+    /// Communities panel: a community's elections.
+    Elections(ElectionsAction),
 
     /// Dismiss the startup loading screen (Enter, once loading has completed) and
     /// reveal the main page. Phase-2 connections are already running in the

@@ -31,6 +31,7 @@ use crate::state_handler::main_page::{
 };
 
 pub mod content;
+pub mod elections;
 pub mod menu;
 pub mod repos;
 pub mod rooms;

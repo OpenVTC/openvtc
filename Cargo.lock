@@ -6470,6 +6470,7 @@ dependencies = [
  "vta-sdk",
  "vta-service",
  "vti-vetting-pcs",
+ "vti-voting",
  "wiremock",
  "x25519-dalek 2.0.1",
  "zeroize",

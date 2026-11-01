@@ -327,6 +327,24 @@ impl Component for MainPage {
             // A pasted did:key lands in the grant form's focused text field. The
             // deletion confirmation takes no paste: typing it is the point.
             MainMenu::Communities => {
+                // A text answer on a ballot takes the paste, character by character.
+                if let Some(view) = self.props.main_page.content_panel.elections.view.as_ref() {
+                    let typing = view.screen
+                        == crate::state_handler::main_page::elections::Screen::Ballot
+                        && view
+                            .form
+                            .as_ref()
+                            .zip(view.shown.as_ref())
+                            .is_some_and(|(f, s)| f.typing(s.manifest()));
+                    if typing {
+                        for c in trimmed.chars() {
+                            let _ = self.action_tx.send(Action::Elections(
+                                crate::state_handler::actions::ElectionsAction::BallotChar(c),
+                            ));
+                        }
+                    }
+                    return;
+                }
                 if let Some(view) = self.props.main_page.content_panel.repos.view.as_ref() {
                     if let Some(action) = repos_paste(view, trimmed) {
                         let _ = self.action_tx.send(Action::Repos(action));
@@ -371,6 +389,77 @@ fn rooms_key(
         KeyCode::Down | KeyCode::Char('j') => R::Select((view.selected + 1).min(last)),
         KeyCode::Enter | KeyCode::Char('a') => R::Accept,
         _ => return None,
+    })
+}
+
+/// The Elections panel's keys, by screen. `None` when the key means nothing here.
+///
+/// On the ballot, a text question takes printable keys as its answer, so its blank toggle is
+/// `Ctrl-a`; elsewhere on the ballot `a` leaves the focused question blank. On the
+/// confirmation only `y` casts — anything else goes back to the ballot, so a key held a
+/// moment too long after `⏎` never casts.
+fn elections_key(
+    key: KeyEvent,
+    view: &crate::state_handler::main_page::elections::ElectionsView,
+) -> Option<crate::state_handler::actions::ElectionsAction> {
+    use crate::state_handler::actions::ElectionsAction as E;
+    use crate::state_handler::main_page::elections::Screen;
+    let ctrl = key
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::CONTROL);
+    Some(match view.screen {
+        Screen::List => {
+            let last = view.elections.len().saturating_sub(1);
+            match key.code {
+                KeyCode::Esc => E::Back,
+                KeyCode::Char('r') => E::Refresh,
+                KeyCode::Up | KeyCode::Char('k') => E::Select(view.selected.saturating_sub(1)),
+                KeyCode::Down | KeyCode::Char('j') => E::Select((view.selected + 1).min(last)),
+                KeyCode::Enter => E::Show,
+                _ => return None,
+            }
+        }
+        Screen::Detail => match key.code {
+            KeyCode::Esc => E::Back,
+            KeyCode::Char('r') => E::Refresh,
+            KeyCode::Char('t') => E::TakeTicket,
+            KeyCode::Char('v') => E::Vote,
+            _ => return None,
+        },
+        Screen::Ballot => {
+            let typing = view
+                .form
+                .as_ref()
+                .zip(view.shown.as_ref())
+                .is_some_and(|(f, s)| f.typing(s.manifest()));
+            match key.code {
+                KeyCode::Esc => E::Back,
+                KeyCode::Tab => E::BallotQuestion(1),
+                KeyCode::BackTab => E::BallotQuestion(-1),
+                KeyCode::Up => E::BallotOption(-1),
+                KeyCode::Down => E::BallotOption(1),
+                KeyCode::Enter => E::Review,
+                KeyCode::Char('a') if ctrl => E::BallotAbstain,
+                KeyCode::Backspace if typing => E::BallotBackspace,
+                KeyCode::Char(c) if typing && !ctrl => E::BallotChar(c),
+                KeyCode::Char(' ') => E::BallotToggle,
+                KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => E::BallotAdjust(1),
+                KeyCode::Char('-') | KeyCode::Left => E::BallotAdjust(-1),
+                KeyCode::Char('a') => E::BallotAbstain,
+                KeyCode::Char('k') => E::BallotOption(-1),
+                KeyCode::Char('j') => E::BallotOption(1),
+                _ => return None,
+            }
+        }
+        Screen::Confirm => match key.code {
+            KeyCode::Char('y') => E::Cast,
+            _ => E::Back,
+        },
+        Screen::Result => match key.code {
+            KeyCode::Esc => E::Back,
+            KeyCode::Char('r') => E::Resend,
+            _ => return None,
+        },
     })
 }
 
@@ -1311,6 +1400,15 @@ impl MainPage {
             }
             return handled;
         }
+        // Elections view open: the same.
+        if let Some(view) = self.props.main_page.content_panel.elections.view.as_ref() {
+            let action = elections_key(key, view);
+            let handled = action.is_some();
+            if let Some(action) = action {
+                let _ = self.action_tx.send(Action::Elections(action));
+            }
+            return handled;
+        }
         // The personhood witness-credential picker owns the keys while open.
         if let Some(view) = self
             .props
@@ -1485,6 +1583,13 @@ impl MainPage {
                 // Open the community's data rooms (vtc/rooms/memberships/*).
                 let _ = self.action_tx.send(Action::Rooms(
                     crate::state_handler::actions::RoomsAction::Open(selected),
+                ));
+                true
+            }
+            KeyCode::Char('e') if sel_active => {
+                // Open the community's elections (vtc/elections/*).
+                let _ = self.action_tx.send(Action::Elections(
+                    crate::state_handler::actions::ElectionsAction::Open(selected),
                 ));
                 true
             }
@@ -6702,6 +6807,173 @@ mod key_handler_tests {
             Ok(Action::MainPanelSwitch(MainPanel::MainMenu)) => {}
             _ => panic!("expected MainPanelSwitch(MainMenu)"),
         }
+    }
+
+    fn elections_action(
+        rx: &mut UnboundedReceiver<Action>,
+    ) -> Option<crate::state_handler::actions::ElectionsAction> {
+        match rx.try_recv() {
+            Ok(Action::Elections(action)) => Some(action),
+            _ => None,
+        }
+    }
+
+    /// An election shown in the panel, for its key and render tests.
+    fn shown_election(state: &str) -> Box<openvtc_core::elections::ShownElection> {
+        Box::new(
+            openvtc_core::elections::ShownElection::from_payload(serde_json::json!({
+                "manifest": {
+                    "electionId": "agm", "community": "did:key:zVtc", "title": "Annual meeting",
+                    "questions": [
+                        { "key": "chair", "type": "choice", "text": "Who chairs?",
+                          "options": [{ "key": "a", "label": "Ann" }, { "key": "b", "label": "Bo" }],
+                          "minSelections": 1, "maxSelections": 1, "optional": false },
+                        { "key": "note", "type": "text", "maxLength": 20, "optional": true }
+                    ],
+                    "secrecy": "open", "roll": { "rule": "members" },
+                    "registrationOpensAt": "2026-10-01T00:00:00Z",
+                    "votingOpensAt": "2026-10-02T00:00:00Z",
+                    "votingClosesAt": "2026-12-01T00:00:00Z", "revote": "replace",
+                    "board": { "visibility": "public", "auditors": [] },
+                    "ballotBox": "did:key:z6MkBox", "binding": false, "allowEarlyClose": false,
+                    "resultsBeforeClose": false, "textReleaseThreshold": 10
+                },
+                "manifestDigest": "zQmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+                "state": state,
+                "parameters": { "suite": "ps-ddh-bls12381", "votingKey": "zKey" },
+                "disclosure": {
+                    "ballotBox": "did:key:z6MkBox", "ballotBoxOperator": "Example Ballots",
+                    "sameOperator": true, "boardVisibility": "public", "auditors": [],
+                    "revote": "replace", "coercionResistance": false
+                },
+                "checkpoints": []
+            }))
+            .unwrap(),
+        )
+    }
+
+    fn with_elections(
+        screen: crate::state_handler::main_page::elections::Screen,
+    ) -> impl FnOnce(&mut State) {
+        move |s: &mut State| {
+            use crate::state_handler::main_page::elections::{BallotForm, ElectionsView};
+            let mut view = ElectionsView::new(
+                "did:key:zVtc".into(),
+                Default::default(),
+                "did:key:zAlice".into(),
+                "Acme".into(),
+            );
+            let shown = shown_election("voting");
+            view.form = Some(BallotForm::new(shown.manifest()));
+            view.shown = Some(shown);
+            view.screen = screen;
+            s.main_page.content_panel.elections.view = Some(view);
+        }
+    }
+
+    fn drawn(page: &MainPage) -> String {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(140, 60)).expect("test terminal");
+        terminal
+            .draw(|frame| page.render(frame, ()))
+            .expect("render");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    /// `e` on an Active community opens its elections; the panel's keys follow its screen.
+    #[test]
+    fn e_opens_elections_and_the_panel_keys_follow_the_screen() {
+        use crate::state_handler::actions::ElectionsAction as E;
+        use crate::state_handler::main_page::elections::Screen;
+
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            s.main_page.content_panel.communities.items = vec![community_summary("a")].into();
+        });
+        page.handle_key_event(press(KeyCode::Char('e')));
+        assert!(matches!(elections_action(&mut rx), Some(E::Open(0))));
+
+        let (mut page, mut rx) = page_for(MainMenu::Communities, with_elections(Screen::Detail));
+        page.handle_key_event(press(KeyCode::Char('v')));
+        assert!(matches!(elections_action(&mut rx), Some(E::Vote)));
+        page.handle_key_event(press(KeyCode::Char('t')));
+        assert!(matches!(elections_action(&mut rx), Some(E::TakeTicket)));
+
+        // On the ballot, a choice question takes space; a text question takes the letters,
+        // `a` included, and leaves the question blank only with Ctrl-a.
+        let (mut page, mut rx) = page_for(MainMenu::Communities, with_elections(Screen::Ballot));
+        page.handle_key_event(press(KeyCode::Char(' ')));
+        assert!(matches!(elections_action(&mut rx), Some(E::BallotToggle)));
+        page.handle_key_event(press(KeyCode::Char('a')));
+        assert!(matches!(elections_action(&mut rx), Some(E::BallotAbstain)));
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(elections_action(&mut rx), Some(E::Review)));
+        let (mut page, mut rx) = page_for(MainMenu::Communities, |s| {
+            with_elections(Screen::Ballot)(s);
+            if let Some(f) = s
+                .main_page
+                .content_panel
+                .elections
+                .view
+                .as_mut()
+                .and_then(|v| v.form.as_mut())
+            {
+                f.question = 1;
+            }
+        });
+        page.handle_key_event(press(KeyCode::Char('a')));
+        assert!(matches!(
+            elections_action(&mut rx),
+            Some(E::BallotChar('a'))
+        ));
+        page.handle_key_event(ctrl(KeyCode::Char('a')));
+        assert!(matches!(elections_action(&mut rx), Some(E::BallotAbstain)));
+
+        // Only `y` casts; anything else goes back to the ballot.
+        let (mut page, mut rx) = page_for(MainMenu::Communities, with_elections(Screen::Confirm));
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(elections_action(&mut rx), Some(E::Back)));
+        page.handle_key_event(press(KeyCode::Char('y')));
+        assert!(matches!(elections_action(&mut rx), Some(E::Cast)));
+    }
+
+    /// The detail says who runs the ballot box, warns when it is the community's own
+    /// operator, and says a vote can be proven; the ballot shows the questions.
+    #[test]
+    fn the_election_detail_discloses_and_the_ballot_renders() {
+        use crate::state_handler::main_page::elections::Screen;
+
+        let (page, _rx) = page_for(MainMenu::Communities, with_elections(Screen::Detail));
+        let text = drawn(&page);
+        assert!(text.contains("Annual meeting"), "{text}");
+        assert!(text.contains("Example Ballots"), "{text}");
+        assert!(text.contains("same operator"), "{text}");
+        assert!(text.contains("prove how you voted"), "{text}");
+        assert!(text.contains("v vote"), "{text}");
+
+        let (page, _rx) = page_for(MainMenu::Communities, with_elections(Screen::Ballot));
+        let text = drawn(&page);
+        assert!(text.contains("Who chairs?"), "{text}");
+        assert!(text.contains("( ) Ann"), "{text}");
+        assert!(
+            !text.contains("less than an hour"),
+            "no ticket taken here: {text}"
+        );
+
+        let (page, _rx) = page_for(MainMenu::Communities, |s| {
+            with_elections(Screen::Ballot)(s);
+            s.main_page.content_panel.elections.tickets_taken.insert(
+                ("did:key:zVtc".into(), "agm".into()),
+                std::time::Instant::now(),
+            );
+        });
+        let text = drawn(&page);
+        assert!(text.contains("less than an hour"), "{text}");
     }
 }
 

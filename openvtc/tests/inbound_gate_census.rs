@@ -74,6 +74,11 @@ fn routed_types() -> Vec<&'static str> {
         "https://trusttasks.org/spec/vtc/rooms/memberships/list/0.1#response",
         "https://trusttasks.org/spec/vtc/rooms/offers/list/0.4#response",
         "https://trusttasks.org/spec/vtc/rooms/offers/accept/0.1#response",
+        // Election replies for the Elections panel, routed by prefix
+        // (`elections::is_reply_type`).
+        "https://trusttasks.org/spec/vtc/elections/list/0.3#response",
+        "https://trusttasks.org/spec/vtc/elections/show/0.2#response",
+        "https://trusttasks.org/spec/vtc/elections/tickets/issue/0.1#response",
         // A witness's answers, routed by `witness::is_reply_type`.
         "https://trusttasks.org/spec/witness/session/0.2#response",
         "https://trusttasks.org/spec/witness/session/submit/0.2#response",

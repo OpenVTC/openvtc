@@ -33,6 +33,7 @@ pub mod diagnostics;
 pub mod didcomm;
 pub mod display;
 pub mod dtg;
+pub mod elections;
 pub mod errors;
 pub mod forge_credential;
 pub mod git_ns;

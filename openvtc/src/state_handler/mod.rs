@@ -258,6 +258,7 @@ mod community_actions;
 mod community_context_actions;
 mod create_persona;
 mod credential_actions;
+mod elections_actions;
 mod persona_actions;
 mod persona_binding_refresh;
 pub(crate) mod repos_actions;
@@ -1521,6 +1522,7 @@ impl StateHandler {
                                 capability_replies,
                                 git_ns_replies,
                                 rooms_replies,
+                                elections_replies,
                                 personhood_challenges,
                                 vetting_answers,
                                 vetting_grant_checks,
@@ -1727,6 +1729,21 @@ impl StateHandler {
                                 })
                                 .await;
                             }
+                            // Election answers for the Elections panel; each may call for
+                            // the next step of a ticket or a vote.
+                            if !elections_replies.is_empty()
+                                && elections_actions::apply_replies(&mut state, elections_replies)
+                            {
+                                elections_actions::advance(&mut elections_actions::Loop {
+                                    state: &mut state,
+                                    config: &config,
+                                    tdk: &tdk,
+                                    vta: admin_vta.as_ref(),
+                                    dispatch_tx: &dispatch_tx,
+                                    in_flight: &mut in_flight,
+                                })
+                                .await;
+                            }
                             // A vetter's grant is checked for revocation off the
                             // loop: the check fetches the community's status list.
                             for check in vetting_grant_checks {
@@ -1895,6 +1912,16 @@ impl StateHandler {
                     // A VTA answer or a failed send may call for the Rooms panel's next
                     // step, and frees the lane it waits on.
                     rooms_actions::advance(&mut rooms_actions::Loop {
+                        state: &mut state,
+                        config: &config,
+                        tdk: &tdk,
+                        vta: admin_vta.as_ref(),
+                        dispatch_tx: &dispatch_tx,
+                        in_flight: &mut in_flight,
+                    })
+                    .await;
+                    // The same for the Elections panel.
+                    elections_actions::advance(&mut elections_actions::Loop {
                         state: &mut state,
                         config: &config,
                         tdk: &tdk,
@@ -2131,6 +2158,16 @@ impl StateHandler {
                     .await;
                     // The Rooms panel: reply windows, and a step left on a busy lane.
                     rooms_actions::tick(&mut rooms_actions::Loop {
+                        state: &mut state,
+                        config: &config,
+                        tdk: &tdk,
+                        vta: admin_vta.as_ref(),
+                        dispatch_tx: &dispatch_tx,
+                        in_flight: &mut in_flight,
+                    })
+                    .await;
+                    // The Elections panel: the same.
+                    elections_actions::tick(&mut elections_actions::Loop {
                         state: &mut state,
                         config: &config,
                         tdk: &tdk,
@@ -3447,7 +3484,7 @@ impl StateHandler {
                     // messaging runtime that comes with it. Inert, but not
                     // silent — a dead key is indistinguishable from a broken one.
                     Action::Inbox(..) | Action::Relationship(..) | Action::Credential(..) |
-                    Action::IssueMemberVmc(..) | Action::CapabilitiesOpen(..) | Action::Repos(..) | Action::Rooms(..) |
+                    Action::IssueMemberVmc(..) | Action::CapabilitiesOpen(..) | Action::Repos(..) | Action::Rooms(..) | Action::Elections(..) |
                     Action::RequestPersonhoodChallenge(..) | Action::AssertPersonhood { .. } |
                     Action::PersonhoodEvidence(..) |
                     Action::RenewMembership(..) |
@@ -4766,6 +4803,9 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
         }
         Action::Rooms(action) => {
             return rooms_actions::reduce(state, action);
+        }
+        Action::Elections(action) => {
+            return elections_actions::reduce(state, action);
         }
         Action::AgentNameManagerInput(key) => {
             use tui_input::backend::crossterm::EventHandler;
