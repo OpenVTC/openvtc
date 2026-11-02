@@ -71,7 +71,7 @@ fn routed_types() -> Vec<&'static str> {
         "https://trusttasks.org/spec/git-ns/drift/resolve/0.4#response",
         // Data-room replies for the Rooms panel, routed by prefix
         // (`community_rooms::is_reply_type`).
-        "https://trusttasks.org/spec/vtc/rooms/memberships/list/0.1#response",
+        "https://trusttasks.org/spec/vtc/rooms/memberships/list/0.2#response",
         "https://trusttasks.org/spec/vtc/rooms/offers/list/0.4#response",
         "https://trusttasks.org/spec/vtc/rooms/offers/accept/0.1#response",
         // Election replies for the Elections panel, routed by prefix

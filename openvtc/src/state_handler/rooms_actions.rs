@@ -15,7 +15,13 @@
 //! (`vtc/rooms/offers/list`), the VTA storing them and giving the KeyPackage
 //! (`rooms/keys/key-package/0.2` — the one it already holds, if another surface began
 //! this acceptance), the acceptance (`vtc/rooms/offers/accept`), and the VTA joining from
-//! the Welcome — where `alreadyJoined` means another surface finished first. Each step's
+//! the Welcome — where `alreadyJoined` means another surface finished first.
+//!
+//! **Renewals** are collected on every read once a VTA is connected: the offers listing
+//! (`vtc/rooms/offers/list/0.4`) carries the renewals the community keeps for the member,
+//! and the VTA stores those it does not hold ([`community_rooms::collect_renewals`]) —
+//! which is what restores a member suspended while a room was closed. A read that renewed
+//! nothing does not read again. Each step's
 //! answer sets the view's [`Next`]; [`advance`], which the loop calls after applying
 //! replies and outcomes, takes it. After an acceptance ends, either way, the view is read
 //! again: the community and the VTA are the record.
@@ -24,7 +30,9 @@ use std::time::{Duration, Instant};
 
 use affinidi_tdk::TDK;
 use openvtc_core::capabilities::{RequestDocument, correlation_thread};
-use openvtc_core::community_rooms::{self, Joined, Offer, Prepared, Reply, Request, Standing};
+use openvtc_core::community_rooms::{
+    self, Joined, Offer, Prepared, Renewal, Reply, Request, RoomCondition, Standing,
+};
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
 use tokio::sync::mpsc::UnboundedSender;
@@ -228,6 +236,8 @@ fn fail(state: &mut State, purpose: &Purpose, why: String) {
             view.accept = None;
             view.note(Severity::Error, why);
         }
+        // A background check: the record is shown regardless.
+        Purpose::Renewals => {}
     }
 }
 
@@ -304,6 +314,17 @@ async fn start_accept(lp: &mut Loop<'_>) {
     let Some(row) = view.selected_row() else {
         return;
     };
+    // An archived room, or one being removed, admits nobody: the community would refuse.
+    let condition = RoomCondition::of(&row.room);
+    if !condition.admits() && row.standing.acceptable() {
+        view.note(
+            Severity::Warning,
+            condition
+                .explain()
+                .unwrap_or_else(|| "This room admits nobody now.".into()),
+        );
+        return;
+    }
     match row.standing {
         s if s.acceptable() => {}
         Standing::NeedsReadmission => {
@@ -311,6 +332,17 @@ async fn start_accept(lp: &mut Loop<'_>) {
                 Severity::Warning,
                 "Your VTA never joined this room and the community no longer keeps what it \
                  needs to finish: ask an administrator to remove and re-admit you.",
+            );
+            return;
+        }
+        Standing::Suspended => {
+            view.note(
+                Severity::Info,
+                condition.explain().unwrap_or_else(|| {
+                    "Your access to this room is withdrawn while it is closed; it is restored \
+                     if the community reopens it."
+                        .into()
+                }),
             );
             return;
         }
@@ -452,6 +484,31 @@ pub(crate) async fn advance(lp: &mut Loop<'_>) {
                 None => true,
             }
         }
+        // Without a VTA there is nowhere to store a renewal, so nothing to read.
+        Next::CheckRenewals if lp.vta.is_none() => true,
+        Next::CheckRenewals => {
+            lp.send(Request::Offers { cursor: None }, Purpose::Renewals)
+                .await
+        }
+        Next::Renew => {
+            let ask = view_mut(lp.state).map(|v| VtaAsk::Renew {
+                renewals: std::mem::take(&mut v.renewals),
+                member: v.me.clone(),
+            });
+            match ask {
+                Some(VtaAsk::Renew { renewals, member }) if !renewals.is_empty() => {
+                    let taken = lp.ask_vta(VtaAsk::Renew {
+                        renewals: renewals.clone(),
+                        member,
+                    });
+                    if !taken && let Some(view) = view_mut(lp.state) {
+                        view.renewals = renewals;
+                    }
+                    taken
+                }
+                _ => true,
+            }
+        }
     };
     // A lane that was busy: keep the step for the next tick.
     if !taken && let Some(view) = view_mut(lp.state) {
@@ -495,6 +552,15 @@ pub(crate) async fn tick(lp: &mut Loop<'_>) {
                     format!(
                         "No reply within {secs}s. Accepting again is safe: it finishes whatever \
                          was done, here or elsewhere. Refresh (r) first to see where it stands."
+                    ),
+                );
+            }
+            Purpose::Renewals => {
+                view.note(
+                    Severity::Warning,
+                    format!(
+                        "no reply within {secs}s to the check for renewed access; refresh (r) to \
+                         check again"
                     ),
                 );
             }
@@ -640,6 +706,18 @@ fn apply_reply(state: &mut State, thid: &str, reply: Reply) -> bool {
                 view.next = Some(Next::MembershipsPage { cursor });
             } else {
                 view.clear_progress();
+                // An acceptance in flight reads the offers itself; otherwise look for
+                // renewals the community keeps for the member.
+                if view.accept.is_none() {
+                    view.next = Some(Next::CheckRenewals);
+                }
+            }
+        }
+        // Renewals are listed on the first page (`vtc/rooms/offers/list/0.4`).
+        (Reply::Offers(page), Purpose::Renewals) => {
+            if !page.renewals.is_empty() {
+                view.renewals = page.renewals;
+                view.next = Some(Next::Renew);
             }
         }
         (Reply::Offers(page), Purpose::Offers { room }) => {
@@ -714,6 +792,11 @@ fn apply_reply(state: &mut State, thid: &str, reply: Reply) -> bool {
                 view.note(Severity::Error, r.explain());
                 view.next = Some(Next::Refresh);
             }
+            // The record stands; renewed access is looked for again on the next refresh.
+            Purpose::Renewals => view.note(
+                Severity::Warning,
+                format!("couldn't check for renewed access: {}", r.explain()),
+            ),
         },
         (Reply::Unreadable { task, detail }, purpose) => {
             let text = format!(
@@ -745,6 +828,10 @@ fn apply_reply(state: &mut State, thid: &str, reply: Reply) -> bool {
 
 /// One call to the member's VTA.
 enum VtaAsk {
+    Renew {
+        renewals: Vec<Renewal>,
+        member: String,
+    },
     Held {
         member: String,
     },
@@ -762,6 +849,7 @@ enum VtaAsk {
 
 /// What the VTA answered.
 pub(crate) enum VtaAnswer {
+    Renewed(Result<Vec<String>, String>),
     Held(Result<Vec<String>, String>),
     Prepared(Result<Prepared, String>),
     Joined(Result<Joined, String>),
@@ -770,6 +858,9 @@ pub(crate) enum VtaAnswer {
 impl VtaAsk {
     async fn run(self, vta: &VtaClient) -> VtaAnswer {
         match self {
+            VtaAsk::Renew { renewals, member } => {
+                VtaAnswer::Renewed(community_rooms::collect_renewals(vta, &renewals, &member).await)
+            }
             VtaAsk::Held { member } => VtaAnswer::Held(
                 community_rooms::held_rooms(vta, &member)
                     .await
@@ -807,6 +898,22 @@ impl RoomsVtaOutcome {
             return;
         }
         match self.answer {
+            VtaAnswer::Renewed(Ok(rooms)) if rooms.is_empty() => {}
+            VtaAnswer::Renewed(Ok(rooms)) => {
+                view.note(
+                    Severity::Success,
+                    format!(
+                        "Your VTA stored renewed access to {} room{} the community re-issued.",
+                        rooms.len(),
+                        if rooms.len() == 1 { "" } else { "s" }
+                    ),
+                );
+                view.next = Some(Next::Refresh);
+            }
+            VtaAnswer::Renewed(Err(e)) => view.note(
+                Severity::Error,
+                format!("couldn't store renewed access: {e}"),
+            ),
             VtaAnswer::Held(Ok(rooms)) => {
                 view.held = Some(rooms);
                 view.held_error = None;
@@ -930,7 +1037,7 @@ mod tests {
             "roomId": id, "host": "did:key:zVtc", "label": "Board pack",
             "visibility": "private", "actions": ["read"],
             "validUntil": "2027-10-01T00:00:00Z", "state": state,
-            "offeredAt": "2026-10-14T10:00:00Z",
+            "offeredAt": "2026-10-14T10:00:00Z", "roomState": "active",
         });
         if repeat {
             v["repeatAcceptUntil"] = json!("2026-10-24T10:00:00Z");
@@ -1037,5 +1144,76 @@ mod tests {
         assert!(view.accept.is_none());
         assert!(view.status.as_ref().unwrap().text.contains("re-admit"));
         assert_eq!(view.next, Some(Next::Refresh));
+    }
+
+    /// A whole record leads to a check for renewals; a listing that carries some has the
+    /// VTA store them, and one that carries none ends there.
+    #[test]
+    fn a_whole_record_checks_for_renewals_and_collects_any() {
+        let mut state = state_with_view();
+        arm(&mut state, Purpose::Memberships);
+        apply_replies(
+            &mut state,
+            vec![inbound(page(
+                json!([room("did:key:zR1", "admitted", false)]),
+                None,
+            ))],
+        );
+        assert_eq!(
+            view_mut(&mut state).unwrap().next,
+            Some(Next::CheckRenewals)
+        );
+
+        // A listing with a renewal: the VTA is asked to store it.
+        let view = view_mut(&mut state).unwrap();
+        view.next = None;
+        arm(&mut state, Purpose::Renewals);
+        let offers: Reply = Reply::Offers(Box::new(
+            serde_json::from_value(json!({
+                "items": [],
+                "renewals": [{
+                    "roomId": "did:key:zR1", "host": "did:key:zVtc", "label": "Board pack",
+                    "visibility": "private", "actions": ["read"],
+                    "validUntil": "2027-11-10T00:00:00Z", "renewsAt": "2027-10-01T00:00:00Z",
+                    "issuedAt": "2026-11-03T09:00:00Z",
+                    "credentials": { "membership": "{}", "authority": "{}" },
+                }],
+            }))
+            .unwrap(),
+        ));
+        apply_replies(&mut state, vec![inbound(offers)]);
+        let view = view_mut(&mut state).unwrap();
+        assert_eq!(view.next, Some(Next::Renew));
+        assert_eq!(view.renewals.len(), 1);
+
+        // A listing with none: nothing more to do, and nothing failed.
+        view.next = None;
+        view.renewals.clear();
+        arm(&mut state, Purpose::Renewals);
+        let none: Reply = Reply::Offers(Box::new(
+            serde_json::from_value(json!({ "items": [], "renewals": [] })).unwrap(),
+        ));
+        apply_replies(&mut state, vec![inbound(none)]);
+        let view = view_mut(&mut state).unwrap();
+        assert_eq!(view.next, None);
+        assert!(view.status.is_none());
+    }
+
+    /// A suspended admission in a closed room reads as suspended, with the room's state
+    /// beside it.
+    #[test]
+    fn a_closed_room_shows_its_members_suspended() {
+        let mut state = state_with_view();
+        arm(&mut state, Purpose::Memberships);
+        let mut r = room("did:key:zR1", "suspended", false);
+        r["suspendedAt"] = json!("2026-11-02T10:00:00Z");
+        r["roomState"] = json!("archived");
+        r["roomAccess"] = json!("noAccess");
+        apply_replies(&mut state, vec![inbound(page(json!([r]), None))]);
+        let view = view_mut(&mut state).unwrap();
+        let row = &view.rows()[0];
+        assert_eq!(row.standing, Standing::Suspended);
+        assert_eq!(RoomCondition::of(&row.room), RoomCondition::Closed);
+        assert!(!RoomCondition::of(&row.room).admits());
     }
 }
