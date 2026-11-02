@@ -49,7 +49,7 @@
 "vtc/join-requests/wallet-session/status" = "0.1"
 "vtc/members/personhood/assert" = "0.2"
 "vtc/members/renew" = "0.1"
-"vtc/rooms/memberships/list" = "0.1"
+"vtc/rooms/memberships/list" = "0.2"
 "vtc/rooms/offers/accept" = "0.1"
 "vtc/rooms/offers/list" = "0.4"
 "vtc/vetting/vetters/pcs-tokens" = "0.1"

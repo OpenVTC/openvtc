@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use openvtc_core::community_rooms::{Offer, RoomMembership, Standing};
+use openvtc_core::community_rooms::{Offer, Renewal, RoomMembership, Standing};
 use openvtc_core::config::account::PersonaId;
 
 pub use super::repos::{Severity, Status};
@@ -31,6 +31,8 @@ pub enum Purpose {
     Offers { room: String },
     /// The acceptance of `room`, carrying the KeyPackage when sealed.
     Accept { room: String },
+    /// The offers listing read for its `renewals`, to collect them.
+    Renewals,
 }
 
 /// A request to the community awaiting its answer.
@@ -85,6 +87,10 @@ pub enum Next {
         welcome: String,
         ratchet_tree: Option<String>,
     },
+    /// Read the offers listing for the renewals the community keeps for the member.
+    CheckRenewals,
+    /// Have the VTA store [`RoomsView::renewals`].
+    Renew,
 }
 
 /// An acceptance in progress. One at a time.
@@ -118,6 +124,8 @@ pub struct RoomsView {
     pub accept: Option<AcceptFlow>,
     pub next: Option<Next>,
     pub status: Option<Status>,
+    /// The renewals the community last listed, while the VTA stores them.
+    pub renewals: Vec<Renewal>,
 }
 
 impl RoomsView {
@@ -138,6 +146,7 @@ impl RoomsView {
             accept: None,
             next: None,
             status: None,
+            renewals: Vec::new(),
         }
     }
 

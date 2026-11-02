@@ -274,9 +274,9 @@ digest = "sha256:bacc4292668ab09cae4ba8c90ffcfbed85a855096d882cd132c7da596003cbf
 
 [[task]]
 slug = "vtc/rooms/memberships/list"
-version = "0.1"
-type_uri = "https://trusttasks.org/spec/vtc/rooms/memberships/list/0.1"
-digest = "sha256:e9f3391572fea47054b34bc4e14bd0cb1ea1c620ed66c3084e91cb791d8dd814"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/vtc/rooms/memberships/list/0.2"
+digest = "sha256:a74c13ce9666e64df99c2874dd5555d25465258ce4dd49e7fbbcdbd85c4adf39"
 
 [[task]]
 slug = "vtc/rooms/offers/accept"
