@@ -6818,8 +6818,12 @@ mod key_handler_tests {
         }
     }
 
-    /// An election shown in the panel, for its key and render tests.
-    fn shown_election(state: &str) -> Box<openvtc_core::elections::ShownElection> {
+    /// An election shown in the panel, for its key and render tests, whose written answers are
+    /// released once `threshold` ballots are in.
+    fn shown_election_releasing_at(
+        state: &str,
+        threshold: u64,
+    ) -> Box<openvtc_core::elections::ShownElection> {
         Box::new(
             openvtc_core::elections::ShownElection::from_payload(serde_json::json!({
                 "manifest": {
@@ -6836,7 +6840,7 @@ mod key_handler_tests {
                     "votingClosesAt": "2026-12-01T00:00:00Z", "revote": "replace",
                     "board": { "visibility": "public", "auditors": [] },
                     "ballotBox": "did:key:z6MkBox", "binding": false, "allowEarlyClose": false,
-                    "resultsBeforeClose": false, "textReleaseThreshold": 10
+                    "resultsBeforeClose": false, "textReleaseThreshold": threshold
                 },
                 "manifestDigest": "zQmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
                 "state": state,
@@ -6855,6 +6859,14 @@ mod key_handler_tests {
     fn with_elections(
         screen: crate::state_handler::main_page::elections::Screen,
     ) -> impl FnOnce(&mut State) {
+        with_elections_releasing_at(screen, 10)
+    }
+
+    /// [`with_elections`] on an election that releases written answers at `threshold`.
+    fn with_elections_releasing_at(
+        screen: crate::state_handler::main_page::elections::Screen,
+        threshold: u64,
+    ) -> impl FnOnce(&mut State) {
         move |s: &mut State| {
             use crate::state_handler::main_page::elections::{BallotForm, ElectionsView};
             let mut view = ElectionsView::new(
@@ -6863,7 +6875,7 @@ mod key_handler_tests {
                 "did:key:zAlice".into(),
                 "Acme".into(),
             );
-            let shown = shown_election("voting");
+            let shown = shown_election_releasing_at("voting", threshold);
             view.form = Some(BallotForm::new(shown.manifest()));
             view.shown = Some(shown);
             view.screen = screen;
@@ -6974,6 +6986,37 @@ mod key_handler_tests {
         });
         let text = drawn(&page);
         assert!(text.contains("less than an hour"), "{text}");
+    }
+
+    /// VTI-VOT-065 / VTI-VOT-090: an election releasing written answers below 10 ballots warns
+    /// the member before a ticket is taken (the detail) and when voting (ballot and
+    /// confirmation); at 10 nothing is said.
+    #[test]
+    fn vti_vot_090_a_low_text_release_threshold_is_warned_before_ticket_and_vote() {
+        use crate::state_handler::main_page::elections::Screen;
+
+        for screen in [Screen::Detail, Screen::Ballot, Screen::Confirm] {
+            let (page, _rx) = page_for(
+                MainMenu::Communities,
+                with_elections_releasing_at(screen, 3),
+            );
+            let text = drawn(&page);
+            assert!(
+                text.contains("Written answers are released once 3 ballots are counted."),
+                "{screen:?}: {text}"
+            );
+            assert!(
+                text.contains("Below 10, a written answer may identify"),
+                "{screen:?}: {text}"
+            );
+
+            let (page, _rx) = page_for(MainMenu::Communities, with_elections(screen));
+            let text = drawn(&page);
+            assert!(
+                !text.contains("Written answers are released"),
+                "{screen:?}: {text}"
+            );
+        }
     }
 }
 

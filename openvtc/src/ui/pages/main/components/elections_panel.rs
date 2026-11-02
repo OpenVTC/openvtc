@@ -4,7 +4,8 @@
 //! ballot, its confirmation, and the result. What the member is told before taking a ticket or
 //! voting is the disclosure the community publishes (VTI-VOT-090): who runs the ballot box,
 //! whether that is the community itself, who can read the board, whether a later vote replaces
-//! an earlier one, and that a vote can be proven to someone who demands it.
+//! an earlier one, that a vote can be proven to someone who demands it, and — where written answers
+//! are released after fewer than 10 ballots — that one may identify its author (VTI-VOT-065).
 
 use std::time::Instant;
 
@@ -182,6 +183,20 @@ fn render_list(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
     keys(lines, &["↑/↓ navigate", "⏎ open", "r refresh", "Esc back"]);
 }
 
+/// The warning an election whose written answers are released after fewer than 10 ballots
+/// carries, wherever the member is about to take a ticket or vote (VTI-VOT-065, VTI-VOT-090).
+fn push_text_release_warning(shown: &ShownElection, lines: &mut Vec<Line<'static>>) {
+    if let Some(warning) = shown.text_release_warning() {
+        lines.push(Line::from(""));
+        wrap(
+            lines,
+            &format!("⚠ {warning}"),
+            4,
+            Style::default().fg(COLOR_ORANGE).bold(),
+        );
+    }
+}
+
 /// What a member is told about an election before taking a ticket or voting (VTI-VOT-090).
 fn render_disclosure(shown: &ShownElection, lines: &mut Vec<Line<'static>>) {
     let m = shown.manifest();
@@ -233,6 +248,7 @@ fn render_disclosure(shown: &ShownElection, lines: &mut Vec<Line<'static>>) {
             Style::default().fg(COLOR_ORANGE).bold(),
         );
     }
+    push_text_release_warning(shown, lines);
     lines.push(Line::from(vec![
         dim("    the board     "),
         text(match d.board_visibility.to_string().as_str() {
@@ -438,6 +454,7 @@ fn render_ballot(view: &ElectionsView, recent_ticket: bool, lines: &mut Vec<Line
             Style::default().fg(COLOR_ORANGE).bold(),
         );
     }
+    push_text_release_warning(shown, lines);
     lines.push(Line::from(""));
     render_form(form, shown, lines);
     if let Some(e) = &form.error {
@@ -532,6 +549,7 @@ fn render_confirm(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
         ))]));
         wrap(lines, &answer, 10, Style::default().fg(COLOR_SUCCESS));
     }
+    push_text_release_warning(shown, lines);
     lines.push(Line::from(""));
     wrap(
         lines,
