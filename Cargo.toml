@@ -467,9 +467,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # generates exactly the versions pinned in `openvtc-core/trust-tasks.lock` with
 # `trust-tasks-build`, as `openvtc_core::specs`. `default-features = false`
 # leaves out every prebuilt family; a spec version reached through `vta-sdk`'s
-# re-exports is still vta-sdk's to choose. **0.36.1** follows `vta-sdk` 0.75.
-trust-tasks-rs = { version = "0.36.1", default-features = false }
-trust-tasks-capability-client = "0.36.1"
+# re-exports is still vta-sdk's to choose. **0.36.1** follows `vta-sdk` 0.75;
+# **0.36.2** follows 0.78, which declares it.
+trust-tasks-rs = { version = "0.36.2", default-features = false }
+trust-tasks-capability-client = "0.36.2"
 # Build dependency of `openvtc-core`: generates `openvtc_core::specs` from the
 # vendored bundles. `trust-tasks check` (trust-tasks-cli) verifies them.
 trust-tasks-build = "0.1.2"
@@ -690,7 +691,11 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # **0.75** is `vta-service` 0.67's line: trust-tasks 0.36 / TDK 0.36 /
 # messaging-sdk 0.44, with the services on current task versions only (VTI
 # #2313–#2315, #2321, #2323, #2324). did-git-sign 0.26 (VGI #182) is on it.
-vta-sdk = { version = "0.75.0", features = [
+# **0.78** is `vta-service` 0.70's line, still trust-tasks 0.36 / TDK 0.36 /
+# messaging-sdk 0.44: the voting tasks over the voting/_shared/0.3 manifest,
+# whose `textReleaseThreshold` may be as low as 1 (VTI-VOT-065, VTI #2379).
+# did-git-sign 0.30 (VGI #191) is on it; 0.76 and 0.77 were skipped.
+vta-sdk = { version = "0.78.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses

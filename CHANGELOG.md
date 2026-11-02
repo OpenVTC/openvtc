@@ -14,20 +14,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   schedule, who runs the ballot box (with a warning when it is the community's own
   operator), who can read the board, whether a later vote replaces an earlier one, and that
   a vote can be proven to someone who demands it. **t** takes a ticket: your VTA builds the
-  blinded request (`vta/pcs/voter/register/0.2`), OpenVTC signs it as your persona and sends
+  blinded request (`vta/pcs/voter/register/0.3`), OpenVTC signs it as your persona and sends
   it to the community (`vtc/elections/tickets/issue/0.1`), and the VTA takes the community's
   blind signature (`vta/pcs/voter/accept/0.1`). **v** votes: with no ticket held it takes
   one and stops — come back later, so the ticket and the vote cannot be paired by time — and
   with one held it opens the ballot (single and multiple choice, ranking, scores, free text,
   leaving optional questions blank), checks it against the election's rules, and on **y**
-  has your VTA seal it under a key made for that vote alone (`vta/pcs/vote/0.2`, or
-  `vta/pcs/vote-encrypted/0.3` for a sealed or encrypted election). OpenVTC then sends the
+  has your VTA seal it under a key made for that vote alone (`vta/pcs/vote/0.3`, or
+  `vta/pcs/vote-encrypted/0.4` for a sealed or encrypted election). OpenVTC then sends the
   cast to the ballot box itself, over its advertised HTTPS door after a random pause of up to
   20 s, checks that the receipt is signed by the ballot box and answers this cast, and has
   the VTA keep it (`vta/pcs/voter/receipt/0.1`). The community never sees a ballot, a cast
   or a receipt; the ballot box never sees who you are. A cast whose answer was lost is resent
-  unchanged (**r**), never rebuilt. Needs a VTA serving `vta/pcs/voter/*` (vta-service 0.67)
-  and a community serving `vtc/elections/list/0.3` and `show/0.2`.
+  unchanged (**r**), never rebuilt. An election may release written answers after fewer
+  than 10 ballots (as few as 1, VTI-VOT-065); then the election, the ballot and the
+  confirmation all say "Written answers are released once N ballots are counted. Below 10,
+  a written answer may identify who wrote it." (VTI-VOT-090). Needs a VTA serving
+  `vta/pcs/voter/register/0.3`, `vote/0.3` and `vote-encrypted/0.4` (vta-service 0.70)
+  and a community serving `vtc/elections/list/0.3` and `show/0.3`.
 - **Repositories in nested GitLab groups.** A repository may now be named
   `<forge>/<owner>/<group>/…/<repo>` (up to GitLab's 20 levels of subgroups), so
   cloning, the workspace layout, remote matching and signing set-up work for
@@ -116,6 +120,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Onto the VTI 0.78 stack:** `vta-sdk` 0.78, `did-git-sign` 0.30 (the same
+  signer, rebuilt on that line) and `trust-tasks-rs` 0.36.2; `affinidi-tdk` 0.36 and
+  `affinidi-messaging-sdk` 0.44 are unchanged. The test `MockVta` moves to
+  `vta-service` 0.70, with `vti-voting` 0.7 and `vti-vetting-pcs` 0.11 beside it.
 - **Personhood assertions are sent as `vtc/members/personhood/assert/0.2`**, the
   only version a community on `vtc-service` with VTI #2147 serves, with or without
   witness credentials. `openvtc_core::personhood::assert_personhood` takes the
