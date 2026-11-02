@@ -77,7 +77,7 @@ fn routed_types() -> Vec<&'static str> {
         // Election replies for the Elections panel, routed by prefix
         // (`elections::is_reply_type`).
         "https://trusttasks.org/spec/vtc/elections/list/0.3#response",
-        "https://trusttasks.org/spec/vtc/elections/show/0.2#response",
+        "https://trusttasks.org/spec/vtc/elections/show/0.3#response",
         "https://trusttasks.org/spec/vtc/elections/tickets/issue/0.1#response",
         // A witness's answers, routed by `witness::is_reply_type`.
         "https://trusttasks.org/spec/witness/session/0.2#response",

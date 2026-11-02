@@ -56,6 +56,9 @@ async fn admin_client(mock: &MockVta) -> VtaClient {
     .await
 }
 
+/// The election releases written answers after 3 ballots: below the 10 VTI-VOT-065 advises and
+/// above the 1 it allows, so the whole flow runs on the voting/_shared/0.3 manifest, which a 0.2
+/// task would refuse.
 fn manifest(ballot_box: &str) -> Value {
     let now = chrono::Utc::now();
     let t = |d: chrono::DateTime<chrono::Utc>| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -73,7 +76,7 @@ fn manifest(ballot_box: &str) -> Value {
         "revote": "replace",
         "board": { "visibility": "public", "auditors": [] }, "ballotBox": ballot_box,
         "binding": false, "allowEarlyClose": false, "resultsBeforeClose": false,
-        "textReleaseThreshold": 10
+        "textReleaseThreshold": 3
     })
 }
 
@@ -130,6 +133,10 @@ async fn a_member_takes_a_ticket_then_votes_and_keeps_the_receipt() {
         "checkpoints": []
     }))
     .expect("the community's show answer");
+    assert!(
+        shown.text_release_warning().is_some(),
+        "VTI-VOT-090: the member is warned before taking the ticket"
+    );
     let voter = Voter {
         vta: &client,
         context_id: CONTEXT,

@@ -1,7 +1,7 @@
 //! The Elections panel's state: a community's elections, from the member's side.
 //!
 //! Display state only, rebuilt from the community's answers (`vtc/elections/list/0.3`,
-//! `vtc/elections/show/0.2`) on every open and refresh. **Nothing here is persisted.** The
+//! `vtc/elections/show/0.3`) on every open and refresh. **Nothing here is persisted.** The
 //! member's VTA holds the voter keys, the ticket and the receipts; the community holds the
 //! record of who took a ticket; a copy kept here would be a third record to disagree.
 //!

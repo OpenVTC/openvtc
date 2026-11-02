@@ -643,7 +643,7 @@ fn the_pause_before_a_cast_is_bounded() {
 fn replies_are_classified_by_thread() {
     let doc: TrustTask<Value> = serde_json::from_value(json!({
         "id": "urn:uuid:00000000-0000-4000-8000-000000000002",
-        "type": "https://trusttasks.org/spec/vtc/elections/show/0.2#response",
+        "type": "https://trusttasks.org/spec/vtc/elections/show/0.3#response",
         "issuer": VTC,
         "recipient": "did:key:z6MkMember",
         "threadId": "urn:uuid:00000000-0000-4000-8000-000000000001",
@@ -684,4 +684,46 @@ fn the_list_puts_what_can_be_done_first() {
     sort_for_display(&mut items);
     let order: Vec<&str> = items.iter().map(|i| i.election_id.as_str()).collect();
     assert_eq!(order, ["now", "late", "reg", "soon", "done"]);
+}
+
+/// VTI-VOT-065: voting/_shared/0.3 lets `textReleaseThreshold` be as low as 1, and a show
+/// answer carrying one below 10 is read, not refused; 0 is still no manifest.
+#[test]
+fn vti_vot_065_a_threshold_below_ten_is_read_and_zero_is_refused() {
+    for threshold in [1, 9] {
+        let mut raw = shown_raw("open", false);
+        raw["manifest"]["textReleaseThreshold"] = json!(threshold);
+        let shown = ShownElection::from_payload(raw).expect("a threshold of 1 - 9 is valid");
+        assert_eq!(shown.text_release_threshold(), threshold);
+    }
+    let mut raw = shown_raw("open", false);
+    raw["manifest"]["textReleaseThreshold"] = json!(0);
+    assert!(ShownElection::from_payload(raw).is_err());
+}
+
+/// VTI-VOT-090: below 10 the member is told, before a ticket and when voting, how soon written
+/// answers come out and that one may identify its author; at 10 or above, nothing.
+#[test]
+fn vti_vot_090_a_threshold_below_ten_carries_its_warning() {
+    assert_eq!(shown("open").text_release_warning(), None);
+    assert_eq!(text_release_warning(10), None);
+    assert_eq!(text_release_warning(25), None);
+    assert_eq!(
+        text_release_warning(3).as_deref(),
+        Some(
+            "Written answers are released once 3 ballots are counted. Below 10, a written \
+             answer may identify who wrote it."
+        )
+    );
+    assert_eq!(
+        text_release_warning(1).as_deref(),
+        Some(
+            "Written answers are released once 1 ballot is counted. Below 10, a written \
+             answer may identify who wrote it."
+        )
+    );
+    let mut raw = shown_raw("open", false);
+    raw["manifest"]["textReleaseThreshold"] = json!(4);
+    let shown = ShownElection::from_payload(raw).expect("valid");
+    assert_eq!(shown.text_release_warning(), text_release_warning(4));
 }

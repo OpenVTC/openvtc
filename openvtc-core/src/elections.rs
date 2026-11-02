@@ -1,7 +1,7 @@
 //! Community elections — the member's side of `vtc/elections/*` and the voting tasks.
 //!
 //! A community runs an election; its **ballot box**, a separate service, takes the casts.
-//! A member reads the elections (`vtc/elections/list/0.3`, `vtc/elections/show/0.2`), takes a
+//! A member reads the elections (`vtc/elections/list/0.3`, `vtc/elections/show/0.3`), takes a
 //! **ticket** — a credential the community signs blind — and later casts a ballot with it. Two
 //! parties are kept from learning what they must not (VTI-VOT-001 – 004, the threat model in
 //! VTI's `docs/05-design-notes/community-voting-threat-model.md`):
@@ -21,9 +21,9 @@
 //!   `vtc/rooms/*` are ([`crate::community_rooms`]); the answer arrives on the inbound channel and
 //!   is matched by thread id ([`parse_reply`]).
 //! - **The member's VTA** holds every voter key: it builds the blinded ticket request
-//!   (`vta/pcs/voter/register/0.2`, [`register`]), unblinds the community's answer
+//!   (`vta/pcs/voter/register/0.3`, [`register`]), unblinds the community's answer
 //!   (`vta/pcs/voter/accept/0.1`, [`accept`]), builds and signs the cast
-//!   (`vta/pcs/vote/0.2` / `vta/pcs/vote-encrypted/0.3`, [`vote`]) and keeps the receipt
+//!   (`vta/pcs/vote/0.3` / `vta/pcs/vote-encrypted/0.4`, [`vote`]) and keeps the receipt
 //!   (`vta/pcs/voter/receipt/0.1`, [`keep_receipt`]). The voter keys are derived in the
 //!   persona's own context.
 //! - **The ballot box** is reached over its advertised `TrustTaskHTTPS` endpoint
@@ -57,17 +57,17 @@ use vta_sdk::client::VtaClient;
 use crate::errors::OpenVTCError;
 use crate::specs::voting::ballot::{cast::v0_1 as cast, cast_encrypted::v0_1 as cast_encrypted};
 use crate::specs::vta::pcs::{
-    vote::v0_2 as pcs_vote, vote_encrypted::v0_3 as pcs_vote_encrypted,
+    vote::v0_3 as pcs_vote, vote_encrypted::v0_4 as pcs_vote_encrypted,
     voter::accept::v0_1 as pcs_accept, voter::receipt::v0_1 as pcs_receipt,
-    voter::register::v0_2 as pcs_register,
+    voter::register::v0_3 as pcs_register,
 };
 use crate::specs::vtc::elections::{
-    list::v0_3 as list, show::v0_2 as show, tickets::issue::v0_1 as issue,
+    list::v0_3 as list, show::v0_3 as show, tickets::issue::v0_1 as issue,
 };
 
 /// The generated `vtc/elections/list/0.3` item and state.
 pub use list::{ElectionListItem, RegistrarState};
-/// The generated `vtc/elections/show/0.2` manifest and its parts.
+/// The generated `vtc/elections/show/0.3` manifest and its parts.
 pub use show::{Disclosure, Manifest, Question, QuestionOption};
 
 /// Every community task this module sends or reads starts with this.
@@ -95,7 +95,7 @@ pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
 // Requests to the community
 // ****************************************************************************
 
-/// The ticket request the member's VTA built (`vta/pcs/voter/register/0.2`'s answer), to carry to
+/// The ticket request the member's VTA built (`vta/pcs/voter/register/0.3`'s answer), to carry to
 /// the community as `vtc/elections/tickets/issue/0.1`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TicketRequest {
@@ -111,7 +111,7 @@ pub struct TicketRequest {
 pub enum Request {
     /// `vtc/elections/list/0.3`: the elections the member may take part in.
     List { cursor: Option<String> },
-    /// `vtc/elections/show/0.2`: one election — its manifest, parameters and disclosure.
+    /// `vtc/elections/show/0.3`: one election — its manifest, parameters and disclosure.
     Show { election_id: String },
     /// `vtc/elections/tickets/issue/0.1`: the blinded ticket request, for the community to sign.
     IssueTicket(TicketRequest),
@@ -199,7 +199,7 @@ pub struct ShownElection {
 }
 
 impl ShownElection {
-    /// Read a `vtc/elections/show/0.2` payload.
+    /// Read a `vtc/elections/show/0.3` payload.
     ///
     /// # Errors
     ///
@@ -286,6 +286,42 @@ impl ShownElection {
     pub fn state_label(&self) -> &'static str {
         state_label(&self.typed.state.to_string())
     }
+
+    /// The manifest's `textReleaseThreshold`: how many counted ballots must be in before any
+    /// written answer is released (VTI-VOT-065).
+    #[must_use]
+    pub fn text_release_threshold(&self) -> u64 {
+        self.typed.manifest.text_release_threshold.get()
+    }
+
+    /// What the member must be told, before taking a ticket and again when voting, when the
+    /// election releases written answers after fewer than [`TEXT_RELEASE_THRESHOLD_ADVISED`]
+    /// ballots (VTI-VOT-065, VTI-VOT-090). `None` at the advised threshold or above.
+    #[must_use]
+    pub fn text_release_warning(&self) -> Option<String> {
+        text_release_warning(self.text_release_threshold())
+    }
+}
+
+/// The `textReleaseThreshold` VTI-VOT-065 says an election SHOULD meet. voting/_shared/0.3
+/// allows as low as 1; below this the member is warned (VTI-VOT-090).
+pub const TEXT_RELEASE_THRESHOLD_ADVISED: u64 = 10;
+
+/// The warning for an election whose written answers are released once `threshold` ballots are
+/// counted, or `None` when `threshold` is at least [`TEXT_RELEASE_THRESHOLD_ADVISED`].
+#[must_use]
+pub fn text_release_warning(threshold: u64) -> Option<String> {
+    (threshold < TEXT_RELEASE_THRESHOLD_ADVISED).then(|| {
+        let ballots = if threshold == 1 {
+            "1 ballot is".to_string()
+        } else {
+            format!("{threshold} ballots are")
+        };
+        format!(
+            "Written answers are released once {ballots} counted. Below \
+             {TEXT_RELEASE_THRESHOLD_ADVISED}, a written answer may identify who wrote it."
+        )
+    })
 }
 
 /// The community's answer to one request.
@@ -614,7 +650,7 @@ fn members(a: &pcs_vote::Answer) -> usize {
         + usize::from(a.abstain.is_some())
 }
 
-/// Check `ballot` (a `vta/pcs/vote/0.2` ballot, as JSON) against the election the community
+/// Check `ballot` (a `vta/pcs/vote/0.3` ballot, as JSON) against the election the community
 /// shows: the same rules VTI's `check_ballot` holds. `manifest_digest` is the community's.
 ///
 /// # Errors
@@ -797,7 +833,7 @@ impl BallotDraft {
         Self { answers }
     }
 
-    /// The ballot as `vta/pcs/vote/0.2` takes it. An unscored score is left out, so
+    /// The ballot as `vta/pcs/vote/0.3` takes it. An unscored score is left out, so
     /// [`check_ballot`] says to score every option.
     #[must_use]
     pub fn to_ballot(&self, election_id: &str, manifest_digest: &str) -> Value {
@@ -893,7 +929,7 @@ pub fn vta_refusal_words(code: &str, message: &str) -> String {
         }
         "unsupportedType" | "unsupportedVersion" => format!(
             "Your VTA does not serve this request{detail} — it may predate community voting \
-             (vta/pcs/voter/register/0.2)."
+             (vta/pcs/voter/register/0.3)."
         ),
         other => format!("Your VTA refused ({other}){detail}."),
     }
@@ -958,7 +994,7 @@ pub struct Voter<'a> {
     pub community: &'a str,
 }
 
-/// What `vta/pcs/voter/register/0.2` said.
+/// What `vta/pcs/voter/register/0.3` said.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Registered {
     /// The ticket request to carry to the community.
@@ -967,7 +1003,7 @@ pub enum Registered {
     AlreadyHeld,
 }
 
-/// The `vta/pcs/voter/register/0.2` payload: no `member` — the request is the VTA's alone to
+/// The `vta/pcs/voter/register/0.3` payload: no `member` — the request is the VTA's alone to
 /// build, and this client signs `vtc/elections/tickets/issue` as the persona itself.
 #[must_use]
 pub fn register_payload(v: &Voter<'_>, shown: &ShownElection) -> Value {
@@ -1064,7 +1100,7 @@ pub enum VoteError {
     Vta(#[from] VtaCallError),
 }
 
-/// The `vta/pcs/vote/0.2` or `vta/pcs/vote-encrypted/0.3` payload, and which of the two.
+/// The `vta/pcs/vote/0.3` or `vta/pcs/vote-encrypted/0.4` payload, and which of the two.
 ///
 /// # Errors
 ///
