@@ -47,7 +47,7 @@ fn push_status(lines: &mut Vec<Line<'static>>, status: &Status) {
 fn standing_style(standing: Standing) -> Style {
     Style::default().fg(match standing {
         Standing::Joined => COLOR_SUCCESS,
-        Standing::Offered | Standing::Unfinished => COLOR_ORANGE,
+        Standing::Offered | Standing::Unfinished | Standing::Suspended => COLOR_ORANGE,
         Standing::NeedsReadmission => COLOR_WARNING_ACCESSIBLE_RED,
         Standing::Admitted | Standing::Removed => COLOR_DARK_GRAY,
     })
@@ -126,6 +126,10 @@ impl Panel for RoomsPanel {
                     text(format!("{:<12}", row.room.visibility.to_string())),
                     text(format!("{:<20}", actions.join(", "))),
                     Span::styled(row.standing.label(), standing_style(row.standing)),
+                    dim(community_rooms::RoomCondition::of(&row.room)
+                        .label()
+                        .map(|l| format!(" · {l}"))
+                        .unwrap_or_default()),
                 ]));
                 if selected {
                     if let Some(d) = &row.room.description {
@@ -161,6 +165,9 @@ impl Panel for RoomsPanel {
                     if let Some(e) = explain {
                         lines.push(Line::from(dim(format!("        {e}"))));
                     }
+                    if let Some(e) = community_rooms::RoomCondition::of(&row.room).explain() {
+                        lines.push(Line::from(dim(format!("        {e}"))));
+                    }
                 }
             }
         }
@@ -185,7 +192,10 @@ impl Panel for RoomsPanel {
         }
 
         let mut keys = vec!["↑/↓ navigate"];
-        if view.selected_row().is_some_and(|r| r.standing.acceptable()) && view.accept.is_none() {
+        if view.selected_row().is_some_and(|r| {
+            r.standing.acceptable() && community_rooms::RoomCondition::of(&r.room).admits()
+        }) && view.accept.is_none()
+        {
             keys.push("⏎ accept");
         }
         keys.extend(["r refresh", "Esc back"]);

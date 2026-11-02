@@ -3,11 +3,13 @@
 //! A community that owns data rooms offers its members admission to them. The member
 //! reaches those rooms from more than one surface: the community's member portal through
 //! their wallet, `pnm`, and this client. **None of them keeps its own record of which
-//! rooms the member accepted** (`vtc/rooms/memberships/list/0.1`, Surface item 1). Every
+//! rooms the member accepted** (`vtc/rooms/memberships/list/0.2`, Surface item 1). Every
 //! surface reads the same two:
 //!
 //! - the **community's** record — [`Request::Memberships`], every room it offered the
-//!   member, `offered`, `admitted` or `removed`;
+//!   member, `offered`, `admitted`, `suspended` or `removed`, and where the room itself
+//!   stands: active, archived (read-only or closed), being removed, removed
+//!   ([`RoomCondition`]);
 //! - the **key holder's** custody — the member's VTA, `rooms/keys/list`: which rooms'
 //!   groups it holds, for which member ([`held_rooms`]).
 //!
@@ -25,10 +27,19 @@
 //! ([`crate::git_ns`]); the community answers on the same route. The room tasks go to the
 //! member's VTA, which holds the room keys and the credentials.
 //!
+//! # Renewals
+//!
+//! The community renews an admission by having the room issue fresh membership and
+//! authority credentials, listed for the member in `vtc/rooms/offers/list/0.4`'s
+//! `renewals` — on a schedule, and when a room archived with no access reopens, which is
+//! what restores a `suspended` member. [`collect_renewals`] stores each in the VTA's vault
+//! in place of the credential it renews, as `pnm rooms offers renew` does; a renewal
+//! already held is left alone, so collecting again changes nothing.
+//!
 //! **Nothing here is persisted.** The community is the record and the VTA the custody;
 //! a client that kept its own copy would be the one place the three disagree.
 
-use crate::specs::vtc::rooms::memberships::list::v0_1 as memberships;
+use crate::specs::vtc::rooms::memberships::list::v0_2 as memberships;
 use crate::specs::vtc::rooms::offers::{accept::v0_1 as accept, list::v0_4 as offers};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -39,11 +50,13 @@ use vta_sdk::error::VtaError;
 
 use crate::errors::OpenVTCError;
 
-/// The generated `vtc/rooms/memberships/list/0.1` types.
-pub use memberships::RoomMembership;
-/// The generated `vtc/rooms/offers/list/0.4` types. 0.4 also lists the renewals of
-/// admissions the member already holds (`renewals`), which this module does not read.
+/// The generated `vtc/rooms/memberships/list/0.2` types: the member's record with the
+/// room's own state (`roomState`, `roomAccess`, `purgeAt`) and the `suspended` state.
+pub use memberships::RoomMembershipV2 as RoomMembership;
+/// The generated `vtc/rooms/offers/list/0.4` types: the open offers, and the renewals of
+/// admissions the member already holds ([`collect_renewals`]).
 pub use offers::OfferV2 as Offer;
+pub use offers::Renewal;
 
 /// Every type this module sends or reads starts with this.
 const TYPE_PREFIX: &str = "https://trusttasks.org/spec/vtc/rooms/";
@@ -58,8 +71,8 @@ const MAX_PEER_TEXT: usize = 512;
 /// One request to the community, as the member.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
-    /// `vtc/rooms/memberships/list/0.1`: the community's record of every room it offered
-    /// the member, and where each stands.
+    /// `vtc/rooms/memberships/list/0.2`: the community's record of every room it offered
+    /// the member, where each admission stands, and where each room does.
     Memberships { cursor: Option<String> },
     /// `vtc/rooms/offers/list/0.4`: the open offers, with the credentials an acceptance
     /// stores with the key holder.
@@ -272,7 +285,8 @@ impl Refusal {
             }
             "unsupportedType" | "unsupportedVersion" => format!(
                 "This community does not serve that request{detail} — it may predate the \
-                 shared room record (vtc/rooms/memberships/list)."
+                 room record with room states (vtc/rooms/memberships/list/0.2): its VTC \
+                 needs updating."
             ),
             "permissionDenied" => format!("The community refused{detail}."),
             other => format!("The community refused ({other}){detail}."),
@@ -281,7 +295,7 @@ impl Refusal {
 }
 
 // ****************************************************************************
-// Standing — vtc/rooms/memberships/list/0.1 *One record, every surface*
+// Standing — vtc/rooms/memberships/list/0.2 *One record, every surface*
 // ****************************************************************************
 
 /// What every surface shows for one room, from the community's state and the key
@@ -300,7 +314,11 @@ pub enum Standing {
     NeedsReadmission,
     /// Admitted, but this client cannot read the key holder's custody (no VTA).
     Admitted,
-    /// Removed by an administrator.
+    /// Admitted, but the room is closed to every member — archived with no access, or
+    /// being removed — and the host refuses the member's credentials. Restored, by a
+    /// renewal, if the room reopens.
+    Suspended,
+    /// Removed by an administrator, an offer withdrawn, or the room removed.
     Removed,
 }
 
@@ -308,11 +326,12 @@ impl Standing {
     /// The table. `held` is `None` when the key holder could not be asked.
     #[must_use]
     pub fn of(room: &RoomMembership, held: Option<bool>) -> Self {
-        use memberships::MemberState as S;
+        use memberships::MemberStateV2 as S;
         let sealed = room.visibility != memberships::Visibility::Open;
         match (room.state, held) {
             (S::Offered, _) => Standing::Offered,
             (S::Removed, _) => Standing::Removed,
+            (S::Suspended, _) => Standing::Suspended,
             (S::Admitted, _) if !sealed => Standing::Joined,
             (S::Admitted, Some(true)) => Standing::Joined,
             (S::Admitted, None) => Standing::Admitted,
@@ -337,7 +356,84 @@ impl Standing {
             Standing::Unfinished => "accepted — finish joining",
             Standing::NeedsReadmission => "needs re-admission",
             Standing::Admitted => "admitted",
+            Standing::Suspended => "suspended",
             Standing::Removed => "removed",
+        }
+    }
+}
+
+/// Where the room itself stands, as its owner set it (`roomState`, `roomAccess`,
+/// `purgeAt`) — beside the member's own [`Standing`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomCondition {
+    /// Open as usual.
+    Active,
+    /// Archived read-only: members keep reading; nobody writes, nobody is admitted.
+    ReadOnly,
+    /// Archived with no access: every member's credentials are withdrawn until it reopens.
+    Closed,
+    /// Scheduled for removal (or being purged): its content is deleted at this time.
+    Going(Option<DateTime<Utc>>),
+    /// Removed: nothing of it is left at the host.
+    Removed,
+}
+
+impl RoomCondition {
+    #[must_use]
+    pub fn of(room: &RoomMembership) -> Self {
+        use memberships::{ArchiveAccess as A, RoomState as R};
+        match room.room_state {
+            R::Active => RoomCondition::Active,
+            R::Archived if room.room_access == Some(A::ReadOnly) => RoomCondition::ReadOnly,
+            R::Archived => RoomCondition::Closed,
+            R::RemovalScheduled | R::Purging => RoomCondition::Going(room.purge_at),
+            R::Removed => RoomCondition::Removed,
+        }
+    }
+
+    /// Whether the room admits anyone: only an active room does.
+    #[must_use]
+    pub fn admits(self) -> bool {
+        self == RoomCondition::Active
+    }
+
+    /// A short word for the room's state, or `None` while it is active.
+    #[must_use]
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            RoomCondition::Active => None,
+            RoomCondition::ReadOnly => Some("read-only"),
+            RoomCondition::Closed => Some("closed for now"),
+            RoomCondition::Going(_) => Some("being removed"),
+            RoomCondition::Removed => Some("room removed"),
+        }
+    }
+
+    /// What it means for the member, in a sentence.
+    #[must_use]
+    pub fn explain(self) -> Option<String> {
+        match self {
+            RoomCondition::Active => None,
+            RoomCondition::ReadOnly => Some(
+                "Archived read-only: you can still read it; nothing can be written, and \
+                 nobody new is admitted."
+                    .into(),
+            ),
+            RoomCondition::Closed => Some(
+                "Archived and closed: your access is withdrawn for now and is restored if the \
+                 community reopens it. Nothing you already read is affected."
+                    .into(),
+            ),
+            RoomCondition::Going(Some(at)) => Some(format!(
+                "Being removed: its content is deleted on {}. Your access is withdrawn.",
+                at.format("%Y-%m-%d %H:%M UTC")
+            )),
+            RoomCondition::Going(None) => Some(
+                "Being removed: its content is being deleted. Your access is withdrawn.".into(),
+            ),
+            RoomCondition::Removed => {
+                Some("Removed by the community: nothing of it is left to open.".into())
+            }
         }
     }
 }
@@ -432,6 +528,108 @@ pub async fn prepare_acceptance(
     }
 }
 
+/// Store every renewal in `renewals` that the VTA does not hold yet, each credential in
+/// place of the one it renews (`vtc/rooms/offers/list/0.4` `renewals`, as
+/// `pnm rooms offers renew` stores one). Answers the rooms renewed now. A renewal whose
+/// credentials the vault already holds is skipped, so collecting again changes nothing.
+///
+/// # Errors
+///
+/// A credential that is not JSON, a vault that refused or did not answer, or a vault that
+/// holds two credentials of one kind for a room — it acts with neither, and nor can this
+/// client choose; the error names the room.
+pub async fn collect_renewals(
+    vta: &VtaClient,
+    renewals: &[Renewal],
+    member: &str,
+) -> Result<Vec<String>, String> {
+    let mut renewed = Vec::new();
+    for renewal in renewals {
+        let room_id = renewal.room_id.as_str();
+        let mut stored = false;
+        for (what, type_tag, credential) in [
+            (
+                "membership",
+                "MembershipCredential",
+                renewal.credentials.membership.as_str(),
+            ),
+            (
+                "authority",
+                "AuthorityCredential",
+                renewal.credentials.authority.as_str(),
+            ),
+        ] {
+            let body: Value = serde_json::from_str(credential)
+                .map_err(|e| format!("the renewal's {what} credential is not JSON: {e}"))?;
+            let held = held_room_credential(vta, room_id, member, type_tag).await?;
+            if held.as_ref().is_some_and(|(_, current)| *current == body) {
+                continue;
+            }
+            vta.cred_vault_receive(body, held.as_ref().map(|(id, _)| id.as_str()))
+                .await
+                .map_err(|e| {
+                    format!(
+                        "your VTA's credential vault refused the renewed {what} credential for \
+                         {room_id}: {e}"
+                    )
+                })?;
+            stored = true;
+        }
+        if stored {
+            renewed.push(room_id.to_string());
+        }
+    }
+    Ok(renewed)
+}
+
+/// The vault handle and body of the `type_tag` credential `room_id` issued `member`, as the
+/// VTA holds it: `None` when it holds none, and an error when it holds more than one.
+async fn held_room_credential(
+    vta: &VtaClient,
+    room_id: &str,
+    member: &str,
+    type_tag: &str,
+) -> Result<Option<(String, Value)>, String> {
+    let found = vta
+        .cred_vault_query(serde_json::json!({ "type": type_tag, "issuerDid": room_id }))
+        .await
+        .map_err(|e| format!("your VTA's credential vault did not answer a query: {e}"))?;
+    let mut mine = Vec::new();
+    for descriptor in found["credentials"].as_array().cloned().unwrap_or_default() {
+        let Some(id) = descriptor["id"].as_str() else {
+            continue;
+        };
+        let got = vta
+            .cred_vault_get(id)
+            .await
+            .map_err(|e| format!("your VTA's credential vault did not return {id}: {e}"))?;
+        // A room's credential is a Data Integrity credential: its body is a JSON object.
+        let credential = serde_json::to_value(&got)
+            .ok()
+            .and_then(|v| v.get("credential").cloned())
+            .filter(Value::is_object);
+        let Some(credential) = credential else {
+            continue;
+        };
+        let subject = credential
+            .get("credentialSubject")
+            .and_then(|s| s.get("id"))
+            .and_then(Value::as_str);
+        if subject == Some(member) {
+            mine.push((id.to_string(), credential));
+        }
+    }
+    match mine.len() {
+        0 => Ok(None),
+        1 => Ok(mine.pop()),
+        n => Err(format!(
+            "your VTA holds {n} {type_tag}s that {room_id} issued you, and acts on the room \
+             with none of them until one is left: remove the older one from its credential \
+             vault"
+        )),
+    }
+}
+
 /// How a join from a Welcome ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Joined {
@@ -486,6 +684,7 @@ mod tests {
             "validUntil": "2027-10-01T00:00:00Z",
             "state": state,
             "offeredAt": "2026-10-14T10:00:00Z",
+            "roomState": "active",
         });
         if repeat {
             v["repeatAcceptUntil"] = json!("2026-10-24T10:00:00Z");
@@ -493,7 +692,7 @@ mod tests {
         serde_json::from_value(v).unwrap()
     }
 
-    /// `vtc/rooms/memberships/list/0.1`'s table, as `pnm rooms memberships` reads it too.
+    /// `vtc/rooms/memberships/list/0.2`'s table, as `pnm rooms memberships` reads it too.
     #[test]
     fn standing_follows_the_one_record() {
         assert_eq!(
@@ -524,8 +723,51 @@ mod tests {
             Standing::of(&room("removed", "private", false), Some(true)),
             Standing::Removed
         );
+        assert_eq!(
+            Standing::of(&room("suspended", "private", false), Some(true)),
+            Standing::Suspended
+        );
         assert!(Standing::Unfinished.acceptable());
         assert!(!Standing::Joined.acceptable());
+        assert!(!Standing::Suspended.acceptable());
+    }
+
+    fn room_in(state: &str, room_state: &str, access: Option<&str>) -> RoomMembership {
+        let mut v = json!({
+            "roomId": "did:webvh:example.com:rooms:board", "host": "did:example:community",
+            "label": "Board pack", "visibility": "open", "actions": ["read"],
+            "validUntil": "2027-10-01T00:00:00Z", "state": state,
+            "offeredAt": "2026-10-14T10:00:00Z", "roomState": room_state,
+        });
+        if let Some(a) = access {
+            v["roomAccess"] = json!(a);
+        }
+        if room_state == "removalScheduled" {
+            v["purgeAt"] = json!("2026-12-02T10:00:00Z");
+        }
+        if state == "suspended" {
+            v["suspendedAt"] = json!("2026-11-02T10:00:00Z");
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// The room's own state, as the community's record says it.
+    #[test]
+    fn the_room_condition_follows_its_state() {
+        let active = RoomCondition::of(&room_in("admitted", "active", None));
+        assert_eq!(active, RoomCondition::Active);
+        assert!(active.admits() && active.label().is_none());
+        let ro = RoomCondition::of(&room_in("admitted", "archived", Some("readOnly")));
+        assert_eq!(ro, RoomCondition::ReadOnly);
+        assert!(!ro.admits());
+        let closed = RoomCondition::of(&room_in("suspended", "archived", Some("noAccess")));
+        assert_eq!(closed, RoomCondition::Closed);
+        let going = RoomCondition::of(&room_in("suspended", "removalScheduled", Some("noAccess")));
+        assert!(matches!(going, RoomCondition::Going(Some(_))));
+        assert!(going.explain().unwrap().contains("2026-12-02"));
+        assert_eq!(going.label(), Some("being removed"));
+        let gone = RoomCondition::of(&room_in("removed", "removed", None));
+        assert_eq!(gone, RoomCondition::Removed);
     }
 
     #[test]
@@ -538,7 +780,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             doc.type_uri.to_string(),
-            "https://trusttasks.org/spec/vtc/rooms/memberships/list/0.1"
+            "https://trusttasks.org/spec/vtc/rooms/memberships/list/0.2"
         );
         let accept = build(
             &Request::Accept {
@@ -567,7 +809,7 @@ mod tests {
     fn replies_are_classified_by_thread() {
         let doc: TrustTask<Value> = serde_json::from_value(json!({
             "id": "urn:uuid:00000000-0000-4000-8000-000000000002",
-            "type": "https://trusttasks.org/spec/vtc/rooms/memberships/list/0.1#response",
+            "type": "https://trusttasks.org/spec/vtc/rooms/memberships/list/0.2#response",
             "issuer": "did:key:zVtc",
             "recipient": "did:key:zAlice",
             "issuedAt": "2026-10-17T10:00:01Z",
