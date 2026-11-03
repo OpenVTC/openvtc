@@ -65,12 +65,12 @@ use crate::state_handler::main_page::content::{
     ApplicationRow, AttestForm, CardPreview, DECLINE_MESSAGE_MAX, DECLINE_REASONS,
     DIRECTORY_FIELDS, DIRECTORY_LABELS, DIRECTORY_METHODS, DeskRow, DeskStage, DeskView,
     DirectoryCommunity, DirectoryView, EVENT_FIELDS, EVENT_LABELS, EventForm, EventOffer,
-    FaceChoice, HiddenVettingRow, IssuedRow, JourneySteps, JourneyTarget, JourneyView, LineTone,
-    ListedVetterRow, NewFaceForm, NewFaceStep, PROFILE_FIELDS, PROFILE_LABELS, PendingTicket,
-    PoolRow, RequestRow, TicketRow, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_TICKET_USES,
-    VETTING_WITHDRAWAL_REASONS, VetterProfileForm, VetterStandingRow, VettingMembership,
-    VettingMode, VettingPersona, VettingState, VettingTab, decline_reason_words, method_label,
-    row_of,
+    FaceChoice, HiddenKeyLine, HiddenVettingRow, IssuedRow, JourneySteps, JourneyTarget,
+    JourneyView, LineTone, ListedVetterRow, NewFaceForm, NewFaceStep, PROFILE_FIELDS,
+    PROFILE_LABELS, PendingTicket, PoolRow, RequestRow, TicketRow, VETTING_METHODS,
+    VETTING_RELATIONSHIPS, VETTING_TICKET_USES, VETTING_WITHDRAWAL_REASONS, VetterProfileForm,
+    VetterStandingRow, VettingMembership, VettingMode, VettingPersona, VettingState, VettingTab,
+    decline_reason_words, method_label, row_of,
 };
 use crate::state_handler::main_page::menu::MainMenu;
 use crate::state_handler::main_page::{sanitize_display, shorten_did};
@@ -157,6 +157,9 @@ pub(crate) fn outlook_words(o: &HiddenOutlook, now: DateTime<Utc>) -> String {
         // full story is told once — where it is acted on ([`outlook_detail`]).
         return if o.enrolment_lost {
             "not enrolled — the community's answer to your enrolment was lost (h for details)"
+                .to_string()
+        } else if o.key_held {
+            "not enrolled — the community knows you by another hidden-vetting key (h for details)"
                 .to_string()
         } else if o.asking {
             "not enrolled yet — asking the community now".to_string()
@@ -255,7 +258,7 @@ pub(crate) fn tokens_obtainable_now(
     ) else {
         return true;
     };
-    if o.rekeyed || o.enrolment_lost {
+    if o.rekeyed || o.enrolment_lost || o.key_held {
         return false;
     }
     !o.enrolled
@@ -297,6 +300,11 @@ pub(crate) fn get_tokens_words(
     if !o.enrolled {
         if o.enrolment_lost {
             return lost_enrolment_words(name, o.owed.as_deref(), now);
+        }
+        if o.key_held
+            && let Some(words) = key_words(held, name)
+        {
+            return words;
         }
         if o.asking {
             return "your enrolment is on its way; your first tokens are drawn the moment it is \
@@ -362,6 +370,19 @@ pub(crate) fn get_tokens_words(
             tokens(o.usable)
         ),
     }
+}
+
+/// Where getting back to the hidden-vetting key `name` bound us to stands, in one sentence —
+/// `None` when nothing is wrong with the key.
+pub(crate) fn key_words(held: &HiddenVetterState, name: &str) -> Option<String> {
+    let check = held.key.as_ref()?;
+    Some(
+        openvtc_core::vetting::binding::key_lines(check, name, |s| sanitize_display(s, 200))
+            .into_iter()
+            .map(|l| format!("{} {}", l.label.to_lowercase(), l.text))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
 }
 
 /// `text` as a clause to continue a sentence: without the full stop it may end with, so a
@@ -500,6 +521,7 @@ fn hidden_row(
 ) -> HiddenVettingRow {
     use openvtc_core::vetting::hidden;
     let when = |t: DateTime<Utc>| t.format("%Y-%m-%d %H:%M UTC").to_string();
+    let community_name = community.clone();
     let events = held.event_draws(now.date_naive());
     let mut enrolled: Vec<(String, Option<String>)> = held
         .engine
@@ -605,6 +627,23 @@ fn hidden_row(
         }),
         waiting_until: held.retry_at.filter(|t| *t > now).map(when),
         rekeyed: held.rekeyed_at.map(when),
+        key: held
+            .key
+            .as_ref()
+            .map(|check| {
+                openvtc_core::vetting::binding::key_lines(check, &community_name, |s| {
+                    sanitize_display(s, 200)
+                })
+                .into_iter()
+                .map(|l| HiddenKeyLine {
+                    label: l.label,
+                    text: l.text,
+                    act: l.act,
+                })
+                .collect()
+            })
+            .unwrap_or_default(),
+        enrolment_held: held.enrolment_held(),
     }
 }
 
@@ -1586,6 +1625,38 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 );
             } else {
                 page(ctx).mode = VettingMode::HiddenVetting { index: 0 };
+            }
+        }
+        VettingAction::CheckHiddenKey => {
+            let now = Utc::now();
+            let index = match page(ctx).mode {
+                VettingMode::HiddenVetting { index } => index,
+                _ => 0,
+            };
+            let Some(held) = ctx.config.private.vetting.hidden_vetter.get_mut(index) else {
+                return;
+            };
+            let community = held.community.clone();
+            let started = held.recheck_key(now);
+            let name = community_display(ctx.config, &community);
+            if started {
+                ctx.save.mark_dirty();
+                status(
+                    ctx,
+                    format!(
+                        "Asking {name} which hidden-vetting key it holds for you, to restore it \
+                         at your VTA…"
+                    ),
+                );
+                refresh_vetter_side(ctx).await;
+            } else {
+                status(
+                    ctx,
+                    format!(
+                        "Nothing to check at {name}: your hidden-vetting key is not in question, \
+                         or a check is already running."
+                    ),
+                );
             }
         }
         VettingAction::DrawNow => {
@@ -4128,6 +4199,17 @@ pub(crate) fn hidden_vetting_tick(
         persona: state.persona,
         context_id: context_id.clone(),
     });
+    // The community bound us to a key the engine does not hold: the VTA is asked to restore
+    // it, once ([`openvtc_core::vetting::binding`]). Enrolment is held in the plan until then.
+    if let Some(bound_id) = state.recovery_due() {
+        work.push(PcsWork::Recover {
+            community: community.to_string(),
+            persona: state.persona,
+            context_id: context_id.clone(),
+            did: did.clone(),
+            bound_id: bound_id.to_string(),
+        });
+    }
     for owed in plan.owed {
         if enrolling(&owed) {
             continue;
@@ -4200,6 +4282,9 @@ pub(crate) async fn refresh_vetter_side(ctx: &mut ActionCtx<'_>) {
     // longer counts would only collect refusals.
     communities
         .retain(|c| ctx.config.private.vetting.vetter_mode(c).mode() != Some(VetterMode::Named));
+    // Where the community refused us as another key, ask it which key it bound us to — or, while
+    // an admin's reset is awaited, how that reset stands.
+    ask_bindings(ctx).await;
     let mut work = Vec::new();
     for community in communities {
         hidden_vetting_tick(ctx, &community, &mut work);
@@ -4208,6 +4293,79 @@ pub(crate) async fn refresh_vetter_side(ctx: &mut ActionCtx<'_>) {
     // and what is owed is planned afresh then.
     if !work.is_empty() && !start_pcs_work(ctx, work) {
         ctx.config.private.vetting.vetter_refresh_due = true;
+    }
+}
+
+/// Ask each community that refused our enrolment as another key which key it bound us to
+/// (`vtc/vetting/vetters/pcs-binding/show`), where the engine's key check wants it read
+/// ([`HiddenVetterState::binding_read_due`]): once to start the check, then at most every
+/// [`BINDING_REASK`](openvtc_core::vetting::binding::BINDING_REASK) while a reset is awaited, and
+/// never while a question is open or the community's silence is being backed off (R1.4).
+async fn ask_bindings(ctx: &mut ActionCtx<'_>) {
+    let now = Utc::now();
+    // A record kept before this client could recover a key: its last word from the community
+    // is `identifierRebound` and no check is running. Start one rather than wait for the next
+    // enrolment to collect the same refusal.
+    for held in &mut ctx.config.private.vetting.hidden_vetter {
+        if held.key.is_none() && held.recheck_key(now) {
+            ctx.save.mark_dirty();
+        }
+    }
+    let due: Vec<(String, PersonaId)> = {
+        let book = &ctx.config.private.vetting;
+        book.hidden_vetter
+            .iter()
+            .filter(|h| h.binding_read_due(now))
+            .filter(|h| h.retry_at.is_none_or(|t| t <= now))
+            .filter(|h| {
+                book.waiting_on(&h.community, QueryKind::PcsBinding)
+                    .is_none()
+            })
+            .map(|h| (h.community.clone(), h.persona))
+            .collect()
+    };
+    for (community, persona) in due {
+        let Some(did) = persona_did(ctx.config, persona) else {
+            continue;
+        };
+        let document = match wire::pcs_binding_show_request(&did, &community) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(community = %community, error = %e, "could not build the binding question");
+                continue;
+            }
+        };
+        let document_id = document.id.clone();
+        if let Some(held) = ctx
+            .config
+            .private
+            .vetting
+            .hidden_vetter_mut(&community, persona)
+        {
+            held.binding_asked(now);
+        }
+        ctx.config.private.vetting.ask(CommunityQuery {
+            document_id: document_id.clone(),
+            community: community.clone(),
+            persona,
+            kind: QueryKind::PcsBinding,
+            sent_at: now,
+        });
+        ctx.save.mark_dirty();
+        let sent = Sent::Query {
+            document_id,
+            community: community.clone(),
+            kind: QueryKind::PcsBinding,
+        };
+        if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
+            status(
+                ctx,
+                format!(
+                    "Could not ask {} which hidden-vetting key it holds for you: {e}",
+                    community_display(ctx.config, &community)
+                ),
+            );
+        }
     }
 }
 
@@ -4695,6 +4853,12 @@ async fn apply_pcs_result(
                 );
             }
         }
+        (
+            PcsWork::Recover {
+                community, persona, ..
+            },
+            result,
+        ) => apply_recovery(ctx, &community, persona, result, now),
         (PcsWork::Inbound { item, .. }, result) => apply_pcs_inbound(ctx, item, result, now),
         (PcsWork::Create { application, .. }, Ok(PcsDone::Created(view))) => {
             if let Some(app) = ctx
@@ -4753,6 +4917,74 @@ async fn apply_pcs_result(
                 "a hidden-vetting answer from the VTA that fits nothing asked"
             );
         }
+    }
+}
+
+/// Take the VTA's answer to restoring the key the community bound us to: enrol again on a key
+/// restored or already held, or say what is in the way — each refusal in its own words (R6.4).
+fn apply_recovery(
+    ctx: &mut ActionCtx<'_>,
+    community: &str,
+    persona: PersonaId,
+    result: Result<PcsDone, PcsError>,
+    now: DateTime<Utc>,
+) {
+    use openvtc_core::vetting::binding::{KeyPhase, RecoverRefusal, key_lines};
+    let name = community_display(ctx.config, community);
+    let book = &mut ctx.config.private.vetting;
+    let Some(held) = book.hidden_vetter_mut(community, persona) else {
+        return;
+    };
+    match result {
+        Ok(PcsDone::Recovered(answer)) => {
+            tracing::info!(community = %community, recovered = answer.recovered, "the VTA holds the hidden-vetting key the community bound us to");
+            held.on_recovered(answer.recovered, answer.vetter, now);
+        }
+        // Not reached: the identifier is still held, and the next pass asks again (R1.4: the
+        // VTA's own backoff paces it).
+        Err(PcsError::Unreachable(e)) => {
+            tracing::warn!(community = %community, error = %e, "could not reach the VTA to restore a hidden-vetting key");
+            return;
+        }
+        Err(PcsError::Refused { code, message }) => {
+            tracing::warn!(community = %community, %code, "the VTA could not restore the hidden-vetting key the community bound us to");
+            held.on_recover_refused(RecoverRefusal::from_code(&code, &message), now);
+        }
+        Err(PcsError::Unreadable(e)) => {
+            // A contract mismatch, not a refusal (R6.4): said as such, and asked again by hand.
+            held.on_recover_refused(
+                RecoverRefusal::Refused {
+                    code: "unreadable".to_string(),
+                    message: format!(
+                        "this client and your VTA disagree about vta/pcs/vetter/recover — update                          one or the other ({e})"
+                    ),
+                },
+                now,
+            );
+        }
+        Ok(other) => {
+            tracing::warn!(?other, "unexpected answer to vetter/recover");
+            return;
+        }
+    }
+    // Enrolling again — on the key restored, or the current one where a reset is open: now,
+    // not at the next pass.
+    let retrying = matches!(
+        held.key.as_ref().map(|k| &k.phase),
+        Some(KeyPhase::Retrying { .. })
+    );
+    let words = held.key.as_ref().map(|check| {
+        key_lines(check, &name, |s| sanitize_display(s, 200))
+            .into_iter()
+            .map(|l| format!("{}: {}", l.label, l.text))
+            .collect::<Vec<_>>()
+            .join(". ")
+    });
+    if retrying {
+        book.vetter_refresh_due = true;
+    }
+    if let Some(words) = words {
+        persist(ctx, format!("Hidden vetting at {name} — {words}."));
     }
 }
 
@@ -4905,6 +5137,7 @@ fn apply_pcs_inbound(
             match result {
                 Ok(PcsDone::Enrolled(view)) => {
                     held.take_engine(view);
+                    held.key_settled();
                     held.enrolled_at.insert(period, now);
                     held.enrol_asked_at = None;
                     held.last_refusal = None;
@@ -6594,15 +6827,18 @@ pub(crate) fn expire_queries(state: &mut State, config: &mut Config, now: chrono
         // Enrolment and the drip are asked again on their own, backed off (R1.4), so the line
         // says when rather than sending the vetter to try something they never started. An
         // answer that arrives late is still taken.
-        let retry = matches!(query.kind, QueryKind::PcsRoot | QueryKind::PcsTokens)
-            .then(|| {
-                config
-                    .private
-                    .vetting
-                    .hidden_vetter_mut(&query.community, query.persona)
-                    .map(|held| held.unanswered_at(now))
-            })
-            .flatten();
+        let retry = matches!(
+            query.kind,
+            QueryKind::PcsRoot | QueryKind::PcsTokens | QueryKind::PcsBinding
+        )
+        .then(|| {
+            config
+                .private
+                .vetting
+                .hidden_vetter_mut(&query.community, query.persona)
+                .map(|held| held.unanswered_at(now))
+        })
+        .flatten();
         let words = match retry {
             Some(at) => format!(
                 "No answer from {name} about {} within {} seconds — its service may be offline \
@@ -7315,6 +7551,74 @@ mod tests {
             read + chrono::Duration::days(1),
         );
         assert_eq!(next_day.params_read, "read 2026-10-05 21:16 UTC");
+    }
+
+    /// A vetter the community knows by another hidden-vetting key is told where getting it back
+    /// stands — on the hidden view, in the desk's token line and when asking for tokens — and
+    /// enrolment waits on it until the key is restored or a reset opens.
+    #[test]
+    fn a_key_bound_elsewhere_is_said_until_a_reset_opens() {
+        use openvtc_core::vetting::binding::{Binding, RecoverRefusal, ResetState};
+        let community = "did:web:first-vtc.example";
+        let (mut book, persona) = hidden_vetter_book(0, false);
+        let now = Utc::now();
+        let bound = |reset: Option<ResetState>| Binding {
+            id: Some("zOld".into()),
+            reset,
+        };
+        let held = &mut book.hidden_vetter[0];
+        held.on_rebound(now);
+        held.on_binding_shown(&bound(None), now);
+        let row = hidden_row(&book.hidden_vetter[0], "first-vtc".into(), None, now);
+        assert!(row.enrolment_held);
+        assert!(row.key[0].text.contains("asking your VTA to restore it"));
+        assert!(!row.key[0].act, "nothing for the vetter to do yet");
+
+        book.hidden_vetter[0].on_recover_refused(RecoverRefusal::NotFound, now);
+        let row = hidden_row(&book.hidden_vetter[0], "first-vtc".into(), None, now);
+        assert_eq!(row.key.len(), 1);
+        assert!(row.key[0].act);
+        assert!(
+            row.key[0]
+                .text
+                .contains("ask an admin of first-vtc to reset your hidden-vetting key"),
+            "{}",
+            row.key[0].text
+        );
+        let words = get_tokens_words(&book, community, persona, "first-vtc", now);
+        assert!(words.contains("reset your hidden-vetting key"), "{words}");
+        assert!(!tokens_obtainable_now(&book, community, persona, now));
+        let outlook = book.hidden_outlook(community, persona, now).unwrap();
+        assert!(outlook_words(&outlook, now).contains("another hidden-vetting key"));
+
+        // An admin reset it; last month's label is still live.
+        let waiting = ResetState {
+            reset_at: now,
+            waiting_on: vec!["vetter/2026-10".into()],
+            open: false,
+        };
+        book.hidden_vetter[0].on_binding_shown(&bound(Some(waiting)), now);
+        let row = hidden_row(&book.hidden_vetter[0], "first-vtc".into(), None, now);
+        assert!(row.enrolment_held);
+        assert_eq!(row.key[1].label, "Reset");
+        assert!(
+            row.key[1]
+                .text
+                .contains("waiting for vetter/2026-10 to retire")
+        );
+
+        // The label retired: enrolment goes ahead with the current key.
+        let open = ResetState {
+            reset_at: now,
+            waiting_on: Vec::new(),
+            open: true,
+        };
+        book.hidden_vetter[0].on_binding_shown(&bound(Some(open)), now);
+        let row = hidden_row(&book.hidden_vetter[0], "first-vtc".into(), None, now);
+        assert!(!row.enrolment_held);
+        assert_eq!(row.key[0].label, "Reset");
+        assert!(row.key[0].text.starts_with("open — enrolling now"));
+        assert!(tokens_obtainable_now(&book, community, persona, now));
     }
 
     fn pending_for(persona: PersonaId, asked_at: DateTime<Utc>) -> PendingTicket {

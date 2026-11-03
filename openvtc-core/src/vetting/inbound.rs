@@ -567,6 +567,7 @@ pub fn is_hidden_vetting_answer_type(typ: &str) -> bool {
         wire::pcs::TOKENS_TYPE,
         wire::pcs::EVENT_MODE_TYPE,
         wire::pcs::CHALLENGE_TYPE,
+        wire::PCS_BINDING_SHOW_TYPE,
     ]
     .iter()
     .any(|t| typ.strip_suffix("#response") == Some(*t))
@@ -625,6 +626,9 @@ pub async fn handle(
         }
         t if t == wire::pcs::response_of(wire::pcs::CHALLENGE_TYPE) => {
             challenge_issued(book, message, sender)
+        }
+        t if t == wire::pcs::response_of(wire::PCS_BINDING_SHOW_TYPE) => {
+            binding_shown(book, ctx, message, sender)
         }
         t if t == wire::pcs::response_of(wire::WALLET_SESSION_START_TYPE) => {
             wallet_session_started(book, message, sender)
@@ -1403,6 +1407,48 @@ fn challenge_issued(book: &mut VettingBook, message: &Message, sender: &str) -> 
     }
 }
 
+/// `vtc/vetting/vetters/pcs-binding/show/0.1#response` — which hidden-vetting key the community
+/// bound us to, and any admin reset of it.
+///
+/// Taken by the engine's key check ([`super::binding`]): it decides whether the VTA is asked to
+/// restore the key, enrolment is asked again, or a reset is waited on. Whatever it decided, the
+/// schedule runs again now rather than at its next pass, which can be an hour away.
+fn binding_shown(
+    book: &mut VettingBook,
+    ctx: &Context<'_>,
+    message: &Message,
+    sender: &str,
+) -> Handled {
+    use super::binding::{Binding, show};
+    let Some((query, body)) =
+        answer_to::<show::Response>(book, message, sender, QueryKind::PcsBinding)
+    else {
+        return Handled::default();
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(unreadable) => {
+            return Handled {
+                answer: Some(unreadable),
+                ..Handled::default()
+            };
+        }
+    };
+    let Some(state) = book.hidden_vetter_mut(sender, query.persona) else {
+        return Handled::default();
+    };
+    state.answered();
+    let step = state.on_binding_shown(&Binding::from(body), ctx.now);
+    info!(community = %sender, ?step, "the community said which hidden-vetting key it holds for us");
+    if step.is_some() {
+        book.vetter_refresh_due = true;
+    }
+    Handled {
+        changed: true,
+        ..Handled::default()
+    }
+}
+
 /// `vtc/join-requests/wallet-session/start/0.1#response` — what the wallet is
 /// to scan. Nothing is kept: the join waiting on it holds the session.
 fn wallet_session_started(book: &mut VettingBook, message: &Message, sender: &str) -> Handled {
@@ -1689,7 +1735,8 @@ fn refusal_of(
             QueryKind::PcsRoot
             | QueryKind::PcsTokens
             | QueryKind::PcsEventMode
-            | QueryKind::PcsChallenge => {
+            | QueryKind::PcsChallenge
+            | QueryKind::PcsBinding => {
                 hidden_refused(book, ctx, &query, sender, &code, detail.as_deref())
             }
             // Its mode could not be read now; the last reading stands, marked as such.
@@ -1786,6 +1833,27 @@ fn hidden_refused(
     };
     // A refusal is an answer: the community is there.
     state.answered();
+    // Enrolled under another key. Revoking and re-granting the vetter role does not change
+    // which key the community binds us to, so asking again only collects this refusal: the
+    // community is asked which key it bound, at once, and the VTA to restore it
+    // ([`super::binding`]). Enrolment waits until then.
+    if query.kind == QueryKind::PcsRoot && code.ends_with(":identifierRebound") {
+        state.on_rebound(ctx.now);
+        state.last_refusal = Some(super::book::HiddenRefusal {
+            what: query.kind.describe().to_string(),
+            code: code.to_string(),
+            at: ctx.now,
+        });
+        book.vetter_refresh_due = true;
+        return (
+            true,
+            Some(Notice::HiddenVettingRefused {
+                community: sender.to_string(),
+                what: query.kind.describe(),
+                code: code.to_string(),
+            }),
+        );
+    }
     // Enrolled already, under the label we asked for, and this client holds no credential
     // under it: the answer to an earlier request was lost. Asking again only collects this
     // refusal, so the schedule stops until the label moves on (an answer still on its way is
@@ -2065,6 +2133,7 @@ mod claim_tests {
             pcs::TOKENS_TYPE,
             pcs::EVENT_MODE_TYPE,
             pcs::CHALLENGE_TYPE,
+            crate::vetting::wire::PCS_BINDING_SHOW_TYPE,
         ] {
             let answer = pcs::response_of(task);
             assert!(may_claim(&answer), "{answer} must reach the vetting router");

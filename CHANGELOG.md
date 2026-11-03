@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Get back to the hidden-vetting key a community bound you to.** A vetter whose VTA derived
+  a new PCS key (its vetter engine record was replaced) was refused enrolment for good with
+  `identifierRebound`, told to "vet from the install that enrolled first" — wrong now the key
+  lives in the VTA, and revoking and re-granting the vetter role did not help, because the
+  community binds a member to one key. Now that refusal starts a check: enrolment is held, the
+  community is asked which key it bound (`vtc/vetting/vetters/pcs-binding/show/0.1`), and the
+  VTA is asked to restore it (`vta/pcs/vetter/recover/0.1`); restored (or already held),
+  enrolment is asked again once. If the VTA cannot find the key, the Hidden vetting view says
+  to ask an admin of the community to reset your hidden-vetting key, then follows the reset —
+  "Reset: waiting for vetter/2026-10 to retire" — and enrols with your current key once it
+  opens. A key held in another of your contexts, an engine bound to another member DID, and an
+  engine that already holds the community's credentials are each said in their own words.
+  **r** on the Hidden vetting view checks again from the top. Needs a community serving
+  `pcs-binding/show/0.1` and a VTA serving `vta/pcs/vetter/recover/0.1`.
 - **Vote in a community's elections.** Press `e` on an active community to see its
   elections — voting open first, then those issuing tickets, upcoming, and closed — and
   whether you hold a ticket. Opening one shows what you are told before taking part: the

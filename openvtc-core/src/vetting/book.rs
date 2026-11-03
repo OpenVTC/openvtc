@@ -398,6 +398,15 @@ pub struct HiddenVetterState {
     /// the schedule again, so the draws go out on what it says. Memory only.
     #[serde(skip)]
     pub awaiting_read: bool,
+    /// The community refused our enrolment as a different key (`identifierRebound`), and where
+    /// getting back to the key it bound stands ([`super::binding`]). Enrolment waits on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<super::binding::KeyCheck>,
+    /// The identifier the community bound us to, while the VTA is asked to restore its key.
+    /// Memory only: the specification asks a client to drop it once the engine matches, and a
+    /// restart that forgot it asks the community again.
+    #[serde(skip)]
+    pub bound_id: Option<String>,
 }
 
 /// How long an enrolment request the VTA still holds is waited on before it is asked for again
@@ -511,6 +520,9 @@ pub struct HiddenOutlook {
     pub events_offered: bool,
     /// The community's last refusal, until something succeeds.
     pub last_refusal: Option<HiddenRefusal>,
+    /// Enrolment waits while the key the community bound us to is restored or reset
+    /// ([`HiddenVetterState::enrolment_held`]).
+    pub key_held: bool,
 }
 
 /// One served tick of the drip.
@@ -596,6 +608,8 @@ impl HiddenVetterState {
             params_read_at: None,
             over_quota: None,
             awaiting_read: false,
+            key: None,
+            bound_id: None,
         }
     }
 
@@ -805,6 +819,10 @@ impl HiddenVetterState {
         while plan.owed.len() < MAX_DRAWS_PER_PASS {
             match due(&self.params, Some(&self.engine), &ticks, &events, now) {
                 Due::Nothing => break,
+                // The community knows us by another key: an enrolment now would only be refused
+                // again (`identifierRebound`) until the key is restored or reset
+                // ([`super::binding`]).
+                Due::Enrol { .. } if self.enrolment_held() => break,
                 // Enrolment blocks every draw behind it, so it is the whole plan.
                 // Under a label whose answer we lost, ask once more — a community that
                 // re-issues to the same identifier answers it — and then stop: one that
@@ -1578,6 +1596,7 @@ impl VettingBook {
             rekeyed: held.rekeyed_at.is_some(),
             events_offered: !held.params.events.is_empty(),
             last_refusal: held.last_refusal.clone(),
+            key_held: held.enrolment_held(),
         })
     }
 

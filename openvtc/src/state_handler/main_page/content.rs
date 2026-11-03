@@ -2370,6 +2370,22 @@ pub struct HiddenVettingRow {
     pub waiting_until: Option<String>,
     /// The community publishes keys other than ours; the drip has stopped.
     pub rekeyed: Option<String>,
+    /// The community refused us as another hidden-vetting key: where getting back to the one it
+    /// bound — restored at the VTA, or reset by an admin — stands. Empty while nothing is wrong.
+    pub key: Vec<HiddenKeyLine>,
+    /// Enrolment waits on [`Self::key`]: asking now would only be refused again.
+    pub enrolment_held: bool,
+}
+
+/// One line of the hidden-vetting view about the vetter's key ("Key", "Reset").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HiddenKeyLine {
+    /// "Key" or "Reset".
+    pub label: &'static str,
+    /// What it says.
+    pub text: String,
+    /// The vetter has to do something about it.
+    pub act: bool,
 }
 
 /// One (event, tier) a community we vet for is offering.

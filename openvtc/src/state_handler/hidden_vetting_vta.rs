@@ -55,6 +55,16 @@ pub(crate) enum PcsWork {
         join_did: String,
         params: HiddenParams,
     },
+    /// Restore the key the community bound this vetter to (`vta/pcs/vetter/recover`).
+    Recover {
+        community: String,
+        persona: PersonaId,
+        context_id: String,
+        /// The persona's DID: the member DID the engine is bound to.
+        did: String,
+        /// The identifier the community bound the member to. Carried in memory only.
+        bound_id: String,
+    },
     /// Attest for a request, after the human check (`vta/pcs/attest`).
     Attest {
         job: HiddenAttestJob,
@@ -87,6 +97,8 @@ pub(crate) enum PcsDone {
     Created(ApplicationView),
     /// `Attest`: the `vetting/attestation/0.1` payload to send the applicant.
     Attested(serde_json::Value),
+    /// `Recover`: whether the key was replaced, and the engine after.
+    Recovered(pcs_vta::Recovered),
 }
 
 /// What one job did.
@@ -226,6 +238,15 @@ impl PcsWork {
             } => pcs_vta::create_application(client, context_id, community, join_did, params)
                 .await
                 .map(PcsDone::Created),
+            PcsWork::Recover {
+                community,
+                context_id,
+                did,
+                bound_id,
+                ..
+            } => pcs_vta::vetter_recover(client, context_id, community, did, bound_id)
+                .await
+                .map(PcsDone::Recovered),
             PcsWork::Attest {
                 job, context_id, ..
             } => pcs_vta::attest(
