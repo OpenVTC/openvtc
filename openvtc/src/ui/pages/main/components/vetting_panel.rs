@@ -1679,7 +1679,8 @@ fn desk_views(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     let count = |view: DeskView| match view {
         DeskView::Requests => v.desk.len(),
         DeskView::Tickets => v.tickets.len(),
-        DeskView::Issued => v.issued.len(),
+        // Everything History lists, not only the statements a row can be selected for.
+        DeskView::Issued => v.issued.len() + v.attested_hidden.len() + v.declined.len(),
     };
     let mut spans = vec![Span::styled("  ", dim())];
     for view in DeskView::ALL {
@@ -2213,7 +2214,7 @@ fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
 }
 
 fn issued(lines: &mut Vec<Line<'static>>, v: &VettingState) {
-    if v.issued.is_empty() && v.declined.is_empty() {
+    if v.issued.is_empty() && v.declined.is_empty() && v.attested_hidden.is_empty() {
         lines.push(hint("You have not finished vetting anyone yet."));
         lines.push(Line::from(""));
         lines.push(hint(DESK_KEYS));
@@ -2247,6 +2248,23 @@ fn issued(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             },
         ]));
     }
+    // Hidden-vetting attestations: the community and the date. The attestation names nobody,
+    // so there is no one to list and nothing to withdraw.
+    if !v.attested_hidden.is_empty() {
+        if !v.issued.is_empty() {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            "Attested by hidden vetting",
+            value(),
+        )));
+        for (community, date) in v.attested_hidden.iter() {
+            lines.push(Line::from(Span::styled(
+                format!("    {date} · {community}"),
+                dim(),
+            )));
+        }
+    }
     // Declines, as a record that you vetted someone and no more: the card and
     // every identifier went when the request closed.
     if !v.declined.is_empty() {
@@ -2271,7 +2289,9 @@ fn issued(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         Some(row) if row.withdrawal.is_some() => {
             lines.push(hint("w: send the withdrawal again"));
         }
-        _ => lines.push(hint("w: withdraw")),
+        Some(_) => lines.push(hint("w: withdraw")),
+        // Nothing signed to withdraw: hidden attestations and declines have no statement.
+        None => {}
     }
     lines.push(hint(DESK_KEYS));
 }
@@ -2663,13 +2683,31 @@ mod desk_tests {
             declined: vec![("first-vtc".to_string(), "2026-10-05".to_string())].into(),
             ..VettingState::default()
         });
-        assert!(text.contains("History (0)"), "{text}");
+        assert!(text.contains("History (1)"), "{text}");
         assert!(text.contains("Declined"), "{text}");
         assert!(text.contains("2026-10-05 · first-vtc"), "{text}");
         assert!(
             text.contains("Not kept: anyone's card or document"),
             "{text}"
         );
+    }
+
+    /// A hidden-vetting attestation is listed by community and date, counted in the tab, and
+    /// offers no withdrawal — it names nobody and has no statement.
+    #[test]
+    fn history_lists_hidden_attestations() {
+        use crate::state_handler::main_page::content::DeskView;
+        let text = drawn(&VettingState {
+            tab: VettingTab::Desk,
+            desk_view: DeskView::Issued,
+            attested_hidden: vec![("first-vtc".to_string(), "2026-11-04".to_string())].into(),
+            ..VettingState::default()
+        });
+        assert!(text.contains("History (1)"), "{text}");
+        assert!(text.contains("Attested by hidden vetting"), "{text}");
+        assert!(text.contains("2026-11-04 · first-vtc"), "{text}");
+        assert!(!text.contains("You have not finished vetting"), "{text}");
+        assert!(!text.contains("w: "), "{text}");
     }
 
     /// A withdrawal the community has not recorded — refused, or never heard —

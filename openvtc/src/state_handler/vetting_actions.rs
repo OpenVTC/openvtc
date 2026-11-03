@@ -1112,6 +1112,40 @@ pub(crate) fn sync(vetting: &mut VettingState, config: &Config) {
         })
         .collect();
 
+    // Hidden-vetting attestations, newest first, the same way: recorded as signed, but with no
+    // statement in `issued` to list them by.
+    use openvtc_core::vetting::book::is_hidden_attestation;
+    let mut attested_hidden: Vec<(chrono::DateTime<Utc>, String)> = book
+        .desk
+        .iter()
+        .filter_map(|e| match &e.state {
+            openvtc_core::vetting::vetter::DeskState::Attested {
+                statement_id,
+                issued_at,
+                ..
+            } if is_hidden_attestation(statement_id) => Some((*issued_at, e.community.clone())),
+            _ => None,
+        })
+        .chain(book.vetted.iter().filter_map(|r| match &r.outcome {
+            openvtc_core::vetting::book::VettedOutcome::Signed { statement_id }
+                if is_hidden_attestation(statement_id) =>
+            {
+                Some((r.closed_at, r.community.clone()))
+            }
+            _ => None,
+        }))
+        .collect();
+    attested_hidden.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    vetting.attested_hidden = attested_hidden
+        .into_iter()
+        .map(|(at, community)| {
+            (
+                community_name(&community).unwrap_or_else(|| shorten_did(&community, 48)),
+                at.format("%Y-%m-%d").to_string(),
+            )
+        })
+        .collect();
+
     vetting.selected = vetting.selected.min(vetting.tab_len().saturating_sub(1));
     sync_journey(vetting, config, now);
 }
@@ -7861,6 +7895,29 @@ mod tests {
                 "the short line is not repeated: {refusal}"
             );
         }
+    }
+
+    /// A hidden-vetting attestation is in History once archived, and is not taken for a
+    /// signed statement or a decline.
+    #[test]
+    fn an_archived_hidden_attestation_is_in_history() {
+        use openvtc_core::vetting::book::{HIDDEN_ATTESTATION_PREFIX, VettedOutcome, VettedRecord};
+        let community = "did:web:first-vtc.example";
+        let now = Utc::now();
+        let mut config = test_config();
+        config.private.vetting.vetted.push(VettedRecord {
+            community: community.to_string(),
+            closed_at: now,
+            outcome: VettedOutcome::Signed {
+                statement_id: format!("{HIDDEN_ATTESTATION_PREFIX}req-1"),
+            },
+        });
+        let mut v = VettingState::default();
+        sync(&mut v, &config);
+        assert_eq!(v.attested_hidden.len(), 1);
+        assert_eq!(v.attested_hidden[0].1, now.format("%Y-%m-%d").to_string());
+        assert!(v.issued.is_empty());
+        assert!(v.declined.is_empty());
     }
 
     /// A ticket issued under one mode is marked once the community runs the other.
