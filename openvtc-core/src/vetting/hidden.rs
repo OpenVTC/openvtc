@@ -490,13 +490,13 @@ pub fn refusal_words(code: &str) -> String {
         }
         ("recover", "memberMismatch") => {
             "your VTA's hidden-vetting engine for this community in this context belongs to \
-             another member DID. Vet as the persona it was made for, or ask an admin of the \
-             community to reset your hidden-vetting key."
+             another member DID. Vet as the persona it was made for; a reset of your \
+             hidden-vetting key does not change which member an engine serves."
         }
         ("recover", "engineEnrolled") => {
             "your VTA will not replace its key for this community: that key already holds a \
-             credential, tokens or attestations the community issued. Ask an admin of the \
-             community to check your hidden-vetting binding."
+             credential, tokens or attestations the community issued, so the binding this \
+             client read was likely stale. It is read again on the next check (r on the desk)."
         }
         ("pcs-challenge", "notHiddenVetting") => {
             "it no longer counts vetting from a zero-knowledge proof for this criterion."

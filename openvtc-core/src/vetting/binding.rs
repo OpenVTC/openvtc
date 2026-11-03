@@ -522,11 +522,12 @@ pub fn key_lines(check: &KeyCheck, name: &str, clean: impl Fn(&str) -> String) -
             let text = match local {
                 "engineEnrolled" => format!(
                     "your VTA will not replace its key: that key already holds a credential, \
-                     tokens or attestations, yet {name} binds you to another — {ask_admin}"
+                     tokens or attestations, yet {name} seemed to bind you to another. The \
+                     binding read was likely stale — r checks it again"
                 ),
                 "memberMismatch" => format!(
                     "your VTA's engine for {name} in this context belongs to another member DID \
-                     — vet as the persona it was made for, or {ask_admin}"
+                     — vet as the persona it was made for; a reset does not change that"
                 ),
                 _ => format!(
                     "your VTA refused to restore it ({}): {}",

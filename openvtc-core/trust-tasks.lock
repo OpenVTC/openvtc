@@ -1,6 +1,6 @@
 # Written by `trust-tasks`. Do not edit by hand.
 version = 1
-registry = "/Users/glenngore/devel/dtgwg-trust-tasks-tf-worktrees/pcs-binding/website"
+registry = "https://trusttasks.org"
 
 [[task]]
 slug = "git-ns/account/link"
@@ -300,7 +300,7 @@ digest = "sha256:aa3618469b8bcfeda1084a4868a170743c3b3c762411f610e2617b11234cf65
 slug = "vtc/vetting/vetters/pcs-binding/show"
 version = "0.1"
 type_uri = "https://trusttasks.org/spec/vtc/vetting/vetters/pcs-binding/show/0.1"
-digest = "sha256:92323273e4744f66b220a588d7820a640db240a97bb2dd1600ab87e91eb91836"
+digest = "sha256:8384553f04fa094e7ad8ab3e49ecae188e6f3bf28626d8a12196b3b83bae7cc2"
 
 [[task]]
 slug = "vtc/vetting/vetters/pcs-tokens"
