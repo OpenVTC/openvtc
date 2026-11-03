@@ -226,6 +226,17 @@ pub struct VettedRecord {
     pub outcome: VettedOutcome,
 }
 
+/// The `statement_id` a hidden-vetting attestation is recorded under. It is not a statement:
+/// the zero-knowledge attestation names nobody, so nothing goes into
+/// [`VettingBook::issued`] and there is nothing to withdraw.
+pub const HIDDEN_ATTESTATION_PREFIX: &str = "urn:openvtc:hidden-attestation:";
+
+/// Whether `statement_id` records a hidden-vetting attestation rather than a signed statement.
+#[must_use]
+pub fn is_hidden_attestation(statement_id: &str) -> bool {
+    statement_id.starts_with(HIDDEN_ATTESTATION_PREFIX)
+}
+
 /// How a finished request ended.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1731,7 +1742,7 @@ impl VettingBook {
             return Err(VetterError::WrongState("be attested"));
         };
         entry.state = DeskState::Attested {
-            statement_id: format!("urn:openvtc:hidden-attestation:{request_id}"),
+            statement_id: format!("{HIDDEN_ATTESTATION_PREFIX}{request_id}"),
             issued_at: now,
             card: card.clone(),
         };

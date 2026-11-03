@@ -2252,6 +2252,9 @@ pub struct VettingState {
     /// Requests we declined, as `(community, date)`: the record that we
     /// vetted someone, with nothing about who.
     pub declined: Arc<[(String, String)]>,
+    /// Hidden-vetting attestations we made, as `(community, date)`: like a decline, a record
+    /// that we vetted someone and nothing about who — the attestation itself names nobody.
+    pub attested_hidden: Arc<[(String, String)]>,
     /// Personas an application can join with.
     pub personas: Arc<[VettingPersona]>,
     /// Communities we are an active member of, and so can vet for.
