@@ -47,6 +47,17 @@ pub enum DegradedReason {
         /// The store or VTA's own message.
         detail: String,
     },
+    /// The VTA answered and refused the key: this account is not permitted it
+    /// (`forbidden`), or the VTA no longer holds it (`notFound` / `gone`).
+    ///
+    /// Distinct from [`Self::KeyUnavailable`] because restarting does not fix
+    /// it. The usual cause is a persona whose VTA context was deleted or
+    /// replaced — its record came back (from a backup, or from account state
+    /// synced off the VTA) but the keys and the authority over them did not.
+    KeyNotAccessible {
+        /// The VTA's own message.
+        detail: String,
+    },
     /// The persona's DID document could not be resolved and none was cached.
     DocumentUnresolvable {
         /// The resolver's own message.
@@ -70,6 +81,9 @@ impl DegradedReason {
             }
             DegradedReason::KeyUnavailable { detail } => {
                 format!("its keys could not be retrieved: {detail}")
+            }
+            DegradedReason::KeyNotAccessible { detail } => {
+                format!("the VTA refused its keys to this account: {detail}")
             }
             DegradedReason::DocumentUnresolvable { detail } => {
                 format!("its DID document could not be resolved: {detail}")
@@ -163,6 +177,16 @@ impl LoadIntegrity {
                 .degraded_personas
                 .iter()
                 .any(|p| p.reason.is_incomplete_write())
+    }
+
+    /// True when the VTA refused a persona's keys outright — a fault no
+    /// restart fixes, and one that needs saying differently from a network
+    /// blip (VTI R6.4).
+    #[must_use]
+    pub fn has_inaccessible_keys(&self) -> bool {
+        self.degraded_personas
+            .iter()
+            .any(|p| matches!(p.reason, DegradedReason::KeyNotAccessible { .. }))
     }
 
     /// True when every fault could clear on its own — worth saying, because it
@@ -263,6 +287,22 @@ mod tests {
         };
         assert!(integrity.is_all_transient());
         assert!(!integrity.has_incomplete_write());
+    }
+
+    /// A VTA that answered and refused the key is not a bad moment: telling
+    /// the user to restart once they are back online sends them round a loop
+    /// that never ends.
+    #[test]
+    fn a_refused_key_is_neither_transient_nor_an_interrupted_write() {
+        let integrity = LoadIntegrity {
+            degraded_personas: vec![persona(DegradedReason::KeyNotAccessible {
+                detail: "forbidden: key is not within the caller's scope".to_string(),
+            })],
+            ..Default::default()
+        };
+        assert!(!integrity.is_all_transient());
+        assert!(!integrity.has_incomplete_write());
+        assert!(integrity.has_inaccessible_keys());
     }
 
     /// Orphaned keys are the mirror image of the same interrupted write, so

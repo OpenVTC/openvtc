@@ -19,6 +19,7 @@ use affinidi_tdk::{
 };
 use std::collections::HashMap;
 use tracing::warn;
+use vta_sdk::error::VtaError;
 
 /// Resolves a single key from a DID document verification relationship field.
 async fn resolve_key_from_document(
@@ -397,8 +398,19 @@ impl Config {
                     })?;
 
                     let key_secret = client.get_key_secret(key_id).await.map_err(|e| {
-                        DegradedReason::KeyUnavailable {
-                            detail: format!("the VTA would not return key {key_id}: {e}"),
+                        // The VTA answered and said no: a different fault from
+                        // not reaching it, and one a restart does not clear.
+                        if matches!(
+                            e,
+                            VtaError::Forbidden(_) | VtaError::NotFound(_) | VtaError::Gone(_)
+                        ) {
+                            DegradedReason::KeyNotAccessible {
+                                detail: format!("key {key_id}: {e}"),
+                            }
+                        } else {
+                            DegradedReason::KeyUnavailable {
+                                detail: format!("the VTA would not return key {key_id}: {e}"),
+                            }
                         }
                     })?;
 
