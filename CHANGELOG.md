@@ -184,6 +184,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A persona whose keys the VTA refuses is no longer called a network blip.** When
+  the VTA answered `forbidden`, `notFound` or `gone` for a persona's key, the startup
+  report said "this looks temporary" and to restart once connectivity was back,
+  which can never help. That happens, for example, when a VTA context is deleted and
+  recreated under the same id, and synced account state brings the old personas back
+  without their keys. The report now says the VTA refused the keys to this account
+  and that a restart won't change it. It names the usual cause and says what to do.
+  An unreachable VTA is still reported as temporary.
+
 - **A setup over REST keeps the VTA's DIDComm mediator.** A REST bootstrap
   saved the account with no mediator even when the VTA's DID document advertised
   one, so the first persona then refused with "your VTA did not advertise a DIDComm

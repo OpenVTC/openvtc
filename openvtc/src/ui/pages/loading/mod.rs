@@ -428,31 +428,61 @@ impl LoadingScreen {
             .collect(),
         );
 
-        // The advice divides on one question: is this loss, or a bad moment?
-        let advice: Vec<String> = if integrity.is_all_transient() {
-            vec![
+        // The advice divides on one question: is this loss, a refusal, or a
+        // bad moment? Each needs different words — one fixed hint for all of
+        // them is what VTI R6.4 forbids.
+        let mut advice: Vec<String> = Vec::new();
+        if integrity.is_all_transient() {
+            advice.push(
                 "This looks temporary — the VTA or the network could not be reached for \
                  these personas rather than anything being lost."
                     .to_string(),
+            );
+            advice.push(
                 "Restart OpenVTC once connectivity is back; they should load normally.".to_string(),
-            ]
+            );
         } else {
-            vec![
-                "A persona recorded with no key material is the signature of a save that \
-                 was interrupted — most often a crash or a power loss part-way through \
-                 creating that persona."
-                    .to_string(),
-                "If you have an encrypted export from before the interruption, restoring \
-                 it (Settings -> Import / Restore Backup) is the way to get the persona \
-                 back."
-                    .to_string(),
-                "Otherwise the affected persona cannot be recovered and will need to be \
-                 created again, and any community joined with it re-joined. It is left \
-                 in your configuration until you remove it."
-                    .to_string(),
+            let refused = integrity.has_inaccessible_keys();
+            if refused {
+                advice.push(
+                    "The VTA answered, but refused some personas' keys to this account — it \
+                     is not permitted them, or no longer holds them. Restarting will not \
+                     change that."
+                        .to_string(),
+                );
+                advice.push(
+                    "The usual cause is a VTA context that was deleted or replaced: the \
+                     personas' records came back (from a backup, or from account state \
+                     synced off the VTA) but their keys did not. If these personas are no \
+                     longer yours, remove them; if they should be, the VTA's administrator \
+                     needs to restore this account's access to their context."
+                        .to_string(),
+                );
+            }
+            if integrity.has_incomplete_write() || !refused {
+                advice.push(
+                    "A persona recorded with no key material is the signature of a save that \
+                     was interrupted — most often a crash or a power loss part-way through \
+                     creating that persona."
+                        .to_string(),
+                );
+                advice.push(
+                    "If you have an encrypted export from before the interruption, restoring \
+                     it (Settings -> Import / Restore Backup) is the way to get the persona \
+                     back."
+                        .to_string(),
+                );
+                advice.push(
+                    "Otherwise the affected persona cannot be recovered and will need to be \
+                     created again, and any community joined with it re-joined. It is left \
+                     in your configuration until you remove it."
+                        .to_string(),
+                );
+            }
+            advice.push(
                 "This does not affect your other personas — carry on using them.".to_string(),
-            ]
-        };
+            );
+        }
         let mut advice_lines = Vec::new();
         for (i, item) in advice.iter().enumerate() {
             let first = format!("  {}. ", i + 1);
@@ -997,6 +1027,39 @@ mod tests {
         let lossy = flat(&rows(&screen(&degraded_state()), 100, 60));
         assert!(lossy.contains("interrupted"), "{lossy}");
         assert!(lossy.contains("cannot be recovered"), "{lossy}");
+    }
+
+    /// A VTA that answered and refused the key is neither a network blip nor
+    /// an interrupted save. The report used to call it "temporary" and say
+    /// restart once connectivity is back — advice that can never work, for a
+    /// persona whose VTA context had been deleted and recreated.
+    #[test]
+    fn a_refused_key_is_not_described_as_a_network_fault() {
+        use openvtc_core::config::{
+            account::PersonaId,
+            integrity::{DegradedPersona, DegradedReason, LoadIntegrity},
+        };
+        let state = State {
+            loading_complete: true,
+            integrity: Some(std::sync::Arc::new(LoadIntegrity {
+                degraded_personas: vec![DegradedPersona {
+                    persona_id: PersonaId(uuid::Uuid::nil()),
+                    did: "did:webvh:QmAlice:example.com:alice".to_string(),
+                    label: None,
+                    created_at: chrono::Utc::now(),
+                    reason: DegradedReason::KeyNotAccessible {
+                        detail: "forbidden: key is not within the caller's scope".to_string(),
+                    },
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let text = flat(&rows(&screen(&state), 100, 80));
+        assert!(text.contains("refused"), "{text}");
+        assert!(text.contains("will not"), "{text}");
+        assert!(!text.contains("looks temporary"), "{text}");
+        assert!(!text.contains("interrupted"), "{text}");
     }
 
     /// Scroll keys are inert on a healthy startup, where they would otherwise
