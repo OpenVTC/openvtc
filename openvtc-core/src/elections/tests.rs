@@ -294,7 +294,7 @@ fn register_carries_the_manifest_as_received_and_no_member() {
     // A spelling the generated type would rewrite: the VTA must see this one.
     raw["manifest"]["votingOpensAt"] = json!("2026-10-02T00:00:00.000Z");
     let s = ShownElection::from_payload(raw).unwrap();
-    let p = register_payload(&v, &s);
+    let p = register_payload(&v, &s, None);
     assert_eq!(p["contextId"], "ctx-persona");
     assert_eq!(p["community"], VTC);
     assert!(
@@ -320,11 +320,11 @@ fn a_register_answer_under_another_digest_takes_no_ticket() {
     let Registered::Request(t) = registered_from(&typed, &ok, DIGEST).unwrap() else {
         panic!("a request")
     };
-    // It becomes vtc/elections/tickets/issue/0.1 as the persona.
+    // It becomes vtc/elections/tickets/issue/0.3 as the persona.
     let doc = build(&Request::IssueTicket(t), "did:key:z6MkMember", VTC).unwrap();
     assert_eq!(
         doc.type_uri.to_string(),
-        "https://trusttasks.org/spec/vtc/elections/tickets/issue/0.1"
+        "https://trusttasks.org/spec/vtc/elections/tickets/issue/0.3"
     );
     assert_eq!(doc.payload["request"]["label"], "voter/agm-2027");
     assert_eq!(doc.issuer.as_deref(), Some("did:key:z6MkMember"));
@@ -595,7 +595,7 @@ fn community_and_vta_refusals_are_in_words() {
         code: "unsupportedType".into(),
         message: None,
     };
-    assert!(r.explain().contains("vtc/elections/list/0.3"));
+    assert!(r.explain().contains("vtc/elections/show/0.6"));
     let e = VtaCallError::Refused {
         code: "vta/pcs/voter/register:ticketHeld".into(),
         message: String::new(),
@@ -643,7 +643,7 @@ fn the_pause_before_a_cast_is_bounded() {
 fn replies_are_classified_by_thread() {
     let doc: TrustTask<Value> = serde_json::from_value(json!({
         "id": "urn:uuid:00000000-0000-4000-8000-000000000002",
-        "type": "https://trusttasks.org/spec/vtc/elections/show/0.3#response",
+        "type": "https://trusttasks.org/spec/vtc/elections/show/0.6#response",
         "issuer": VTC,
         "recipient": "did:key:z6MkMember",
         "threadId": "urn:uuid:00000000-0000-4000-8000-000000000001",
@@ -658,7 +658,7 @@ fn replies_are_classified_by_thread() {
     assert!(s.voting_open());
     assert_eq!(s.title(), "Annual general meeting");
     assert!(is_reply_type(
-        "https://trusttasks.org/spec/vtc/elections/list/0.3#response"
+        "https://trusttasks.org/spec/vtc/elections/list/0.5#response"
     ));
     assert!(!is_reply_type(
         "https://trusttasks.org/spec/vtc/rooms/offers/list/0.4#response"
@@ -726,4 +726,167 @@ fn vti_vot_090_a_threshold_below_ten_carries_its_warning() {
     raw["manifest"]["textReleaseThreshold"] = json!(4);
     let shown = ShownElection::from_payload(raw).expect("valid");
     assert_eq!(shown.text_release_warning(), text_release_warning(4));
+}
+
+const PARTY: &str = "did:key:z6MkPartyThatIsAMemberOfTheCommunity";
+
+/// A show answer for an election under a credential roll naming `member_of`.
+fn credential_roll_raw(member_of: &str, kind: &str) -> Value {
+    let mut raw = shown_raw("open", false);
+    raw["manifest"]["roll"] = json!({ "rule": "credential", "memberOf": member_of });
+    raw["disclosure"]["rollCredential"] = json!({
+        "memberOf": member_of, "memberOfKind": kind, "memberOfName": "Partners",
+        "presenterDisclosed": true
+    });
+    raw
+}
+
+/// VTI-VOT-090: under a credential roll the member is told whose credential counts and that
+/// claiming a ticket shows the community that membership; under any other rule, nothing.
+#[test]
+fn vti_vot_090_a_credential_roll_is_disclosed_with_what_claiming_shows() {
+    let s = ShownElection::from_payload(credential_roll_raw(PARTY, "memberParty")).unwrap();
+    assert_eq!(s.credential_roll(), Some(PARTY));
+    let words = s.roll_credential_words().unwrap();
+    assert!(words.contains("a party that is itself a member of this community"));
+    assert!(words.contains("\"Partners\""));
+    assert!(words.contains(PARTY));
+    assert_eq!(s.roll_credential_warning(), Some(ROLL_CREDENTIAL_WARNING));
+    let plain = shown("open");
+    assert_eq!(plain.credential_roll(), None);
+    assert_eq!(plain.roll_credential_words(), None);
+    assert_eq!(plain.roll_credential_warning(), None);
+}
+
+/// VTI-VOT-025: under a credential roll the VTA signs the claim as the member and presents
+/// the credential — the register request names both, and only then.
+#[test]
+fn vti_vot_025_a_credential_roll_claim_names_the_member_and_the_credential() {
+    let vta = client();
+    let v = Voter {
+        vta: &vta,
+        context_id: "ctx-persona",
+        community: VTC,
+    };
+    let s = ShownElection::from_payload(credential_roll_raw(PARTY, "memberParty")).unwrap();
+    let claim = Claim {
+        member: "did:key:z6MkMember",
+        credential: "cred-handle-1",
+    };
+    let p = register_payload(&v, &s, Some(claim));
+    assert_eq!(p["member"], "did:key:z6MkMember");
+    assert_eq!(p["membershipCredential"], "cred-handle-1");
+    serde_json::from_value::<pcs_register::Payload>(p).expect("a valid register/0.5 payload");
+    let p = register_payload(&v, &s, None);
+    assert!(p.get("member").is_none() && p.get("membershipCredential").is_none());
+}
+
+/// The VTA's signed claim is carried as it answered it — never rebuilt here.
+#[test]
+fn a_signed_claim_is_carried_as_the_vta_answered_it() {
+    let ticket_document = json!({
+        "id": "urn:uuid:00000000-0000-4000-8000-0000000000aa",
+        "type": "https://trusttasks.org/spec/vtc/elections/tickets/issue/0.3",
+        "issuer": "did:key:z6MkMember", "recipient": VTC,
+        "issuedAt": "2026-10-03T00:00:00.000000Z",
+        "payload": { "electionId": "agm-2027", "manifestDigest": DIGEST,
+                     "request": { "label": "voter/agm-2027", "id": "z6MkRequestXd",
+                                  "request": { "proof": "z6MkProof" } },
+                     "presentation": { "type": ["VerifiablePresentation"] } },
+        "proof": { "type": "DataIntegrityProof", "proofValue": "z5opaque" }
+    });
+    let answer = json!({
+        "electionId": "agm-2027",
+        "manifestDigest": DIGEST,
+        "request": { "label": "voter/agm-2027", "id": "z6MkRequestXd", "request": { "proof": "z6MkProof" } },
+        "ticketDocument": ticket_document
+    });
+    let typed: pcs_register::Response = serde_json::from_value(answer.clone()).unwrap();
+    assert_eq!(
+        registered_from(&typed, &answer, DIGEST).unwrap(),
+        Registered::Document(ticket_document)
+    );
+}
+
+/// VTI-VOT-016: a presenting read names the party the member chose to show, so the VTA
+/// presents only a credential that party issued.
+#[test]
+fn vti_vot_016_a_presenting_read_names_the_party_it_proves() {
+    let vta = client();
+    let v = Voter {
+        vta: &vta,
+        context_id: "ctx-persona",
+        community: VTC,
+    };
+    let p = read_presenting_payload(&v, "did:key:z6MkMember", "agm-2027", PARTY, "cred-1");
+    assert_eq!(p["read"], "show");
+    assert_eq!(p["memberOf"], PARTY);
+    assert_eq!(p["membershipCredential"], "cred-1");
+    assert_eq!(p["payload"], json!({ "electionId": "agm-2027" }));
+    serde_json::from_value::<pcs_read::Payload>(p).expect("a valid voter/read/0.6 payload");
+}
+
+/// The credential presented is the party's own — never a group's, nor one revoked, expired or
+/// archived — and of several, the one valid longest.
+#[test]
+fn the_membership_presented_is_the_partys_own_and_valid_longest() {
+    let listing = json!({ "credentials": [
+        { "id": "group", "issuerDid": "did:key:z6MkAGroupOfTheParty", "types": [], "status": "valid" },
+        { "id": "revoked", "issuerDid": PARTY, "types": [], "status": "revoked" },
+        { "id": "archived", "issuerDid": PARTY, "types": [], "status": "valid", "lifecycle": "archived" },
+        { "id": "short", "issuerDid": PARTY, "types": [], "status": "valid", "validUntil": "2027-01-01T00:00:00Z" },
+        { "id": "long", "issuerDid": PARTY, "types": [], "status": "valid", "validUntil": "2028-01-01T00:00:00Z" }
+    ]});
+    assert_eq!(
+        choose_membership_credential(&listing, PARTY).as_deref(),
+        Some("long")
+    );
+    assert_eq!(
+        choose_membership_credential(&json!({ "credentials": [] }), PARTY),
+        None
+    );
+    assert_eq!(
+        membership_credential_filter(PARTY, "did:key:z6MkMember"),
+        json!({ "issuerDid": PARTY, "subjectDid": "did:key:z6MkMember" })
+    );
+}
+
+/// VTI-VOT-018: an `indeterminate` answer says nothing was recorded and to try again later.
+#[test]
+fn vti_vot_018_an_indeterminate_answer_says_to_try_again() {
+    let r = Refusal {
+        code: "indeterminate".into(),
+        message: None,
+    };
+    assert!(r.is("indeterminate"));
+    assert!(r.explain().contains("Nothing was recorded"));
+    for code in [
+        "vtc/elections/tickets/issue:presentationRequired",
+        "vtc/elections/tickets/issue:membershipNotProven",
+        "vtc/elections/tickets/issue:membershipRevoked",
+        "vtc/elections/tickets/issue:rollUntrusted",
+    ] {
+        let r = Refusal {
+            code: code.into(),
+            message: None,
+        };
+        assert!(
+            !r.explain().contains("refused ("),
+            "{code} is explained in words"
+        );
+    }
+}
+
+/// An answer from a community this persona is not a member of is admitted only on a thread
+/// sent to it, and only from it.
+#[test]
+fn an_answer_from_a_community_we_do_not_belong_to_is_admitted_only_on_its_thread() {
+    let thid = "urn:uuid:00000000-0000-4000-8000-0000000000bb";
+    assert!(!is_awaited(VTC, thid));
+    expect_answer(VTC, thid);
+    assert!(is_awaited(VTC, thid));
+    assert!(is_awaited(VTC, "00000000-0000-4000-8000-0000000000bb"));
+    assert!(!is_awaited("did:key:z6MkSomeoneElse", thid));
+    answered(thid);
+    assert!(!is_awaited(VTC, thid));
 }

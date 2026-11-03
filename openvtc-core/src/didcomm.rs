@@ -1700,6 +1700,11 @@ pub const OPENVTC_CATCH_ALL_PATTERN: &str = concat!(
     // the envelope before the gate, so without this arm a witness answering over TSP would be
     // dropped here and the witnessing would wait out its timeout.
     r"|https://trusttasks\.org/spec/witness/.*",
+    // Notifications addressed to a persona (`notifications/notify`, `notifications/relay`),
+    // which this client hands to the member's VTA (VTI-NTF-054). Over DIDComm they pass in the
+    // binding envelope; TSP opens the envelope before the gate, so without this arm a
+    // notification delivered over TSP would be dropped here and never reach the VTA.
+    r"|https://trusttasks\.org/spec/notifications/.*",
     // The **binding envelopes**, whose type says "a Trust Task is inside" and
     // names no task. A peer built on `trust-tasks-didcomm` types every message
     // this way, and so does this crate's own `capabilities::

@@ -167,6 +167,10 @@ pub struct InboundEffects {
     /// waiting on its thread, which verifies it as the witness's before reading it; one on a
     /// thread nobody waits on is dropped there.
     pub witness_replies: Vec<openvtc_core::witness::InboundReply>,
+    /// Notifications (`notifications/notify`, `notifications/relay`) addressed to one of our
+    /// personas, exactly as received. The loop hands each to the member's VTA and answers the
+    /// sender (VTI-NTF-054); nothing here reads, filters or acts on them.
+    pub notifications: Vec<openvtc_core::notifications::Received>,
     /// A message whose handling waits on a network-bound check (a DID resolve,
     /// a status-list fetch). The loop runs [`VerifyJob::run`] off the loop and
     /// hands the message back with the result; nothing about it is applied
@@ -510,6 +514,11 @@ fn verification_job(
                 .collect(),
         });
     }
+    // An election answer from the community holding an election a notification told us of
+    // (VTI-NTF-063), which may be one we hold no membership with: only on a thread we sent it.
+    if !member && openvtc_core::elections::is_reply_type(typ) {
+        return awaited_election_answer(message, from_did).then(operational);
+    }
     if is_capability_reply_type(typ)
         || openvtc_core::git_ns::is_reply_type(typ)
         || openvtc_core::community_rooms::is_reply_type(typ)
@@ -624,6 +633,18 @@ fn relationship_request_admissible(
     Ok(())
 }
 
+/// Whether `message` answers an elections request we sent `from_did` and still wait for — the
+/// only standing a community we hold no membership with has here.
+fn awaited_election_answer(message: &Message, from_did: &str) -> bool {
+    let thread = message.thid.as_deref().or_else(|| {
+        message
+            .body
+            .get("threadId")
+            .and_then(serde_json::Value::as_str)
+    });
+    thread.is_some_and(|t| openvtc_core::elections::is_awaited(from_did, t))
+}
+
 /// An operational document that was not checked.
 static NOT_CHECKED: Result<
     openvtc_core::operational::VerifiedOperational,
@@ -674,8 +695,14 @@ fn community_reply_proven(
             false
         }
         // Capability and git-ns views exist only for communities we belong
-        // to, so a reply from anyone else has no standing, and is not recorded.
-        Ok(_) if config.account.memberships_for(from_did).is_empty() => {
+        // to, so a reply from anyone else has no standing, and is not recorded —
+        // except an election answer on a thread we sent that community, for an
+        // election a notification told us of (VTI-NTF-063).
+        Ok(_)
+            if config.account.memberships_for(from_did).is_empty()
+                && !(openvtc_core::elections::is_reply_type(&message.typ)
+                    && awaited_election_answer(message, from_did)) =>
+        {
             warn!(typ = %message.typ, "reply from a community we hold no membership with — ignored");
             false
         }
@@ -782,6 +809,7 @@ async fn process_inbound(
         vetting_grant_checks,
         renewals,
         witness_replies,
+        notifications,
         deferred,
     } = effects;
     // A message handed back with its check's result (or restored from before
@@ -924,6 +952,30 @@ async fn process_inbound(
 
     // Computed at most once per message (see `community_reply_proven`).
     let mut reply_proven: Option<bool> = None;
+
+    // A notification addressed to one of our personas (VTI-NTF-054): handed to the member's
+    // VTA exactly as received, whoever sent it — no acceptance policy here, which would be
+    // declining on the principal's behalf. The loop deposits it and answers the sender; nothing
+    // else is done because of it (VTI-NTF-053).
+    if openvtc_core::notifications::is_notification_type(&message.typ) {
+        match openvtc_core::notifications::addressee_of(&message.body)
+            .filter(|addressee| config.account.persona_id_for_did(addressee).is_some())
+        {
+            Some(addressee) => notifications.push(openvtc_core::notifications::Received {
+                document: message.body.clone(),
+                sender: from_did.to_string(),
+                addressee: addressee.to_string(),
+                // The loop knows the carriage; it sets this.
+                over_tsp: false,
+            }),
+            None => warn!(
+                id = %message.id,
+                "notification addressed to a DID this account holds no persona for — not handed \
+                 to the VTA"
+            ),
+        }
+        return Ok(false);
+    }
 
     // Capability replies (governance/capability/*), in either carriage: hand
     // them to the state loop keyed by the document's `threadId` (== our request
@@ -3039,6 +3091,93 @@ mod tests {
         assert_eq!(view.phase, ReposPhase::Loaded);
         assert!(view.pending.is_none(), "the wait is over");
         assert_eq!(view.my_repos().len(), 1);
+    }
+
+    /// VTI-NTF-054: a notification addressed to one of our personas is handed over exactly as
+    /// received, whoever sent it — this client applies no acceptance policy — and one addressed
+    /// to a DID this account holds no persona for is not.
+    #[tokio::test]
+    async fn vti_ntf_054_a_notification_for_a_persona_is_handed_over_as_received() {
+        let tdk = test_tdk().await;
+        let mut config = with_identity(pending_config("did:key:z6MkSomeCommunity"));
+        let stranger = "did:key:z6MkNotACommunityWeKnow";
+        let document = serde_json::json!({
+            "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+            "type": openvtc_core::notifications::NOTIFY_TYPE,
+            "issuer": stranger,
+            "recipient": PERSONA,
+            "issuedAt": "2026-11-03T00:00:00.000000Z",
+            "payload": { "notification": { "notificationId": "n-1" } },
+            "proof": { "type": "DataIntegrityProof", "proofValue": "z5opaque" }
+        });
+        let wrapped = vta_sdk::tsp_binding::wrap_envelope(&serde_json::to_vec(&document).unwrap());
+        let m = openvtc_core::didcomm::deliver_tsp_document(&wrapped, stranger, PERSONA)
+            .expect("a notification passes the inbound gate");
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+        assert!(
+            effects.deferred.is_none(),
+            "nothing is checked before the hand-over"
+        );
+        assert_eq!(effects.notifications.len(), 1);
+        let received = &effects.notifications[0];
+        assert_eq!(received.document, document, "exactly as received");
+        assert_eq!(received.sender, stranger);
+        assert_eq!(received.addressee, PERSONA);
+
+        let mut elsewhere = document.clone();
+        elsewhere["recipient"] = serde_json::json!("did:key:z6MkNotOurs");
+        elsewhere["id"] = serde_json::json!(format!("urn:uuid:{}", uuid::Uuid::new_v4()));
+        let wrapped = vta_sdk::tsp_binding::wrap_envelope(&serde_json::to_vec(&elsewhere).unwrap());
+        let m = openvtc_core::didcomm::deliver_tsp_document(&wrapped, stranger, PERSONA).unwrap();
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+        assert!(effects.notifications.is_empty());
+    }
+
+    /// An election answer from a community we hold no membership with — one holding an
+    /// election a notification told us of — is checked and handed over only on a thread we sent
+    /// it (VTI-NTF-063); on any other it has no standing and is never set aside for a check.
+    #[tokio::test]
+    async fn an_election_answer_from_a_non_member_community_needs_a_thread_we_sent() {
+        let (holder, key) = community_key();
+        let tdk = test_tdk().await;
+        let mut config = with_identity(pending_config("did:key:z6MkTheCommunityWeBelongTo"));
+        let answer = |thid: String| {
+            let holder = holder.clone();
+            let key = key.clone();
+            async move {
+                let mut document = serde_json::from_value(serde_json::json!({
+                    "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+                    "type": "https://trusttasks.org/spec/trust-task-error/0.1",
+                    "issuer": holder,
+                    "recipient": PERSONA,
+                    "issuedAt": chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    "threadId": thid,
+                    "payload": { "code": "vtc/elections/show:electionUnknown" },
+                }))
+                .unwrap();
+                openvtc_core::capabilities::sign_document(&mut document, &key)
+                    .await
+                    .unwrap();
+                let wrapped =
+                    vta_sdk::tsp_binding::wrap_envelope(&serde_json::to_vec(&document).unwrap());
+                openvtc_core::didcomm::deliver_tsp_document(&wrapped, &holder, PERSONA).unwrap()
+            }
+        };
+
+        // Not on a thread we sent it: not even set aside for a check.
+        let m = answer(format!("urn:uuid:{}", uuid::Uuid::new_v4())).await;
+        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+        assert!(effects.deferred.is_none() && effects.elections_replies.is_empty());
+
+        // On a thread we sent it: checked, then handed to the Elections panel.
+        let thid = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+        openvtc_core::elections::expect_answer(&holder, &thid);
+        let m = answer(thid.clone()).await;
+        let effects = dispatch_checked(&mut config, &tdk, &m).await;
+        assert_eq!(effects.elections_replies.len(), 1);
+        assert_eq!(effects.elections_replies[0].thid, thid);
+        openvtc_core::elections::answered(&thid);
     }
 
     /// Dispatch `m` as `arrival`, returning the effects.

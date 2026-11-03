@@ -110,7 +110,9 @@ anyhow.workspace = true
 # same signer on ^0.75 (trust-tasks 0.36, VGI #182; it superseded the ^0.74
 # release, which was never published). 0.30.0 is the same signer on ^0.78 (VGI
 # #191), the line `vta-service` 0.70 is on (0.29.0, on ^0.76, was skipped here).
-did-git-sign = "0.30.0"
+# 0.32.0 is the same signer on ^0.79, the line `vta-service` 0.71 is on; 0.31.0, still
+# on ^0.78, would put a second sdk in the graph, and `git_signing` hands it a `VtaClient`.
+did-git-sign = "0.32.0"
 base64.workspace = true
 byteorder.workspace = true
 chrono.workspace = true

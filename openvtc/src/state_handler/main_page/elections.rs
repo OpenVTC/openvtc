@@ -1,9 +1,16 @@
 //! The Elections panel's state: a community's elections, from the member's side.
 //!
-//! Display state only, rebuilt from the community's answers (`vtc/elections/list/0.3`,
-//! `vtc/elections/show/0.3`) on every open and refresh. **Nothing here is persisted.** The
-//! member's VTA holds the voter keys, the ticket and the receipts; the community holds the
-//! record of who took a ticket; a copy kept here would be a third record to disagree.
+//! Display state only, rebuilt from the community's answers (`vtc/elections/list/0.5`,
+//! `vtc/elections/show/0.6`) and the member's VTA's held notifications of the kind `election`
+//! (`vta/notifications/list/0.1`) on every open and refresh. **Nothing here is persisted.** The
+//! member's VTA holds the voter keys, the ticket, the receipts and the notifications; the
+//! community holds the record of who took a ticket; a copy kept here would be a third record to
+//! disagree.
+//!
+//! The list is both (VTI-NTF-063): the elections the community's list shows the member, and
+//! those a held notification tells them of — an election another community puts to the members
+//! of a party this one stands for, which that community's list never shows them (VTI-VOT-015).
+//! A notified election is shown only as notified until the member opens it.
 //!
 //! The one thing kept between views is when this app took a ticket
 //! ([`ElectionsState::tickets_taken`]), in memory only, so the ballot screen can warn that a
@@ -17,6 +24,7 @@ use openvtc_core::elections::{
     AnswerDraft, BallotDraft, Cast, ElectionListItem, Kept, Manifest, Question, ReceiptOutcome,
     ShownElection, TicketRequest, VerifiedReceipt, question_optional, question_options,
 };
+use openvtc_core::notifications::NotifiedElection;
 
 pub use super::repos::{Severity, Status};
 
@@ -36,6 +44,9 @@ pub enum ElectionsPhase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     List,
+    /// Before an election put to a party's members is read presenting that membership: what
+    /// the read shows the community (VTI-VOT-015, VTI-VOT-016), and the member's choice.
+    Disclose,
     Detail,
     Ballot,
     Confirm,
@@ -70,6 +81,37 @@ pub struct Pending {
     pub thid: String,
     pub sent_at: Instant,
     pub purpose: Purpose,
+    /// The community it went to: the panel's own, or the one holding a notified election.
+    pub to: String,
+}
+
+/// An election read presenting a membership is offered, waiting for the member's choice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Disclose {
+    /// The community holding the election.
+    pub held_by: String,
+    pub election: String,
+    /// The party whose membership the read would present.
+    pub member_of: String,
+    pub intent: Intent,
+}
+
+/// The VTA's held notifications of the kind `election`, as last read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotifiedPhase {
+    Loading,
+    Loaded,
+    /// Not read, and why: no VTA, or it refused.
+    Unavailable(String),
+}
+
+/// One row of the list.
+#[derive(Clone, Copy, Debug)]
+pub enum Row<'a> {
+    /// An election the community's list shows the member.
+    Listed(&'a ElectionListItem),
+    /// An election a held notification tells the member of, shown only as notified.
+    Notified(&'a NotifiedElection),
 }
 
 /// Where a ticket or a vote is.
@@ -125,10 +167,26 @@ pub enum Next {
     ListPage {
         cursor: String,
     },
+    /// Have the VTA sign the read of `election` at the view's target, presenting the member's
+    /// membership of `member_of` (VTI-VOT-015) — only after the member chose to.
+    ReadPresenting {
+        election: String,
+        member_of: String,
+        intent: Intent,
+    },
+    /// Carry a read the VTA signed to the community, unchanged.
+    SendShowDocument {
+        document: serde_json::Value,
+        election: String,
+        intent: Intent,
+    },
     /// Have the VTA build the ticket request.
     Register,
     /// Carry the ticket request to the community.
     SendIssue(TicketRequest),
+    /// Carry the claim the VTA signed (a credential roll's, with its presentation) to the
+    /// community, unchanged.
+    SendIssueDocument(serde_json::Value),
     /// Hand the community's answer to the VTA.
     Accept {
         issued: serde_json::Value,
@@ -322,7 +380,23 @@ pub struct ElectionsView {
     /// The list, as the community last answered, in display order.
     pub elections: Vec<ElectionListItem>,
     incoming: Vec<ElectionListItem>,
+    /// The held notifications of the kind `election` that concern this community — held by
+    /// it, or put to its members — as the VTA last answered.
+    pub notified: Vec<NotifiedElection>,
+    pub notified_phase: NotifiedPhase,
+    /// The held notifications are to be read again, once the VTA's lane is free.
+    pub notified_due: bool,
     pub selected: usize,
+    /// The community the open election is read from: the panel's own, or the one holding a
+    /// notified election.
+    pub target: String,
+    /// The party whose membership the open election is read presenting, once the member chose
+    /// to: every later read of it presents the same, and nothing else (VTI-VOT-016).
+    pub presenting: Option<String>,
+    /// The notified election being opened, when it was.
+    pub opening: Option<NotifiedElection>,
+    /// A presenting read offered and not yet chosen.
+    pub disclose: Option<Disclose>,
     /// The election being looked at, as last read.
     pub shown: Option<Box<ShownElection>>,
     pub form: Option<BallotForm>,
@@ -338,16 +412,24 @@ pub struct ElectionsView {
 impl ElectionsView {
     #[must_use]
     pub fn new(vtc_did: String, persona: PersonaId, me: String, community: String) -> Self {
+        let target = vtc_did.clone();
         Self {
             vtc_did,
             persona,
             me,
             community,
+            target,
             phase: ElectionsPhase::Loading,
             screen: Screen::List,
             elections: Vec::new(),
             incoming: Vec::new(),
+            notified: Vec::new(),
+            notified_phase: NotifiedPhase::Loading,
+            notified_due: false,
             selected: 0,
+            presenting: None,
+            opening: None,
+            disclose: None,
             shown: None,
             form: None,
             pending: None,
@@ -359,9 +441,36 @@ impl ElectionsView {
         }
     }
 
+    /// The notified elections the list shows: those that concern this community and that its
+    /// own list does not already show (VTI-NTF-063).
     #[must_use]
-    pub fn selected_item(&self) -> Option<&ElectionListItem> {
-        self.elections.get(self.selected)
+    pub fn notified_rows(&self) -> Vec<&NotifiedElection> {
+        self.notified
+            .iter()
+            .filter(|n| n.concerns(&self.vtc_did))
+            .filter(|n| {
+                !(vta_sdk::did_scid::same_reference(&n.held_by, &self.vtc_did)
+                    && self
+                        .elections
+                        .iter()
+                        .any(|e| e.election_id.as_str() == n.election_id))
+            })
+            .collect()
+    }
+
+    /// Every row of the list, the community's own first.
+    #[must_use]
+    pub fn rows(&self) -> Vec<Row<'_>> {
+        self.elections
+            .iter()
+            .map(Row::Listed)
+            .chain(self.notified_rows().into_iter().map(Row::Notified))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn selected_row(&self) -> Option<Row<'_>> {
+        self.rows().get(self.selected).copied()
     }
 
     /// Take one page of the list; `last` says whether it was the last.
@@ -371,9 +480,28 @@ impl ElectionsView {
             let mut all = std::mem::take(&mut self.incoming);
             openvtc_core::elections::sort_for_display(&mut all);
             self.elections = all;
-            self.selected = self.selected.min(self.elections.len().saturating_sub(1));
+            self.clamp_selection();
             self.phase = ElectionsPhase::Loaded;
         }
+    }
+
+    /// Take the VTA's held election notifications.
+    pub fn take_notified(&mut self, items: Vec<NotifiedElection>) {
+        self.notified = items;
+        self.notified_phase = NotifiedPhase::Loaded;
+        self.clamp_selection();
+    }
+
+    fn clamp_selection(&mut self) {
+        self.selected = self.selected.min(self.rows().len().saturating_sub(1));
+    }
+
+    /// Back to reading the panel's own community, presenting nothing.
+    pub fn reset_target(&mut self) {
+        self.target = self.vtc_did.clone();
+        self.presenting = None;
+        self.opening = None;
+        self.disclose = None;
     }
 
     pub fn restart_pages(&mut self) {

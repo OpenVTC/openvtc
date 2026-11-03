@@ -144,7 +144,8 @@ async fn a_member_takes_a_ticket_then_votes_and_keeps_the_receipt() {
     };
 
     // 1. The ticket request, built by the VTA, carried to the community as the persona.
-    let Registered::Request(ticket) = elections::register(&voter, &shown).await.unwrap() else {
+    let Registered::Request(ticket) = elections::register(&voter, &shown, None).await.unwrap()
+    else {
         panic!("no ticket held yet")
     };
     let sent = elections::build(
@@ -172,7 +173,7 @@ async fn a_member_takes_a_ticket_then_votes_and_keeps_the_receipt() {
         .await
         .expect("the VTA takes the ticket");
     assert_eq!(
-        elections::register(&voter, &shown).await.unwrap(),
+        elections::register(&voter, &shown, None).await.unwrap(),
         Registered::AlreadyHeld
     );
 

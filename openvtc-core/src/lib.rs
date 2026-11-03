@@ -46,6 +46,7 @@ pub mod join;
 pub mod logs;
 pub mod members;
 pub mod messaging;
+pub mod notifications;
 // Crate-private stopgap: a copy of `affinidi-did-web`'s host classifier until
 // that crate exports it (see the module header).
 mod net_guard;

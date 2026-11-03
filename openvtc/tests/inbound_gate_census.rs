@@ -76,9 +76,13 @@ fn routed_types() -> Vec<&'static str> {
         "https://trusttasks.org/spec/vtc/rooms/offers/accept/0.1#response",
         // Election replies for the Elections panel, routed by prefix
         // (`elections::is_reply_type`).
-        "https://trusttasks.org/spec/vtc/elections/list/0.3#response",
-        "https://trusttasks.org/spec/vtc/elections/show/0.3#response",
-        "https://trusttasks.org/spec/vtc/elections/tickets/issue/0.1#response",
+        "https://trusttasks.org/spec/vtc/elections/list/0.5#response",
+        "https://trusttasks.org/spec/vtc/elections/show/0.6#response",
+        "https://trusttasks.org/spec/vtc/elections/tickets/issue/0.3#response",
+        // Notifications addressed to a persona, handed to the member's VTA
+        // (`notifications::is_notification_type`, VTI-NTF-054).
+        openvtc_core::notifications::NOTIFY_TYPE,
+        openvtc_core::notifications::RELAY_TYPE,
         // A witness's answers, routed by `witness::is_reply_type`.
         "https://trusttasks.org/spec/witness/session/0.2#response",
         "https://trusttasks.org/spec/witness/session/submit/0.2#response",
