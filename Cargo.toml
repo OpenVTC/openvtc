@@ -695,7 +695,12 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # messaging-sdk 0.44: the voting tasks over the voting/_shared/0.3 manifest,
 # whose `textReleaseThreshold` may be as low as 1 (VTI-VOT-065, VTI #2379).
 # did-git-sign 0.30 (VGI #191) is on it; 0.76 and 0.77 were skipped.
-vta-sdk = { version = "0.78.0", features = [
+# **0.79** is `vta-service` 0.71's line, still trust-tasks 0.36 / TDK 0.36 /
+# messaging-sdk 0.44: credential rolls (`vta/pcs/voter/register/0.5`'s
+# `membershipCredential`, `voter/read/0.6`'s `memberOf`) and notifications
+# (`VtaClient::notifications_deposit_json`, VTI-NTF-054), which the Elections panel
+# and the inbound notification hand-over use.
+vta-sdk = { version = "0.79.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses

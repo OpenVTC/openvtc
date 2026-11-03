@@ -409,7 +409,7 @@ fn elections_key(
         .contains(crossterm::event::KeyModifiers::CONTROL);
     Some(match view.screen {
         Screen::List => {
-            let last = view.elections.len().saturating_sub(1);
+            let last = view.rows().len().saturating_sub(1);
             match key.code {
                 KeyCode::Esc => E::Back,
                 KeyCode::Char('r') => E::Refresh,
@@ -419,6 +419,11 @@ fn elections_key(
                 _ => return None,
             }
         }
+        // Only `y` presents; anything else goes back without presenting (VTI-VOT-016).
+        Screen::Disclose => match key.code {
+            KeyCode::Char('y') => E::Present,
+            _ => E::Back,
+        },
         Screen::Detail => match key.code {
             KeyCode::Esc => E::Back,
             KeyCode::Char('r') => E::Refresh,

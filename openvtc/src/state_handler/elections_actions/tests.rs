@@ -21,10 +21,15 @@ fn view(state: &mut State) -> &mut ElectionsView {
 }
 
 fn arm(state: &mut State, purpose: Purpose) {
+    arm_to(state, purpose, VTC);
+}
+
+fn arm_to(state: &mut State, purpose: Purpose, to: &str) {
     view(state).pending = Some(Pending {
         thid: "t1".into(),
         sent_at: Instant::now(),
         purpose,
+        to: to.into(),
     });
 }
 
@@ -367,4 +372,166 @@ fn back_walks_the_screens_and_closes_from_the_list() {
     assert_eq!(view(&mut state).screen, Screen::List);
     reduce(&mut state, &Act::Back);
     assert!(state.main_page.content_panel.elections.view.is_none());
+}
+
+/// Another community, holding an election put to the members of this one (VTC), which is
+/// itself one of its members.
+const HOLDER: &str = "did:key:zHolder";
+
+fn notified(held_by: &str, audience: &str, id: &str) -> NotifiedElection {
+    NotifiedElection {
+        record_id: format!("hn-{id}-0000000000000"),
+        held_by: held_by.into(),
+        election_id: id.into(),
+        audience: audience.into(),
+        originator: held_by.into(),
+        relayed_by: vec![audience.into()],
+        valid_from: Some("2027-01-01T00:00:00+00:00".into()),
+        valid_until: Some("2027-01-08T00:00:00+00:00".into()),
+        open_with: "https://trusttasks.org/spec/vtc/elections/show/0.6".into(),
+    }
+}
+
+/// VTI-NTF-063: the list is the community's own and the held notifications that concern it —
+/// a notified election the list already shows is not shown twice, and one for another
+/// community not at all.
+#[test]
+fn vti_ntf_063_the_list_carries_notified_elections_once() {
+    let mut state = state_with_view();
+    arm(&mut state, Purpose::List);
+    apply_replies(
+        &mut state,
+        vec![inbound(list_page(json!([item("agm", "voting")]), None))],
+    );
+    vta(
+        &mut state,
+        VtaAnswer::Notified(Ok(vec![
+            notified(HOLDER, VTC, "partners-vote"),
+            notified(VTC, VTC, "agm"),
+            notified("did:key:zElsewhere", "did:key:zElsewhere", "other"),
+        ])),
+    );
+    let v = view(&mut state);
+    assert_eq!(v.notified_phase, NotifiedPhase::Loaded);
+    let rows = v.rows();
+    assert_eq!(rows.len(), 2);
+    assert!(matches!(rows[0], Row::Listed(e) if e.election_id.as_str() == "agm"));
+    assert!(matches!(rows[1], Row::Notified(n) if n.election_id == "partners-vote"));
+}
+
+/// A notified election put to a party's members is read first presenting nothing; when its
+/// community answers `electionUnknown`, the member is asked before anything is presented
+/// (VTI-VOT-015, VTI-VOT-016), and only `y` presents.
+#[test]
+fn vti_vot_016_a_membership_is_presented_only_once_the_member_chooses() {
+    let mut state = state_with_view();
+    {
+        let v = view(&mut state);
+        v.take_notified(vec![notified(HOLDER, VTC, "partners-vote")]);
+        v.target = HOLDER.into();
+        v.opening = Some(notified(HOLDER, VTC, "partners-vote"));
+        v.screen = Screen::Detail;
+    }
+    arm_to(
+        &mut state,
+        Purpose::Show {
+            election: "partners-vote".into(),
+            intent: Intent::View,
+        },
+        HOLDER,
+    );
+    let mut refusal = inbound(Reply::Refused(Refusal {
+        code: "vtc/elections/show:electionUnknown".into(),
+        message: None,
+    }));
+    // From the community the read went to — not the panel's own.
+    refusal.from = HOLDER.into();
+    refusal.issuer = Some(HOLDER.into());
+    assert!(apply_replies(&mut state, vec![refusal]));
+    let v = view(&mut state);
+    assert_eq!(v.screen, Screen::Disclose);
+    assert!(v.presenting.is_none(), "nothing presented yet");
+    let d = v.disclose.clone().unwrap();
+    assert_eq!((d.held_by.as_str(), d.member_of.as_str()), (HOLDER, VTC));
+
+    // Any key but `y` goes back, presenting nothing.
+    reduce(&mut state, &Act::Back);
+    let v = view(&mut state);
+    assert_eq!(v.screen, Screen::List);
+    assert!(v.presenting.is_none() && v.disclose.is_none());
+    assert_eq!(v.target, VTC);
+
+    // `y` reads presenting the membership of the party the election is put to.
+    let v = view(&mut state);
+    v.screen = Screen::Disclose;
+    v.disclose = Some(d);
+    present(&mut state, true);
+    let v = view(&mut state);
+    assert_eq!(v.screen, Screen::Detail);
+    assert_eq!(v.target, HOLDER);
+    assert_eq!(v.presenting.as_deref(), Some(VTC));
+    assert!(matches!(
+        v.next,
+        Some(Next::ReadPresenting { ref election, ref member_of, .. })
+            if election == "partners-vote" && member_of == VTC
+    ));
+}
+
+/// The VTA's signed read and claim are carried to the community unchanged.
+#[test]
+fn signed_reads_and_claims_go_to_the_community_as_the_vta_signed_them() {
+    let mut state = state_with_view();
+    let read = json!({ "id": "urn:uuid:read-1", "type": "https://trusttasks.org/spec/vtc/elections/show/0.6" });
+    vta(
+        &mut state,
+        VtaAnswer::ReadSigned {
+            election: "agm".into(),
+            intent: Intent::Ticket,
+            result: Ok(read.clone()),
+        },
+    );
+    assert!(matches!(
+        view(&mut state).next,
+        Some(Next::SendShowDocument { ref document, .. }) if *document == read
+    ));
+    view(&mut state).next = None;
+    view(&mut state).flow = Some(Flow {
+        election: "agm".into(),
+        intent: Intent::Ticket,
+        step: Step::Registering,
+    });
+    let claim = json!({ "id": "urn:uuid:claim-1", "payload": { "presentation": {} } });
+    vta(
+        &mut state,
+        VtaAnswer::Registered(Ok(Registered::Document(claim.clone()))),
+    );
+    let v = view(&mut state);
+    assert!(matches!(v.next, Some(Next::SendIssueDocument(ref d)) if *d == claim));
+    assert_eq!(v.flow.as_ref().unwrap().step, Step::Issuing);
+}
+
+/// An answer from the community a notified election is held by is taken while the view asks
+/// it; the panel's own community answering that thread is not.
+#[test]
+fn an_answer_is_taken_from_the_community_the_request_went_to() {
+    let mut state = state_with_view();
+    view(&mut state).target = HOLDER.into();
+    arm_to(
+        &mut state,
+        Purpose::Show {
+            election: "agm".into(),
+            intent: Intent::View,
+        },
+        HOLDER,
+    );
+    // The panel's own community is not the one asked.
+    assert!(!apply_replies(
+        &mut state,
+        vec![inbound(Reply::Show(shown("voting")))]
+    ));
+    let mut from_holder = inbound(Reply::Show(shown("voting")));
+    from_holder.from = HOLDER.into();
+    from_holder.issuer = Some(HOLDER.into());
+    assert!(apply_replies(&mut state, vec![from_holder]));
+    assert!(view(&mut state).shown.is_some());
 }

@@ -533,6 +533,9 @@ pub enum ElectionsAction {
     Select(usize),
     /// Open the highlighted election.
     Show,
+    /// Read the election presenting the membership it is put to, as the member chose on the
+    /// disclosure screen (VTI-VOT-015, VTI-VOT-016).
+    Present,
     /// Take the open election's ticket, and nothing else.
     TakeTicket,
     /// Vote in the open election, or, with no ticket held, take it and stop.

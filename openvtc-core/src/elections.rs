@@ -1,7 +1,7 @@
 //! Community elections — the member's side of `vtc/elections/*` and the voting tasks.
 //!
 //! A community runs an election; its **ballot box**, a separate service, takes the casts.
-//! A member reads the elections (`vtc/elections/list/0.3`, `vtc/elections/show/0.3`), takes a
+//! A member reads the elections (`vtc/elections/list/0.5`, `vtc/elections/show/0.6`), takes a
 //! **ticket** — a credential the community signs blind — and later casts a ballot with it. Two
 //! parties are kept from learning what they must not (VTI-VOT-001 – 004, the threat model in
 //! VTI's `docs/05-design-notes/community-voting-threat-model.md`):
@@ -21,11 +21,21 @@
 //!   `vtc/rooms/*` are ([`crate::community_rooms`]); the answer arrives on the inbound channel and
 //!   is matched by thread id ([`parse_reply`]).
 //! - **The member's VTA** holds every voter key: it builds the blinded ticket request
-//!   (`vta/pcs/voter/register/0.3`, [`register`]), unblinds the community's answer
+//!   (`vta/pcs/voter/register/0.5`, [`register`]), unblinds the community's answer
 //!   (`vta/pcs/voter/accept/0.1`, [`accept`]), builds and signs the cast
-//!   (`vta/pcs/vote/0.3` / `vta/pcs/vote-encrypted/0.4`, [`vote`]) and keeps the receipt
+//!   (`vta/pcs/vote/0.4` / `vta/pcs/vote-encrypted/0.5`, [`vote`]) and keeps the receipt
 //!   (`vta/pcs/voter/receipt/0.1`, [`keep_receipt`]). The voter keys are derived in the
 //!   persona's own context.
+//! - **Under a credential roll** (`roll.rule: credential`, voting/_shared/0.4, VTI-VOT-021,
+//!   VTI-VOT-025) a ticket claim carries a presentation of the member's membership credential
+//!   for `roll.memberOf`, bound to the claim itself — so the VTA, which holds the credential and
+//!   the persona's key, builds and signs the whole `tickets/issue/0.3` document as the member
+//!   ([`Claim`], [`Registered::Document`]), and this client carries it unchanged. Likewise the
+//!   read of an election put to the members of a party that is itself a member of the
+//!   community, which the community shows nobody else (VTI-VOT-015): `vta/pcs/voter/read/0.6`
+//!   signs it with the presentation, offered only for the party the member chose to show
+//!   ([`read_presenting`], VTI-VOT-016). A presentation is made only for the party the roll
+//!   names: [`membership_credential_for`] picks the credential that party itself issued.
 //! - **The ballot box** is reached over its advertised `TrustTaskHTTPS` endpoint
 //!   ([`ballot_box_endpoint`]) — the sessionless cast door VTI-VOT-004 requires — and its
 //!   receipt is believed only once its proof is shown to be the ballot box's, answering this
@@ -57,18 +67,20 @@ use vta_sdk::client::VtaClient;
 use crate::errors::OpenVTCError;
 use crate::specs::voting::ballot::{cast::v0_1 as cast, cast_encrypted::v0_1 as cast_encrypted};
 use crate::specs::vta::pcs::{
-    vote::v0_3 as pcs_vote, vote_encrypted::v0_4 as pcs_vote_encrypted,
-    voter::accept::v0_1 as pcs_accept, voter::receipt::v0_1 as pcs_receipt,
-    voter::register::v0_3 as pcs_register,
+    vote::v0_4 as pcs_vote, vote_encrypted::v0_5 as pcs_vote_encrypted,
+    voter::accept::v0_1 as pcs_accept, voter::read::v0_6 as pcs_read,
+    voter::receipt::v0_1 as pcs_receipt, voter::register::v0_5 as pcs_register,
 };
 use crate::specs::vtc::elections::{
-    list::v0_3 as list, show::v0_3 as show, tickets::issue::v0_1 as issue,
+    list::v0_5 as list, show::v0_6 as show, tickets::issue::v0_3 as issue,
 };
 
-/// The generated `vtc/elections/list/0.3` item and state.
+/// The generated `vtc/elections/list/0.5` item and state.
 pub use list::{ElectionListItem, RegistrarState};
-/// The generated `vtc/elections/show/0.3` manifest and its parts.
-pub use show::{Disclosure, Manifest, Question, QuestionOption};
+/// The generated `vtc/elections/show/0.6` manifest and its parts.
+pub use show::{
+    Disclosure, Manifest, Question, QuestionOption, RollCredentialDisclosureMemberOfKind,
+};
 
 /// Every community task this module sends or reads starts with this.
 const TYPE_PREFIX: &str = "https://trusttasks.org/spec/vtc/elections/";
@@ -95,8 +107,9 @@ pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
 // Requests to the community
 // ****************************************************************************
 
-/// The ticket request the member's VTA built (`vta/pcs/voter/register/0.3`'s answer), to carry to
-/// the community as `vtc/elections/tickets/issue/0.1`.
+/// The ticket request the member's VTA built (`vta/pcs/voter/register/0.5`'s answer), to carry to
+/// the community as `vtc/elections/tickets/issue/0.3` — under any roll but a credential roll,
+/// which the VTA signs whole ([`Registered::Document`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TicketRequest {
     pub election_id: String,
@@ -109,11 +122,14 @@ pub struct TicketRequest {
 /// by construction: there is no variant that could.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
-    /// `vtc/elections/list/0.3`: the elections the member may take part in.
+    /// `vtc/elections/list/0.5`: the elections the member may take part in.
     List { cursor: Option<String> },
-    /// `vtc/elections/show/0.3`: one election — its manifest, parameters and disclosure.
+    /// `vtc/elections/show/0.6`: one election — its manifest, parameters and disclosure. Carries
+    /// no presentation: one that must is signed by the VTA ([`read_presenting`]).
     Show { election_id: String },
-    /// `vtc/elections/tickets/issue/0.1`: the blinded ticket request, for the community to sign.
+    /// `vtc/elections/tickets/issue/0.3`: the blinded ticket request, for the community to sign.
+    /// Carries no presentation: a claim under a credential roll is signed by the VTA
+    /// ([`Registered::Document`]).
     IssueTicket(TicketRequest),
 }
 
@@ -199,7 +215,7 @@ pub struct ShownElection {
 }
 
 impl ShownElection {
-    /// Read a `vtc/elections/show/0.3` payload.
+    /// Read a `vtc/elections/show/0.6` payload.
     ///
     /// # Errors
     ///
@@ -287,6 +303,47 @@ impl ShownElection {
         state_label(&self.typed.state.to_string())
     }
 
+    /// The DID a `credential` roll names (`roll.memberOf`, voting/_shared/0.4): the party whose
+    /// membership credential admits a voter. `None` under every other rule.
+    #[must_use]
+    pub fn credential_roll(&self) -> Option<&str> {
+        let roll = &self.typed.manifest.roll;
+        if roll.rule != show::RollRuleRule::Credential {
+            return None;
+        }
+        roll.member_of.as_ref().map(|m| m.as_str())
+    }
+
+    /// Whose membership credential admits a voter, in words, from the disclosure's
+    /// `rollCredential` (VTI-VOT-090). `None` under every other rule.
+    #[must_use]
+    pub fn roll_credential_words(&self) -> Option<String> {
+        let r = self.typed.disclosure.roll_credential.as_ref()?;
+        let what = match r.member_of_kind {
+            RollCredentialDisclosureMemberOfKind::ThisCommunity => "this community",
+            RollCredentialDisclosureMemberOfKind::CommunityGroup => "a group of this community",
+            RollCredentialDisclosureMemberOfKind::MemberParty => {
+                "a party that is itself a member of this community"
+            }
+        };
+        let name = r
+            .member_of_name
+            .as_ref()
+            .map(|n| format!(" \"{}\"", crate::display::sanitize_display(n.as_str(), 128)))
+            .unwrap_or_default();
+        Some(format!(
+            "Holders of a membership credential issued by {what}{name} ({}).",
+            crate::display::sanitize_display(r.member_of.as_str(), 256)
+        ))
+    }
+
+    /// What claiming a ticket under a credential roll shows the community (VTI-VOT-025,
+    /// VTI-VOT-090) — told before the member takes one. `None` under every other rule.
+    #[must_use]
+    pub fn roll_credential_warning(&self) -> Option<&'static str> {
+        self.credential_roll().map(|_| ROLL_CREDENTIAL_WARNING)
+    }
+
     /// The manifest's `textReleaseThreshold`: how many counted ballots must be in before any
     /// written answer is released (VTI-VOT-065).
     #[must_use]
@@ -301,6 +358,23 @@ impl ShownElection {
     pub fn text_release_warning(&self) -> Option<String> {
         text_release_warning(self.text_release_threshold())
     }
+}
+
+/// What taking a ticket under a credential roll shows the community (VTI-VOT-025, VTI-VOT-090).
+pub const ROLL_CREDENTIAL_WARNING: &str = "Taking a ticket presents your membership credential \
+    for that party: the community learns that you are a member of it.";
+
+/// What reading an election put to the members of a party shows the community holding it,
+/// before the member has seen what it asks (VTI-VOT-015, VTI-VOT-016).
+#[must_use]
+pub fn presenting_read_warning(held_by: &str, member_of: &str) -> String {
+    format!(
+        "{} shows this election only to those who present a membership of {}. Opening it \
+         presents yours: the community learns that you are a member of that party before you \
+         have seen what the election asks.",
+        crate::display::sanitize_display(held_by, 256),
+        crate::display::sanitize_display(member_of, 256),
+    )
 }
 
 /// The `textReleaseThreshold` VTI-VOT-065 says an election SHOULD meet. voting/_shared/0.3
@@ -426,6 +500,12 @@ impl Refusal {
         }
     }
 
+    /// Whether the community refused with this local error code.
+    #[must_use]
+    pub fn is(&self, local: &str) -> bool {
+        local_code(&self.code) == local
+    }
+
     /// What happened and what to do about it.
     #[must_use]
     pub fn explain(&self) -> String {
@@ -456,9 +536,27 @@ impl Refusal {
             "notAMember" => {
                 "The community does not count this persona as an active member.".to_string()
             }
+            "presentationRequired" => "This election's roll is the holders of a membership \
+                                       credential, and the claim carried none."
+                .to_string(),
+            "membershipNotProven" => format!(
+                "The community did not accept your membership credential as proof of the \
+                 membership this election's roll names{detail}."
+            ),
+            "membershipRevoked" => "Your membership credential for the party this election's \
+                                    roll names has been revoked."
+                .to_string(),
+            "rollUntrusted" => "The community no longer trusts the party this election's roll \
+                                names, so it issues no tickets under it."
+                .to_string(),
+            "indeterminate" => "The community could not complete a check of your membership \
+                                credential just now (its issuer's DID document or status list \
+                                could not be read). Nothing was recorded: try again in a \
+                                little while."
+                .to_string(),
             "unsupportedType" | "unsupportedVersion" => format!(
-                "This community does not serve that request{detail} — it may predate community \
-                 elections (vtc/elections/list/0.3)."
+                "This community does not serve that request{detail} — it may predate credential \
+                 rolls (vtc/elections/show/0.6, tickets/issue/0.3)."
             ),
             "permissionDenied" => format!("The community refused{detail}."),
             other => format!("The community refused ({other}){detail}."),
@@ -867,6 +965,58 @@ impl BallotDraft {
 }
 
 // ****************************************************************************
+// Answers from a community this persona is not a member of
+// ****************************************************************************
+
+/// How long an answer from a community this persona holds no membership with is waited for.
+const AWAITING_TTL: Duration = Duration::from_secs(120);
+
+/// The most such requests outstanding at once.
+const MAX_AWAITING: usize = 64;
+
+/// Requests sent to a community this persona holds no membership with, by thread: an election
+/// put to the members of a party the persona belongs to, held by a community it does not
+/// (VTI-NTF-061, VTI-NTF-063). The inbound gate admits that community's answer only on a
+/// thread recorded here; any other document from it has no standing.
+static AWAITING: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn thread_key(thid: &str) -> &str {
+    thid.strip_prefix("urn:uuid:").unwrap_or(thid)
+}
+
+/// Record that `thid` was sent to `community`, so its answer is admitted.
+pub fn expect_answer(community: &str, thid: &str) {
+    if let Ok(mut a) = AWAITING.lock() {
+        a.retain(|_, (_, at)| at.elapsed() < AWAITING_TTL);
+        if a.len() < MAX_AWAITING {
+            a.insert(
+                thread_key(thid).to_string(),
+                (community.to_string(), std::time::Instant::now()),
+            );
+        }
+    }
+}
+
+/// Whether `thid` answers a request sent to `community` and still waited for.
+#[must_use]
+pub fn is_awaited(community: &str, thid: &str) -> bool {
+    AWAITING.lock().is_ok_and(|a| {
+        a.get(thread_key(thid)).is_some_and(|(c, at)| {
+            at.elapsed() < AWAITING_TTL && vta_sdk::did_scid::same_reference(c, community)
+        })
+    })
+}
+
+/// The answer on `thid` was taken, or is no longer waited for.
+pub fn answered(thid: &str) {
+    if let Ok(mut a) = AWAITING.lock() {
+        a.remove(thread_key(thid));
+    }
+}
+
+// ****************************************************************************
 // The member's VTA
 // ****************************************************************************
 
@@ -918,6 +1068,18 @@ pub fn vta_refusal_words(code: &str, message: &str) -> String {
                                 at your VTA."
             .to_string(),
         "memberNotHeld" => "Your VTA holds no key for this persona.".to_string(),
+        "membershipCredentialRequired" => "This election's roll is the holders of a membership \
+                                           credential, and none was named for your VTA to \
+                                           present."
+            .to_string(),
+        "membershipCredentialUnusable" => format!(
+            "Your VTA cannot present that membership credential{detail}: it is not in its \
+             vault, not about this persona, not issued by the party the roll names, or expired."
+        ),
+        "membershipCredentialMismatch" => "That membership credential was not issued by the \
+                                           party the election is put to: your VTA presents \
+                                           nothing unrelated to the election."
+            .to_string(),
         "unsupportedSecrecy" | "wrongLevel" => {
             format!("Your VTA cannot vote at this election's secrecy level{detail}.")
         }
@@ -928,8 +1090,8 @@ pub fn vta_refusal_words(code: &str, message: &str) -> String {
             format!("Your VTA could not check the ballot box's receipt{detail}.")
         }
         "unsupportedType" | "unsupportedVersion" => format!(
-            "Your VTA does not serve this request{detail} — it may predate community voting \
-             (vta/pcs/voter/register/0.3)."
+            "Your VTA does not serve this request{detail} — it may predate credential rolls \
+             (vta/pcs/voter/register/0.5)."
         ),
         other => format!("Your VTA refused ({other}){detail}."),
     }
@@ -994,25 +1156,43 @@ pub struct Voter<'a> {
     pub community: &'a str,
 }
 
-/// What `vta/pcs/voter/register/0.3` said.
+/// What `vta/pcs/voter/register/0.5` said.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Registered {
-    /// The ticket request to carry to the community.
+    /// The ticket request to carry to the community, signed here as the persona.
     Request(TicketRequest),
+    /// Under a credential roll: the whole `vtc/elections/tickets/issue/0.3` request, signed by
+    /// the VTA as the member and carrying the presentation — to send to the community unchanged.
+    Document(Value),
     /// The VTA already holds this election's ticket (`ticketHeld`).
     AlreadyHeld,
 }
 
-/// The `vta/pcs/voter/register/0.3` payload: no `member` — the request is the VTA's alone to
-/// build, and this client signs `vtc/elections/tickets/issue` as the persona itself.
+/// A ticket claim under a credential roll: the persona the VTA signs as, and the membership
+/// credential it presents (its vault handle, [`membership_credential_for`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Claim<'a> {
+    pub member: &'a str,
+    pub credential: &'a str,
+}
+
+/// The `vta/pcs/voter/register/0.5` payload. Without a [`Claim`], no `member` — the request is
+/// the VTA's alone to build, and this client signs `vtc/elections/tickets/issue` as the persona
+/// itself. With one, `member` and `membershipCredential`: the VTA signs the claim, presentation
+/// and all (VTI-VOT-025).
 #[must_use]
-pub fn register_payload(v: &Voter<'_>, shown: &ShownElection) -> Value {
-    json!({
+pub fn register_payload(v: &Voter<'_>, shown: &ShownElection, claim: Option<Claim<'_>>) -> Value {
+    let mut p = json!({
         "contextId": v.context_id,
         "community": v.community,
         "parameters": shown.raw_parameters(),
         "manifest": shown.raw_manifest(),
-    })
+    });
+    if let Some(c) = claim {
+        p["member"] = json!(c.member);
+        p["membershipCredential"] = json!(c.credential);
+    }
+    p
 }
 
 /// Have the VTA build the blinded ticket request for the election `shown` describes — or say it
@@ -1022,8 +1202,14 @@ pub fn register_payload(v: &Voter<'_>, shown: &ShownElection) -> Value {
 ///
 /// The VTA refused (other than `ticketHeld`), could not be reached, or computed another manifest
 /// digest than the community shows — in which case no ticket is taken.
-pub async fn register(v: &Voter<'_>, shown: &ShownElection) -> Result<Registered, VtaCallError> {
-    match call::<pcs_register::Payload>(v.vta, register_payload(v, shown), VTA_TIMEOUT_SECS).await {
+pub async fn register(
+    v: &Voter<'_>,
+    shown: &ShownElection,
+    claim: Option<Claim<'_>>,
+) -> Result<Registered, VtaCallError> {
+    match call::<pcs_register::Payload>(v.vta, register_payload(v, shown, claim), VTA_TIMEOUT_SECS)
+        .await
+    {
         Ok((r, raw)) => registered_from(&r, &raw, shown.manifest_digest()),
         Err(e) if e.is("ticketHeld") => Ok(Registered::AlreadyHeld),
         Err(e) => Err(e),
@@ -1043,12 +1229,125 @@ fn registered_from(
                 .into(),
         ));
     }
+    // The signed claim exactly as the VTA answered it: its proof covers these bytes.
+    if let Some(doc) = raw.get("ticketDocument").filter(|d| d.is_object()) {
+        return Ok(Registered::Document(doc.clone()));
+    }
     let request = raw["request"].clone();
     Ok(Registered::Request(TicketRequest {
         election_id: r.election_id.to_string(),
         manifest_digest: r.manifest_digest.to_string(),
         request,
     }))
+}
+
+/// The `vta/pcs/voter/read/0.6` payload for a `show` that presents `credential`, the member's
+/// membership credential for `member_of`: the VTA presents it only where `member_of` issued it
+/// (`membershipCredentialMismatch` otherwise), so it never shows a membership unrelated to the
+/// election (VTI-VOT-016).
+#[must_use]
+pub fn read_presenting_payload(
+    v: &Voter<'_>,
+    member: &str,
+    election_id: &str,
+    member_of: &str,
+    credential: &str,
+) -> Value {
+    json!({
+        "contextId": v.context_id,
+        "community": v.community,
+        "member": member,
+        "read": "show",
+        "payload": { "electionId": election_id },
+        "membershipCredential": credential,
+        "memberOf": member_of,
+    })
+}
+
+/// Have the VTA sign `vtc/elections/show/0.6` for `election_id` as `member`, presenting
+/// `credential` for `member_of` (VTI-VOT-015) — the read of an election put to the members of
+/// a party that is itself a member of the community, which the community shows nobody else.
+/// Returns the signed document, to send to the community unchanged.
+///
+/// # Errors
+///
+/// The VTA refused or could not be reached.
+pub async fn read_presenting(
+    v: &Voter<'_>,
+    member: &str,
+    election_id: &str,
+    member_of: &str,
+    credential: &str,
+) -> Result<Value, VtaCallError> {
+    let (_, raw) = call::<pcs_read::Payload>(
+        v.vta,
+        read_presenting_payload(v, member, election_id, member_of, credential),
+        VTA_TIMEOUT_SECS,
+    )
+    .await?;
+    raw.get("document")
+        .filter(|d| d.is_object())
+        .cloned()
+        .ok_or_else(|| VtaCallError::Unreadable("vta/pcs/voter/read answered no document".into()))
+}
+
+/// The `vault/credentials/query/0.1` filter for `member`'s membership credentials from
+/// `member_of`.
+#[must_use]
+pub fn membership_credential_filter(member_of: &str, member: &str) -> Value {
+    json!({ "issuerDid": member_of, "subjectDid": member })
+}
+
+/// The vault handle of the membership credential to present for `member_of`, out of a
+/// `vault/credentials/query/0.1` answer: one issued by `member_of` itself — never by a group of
+/// it, or anyone else — active and valid; of several, the one valid longest. `None` when the
+/// vault holds none.
+#[must_use]
+pub fn choose_membership_credential(listing: &Value, member_of: &str) -> Option<String> {
+    let mut usable: Vec<(&str, Option<&str>)> = listing
+        .get("credentials")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|d| {
+            d.get("issuerDid")
+                .and_then(Value::as_str)
+                .is_some_and(|i| vta_sdk::did_scid::same_reference(i, member_of))
+                && d.get("status").and_then(Value::as_str) == Some("valid")
+                && d.get("lifecycle").is_none_or(|l| l == "active")
+        })
+        .filter_map(|d| {
+            let id = d.get("id").and_then(Value::as_str)?;
+            Some((id, d.get("validUntil").and_then(Value::as_str)))
+        })
+        .collect();
+    // No `validUntil` is valid longest; RFC 3339 instants in UTC sort as text.
+    usable.sort_by(|a, b| match (a.1, b.1) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(x), Some(y)) => y.cmp(x),
+    });
+    usable.first().map(|(id, _)| (*id).to_string())
+}
+
+/// The vault handle of `member`'s membership credential from `member_of`, as the member's VTA
+/// holds it ([`choose_membership_credential`]). The handle goes to the VTA only, which presents
+/// it; this client never sees the credential's body.
+///
+/// # Errors
+///
+/// The vault did not answer.
+pub async fn membership_credential_for(
+    vta: &VtaClient,
+    member_of: &str,
+    member: &str,
+) -> Result<Option<String>, VtaCallError> {
+    let listing = vta
+        .cred_vault_query(membership_credential_filter(member_of, member))
+        .await
+        .map_err(|e| VtaCallError::Unreachable(e.to_string()))?;
+    Ok(choose_membership_credential(&listing, member_of))
 }
 
 /// The `vta/pcs/voter/accept/0.1` payload: the community's answer as received, without `ext`.

@@ -286,6 +286,7 @@ mod join_flow;
 mod join_status_poll;
 pub mod main_page;
 mod message_dispatch;
+mod notification_actions;
 mod relationship_actions;
 mod runtime_actions;
 mod save_coalesce;
@@ -1528,8 +1529,21 @@ impl StateHandler {
                                 vetting_grant_checks,
                                 renewals,
                                 witness_replies,
+                                notifications,
                                 deferred,
                             } = effects;
+                            // Notifications for our personas, to the member's VTA as received,
+                            // and the sender answered (VTI-NTF-054).
+                            for mut received in notifications {
+                                received.over_tsp = transport == openvtc_core::didcomm::MessagingTransport::Tsp;
+                                notification_actions::hand_over(
+                                    &config,
+                                    &tdk,
+                                    admin_vta.as_ref(),
+                                    received,
+                                )
+                                .await;
+                            }
                             // A witness's answers, to the witnessing waiting on their thread.
                             for reply in witness_replies {
                                 let thread = reply

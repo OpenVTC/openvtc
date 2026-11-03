@@ -8,6 +8,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Elections put to the members of a party you belong to, and the notifications that tell
+  you of them.** A notification (`notifications/notify`, `notifications/relay`, VTI-NTF-054)
+  addressed to one of your personas is handed to your VTA exactly as it arrived
+  (`vta/notifications/deposit/0.1`) — every one, with no filter of this app's own — and its
+  sender is answered with the receipt the task defines, the same whatever your VTA does with
+  it. When your VTA cannot be reached the notification is neither handed over nor answered, so
+  its sender delivers it again. Nothing is opened, and nobody else told, because one arrived.
+  A community's Elections panel now also lists, under **Told of**, the elections your VTA holds
+  a notification of that concern that community — held by it, or put to its members by another
+  community — shown only as notified (who holds it, its identifier, whom it is put to, its
+  period) until you open it (VTI-NTF-063). Opening one reads it from the community holding it,
+  first presenting nothing; if that community shows it only to those who present a membership
+  of the party it is put to, the panel says what presenting shows before your VTA presents
+  anything, and only **y** presents (VTI-VOT-015, VTI-VOT-016).
+- **Credential rolls.** An election whose roll is the holders of a membership credential for
+  one DID (`roll.rule: credential`) shows whose credential admits a voter, and warns that
+  taking a ticket shows the community your membership of that party (VTI-VOT-090). **t** finds
+  the membership credential that party itself issued you in your VTA's vault, and your VTA signs
+  the claim with its presentation (`vta/pcs/voter/register/0.5`'s `membershipCredential`,
+  VTI-VOT-025); this app carries it unchanged. The community's new refusals — no presentation,
+  membership not proven or revoked, the roll's party no longer trusted, and `indeterminate`
+  when it could not complete a check (nothing recorded: try again later, VTI-VOT-018) — are
+  said in words. The Elections panel now speaks `vtc/elections/list/0.5`, `show/0.6` and
+  `tickets/issue/0.3`, and `vta/pcs/voter/register/0.5`, `read/0.6`, `vote/0.4` and
+  `vote-encrypted/0.5`: it needs a community on VTI's vtc-service 0.19 and a VTA on vta-service
+  0.71.
 - **Get back to the hidden-vetting key a community bound you to.** A vetter whose VTA derived
   a new PCS key (its vetter engine record was replaced) was refused enrolment for good with
   `identifierRebound`, told to "vet from the install that enrolled first" — wrong now the key

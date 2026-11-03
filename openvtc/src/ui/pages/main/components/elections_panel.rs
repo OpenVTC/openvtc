@@ -1,11 +1,17 @@
 //! Elections panel — a community's elections, opened from the Communities panel with `e`.
 //!
-//! Five screens: the list (what can be done first), one election's detail and disclosure, the
-//! ballot, its confirmation, and the result. What the member is told before taking a ticket or
-//! voting is the disclosure the community publishes (VTI-VOT-090): who runs the ballot box,
-//! whether that is the community itself, who can read the board, whether a later vote replaces
-//! an earlier one, that a vote can be proven to someone who demands it, and — where written answers
+//! Six screens: the list (what can be done first), the choice to present a membership before an
+//! election put to a party's members is read, one election's detail and disclosure, the ballot,
+//! its confirmation, and the result. What the member is told before taking a ticket or voting
+//! is the disclosure the community publishes (VTI-VOT-090): who runs the ballot box, whether
+//! that is the community itself, who can read the board, whether a later vote replaces an
+//! earlier one, that a vote can be proven to someone who demands it, whose membership
+//! credential admits a voter and that claiming a ticket shows it, and — where written answers
 //! are released after fewer than 10 ballots — that one may identify its author (VTI-VOT-065).
+//!
+//! The list carries the elections the community's list shows and those a held notification
+//! tells the member of (VTI-NTF-063); a notified one is shown only as notified — who holds it,
+//! its identifier, whom it is put to and its period — until it is opened.
 
 use std::time::Instant;
 
@@ -17,7 +23,7 @@ use crate::colors::{
 };
 use crate::state_handler::main_page::content::ContentPanelState;
 use crate::state_handler::main_page::elections::{
-    BallotForm, ElectionsPhase, ElectionsView, Screen, Severity, Status, VoteResult,
+    BallotForm, ElectionsPhase, ElectionsView, NotifiedPhase, Screen, Severity, Status, VoteResult,
 };
 use crate::state_handler::main_page::shorten_did;
 use crate::state_handler::state::ConnectionState;
@@ -96,11 +102,12 @@ impl Panel for ElectionsPanel {
         ])];
         match view.screen {
             Screen::List => render_list(view, &mut lines),
+            Screen::Disclose => render_disclose(view, &mut lines),
             Screen::Detail => render_detail(view, &mut lines),
             Screen::Ballot => {
                 let recent = view.shown.as_ref().is_some_and(|s| {
                     state.elections.ticket_taken_recently(
-                        &view.vtc_did,
+                        &view.target,
                         s.election_id(),
                         Instant::now(),
                     )
@@ -139,9 +146,14 @@ fn render_list(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
         ElectionsPhase::Loaded => {}
     }
     lines.push(Line::from(""));
-    if view.elections.is_empty() {
+    let notified = view.notified_rows();
+    if view.elections.is_empty() && notified.is_empty() {
         lines.push(Line::from(dim(
             "    The community has no elections you may take part in.",
+        )));
+    } else if view.elections.is_empty() {
+        lines.push(Line::from(dim(
+            "    The community's own list shows you no elections.",
         )));
     } else {
         lines.push(Line::from(dim(format!(
@@ -176,11 +188,118 @@ fn render_list(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
             ]));
         }
     }
+    render_notified(view, &notified, lines);
     if let Some(status) = &view.status {
         lines.push(Line::from(""));
         push_status(lines, status);
     }
     keys(lines, &["↑/↓ navigate", "⏎ open", "r refresh", "Esc back"]);
+}
+
+/// The elections held notifications tell the member of, shown only as notified (VTI-NTF-063):
+/// who holds each, its identifier, whom it is put to, and its period. A notification is no
+/// evidence the member may vote (VTI-NTF-004), and says so.
+fn render_notified(
+    view: &ElectionsView,
+    notified: &[&openvtc_core::notifications::NotifiedElection],
+    lines: &mut Vec<Line<'static>>,
+) {
+    match &view.notified_phase {
+        NotifiedPhase::Loading => {
+            lines.push(Line::from(""));
+            lines.push(Line::from(dim(
+                "    asking your VTA which elections you have been told of…",
+            )));
+            return;
+        }
+        NotifiedPhase::Unavailable(why) => {
+            lines.push(Line::from(""));
+            wrap(
+                lines,
+                &format!("Elections you have been told of could not be read from your VTA: {why}"),
+                4,
+                Style::default().fg(COLOR_DARK_GRAY),
+            );
+            return;
+        }
+        NotifiedPhase::Loaded => {}
+    }
+    if notified.is_empty() {
+        return;
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(dim(
+        "    Told of — a notification says these exist; opening one reads it from its community",
+    )));
+    let first = view.elections.len();
+    for (i, n) in notified.iter().enumerate() {
+        let selected = first + i == view.selected;
+        let name_style = if selected {
+            Style::default().fg(COLOR_SUCCESS).bold()
+        } else {
+            Style::default().fg(COLOR_TEXT_DEFAULT)
+        };
+        let id: String = n.election_id.chars().take(32).collect();
+        let period = match (&n.valid_from, &n.valid_until) {
+            (Some(from), Some(until)) => format!("{} → {}", day(from), day(until)),
+            (None, Some(until)) => format!("until {}", day(until)),
+            (Some(from), None) => format!("from {}", day(from)),
+            (None, None) => "no period stated".to_string(),
+        };
+        lines.push(Line::from(vec![
+            Span::raw(if selected { "    ▸ " } else { "      " }),
+            Span::styled(format!("{id:<34}"), name_style),
+            text(period),
+        ]));
+        lines.push(Line::from(dim(format!(
+            "        held by {}   put to {}",
+            shorten_did(&n.held_by, 40),
+            shorten_did(&n.audience, 40)
+        ))));
+    }
+}
+
+/// The date part of an RFC 3339 instant.
+fn day(t: &str) -> String {
+    t.chars().take(10).collect()
+}
+
+/// Before an election put to a party's members is read presenting that membership: what the
+/// read shows the community, and the member's choice (VTI-VOT-015, VTI-VOT-016).
+fn render_disclose(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
+    lines.push(Line::from(""));
+    let Some(d) = &view.disclose else {
+        keys(lines, &["Esc back"]);
+        return;
+    };
+    lines.push(Line::from(Span::styled(
+        format!(
+            "    Open {} presenting your membership?",
+            crate::state_handler::main_page::sanitize_display(&d.election, 128)
+        ),
+        Style::default().fg(COLOR_TEXT_DEFAULT).bold(),
+    )));
+    lines.push(Line::from(""));
+    wrap(
+        lines,
+        &elections::presenting_read_warning(&d.held_by, &d.member_of),
+        4,
+        Style::default().fg(COLOR_ORANGE).bold(),
+    );
+    lines.push(Line::from(""));
+    wrap(
+        lines,
+        "Your VTA presents only a membership credential that party itself issued you. A \
+         notification is not proof that you may vote: the community decides that when you \
+         claim a ticket.",
+        4,
+        Style::default().fg(COLOR_DARK_GRAY),
+    );
+    if let Some(status) = &view.status {
+        lines.push(Line::from(""));
+        push_status(lines, status);
+    }
+    keys(lines, &["y present and open", "any other key: back"]);
 }
 
 /// The warning an election whose written answers are released after fewer than 10 ballots
@@ -249,6 +368,19 @@ fn render_disclosure(shown: &ShownElection, lines: &mut Vec<Line<'static>>) {
         );
     }
     push_text_release_warning(shown, lines);
+    if let Some(roll) = shown.roll_credential_words() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(dim("    who votes")));
+        wrap(lines, &roll, 6, Style::default().fg(COLOR_TEXT_DEFAULT));
+    }
+    if let Some(warning) = shown.roll_credential_warning() {
+        wrap(
+            lines,
+            &format!("⚠ {warning}"),
+            4,
+            Style::default().fg(COLOR_ORANGE).bold(),
+        );
+    }
     lines.push(Line::from(vec![
         dim("    the board     "),
         text(match d.board_visibility.to_string().as_str() {
@@ -333,6 +465,18 @@ fn render_detail(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
         keys(lines, &["r retry", "Esc back"]);
         return;
     };
+    if !vta_sdk::did_scid::same_reference(&view.target, &view.vtc_did) {
+        lines.push(Line::from(vec![
+            dim("    held by       "),
+            text(shorten_did(&view.target, 60)),
+        ]));
+    }
+    if let Some(member_of) = &view.presenting {
+        lines.push(Line::from(vec![
+            dim("    read showing  "),
+            text(format!("your membership of {}", shorten_did(member_of, 60))),
+        ]));
+    }
     render_disclosure(shown, lines);
     if let Some(flow) = &view.flow {
         lines.push(Line::from(""));

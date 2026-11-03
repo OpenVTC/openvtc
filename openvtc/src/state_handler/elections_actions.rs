@@ -5,7 +5,10 @@
 //! - the **community** — `vtc/elections/{list,show,tickets/issue}`, signed with the persona's
 //!   key and sent on its channel in [`DispatchDomain::Elections`], exactly as the Rooms panel
 //!   sends `vtc/rooms/*`; the answer arrives on the inbound channel and [`apply_replies`]
-//!   matches it by thread;
+//!   matches it by thread. A read or claim that carries a presentation of the member's
+//!   membership credential (a credential roll, VTI-VOT-015, VTI-VOT-025) is signed by the VTA
+//!   instead and carried unchanged. A notified election (VTI-NTF-063) is read from the
+//!   community holding it, which may be one this persona is not a member of;
 //! - the member's **VTA**, which holds every voter key — register, accept, vote, keep the
 //!   receipt — in [`DispatchDomain::ElectionsVta`];
 //! - the **ballot box**, over HTTPS from this client's own connection after a random pause, in
@@ -30,16 +33,18 @@ use openvtc_core::capabilities::{RequestDocument, correlation_thread};
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
 use openvtc_core::elections::{
-    self, Cast, CastError, Kept, Registered, Reply, Request, ShownElection, VerifiedReceipt, Voter,
+    self, Cast, CastError, Claim, Kept, Registered, Reply, Request, ShownElection, VerifiedReceipt,
+    Voter,
 };
+use openvtc_core::notifications::NotifiedElection;
 use tokio::sync::mpsc::UnboundedSender;
 use vta_sdk::client::VtaClient;
 
 use crate::state_handler::actions::ElectionsAction as Act;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
 use crate::state_handler::main_page::elections::{
-    BallotForm, ElectionsPhase, ElectionsView, Flow, Intent, Next, Pending, Purpose, Screen,
-    Severity, Step, VoteResult,
+    BallotForm, Disclose, ElectionsPhase, ElectionsView, Flow, Intent, Next, NotifiedPhase,
+    Pending, Purpose, Row, Screen, Severity, Step, VoteResult,
 };
 use crate::state_handler::repos_actions::{Sender, sender};
 use crate::state_handler::runtime_actions::ActionCtx;
@@ -84,17 +89,24 @@ pub(crate) fn reduce(state: &mut State, action: &Act) -> bool {
         Act::Open(_)
         | Act::Refresh
         | Act::Show
+        | Act::Present
         | Act::TakeTicket
         | Act::Vote
         | Act::Cast
         | Act::Resend => return false,
         Act::Back => match view.screen {
             Screen::List => panel.view = None,
+            Screen::Disclose => {
+                view.screen = Screen::List;
+                view.reset_target();
+                view.status = None;
+            }
             Screen::Detail => {
                 view.screen = Screen::List;
                 view.shown = None;
                 view.flow = None;
                 view.status = None;
+                view.reset_target();
             }
             Screen::Ballot => {
                 view.drop_ballot();
@@ -107,7 +119,7 @@ pub(crate) fn reduce(state: &mut State, action: &Act) -> bool {
             }
         },
         Act::Select(i) => {
-            view.selected = (*i).min(view.elections.len().saturating_sub(1));
+            view.selected = (*i).min(view.rows().len().saturating_sub(1));
         }
         Act::BallotQuestion(d) => {
             if let Some(f) = view.form.as_mut() {
@@ -191,48 +203,108 @@ impl Loop<'_> {
     /// Send `request` to the open view's community, armed on `purpose`. Returns whether it was
     /// dispatched; every early return says why in the view.
     async fn send(&mut self, request: Request, purpose: Purpose) -> bool {
-        let Some((vtc_did, persona, waiting)) = self
+        // The list is always the panel's own community's; one election is read from where it
+        // is held.
+        let to_target = !matches!(request, Request::List { .. });
+        self.dispatch(Outgoing::Build(request), purpose, to_target)
+            .await
+    }
+
+    /// Carry a document the VTA signed to the view's target community, unchanged.
+    async fn send_signed(&mut self, document: serde_json::Value, purpose: Purpose) -> bool {
+        self.dispatch(Outgoing::Signed(document), purpose, true)
+            .await
+    }
+
+    async fn dispatch(&mut self, outgoing: Outgoing, purpose: Purpose, to_target: bool) -> bool {
+        let Some((vtc_did, target, persona, waiting)) = self
             .state
             .main_page
             .content_panel
             .elections
             .view
             .as_ref()
-            .map(|v| (v.vtc_did.clone(), v.persona, v.pending.is_some()))
+            .map(|v| {
+                (
+                    v.vtc_did.clone(),
+                    v.target.clone(),
+                    v.persona,
+                    v.pending.is_some(),
+                )
+            })
         else {
             return false;
         };
         if waiting {
             return false;
         }
-        let sender = match sender(self.config, self.tdk, persona, &vtc_did).await {
+        let to = if to_target { target } else { vtc_did };
+        let mut sender = match sender(self.config, self.tdk, persona, &to).await {
             Ok(s) => s,
             Err(e) => {
                 fail(self.state, &purpose, e);
                 return true;
             }
         };
-        let doc = match elections::build(&request, &sender.persona_did, &vtc_did) {
-            Ok(doc) => doc,
-            Err(e) => {
-                fail(self.state, &purpose, format!("couldn't send: {e}"));
-                return true;
+        // A community this persona is not a member of (one holding a notified election) has
+        // no membership transport to follow: TSP when the persona speaks it anywhere, so the
+        // answer comes back on the socket TSP answers arrive on; DIDComm otherwise.
+        if self.config.account.membership(&to, persona).is_none() {
+            sender.over_tsp = self
+                .config
+                .account
+                .memberships()
+                .any(|c| c.persona_ref == persona && c.joined_over_tsp());
+        }
+        let doc = match outgoing {
+            Outgoing::Build(request) => {
+                match elections::build(&request, &sender.persona_did, &to) {
+                    Ok(doc) => Doc::Unsigned(Box::new(doc)),
+                    Err(e) => {
+                        fail(self.state, &purpose, format!("couldn't send: {e}"));
+                        return true;
+                    }
+                }
             }
+            Outgoing::Signed(document) => {
+                let addressed = document
+                    .get("recipient")
+                    .and_then(serde_json::Value::as_str);
+                if !addressed.is_some_and(|r| vta_sdk::did_scid::same_reference(r, &to)) {
+                    fail(
+                        self.state,
+                        &purpose,
+                        "your VTA signed the request for another community than this one".into(),
+                    );
+                    return true;
+                }
+                Doc::Signed(document)
+            }
+        };
+        let Some(thid) = doc.thread() else {
+            fail(
+                self.state,
+                &purpose,
+                "couldn't send: a request without an id".into(),
+            );
+            return true;
         };
         if !self.in_flight.try_begin(SEND) {
             return false;
         }
-        let thid = correlation_thread(&doc).to_string();
+        // Its answer is admitted from this community on this thread, member or not.
+        elections::expect_answer(&to, &thid);
         if let Some(view) = view_mut(self.state) {
             view.pending = Some(Pending {
                 thid,
                 sent_at: Instant::now(),
                 purpose,
+                to: to.clone(),
             });
         }
         let job = SendJob {
             sender,
-            vtc_did,
+            vtc_did: to,
             persona,
             doc,
         };
@@ -244,14 +316,14 @@ impl Loop<'_> {
 
     /// Ask the VTA. Returns whether it was dispatched (or failed in a way the view now shows).
     fn ask_vta(&mut self, ask: VtaAsk) -> bool {
-        let Some((vtc_did, persona)) = self
+        let Some((vtc_did, target, persona)) = self
             .state
             .main_page
             .content_panel
             .elections
             .view
             .as_ref()
-            .map(|v| (v.vtc_did.clone(), v.persona))
+            .map(|v| (v.vtc_did.clone(), v.target.clone(), v.persona))
         else {
             return true;
         };
@@ -276,10 +348,11 @@ impl Loop<'_> {
             return false;
         }
         background_dispatch::spawn_dispatch(self.dispatch_tx.clone(), VTA, async move {
+            // The registrar is the community holding the election.
             let voter = Voter {
                 vta: &vta,
                 context_id: &context_id,
-                community: &vtc_did,
+                community: &target,
             };
             let answer = ask.run(&voter).await;
             DispatchOutcome::ElectionsVta(ElectionsVtaOutcome {
@@ -326,15 +399,51 @@ impl Loop<'_> {
         true
     }
 
-    /// Read the list again.
+    /// Read the list again, and the VTA's held election notifications beside it.
     pub(crate) async fn refresh(&mut self) {
         match view_mut(self.state) {
-            Some(view) => view.restart_pages(),
+            Some(view) => {
+                view.restart_pages();
+                view.notified_due = true;
+            }
             None => return,
         }
         self.send(Request::List { cursor: None }, Purpose::List)
             .await;
     }
+
+    /// Read the open election again — presenting the membership the member chose to show for
+    /// it, and nothing else (VTI-VOT-016). Returns whether it was dispatched.
+    async fn read_election(&mut self, election: String, intent: Intent) -> bool {
+        let presenting = view_mut(self.state).and_then(|v| v.presenting.clone());
+        match presenting {
+            Some(member_of) => {
+                if let Some(view) = view_mut(self.state) {
+                    view.next = Some(Next::ReadPresenting {
+                        election,
+                        member_of,
+                        intent,
+                    });
+                }
+                true
+            }
+            None => {
+                self.send(
+                    Request::Show {
+                        election_id: election.clone(),
+                    },
+                    Purpose::Show { election, intent },
+                )
+                .await
+            }
+        }
+    }
+}
+
+/// What a send carries: a request built and signed here, or a document the VTA signed.
+enum Outgoing {
+    Build(Request),
+    Signed(serde_json::Value),
 }
 
 /// The context the persona's keys — and so its voter keys — are derived in.
@@ -392,6 +501,10 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
         }
         Act::Refresh => refresh_screen(&mut lp).await,
         Act::Show => show_selected(&mut lp).await,
+        Act::Present => {
+            let has_vta = lp.vta.is_some();
+            present(lp.state, has_vta);
+        }
         Act::TakeTicket => start_flow(&mut lp, Intent::Ticket).await,
         Act::Vote => start_flow(&mut lp, Intent::Vote).await,
         Act::Cast => cast(&mut lp),
@@ -418,17 +531,7 @@ async fn refresh_screen(lp: &mut Loop<'_>) {
         view.shown.as_ref().map(|s| s.election_id().to_string()),
     ) {
         (Screen::Detail, Some(election)) => {
-            let sent = lp
-                .send(
-                    Request::Show {
-                        election_id: election.clone(),
-                    },
-                    Purpose::Show {
-                        election,
-                        intent: Intent::View,
-                    },
-                )
-                .await;
+            let sent = lp.read_election(election, Intent::View).await;
             if !sent && let Some(view) = view_mut(lp.state) {
                 view.note(Severity::Warning, InFlight::busy_message(SEND));
             }
@@ -451,8 +554,31 @@ async fn show_selected(lp: &mut Loop<'_>) {
     if view.screen != Screen::List || view.pending.is_some() {
         return;
     }
-    let Some(election) = view.selected_item().map(|e| e.election_id.to_string()) else {
-        return;
+    let election = match view.selected_row() {
+        Some(Row::Listed(e)) => {
+            let election = e.election_id.to_string();
+            view.reset_target();
+            election
+        }
+        Some(Row::Notified(n)) => {
+            let n = n.clone();
+            if !n.opens_with_a_served_version() {
+                view.note(
+                    Severity::Warning,
+                    "The notification names a way to open this election that this app does not \
+                     speak (it reads elections with vtc/elections/show/0.6).",
+                );
+                return;
+            }
+            let election = n.election_id.clone();
+            // Read without presenting anything first: an election the member can already see
+            // shows the community nothing (VTI-VOT-016).
+            view.reset_target();
+            view.target = n.held_by.clone();
+            view.opening = Some(n);
+            election
+        }
+        None => return,
     };
     view.screen = Screen::Detail;
     view.shown = None;
@@ -504,18 +630,47 @@ async fn start_flow(lp: &mut Loop<'_>, intent: Intent) {
         step: Step::Reading,
     });
     view.note(Severity::Progress, "Reading the election again…");
-    let sent = lp
-        .send(
-            Request::Show {
-                election_id: election.clone(),
-            },
-            Purpose::Show { election, intent },
-        )
-        .await;
+    let sent = lp.read_election(election, intent).await;
     if !sent && let Some(view) = view_mut(lp.state) {
         view.flow = None;
         view.note(Severity::Warning, InFlight::busy_message(SEND));
     }
+}
+
+/// `y` on the disclosure: read the election presenting the membership it is put to, as the
+/// member chose. Nothing is presented before this key (VTI-VOT-016).
+fn present(state: &mut State, has_vta: bool) {
+    let Some(view) = view_mut(state) else {
+        return;
+    };
+    if view.screen != Screen::Disclose {
+        return;
+    }
+    let Some(d) = view.disclose.take() else {
+        return;
+    };
+    if !has_vta {
+        view.screen = Screen::List;
+        view.note(
+            Severity::Error,
+            "Reading this election presents your membership credential, which your VTA holds. \
+             None is connected.",
+        );
+        return;
+    }
+    view.target = d.held_by;
+    view.presenting = Some(d.member_of.clone());
+    view.screen = Screen::Detail;
+    view.shown = None;
+    view.note(
+        Severity::Progress,
+        "Your VTA is signing the read, presenting your membership…",
+    );
+    view.next = Some(Next::ReadPresenting {
+        election: d.election,
+        member_of: d.member_of,
+        intent: d.intent,
+    });
 }
 
 /// `y` on the confirmation: have the VTA build the cast.
@@ -604,6 +759,7 @@ fn open(ctx: &mut ActionCtx<'_>, index: usize) {
 /// Take the step the view's last answer called for, if its lane is free. The loop calls this
 /// after applying replies and dispatch outcomes, and on its tick.
 pub(crate) async fn advance(lp: &mut Loop<'_>) {
+    ask_notified(lp);
     let Some(next) = view_mut(lp.state).and_then(|v| v.next.take()) else {
         return;
     };
@@ -618,6 +774,34 @@ pub(crate) async fn advance(lp: &mut Loop<'_>) {
                 true
             }
         }
+        Next::ReadPresenting {
+            election,
+            member_of,
+            intent,
+        } => {
+            let member = view_mut(lp.state).map(|v| v.me.clone()).unwrap_or_default();
+            lp.ask_vta(VtaAsk::ReadPresenting {
+                member,
+                election,
+                member_of,
+                intent,
+            })
+        }
+        Next::SendShowDocument {
+            document,
+            election,
+            intent,
+        } => {
+            lp.send_signed(document, Purpose::Show { election, intent })
+                .await
+        }
+        Next::SendIssueDocument(document) => {
+            let election = shown
+                .as_ref()
+                .map(|s| s.election_id().to_string())
+                .unwrap_or_default();
+            lp.send_signed(document, Purpose::Issue { election }).await
+        }
         Next::ListPage { cursor } => {
             lp.send(
                 Request::List {
@@ -628,7 +812,10 @@ pub(crate) async fn advance(lp: &mut Loop<'_>) {
             .await
         }
         Next::Register => match shown {
-            Some(shown) => lp.ask_vta(VtaAsk::Register { shown }),
+            Some(shown) => {
+                let member = view_mut(lp.state).map(|v| v.me.clone()).unwrap_or_default();
+                lp.ask_vta(VtaAsk::Register { shown, member })
+            }
             None => true,
         },
         Next::SendIssue(ticket) => {
@@ -659,6 +846,31 @@ pub(crate) async fn advance(lp: &mut Loop<'_>) {
     }
 }
 
+/// Read the VTA's held election notifications, when due and its lane is free (VTI-NTF-063).
+fn ask_notified(lp: &mut Loop<'_>) {
+    let has_vta = lp.vta.is_some();
+    let Some(view) = view_mut(lp.state) else {
+        return;
+    };
+    if !view.notified_due || view.flow.is_some() {
+        return;
+    }
+    if !has_vta {
+        view.notified_due = false;
+        view.notified_phase =
+            NotifiedPhase::Unavailable("no VTA is connected, and it holds them".into());
+        return;
+    }
+    if lp.in_flight.is_busy(VTA) {
+        return;
+    }
+    if lp.ask_vta(VtaAsk::Notified)
+        && let Some(view) = view_mut(lp.state)
+    {
+        view.notified_due = false;
+    }
+}
+
 /// The loop's periodic pass: reply windows, and any step left waiting on a busy lane.
 pub(crate) async fn tick(lp: &mut Loop<'_>) {
     let now = Instant::now();
@@ -669,6 +881,7 @@ pub(crate) async fn tick(lp: &mut Loop<'_>) {
             .is_some_and(|p| now.duration_since(p.sent_at) > REPLY_WINDOW)
         && let Some(p) = view.pending.take()
     {
+        elections::answered(&p.thid);
         let secs = REPLY_WINDOW.as_secs();
         match p.purpose {
             Purpose::List if view.elections.is_empty() => {
@@ -723,18 +936,41 @@ pub(crate) struct SendJob {
     sender: Sender,
     vtc_did: String,
     persona: PersonaId,
-    doc: RequestDocument,
+    doc: Doc,
+}
+
+/// A document on its way to the community.
+enum Doc {
+    /// Built here: signed as the persona before it goes.
+    Unsigned(Box<RequestDocument>),
+    /// Signed by the VTA as the member, carrying a presentation: sent exactly as it answered.
+    Signed(serde_json::Value),
+}
+
+impl Doc {
+    /// The thread its answer carries: the document's id.
+    fn thread(&self) -> Option<String> {
+        match self {
+            Doc::Unsigned(doc) => Some(correlation_thread(doc).to_string()),
+            Doc::Signed(doc) => doc
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
+        }
+    }
 }
 
 impl SendJob {
     async fn run(mut self) -> ElectionsOutcome {
-        let thid = correlation_thread(&self.doc).to_string();
-        let result = crate::state_handler::repos_actions::sign_and_send(
-            &self.sender,
-            &self.vtc_did,
-            &mut self.doc,
-        )
-        .await;
+        let thid = self.doc.thread().unwrap_or_default();
+        let result = match &mut self.doc {
+            Doc::Unsigned(doc) => {
+                crate::state_handler::repos_actions::sign_and_send(&self.sender, &self.vtc_did, doc)
+                    .await
+            }
+            Doc::Signed(doc) => send_signed_document(&self.sender, &self.vtc_did, doc).await,
+        };
         ElectionsOutcome {
             vtc_did: self.vtc_did,
             persona: self.persona,
@@ -742,6 +978,34 @@ impl SendJob {
             result,
         }
     }
+}
+
+/// Send a document the VTA signed, unchanged, on the community's transport.
+async fn send_signed_document(
+    s: &Sender,
+    vtc_did: &str,
+    doc: &serde_json::Value,
+) -> Result<(), String> {
+    let id = doc
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let tsp_mediator = openvtc_core::community_send::tsp_mediator_for(s.over_tsp, vtc_did).await;
+    openvtc_core::community_send::send_document(
+        &openvtc_core::community_send::Delivery {
+            atm: &s.atm,
+            profile: &s.profile,
+            member_did: &s.persona_did,
+            vtc_did,
+            mediator_did: &s.mediator,
+            tsp_mediator_did: tsp_mediator.as_deref(),
+        },
+        id,
+        doc.clone(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// What a send did. Applied on the loop.
@@ -758,10 +1022,11 @@ impl ElectionsOutcome {
         let Err(e) = self.result else {
             return;
         };
+        elections::answered(&self.thid);
         let Some(view) = view_mut(state) else {
             return;
         };
-        if view.vtc_did != self.vtc_did
+        if view.pending.as_ref().is_none_or(|p| p.to != self.vtc_did)
             || view.persona != self.persona
             || view.pending.as_ref().is_none_or(|p| p.thid != self.thid)
         {
@@ -782,7 +1047,13 @@ impl ElectionsOutcome {
 pub(crate) fn apply_replies(state: &mut State, replies: Vec<InboundReply>) -> bool {
     let mut taken = false;
     for inbound in replies {
-        let Some(vtc) = view_mut(state).map(|v| v.vtc_did.clone()) else {
+        // The community the outstanding request went to: the panel's own, or the one holding a
+        // notified election.
+        let Some(vtc) = view_mut(state).map(|v| {
+            v.pending
+                .as_ref()
+                .map_or_else(|| v.vtc_did.clone(), |p| p.to.clone())
+        }) else {
             continue;
         };
         // A thread id is a correlation key, not a credential: an answer is taken only from the
@@ -815,6 +1086,7 @@ fn apply_reply(state: &mut State, thid: &str, reply: Reply) -> bool {
     let Some(pending) = view.pending.take() else {
         return false;
     };
+    elections::answered(&pending.thid);
     match (reply, pending.purpose) {
         (Reply::List(page), Purpose::List) => {
             let next = page.next_cursor.as_ref().map(|c| c.as_str().to_string());
@@ -845,6 +1117,29 @@ fn apply_reply(state: &mut State, thid: &str, reply: Reply) -> bool {
             }
             view.note(Severity::Progress, Step::Accepting.words());
             view.next = Some(Next::Accept { issued: raw });
+        }
+        // A notified election put to the members of another party: its community shows it
+        // only to a read presenting that membership (VTI-VOT-015). Offer that read, saying what
+        // it shows, and present nothing until the member chooses (VTI-VOT-016).
+        (Reply::Refused(r), Purpose::Show { election, intent })
+            if r.is("electionUnknown")
+                && view.presenting.is_none()
+                && view.opening.as_ref().is_some_and(|n| {
+                    n.election_id == election && n.audience_is_another_party()
+                }) =>
+        {
+            let Some(n) = view.opening.clone() else {
+                return true;
+            };
+            view.flow = None;
+            view.status = None;
+            view.disclose = Some(Disclose {
+                held_by: n.held_by,
+                election,
+                member_of: n.audience,
+                intent,
+            });
+            view.screen = Screen::Disclose;
         }
         (Reply::Refused(r), purpose) => match purpose {
             Purpose::List if view.elections.is_empty() => {
@@ -909,8 +1204,19 @@ fn after_show(view: &mut ElectionsView) {
 
 /// One call to the member's VTA.
 enum VtaAsk {
+    /// The held notifications of the kind `election`.
+    Notified,
+    /// Sign the read of an election presenting a membership.
+    ReadPresenting {
+        member: String,
+        election: String,
+        member_of: String,
+        intent: Intent,
+    },
     Register {
         shown: Box<ShownElection>,
+        /// The persona DID: under a credential roll, the VTA signs the claim as it.
+        member: String,
     },
     Accept {
         shown: Box<ShownElection>,
@@ -928,6 +1234,12 @@ enum VtaAsk {
 
 /// What the VTA answered.
 pub(crate) enum VtaAnswer {
+    Notified(Result<Vec<NotifiedElection>, String>),
+    ReadSigned {
+        election: String,
+        intent: Intent,
+        result: Result<serde_json::Value, String>,
+    },
     Registered(Result<Registered, String>),
     Accepted(Result<(), String>),
     Voted(Result<Cast, String>),
@@ -937,11 +1249,47 @@ pub(crate) enum VtaAnswer {
 impl VtaAsk {
     async fn run(self, v: &Voter<'_>) -> VtaAnswer {
         match self {
-            VtaAsk::Register { shown } => VtaAnswer::Registered(
-                elections::register(v, &shown)
-                    .await
-                    .map_err(|e| e.to_string()),
+            VtaAsk::Notified => VtaAnswer::Notified(
+                openvtc_core::notifications::list_elections(v.vta, v.context_id).await,
             ),
+            VtaAsk::ReadPresenting {
+                member,
+                election,
+                member_of,
+                intent,
+            } => {
+                let result = async {
+                    let credential = held_membership(v, &member_of, &member).await?;
+                    elections::read_presenting(v, &member, &election, &member_of, &credential)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                .await;
+                VtaAnswer::ReadSigned {
+                    election,
+                    intent,
+                    result,
+                }
+            }
+            VtaAsk::Register { shown, member } => {
+                let result = async {
+                    // Under a credential roll the claim presents the membership the roll names
+                    // (VTI-VOT-025); under any other, the VTA builds the request alone.
+                    let credential = match shown.credential_roll() {
+                        Some(member_of) => Some(held_membership(v, member_of, &member).await?),
+                        None => None,
+                    };
+                    let claim = credential.as_deref().map(|credential| Claim {
+                        member: &member,
+                        credential,
+                    });
+                    elections::register(v, &shown, claim)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                .await;
+                VtaAnswer::Registered(result)
+            }
             VtaAsk::Accept { shown, issued } => VtaAnswer::Accepted(
                 elections::accept(v, &shown, &issued)
                     .await
@@ -959,6 +1307,21 @@ impl VtaAsk {
             ),
         }
     }
+}
+
+/// The vault handle of the persona's membership credential from `member_of`, or why there is
+/// none to present.
+async fn held_membership(v: &Voter<'_>, member_of: &str, member: &str) -> Result<String, String> {
+    elections::membership_credential_for(v.vta, member_of, member)
+        .await
+        .map_err(|e| format!("your VTA's credential vault did not answer: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "Your VTA holds no valid membership credential that {} issued this persona, so \
+                 there is nothing to present.",
+                openvtc_core::display::sanitize_display(member_of, 256)
+            )
+        })
 }
 
 /// The VTA's answer. Applied on the loop.
@@ -980,6 +1343,32 @@ impl ElectionsVtaOutcome {
         }
         let intent = view.flow.as_ref().map(|f| f.intent);
         match self.answer {
+            VtaAnswer::Notified(Ok(items)) => view.take_notified(items),
+            VtaAnswer::Notified(Err(e)) => {
+                view.notified_phase = NotifiedPhase::Unavailable(e);
+            }
+            VtaAnswer::ReadSigned {
+                election,
+                intent,
+                result: Ok(document),
+            } => {
+                view.next = Some(Next::SendShowDocument {
+                    document,
+                    election,
+                    intent,
+                });
+            }
+            VtaAnswer::ReadSigned { result: Err(e), .. } => {
+                view.flow = None;
+                view.note(Severity::Error, e);
+            }
+            VtaAnswer::Registered(Ok(Registered::Document(document))) => {
+                if let Some(flow) = view.flow.as_mut() {
+                    flow.step = Step::Issuing;
+                }
+                view.note(Severity::Progress, Step::Issuing.words());
+                view.next = Some(Next::SendIssueDocument(document));
+            }
             VtaAnswer::Registered(Ok(Registered::Request(ticket))) => {
                 if let Some(flow) = view.flow.as_mut() {
                     flow.step = Step::Issuing;
@@ -1013,7 +1402,7 @@ impl ElectionsVtaOutcome {
                 if let Some(flow) = view.flow.take() {
                     panel
                         .tickets_taken
-                        .insert((view.vtc_did.clone(), flow.election), now);
+                        .insert((view.target.clone(), flow.election), now);
                 }
                 view.note(
                     Severity::Success,
