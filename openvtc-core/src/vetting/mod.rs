@@ -56,6 +56,7 @@ where
 }
 
 pub mod applicant;
+pub mod binding;
 pub mod book;
 pub mod disclosure;
 pub mod discover;

@@ -440,6 +440,9 @@ pub enum VettingAction {
     OpenHiddenVetting,
     /// Run the hidden-vetting schedule now, from its view.
     DrawNow,
+    /// Check again, from the top, the hidden-vetting key the community in view bound us to:
+    /// ask it which key, and the VTA to restore it.
+    CheckHiddenKey,
     /// Arm the confirmation for abandoning the highlighted application.
     ///
     /// Confirming is `Enter`, which the open mode already routes — the same

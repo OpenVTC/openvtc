@@ -1884,11 +1884,23 @@ fn hidden_vetting(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize
                      its operator to publish a new live period, then press d",
                     "Owed"
                 )
+            } else if row.enrolment_held {
+                format!("  {:<20}{owed} — waiting on your key (below)", "Owed")
             } else {
                 format!("  {:<20}{owed} — enrolling now", "Owed")
             })
             .fg(COLOR_ORANGE),
         );
+    }
+    // The community knows us by another key: where restoring it at the VTA, or an admin's
+    // reset, stands — and what the vetter has to do, in orange.
+    for key in &row.key {
+        let line = Line::from(format!("  {:<20}{}", key.label, key.text));
+        lines.push(if key.act {
+            line.fg(COLOR_ORANGE)
+        } else {
+            line.style(value())
+        });
     }
     lines.push(Line::from(""));
 
@@ -1961,10 +1973,15 @@ fn hidden_vetting(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize
         lines.push(Line::from(format!("  Last refusal  {refusal}")).fg(COLOR_ORANGE));
     }
     lines.push(Line::from(""));
-    lines.push(hint(if v.hidden.len() > 1 {
-        "d or Enter: draw now  ←/→: community  Esc: back"
+    let check = if row.key.is_empty() {
+        ""
     } else {
-        "d or Enter: draw now  Esc: back"
+        "r: check my key again  "
+    };
+    lines.push(hint(if v.hidden.len() > 1 {
+        format!("d or Enter: draw now  {check}←/→: community  Esc: back")
+    } else {
+        format!("d or Enter: draw now  {check}Esc: back")
     }));
 }
 
@@ -2406,6 +2423,66 @@ mod desk_tests {
             text.contains("its parameters are being read again"),
             "{text}"
         );
+    }
+
+    /// The community knows the vetter by another key: the view says where getting it back
+    /// stands, says the owed enrolment waits on it, and offers to check again.
+    #[test]
+    fn the_hidden_vetting_view_says_where_the_key_stands() {
+        use crate::state_handler::main_page::content::{HiddenKeyLine, HiddenVettingRow};
+        let row = HiddenVettingRow {
+            community: "Kernel Developers".into(),
+            enrolment_owed: Some("vetter/2026-11".into()),
+            enrolment_held: true,
+            key: vec![
+                HiddenKeyLine {
+                    label: "Key",
+                    text: "lost — an admin of Kernel Developers reset it on 2026-11-02".into(),
+                    act: false,
+                },
+                HiddenKeyLine {
+                    label: "Reset",
+                    text: "waiting for vetter/2026-10 to retire — then you enrol with your \
+                           current key"
+                        .into(),
+                    act: false,
+                },
+            ],
+            ..HiddenVettingRow::default()
+        };
+        let v = VettingState {
+            tab: VettingTab::Desk,
+            mode: VettingMode::HiddenVetting { index: 0 },
+            hidden: vec![row.clone()].into(),
+            ..VettingState::default()
+        };
+        let text = drawn(&v);
+        for expected in [
+            "vetter/2026-11 — waiting on your key (below)",
+            "Key",
+            "reset it on 2026-11-02",
+            "Reset",
+            "waiting for vetter/2026-10 to retire",
+            "r: check my key again",
+        ] {
+            assert!(
+                text.contains(expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+        // Nothing wrong with the key: neither the lines nor the key.
+        let v = VettingState {
+            hidden: vec![HiddenVettingRow {
+                key: Vec::new(),
+                enrolment_held: false,
+                ..row
+            }]
+            .into(),
+            ..v
+        };
+        let text = drawn(&v);
+        assert!(text.contains("vetter/2026-11 — enrolling now"), "{text}");
+        assert!(!text.contains("r: check my key"), "{text}");
     }
 
     /// A community known only by its DID is shortened to 48 characters, wider

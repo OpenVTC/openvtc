@@ -49,6 +49,9 @@ pub enum QueryKind {
     PcsEventMode,
     /// `vtc/vetting/pcs-challenge/0.1` — the nonce a submission binds.
     PcsChallenge,
+    /// `vtc/vetting/vetters/pcs-binding/show/0.1` — which hidden-vetting key the community has
+    /// bound us to.
+    PcsBinding,
     /// `vtc/join-requests/wallet-session/start/0.1` — open an OpenID4VP
     /// session a wallet answers.
     WalletSessionStart,
@@ -83,6 +86,7 @@ impl QueryKind {
             QueryKind::PcsTokens => "your attestation tokens",
             QueryKind::PcsEventMode => "your place at the event",
             QueryKind::PcsChallenge => "the challenge for your submission",
+            QueryKind::PcsBinding => "the hidden-vetting key it holds for you",
             QueryKind::WalletSessionStart => "a session for your wallet",
             QueryKind::WalletSessionStatus => "your wallet session",
         }
@@ -260,6 +264,7 @@ pub fn refusal_words(kind: QueryKind, community: &str, code: &str) -> String {
             | QueryKind::PcsTokens
             | QueryKind::PcsEventMode
             | QueryKind::PcsChallenge
+            | QueryKind::PcsBinding
     ) && !code.ends_with("permissionDenied")
         && !code.ends_with("malformedRequest")
     {

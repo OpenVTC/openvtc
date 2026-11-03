@@ -2990,6 +2990,88 @@ async fn already_enrolled_without_a_credential_asks_once_more_then_stops() {
     assert!(outlook.enrolment_lost);
 }
 
+/// The live failure: the vetter's VTA derived a new key (its engine record was replaced), so the
+/// community refuses enrolment as `identifierRebound` — and asking again, or re-granting the
+/// vetter role, only collected the same refusal. Now the refusal starts a check: enrolment is
+/// held, the community is asked which key it bound, and its answer has the VTA asked to restore
+/// that key.
+#[tokio::test]
+async fn a_rebound_refusal_asks_which_key_and_has_the_vta_restore_it() {
+    let (mut vetter, request, _) = vetter_asking_to_enrol().await;
+    let refusal = community_refusal(&request, "vtc/vetting/vetters/pcs-root:identifierRebound");
+    let handled = vetter.receive(&refusal, COMMUNITY).await;
+    assert!(handled.changed);
+    assert!(vetter.book.vetter_refresh_due, "the check starts now");
+    let october = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 5, 15, 0, 0).unwrap();
+    {
+        let held = &mut vetter.book.hidden_vetter[0];
+        assert_eq!(
+            held.key.as_ref().map(|k| &k.phase),
+            Some(&super::binding::KeyPhase::Checking)
+        );
+        assert!(held.binding_read_due(Utc::now()));
+        assert!(
+            held.plan(None, &[], october).owed.is_empty(),
+            "no enrolment that would only be refused again"
+        );
+    }
+    let outlook = vetter
+        .book
+        .hidden_outlook(COMMUNITY, vetter.persona, october)
+        .unwrap();
+    assert!(outlook.key_held);
+
+    // Asked: the community answers with the identifier it bound.
+    vetter.book.vetter_refresh_due = false;
+    let show = wire::pcs_binding_show_request(&vetter.did, COMMUNITY).unwrap();
+    vetter
+        .book
+        .ask(asked(&show, vetter.persona, QueryKind::PcsBinding));
+    vetter.book.hidden_vetter[0].binding_asked(Utc::now());
+    let answer: super::binding::show::Response = serde_json::from_value(json!({
+        "bound": true,
+        "id": "z3Previous",
+        "enrolledLabels": ["vetter/2026-09"],
+    }))
+    .unwrap();
+    let message = community_answer(&show, &answer).await;
+    let handled = vetter.receive(&message, COMMUNITY).await;
+    assert!(handled.changed);
+    assert!(vetter.book.vetter_refresh_due, "the VTA is asked at once");
+    let held = &vetter.book.hidden_vetter[0];
+    assert_eq!(held.recovery_due(), Some("z3Previous"));
+    assert!(
+        !serde_json::to_string(&vetter.book)
+            .unwrap()
+            .contains("z3Previous"),
+        "the bound identifier is never stored"
+    );
+}
+
+/// A refusal of the binding question is said, and the check is not asked again on every pass.
+#[tokio::test]
+async fn a_refused_binding_question_is_said_and_not_asked_every_pass() {
+    let (mut vetter, request, _) = vetter_asking_to_enrol().await;
+    let refusal = community_refusal(&request, "vtc/vetting/vetters/pcs-root:identifierRebound");
+    vetter.receive(&refusal, COMMUNITY).await;
+    let show = wire::pcs_binding_show_request(&vetter.did, COMMUNITY).unwrap();
+    vetter
+        .book
+        .ask(asked(&show, vetter.persona, QueryKind::PcsBinding));
+    let now = Utc::now();
+    vetter.book.hidden_vetter[0].binding_asked(now);
+    let refused = community_refusal(&show, super::binding::show::error_codes::NOT_A_MEMBER.code);
+    let handled = vetter.receive(&refused, COMMUNITY).await;
+    let notice = handled.notice.expect("said").describe();
+    assert!(
+        notice.contains("does not count you as a member"),
+        "{notice}"
+    );
+    let held = &vetter.book.hidden_vetter[0];
+    assert!(!held.binding_read_due(now + Duration::minutes(1)));
+    assert!(held.binding_read_due(now + super::binding::BINDING_REASK));
+}
+
 /// No credential and no token are states a vetter waits out — not "parameters could not be
 /// read", which is what both used to say. The VTA refuses with `notEnrolled` / `noToken`, and the
 /// desk says them in these words.

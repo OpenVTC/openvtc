@@ -558,6 +558,49 @@ pub async fn vetter_show(
     }
 }
 
+/// What `vta/pcs/vetter/recover` did: whether it replaced the engine's key with the one the
+/// community bound (`false` when the engine already held it), and the engine after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recovered {
+    /// The engine's key was replaced by the bound one.
+    pub recovered: bool,
+    /// The engine, as the VTA holds it now.
+    pub vetter: VetterView,
+}
+
+/// `vta/pcs/vetter/recover` — ask the VTA to make the key whose identifier is `bound_id` (what
+/// the community has bound `member_did` to, from `vtc/vetting/vetters/pcs-binding/show`) the
+/// engine's key for `community`. The VTA searches only the keys it derives for `context_id`, a
+/// bounded search, so it runs under the pairing-heavy budget.
+///
+/// # Errors
+/// [`PcsError`]; the declared refusals are `NOT_FOUND` (no key this VTA can derive has the
+/// identifier — an admin reset is the way on), `HELD_IN_ANOTHER_CONTEXT` (its message names the
+/// context), `MEMBER_MISMATCH` and `ENGINE_ENROLLED`.
+pub async fn vetter_recover(
+    client: &VtaClient,
+    context_id: &str,
+    community: &str,
+    member_did: &str,
+    bound_id: &str,
+) -> Result<Recovered, PcsError> {
+    let answer = call::<pcs::vetter::recover::v0_1::Payload>(
+        client,
+        json!({
+            "contextId": context_id,
+            "community": community,
+            "memberDid": member_did,
+            "boundId": bound_id,
+        }),
+        PROOF_TIMEOUT_SECS,
+    )
+    .await?;
+    Ok(Recovered {
+        recovered: answer.recovered,
+        vetter: carry(&answer.vetter)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +631,40 @@ mod tests {
         });
         serde_json::from_value::<pcs::applications::create::v0_1::Payload>(payload)
             .expect("the engine's schema accepts the parameters");
+    }
+
+    /// The recovery request this client sends is one the task's schema takes, and its answer
+    /// carries into the engine view the schedule reads.
+    #[test]
+    fn a_recovery_is_asked_and_read_in_the_tasks_own_shape() {
+        let request = json!({
+            "contextId": "personal/communities",
+            "community": "did:webvh:QmCommunity:vtc.example.org",
+            "memberDid": "did:webvh:QmMember:vta.example.com:alice",
+            "boundId": "z4FvpxtP31f2HAEo4V9ffW3VRH1yZJAXY",
+        });
+        serde_json::from_value::<pcs::vetter::recover::v0_1::Payload>(request)
+            .expect("the schema takes the request");
+        let answer: pcs::vetter::recover::v0_1::Response = serde_json::from_value(json!({
+            "recovered": true,
+            "vetter": {
+                "contextId": "personal/communities",
+                "community": "did:webvh:QmCommunity:vtc.example.org",
+                "memberDid": "did:webvh:QmMember:vta.example.com:alice",
+                "suite": "ps-ddh-bls12381",
+                "id": "z4FvpxtP31f2HAEo4V9ffW3VRH1yZJAXY",
+                "enrolledLabels": [],
+                "pendingLabels": [],
+                "tokensFree": 0,
+                "tokensHeld": 0,
+                "drawsInFlight": [],
+                "attested": 0
+            }
+        }))
+        .unwrap();
+        assert!(answer.recovered);
+        let view: VetterView = carry(&answer.vetter).unwrap();
+        assert_eq!(view.id, "z4FvpxtP31f2HAEo4V9ffW3VRH1yZJAXY");
     }
 
     #[test]

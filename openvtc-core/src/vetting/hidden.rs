@@ -441,8 +441,11 @@ pub fn refusal_words(code: &str) -> String {
              there again once it publishes a new label."
         }
         ("pcs-root", "identifierRebound") => {
-            "it has you enrolled under a different hidden-vetting key. This install's key is not \
-             the one the community knows — vet from the install that enrolled first."
+            "it knows you by a different hidden-vetting key from the one your VTA holds now — \
+             it binds you to the key you first enrolled with, and revoking and re-granting the \
+             vetter role does not change that. This client asks the community which key that \
+             is and asks your VTA to restore it; if your VTA cannot, an admin of the community \
+             has to reset your hidden-vetting key (see Key in the Hidden vetting view)."
         }
         ("pcs-root", "badRequest") | ("pcs-tokens", "badOpeningProof") => {
             "it could not verify the request this client built. Update OpenVTC; if that does \
@@ -473,6 +476,28 @@ pub fn refusal_words(code: &str) -> String {
             "you have already asked to vet at that event; its answer stands."
         }
         ("event-mode", "eventClosed") => "that event has closed.",
+        ("show", "notAMember") => {
+            "it does not count you as a member, so it will not say which hidden-vetting key it \
+             holds for you."
+        }
+        ("recover", "notFound") => {
+            "your VTA holds no key with the identifier the community bound you to — it cannot be \
+             restored here. An admin of the community has to reset your hidden-vetting key."
+        }
+        ("recover", "heldInAnotherContext") => {
+            "another of your VTA contexts holds the key the community bound you to. Vet for this \
+             community from that persona; a key cannot move between contexts."
+        }
+        ("recover", "memberMismatch") => {
+            "your VTA's hidden-vetting engine for this community in this context belongs to \
+             another member DID. Vet as the persona it was made for; a reset of your \
+             hidden-vetting key does not change which member an engine serves."
+        }
+        ("recover", "engineEnrolled") => {
+            "your VTA will not replace its key for this community: that key already holds a \
+             credential, tokens or attestations the community issued, so the binding this \
+             client read was likely stale. It is read again on the next check (r on the desk)."
+        }
         ("pcs-challenge", "notHiddenVetting") => {
             "it no longer counts vetting from a zero-knowledge proof for this criterion."
         }
@@ -1476,6 +1501,41 @@ mod schedule_tests {
                 .contains("not issuing tokens under that label")
         );
         assert!(refusal_words("vtc/vetting/vetters/pcs-root:notAVetter").contains("vetter grant"));
+        // A different key: the VTA holds it now, a re-grant does not help, recovery is tried,
+        // and a reset is the way on otherwise. Never "the install that enrolled first".
+        let rebound = refusal_words("vtc/vetting/vetters/pcs-root:identifierRebound");
+        for said in [
+            "your VTA",
+            "re-granting the vetter role does not change",
+            "restore it",
+            "reset your hidden-vetting key",
+        ] {
+            assert!(rebound.contains(said), "{said:?} missing from {rebound}");
+        }
+        assert!(!rebound.contains("install"), "{rebound}");
+        // Each of the VTA's recovery refusals has its own way on (R6.4).
+        use crate::vetting::pcs_vta::tasks::vetter::recover::v0_1::error_codes as recover;
+        let not_found = refusal_words(recover::NOT_FOUND.code);
+        assert!(
+            not_found.contains("reset your hidden-vetting key"),
+            "{not_found}"
+        );
+        let elsewhere = refusal_words(recover::HELD_IN_ANOTHER_CONTEXT.code);
+        assert!(elsewhere.contains("from that persona"), "{elsewhere}");
+        let mismatch = refusal_words(recover::MEMBER_MISMATCH.code);
+        assert!(mismatch.contains("another member DID"), "{mismatch}");
+        let enrolled = refusal_words(recover::ENGINE_ENROLLED.code);
+        assert!(enrolled.contains("will not replace its key"), "{enrolled}");
+        let words = [&not_found, &elsewhere, &mismatch, &enrolled];
+        for (i, a) in words.iter().enumerate() {
+            for b in &words[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        assert!(
+            refusal_words(crate::vetting::binding::show::error_codes::NOT_A_MEMBER.code)
+                .contains("does not count you as a member")
+        );
         assert!(refusal_words("vtc/vetting/vetters/event-mode:eventClosed").contains("has closed"));
         assert!(
             refusal_words("vtc/vetting/vetters/pcs-tokens:somethingNew")

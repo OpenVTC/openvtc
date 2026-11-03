@@ -147,6 +147,12 @@ type_uri = "https://trusttasks.org/spec/vta/pcs/verify-attestation/0.1"
 digest = "sha256:851da0ac0d05e7b0236527935ce46e28a7c7ac388c93dd2d5338a702b0755204"
 
 [[task]]
+slug = "vta/pcs/vetter/recover"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/pcs/vetter/recover/0.1"
+digest = "sha256:b72dec5809f573dddcdd8b3fc31641e16390d50f1f5b611bb6269fb25a6646f3"
+
+[[task]]
 slug = "vta/pcs/vetter/show"
 version = "0.1"
 type_uri = "https://trusttasks.org/spec/vta/pcs/vetter/show/0.1"
@@ -289,6 +295,12 @@ slug = "vtc/rooms/offers/list"
 version = "0.4"
 type_uri = "https://trusttasks.org/spec/vtc/rooms/offers/list/0.4"
 digest = "sha256:aa3618469b8bcfeda1084a4868a170743c3b3c762411f610e2617b11234cf65d"
+
+[[task]]
+slug = "vtc/vetting/vetters/pcs-binding/show"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vtc/vetting/vetters/pcs-binding/show/0.1"
+digest = "sha256:8384553f04fa094e7ad8ab3e49ecae188e6f3bf28626d8a12196b3b83bae7cc2"
 
 [[task]]
 slug = "vtc/vetting/vetters/pcs-tokens"

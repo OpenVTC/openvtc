@@ -3134,6 +3134,7 @@ impl MainPage {
                         Some(V::RemoveEvent)
                     }
                     None if on_hidden && code == KeyCode::Char('d') => Some(V::DrawNow),
+                    None if on_hidden && code == KeyCode::Char('r') => Some(V::CheckHiddenKey),
                     None if code == KeyCode::Char(' ') => Some(V::Toggle),
                     None => None,
                 },

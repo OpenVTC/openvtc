@@ -538,6 +538,31 @@ pub fn pcs_challenge_request(
     )
 }
 
+/// `vtc/vetting/vetters/pcs-binding/show/0.1` — which hidden-vetting identifier the community
+/// has bound this member to, and whether an admin has reset it.
+pub const PCS_BINDING_SHOW_TYPE: &str =
+    <crate::specs::vtc::vetting::vetters::pcs_binding::show::v0_1::Payload as trust_tasks_rs::Payload>::TYPE_URI;
+
+/// A `vtc/vetting/vetters/pcs-binding/show/0.1` request: ask `community_did` which
+/// hidden-vetting identifier it has bound `vetter_did` to. The payload is empty: the community
+/// answers about the signer and no one else.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Config`] if the document cannot be built.
+pub fn pcs_binding_show_request(
+    vetter_did: &str,
+    community_did: &str,
+) -> Result<TrustTask<Value>, OpenVTCError> {
+    document(
+        PCS_BINDING_SHOW_TYPE,
+        vetter_did,
+        community_did,
+        new_id(),
+        &crate::specs::vtc::vetting::vetters::pcs_binding::show::v0_1::Payload::default(),
+    )
+}
+
 /// `vtc/join-requests/wallet-session/start/0.1`.
 pub const WALLET_SESSION_START_TYPE: &str =
     <crate::specs::vtc::join_requests::wallet_session::start::v0_1::Payload as trust_tasks_rs::Payload>::TYPE_URI;
