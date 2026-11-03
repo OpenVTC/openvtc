@@ -288,7 +288,7 @@ pub fn notified_elections(page: &Value) -> Result<(Vec<NotifiedElection>, Option
 }
 
 /// Every held notification of the kind `election` in `context_id` the VTA holds as active and
-/// available — dismissed, withdrawn and lapsed ones left out — up to [`MAX_LIST_PAGES`] pages.
+/// available — dismissed, withdrawn and lapsed ones left out — up to five pages (`MAX_LIST_PAGES`).
 ///
 /// # Errors
 ///
