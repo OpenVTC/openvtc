@@ -2949,6 +2949,8 @@ dependencies = [
 [[package]]
 name = "did-git-sign"
 version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bfb115f781700b1e6a953c744bf1da6672bda8a97df3a2a65f2dbd9044f6e67"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -10068,6 +10070,8 @@ dependencies = [
 [[package]]
 name = "vgi-core"
 version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "714f69ef2ec15e9b8845c4497443d5a8396917cae95366cae5ae40f55c157bcc"
 dependencies = [
  "affinidi-did-common",
  "anyhow",
