@@ -230,7 +230,8 @@ async fn clone(args: &ArgMatches, deferred: DeferredLoad) -> Result<()> {
 // Account and community
 // ****************************************************************************
 
-/// The account, without an admin VTA session: this command never needs one.
+/// The account, without its admin VTA session (a request that connects a persona
+/// opens its own, for the collection claim).
 async fn load(deferred: DeferredLoad) -> Result<(Config, affinidi_tdk::TDK)> {
     progress("Loading the account…");
     let (config, tdk, _) = headless::load_account(deferred, Admin::Drop).await?;
@@ -310,8 +311,18 @@ async fn ask(
     target: &Membership,
     request: Request,
 ) -> Result<(String, Reply)> {
+    // A persona whose keys the VTA holds connects only under a collection claim
+    // (VTI-NTF-083), so a VTA account asks its VTA for one first.
+    let vta = match &config.key_backend {
+        openvtc_core::config::KeyBackend::Vta { .. } => Some(
+            openvtc_core::config::build_runtime_vta_client(&config.key_backend)
+                .await
+                .map_err(|e| anyhow!("couldn't reach the account's VTA: {e}"))?,
+        ),
+        openvtc_core::config::KeyBackend::Bip32 { .. } => None,
+    };
     // Listen first, so a fast answer is not stored unread at the mediator.
-    let (service, mut event_rx) = headless::start_messaging(config).await;
+    let (service, mut event_rx) = headless::start_messaging(config, vta.as_ref()).await;
     let result = async {
         // Outbound TSP must share the listener's relationship store.
         let tdk = service
@@ -364,7 +375,11 @@ async fn ask(
         Ok((sender.persona_did, reply?))
     }
     .await;
+    // Sockets closed and claims released first, then the session they were made at.
     service.shutdown().await;
+    if let Some(vta) = vta {
+        vta.shutdown().await;
+    }
     result
 }
 

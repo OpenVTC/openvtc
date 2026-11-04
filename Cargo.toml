@@ -94,8 +94,10 @@ argon2 = "0.6"
 # (TSP 1.0, VTI #2282). 0.32 -> 0.33 is the trust-tasks 0.35 line (messaging-sdk
 # 0.41), the one `affinidi-messaging-test-mediator` 0.46 and the VTI trust-tasks
 # 0.35 move are on. 0.33 -> 0.36 is the trust-tasks 0.36 line (messaging-sdk
-# 0.44) `vta-sdk` 0.75 declares; 0.34 / 0.35 were skipped.
-affinidi-tdk = "0.36"
+# 0.44) `vta-sdk` 0.75 declares; 0.34 / 0.35 were skipped. 0.36 -> 0.37 is the
+# trust-tasks 0.37 line (messaging-sdk 0.45, test mediator 0.50) `vta-sdk` 0.80
+# declares.
+affinidi-tdk = "0.37"
 affinidi-data-integrity = "0.8"
 # Decodes a community's Bitstring Status List. Already in the graph through
 # `vta-sdk`, whose status reader cannot verify a list signed with a proof set;
@@ -163,8 +165,9 @@ affinidi-messaging-core = "0.1.11"
 # **0.34.1** follows `vta-sdk` 0.65, which declares it; **0.36** follows 0.68;
 # **0.40** follows 0.73 (TSP 1.0). **0.41** is the trust-tasks 0.35 line, with
 # `affinidi-tdk` 0.33 above. **0.44** is the trust-tasks 0.36 line, with
-# `affinidi-tdk` 0.36 (`vta-sdk` 0.75).
-affinidi-messaging-sdk = "0.44.0"
+# `affinidi-tdk` 0.36 (`vta-sdk` 0.75). **0.45** is the trust-tasks 0.37 line,
+# with `affinidi-tdk` 0.37 (`vta-sdk` 0.80).
+affinidi-messaging-sdk = "0.45.0"
 # `StreamExt::next` on the `BoxStream` returned by `MessagingService::subscribe`.
 futures-util = "0.3"
 # Agent names (DID shortcuts). `agent-names` carries the parse /
@@ -468,9 +471,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # `trust-tasks-build`, as `openvtc_core::specs`. `default-features = false`
 # leaves out every prebuilt family; a spec version reached through `vta-sdk`'s
 # re-exports is still vta-sdk's to choose. **0.36.1** follows `vta-sdk` 0.75;
-# **0.36.2** follows 0.78, which declares it.
-trust-tasks-rs = { version = "0.36.2", default-features = false }
-trust-tasks-capability-client = "0.36.2"
+# **0.36.2** follows 0.78, which declares it; **0.37.2** follows 0.80.
+trust-tasks-rs = { version = "0.37.2", default-features = false }
+trust-tasks-capability-client = "0.37.2"
 # Build dependency of `openvtc-core`: generates `openvtc_core::specs` from the
 # vendored bundles. `trust-tasks check` (trust-tasks-cli) verifies them.
 trust-tasks-build = "0.1.2"
@@ -700,7 +703,11 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # `membershipCredential`, `voter/read/0.6`'s `memberOf`) and notifications
 # (`VtaClient::notifications_deposit_json`, VTI-NTF-054), which the Elections panel
 # and the inbound notification hand-over use.
-vta-sdk = { version = "0.79.0", features = [
+# **0.80** is `vta-service` 0.73's line, on trust-tasks 0.37 / TDK 0.37 /
+# messaging-sdk 0.45: collection claims (`VtaClient::collection_{claim,release}`,
+# `vta/collection/*/0.1`, VTI-NTF-080 – 093, VTI #2421), which a persona's mediator
+# socket now waits for. did-git-sign 0.33 (VGI #197) is on it.
+vta-sdk = { version = "0.80.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses

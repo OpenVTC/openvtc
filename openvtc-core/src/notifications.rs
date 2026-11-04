@@ -22,8 +22,12 @@
 //!
 //! The sender is answered by this client with the receipt the task defines (`notificationId`,
 //! `revision` of the innermost notification), **the same whatever the VTA does** with the
-//! document (VTI-NTF-023): [`receipt_for`] reads it from the document as this client verified
-//! it, never from the VTA's answer.
+//! document (VTI-NTF-023, VTI-NTF-054). That receipt is the one the VTA answers the deposit with
+//! (VTI-NTF-055), which is the same whether it held, declined or already held the document
+//! ([`Deposited::Answered`]). This client verifies nothing of its own to decide whether to
+//! answer: the VTA is the recipient that verifies, so the answer is the one the VTA would give
+//! had it collected the document itself (VTI-NTF-086) — never one turned on a second
+//! verification here that could come out differently.
 //!
 //! Receiving a notification sends nothing to its originator, to any relayer or to the thing's
 //! holder beyond that receipt, and never opens the thing (VTI-NTF-053). Opening is the member's
@@ -42,6 +46,7 @@ use trust_tasks_rs::Payload as _;
 use vta_sdk::client::VtaClient;
 
 use crate::specs::notifications::{notify::v0_1 as notify, relay::v0_1 as relay};
+use crate::specs::vta::notifications::deposit::v0_1 as deposited;
 use crate::specs::vta::notifications::list::v0_1 as held;
 
 /// `notifications/notify/0.1`.
@@ -119,12 +124,13 @@ pub fn deposit_payload(context_id: &str, document: &Value) -> Value {
     json!({ "contextId": context_id, "document": document })
 }
 
-/// What a deposit came to. Only reachability matters to the sender's receipt: whatever the VTA
-/// decided, the receipt is the same (VTI-NTF-054).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What a deposit came to. Whatever the VTA decided about holding it, the receipt is the same
+/// (VTI-NTF-054, VTI-NTF-055).
+#[derive(Clone, Debug, PartialEq)]
 pub enum Deposited {
-    /// The VTA answered with its receipt — held, declined or already held, never saying which.
-    Answered,
+    /// The VTA verified the document and answered with its receipt — held, declined or already
+    /// held, never saying which. The sender is answered with exactly this receipt.
+    Answered(Value),
     /// The VTA refused the document (`notAddressedHere`, `documentInvalid`, `permissionDenied`).
     Refused(String),
 }
@@ -144,7 +150,7 @@ pub async fn deposit(
         .notifications_deposit_json(deposit_payload(context_id, document))
         .await
     {
-        Ok(_) => Ok(Deposited::Answered),
+        Ok(answer) => receipt_from_deposit(answer).map(Deposited::Answered),
         Err(vta_sdk::error::VtaError::Rejected { code, .. }) => Ok(Deposited::Refused(code)),
         Err(e) if is_refusal(&e) => Ok(Deposited::Refused(e.to_string())),
         Err(e) => Err(e.to_string()),
@@ -166,15 +172,24 @@ fn is_refusal(e: &vta_sdk::error::VtaError) -> bool {
     )
 }
 
-/// The receipt a notify or relay is answered with: the innermost notification's
-/// `notificationId` and `revision` (VTI-NTF-023), from the delivery as this client verified it.
-#[must_use]
-pub fn receipt_for(verified: &vta_sdk::notifications::VerifiedDelivery) -> Value {
-    let n = verified.notification();
-    json!({
-        "notificationId": n.notification_id.as_str(),
-        "revision": n.revision.get(),
-    })
+/// The receipt a notify or relay is answered with — the innermost notification's
+/// `notificationId` and `revision` (VTI-NTF-023) — read from the VTA's answer to the deposit,
+/// which carries exactly that receipt whatever the VTA did with the document (VTI-NTF-055).
+///
+/// # Errors
+///
+/// An answer the deposit's response schema refuses: no receipt was given, so none is sent.
+pub fn receipt_from_deposit(answer: Value) -> Result<Value, String> {
+    let r: deposited::Response = serde_json::from_value(answer).map_err(|e| {
+        crate::display::sanitize_display(
+            &format!("vta/notifications/deposit answer: {e}"),
+            MAX_PEER_TEXT,
+        )
+    })?;
+    Ok(json!({
+        "notificationId": r.notification_id.as_str(),
+        "revision": r.revision,
+    }))
 }
 
 /// The receipt document: `<the received type>#response`, threaded on the received document,

@@ -93,6 +93,18 @@ type_uri = "https://trusttasks.org/spec/voting/ballot/cast-encrypted/0.1"
 digest = "sha256:51ae1c52f37984a771fd1c12adc304e17b2539d210a23c98c3f9bb0238c28008"
 
 [[task]]
+slug = "vta/collection/claim"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/collection/claim/0.1"
+digest = "sha256:b79968857a988de3e0893addf6dc7381c091936f572dfcfe4444ee528f73a516"
+
+[[task]]
+slug = "vta/collection/release"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/vta/collection/release/0.1"
+digest = "sha256:ef81e9945d6ae82477f55206ad357f96d9b5d541bc06d689d1ca694915957294"
+
+[[task]]
 slug = "vta/notifications/deposit"
 version = "0.1"
 type_uri = "https://trusttasks.org/spec/vta/notifications/deposit/0.1"

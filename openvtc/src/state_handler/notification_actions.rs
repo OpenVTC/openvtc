@@ -9,15 +9,23 @@
 //!    of the persona it was addressed to. Every one: this client applies no acceptance policy,
 //!    and declining is the VTA's decision.
 //! 2. **Answer the sender** with the receipt the task defines (`notificationId`, `revision` of
-//!    the innermost notification), read from the document as this client verifies it — the
-//!    same whatever the VTA did with it (VTI-NTF-023). A document that does not verify, or
-//!    whose sender is not its issuer, is not answered: VTI-NTF-023 answers a verified one.
+//!    the innermost notification) — the receipt the VTA answered the deposit with, which is
+//!    the same whether it held the document, declined it under the principal's acceptance
+//!    policy, or already held it (VTI-NTF-023, VTI-NTF-054, VTI-NTF-055). This client runs no
+//!    verification of its own to decide whether to answer: the VTA is the recipient that
+//!    verifies, and the answer must be the one it would give had it collected the document
+//!    itself (VTI-NTF-086). A second verification here could come out differently from the
+//!    VTA's — another resolver cache, another clock — and an answer turned on it would set a
+//!    document this client collected apart from one the VTA collected.
 //!
-//! When the VTA cannot be reached (or none is connected) the document is **not** handed over,
-//! and the sender is not answered either: no receipt is what makes the originator's retry
-//! (the operation's second retry class, VTI-NTF-021) deliver it again. That turns on
-//! reachability only — never on what the VTA decided — so the answer still says nothing of the
-//! member's relationships.
+//! A sender is not answered when no receipt was given: the VTA could not be reached (or none
+//! is connected), or it refused the document — as not addressed to a DID it holds, or as one it
+//! would not have accepted delivered directly (`documentInvalid`: not a notification it can
+//! verify, outside its acceptance window). None of those is a decision about holding it, so
+//! none says anything of the member's relationships, and an unanswered sender delivers again
+//! (VTI-NTF-021, VTI-TRN-046). Nor is a document whose transport sender is not its issuer, as
+//! the VTA does not answer one it collects (the document must be bound to the party that
+//! delivered it) — a check on the delivery alone, made before anything is decided.
 //!
 //! Nothing here opens the thing a notification points at, or tells its holder anything
 //! (VTI-NTF-053).
@@ -68,8 +76,14 @@ pub(crate) async fn hand_over(
         return;
     };
     // The persona's messaging identity and key, for the receipt. Resolved now (in memory, not
-    // I/O); the job owns them.
+    // I/O); the job owns them. Only a document its sender issued is answered (above).
+    let issued_by_sender = received
+        .document
+        .get("issuer")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|issuer| vta_sdk::did_scid::same_reference(issuer, &received.sender));
     let answer_as = match sender(config, tdk, persona, &received.sender).await {
+        Ok(_) if !issued_by_sender => None,
         Ok(s) => Some(s),
         Err(e) => {
             warn!(from = %received.sender, "the receipt cannot be sent: {e}");
@@ -84,28 +98,23 @@ pub(crate) async fn hand_over(
         );
         return;
     };
-    let resolver = tdk.did_resolver().clone();
     tokio::spawn(async move {
         let _permit = permit;
-        run(vta, context_id, received, answer_as, resolver).await;
+        run(vta, context_id, received, answer_as).await;
     });
 }
 
-async fn run(
-    vta: VtaClient,
-    context_id: String,
-    received: Received,
-    answer_as: Option<Sender>,
-    resolver: affinidi_tdk::did_resolver::DIDCacheClient,
-) {
-    // 1. The deposit, exactly as received.
-    match notifications::deposit(&vta, &context_id, &received.document).await {
-        Ok(Deposited::Answered) => {
+async fn run(vta: VtaClient, context_id: String, received: Received, answer_as: Option<Sender>) {
+    // 1. The deposit, exactly as received; its answer is the receipt.
+    let receipt = match notifications::deposit(&vta, &context_id, &received.document).await {
+        Ok(Deposited::Answered(receipt)) => {
             info!(from = %received.sender, "notification handed to the VTA");
+            receipt
         }
         Ok(Deposited::Refused(code)) => {
-            // The VTA's decision, not ours; the sender is answered the same.
-            debug!(from = %received.sender, %code, "the VTA refused a deposited notification");
+            // No receipt was given, so none is sent; the sender delivers again.
+            debug!(from = %received.sender, %code, "the VTA refused a deposited notification — not answered");
+            return;
         }
         Err(e) => {
             warn!(
@@ -115,30 +124,14 @@ async fn run(
             );
             return;
         }
-    }
+    };
 
-    // 2. The receipt, from the document as verified here.
+    // 2. The sender answered with the VTA's receipt, whatever the VTA did with the document.
     let Some(answer_as) = answer_as else {
-        return;
-    };
-    let vm = vta_sdk::trust_task_proof::TrustTaskVmResolver::new(resolver);
-    let verified = match vta_sdk::notifications::verify_delivery(&received.document, &vm).await {
-        Ok(v) => v,
-        Err(e) => {
-            debug!(from = %received.sender, "a notification that does not verify is not answered: {e}");
-            return;
-        }
-    };
-    let issuer = received
-        .document
-        .get("issuer")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    if !vta_sdk::did_scid::same_reference(issuer, &received.sender) {
         debug!(from = %received.sender, "a notification its sender did not issue is not answered");
         return;
-    }
-    if let Err(e) = answer(&answer_as, &received, notifications::receipt_for(&verified)).await {
+    };
+    if let Err(e) = answer(&answer_as, &received, receipt).await {
         warn!(from = %received.sender, "the notification's receipt was not sent: {e}");
     }
 }

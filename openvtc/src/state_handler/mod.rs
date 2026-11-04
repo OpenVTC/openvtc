@@ -217,6 +217,19 @@ pub(crate) fn format_lifecycle_log(
             summary: format!("Missed {count} lifecycle event(s)"),
             detail: None,
         },
+        // Why a persona's socket is closed, or open without a claim (VTI-NTF-083).
+        LifecycleLog::Collection {
+            listener_id,
+            notice,
+        } => LifecycleLine {
+            summary: format!("Persona {}: {notice}", who(config, listener_id)),
+            detail: Some(format!(
+                "{}\nA persona's mediator permits one connection, and your VTA can collect \
+                 its messages too, so this app connects a persona only while the VTA has \
+                 granted it the collection claim (VTI-NTF-083).",
+                detail_for(config, listener_id)
+            )),
+        },
     }
 }
 
@@ -996,6 +1009,9 @@ impl StateHandler {
         let shutdown_token = tokio_util::sync::CancellationToken::new();
         let didcomm_service =
             didcomm::start_empty_service(didcomm_event_tx.clone(), shutdown_token.clone());
+        // Persona listeners claim collection from the admin session before they
+        // connect (VTI-NTF-083), so it is set before any is installed.
+        didcomm_service.set_collection_vta(admin_vta.clone());
         // Hydrate the durable TSP Rev 3 relationship store from the persisted
         // config before any listener is installed, so the SDK resumes the
         // relationships that survived the last run rather than starting empty and
@@ -2085,6 +2101,8 @@ impl StateHandler {
                 // presence task's watch.
                 Some(outcome) = vta_supervisor.done_rx.recv() => {
                     if let Some(client) = vta_supervisor.land(outcome, &mut state.main_page) {
+                        // Collection claims are made on the live session too.
+                        didcomm_service.set_collection_vta(Some(client.clone()));
                         admin_vta = Some(client);
                     }
                 },
@@ -3522,6 +3540,9 @@ impl StateHandler {
                 },
                 Some(outcome) = vta_supervisor.done_rx.recv() => {
                     if let Some(client) = vta_supervisor.land(outcome, &mut state.main_page) {
+                        if let Some(m) = messaging {
+                            m.set_collection_vta(Some(client.clone()));
+                        }
                         match join_ctx.as_mut() {
                             Some(ctx) => ctx.admin_vta = Some(client),
                             // Nothing holds the session any more: close it.
