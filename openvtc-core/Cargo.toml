@@ -28,10 +28,10 @@ arbitrary = ["dep:arbitrary", "chrono/arbitrary"]
 # library writes the keyring entry, profile and include file exactly as
 # `did-git-sign init --profile` does. Kept on the same release as the
 # `openvtc` crate's dependency, and on this workspace's `vta-sdk` line.
-did-git-sign = "0.32.0"
+did-git-sign = "0.33.0"
 # The SSHSIG encoding did-git-sign signs with, to check the VTA's proof
 # signature (`git_signing::verify_signer`). Same release as did-git-sign.
-vgi-core = "0.32.0"
+vgi-core = "0.33.0"
 
 aes-gcm.workspace = true
 anyhow.workspace = true
@@ -137,8 +137,9 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # line `vta-service` 0.61's `transport-harness` declares (VTI #2089). 0.45 is on
 # `affinidi-tdk` 0.32 / messaging-sdk 0.40, matching `vta-sdk` 0.73. 0.46 is on
 # `affinidi-tdk` 0.33 / messaging-sdk 0.41 / trust-tasks 0.35. 0.48 is on
-# `affinidi-tdk` 0.36 / messaging-sdk 0.44 / trust-tasks 0.36.
-affinidi-messaging-test-mediator = "0.48"
+# `affinidi-tdk` 0.36 / messaging-sdk 0.44 / trust-tasks 0.36. 0.50 is on
+# `affinidi-tdk` 0.37 / messaging-sdk 0.45 / trust-tasks 0.37.
+affinidi-messaging-test-mediator = "0.50"
 # In-process MockVta for the bootstrap e2e (VTI#406/#427 test-support seams).
 # `vta-service` is the VTA server crate; it carries the credential-vault
 # lifecycle tasks (receive/query/archive/delete/restore/purge) + the
@@ -209,21 +210,24 @@ affinidi-messaging-test-mediator = "0.48"
 # `textReleaseThreshold` may be as low as 1 (VTI-VOT-065, VTI #2379), which
 # `tests/elections_vote_e2e.rs` sends. 0.71.0 is on `vta-sdk` 0.79 and serves the
 # credential-roll versions (`vta/pcs/voter/register/0.5`, `read/0.6`, `vote/0.4`,
-# `vote-encrypted/0.5`, over voting/_shared/0.4) and `vta/notifications/*`.
-vta-service = { version = "0.71.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
+# `vote-encrypted/0.5`, over voting/_shared/0.4) and `vta/notifications/*`. 0.73.0 is
+# on `vta-sdk` 0.80 and serves `vta/collection/*/0.1` (VTI #2421), which the persona
+# connect path claims through.
+vta-service = { version = "0.73.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
 # The community's half of hidden vetting, in process (`vtc::Vtc`, feature `harness`), for the
 # end-to-end run against `MockVta` (`tests/hidden_vetting_onboarding.rs`). The engine itself is
 # the VTA's: this client holds no PCS key and runs no PCS operation.
 # 0.8 is the release on `vta-sdk` 0.75, so the dev graph keeps one `vta-sdk`;
-# 0.11 is the one on 0.78, 0.12 the one on 0.79.
-vti-vetting-pcs = { version = "0.12", features = ["harness"] }
+# 0.11 is the one on 0.78, 0.12 the one on 0.79, 0.13 the one on 0.80.
+vti-vetting-pcs = { version = "0.13", features = ["harness"] }
 # The community's and the ballot box's halves of an election, in process (`registrar::Registrar`,
 # `service::BallotBox`), for the end-to-end vote against `MockVta` (`tests/elections_vote_e2e.rs`).
 # The voter's keys are the VTA's: this client holds none. 0.4 is the line `vta-service` 0.67
 # itself runs, so the dev graph keeps one. 0.7 is `vta-service` 0.70's, and reads the
 # voting/_shared/0.3 manifest (a `textReleaseThreshold` from 1, VTI-VOT-065). 0.8 is
-# `vta-service` 0.71's, and reads voting/_shared/0.4 (credential rolls).
-vti-voting = "0.8"
+# `vta-service` 0.71's, and reads voting/_shared/0.4 (credential rolls). 0.9 is
+# `vta-service` 0.73's.
+vti-voting = "0.9"
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }

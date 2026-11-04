@@ -94,12 +94,20 @@ pub async fn load_account(
 }
 
 /// A messaging runtime with no listeners yet, holding the account's TSP
-/// relationships. Shut it down with [`Messaging::shutdown`].
-pub async fn start_messaging(config: &Config) -> (Messaging, UnboundedReceiver<DIDCommEvent>) {
+/// relationships. Shut it down with [`Messaging::shutdown`] — before `vta`, which
+/// releases the collection claims its persona sockets were connected under.
+///
+/// `vta` is the session those claims are made at (VTI-NTF-083): a persona whose
+/// keys the VTA holds connects only once it grants one.
+pub async fn start_messaging(
+    config: &Config,
+    vta: Option<&vta_sdk::client::VtaClient>,
+) -> (Messaging, UnboundedReceiver<DIDCommEvent>) {
     let (event_tx, events) = unbounded_channel();
     // Shut down explicitly; the token is never cancelled.
     let messaging =
         didcomm::start_empty_service(event_tx, tokio_util::sync::CancellationToken::new());
+    messaging.set_collection_vta(vta.cloned());
     messaging
         .tsp_store()
         .hydrate(&config.private.tsp_relationships)

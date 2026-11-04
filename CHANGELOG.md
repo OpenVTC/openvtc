@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Collection claims before a persona connects** (VTI-NTF-080 – 084, `vta/collection/claim/0.1`,
+  `vta/collection/release/0.1`). A persona's mediator permits one connection, and your VTA can
+  collect its messages too, so this app now connects a persona whose keys your VTA holds only
+  once the VTA grants it the claim, asked for twenty-four hours. It renews the claim at half
+  time and closes the connection two minutes before the claim ends unless the renewal landed.
+  When a persona stops for good, its connection closes first and the claim is released after.
+  If another of your apps holds the claim, your VTA refuses it, or the VTA cannot be asked, the
+  persona stays disconnected, the activity log says why, and the claim is asked again later.
+  A claim released from elsewhere disconnects the persona before it ends. A persona your VTA
+  never collects for, or a VTA too old to take claims, connects without one. A BIP32 account is
+  unchanged. `openvtc repos …` opens a VTA session to make the claim.
 - **Elections put to the members of a party you belong to, and the notifications that tell
   you of them.** A notification (`notifications/notify`, `notifications/relay`, VTI-NTF-054)
   addressed to one of your personas is handed to your VTA exactly as it arrived
@@ -160,6 +171,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **A received notification's sender is answered with your VTA's receipt** (VTI-NTF-054,
+  VTI-NTF-055). The receipt is the one the VTA answers the hand-over with, the same whether it
+  held the notification or declined it. This app no longer verifies the notification itself to
+  decide whether to answer, so the answer cannot differ from the one your VTA gives when it
+  collects the persona's messages itself. A notification the VTA refuses (not addressed to one
+  of your personas, or one it could not have accepted) is not answered, and its sender delivers
+  it again.
+- vta-sdk 0.80, did-git-sign 0.33, affinidi-tdk 0.37, affinidi-messaging-sdk 0.45 and
+  trust-tasks 0.37.
 - **Onto the VTI 0.78 stack:** `vta-sdk` 0.78, `did-git-sign` 0.30 (the same
   signer, rebuilt on that line) and `trust-tasks-rs` 0.36.2; `affinidi-tdk` 0.36 and
   `affinidi-messaging-sdk` 0.44 are unchanged. The test `MockVta` moves to

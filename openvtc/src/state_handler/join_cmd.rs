@@ -107,7 +107,7 @@ pub async fn run(args: &ArgMatches, deferred: DeferredLoad, vic: Option<Value>) 
     if tdk.atm.is_none() {
         bail!("messaging is unavailable, so the join request cannot be sent");
     }
-    let (messaging, mut events) = headless::start_messaging(&config).await;
+    let (messaging, mut events) = headless::start_messaging(&config, Some(&admin)).await;
 
     let job = Job {
         tdk: &tdk,

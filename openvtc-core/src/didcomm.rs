@@ -110,6 +110,9 @@ pub struct ListenerSpec {
     pub label: String,
     /// Signing + key-agreement secrets for [`did`](Self::did).
     pub secrets: Vec<Secret>,
+    /// What this listener claims from the VTA before it connects (VTI-NTF-083): set for a
+    /// persona whose keys the VTA holds, `None` for every other listener.
+    pub collection: Option<crate::collection::CollectionTarget>,
 }
 
 impl std::fmt::Debug for ListenerSpec {
@@ -120,6 +123,7 @@ impl std::fmt::Debug for ListenerSpec {
             .field("did", &self.did)
             .field("mediator_did", &self.mediator_did)
             .field("label", &self.label)
+            .field("collection", &self.collection)
             .field(
                 "secrets",
                 &format_args!("<{} redacted>", self.secrets.len()),
@@ -444,6 +448,8 @@ struct MessagingInner {
     /// activity log. A separate channel from `status_tx` because these are not
     /// connection transitions, and the session manager has no use for them.
     supervisor_tx: tokio::sync::broadcast::Sender<LifecycleLog>,
+    /// The collection claims persona listeners connect under (VTI-NTF-080 – 093).
+    collection: Arc<crate::collection::Collection>,
 }
 
 impl Messaging {
@@ -468,6 +474,7 @@ impl Messaging {
             tsp_store: crate::tsp_store::TspStoreHandle::new(),
             stranded: std::sync::Mutex::new(HashMap::new()),
             supervisor_tx: tokio::sync::broadcast::channel(LISTENER_STATUS_CAPACITY).0,
+            collection: Arc::new(crate::collection::Collection::default()),
         });
 
         let dispatcher = tokio::spawn(dispatch_inbound(service.clone(), event_tx));
@@ -483,10 +490,13 @@ impl Messaging {
         let supervisor = tokio::spawn(async move { supervise_transports(supervised).await });
         let collecting = messaging.clone();
         let collector = tokio::spawn(async move { pickup_on_connect(collecting).await });
+        let claiming = messaging.clone();
+        let claimer = tokio::spawn(async move { retry_claims(claiming).await });
         {
             let mut tasks = messaging.inner.tasks.lock().expect("tasks mutex");
             tasks.push(supervisor);
             tasks.push(collector);
+            tasks.push(claimer);
         }
 
         messaging
@@ -501,6 +511,124 @@ impl Messaging {
     /// each listener's ATM by [`add_listener`].
     pub fn tsp_store(&self) -> crate::tsp_store::TspStoreHandle {
         self.inner.tsp_store.clone()
+    }
+
+    /// The collection claims this runtime's persona listeners connect under.
+    pub fn collection(&self) -> Arc<crate::collection::Collection> {
+        self.inner.collection.clone()
+    }
+
+    /// The VTA persona listeners claim collection from before they connect (VTI-NTF-083).
+    /// Set it before installing persona listeners, and again whenever the admin session is
+    /// rebuilt. With none set, a persona listener that needs a claim does not connect.
+    pub fn set_collection_vta(&self, vta: Option<vta_sdk::client::VtaClient>) {
+        self.inner.collection.set_vta(vta);
+    }
+
+    /// Whether this runtime means `listener_id` to be up: installed, being rebuilt by the
+    /// supervisor, or waiting for its claim.
+    pub(crate) async fn collects_for(&self, listener_id: &str) -> bool {
+        self.has_listener(listener_id).await
+            || self
+                .inner
+                .stranded
+                .lock()
+                .expect("stranded mutex")
+                .contains_key(listener_id)
+            || self
+                .inner
+                .collection
+                .waiting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(listener_id)
+    }
+
+    /// Tell the member about a persona's collection, in words (the activity log), unless it
+    /// was already told the same.
+    pub(crate) fn tell(
+        &self,
+        listener_id: &str,
+        notice: Option<crate::collection::CollectionNotice>,
+    ) {
+        let Some(notice) = notice else {
+            return;
+        };
+        if self.inner.collection.is_new(listener_id, &notice) {
+            tracing::info!(
+                listener = %crate::display::truncate_did(listener_id, 32),
+                "{notice}"
+            );
+            let _ = self.inner.supervisor_tx.send(LifecycleLog::Collection {
+                listener_id: listener_id.to_string(),
+                notice,
+            });
+        }
+    }
+
+    /// Close `listener_id`'s socket before its claim ends (VTI-NTF-083). With `come_back`, the
+    /// claim is asked again later and the socket reconnects once granted; otherwise it stays
+    /// closed until reconnected by hand. The claim is released once closed.
+    pub(crate) async fn close_for_collection(&self, listener_id: &str, come_back: bool) {
+        let spec = self
+            .inner
+            .identities
+            .read()
+            .await
+            .get(listener_id)
+            .map(|wire| wire.spec.clone());
+        self.remove_listener(listener_id).await;
+        if come_back && let Some(spec) = spec {
+            self.wait_for_claim(
+                spec,
+                &crate::collection::ClaimAnswer::Unreachable(String::new()),
+            );
+        }
+        if come_back {
+            self.tell(
+                listener_id,
+                Some(crate::collection::CollectionNotice::Lapsed),
+            );
+        } else {
+            // Why it closes was told when the renewal was refused.
+            self.inner.collection.release_now(listener_id).await;
+        }
+    }
+
+    /// Keep `spec` to ask its claim again after the backoff `answer` calls for.
+    fn wait_for_claim(&self, spec: ListenerSpec, answer: &crate::collection::ClaimAnswer) {
+        let mut waiting = self
+            .inner
+            .collection
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let attempts = waiting.get(&spec.id).map_or(0, |w| w.attempts + 1);
+        let due = std::time::Instant::now() + crate::collection::retry_after(answer, attempts);
+        waiting.insert(
+            spec.id.clone(),
+            crate::collection::Waiting {
+                spec,
+                due,
+                attempts,
+            },
+        );
+    }
+
+    /// Release `listener_id`'s claim once [`crate::collection::RELEASE_GRACE`] has passed,
+    /// unless the listener is meant to be up again by then (a reconnect removes and re-adds).
+    fn release_unless_back(&self, listener_id: &str) {
+        if !self.inner.collection.holds(listener_id) {
+            return;
+        }
+        let service = self.clone();
+        let listener_id = listener_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(crate::collection::RELEASE_GRACE).await;
+            if !service.collects_for(&listener_id).await {
+                service.inner.collection.release_now(&listener_id).await;
+            }
+        });
     }
 
     /// Whether a transport is installed for `listener_id`.
@@ -535,12 +663,20 @@ impl Messaging {
             .lock()
             .expect("stranded mutex")
             .remove(listener_id);
+        self.inner
+            .collection
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(listener_id);
         self.inner.service.remove_transport(listener_id);
         let removed = self.inner.identities.write().await.remove(listener_id);
         if let Some(wire) = removed {
             let atm = quiesce_wire(listener_id, wire).await;
             tokio::spawn(async move { atm.graceful_shutdown().await });
         }
+        // Closed first, then the claim released (VTI-NTF-083) — unless this was a reconnect.
+        self.release_unless_back(listener_id);
     }
 
     /// This listener's live connection state, or `None` if not installed.
@@ -768,6 +904,8 @@ impl Messaging {
             self.inner.service.remove_transport(&id);
             quiesce_wire(&id, wire).await.graceful_shutdown().await;
         }
+        // Every socket is closed, so every claim can go (VTI-NTF-083: stop, then release).
+        self.inner.collection.release_all().await;
     }
 }
 
@@ -1000,6 +1138,118 @@ pub async fn add_listener(service: &Messaging, spec: &ListenerSpec) -> Result<()
     if service.has_listener(&spec.id).await {
         return Ok(());
     }
+
+    // A persona whose keys the VTA holds connects only under a collection claim (VTI-NTF-081,
+    // VTI-NTF-083): otherwise the VTA collecting for it and this socket evict each other.
+    if let Some(target) = &spec.collection {
+        claim_collection(service, spec, target)
+            .await
+            .map_err(fail)?;
+    }
+    let connected = connect_listener(service, spec).await;
+    if connected.is_err() {
+        // Granted but not connected: the claim goes unless someone brings it back.
+        service.release_unless_back(&spec.id);
+    }
+    connected
+}
+
+/// Claim collection for `spec` before it connects. `Err` carries the words the member was told:
+/// the socket stays closed, and the claim is asked again after a backoff.
+async fn claim_collection(
+    service: &Messaging,
+    spec: &ListenerSpec,
+    target: &crate::collection::CollectionTarget,
+) -> Result<(), String> {
+    use crate::collection::ClaimAnswer;
+    let collection = &service.inner.collection;
+    let answer = collection.ask(target).await;
+    match &answer {
+        ClaimAnswer::Granted { ends_at, .. } => {
+            collection.forget_told(&spec.id);
+            collection
+                .waiting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&spec.id);
+            let generation = collection.record_grant(&spec.id, target, *ends_at);
+            let task = tokio::spawn(crate::collection::renew_loop(
+                service.clone(),
+                spec.id.clone(),
+                generation,
+            ));
+            collection.attach_renewal(&spec.id, generation, task.abort_handle());
+            Ok(())
+        }
+        a if a.may_connect() => {
+            collection
+                .waiting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&spec.id);
+            service.tell(&spec.id, a.notice());
+            Ok(())
+        }
+        refused => {
+            // Asked again by `retry_claims`, not by the supervisor's faster rebuild loop.
+            service
+                .inner
+                .stranded
+                .lock()
+                .expect("stranded mutex")
+                .remove(&spec.id);
+            service.wait_for_claim(spec.clone(), refused);
+            let words = refused.notice().map(|n| n.to_string()).unwrap_or_default();
+            service.tell(&spec.id, refused.notice());
+            Err(words)
+        }
+    }
+}
+
+/// Ask again, after their backoff, the claims of persona listeners that were refused one.
+async fn retry_claims(service: Messaging) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+    loop {
+        tick.tick().await;
+        let now = std::time::Instant::now();
+        let due: Vec<ListenerSpec> = service
+            .inner
+            .collection
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|w| w.due <= now)
+            .map(|w| w.spec.clone())
+            .collect();
+        for spec in due {
+            if service.has_listener(&spec.id).await {
+                service
+                    .inner
+                    .collection
+                    .waiting
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&spec.id);
+                continue;
+            }
+            if let Err(e) = add_listener(&service, &spec).await {
+                tracing::debug!(
+                    listener = %crate::display::truncate_did(&spec.id, 32),
+                    error = %e,
+                    "persona still not connected"
+                );
+            }
+        }
+    }
+}
+
+/// The connect half of [`add_listener`], once the listener may connect.
+async fn connect_listener(service: &Messaging, spec: &ListenerSpec) -> Result<(), MessagingError> {
+    let fail = |reason: String| MessagingError::Listener {
+        listener_id: spec.id.clone(),
+        reason,
+    };
 
     let tdk_profile = make_profile(
         &spec.did,
@@ -1780,6 +2030,7 @@ pub async fn build_listener_configs(config: &Config, tdk: &affinidi_tdk::TDK) ->
             mediator_did: mediator.to_string(),
             label,
             secrets: persona_secrets,
+            collection: collection_target(config, identity.persona_id, did),
         });
     }
 
@@ -1823,6 +2074,8 @@ pub async fn build_listener_configs(config: &Config, tdk: &affinidi_tdk::TDK) ->
                 crate::display::truncate_did(remote_p_did, 32)
             ),
             secrets: r_did_secrets,
+            // A pairwise did:peer: no VTA collects for it.
+            collection: None,
         });
     }
 
@@ -1974,6 +2227,12 @@ pub enum LifecycleLog {
     },
     /// The event stream lagged and dropped `count` events.
     Missed { count: u64 },
+    /// What a persona's collection claim came to, when it leaves the socket closed or open
+    /// without a claim (VTI-NTF-083).
+    Collection {
+        listener_id: String,
+        notice: crate::collection::CollectionNotice,
+    },
 }
 
 /// A drop that has happened but has not been reported yet — see
@@ -2396,7 +2655,34 @@ pub async fn persona_listener_config(config: &Config, tdk: &affinidi_tdk::TDK) -
         mediator_did: config.mediator_did().to_string(),
         label: config.persona_profile_label(),
         secrets,
+        collection: config
+            .active_identity()
+            .and_then(|i| collection_target(config, i.persona_id, config.persona_did())),
     }
+}
+
+/// What a persona's listener claims before it connects (VTI-NTF-083): the persona DID in its
+/// trust context, when the VTA holds the persona's keys. `None` for a BIP32 account, whose
+/// VTA holds no persona key and so cannot collect for one.
+#[must_use]
+pub fn collection_target(
+    config: &Config,
+    persona_id: crate::config::account::PersonaId,
+    did: &str,
+) -> Option<crate::collection::CollectionTarget> {
+    if !matches!(config.key_backend, crate::config::KeyBackend::Vta { .. }) || did.is_empty() {
+        return None;
+    }
+    let persona = config.account.personas.get(&persona_id)?;
+    let context_id = crate::config::community_context::persona_context(
+        persona,
+        config.account.top_context_id.as_str(),
+    )
+    .to_string();
+    Some(crate::collection::CollectionTarget {
+        context_id,
+        identifier: did.to_string(),
+    })
 }
 
 /// Build the persona listener config for a **specific** persona (not necessarily
@@ -2422,6 +2708,7 @@ pub async fn persona_listener_config_for(
         mediator_did: mediator.to_string(),
         label,
         secrets,
+        collection: collection_target(config, persona_id, did),
     })
 }
 
@@ -2573,6 +2860,8 @@ pub fn relationship_listener_config_from_secrets(
             crate::display::truncate_did(remote_p_did, 32)
         ),
         secrets,
+        // A pairwise did:peer: no VTA collects for it.
+        collection: None,
     }
 }
 
@@ -2811,6 +3100,7 @@ mod supervisor_policy_tests {
             mediator_did: "did:example:no-such-mediator".to_string(),
             label: "test".to_string(),
             secrets: Vec::new(),
+            collection: None,
         };
 
         let started = std::time::Instant::now();
@@ -2890,6 +3180,7 @@ mod supervisor_policy_tests {
             mediator_did: "did:example:no-such-mediator".to_string(),
             label: "test".to_string(),
             secrets: Vec::new(),
+            collection: None,
         }
     }
 
@@ -3491,5 +3782,100 @@ mod authenticated_sender_tests {
             authenticated_sender(&message("did:webvh:QmS:example.com"), &meta(bare_kid)),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod collection_gate_tests {
+    use super::*;
+    use crate::collection::{CollectionNotice, CollectionTarget};
+
+    fn persona_spec() -> ListenerSpec {
+        ListenerSpec {
+            id: "did:webvh:QmScid:example.com:alice".to_string(),
+            did: "did:webvh:QmScid:example.com:alice".to_string(),
+            mediator_did: "did:example:no-such-mediator".to_string(),
+            label: "test".to_string(),
+            secrets: Vec::new(),
+            collection: Some(CollectionTarget {
+                context_id: "personal".into(),
+                identifier: "did:webvh:QmScid:example.com:alice".into(),
+            }),
+        }
+    }
+
+    /// VTI-NTF-083: a persona whose keys the VTA holds does not connect without the VTA's
+    /// grant. With no VTA to ask, nothing is opened, the member is told why once, and the
+    /// claim is asked again later — not by the supervisor's faster rebuild loop.
+    #[tokio::test]
+    async fn vti_ntf_083_no_grant_no_socket() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let service = start_empty_service(event_tx, tokio_util::sync::CancellationToken::new());
+        let mut supervisor_rx = service.inner.supervisor_tx.subscribe();
+        let spec = persona_spec();
+
+        let refused = add_listener(&service, &spec).await;
+        assert!(refused.is_err(), "no claim, no connection");
+        assert!(!service.has_listener(&spec.id).await);
+        assert!(
+            service
+                .inner
+                .collection
+                .waiting
+                .lock()
+                .unwrap()
+                .contains_key(&spec.id),
+            "the claim is asked again later"
+        );
+        assert!(
+            !service
+                .inner
+                .stranded
+                .lock()
+                .unwrap()
+                .contains_key(&spec.id)
+        );
+        assert!(service.collects_for(&spec.id).await);
+        match supervisor_rx.try_recv() {
+            Ok(LifecycleLog::Collection {
+                listener_id,
+                notice,
+            }) => {
+                assert_eq!(listener_id, spec.id);
+                assert!(matches!(notice, CollectionNotice::VtaUnreachable(_)));
+            }
+            other => panic!("the member is told why: {other:?}"),
+        }
+
+        // Refused the same way again: nothing new to say.
+        let _ = add_listener(&service, &spec).await;
+        assert!(supervisor_rx.try_recv().is_err(), "said once");
+
+        // A deliberate removal is not ours to bring back.
+        service.remove_listener(&spec.id).await;
+        assert!(!service.collects_for(&spec.id).await);
+        service.shutdown().await;
+    }
+
+    /// A listener that claims nothing (a BIP32 account's persona, an R-DID) is not gated.
+    #[tokio::test]
+    async fn a_listener_with_no_claim_to_make_is_not_gated() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let service = start_empty_service(event_tx, tokio_util::sync::CancellationToken::new());
+        let mut spec = persona_spec();
+        spec.collection = None;
+        // It fails at the mediator, not at the claim.
+        let err = add_listener(&service, &spec).await.unwrap_err().to_string();
+        assert!(!err.contains("collect"), "{err}");
+        assert!(
+            !service
+                .inner
+                .collection
+                .waiting
+                .lock()
+                .unwrap()
+                .contains_key(&spec.id)
+        );
+        service.shutdown().await;
     }
 }

@@ -16,6 +16,7 @@ use std::{fmt, sync::Arc};
 pub mod agent_name;
 pub mod bip32;
 pub mod capabilities;
+pub mod collection;
 pub mod community_access;
 pub mod community_rooms;
 pub mod community_send;

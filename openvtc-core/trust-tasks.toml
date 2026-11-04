@@ -19,6 +19,8 @@
 "persona/profile/compose" = "1.1"
 "voting/ballot/cast" = "0.1"
 "voting/ballot/cast-encrypted" = "0.1"
+"vta/collection/claim" = "0.1"
+"vta/collection/release" = "0.1"
 "vta/notifications/deposit" = "0.1"
 "vta/notifications/list" = "0.1"
 "vta/pcs/applications/create" = "0.1"

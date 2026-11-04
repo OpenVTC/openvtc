@@ -152,36 +152,19 @@ fn a_page_the_schema_refuses_is_an_error_not_an_empty_list() {
     assert!(notified_elections(&json!({ "items": [{ "recordId": "x" }] })).is_err());
 }
 
-/// The receipt is read from the delivery as this client verified it: a community's signed
-/// notification, verified against its `did:key`, answers with its own id and revision.
-#[tokio::test]
-async fn a_verified_notification_is_answered_with_its_own_id_and_revision() {
-    use affinidi_tdk::dids::{DID, KeyType};
-    let (community, key) = DID::generate_did_key(KeyType::Ed25519).unwrap();
-    let mut n = notification(PARTY, "available");
-    n["subject"]["heldBy"] = json!(community);
-    let doc = crate::trust_task_doc::build_signed_value(
-        NOTIFY_TYPE,
-        &community,
-        "did:key:z6MkMe",
-        "urn:uuid:00000000-0000-4000-8000-000000000005",
-        json!({ "notification": n }),
-        &key,
-    )
-    .await
-    .unwrap();
-    let resolver = vta_sdk::trust_task_proof::TrustTaskVmResolver::new(
-        affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
-            affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
-        )
-        .await
-        .unwrap(),
+/// VTI-NTF-054 / VTI-NTF-055: the sender's receipt is the VTA's answer to the deposit, taken
+/// as the deposit's response schema reads it — whatever the VTA did with the document, and with
+/// no verification of this client's own to turn it on.
+#[test]
+fn the_receipt_is_the_vtas_answer_to_the_deposit() {
+    let answer =
+        json!({ "notificationId": "urn:uuid:7f7d1b9e-1c1e-4c1a-9d1e-0b0b0b0b0b0b", "revision": 2 });
+    assert_eq!(receipt_from_deposit(answer.clone()).unwrap(), answer);
+    // Anything more than the receipt, or less, is not one: no receipt is sent.
+    assert!(
+        receipt_from_deposit(json!({ "notificationId": "n-1", "revision": 1, "held": true }))
+            .is_err()
     );
-    let verified = vta_sdk::notifications::verify_delivery(&doc, &resolver)
-        .await
-        .expect("a community's signed notification verifies");
-    assert_eq!(
-        receipt_for(&verified),
-        json!({ "notificationId": "urn:uuid:7f7d1b9e-1c1e-4c1a-9d1e-0b0b0b0b0b0b", "revision": 2 })
-    );
+    assert!(receipt_from_deposit(json!({ "notificationId": "n-1" })).is_err());
+    assert!(receipt_from_deposit(json!({})).is_err());
 }
