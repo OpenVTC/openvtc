@@ -15,7 +15,7 @@ deprecated = "allow"
 
 [workspace.package]
 description = "Open Verifiable Trust Community (OpenVTC) - First Person Protocol"
-version = "0.6.0"
+version = "0.8.0"
 edition = "2024"
 publish = true
 authors = ["Glenn Gore <glenn@affinidi.com>"]
@@ -25,7 +25,7 @@ license = "Apache-2.0"
 repository = "https://github.com/OpenVTC/openvtc"
 
 [workspace.dependencies]
-openvtc-core = { version = "0.6.0", path = "openvtc-core", default-features = false }
+openvtc-core = { version = "0.8.0", path = "openvtc-core", default-features = false }
 
 # Decentralized Trust Graph Credentials.
 #
