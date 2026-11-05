@@ -67,7 +67,7 @@ release from a release branch.
 | Release | Branch | First RC | GA | Latest | Status |
 |---|---|---|---|---|---|
 | ≤ 0.6 | — | — | — | `0.6.0` | released from `main` by hand |
-| 0.7 | — | TBD | TBD | — | in development on `main` |
+| 0.7 | `release/0.7` | 2026-11-05 | 2026-11-05 | `0.7.0` | supported (N) |
 
 ## Support
 
