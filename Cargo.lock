@@ -6355,7 +6355,7 @@ dependencies = [
 
 [[package]]
 name = "openvtc"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "affinidi-data-integrity",
@@ -6416,7 +6416,7 @@ dependencies = [
 
 [[package]]
 name = "openvtc-core"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "affinidi-data-integrity",
