@@ -121,6 +121,14 @@ pub enum OpenVTCError {
     #[error("Decrypt Error: {0}")]
     Decrypt(String),
 
+    /// The unlock code does not open this profile's secured config.
+    ///
+    /// Distinct from [`Self::Decrypt`] so a caller can treat a mistyped code
+    /// as the ordinary thing it is (ask again, point at recovery) rather than
+    /// as a decryption fault in the stored data.
+    #[error("That unlock code didn't work")]
+    UnlockCodeRejected,
+
     /// A contacts/address-book operation failed.
     #[error("Contacts Error: {0}")]
     Contact(String),
@@ -235,6 +243,7 @@ mod tests {
             )),
             Box::new(OpenVTCError::Encrypt("aes failure".into())),
             Box::new(OpenVTCError::Decrypt("bad key".into())),
+            Box::new(OpenVTCError::UnlockCodeRejected),
             Box::new(OpenVTCError::Contact("unknown".into())),
             Box::new(OpenVTCError::MutexPoisoned("lock failed".into())),
         ];

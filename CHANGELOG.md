@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A wrong unlock code now gets another try.** At start-up the unlock prompt only
+  rejected codes shorter than eight characters. A wrong code of full length left the
+  prompt on the first try and failed afterwards, while the secured config was being
+  decrypted, with a message about decryption and no second chance in that session.
+  The five-attempt limit and the delay after the third miss, listed under 0.2.0, never
+  applied to a wrong code. Each code is now checked against the stored config at the
+  prompt: a wrong one says "That unlock code didn't work" and asks again, with the limit
+  and delay applied. After the last attempt, or when a code given with `--unlock-code`
+  or `--unlock-code-file` is wrong, it says how to recover an account kept by a VTA if
+  the code is forgotten. The limit is there for typos and starts again when you restart.
+  It does not protect against guessing; the cost of Argon2id for each guess does that,
+  including for anyone who copies the stored config and guesses offline. Reported
+  through the security process.
+
 ## [0.7.0] - 2026-11-05 (cut to release/0.7)
 
 ### Added
