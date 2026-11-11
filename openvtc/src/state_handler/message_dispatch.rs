@@ -772,12 +772,20 @@ fn commit_community_document(
 /// is applied; the loop runs the check off the loop and calls this again with
 /// its result, and the message is handled from the top with that result — so
 /// nothing is ever acted on before its check has passed.
+///
+/// `authenticated` is the sender the transport bound to the frame
+/// ([`openvtc_core::didcomm::DIDCommEvent::InboundMessage`]). The message is
+/// handled as that sender only: one with no authenticated sender, or whose
+/// `from` names someone else, is dropped before any handler sees it
+/// ([`openvtc_core::didcomm::bound_sender`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn process_inbound_message(
     config: &mut Config,
     tdk: &TDK,
     service: &Messaging,
     seen: &mut SeenMessages,
     message: &Message,
+    authenticated: Option<&str>,
     effects: &mut InboundEffects,
     arrival: Arrival<'_>,
 ) -> Result<bool, anyhow::Error> {
@@ -785,16 +793,28 @@ pub async fn process_inbound_message(
     // reports no other change — otherwise a restart forgets it and the
     // document can be replayed.
     let seen_before = config.private.seen_documents.revision();
-    let changed = process_inbound(config, tdk, service, seen, message, effects, arrival).await?;
+    let changed = process_inbound(
+        config,
+        tdk,
+        service,
+        seen,
+        message,
+        authenticated,
+        effects,
+        arrival,
+    )
+    .await?;
     Ok(changed || config.private.seen_documents.revision() != seen_before)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_inbound(
     config: &mut Config,
     tdk: &TDK,
     service: &Messaging,
     seen: &mut SeenMessages,
     message: &Message,
+    authenticated: Option<&str>,
     effects: &mut InboundEffects,
     arrival: Arrival<'_>,
 ) -> Result<bool, anyhow::Error> {
@@ -848,24 +868,23 @@ async fn process_inbound(
         seen.observe(&message.id);
     }
 
-    // The sender — a routing hint, not an identity. It selects the record a
-    // message is about; every decision that turns on who said something is
-    // gated on a proof by that party (`openvtc_core::proof_check`), not on this.
-    //
-    // Trust-pong messages may omit `from` (the thid linkage to our outbound
-    // ping is sufficient for task cleanup).
-    let from_did = match &message.from {
-        Some(did) => Arc::new(did.to_string()),
-        None => {
-            // Allow pong through for task cleanup even without `from`
-            if message.typ == openvtc_core::protocol_urls::TRUST_PONG {
-                if let Some(task_id) = &message.thid {
-                    config.private.tasks.remove(&Arc::new(task_id.to_string()));
-                }
-                debug!("trust-pong (no from) — task cleaned up");
-                return Ok(true);
-            }
-            warn!("anonymous inbound message rejected (no 'from' field)");
+    // The sender: the DID the transport authenticated, and the `from` header
+    // only where it names that same DID. A message with no authenticated
+    // sender, or claiming someone else's `from`, is handled as nobody — no
+    // inbox task, no reply, no receipt, no task removed. It selects the record
+    // a message is about; decisions with lasting effect (a credential stored,
+    // a membership ended, a relationship bound) are further gated on a proof
+    // by that party (`openvtc_core::proof_check`).
+    let from_did = match openvtc_core::didcomm::bound_sender(message.from.as_deref(), authenticated)
+    {
+        Ok(did) => Arc::new(did),
+        Err(reason) => {
+            warn!(
+                id = %message.id,
+                typ = %message.typ,
+                claimed = ?message.from,
+                "inbound message dropped: {reason}"
+            );
             return Ok(false);
         }
     };
@@ -1941,9 +1960,17 @@ async fn process_inbound(
         }
 
         MessageType::TrustPong => {
-            if let Some(task_id) = &message.thid {
-                config.private.tasks.remove(&Arc::new(task_id.to_string()));
+            // A pong closes only our own ping, on its thread, to the party
+            // that answers — the thread id alone names no counterparty.
+            let Some(task_id) = message.thid.as_deref().map(|t| Arc::new(t.to_string())) else {
+                debug!(from = %from_did, "trust-pong on no thread — ignoring");
+                return Ok(false);
+            };
+            if !is_our_ping_to(config, &task_id, &from_did) {
+                warn!(from = %from_did, "trust-pong for no ping of ours to this party — ignoring");
+                return Ok(false);
             }
+            config.private.tasks.remove(&task_id);
             debug!(from = %from_did, "trust-pong received (auto-processed)");
             Ok(true)
         }
@@ -2179,6 +2206,33 @@ async fn process_inbound(
     }
 }
 
+/// Whether `task_id` is a ping we sent to `from` — directly, or to the
+/// relationship `from` answers for (a ping goes to the peer's relationship DID,
+/// which is the DID its pong comes from).
+fn is_our_ping_to(config: &Config, task_id: &Arc<String>, from: &Arc<String>) -> bool {
+    let Some(task) = config.private.tasks.get_by_id(task_id) else {
+        return false;
+    };
+    let TaskType::TrustPing {
+        to, remote_p_did, ..
+    } = &task.type_
+    else {
+        return false;
+    };
+    if vta_sdk::did_scid::same_reference(to, from) {
+        return true;
+    }
+    config
+        .private
+        .relationships
+        .find_by_remote_did(from)
+        .is_some_and(|rel| {
+            rel.remote_p_did == *remote_p_did
+                && (vta_sdk::did_scid::same_reference(&rel.remote_did, to)
+                    || vta_sdk::did_scid::same_reference(&rel.remote_p_did, to))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2310,6 +2364,7 @@ mod tests {
             &service,
             &mut seen,
             &m,
+            m.from.as_deref(),
             &mut effects,
             Arrival::FRESH,
         )
@@ -2330,6 +2385,7 @@ mod tests {
             &service,
             &mut seen,
             &deferred.message,
+            deferred.message.from.as_deref(),
             &mut effects,
             Arrival::Returning(pre),
         )
@@ -2360,6 +2416,7 @@ mod tests {
             &service,
             &mut seen,
             &m,
+            m.from.as_deref(),
             &mut effects,
             Arrival::FRESH,
         )
@@ -2379,6 +2436,7 @@ mod tests {
             &service,
             &mut seen,
             &deferred.message,
+            deferred.message.from.as_deref(),
             &mut effects,
             Arrival::Returning(pre),
         )
@@ -2450,6 +2508,7 @@ mod tests {
                 &service,
                 &mut seen,
                 &answer,
+                answer.from.as_deref(),
                 &mut effects,
                 Arrival::FRESH,
             )
@@ -2488,6 +2547,7 @@ mod tests {
             &service,
             &mut seen,
             &other,
+            other.from.as_deref(),
             &mut effects,
             Arrival::FRESH,
         )
@@ -2506,6 +2566,7 @@ mod tests {
             &service,
             &mut seen,
             &m,
+            m.from.as_deref(),
             &mut effects,
             Arrival::Returning(pre),
         )
@@ -2545,6 +2606,7 @@ mod tests {
             &service,
             &mut seen,
             &m,
+            m.from.as_deref(),
             &mut effects,
             Arrival::FRESH,
         )
@@ -3194,9 +3256,18 @@ mod tests {
         );
         let mut seen = SeenMessages::new();
         let mut effects = InboundEffects::default();
-        process_inbound_message(config, tdk, &service, &mut seen, m, &mut effects, arrival)
-            .await
-            .unwrap();
+        process_inbound_message(
+            config,
+            tdk,
+            &service,
+            &mut seen,
+            m,
+            m.from.as_deref(),
+            &mut effects,
+            arrival,
+        )
+        .await
+        .unwrap();
         effects
     }
 
@@ -3464,5 +3535,309 @@ mod tests {
             status(&config, &vtc),
             CommunityStatus::Pending { .. }
         ));
+    }
+
+    /// Every peer-message handler acts only as the sender the transport
+    /// authenticated. A message whose `from` is not backed by its sealing key
+    /// — none bound, or another DID — creates no task, removes none, changes no
+    /// relationship and hands nothing over.
+    mod sender_binding {
+        use super::*;
+        use openvtc_core::protocol_urls;
+        use openvtc_core::relationships::Relationship;
+
+        const ALICE: &str = "did:key:z6MkAlicePeerInAnEstablishedRelationship";
+        const CAROL: &str = "did:key:z6MkCarolSomeoneElse";
+
+        fn config_with(state: RelationshipState, task_id: &str) -> Config {
+            let mut config = with_identity(pending_config("did:key:z6MkSomeCommunity"));
+            let alice = Arc::new(ALICE.to_string());
+            config.private.relationships.relationships.insert(
+                Arc::clone(&alice),
+                Relationship {
+                    task_id: Arc::new(task_id.to_string()),
+                    our_did: Arc::new(PERSONA.to_string()),
+                    remote_did: Arc::clone(&alice),
+                    remote_p_did: alice,
+                    created: chrono::Utc::now(),
+                    state,
+                    our_persona: None,
+                    needs_reestablishment: false,
+                },
+            );
+            config
+        }
+
+        fn message(
+            typ: &str,
+            from: Option<&str>,
+            thid: Option<&str>,
+            body: serde_json::Value,
+        ) -> Message {
+            let mut b = Message::build(uuid::Uuid::new_v4().to_string(), typ.to_string(), body)
+                .to(PERSONA.to_string())
+                .created_time(chrono::Utc::now().timestamp() as u64);
+            if let Some(from) = from {
+                b = b.from(from.to_string());
+            }
+            if let Some(thid) = thid {
+                b = b.thid(thid.to_string());
+            }
+            b.finalize()
+        }
+
+        async fn dispatch_as(
+            config: &mut Config,
+            m: &Message,
+            authenticated: Option<&str>,
+        ) -> InboundEffects {
+            let tdk = test_tdk().await;
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let service = openvtc_core::didcomm::start_empty_service(
+                tx,
+                tokio_util::sync::CancellationToken::new(),
+            );
+            let mut seen = SeenMessages::new();
+            let mut effects = InboundEffects::default();
+            process_inbound_message(
+                config,
+                &tdk,
+                &service,
+                &mut seen,
+                m,
+                authenticated,
+                &mut effects,
+                Arrival::FRESH,
+            )
+            .await
+            .unwrap();
+            effects
+        }
+
+        /// The two ways a claimed `from` is not the sender: nothing bound, or
+        /// someone else bound.
+        const UNBOUND: [Option<&str>; 2] = [None, Some(CAROL)];
+
+        #[tokio::test]
+        async fn a_vrc_request_needs_its_sender_authenticated() {
+            for authenticated in UNBOUND {
+                let mut config = config_with(RelationshipState::Established, "rel");
+                let m = message(
+                    protocol_urls::VRC_REQUEST,
+                    Some(ALICE),
+                    None,
+                    serde_json::json!({ "reason": "please" }),
+                );
+                dispatch_as(&mut config, &m, authenticated).await;
+                assert!(
+                    config.private.tasks.tasks.is_empty(),
+                    "no inbox task for {authenticated:?}"
+                );
+            }
+            let mut config = config_with(RelationshipState::Established, "rel");
+            let m = message(
+                protocol_urls::VRC_REQUEST,
+                Some(ALICE),
+                None,
+                serde_json::json!({ "reason": "please" }),
+            );
+            dispatch_as(&mut config, &m, Some(ALICE)).await;
+            assert_eq!(config.private.tasks.tasks.len(), 1, "authenticated: queued");
+        }
+
+        #[tokio::test]
+        async fn a_vrc_request_rejection_needs_its_sender_authenticated() {
+            let task = Arc::new(uuid::Uuid::new_v4().to_string());
+            let setup = || {
+                let mut config = config_with(RelationshipState::Established, "rel");
+                config.private.tasks.new_task(
+                    &task,
+                    TaskType::VRCRequestOutbound {
+                        remote_p_did: Arc::new(ALICE.to_string()),
+                    },
+                );
+                config
+            };
+            let reject = || {
+                message(
+                    protocol_urls::VRC_REJECTED,
+                    Some(ALICE),
+                    Some(&task),
+                    serde_json::json!({ "reason": "no" }),
+                )
+            };
+            for authenticated in UNBOUND {
+                let mut config = setup();
+                dispatch_as(&mut config, &reject(), authenticated).await;
+                assert!(config.private.tasks.get_by_id(&task).is_some());
+            }
+            let mut config = setup();
+            dispatch_as(&mut config, &reject(), Some(ALICE)).await;
+            assert!(config.private.tasks.get_by_id(&task).is_none());
+        }
+
+        /// A pong closes only our ping, answered by the party pinged — never a
+        /// task named by thread id alone, and never for a pong with no
+        /// authenticated sender.
+        #[tokio::test]
+        async fn a_pong_closes_only_our_ping_to_its_authenticated_sender() {
+            let ping = Arc::new(uuid::Uuid::new_v4().to_string());
+            let other = Arc::new(uuid::Uuid::new_v4().to_string());
+            let setup = || {
+                let mut config = config_with(RelationshipState::Established, "rel");
+                config.private.tasks.new_task(
+                    &ping,
+                    TaskType::TrustPing {
+                        from: Arc::new(PERSONA.to_string()),
+                        to: Arc::new(ALICE.to_string()),
+                        remote_p_did: Arc::new(ALICE.to_string()),
+                    },
+                );
+                config.private.tasks.new_task(
+                    &other,
+                    TaskType::VRCRequestOutbound {
+                        remote_p_did: Arc::new(ALICE.to_string()),
+                    },
+                );
+                config
+            };
+            let pong = |from: Option<&str>, thid: &str| {
+                message(
+                    protocol_urls::TRUST_PONG,
+                    from,
+                    Some(thid),
+                    serde_json::json!({}),
+                )
+            };
+
+            // No `from`, nothing authenticated: the old shortcut is gone.
+            let mut config = setup();
+            dispatch_as(&mut config, &pong(None, &ping), None).await;
+            assert!(config.private.tasks.get_by_id(&ping).is_some());
+
+            for authenticated in UNBOUND {
+                let mut config = setup();
+                dispatch_as(&mut config, &pong(Some(ALICE), &ping), authenticated).await;
+                assert!(config.private.tasks.get_by_id(&ping).is_some());
+            }
+
+            // Authenticated, but the thread names a task that is not a ping.
+            let mut config = setup();
+            dispatch_as(&mut config, &pong(Some(ALICE), &other), Some(ALICE)).await;
+            assert!(config.private.tasks.get_by_id(&other).is_some());
+
+            // Authenticated as someone we did not ping.
+            let mut config = setup();
+            dispatch_as(&mut config, &pong(Some(CAROL), &ping), Some(CAROL)).await;
+            assert!(config.private.tasks.get_by_id(&ping).is_some());
+
+            let mut config = setup();
+            dispatch_as(&mut config, &pong(Some(ALICE), &ping), Some(ALICE)).await;
+            assert!(config.private.tasks.get_by_id(&ping).is_none());
+            assert!(config.private.tasks.get_by_id(&other).is_some());
+        }
+
+        #[tokio::test]
+        async fn a_relationship_rejection_needs_its_sender_authenticated() {
+            let thid = uuid::Uuid::new_v4().to_string();
+            let reject = || {
+                message(
+                    protocol_urls::RELATIONSHIP_REQUEST_REJECT,
+                    Some(ALICE),
+                    Some(&thid),
+                    serde_json::json!({ "reason": "no" }),
+                )
+            };
+            for authenticated in UNBOUND {
+                let mut config = config_with(RelationshipState::RequestSent, &thid);
+                dispatch_as(&mut config, &reject(), authenticated).await;
+                assert_eq!(config.private.relationships.relationships.len(), 1);
+            }
+            let mut config = config_with(RelationshipState::RequestSent, &thid);
+            dispatch_as(&mut config, &reject(), Some(ALICE)).await;
+            assert!(config.private.relationships.relationships.is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_relationship_finalize_needs_its_sender_authenticated() {
+            let thid = uuid::Uuid::new_v4().to_string();
+            let finalize = || {
+                message(
+                    protocol_urls::RELATIONSHIP_REQUEST_FINALIZE,
+                    Some(ALICE),
+                    Some(&thid),
+                    serde_json::json!({}),
+                )
+            };
+            let state = |config: &Config| {
+                config
+                    .private
+                    .relationships
+                    .relationships
+                    .values()
+                    .next()
+                    .map(|r| r.state.clone())
+            };
+            for authenticated in UNBOUND {
+                let mut config = config_with(RelationshipState::RequestAccepted, &thid);
+                dispatch_as(&mut config, &finalize(), authenticated).await;
+                assert_eq!(state(&config), Some(RelationshipState::RequestAccepted));
+            }
+            let mut config = config_with(RelationshipState::RequestAccepted, &thid);
+            dispatch_as(&mut config, &finalize(), Some(ALICE)).await;
+            assert_eq!(state(&config), Some(RelationshipState::Established));
+        }
+
+        #[tokio::test]
+        async fn a_trust_ping_task_needs_its_sender_authenticated() {
+            for authenticated in UNBOUND {
+                let mut config = config_with(RelationshipState::Established, "rel");
+                let m = message(
+                    protocol_urls::TRUST_PING,
+                    Some(ALICE),
+                    None,
+                    serde_json::json!({}),
+                );
+                dispatch_as(&mut config, &m, authenticated).await;
+                assert!(config.private.tasks.tasks.is_empty());
+            }
+        }
+
+        /// A notification is handed over and answered with a receipt to its
+        /// sender; with no authenticated sender there is nobody to answer.
+        #[tokio::test]
+        async fn a_notification_needs_its_sender_authenticated() {
+            let document = || {
+                serde_json::json!({
+                    "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+                    "type": openvtc_core::notifications::NOTIFY_TYPE,
+                    "issuer": ALICE,
+                    "recipient": PERSONA,
+                    "issuedAt": "2026-11-03T00:00:00.000000Z",
+                    "payload": { "notification": { "notificationId": "n-1" } },
+                })
+            };
+            for authenticated in UNBOUND {
+                let mut config = config_with(RelationshipState::Established, "rel");
+                let m = message(
+                    openvtc_core::notifications::NOTIFY_TYPE,
+                    Some(ALICE),
+                    None,
+                    document(),
+                );
+                let effects = dispatch_as(&mut config, &m, authenticated).await;
+                assert!(effects.notifications.is_empty(), "{authenticated:?}");
+            }
+            let mut config = config_with(RelationshipState::Established, "rel");
+            let m = message(
+                openvtc_core::notifications::NOTIFY_TYPE,
+                Some(ALICE),
+                None,
+                document(),
+            );
+            let effects = dispatch_as(&mut config, &m, Some(ALICE)).await;
+            assert_eq!(effects.notifications.len(), 1);
+            assert_eq!(effects.notifications[0].sender, ALICE);
+        }
     }
 }

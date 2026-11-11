@@ -423,17 +423,39 @@ async fn await_reply(
                 });
             }
         };
-        let DIDCommEvent::InboundMessage { message, .. } = event else {
+        let DIDCommEvent::InboundMessage {
+            message,
+            authenticated,
+            ..
+        } = event
+        else {
             continue;
         };
-        match take_reply(&message, tdk, vtc_did, persona_did, thid).await {
+        match take_reply(
+            &message,
+            authenticated.as_deref(),
+            tdk,
+            vtc_did,
+            persona_did,
+            thid,
+        )
+        .await
+        {
             Some(Ok(reply)) => return Ok(reply),
             Some(Err(why)) => {
                 tracing::warn!("git-ns reply on our thread refused: {why}");
                 rejected = Some(why);
             }
             None => {
-                apply_inbound(config, tdk, messaging, &mut others.seen, &message).await;
+                apply_inbound(
+                    config,
+                    tdk,
+                    messaging,
+                    &mut others.seen,
+                    &message,
+                    authenticated.as_deref(),
+                )
+                .await;
                 others.handled += 1;
             }
         }
@@ -444,6 +466,7 @@ async fn await_reply(
 /// our thread that failed a check; `None` is anything else.
 async fn take_reply(
     message: &affinidi_tdk::didcomm::Message,
+    authenticated: Option<&str>,
     tdk: &affinidi_tdk::TDK,
     vtc_did: &str,
     persona_did: &str,
@@ -459,7 +482,13 @@ async fn take_reply(
     if reply_thid != thid {
         return None;
     }
-    let from = message.from.as_deref().unwrap_or_default();
+    // Handled as the sender the transport authenticated, never a claimed
+    // `from` alone.
+    let from = match didcomm::bound_sender(message.from.as_deref(), authenticated) {
+        Ok(from) => from,
+        Err(e) => return Some(Err(format!("not accepted from this sender: {e}"))),
+    };
+    let from = from.as_str();
     if !repos_actions::answered_by(vtc_did, from, doc.issuer.as_deref()) {
         return Some(Err(format!(
             "sent by {from}, not the community it was asked of"

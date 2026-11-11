@@ -681,9 +681,12 @@ impl Job<'_> {
                     bail!("interrupted; the request stays Pending");
                 }
                 Some(event) = events.recv() => {
-                    if let DIDCommEvent::InboundMessage { message, .. } = event {
+                    if let DIDCommEvent::InboundMessage { message, authenticated, .. } = event {
                         note_verdict(&message);
-                        if self.dispatch(config, &mut seen, &message).await {
+                        if self
+                            .dispatch(config, &mut seen, &message, authenticated.as_deref())
+                            .await
+                        {
                             save(config, self.profile)?;
                         }
                     }
@@ -731,8 +734,17 @@ impl Job<'_> {
         config: &mut Config,
         seen: &mut SeenMessages,
         message: &Message,
+        authenticated: Option<&str>,
     ) -> bool {
-        apply_inbound(config, self.tdk, self.messaging, seen, message).await
+        apply_inbound(
+            config,
+            self.tdk,
+            self.messaging,
+            seen,
+            message,
+            authenticated,
+        )
+        .await
     }
 }
 
@@ -740,12 +752,16 @@ impl Job<'_> {
 /// inline, dispatch again with its result. `true` when the config changed.
 /// Shared by every headless command that listens as a persona, so a message
 /// it was not waiting for is applied rather than lost.
+///
+/// `authenticated` is the sender the transport bound to the frame; the
+/// message is handled as that sender only (see `process_inbound_message`).
 pub(crate) async fn apply_inbound(
     config: &mut Config,
     tdk: &TDK,
     messaging: &Messaging,
     seen: &mut SeenMessages,
     message: &Message,
+    authenticated: Option<&str>,
 ) -> bool {
     let nobody = |_: &str| false;
     let mut arrival = Arrival::New { waiting: &nobody };
@@ -760,6 +776,7 @@ pub(crate) async fn apply_inbound(
             messaging,
             seen,
             &message,
+            authenticated,
             &mut effects,
             arrival,
         )

@@ -1519,6 +1519,7 @@ impl StateHandler {
                                 &didcomm_service,
                                 &mut seen_messages,
                                 &message,
+                                authenticated.as_deref(),
                                 &mut effects,
                                 arrival,
                             )
@@ -1818,35 +1819,39 @@ impl StateHandler {
                             );
                         }
                         didcomm::DIDCommEvent::TrustPingReceived { from, listener_id, message_id } => {
+                            // `from` is the sender the transport authenticated
+                            // (never the plaintext header); with none there is
+                            // nobody to answer.
                             let sender = from.as_deref().unwrap_or("unknown");
                             let sender_arc = std::sync::Arc::new(sender.to_string());
 
                             // Only respond to pings from the mediator or established relationships
-                            let is_mediator = sender == config.mediator_did();
-                            let has_relationship = config
-                                .private
-                                .relationships
-                                .find_by_remote_did(&sender_arc)
-                                .map(|r| {
-                                    r.state == openvtc_core::relationships::RelationshipState::Established
-                                })
-                                .unwrap_or(false);
+                            let is_mediator =
+                                from.is_some() && sender == config.mediator_did();
+                            let has_relationship = from.is_some()
+                                && config
+                                    .private
+                                    .relationships
+                                    .find_by_remote_did(&sender_arc)
+                                    .map(|r| {
+                                        r.state == openvtc_core::relationships::RelationshipState::Established
+                                    })
+                                    .unwrap_or(false);
 
                             if is_mediator || has_relationship {
-                                // Send pong to verified sender, setting `from` to our
+                                // Send pong to the authenticated sender, setting `from` to our
                                 // listener's DID so the recipient can identify us.
                                 let our_listener_did = didcomm_service
                                     .listener_did(&listener_id)
                                     .await
                                     .unwrap_or_else(|| config.persona_did().to_string());
-                                if let Some(ref from_did) = from
-                                    && let Ok(pong_msg) =
-                                        build_trust_pong(&our_listener_did, from_did, &message_id)
+                                if let Ok(pong_msg) =
+                                        build_trust_pong(&our_listener_did, sender, &message_id)
                                     && let Err(e) = didcomm::send_message_via(
                                         &didcomm_service,
                                         &pong_msg,
                                         &listener_id,
-                                        from_did,
+                                        sender,
                                     )
                                     .await
                                 {
@@ -1874,7 +1879,12 @@ impl StateHandler {
                                         "Trust-Ping Rejected\n\
                                          ───────────────────\n\
                                          From (DID):      {sender}\n\
-                                         Reason:          no established relationship",
+                                         Reason:          {}",
+                                        if from.is_some() {
+                                            "no established relationship"
+                                        } else {
+                                            "the transport authenticated no sender"
+                                        },
                                     ),
                                 );
                             }
@@ -1882,25 +1892,12 @@ impl StateHandler {
                         didcomm::DIDCommEvent::TrustPongReceived { from } => {
                             debug!(from = ?from, "TrustPongReceived event");
                             let sender_did = from.as_deref().unwrap_or("");
-                            // Pong often has no `from` field. Resolve by looking
-                            // at our most recent outbound ping task to determine
-                            // who we pinged.
+                            // `from` is the sender the transport authenticated.
+                            // A pong with none is logged as such rather than
+                            // credited to whoever we pinged last: it closes no
+                            // ping task either (see the dispatcher).
                             let sender_display = if sender_did.is_empty() {
-                                // Find the most recent TrustPing task to get the target
-                                config
-                                    .private
-                                    .tasks
-                                    .tasks
-                                    .values()
-                                    .filter_map(|task| {
-                                        if let openvtc_core::tasks::TaskType::TrustPing { to, .. } = &task.type_ {
-                                            Some(resolve_did_to_display(&config, to))
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .next()
-                                    .unwrap_or_else(|| "unknown".to_string())
+                                "an unauthenticated sender".to_string()
                             } else {
                                 resolve_did_to_display(&config, sender_did)
                             };
@@ -5389,6 +5386,7 @@ async fn restore_kept(
             service,
             seen,
             &kept.message,
+            Some(&kept.sender),
             &mut effects,
             message_dispatch::Arrival::Restored,
         )

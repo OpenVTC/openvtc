@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Peer messages are handled only as the sender the transport authenticated.** The
+  inbound dispatcher used to fall back to a message's `from` header when the transport
+  bound no sender to it (anoncrypt DIDComm, or an authcrypt whose `from` its sealing key
+  does not back). A VRC request, a VRC request rejection, a trust ping or pong, a
+  relationship rejection or finalize, and a notification are now acted on only when the
+  `from` header names the DID whose key sealed the message; anything else is dropped with
+  a log line before any handler runs. The same rule applies to messages handled by the
+  headless `join` and `repos` commands. A pong now closes only a ping we sent, on its
+  thread, to the party that answers it; a pong with no authenticated sender closes
+  nothing. The answer to a ping, and the receipt a notification is answered with, go only
+  to an authenticated sender. **Behaviour change:** a peer that sends these messages
+  anoncrypt, or a pong with no sender, is no longer answered or acted on; a ping task
+  answered that way stays in the inbox until dismissed. Every service in the stack already
+  sends authcrypt.
 - **A wrong unlock code now gets another try.** At start-up the unlock prompt only
   rejected codes shorter than eight characters. A wrong code of full length left the
   prompt on the first try and failed afterwards, while the secured config was being
