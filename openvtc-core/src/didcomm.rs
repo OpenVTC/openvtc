@@ -1006,6 +1006,9 @@ pub enum DIDCommEvent {
     },
     /// A trust-ping was received — state handler decides whether to respond.
     TrustPingReceived {
+        /// The sender the transport authenticated, or `None` when it bound
+        /// none. Never the plaintext `from` header: a pong goes back to this
+        /// DID, and the log names it.
         from: Option<String>,
         /// The listener that received the ping (needed to send pong back).
         listener_id: String,
@@ -1013,7 +1016,11 @@ pub enum DIDCommEvent {
         message_id: String,
     },
     /// A trust-pong response was received.
-    TrustPongReceived { from: Option<String> },
+    TrustPongReceived {
+        /// The sender the transport authenticated, or `None` when it bound
+        /// none — as for [`DIDCommEvent::TrustPingReceived`].
+        from: Option<String>,
+    },
 }
 
 /// The DIDComm event channel is **unbounded**, deliberately.
@@ -1448,13 +1455,14 @@ async fn dispatch_inbound(
             }
         };
         // The transport's sender is preferred over the plaintext `from` header,
-        // which the sender controls outright. But neither is an identity: the
-        // result is a **routing hint** — which conversation, which community
-        // record, whom to reply to. Anything that turns on *who said it* (a
-        // credential stored, a membership ended, a relationship bound to a DID,
-        // a community's answer acted on) must check a proof by that party
-        // (`crate::proof_check`), because the transport's sender binding is not
-        // something this client can rely on.
+        // which the sender controls outright. `from` is a **routing hint** —
+        // which conversation, which community record, whom to reply to. The
+        // dispatcher handles a message only as the sender the transport
+        // authenticated (`bound_sender`): one with none, or whose `from` names
+        // someone else, is not acted on. Anything that turns on *who said it*
+        // in a durable way (a credential stored, a membership ended, a
+        // relationship bound to a DID, a community's answer acted on) also
+        // checks a proof by that party (`crate::proof_check`).
         let authenticated = item.message.sender.clone();
         let from = authenticated.clone().or_else(|| message.from.clone());
 
@@ -1615,6 +1623,50 @@ fn authenticated_sender(
     }
 }
 
+/// Why an inbound message has no sender the dispatcher may act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum UnboundSender {
+    /// The transport bound no sender to the frame (anoncrypt DIDComm, or an
+    /// authcrypt whose `from` its sealing key does not back).
+    #[error("the transport authenticated no sender")]
+    Unauthenticated,
+    /// The `from` header names someone other than the sender the transport
+    /// authenticated.
+    #[error("the `from` header does not match the authenticated sender")]
+    Mismatch,
+}
+
+/// The sender an inbound message is handled as: the DID the transport
+/// authenticated, never the plaintext `from` alone.
+///
+/// `claimed` is the message's `from` header, `authenticated` the sender the
+/// transport bound to the frame ([`DIDCommEvent::InboundMessage`]'s field of
+/// that name). A message with no authenticated sender, or whose `from` names
+/// another DID, has no sender to act for: everything it could ask — a task in
+/// the inbox, a reply, a receipt, a task removed — turns on who sent it.
+///
+/// Compared by DID, so a did:scid `from` that differs from the key's DID only
+/// in its `?src=` locator still matches (VTI-KEY-163). The `from` is returned
+/// as presented when it matches, as routing has always used it.
+///
+/// # Errors
+///
+/// [`UnboundSender`] when there is no authenticated sender, or `from` names
+/// someone else.
+pub fn bound_sender(
+    claimed: Option<&str>,
+    authenticated: Option<&str>,
+) -> Result<String, UnboundSender> {
+    let authenticated = authenticated.ok_or(UnboundSender::Unauthenticated)?;
+    match claimed {
+        Some(claimed) if vta_sdk::did_scid::same_reference(claimed, authenticated) => {
+            Ok(claimed.to_string())
+        }
+        Some(_) => Err(UnboundSender::Mismatch),
+        None => Ok(authenticated.to_string()),
+    }
+}
+
 /// The routing gate, compiled once and shared by the live dispatcher and the
 /// stored-message pickup so the two admit **exactly** the same set.
 ///
@@ -1646,9 +1698,11 @@ fn classify_inbound(
 ) -> Vec<DIDCommEvent> {
     if message.typ == TRUST_PING_TYPE {
         // Not auto-answered: the state handler pongs only after checking the
-        // sender has a relationship.
+        // sender has a relationship. Only an authenticated sender is offered —
+        // a ping that claims a `from` its sealing key does not back is answered
+        // by nobody.
         return vec![DIDCommEvent::TrustPingReceived {
-            from,
+            from: authenticated,
             listener_id,
             message_id: message.id.clone(),
         }];
@@ -1657,7 +1711,9 @@ fn classify_inbound(
         // Forwarded as both: InboundMessage drives task removal, the pong
         // event drives the activity log.
         return vec![
-            DIDCommEvent::TrustPongReceived { from: from.clone() },
+            DIDCommEvent::TrustPongReceived {
+                from: authenticated.clone(),
+            },
             DIDCommEvent::InboundMessage {
                 from,
                 authenticated,
@@ -3782,6 +3838,103 @@ mod authenticated_sender_tests {
             authenticated_sender(&message("did:webvh:QmS:example.com"), &meta(bare_kid)),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod bound_sender_tests {
+    use super::{
+        DIDCommEvent, MessagingTransport, TRUST_PING_TYPE, TRUST_PONG_TYPE, UnboundSender,
+        bound_sender, classify_inbound,
+    };
+    use affinidi_tdk::didcomm::Message;
+    use serde_json::json;
+
+    const ALICE: &str = "did:webvh:QmA:example.com:alice";
+    const CAROL: &str = "did:webvh:QmC:example.com:carol";
+
+    #[test]
+    fn the_authenticated_sender_is_the_sender() {
+        assert_eq!(bound_sender(Some(ALICE), Some(ALICE)).as_deref(), Ok(ALICE));
+        assert_eq!(bound_sender(None, Some(ALICE)).as_deref(), Ok(ALICE));
+    }
+
+    #[test]
+    fn a_from_with_no_authenticated_sender_is_refused() {
+        assert_eq!(
+            bound_sender(Some(ALICE), None),
+            Err(UnboundSender::Unauthenticated)
+        );
+        assert_eq!(
+            bound_sender(None, None),
+            Err(UnboundSender::Unauthenticated)
+        );
+    }
+
+    #[test]
+    fn a_from_naming_someone_else_is_refused() {
+        assert_eq!(
+            bound_sender(Some(ALICE), Some(CAROL)),
+            Err(UnboundSender::Mismatch)
+        );
+    }
+
+    /// A did:scid `from` may carry a `?src=` locator its key id does not.
+    #[test]
+    fn a_did_scid_locator_does_not_make_a_mismatch() {
+        let located = "did:scid:vh:1:QmS?src=example.com";
+        assert_eq!(
+            bound_sender(Some(located), Some("did:scid:vh:1:QmS")).as_deref(),
+            Ok(located)
+        );
+    }
+
+    fn message(typ: &str, from: Option<&str>) -> Message {
+        let mut b = Message::build("m".to_string(), typ.to_string(), json!({}));
+        if let Some(from) = from {
+            b = b.from(from.to_string());
+        }
+        b.finalize()
+    }
+
+    /// A ping or pong whose `from` the transport did not authenticate reaches
+    /// the state handler with no sender: nobody to answer, nobody to log.
+    #[test]
+    fn ping_and_pong_events_carry_only_the_authenticated_sender() {
+        let events = classify_inbound(
+            message(TRUST_PING_TYPE, Some(ALICE)),
+            MessagingTransport::DidComm,
+            Some(ALICE.to_string()),
+            None,
+            "listener".to_string(),
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [DIDCommEvent::TrustPingReceived { from: None, .. }]
+        ));
+        let events = classify_inbound(
+            message(TRUST_PONG_TYPE, Some(ALICE)),
+            MessagingTransport::DidComm,
+            Some(ALICE.to_string()),
+            None,
+            "listener".to_string(),
+        );
+        assert!(matches!(
+            events.first(),
+            Some(DIDCommEvent::TrustPongReceived { from: None })
+        ));
+
+        let events = classify_inbound(
+            message(TRUST_PING_TYPE, Some(ALICE)),
+            MessagingTransport::DidComm,
+            Some(ALICE.to_string()),
+            Some(ALICE.to_string()),
+            "listener".to_string(),
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [DIDCommEvent::TrustPingReceived { from: Some(f), .. }] if f == ALICE
+        ));
     }
 }
 

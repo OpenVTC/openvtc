@@ -131,6 +131,16 @@ pub struct Relationship {
     pub needs_reestablishment: bool,
 }
 
+impl Relationship {
+    /// Whether `did` is the remote party's relationship DID or persona DID,
+    /// compared by DID (a did:scid `?src=` locator does not make it another).
+    #[must_use]
+    pub fn is_remote(&self, did: &str) -> bool {
+        vta_sdk::did_scid::same_reference(&self.remote_did, did)
+            || vta_sdk::did_scid::same_reference(&self.remote_p_did, did)
+    }
+}
+
 /// serde `skip_serializing_if` predicate: omit a `bool` field when it is false.
 fn is_false(b: &bool) -> bool {
     !*b
@@ -681,9 +691,16 @@ impl Relationships {
         vrcs_issued: &mut Vrcs,
         vrcs_received: &mut Vrcs,
     ) -> Option<Relationship> {
-        // Find and remove any VRCs associated with this relationship
+        // Find and remove any VRCs associated with this relationship — under
+        // its key, and under the remote relationship DID too, where earlier
+        // builds filed a received credential (by its issuer).
         vrcs_issued.remove_relationship(key);
         vrcs_received.remove_relationship(key);
+        if let Some(rel) = self.relationships.get(key)
+            && rel.remote_did != *key
+        {
+            vrcs_received.remove_relationship(&rel.remote_did);
+        }
 
         let removed = self.relationships.remove(key);
         if removed.is_some() {
@@ -743,10 +760,35 @@ impl Relationships {
     }
 
     /// Finds a relationship by its remote DID (either P-DID or R-DID).
+    ///
+    /// Compared by DID, so a did:scid that differs only in its `?src=`
+    /// locator is the same party.
     pub fn find_by_remote_did(&self, did: &Arc<String>) -> Option<&Relationship> {
-        self.relationships
-            .values()
-            .find(|r| r.remote_did == *did || r.remote_p_did == *did)
+        self.relationships.values().find(|r| r.is_remote(did))
+    }
+
+    /// Move received VRCs filed under a relationship's remote R-DID to the
+    /// relationship's key (its remote P-DID), where the relationship view
+    /// reads them and removal clears them. Earlier builds filed a received
+    /// credential under its issuer, which for a relationship DID is the R-DID.
+    ///
+    /// Returns how many credential groups were moved. A group whose key is no
+    /// relationship's R-DID is left as it is.
+    pub fn rekey_received_vrcs(&self, vrcs_received: &mut Vrcs) -> usize {
+        let moves: Vec<(Arc<String>, Arc<String>)> = vrcs_received
+            .keys()
+            .filter(|k| !self.relationships.contains_key(*k))
+            .filter_map(|k| {
+                self.relationships
+                    .iter()
+                    .find(|(_, r)| r.remote_did == *k)
+                    .map(|(p_did, _)| (Arc::clone(k), Arc::clone(p_did)))
+            })
+            .collect();
+        for (from, to) in &moves {
+            vrcs_received.rekey(from, to);
+        }
+        moves.len()
     }
 
     /// Finds the map key (remote P-DID) of a relationship matching the given
@@ -754,7 +796,7 @@ impl Relationships {
     pub fn find_key_by_remote_did(&self, did: &Arc<String>) -> Option<Arc<String>> {
         self.relationships
             .iter()
-            .find(|(_, r)| r.remote_did == *did || r.remote_p_did == *did)
+            .find(|(_, r)| r.is_remote(did))
             .map(|(k, _)| k.clone())
     }
 
@@ -1634,6 +1676,105 @@ mod tests {
             rels.relationships.is_empty(),
             "Relationships should be empty after removal"
         );
+    }
+
+    async fn signed_vrc(subject: &str) -> std::sync::Arc<dtg_credentials::DTGCredential> {
+        let (issuer, secret) =
+            affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
+                .expect("did:key generates");
+        let mut vrc = dtg_credentials::DTGCredential::new_vrc(
+            issuer,
+            dtg_credentials::IssuerScope::Pairwise,
+            subject.to_string(),
+            Utc::now(),
+            None,
+        );
+        vrc.sign(&secret, None).await.expect("signs");
+        std::sync::Arc::new(vrc)
+    }
+
+    /// Removing a relationship removes the credentials received in it, also
+    /// those an earlier build filed under the peer's relationship DID.
+    #[tokio::test]
+    async fn removing_a_relationship_removes_its_received_vrcs() {
+        let mut rels = Relationships::default();
+        let mut vrcs_issued = crate::vrc::Vrcs::default();
+        let mut vrcs_received = crate::vrc::Vrcs::default();
+        let r = make_relationship(
+            "t1",
+            "did:our:1",
+            "did:r:1",
+            "did:rp:1",
+            RelationshipState::Established,
+        );
+        let key = r.remote_p_did.clone();
+        let r_did = r.remote_did.clone();
+        rels.relationships.insert(key.clone(), r);
+        vrcs_received
+            .insert(&key, signed_vrc("did:our:1").await)
+            .unwrap();
+        vrcs_received
+            .insert(&r_did, signed_vrc("did:our:1").await)
+            .unwrap();
+
+        rels.remove(&key, &mut vrcs_issued, &mut vrcs_received);
+        assert_eq!(vrcs_received.keys().count(), 0);
+    }
+
+    /// A received credential filed under the peer's relationship DID moves to
+    /// the relationship key; one filed under no relationship's DID stays.
+    #[tokio::test]
+    async fn received_vrcs_are_refiled_under_the_relationship_key() {
+        let mut rels = Relationships::default();
+        let mut vrcs_received = crate::vrc::Vrcs::default();
+        let r = make_relationship(
+            "t1",
+            "did:our:1",
+            "did:r:1",
+            "did:rp:1",
+            RelationshipState::Established,
+        );
+        let key = r.remote_p_did.clone();
+        let r_did = r.remote_did.clone();
+        rels.relationships.insert(key.clone(), r);
+        let unrelated = std::sync::Arc::new("did:nobody:1".to_string());
+        vrcs_received
+            .insert(&key, signed_vrc("did:our:1").await)
+            .unwrap();
+        vrcs_received
+            .insert(&r_did, signed_vrc("did:our:1").await)
+            .unwrap();
+        vrcs_received
+            .insert(&unrelated, signed_vrc("did:our:1").await)
+            .unwrap();
+
+        assert_eq!(rels.rekey_received_vrcs(&mut vrcs_received), 1);
+        assert!(vrcs_received.get(&r_did).is_none());
+        assert_eq!(vrcs_received.get(&key).map(|m| m.len()), Some(2));
+        assert!(vrcs_received.get(&unrelated).is_some());
+        // Idempotent.
+        assert_eq!(rels.rekey_received_vrcs(&mut vrcs_received), 0);
+    }
+
+    /// A did:scid peer is found whether or not its `?src=` locator is given.
+    #[test]
+    fn a_did_scid_peer_is_found_with_or_without_its_locator() {
+        let mut rels = Relationships::default();
+        let r = make_relationship(
+            "t1",
+            "did:our:1",
+            "did:scid:vh:1:QmR?src=example.com",
+            "did:scid:vh:1:QmP",
+            RelationshipState::Established,
+        );
+        let key = r.remote_p_did.clone();
+        rels.relationships.insert(key.clone(), r);
+        let bare = Arc::new("did:scid:vh:1:QmR".to_string());
+        assert_eq!(rels.find_key_by_remote_did(&bare), Some(key.clone()));
+        let located = Arc::new("did:scid:vh:1:QmP?src=example.com".to_string());
+        assert!(rels.find_by_remote_did(&located).is_some());
+        let other = Arc::new("did:scid:vh:1:QmOther".to_string());
+        assert!(rels.find_by_remote_did(&other).is_none());
     }
 
     #[test]
