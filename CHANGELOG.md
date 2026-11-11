@@ -22,6 +22,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   anoncrypt, or a pong with no sender, is no longer answered or acted on; a ping task
   answered that way stays in the inbox until dismissed. Every service in the stack already
   sends authcrypt.
+- **A VRC received from a peer is checked in full before it is offered for storage.** Its
+  subject must be the DID we use in that relationship, it must be inside its validity
+  window (`validFrom` / `validUntil`), and where it names a `credentialStatus` the
+  issuer's status list must establish that it is not revoked or suspended — a status that
+  cannot be established refuses it, as for a credential a community issues. These join the
+  proof and issuer checks it already passed. Accepting one from the inbox checks its window
+  again, so one that lapsed while waiting is not stored. A received VRC is now filed under
+  the relationship's key (the peer's persona DID) rather than the relationship DID that
+  issued it, so the relationship view lists it and removing the relationship removes it;
+  ones filed the old way are moved at load.
+
 - **A wrong unlock code now gets another try.** At start-up the unlock prompt only
   rejected codes shorter than eight characters. A wrong code of full length left the
   prompt on the first try and failed afterwards, while the secured config was being

@@ -1364,7 +1364,13 @@ pub fn handle_credential_issue(
 ///    sender and rejects forged issuer strings;
 /// 3. the message `thid` only resolves a pending task when that task is our
 ///    *own* outbound VRC request to this same sender. An attacker-chosen
-///    `thid` must not be able to delete unrelated tasks.
+///    `thid` must not be able to delete unrelated tasks;
+/// 4. the credential's subject (`credentialSubject.id`) must be the DID *we*
+///    use in this relationship — a credential about someone else is not a
+///    relationship credential for us, whoever signed it.
+///
+/// The proof, validity window and status are checked off the loop by
+/// [`verify_inbound_vrc`].
 ///
 /// Returns the task id of our pending outbound VRC request when the `thid`
 /// legitimately resolves one, `Ok(None)` when there is no (matching) `thid`,
@@ -1404,6 +1410,17 @@ pub fn vet_vrc_issued(
              relationship ({})",
             vrc.issuer(),
             relationship.remote_did
+        ));
+    }
+
+    // Gate 4: the subject must be us — the DID we use in this relationship,
+    // which is the DID the peer issues to (`prepare_accept_vrc_request` on
+    // their side sets the subject to its `remote_did`, our `our_did`).
+    if !vta_sdk::did_scid::same_reference(vrc.subject(), &relationship.our_did) {
+        return Err(format!(
+            "credential subject ({}) is not the DID we use in this relationship ({})",
+            vrc.subject(),
+            relationship.our_did
         ));
     }
 
@@ -1448,6 +1465,66 @@ pub async fn verify_vrc_proof(tdk: &TDK, vrc: &DTGCredential) -> Result<(), Stri
     )
     .await
     .map_err(|e| format!("proof verification failed: {e}"))
+}
+
+/// Check an inbound VRC before it may be stored: inside its validity window
+/// (`validFrom` / `validUntil`), its data-integrity proof by the issuer
+/// ([`verify_vrc_proof`]), and — where it names a `credentialStatus` — not
+/// revoked or suspended by the issuer's status list.
+///
+/// The same rules a community-issued credential is held to
+/// ([`crate::issued_credential`]), and failing closed the same way: a status
+/// that cannot be established (an unreachable or unverifiable list) refuses
+/// the credential. A VRC with no `credentialStatus` names nothing to check.
+///
+/// # Errors
+///
+/// What failed, naming no DID.
+pub async fn verify_inbound_vrc(
+    tdk: &TDK,
+    vrc: &DTGCredential,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    use crate::issued_credential::{IssuedCredentialError, check_status, check_validity_window};
+
+    let document = serde_json::to_value(vrc)
+        .map_err(|e| format!("the credential could not be read for verification: {e}"))?;
+    // Cheap, local check first: nothing is resolved for a credential that is
+    // out of date.
+    check_validity_window(&document, now).map_err(|e| e.to_string())?;
+    verify_vrc_proof(tdk, vrc).await?;
+    if let Some(status) = document.get("credentialStatus").filter(|s| !s.is_null()) {
+        check_status(status, vrc.issuer(), tdk.did_resolver(), now)
+            .await
+            .map_err(|e| match e {
+                IssuedCredentialError::Revoked => {
+                    "the issuer has revoked or suspended the credential".to_string()
+                }
+                IssuedCredentialError::StatusUnknown(why) => format!(
+                    "the credential's revocation status could not be checked ({why}); ask \
+                     the issuer to send it again once its status list is reachable"
+                ),
+                other => other.to_string(),
+            })?;
+    }
+    Ok(())
+}
+
+/// Whether a stored-or-about-to-be-stored VRC is inside its validity window
+/// at `now`. Local only — the proof and status were checked on arrival
+/// ([`verify_inbound_vrc`]); this catches one that lapsed while it waited in
+/// the inbox.
+///
+/// # Errors
+///
+/// What is wrong with its window.
+pub fn vrc_in_validity_window(
+    vrc: &DTGCredential,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    let document =
+        serde_json::to_value(vrc).map_err(|e| format!("the credential could not be read: {e}"))?;
+    crate::issued_credential::check_validity_window(&document, now).map_err(|e| e.to_string())
 }
 
 /// Verify a VRC's data-integrity proof against an **explicitly supplied** issuer
@@ -3840,10 +3917,107 @@ mod tests {
         DTGCredential::new_vrc(
             issuer.to_string(),
             dtg_credentials::IssuerScope::Pairwise,
-            "did:webvh:example:subject".to_string(),
+            // The DID `relationship()` says we use.
+            "did:webvh:example:us".to_string(),
             Utc::now(),
             None,
         )
+    }
+
+    /// A credential about someone other than us is not a relationship
+    /// credential for us, whoever in the relationship signed it.
+    #[test]
+    fn vrc_issued_about_a_third_party_is_refused() {
+        let sender = "did:webvh:example:sender";
+        let from = Arc::new(sender.to_string());
+        let rel = relationship(sender, sender, RelationshipState::Established);
+        let rels = relationships_with(&rel);
+
+        let vrc = DTGCredential::new_vrc(
+            sender.to_string(),
+            dtg_credentials::IssuerScope::Pairwise,
+            "did:webvh:example:someone-else".to_string(),
+            Utc::now(),
+            None,
+        );
+        let err = vet_vrc_issued(&rels, &Tasks::default(), &vrc, &from, None)
+            .expect_err("a VRC about a third party must not pass vetting");
+        assert!(
+            err.contains("subject"),
+            "unexpected rejection reason: {err}"
+        );
+
+        // The same credential about us passes.
+        vet_vrc_issued(&rels, &Tasks::default(), &unsigned_vrc(sender), &from, None)
+            .expect("a VRC about us passes");
+    }
+
+    #[tokio::test]
+    async fn inbound_vrc_in_its_window_and_validly_signed_is_accepted() {
+        let tdk = test_tdk().await;
+        let (issuer_did, issuer_secret) =
+            DID::generate_did_key(KeyType::Ed25519).expect("did:key generates");
+        let mut vrc = unsigned_vrc(&issuer_did);
+        vrc.sign(&issuer_secret, None).await.expect("signs");
+        verify_inbound_vrc(&tdk, &vrc, Utc::now())
+            .await
+            .expect("a current, signed VRC with no status passes");
+    }
+
+    /// An expired VRC is refused even with a valid proof — and before its
+    /// issuer is resolved.
+    #[tokio::test]
+    async fn inbound_vrc_outside_its_window_is_refused() {
+        let tdk = test_tdk().await;
+        let (issuer_did, issuer_secret) =
+            DID::generate_did_key(KeyType::Ed25519).expect("did:key generates");
+        let now = Utc::now();
+        let mut expired = DTGCredential::new_vrc(
+            issuer_did.clone(),
+            dtg_credentials::IssuerScope::Pairwise,
+            "did:webvh:example:us".to_string(),
+            now - chrono::TimeDelta::days(30),
+            Some(now - chrono::TimeDelta::days(1)),
+        );
+        expired.sign(&issuer_secret, None).await.expect("signs");
+        let err = verify_inbound_vrc(&tdk, &expired, now).await.unwrap_err();
+        assert!(err.contains("expired"), "{err}");
+        assert!(vrc_in_validity_window(&expired, now).is_err());
+
+        let mut future = DTGCredential::new_vrc(
+            issuer_did,
+            dtg_credentials::IssuerScope::Pairwise,
+            "did:webvh:example:us".to_string(),
+            now + chrono::TimeDelta::days(30),
+            None,
+        );
+        future.sign(&issuer_secret, None).await.expect("signs");
+        let err = verify_inbound_vrc(&tdk, &future, now).await.unwrap_err();
+        assert!(err.contains("not valid yet"), "{err}");
+    }
+
+    /// A VRC naming a status list that cannot be read is refused: its status
+    /// is not established, so it fails closed.
+    #[tokio::test]
+    async fn inbound_vrc_whose_status_cannot_be_checked_is_refused() {
+        let tdk = test_tdk().await;
+        let (issuer_did, issuer_secret) =
+            DID::generate_did_key(KeyType::Ed25519).expect("did:key generates");
+        let mut vrc = unsigned_vrc(&issuer_did);
+        vrc.credential_mut().credential_status = Some(json!({
+            "type": "BitstringStatusListEntry",
+            "statusPurpose": "revocation",
+            "statusListIndex": "7",
+            "statusListCredential": "https://127.0.0.1:1/status/revocation",
+        }));
+        vrc.sign(&issuer_secret, None).await.expect("signs");
+        let err = verify_inbound_vrc(&tdk, &vrc, Utc::now())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("revocation status could not be checked"),
+            "{err}"
+        );
     }
 
     #[test]

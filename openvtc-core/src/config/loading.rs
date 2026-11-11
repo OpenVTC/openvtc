@@ -374,6 +374,19 @@ impl Config {
             sync_account_state(client, &mut private_cfg, &mut sc.key_info).await;
         }
 
+        // Received VRCs filed by earlier builds under the peer's relationship
+        // DID move to the relationship's key. After the sync, so a copy synced
+        // from another device under the old key moves too. Rewritten on the
+        // next save.
+        let rekeyed = private_cfg
+            .relationships
+            .rekey_received_vrcs(&mut private_cfg.vrcs_received);
+        if rekeyed > 0 {
+            debug!(
+                "Re-filed received VRCs of {rekeyed} relationship(s) under the relationship key"
+            );
+        }
+
         // The v2 `account` persisted in the protected tier is the source of
         // truth. v1 (singleton) configs are reset before reaching here
         // (D13/R-RST), so a loadable config always carries an account.

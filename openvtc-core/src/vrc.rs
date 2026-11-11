@@ -152,6 +152,19 @@ impl Vrcs {
         }
     }
 
+    /// Move every VRC filed under `from` to `to`, merging with any already
+    /// there. Returns `true` if anything moved.
+    pub fn rekey(&mut self, from: &Arc<String>, to: &Arc<String>) -> bool {
+        if from == to {
+            return false;
+        }
+        let Some(moved) = self.vrcs.remove(from) else {
+            return false;
+        };
+        self.vrcs.entry(Arc::clone(to)).or_default().extend(moved);
+        true
+    }
+
     /// Removes all VRCs for the given remote P-DID.
     ///
     /// Returns `true` if any VRCs were removed.

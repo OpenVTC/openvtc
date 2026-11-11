@@ -20,7 +20,7 @@ use openvtc_core::messaging::{
     credential_in_issue, credential_issue_admissible, handle_community_profile_show_response,
     handle_credential_issue, handle_join_status_response, handle_join_submit_receipt,
     handle_join_trust_task_error, handle_join_verdict, handle_member_removal_notice,
-    is_trust_task_error_type, read_problem_report, require_thid, validate_did, verify_vrc_proof,
+    is_trust_task_error_type, read_problem_report, require_thid, validate_did, verify_inbound_vrc,
     vet_vrc_issued,
 };
 use openvtc_core::personhood::{
@@ -348,7 +348,9 @@ impl VerifyJob {
                 )
                 .await,
             ),
-            VerifyJob::Vrc(vrc) => PreVerified::Vrc(verify_vrc_proof(&tdk, &vrc).await),
+            VerifyJob::Vrc(vrc) => {
+                PreVerified::Vrc(verify_inbound_vrc(&tdk, &vrc, chrono::Utc::now()).await)
+            }
             VerifyJob::Renewal {
                 document,
                 sender,
@@ -2123,7 +2125,9 @@ async fn process_inbound(
             };
 
             // Task R2 gate 4: the data-integrity proof must verify against the
-            // issuer's resolved key before any state is touched.
+            // issuer's resolved key, the credential must be inside its validity
+            // window, and a status it names must be established as not revoked
+            // — all before any state is touched.
             if let Err(reason) = match &pre {
                 Some(PreVerified::Vrc(r)) => r.clone(),
                 _ => Err("its proof was not checked".to_string()),

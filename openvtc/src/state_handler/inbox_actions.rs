@@ -39,13 +39,32 @@ pub fn accept_vrc(config: &mut Config, task_id: &str) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("task not found: {}", task_id))?;
         match &task.type_ {
             TaskType::VRCIssued { vrc } => {
-                // Determine issuer as remote p-did
+                // Stored under the relationship's key — the remote persona
+                // DID — which is what the relationship view reads and what
+                // removing the relationship clears. The issuer is the DID the
+                // peer uses in the relationship (pinned on arrival by
+                // `vet_vrc_issued`), which for a relationship DID is not that
+                // key.
                 let issuer = Arc::new(vrc.issuer().to_string());
-                (Arc::new(*vrc.clone()), issuer)
+                let key = config
+                    .private
+                    .relationships
+                    .find_key_by_remote_did(&issuer)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no relationship with the credential's issuer ({issuer}) — not stored"
+                        )
+                    })?;
+                (Arc::new(*vrc.clone()), key)
             }
             _ => anyhow::bail!("task {} is not a VRC issued task", task_id),
         }
     };
+
+    // Checked in full on arrival; it may have lapsed while it waited here.
+    if let Err(reason) = openvtc_core::messaging::vrc_in_validity_window(&vrc, Utc::now()) {
+        anyhow::bail!("the credential is not stored: {reason}");
+    }
 
     // Store in received VRCs
     config.private.vrcs_received.insert(&remote_p_did, vrc)?;
@@ -1223,5 +1242,99 @@ mod r14_tests {
             config.private.tasks.get_by_id(&task_id).is_some(),
             "task retained on reject failure"
         );
+    }
+
+    async fn vrc_task(
+        config: &mut Config,
+        issuer_r_did: &str,
+        valid_until: Option<chrono::DateTime<Utc>>,
+    ) -> Arc<String> {
+        let (_, secret) =
+            affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
+                .expect("did:key generates");
+        let mut vrc = dtg_credentials::DTGCredential::new_vrc(
+            issuer_r_did.to_string(),
+            dtg_credentials::IssuerScope::Pairwise,
+            "did:peer:our-rdid".to_string(),
+            Utc::now() - chrono::TimeDelta::days(2),
+            valid_until,
+        );
+        // Signed only so it carries a proof value to be stored under; the
+        // proof itself was checked on arrival.
+        vrc.sign(&secret, None).await.expect("signs");
+        let task_id = Arc::new(uuid::Uuid::new_v4().to_string());
+        config
+            .private
+            .tasks
+            .new_task(&task_id, TaskType::VRCIssued { vrc: Box::new(vrc) });
+        task_id
+    }
+
+    fn with_rdid_relationship(config: &mut Config) -> Arc<String> {
+        let p_did = Arc::new("did:peer:their-persona".to_string());
+        config.private.relationships.relationships.insert(
+            Arc::clone(&p_did),
+            openvtc_core::relationships::Relationship {
+                task_id: Arc::new("rel".to_string()),
+                our_did: Arc::new("did:peer:our-rdid".to_string()),
+                remote_did: Arc::new("did:peer:their-rdid".to_string()),
+                remote_p_did: Arc::clone(&p_did),
+                created: Utc::now(),
+                state: RelationshipState::Established,
+                our_persona: None,
+                needs_reestablishment: false,
+            },
+        );
+        p_did
+    }
+
+    /// A received VRC is filed under the relationship's key (the remote
+    /// persona DID), not its issuer's relationship DID, so the relationship
+    /// view finds it and removing the relationship clears it.
+    #[tokio::test]
+    async fn an_accepted_vrc_is_filed_under_the_relationship_key() {
+        let mut config = test_config();
+        let p_did = with_rdid_relationship(&mut config);
+        let task_id = vrc_task(&mut config, "did:peer:their-rdid", None).await;
+
+        accept_vrc(&mut config, &task_id).expect("stored");
+        assert_eq!(
+            config.private.vrcs_received.get(&p_did).map(|m| m.len()),
+            Some(1)
+        );
+        assert!(
+            config
+                .private
+                .vrcs_received
+                .get(&Arc::new("did:peer:their-rdid".to_string()))
+                .is_none()
+        );
+    }
+
+    /// One that lapsed while it waited in the inbox is not stored.
+    #[tokio::test]
+    async fn a_vrc_that_expired_in_the_inbox_is_not_stored() {
+        let mut config = test_config();
+        with_rdid_relationship(&mut config);
+        let task_id = vrc_task(
+            &mut config,
+            "did:peer:their-rdid",
+            Some(Utc::now() - chrono::TimeDelta::hours(1)),
+        )
+        .await;
+
+        let err = accept_vrc(&mut config, &task_id).unwrap_err();
+        assert!(err.to_string().contains("expired"), "{err}");
+        assert_eq!(config.private.vrcs_received.keys().count(), 0);
+        assert!(config.private.tasks.get_by_id(&task_id).is_some());
+    }
+
+    /// With the relationship gone there is nowhere to file it.
+    #[tokio::test]
+    async fn a_vrc_with_no_relationship_is_not_stored() {
+        let mut config = test_config();
+        let task_id = vrc_task(&mut config, "did:peer:their-rdid", None).await;
+        assert!(accept_vrc(&mut config, &task_id).is_err());
+        assert_eq!(config.private.vrcs_received.keys().count(), 0);
     }
 }
