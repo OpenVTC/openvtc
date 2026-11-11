@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`OpenVTCError` is now `#[non_exhaustive]`** (breaking for code that uses
+  `openvtc-core` as a library). A `match` on it outside `openvtc-core` needs a
+  wildcard arm. From now on a new error variant is not a breaking change, so a
+  fix that needs one can be backported to a release branch as it is.
+
 ### Fixed
 
 - **Peer messages are handled only as the sender the transport authenticated.** The

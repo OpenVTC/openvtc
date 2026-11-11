@@ -9,7 +9,14 @@ use didwebvh_rs::DIDWebVHError;
 use thiserror::Error;
 
 /// Unified error type for all OpenVTC operations.
+///
+/// `#[non_exhaustive]` so a new failure category is not a breaking change:
+/// without it every added variant fails the patch-line semver check
+/// (`cargo-semver-checks` `enum_variant_added`), and a fix that needs one
+/// cannot be backported to a release branch as it stands. Matches outside
+/// this crate need a wildcard arm.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum OpenVTCError {
     /// An unrecognised DIDComm message type URL was encountered.
     #[error("Invalid Message Type: {0}")]
