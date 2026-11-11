@@ -10,7 +10,11 @@ use anyhow::{Result, bail};
 use console::style;
 use dialoguer::{Confirm, Password, theme::ColorfulTheme};
 use openvtc_core::{
-    config::{Config, ConfigProtectionType, UnlockCode, public_config::PublicConfig},
+    config::{
+        Config, ConfigProtectionType, MIN_PASSPHRASE_LENGTH, UnlockCode,
+        public_config::PublicConfig,
+        secured_config::{SecuredConfig, UnlockCodeCheck},
+    },
     errors::OpenVTCError,
     process_lock::{check_duplicate_instance, remove_lock_file},
     secure_store::{Durability, StoreDescription},
@@ -689,6 +693,8 @@ async fn main() -> Result<()> {
                 eprintln!("{}", style(hint).themed(CLI_CAUTION));
                 bail!("VTA Connection Error");
             }
+            // Already explained, with the recovery route, where it was asked.
+            Err(OpenVTCError::UnlockCodeRejected) => bail!("Unlock code not accepted"),
             Err(e) => {
                 eprintln!(
                     "{} {}",
@@ -903,6 +909,92 @@ struct SuppliedUnlockCode {
     from_argv: bool,
 }
 
+/// Asks for the unlock code until one opens the profile's secured config, up to
+/// [`MAX_UNLOCK_ATTEMPTS`], with a growing delay after the third miss.
+///
+/// Each code is checked against the stored config here, inside the loop.
+/// `UnlockCode::from_string` only derives a key, so it accepts any code of the
+/// minimum length; checking only that let every wrong full-length code out of
+/// the loop on the first try, to fail later at load with no second chance —
+/// and the attempt limit and delay never applied to a wrong code.
+///
+/// The limit is a usability guard against a run of typos, not a defence
+/// against guessing: a restart begins a fresh count, and anyone with a copy of
+/// the stored config can guess offline. Argon2id's cost per guess is the
+/// defence.
+fn prompt_unlock_code(profile: &str) -> Result<UnlockCode, OpenVTCError> {
+    for attempt in 1..=MAX_UNLOCK_ATTEMPTS {
+        if attempt > 3 {
+            let delay = std::time::Duration::from_secs(1 << (attempt - 3).min(3));
+            std::thread::sleep(delay);
+        }
+        let input = Password::with_theme(&ColorfulTheme::default())
+            .with_prompt("Please enter unlock passphrase")
+            .allow_empty_password(false)
+            .interact()
+            .map_err(|e| {
+                eprintln!("Failed to read passphrase input: {e}");
+                OpenVTCError::Config(format!("Passphrase input failed: {e}"))
+            })?;
+        let problem = match UnlockCode::from_string(&input) {
+            Ok(code) if !unlock_code_rejected(profile, &code) => return Ok(code),
+            Ok(_) => "That unlock code didn't work.".to_string(),
+            Err(_) => format!(
+                "That code is too short. Unlock codes are at least \
+                 {MIN_PASSPHRASE_LENGTH} characters."
+            ),
+        };
+        let remaining = MAX_UNLOCK_ATTEMPTS - attempt;
+        if remaining == 0 {
+            eprintln!("{}", style(problem).themed(CLI_ERROR));
+            eprintln!("That was the last attempt.");
+            eprint_unlock_recovery_hint(profile);
+            return Err(OpenVTCError::UnlockCodeRejected);
+        }
+        eprintln!(
+            "{} Try again — {remaining} attempt{} left.",
+            style(problem).themed(CLI_CAUTION),
+            if remaining == 1 { "" } else { "s" }
+        );
+    }
+    Err(OpenVTCError::UnlockCodeRejected)
+}
+
+/// True only when the stored config is passphrase-protected and `code` does not
+/// open it. A store that cannot be read or parsed is not a wrong code: that
+/// fault is left for `Config::load_step2`, which reports it in full, rather
+/// than telling the user to retype a code that may have been right.
+fn unlock_code_rejected(profile: &str, code: &UnlockCode) -> bool {
+    match SecuredConfig::check_unlock_code(profile, code) {
+        Ok(UnlockCodeCheck::Rejected) => true,
+        Ok(UnlockCodeCheck::Accepted | UnlockCodeCheck::NotApplicable) => false,
+        Err(e) => {
+            tracing::debug!("unlock code not checked ahead of load: {e}");
+            false
+        }
+    }
+}
+
+/// What to do when the unlock code is lost. The code itself cannot be
+/// recovered, but an account kept by a VTA can be rebuilt from it.
+fn eprint_unlock_recovery_hint(profile: &str) {
+    let profile_arg = if profile == "default" {
+        String::new()
+    } else {
+        format!(" --profile {profile}")
+    };
+    eprintln!(
+        "{}",
+        style(format!(
+            "Forgotten your unlock code? It can't be recovered, but if your account is kept \
+             by a VTA you can recover the account: run `openvtc setup{profile_arg}`, connect \
+             to the same VTA and Trust Context, and choose [R] Recover when setup finds the \
+             context in use."
+        ))
+        .themed(CLI_CAUTION)
+    );
+}
+
 /// Fast, synchronous load — only does local config read + terminal prompts.
 /// Network-heavy work (TDK init, DID resolution, VTA auth) is deferred to the state handler.
 fn load_fast(
@@ -926,48 +1018,18 @@ fn load_fast(
                         .themed(CLI_CAUTION)
                     );
                 }
-                Some(UnlockCode::from_string(&supplied.passphrase)?)
-            } else {
-                let mut result = None;
-                for attempt in 1..=MAX_UNLOCK_ATTEMPTS {
-                    // After 3 failed attempts, add exponential backoff delay
-                    if attempt > 3 {
-                        let delay = std::time::Duration::from_secs(1 << (attempt - 3).min(3));
-                        std::thread::sleep(delay);
-                    }
-                    let input = match Password::with_theme(&ColorfulTheme::default())
-                        .with_prompt("Please enter unlock passphrase")
-                        .allow_empty_password(false)
-                        .interact()
-                    {
-                        Ok(input) => input,
-                        Err(e) => {
-                            eprintln!("Failed to read passphrase input: {e}");
-                            return Err(OpenVTCError::Config(format!(
-                                "Passphrase input failed: {e}"
-                            )));
-                        }
-                    };
-                    match UnlockCode::from_string(&input) {
-                        Ok(code) => {
-                            result = Some(code);
-                            break;
-                        }
-                        Err(e) => {
-                            let remaining = MAX_UNLOCK_ATTEMPTS - attempt;
-                            if remaining == 0 {
-                                eprintln!("Too many failed unlock attempts. Aborting.");
-                                return Err(e);
-                            }
-                            eprintln!(
-                                "WARNING: Failed unlock attempt. {} attempt{} remaining.",
-                                remaining,
-                                if remaining == 1 { "" } else { "s" }
-                            );
-                        }
-                    }
+                let code = UnlockCode::from_string(&supplied.passphrase)?;
+                if unlock_code_rejected(profile, &code) {
+                    eprintln!(
+                        "{}",
+                        style("That unlock code didn't work.").themed(CLI_ERROR)
+                    );
+                    eprint_unlock_recovery_hint(profile);
+                    return Err(OpenVTCError::UnlockCodeRejected);
                 }
-                result
+                Some(code)
+            } else {
+                Some(prompt_unlock_code(profile)?)
             }
         }
         ConfigProtectionType::Plaintext => None,
