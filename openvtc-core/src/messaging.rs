@@ -1404,7 +1404,7 @@ pub fn vet_vrc_issued(
     // Gate 1 matched `from_did` — the authenticated DIDComm sender — against
     // this same field, so the credential is now pinned to the channel it
     // arrived on rather than to a persona that could have issued it anywhere.
-    if vrc.issuer() != relationship.remote_did.as_str() {
+    if !vta_sdk::did_scid::same_reference(vrc.issuer(), &relationship.remote_did) {
         return Err(format!(
             "credential issuer ({}) is not the DID the sender uses in this \
              relationship ({})",

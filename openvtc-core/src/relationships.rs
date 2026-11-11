@@ -131,6 +131,16 @@ pub struct Relationship {
     pub needs_reestablishment: bool,
 }
 
+impl Relationship {
+    /// Whether `did` is the remote party's relationship DID or persona DID,
+    /// compared by DID (a did:scid `?src=` locator does not make it another).
+    #[must_use]
+    pub fn is_remote(&self, did: &str) -> bool {
+        vta_sdk::did_scid::same_reference(&self.remote_did, did)
+            || vta_sdk::did_scid::same_reference(&self.remote_p_did, did)
+    }
+}
+
 /// serde `skip_serializing_if` predicate: omit a `bool` field when it is false.
 fn is_false(b: &bool) -> bool {
     !*b
@@ -750,10 +760,11 @@ impl Relationships {
     }
 
     /// Finds a relationship by its remote DID (either P-DID or R-DID).
+    ///
+    /// Compared by DID, so a did:scid that differs only in its `?src=`
+    /// locator is the same party.
     pub fn find_by_remote_did(&self, did: &Arc<String>) -> Option<&Relationship> {
-        self.relationships
-            .values()
-            .find(|r| r.remote_did == *did || r.remote_p_did == *did)
+        self.relationships.values().find(|r| r.is_remote(did))
     }
 
     /// Move received VRCs filed under a relationship's remote R-DID to the
@@ -785,7 +796,7 @@ impl Relationships {
     pub fn find_key_by_remote_did(&self, did: &Arc<String>) -> Option<Arc<String>> {
         self.relationships
             .iter()
-            .find(|(_, r)| r.remote_did == *did || r.remote_p_did == *did)
+            .find(|(_, r)| r.is_remote(did))
             .map(|(k, _)| k.clone())
     }
 
@@ -1743,6 +1754,27 @@ mod tests {
         assert!(vrcs_received.get(&unrelated).is_some());
         // Idempotent.
         assert_eq!(rels.rekey_received_vrcs(&mut vrcs_received), 0);
+    }
+
+    /// A did:scid peer is found whether or not its `?src=` locator is given.
+    #[test]
+    fn a_did_scid_peer_is_found_with_or_without_its_locator() {
+        let mut rels = Relationships::default();
+        let r = make_relationship(
+            "t1",
+            "did:our:1",
+            "did:scid:vh:1:QmR?src=example.com",
+            "did:scid:vh:1:QmP",
+            RelationshipState::Established,
+        );
+        let key = r.remote_p_did.clone();
+        rels.relationships.insert(key.clone(), r);
+        let bare = Arc::new("did:scid:vh:1:QmR".to_string());
+        assert_eq!(rels.find_key_by_remote_did(&bare), Some(key.clone()));
+        let located = Arc::new("did:scid:vh:1:QmP?src=example.com".to_string());
+        assert!(rels.find_by_remote_did(&located).is_some());
+        let other = Arc::new("did:scid:vh:1:QmOther".to_string());
+        assert!(rels.find_by_remote_did(&other).is_none());
     }
 
     #[test]

@@ -31,7 +31,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   again, so one that lapsed while waiting is not stored. A received VRC is now filed under
   the relationship's key (the peer's persona DID) rather than the relationship DID that
   issued it, so the relationship view lists it and removing the relationship removes it;
-  ones filed the old way are moved at load.
+  ones filed the old way are moved at load, and when the account sync brings one in from
+  a device on an older build.
 
 - **A wrong unlock code now gets another try.** At start-up the unlock prompt only
   rejected codes shorter than eight characters. A wrong code of full length left the

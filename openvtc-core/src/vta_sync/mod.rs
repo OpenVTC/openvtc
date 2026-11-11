@@ -569,6 +569,15 @@ pub fn apply_remote(
             }
         }
     }
+
+    // A received VRC that a device on an older build filed under the peer's
+    // relationship DID moves to the relationship key, as at load. Only one
+    // just pulled can be there, so whatever moves is already counted as a
+    // change; the next push files it under its new key.
+    parts
+        .private
+        .relationships
+        .rekey_received_vrcs(&mut parts.private.vrcs_received);
 }
 
 /// Whether a pulled change of `kind` can go into a running session. A

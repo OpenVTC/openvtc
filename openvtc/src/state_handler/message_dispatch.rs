@@ -856,20 +856,6 @@ async fn process_inbound(
         return Ok(false);
     }
 
-    // Drop messages whose ID we've already seen this session. The TDK
-    // already guards against unpack-level duplicates, but the LRU is a
-    // belt-and-braces defense for mediator pickup retries and replay
-    // attempts.
-    if fresh && seen.observe(&message.id) {
-        debug!(id = %message.id, typ = %message.typ, "dropping replayed message ID");
-        return Ok(false);
-    }
-    // A restored message is remembered too, so the mediator redelivering it
-    // is dropped as a replay.
-    if restored {
-        seen.observe(&message.id);
-    }
-
     // The sender: the DID the transport authenticated, and the `from` header
     // only where it names that same DID. A message with no authenticated
     // sender, or claiming someone else's `from`, is handled as nobody — no
@@ -877,6 +863,9 @@ async fn process_inbound(
     // a message is about; decisions with lasting effect (a credential stored,
     // a membership ended, a relationship bound) are further gated on a proof
     // by that party (`openvtc_core::proof_check`).
+    //
+    // Before the replay cache: a message handled as nobody must not take up
+    // the id of one that is, or the real one would be dropped as its replay.
     let from_did = match openvtc_core::didcomm::bound_sender(message.from.as_deref(), authenticated)
     {
         Ok(did) => Arc::new(did),
@@ -890,6 +879,20 @@ async fn process_inbound(
             return Ok(false);
         }
     };
+
+    // Drop messages whose ID we've already seen this session. The TDK
+    // already guards against unpack-level duplicates, but the LRU is a
+    // belt-and-braces defense for mediator pickup retries and replay
+    // attempts.
+    if fresh && seen.observe(&message.id) {
+        debug!(id = %message.id, typ = %message.typ, "dropping replayed message ID");
+        return Ok(false);
+    }
+    // A restored message is remembered too, so the mediator redelivering it
+    // is dropped as a replay.
+    if restored {
+        seen.observe(&message.id);
+    }
 
     // The persona this message was addressed to — the DID any auto-reply must be
     // sent *from*. Resolved from the envelope's `to`, falling back to the active
@@ -3790,6 +3793,42 @@ mod tests {
             let mut config = config_with(RelationshipState::RequestAccepted, &thid);
             dispatch_as(&mut config, &finalize(), Some(ALICE)).await;
             assert_eq!(state(&config), Some(RelationshipState::Established));
+        }
+
+        /// A message dropped for its sender does not enter the replay cache,
+        /// so the authenticated message with the same id is still handled.
+        #[tokio::test]
+        async fn an_unbound_message_does_not_use_up_its_id() {
+            let tdk = test_tdk().await;
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let service = openvtc_core::didcomm::start_empty_service(
+                tx,
+                tokio_util::sync::CancellationToken::new(),
+            );
+            let mut seen = SeenMessages::new();
+            let mut config = config_with(RelationshipState::Established, "rel");
+            let m = message(
+                protocol_urls::VRC_REQUEST,
+                Some(ALICE),
+                None,
+                serde_json::json!({ "reason": "please" }),
+            );
+            for authenticated in [None, Some(ALICE)] {
+                let mut effects = InboundEffects::default();
+                process_inbound_message(
+                    &mut config,
+                    &tdk,
+                    &service,
+                    &mut seen,
+                    &m,
+                    authenticated,
+                    &mut effects,
+                    Arrival::FRESH,
+                )
+                .await
+                .unwrap();
+            }
+            assert_eq!(config.private.tasks.tasks.len(), 1);
         }
 
         #[tokio::test]

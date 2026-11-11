@@ -682,7 +682,16 @@ impl Job<'_> {
                 }
                 Some(event) = events.recv() => {
                     if let DIDCommEvent::InboundMessage { message, authenticated, .. } = event {
-                        note_verdict(&message);
+                        // Only a message from its authenticated sender is
+                        // reported; the dispatcher drops any other.
+                        if openvtc_core::didcomm::bound_sender(
+                            message.from.as_deref(),
+                            authenticated.as_deref(),
+                        )
+                        .is_ok()
+                        {
+                            note_verdict(&message);
+                        }
                         if self
                             .dispatch(config, &mut seen, &message, authenticated.as_deref())
                             .await
