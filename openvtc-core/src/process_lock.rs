@@ -78,7 +78,8 @@ pub fn check_duplicate_instance(profile: &str) -> Result<PathBuf, OpenVTCError> 
 
     let system = System::new_with_specifics(
         RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
-    );
+    )
+    .map_err(|e| OpenVTCError::LockFile(format!("couldn't read the process list: {e}")))?;
     let pid = Pid::from_str(pid_str)
         .map_err(|e| OpenVTCError::LockFile(format!("invalid PID in lock file: {e}")))?;
 
