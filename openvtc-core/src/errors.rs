@@ -9,7 +9,14 @@ use didwebvh_rs::DIDWebVHError;
 use thiserror::Error;
 
 /// Unified error type for all OpenVTC operations.
+///
+/// `#[non_exhaustive]` so a new failure category is not a breaking change:
+/// without it every added variant fails the patch-line semver check
+/// (`cargo-semver-checks` `enum_variant_added`), and a fix that needs one
+/// cannot be backported to a release branch as it stands. Matches outside
+/// this crate need a wildcard arm.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum OpenVTCError {
     /// An unrecognised DIDComm message type URL was encountered.
     #[error("Invalid Message Type: {0}")]
@@ -120,6 +127,14 @@ pub enum OpenVTCError {
     /// Symmetric decryption failed.
     #[error("Decrypt Error: {0}")]
     Decrypt(String),
+
+    /// The unlock code does not open this profile's secured config.
+    ///
+    /// Distinct from [`Self::Decrypt`] so a caller can treat a mistyped code
+    /// as the ordinary thing it is (ask again, point at recovery) rather than
+    /// as a decryption fault in the stored data.
+    #[error("That unlock code didn't work")]
+    UnlockCodeRejected,
 
     /// A contacts/address-book operation failed.
     #[error("Contacts Error: {0}")]
@@ -235,6 +250,7 @@ mod tests {
             )),
             Box::new(OpenVTCError::Encrypt("aes failure".into())),
             Box::new(OpenVTCError::Decrypt("bad key".into())),
+            Box::new(OpenVTCError::UnlockCodeRejected),
             Box::new(OpenVTCError::Contact("unknown".into())),
             Box::new(OpenVTCError::MutexPoisoned("lock failed".into())),
         ];

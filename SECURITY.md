@@ -4,8 +4,11 @@
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.2.x   | :white_check_mark: |
-| 0.1.x   | :x:                |
+| 0.7.x   | :white_check_mark: |
+| < 0.7   | :x:                |
+
+The newest two GA releases are supported; see [RELEASES.md](RELEASES.md#support)
+for the policy and the current schedule.
 
 ## Reporting a Vulnerability
 

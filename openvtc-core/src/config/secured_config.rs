@@ -303,7 +303,46 @@ fn assert_format_matches_intent(
     )))
 }
 
+/// What checking an unlock code against the stored secured config found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnlockCodeCheck {
+    /// The code opens the stored config.
+    Accepted,
+    /// The stored config is passphrase-protected and this code does not open it.
+    Rejected,
+    /// The stored config is not passphrase-protected, so the code was not
+    /// tried. [`SecuredConfig::load`] refuses that mismatch (the downgrade
+    /// check); this check leaves the refusal to it.
+    NotApplicable,
+}
+
 impl SecuredConfigFormat {
+    /// Whether `unlock` opens this blob, decided by the AEAD tag alone. The
+    /// plaintext is zeroed and dropped; it is never parsed or returned.
+    ///
+    /// # Errors
+    ///
+    /// Only for a blob that could not be tried at all (bad base64, a
+    /// malformed key) — never for a code that is simply wrong.
+    pub fn check_unlock_code(&self, unlock: &UnlockCode) -> Result<UnlockCodeCheck, OpenVTCError> {
+        let SecuredConfigFormat::PasswordEncrypted { data } = self else {
+            return Ok(UnlockCodeCheck::NotApplicable);
+        };
+        let decoded = BASE64_URL_SAFE_NO_PAD.decode(data)?;
+        let key = unlock
+            .0
+            .expose_secret()
+            .first_chunk::<32>()
+            .ok_or_else(|| OpenVTCError::Decrypt("Unlock code is not 32 bytes".to_string()))?;
+        Ok(match aead_open(key, &decoded)? {
+            Some(plaintext) => {
+                drop(zeroize::Zeroizing::new(plaintext));
+                UnlockCodeCheck::Accepted
+            }
+            None => UnlockCodeCheck::Rejected,
+        })
+    }
+
     /// Loads secret info from the OS Secure Store
     #[cfg_attr(not(feature = "openpgp-card"), allow(unused_variables))]
     pub fn unlock(
@@ -604,13 +643,9 @@ impl SecuredConfig {
     /// unlock: Use a Password/PIN to unlock secret storage if no hardware token
     /// If token is None and unlock is false, assumes no protection apart from the OS Secure Store
     /// itself
-    pub fn load(
-        profile: &str,
-        #[cfg(feature = "openpgp-card")] user_pin: &SecretString,
-        token: Option<&String>,
-        unlock: Option<&UnlockCode>,
-        #[cfg(feature = "openpgp-card")] touch_prompt: &impl TokenInteractions,
-    ) -> Result<Self, OpenVTCError> {
+    /// Reads and parses the stored wire blob from the OS secure store, without
+    /// decrypting it. The `bool` is "needs migration" (see [`parse_format`](Self::parse_format)).
+    fn read_format(profile: &str) -> Result<(SecuredConfigFormat, bool), OpenVTCError> {
         let entry =
             Entry::new(SERVICE, profile).map_err(|e| OpenVTCError::from_keyring(&e, profile))?;
 
@@ -628,7 +663,38 @@ impl SecuredConfig {
         // Try the current tagged format first, falling back to the legacy
         // untagged shape (flagged for migration). Anything that fails both is
         // genuinely invalid.
-        let (raw_secured_config, needs_migration) = Self::parse_format(secret.as_slice(), profile)?;
+        Self::parse_format(secret.as_slice(), profile)
+    }
+
+    /// Checks an unlock code against the stored secured config without loading
+    /// it: nothing is parsed, migrated or re-saved.
+    ///
+    /// [`UnlockCode::from_string`] only derives a key, so it accepts any code of
+    /// the minimum length. This is how the unlock prompt finds out a code is
+    /// wrong while it can still ask again — rather than at [`load`](Self::load),
+    /// after the prompt has gone.
+    ///
+    /// # Errors
+    ///
+    /// When the stored config cannot be read or parsed. Those are the faults
+    /// [`load`](Self::load) reports in full; a caller that gets one should let
+    /// `load` report it rather than count it as a wrong code.
+    pub fn check_unlock_code(
+        profile: &str,
+        unlock: &UnlockCode,
+    ) -> Result<UnlockCodeCheck, OpenVTCError> {
+        let (format, _) = Self::read_format(profile)?;
+        format.check_unlock_code(unlock)
+    }
+
+    pub fn load(
+        profile: &str,
+        #[cfg(feature = "openpgp-card")] user_pin: &SecretString,
+        token: Option<&String>,
+        unlock: Option<&UnlockCode>,
+        #[cfg(feature = "openpgp-card")] touch_prompt: &impl TokenInteractions,
+    ) -> Result<Self, OpenVTCError> {
+        let (raw_secured_config, needs_migration) = Self::read_format(profile)?;
 
         // Layer-2 downgrade defence: cross-check the stored variant against
         // the caller's credentials before any decryption or re-save.
@@ -754,6 +820,18 @@ pub fn unlock_code_encrypt(unlock: &[u8; 32], input: &[u8]) -> Result<Vec<u8>, O
 ///
 /// Expected input format: `[12-byte nonce | ciphertext + auth tag]`
 pub fn unlock_code_decrypt(unlock: &[u8; 32], input: &[u8]) -> Result<Vec<u8>, OpenVTCError> {
+    aead_open(unlock, input)?.ok_or_else(|| {
+        error!("Couldn't decrypt data. Likely due to incorrect unlock code!");
+        OpenVTCError::Decrypt(
+            "Couldn't decrypt data, likely due to incorrect unlock code!".to_string(),
+        )
+    })
+}
+
+/// The AEAD half of [`unlock_code_decrypt`], with the two failures kept apart:
+/// `Err` for input that cannot be ciphertext at all, `Ok(None)` for ciphertext
+/// this key does not open — the wrong-code case.
+fn aead_open(unlock: &[u8; 32], input: &[u8]) -> Result<Option<Vec<u8>>, OpenVTCError> {
     if input.len() <= NONCE_SIZE {
         return Err(OpenVTCError::Decrypt(
             "Ciphertext too short (missing nonce)".to_string(),
@@ -770,12 +848,9 @@ pub fn unlock_code_decrypt(unlock: &[u8; 32], input: &[u8]) -> Result<Vec<u8>, O
     let nonce: &aes_gcm::Nonce<_> = nonce_arr.into();
     let cipher = derive_key(unlock, nonce_bytes)?;
 
-    cipher.decrypt(nonce, ciphertext).map_err(|e| {
-        error!("Couldn't decrypt data. Likely due to incorrect unlock code! Reason: {e}");
-        OpenVTCError::Decrypt(format!(
-            "Couldn't decrypt data, likely due to incorrect unlock code! Reason: {e}"
-        ))
-    })
+    // aes-gcm's error is opaque by design: a failed tag check is the only
+    // thing it reports here.
+    Ok(cipher.decrypt(nonce, ciphertext).ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +961,58 @@ pub fn passphrase_decrypt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn password_blob(code: &str) -> SecuredConfigFormat {
+        let unlock = UnlockCode::from_string(code).unwrap();
+        let key = unlock.0.expose_secret().first_chunk::<32>().unwrap();
+        SecuredConfigFormat::PasswordEncrypted {
+            data: BASE64_URL_SAFE_NO_PAD.encode(unlock_code_encrypt(key, b"{}").unwrap()),
+        }
+    }
+
+    /// The unlock prompt relies on this to count a wrong code of full length
+    /// as a failed attempt. `UnlockCode::from_string` accepts any such code,
+    /// so without it the prompt's attempt limit and backoff never applied.
+    #[test]
+    fn check_unlock_code_tells_right_from_wrong() {
+        let blob = password_blob("correct horse");
+        let right = UnlockCode::from_string("correct horse").unwrap();
+        let wrong = UnlockCode::from_string("correct house").unwrap();
+        assert_eq!(
+            blob.check_unlock_code(&right).unwrap(),
+            UnlockCodeCheck::Accepted
+        );
+        assert_eq!(
+            blob.check_unlock_code(&wrong).unwrap(),
+            UnlockCodeCheck::Rejected
+        );
+    }
+
+    /// Damage to the stored blob is not a wrong code: it must surface as an
+    /// error, so the prompt does not tell the user to retype a code that was
+    /// right.
+    #[test]
+    fn check_unlock_code_reports_a_damaged_blob_as_an_error() {
+        let code = UnlockCode::from_string("correct horse").unwrap();
+        let truncated = SecuredConfigFormat::PasswordEncrypted {
+            data: BASE64_URL_SAFE_NO_PAD.encode([0u8; 4]),
+        };
+        assert!(truncated.check_unlock_code(&code).is_err());
+        let not_base64 = SecuredConfigFormat::PasswordEncrypted {
+            data: "*not base64*".into(),
+        };
+        assert!(not_base64.check_unlock_code(&code).is_err());
+    }
+
+    #[test]
+    fn check_unlock_code_does_not_apply_to_other_protection() {
+        let code = UnlockCode::from_string("correct horse").unwrap();
+        let plain = SecuredConfigFormat::PlainText { text: "p".into() };
+        assert_eq!(
+            plain.check_unlock_code(&code).unwrap(),
+            UnlockCodeCheck::NotApplicable
+        );
+    }
 
     #[test]
     fn parse_accepts_tagged_blob_and_rejects_garbage() {

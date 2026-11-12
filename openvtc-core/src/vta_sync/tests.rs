@@ -820,3 +820,60 @@ fn a_witnessing_under_another_key_is_refused() {
     assert!(records::apply(&mut parts, &key, Some(&other)).is_err());
     assert!(d.private.witnessings.is_empty());
 }
+
+/// A received VRC that a device on an older build filed under the peer's
+/// relationship DID is re-filed under the relationship key when a running
+/// device pulls it, not only at its next launch.
+#[tokio::test]
+async fn a_received_vrc_pulled_live_is_filed_under_the_relationship_key() {
+    let store = MemStore::default();
+    let p_did = Arc::new("did:key:z6MkTheirPersona".to_string());
+    let r_did = Arc::new("did:key:z6MkTheirRelationshipDid".to_string());
+    let with_relationship = || {
+        let mut d = seeded();
+        d.private.relationships.relationships.insert(
+            Arc::clone(&p_did),
+            crate::relationships::Relationship {
+                task_id: Arc::new("rel".to_string()),
+                our_did: Arc::new("did:key:z6MkOurs".to_string()),
+                remote_did: Arc::clone(&r_did),
+                remote_p_did: Arc::clone(&p_did),
+                created: Utc::now(),
+                state: crate::relationships::RelationshipState::Established,
+                our_persona: None,
+                needs_reestablishment: false,
+            },
+        );
+        d
+    };
+    let mut a = with_relationship();
+    a.load(&store).await;
+    let mut b = with_relationship();
+    b.load(&store).await;
+
+    let (issuer, secret) =
+        affinidi_tdk::dids::DID::generate_did_key(affinidi_tdk::dids::KeyType::Ed25519)
+            .expect("did:key generates");
+    let mut vrc = dtg_credentials::DTGCredential::new_vrc(
+        issuer,
+        dtg_credentials::IssuerScope::Pairwise,
+        "did:key:z6MkOurs".to_string(),
+        Utc::now(),
+        None,
+    );
+    vrc.sign(&secret, None).await.expect("signs");
+    // Filed the old way, as an older build on device A does.
+    a.private
+        .vrcs_received
+        .insert(&r_did, Arc::new(vrc))
+        .expect("stored");
+    a.live(&store).await;
+
+    let report = b.live(&store).await;
+    assert!(report.changed.contains(&RecordKind::VrcReceived));
+    assert!(b.private.vrcs_received.get(&r_did).is_none());
+    assert_eq!(
+        b.private.vrcs_received.get(&p_did).map(|m| m.len()),
+        Some(1)
+    );
+}

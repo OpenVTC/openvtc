@@ -174,7 +174,7 @@ pub async fn verify_issued_credential(
 
 /// Read the credential's status list. Only an established "not revoked"
 /// passes: revoked, suspended, and "could not be established" all refuse.
-async fn check_status(
+pub(crate) async fn check_status(
     status: &Value,
     issuer: &str,
     resolver: &DIDCacheClient,
@@ -210,7 +210,7 @@ async fn check_status(
 /// `validFrom`/`validUntil` (VC 2.0), or `issuanceDate`/`expirationDate`
 /// (VC 1.1). Absent bounds are open; a present bound that does not parse is a
 /// refusal.
-fn check_validity_window(
+pub(crate) fn check_validity_window(
     credential: &Value,
     now: DateTime<Utc>,
 ) -> Result<(), IssuedCredentialError> {

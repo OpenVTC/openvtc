@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`OpenVTCError` is now `#[non_exhaustive]`** (breaking for code that uses
+  `openvtc-core` as a library). A `match` on it outside `openvtc-core` needs a
+  wildcard arm. From now on a new error variant is not a breaking change, so a
+  fix that needs one can be backported to a release branch as it is.
+
+### Fixed
+
+- **Peer messages are handled only as the sender the transport authenticated.** The
+  inbound dispatcher used to fall back to a message's `from` header when the transport
+  bound no sender to it (anoncrypt DIDComm, or an authcrypt whose `from` its sealing key
+  does not back). A VRC request, a VRC request rejection, a trust ping or pong, a
+  relationship rejection or finalize, and a notification are now acted on only when the
+  `from` header names the DID whose key sealed the message; anything else is dropped with
+  a log line before any handler runs. The same rule applies to messages handled by the
+  headless `join` and `repos` commands. A pong now closes only a ping we sent, on its
+  thread, to the party that answers it; a pong with no authenticated sender closes
+  nothing. The answer to a ping, and the receipt a notification is answered with, go only
+  to an authenticated sender. **Behaviour change:** a peer that sends these messages
+  anoncrypt, or a pong with no sender, is no longer answered or acted on; a ping task
+  answered that way stays in the inbox until dismissed. Every service in the stack already
+  sends authcrypt.
+- **A VRC received from a peer is checked in full before it is offered for storage.** Its
+  subject must be the DID we use in that relationship, it must be inside its validity
+  window (`validFrom` / `validUntil`), and where it names a `credentialStatus` the
+  issuer's status list must establish that it is not revoked or suspended — a status that
+  cannot be established refuses it, as for a credential a community issues. These join the
+  proof and issuer checks it already passed. Accepting one from the inbox checks its window
+  again, so one that lapsed while waiting is not stored. A received VRC is now filed under
+  the relationship's key (the peer's persona DID) rather than the relationship DID that
+  issued it, so the relationship view lists it and removing the relationship removes it;
+  ones filed the old way are moved at load, and when the account sync brings one in from
+  a device on an older build.
+
+- **A wrong unlock code now gets another try.** At start-up the unlock prompt only
+  rejected codes shorter than eight characters. A wrong code of full length left the
+  prompt on the first try and failed afterwards, while the secured config was being
+  decrypted, with a message about decryption and no second chance in that session.
+  The five-attempt limit and the delay after the third miss, listed under 0.2.0, never
+  applied to a wrong code. Each code is now checked against the stored config at the
+  prompt: a wrong one says "That unlock code didn't work" and asks again, with the limit
+  and delay applied. After the last attempt, or when a code given with `--unlock-code`
+  or `--unlock-code-file` is wrong, it says how to recover an account kept by a VTA if
+  the code is forgotten. The limit is there for typos and starts again when you restart.
+  It does not protect against guessing; the cost of Argon2id for each guess does that,
+  including for anyone who copies the stored config and guesses offline. Reported
+  through the security process.
+
 ## [0.7.0] - 2026-11-05 (cut to release/0.7)
 
 ### Added
