@@ -180,7 +180,7 @@ fn consumer_kind() -> serde_json::Value {
 /// the thing they would use to identify the machine.
 #[must_use]
 pub fn display_name(profile: &str) -> String {
-    let host = sysinfo::System::host_name().unwrap_or_else(|| "unknown host".to_string());
+    let host = sysinfo::System::host_name().unwrap_or_else(|_| "unknown host".to_string());
     format!("OpenVTC on {host} ({profile})")
 }
 
