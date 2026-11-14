@@ -707,7 +707,7 @@ uuid = { version = "1.23", features = ["v4", "fast-rng", "serde"] }
 # messaging-sdk 0.45: collection claims (`VtaClient::collection_{claim,release}`,
 # `vta/collection/*/0.1`, VTI-NTF-080 – 093, VTI #2421), which a persona's mediator
 # socket now waits for. did-git-sign 0.33 (VGI #197) is on it.
-vta-sdk = { version = "0.80.0", features = [
+vta-sdk = { version = "0.85.0", features = [
   "session",
   "client",
   # The SAME per-platform credential-store registration pnm-cli uses
