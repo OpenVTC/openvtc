@@ -505,9 +505,26 @@ impl Runtime {
 
     /// Run the loop until an arm asks it to stop, then shut down.
     pub(super) async fn run(mut self) -> Result<Interrupted> {
+        // did-git-sign's install is read off the loop (#555), once now and
+        // again when a view that shows it opens.
+        crate::state_handler::settings_actions::refresh_did_git_sign(
+            &mut self.state,
+            &mut self.in_flight,
+            &self.dispatch_tx,
+        );
         let result = loop {
             let flow = tokio::select! {
-                Some(action) = self.action_rx.recv() => self.on_action(action).await,
+                Some(action) = self.action_rx.recv() => {
+                    let flow = self.on_action(action).await;
+                    // A view that shows did-git-sign may just have opened: no
+                    // I/O here, only whether a refresh is due.
+                    crate::state_handler::settings_actions::maybe_refresh_did_git_sign(
+                        &mut self.state,
+                        &mut self.in_flight,
+                        &self.dispatch_tx,
+                    );
+                    flow
+                }
                 // DIDComm inbound message events — as they arrive, or handed
                 // back with the result of their off-loop check.
                 Some((event, pre)) = super::next_inbound(&mut self.didcomm_event_rx, &mut self.verifier) => {
