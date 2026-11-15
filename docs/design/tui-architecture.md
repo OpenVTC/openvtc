@@ -79,7 +79,8 @@ the real work is decomposed into focused modules (declared at `mod.rs:50`):
 | `persona_actions.rs` | The identity pane. `apply(&mut State, &PersonaAction)` is pure and returns a `PersonaEffect` naming any network work; the loop spawns it and folds the result back through `PersonaOutcome::apply`. Reads and writes share one `DispatchDomain`. |
 | `didcomm.rs` | `DIDCommService` integration: service start, listener config/ids, the `DIDCommEvent` enum, lifecycle logging. |
 | `main_page/` | Maps `Config` → display state (`sync_from_config`), menu/content models. |
-| `setup_wizard.rs`, `setup_sequence/`, `setup_*_actions.rs`, `join.rs`, `join_flow.rs` | The setup and join sub-flows (each runs its own scoped `select!` loop, then returns control to `main_loop`). |
+| `setup_wizard.rs`, `setup_sequence/`, `setup_*_actions.rs` | The setup sub-flow (runs its own scoped `select!` loop, then returns control to `main_loop`). |
+| `join.rs`, `join_flow.rs`, `join_flow/driver.rs` | The join flow. `join.rs` is its page state; `join_flow.rs` its pure page logic and the bounded sends it makes while waiting on a community; `driver.rs` the `JoinDriver` state machine the runtime loop (and the State-A loop) drives — no loop of its own (see §4). |
 | `dispatch_util.rs` | Shared helpers + test fixtures (`test_config`). |
 
 **Protocol logic does not live here.** The pure validators, handlers (join-receipt,
@@ -129,6 +130,38 @@ background job on the `DispatchDomain::AgentName` domain (one job, not one per
 DID: the busy-guard is per-domain). Inside the job the DIDs resolve with bounded
 concurrency (a sliding window of 4). The job does I/O only; `apply_outcome` folds
 the verified `(did, name)` results into `Config::agent_names` on the loop thread.
+
+**The join flow** ([`join_flow/driver.rs`](../../openvtc/src/state_handler/join_flow/driver.rs)) —
+the largest user of the pattern, and the one that used to break the rule: it
+ran its own nested `select!` loop that the runtime loop awaited inline, so
+saves, VTA supervision, inbound messages and timers all stopped while the join
+screen was up (#529). It is now a `JoinDriver` state machine the loop drives:
+
+1. While a join is open the loop's action arm hands every action to
+   `JoinDriver::on_action`; page logic runs there, on the loop.
+2. Network work — resolving an agent name, reading a community (invitations,
+   manifest, DID document), and each stage of a launch — runs as one job at a
+   time on `DispatchDomain::Join`. The result comes back as
+   `DispatchOutcome::Join` and progress lines as `ProgressUpdate::Join`, both
+   carrying the job's generation; the loop gives them to the driver *before*
+   `apply_outcome`, and the driver ignores any that are not for the job it is
+   waiting on (an aborted one).
+3. Join actions that arrive while a job is in flight are queued and replayed
+   in order when it finishes. `JoinCancel`, `Exit` and `UXError` are not: they
+   abort the job at once (`AbortHandle`; the driver frees the domain).
+4. A launch is a saga (`openvtc_core::join::saga::JoinSaga`): context
+   registered → persona minted → listener up → submitted → persisted, with
+   on-loop applies between off-loop stages. Any failure, cancel or interrupt
+   undoes the launch from `JoinSaga::compensations` — remove the listener it
+   installed, forget the persona it minted (never a reused one) — rather than
+   from wherever a dropped future happened to stop.
+
+Short, bounded sends (asking a community for its requirements, a challenge, a
+wallet session — each behind a 15 s timeout) and the VTA reads behind the
+Answers page stay inline awaits, as elsewhere in the runtime. Everything the
+join does over the network, to disk or through a live messaging account goes
+through the `JoinIo` trait, so tests drive whole launches offline and fail them
+at each stage.
 
 ## 5. Recipes
 

@@ -1412,12 +1412,11 @@ Following the existing patterns in
     - **cancel**.
   - An application that meets the published requirements joins as its own
     persona, and the page says its statements are presented with the join.
-  - When the book does not know, the community is asked. The join flow cannot
-    hear the answer itself: its loop selects only on actions and interrupts, and
-    inbound messages are read by the runtime loop's own arm, which is parked
-    while the flow runs.
+  - When the book does not know, the community is asked. The join flow does
+    not hear the answer itself: its driver takes actions and its own jobs'
+    results, and inbound messages are read by the runtime loop's own arm.
   - So the flow sends `manifest/0.2` as the active persona, with the send
-    bounded at 15 seconds, and returns `JoinExit::AwaitRequirements`.
+    bounded at 15 seconds, and returns `JoinStep::AwaitRequirements`.
   - The runtime loop keeps the join screen up in an *asking* state and goes on
     reading inbound messages. It enters the flow again when one of these
     happens:
@@ -1654,7 +1653,7 @@ modern-signature subgraph only (O7).
 | D23 | Which criterion applies | The one whose `requirementsDigest` the applicant names in `extensions`; otherwise the first vetting criterion |
 | D24 | Session binding details | Match-code tag `vetting-session-match/v1\0`, distinct from `vtc-personhood-match/v1\0`. `eligibilityVp` carries `nonce` = the `vetting/request` document `id` and `domain` = the applicant's `joinDid` |
 | D25 | Answers to questions put to a community | **Matched by request document id, in memory only.** A directory page, a stored profile, a resent grant or a manifest reaches whoever asked. A `trust-task-error` is claimed only when it answers one of these questions, so the join handler keeps every other error. A question unanswered after 30 s is reported (R1.2) |
-| D26 | How the join flow learns whether a community vets | **From the book, else by asking and handing the wait to the runtime loop** (`JoinExit::AwaitRequirements`, 15 s). The flow's own loop cannot hear inbound messages, so it never waits there, and every wait ends on a message or a deadline |
+| D26 | How the join flow learns whether a community vets | **From the book, else by asking and handing the wait to the runtime loop** (`JoinStep::AwaitRequirements`, 15 s). The join driver does not hear inbound messages, so it never waits there, and every wait ends on a message or a deadline |
 | D27 | Vetter profile | **Opt-in listing; the last profile sent is kept as JSON with the community's answer.** A first profile is unlisted and accepts what `VetterPolicy` accepts. The SDK's `check_shape` is the only validator |
 | D28 | Checking a vetter's grant for revocation | **After a verified acceptance, as a background job, https-only with finite timeouts.** Recorded per request as active, revoked or unknown, and unknown is never shown as unrevoked. Advisory; the community checks again when it decides |
 | D29 | Community branding | **Kept from every manifest; presentation only.** The accent is drawn as a literal-colour swatch. The display name is used only when there is no membership name or verified agent name. The logo is not fetched |
