@@ -95,6 +95,9 @@ cargo clippy --workspace --all-targets -- -D warnings
    A test is `#[ignore]`d only because it is slow or boots an in-process
    service, never because it is flaky or broken, and its `ignore = "…"` reason
    says which. CI's `test-ignored` job runs every one of them and gates the PR.
+   The `coverage` job fails a PR whose workspace line coverage drops under its
+   floor (`--fail-under-lines` in `ci.yml`); raise the floor as coverage
+   rises, never lower it to make a PR pass.
 4. **Open the PR** with a clear title and description summarizing the change
 5. **Link related issues** using `Closes #123` or `Fixes #123` in the PR body
 6. **Respond to review feedback** promptly

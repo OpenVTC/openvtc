@@ -1601,3 +1601,104 @@ mod sender_binding {
         assert_eq!(effects.notifications[0].sender, ALICE);
     }
 }
+
+/// One type for every family, as a peer would send it: the registry's own
+/// type where a route names one exactly, a version under a prefix, and a known
+/// member of each predicate.
+fn one_type_per_family() -> Vec<(String, registry::Family)> {
+    use registry::{Family, ROUTES, TypeMatcher};
+    let mut types: Vec<(String, Family)> = ROUTES
+        .iter()
+        .filter_map(|route| match route.matcher {
+            TypeMatcher::Exact(t) => Some((t.to_string(), route.family)),
+            TypeMatcher::Prefix(p) => Some((format!("{p}show/0.1#response"), route.family)),
+            TypeMatcher::Predicate(_) => None,
+        })
+        .collect();
+    types.push((
+        "https://trusttasks.org/spec/witness/session/0.2#response".into(),
+        Family::WitnessReply,
+    ));
+    types.push((
+        "https://trusttasks.org/spec/vetting/request/0.1".into(),
+        Family::Vetting,
+    ));
+    types.push((
+        crate::vetting::protocol::JoinProtocol::V0_4
+            .submit_response_type()
+            .to_string(),
+        Family::JoinVerdict,
+    ));
+    types
+}
+
+/// Inbound dispatch, family by family: a message nobody can be shown to have
+/// sent — no authenticated sender, no thread we asked on, an empty body —
+/// reaches its family's handler and changes nothing. Every family is driven,
+/// so a handler that persists, or panics, on an unattributable message fails
+/// here by name.
+#[tokio::test]
+async fn an_unattributable_message_of_every_family_changes_nothing() {
+    let tdk = test_tdk().await;
+    let types = one_type_per_family();
+    for family in registry::Family::ALL {
+        assert!(
+            types.iter().any(|(_, f)| f == family),
+            "{family:?} has no sample type here"
+        );
+    }
+    for (typ, family) in types {
+        assert_eq!(
+            registry::classify(&typ),
+            Some(family),
+            "{typ} is not routed to {family:?}"
+        );
+        let mut config = with_identity(pending_config("did:key:z6MkTheCommunity"));
+        let account = serde_json::to_value(&config.account).unwrap();
+        let private = serde_json::to_value(&config.private).unwrap();
+        let message = Message::build(
+            format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+            typ.clone(),
+            serde_json::json!({}),
+        )
+        .from("did:key:z6MkStranger".into())
+        .to(PERSONA.into())
+        .finalize();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service =
+            crate::didcomm::start_empty_service(tx, tokio_util::sync::CancellationToken::new());
+        let mut effects = InboundEffects::default();
+        let result = process_inbound_message(
+            &mut config,
+            &tdk,
+            &service,
+            &mut SeenMessages::new(),
+            &mut PendingReplies::default(),
+            &message,
+            None,
+            &mut effects,
+            Arrival::FRESH,
+        )
+        .await;
+
+        assert!(
+            !matches!(result, Ok(true)),
+            "{family:?} ({typ}) reported a config change"
+        );
+        assert_eq!(
+            serde_json::to_value(&config.account).unwrap(),
+            account,
+            "{family:?} ({typ}) changed the account"
+        );
+        assert_eq!(
+            serde_json::to_value(&config.private).unwrap(),
+            private,
+            "{family:?} ({typ}) changed the protected config"
+        );
+        assert!(
+            effects.inactivated.is_empty() && effects.deferred.is_none(),
+            "{family:?} ({typ}) acted on, or queued a check for, a message nobody sent"
+        );
+    }
+}
