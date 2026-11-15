@@ -58,6 +58,9 @@ use crate::state_handler::{
     setup_sequence::SetupState,
 };
 
+#[cfg(test)]
+mod tests;
+
 /// A boxed future, as [`JoinIo`] returns them.
 pub(crate) type IoFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -3134,6 +3137,15 @@ impl JoinDriver {
             session.launch = None;
         }
         ctx.state.join.processing = false;
+    }
+
+    /// The saga of the launch in progress — for tests.
+    #[cfg(test)]
+    fn saga(&self) -> Option<&JoinSaga> {
+        self.session
+            .as_ref()
+            .and_then(|s| s.launch.as_ref())
+            .map(|l| &l.saga)
     }
 }
 

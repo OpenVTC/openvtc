@@ -258,3 +258,59 @@ async fn the_pending_expiry_sweep_over_an_empty_account_changes_nothing() {
         "nothing changed, so nothing to save"
     );
 }
+
+/// The join no longer parks the loop (#529): with its screen up, the other
+/// arms still run, and its actions are the join's.
+#[tokio::test]
+async fn an_open_join_leaves_the_other_arms_running() {
+    let (mut rt, _h) = runtime().await;
+    assert!(matches!(
+        rt.on_action(Action::StartJoin).await,
+        Flow::Continue
+    ));
+    assert!(rt.end_of_iteration().await.is_none());
+    assert!(rt.join.is_active());
+    assert!(matches!(rt.state.active_page, state::ActivePage::Join));
+
+    let domain = background_dispatch::DispatchDomain::AgentName;
+    assert!(rt.in_flight.try_begin(domain));
+    rt.on_dispatch_outcome(background_dispatch::DispatchOutcome::AgentName(Vec::new()))
+        .await;
+    assert!(!rt.in_flight.is_busy(domain), "another arm ran mid-join");
+
+    assert!(matches!(
+        rt.on_action(Action::JoinCancel).await,
+        Flow::Continue
+    ));
+    assert!(!rt.join.is_active());
+    assert!(matches!(rt.state.active_page, state::ActivePage::Main));
+}
+
+#[tokio::test]
+async fn an_interrupt_with_a_join_open_stops_the_loop() {
+    let (mut rt, h) = runtime().await;
+    rt.on_action(Action::StartJoin).await;
+    rt.end_of_iteration().await;
+    assert!(rt.join.is_active());
+    h.interrupt_tx.send(Interrupted::UserInt).unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), rt.run())
+        .await
+        .expect("the loop stops on an interrupt with a join open")
+        .expect("the loop returns its outcome");
+    assert!(matches!(outcome, Interrupted::UserInt));
+}
+
+#[tokio::test]
+async fn f10_on_a_join_page_stops_the_loop_and_tells_the_terminator() {
+    let (mut rt, mut h) = runtime().await;
+    rt.on_action(Action::StartJoin).await;
+    rt.end_of_iteration().await;
+    assert!(matches!(
+        rt.on_action(Action::Exit).await,
+        Flow::Exit(Interrupted::UserInt)
+    ));
+    assert!(matches!(
+        h.interrupt_seen.try_recv(),
+        Ok(Interrupted::UserInt)
+    ));
+}
