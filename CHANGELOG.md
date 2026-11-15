@@ -62,8 +62,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Text fields have a cursor** ([#578](https://github.com/OpenVTC/openvtc/issues/578)). Every main-page form field is edited
   through `tui_input`: ←/→, Ctrl+←/→ and Home/End move within the field (they no longer
   switch panels), Backspace/Del delete either side, Ctrl+A/E/U/W/K edit, and no Ctrl or
-  Alt chord types its letter. A paste is inserted at the cursor (it was appended); the
-  typed WIPE/RESET/DELETE words still take no paste.
+  Alt chord types its letter. A paste is inserted at the cursor on the main page and in
+  setup (it was appended on one and replaced the whole field on the other); the typed
+  WIPE/RESET/DELETE words still take no paste.
 - **The header names the class of a messaging failure** ([#585](https://github.com/OpenVTC/openvtc/issues/585)): "✗ mediator
   unreachable", "mediator refused us", "mediator incompatible", "mediator not answering"
   … with "see Help". Help / Status shows the class, the full reason and what to do,

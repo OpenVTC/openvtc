@@ -198,8 +198,15 @@ impl Component for SetupFlow {
 
     fn handle_paste_event(&mut self, text: &str) {
         // Handle paste as a single operation instead of per-character key events.
-        // This makes pasting large strings (DIDs) instant.
-        let trimmed = text.trim().to_string();
+        // This makes pasting large strings (DIDs) instant. The paste is
+        // inserted at the cursor, as on the main page (#578) — it used to
+        // replace the whole field here and append there.
+        let trimmed = text.trim();
+        let insert = |target: &mut tui_input::Input| {
+            for c in trimmed.chars().filter(|c| !c.is_control()) {
+                target.handle(tui_input::InputRequest::InsertChar(c));
+            }
+        };
         match self.props.state.active_page {
             SetupPage::ConfigImport => {
                 let target = match self.config_import.active_input {
@@ -207,7 +214,7 @@ impl Component for SetupFlow {
                     1 => &mut self.config_import.config_unlock_passphrase,
                     _ => &mut self.config_import.new_unlock_passphrase,
                 };
-                *target = tui_input::Input::new(trimmed);
+                insert(target);
             }
             SetupPage::UnlockCodeSet => {
                 let target = if self.unlock_code_set.active_input == 0 {
@@ -215,17 +222,13 @@ impl Component for SetupFlow {
                 } else {
                     &mut self.unlock_code_set.confirm
                 };
-                *target = tui_input::Input::new(trimmed);
+                insert(target);
             }
-            SetupPage::VtaEnterDid => {
-                self.vta_enter_did.vta_did = tui_input::Input::new(trimmed);
-            }
-            SetupPage::VtaAclInstructions => {
-                self.vta_acl_instructions.context_id = tui_input::Input::new(trimmed);
-            }
+            SetupPage::VtaEnterDid => insert(&mut self.vta_enter_did.vta_did),
+            SetupPage::VtaAclInstructions => insert(&mut self.vta_acl_instructions.context_id),
             #[cfg(feature = "openpgp-card")]
             SetupPage::TokenSetCardholderName => {
-                self.token_set_cardholder_name.name = tui_input::Input::new(trimmed);
+                insert(&mut self.token_set_cardholder_name.name);
             }
             _ => {}
         }
