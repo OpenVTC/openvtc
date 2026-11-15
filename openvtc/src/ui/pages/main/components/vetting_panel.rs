@@ -101,6 +101,8 @@ fn dim() -> Style {
 fn heading(text: impl Into<String>) -> Line<'static> {
     Line::from(text.into()).fg(COLOR_SUCCESS).bold()
 }
+use crate::ui::pages::main::keymap::{self, k};
+
 fn hint(text: impl Into<String>) -> Line<'static> {
     Line::from(text.into()).fg(COLOR_DARK_GRAY)
 }
@@ -353,9 +355,16 @@ fn new_face(lines: &mut Vec<Line<'static>>, form: &NewFaceForm) {
         lines.push(Line::from(Span::styled(format!(" {error}"), bad())));
     }
     lines.push(Line::from(""));
-    lines.push(hint(
-        "Tab/↑/↓: move  ←/→ or Space: choose  Enter: continue  Esc: cancel",
-    ));
+    keymap::footer(
+        lines,
+        "",
+        &[
+            k("Tab/↑/↓", "move"),
+            k("←/→ or Space", "choose"),
+            k("Enter", "continue"),
+            k("Esc", "cancel"),
+        ],
+    );
 }
 
 /// What the page draws for its current mode — the list, or whichever form or
@@ -413,9 +422,16 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             ));
             lines.push(hint("other communities."));
             lines.push(Line::from(""));
-            lines.push(hint(
-                "Enter: start  Tab: next field  ←/→: choose  Esc: cancel",
-            ));
+            keymap::footer(
+                lines,
+                "",
+                &[
+                    k("Enter", "start"),
+                    k("Tab", "next field"),
+                    k("←/→", "choose"),
+                    k("Esc", "cancel"),
+                ],
+            );
         }
         VettingMode::HolderGrant { credential_did } => {
             lines.push(heading("Your faces need one more grant"));
@@ -435,7 +451,7 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             // Both keys named. This view has no field and no rows, so with only
             // "Esc: back" on it every other key looked broken rather than
             // unbound — including the `f` the line above asks for.
-            lines.push(hint("f: try again   Esc: back"));
+            keymap::footer(lines, "", &[k("f", "try again"), k("Esc", "back")]);
         }
         VettingMode::NewFace(form) => new_face(lines, form),
         VettingMode::ChooseFace {
@@ -553,7 +569,15 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 ),
             ]));
             lines.push(Line::from(""));
-            lines.push(hint("↑/↓: choose  Enter: wear it  Esc: cancel"));
+            keymap::footer(
+                lines,
+                "",
+                &[
+                    k("↑/↓", "choose"),
+                    k("Enter", "wear it"),
+                    k("Esc", "cancel"),
+                ],
+            );
         }
         VettingMode::RequestVetter {
             entry,
@@ -588,7 +612,7 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 ));
             }
             lines.push(Line::from(""));
-            lines.push(hint("Enter: send  Esc: cancel"));
+            keymap::footer(lines, "", &[k("Enter", "send"), k("Esc", "cancel")]);
         }
         VettingMode::Directory(view) => directory(lines, v, view),
         VettingMode::Profile(form) => match &form.event {
@@ -619,7 +643,11 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             }
             lines.push(line);
             lines.push(Line::from(""));
-            lines.push(hint("Enter: ask  ←/→: choose  Esc: cancel"));
+            keymap::footer(
+                lines,
+                "",
+                &[k("Enter", "ask"), k("←/→", "choose"), k("Esc", "cancel")],
+            );
         }
         VettingMode::HiddenVetting { index } => hidden_vetting(lines, v, *index),
         VettingMode::EventMode { index } => {
@@ -686,7 +714,11 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 }
                 lines.push(Line::from(""));
             }
-            lines.push(hint("Enter: ask  ←/→: choose  Esc: cancel"));
+            keymap::footer(
+                lines,
+                "",
+                &[k("Enter", "ask"), k("←/→", "choose"), k("Esc", "cancel")],
+            );
         }
         VettingMode::SendCard {
             application_id,
@@ -719,7 +751,15 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 false,
             ));
             lines.push(Line::from(""));
-            lines.push(hint("Enter: issue  Tab: next field  Esc: cancel"));
+            keymap::footer(
+                lines,
+                "",
+                &[
+                    k("Enter", "issue"),
+                    k("Tab", "next field"),
+                    k("Esc", "cancel"),
+                ],
+            );
         }
         VettingMode::ShowTicket { index } => show_ticket(lines, v, *index),
         VettingMode::OpenSession {
@@ -754,7 +794,7 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 false,
             ));
             lines.push(Line::from(""));
-            lines.push(hint("Enter: open  Esc: cancel"));
+            keymap::footer(lines, "", &[k("Enter", "open"), k("Esc", "cancel")]);
         }
         VettingMode::Attest { request_id, form } => attest(lines, v, request_id, form),
         VettingMode::ConfirmDecline {
@@ -795,14 +835,24 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 true,
             ));
             lines.push(Line::from(""));
-            lines.push(
-                Line::from(if *focused == 1 {
-                    "Enter: done typing    ↑/↓: field    Esc: keep it"
+            keymap::footer(
+                lines,
+                "",
+                &if *focused == 1 {
+                    vec![
+                        k(keymap::TYPE, "the note"),
+                        k("Enter", "done typing"),
+                        k("↑/↓", "field"),
+                        k("Esc", "keep it"),
+                    ]
                 } else {
-                    "y: decline    n or Esc: keep it    ↑/↓: field"
-                })
-                .fg(COLOR_ORANGE)
-                .bold(),
+                    vec![
+                        k("y", "decline"),
+                        k("n or Esc", "keep it"),
+                        k("↑/↓", "field"),
+                        k("←/→", "reason"),
+                    ]
+                },
             );
         }
         VettingMode::ConfirmAbandon { application_id } => {
@@ -853,6 +903,7 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 lines.push(hint("answer."));
             }
             lines.push(Line::from(""));
+            keymap::confirming();
             lines.push(hint("y: abandon · any other key: keep it"));
         }
         VettingMode::ConfirmDeleteTicket { ticket_id } => {
@@ -895,6 +946,7 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 "so hand out a new one if they still need to reach you.",
             ));
             lines.push(Line::from(""));
+            keymap::confirming();
             lines.push(hint("y: delete · any other key: keep it"));
         }
         VettingMode::Withdraw {
@@ -928,7 +980,11 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 false,
             ));
             lines.push(Line::from(""));
-            lines.push(hint("←/→: reason  y: withdraw  Esc: cancel"));
+            keymap::footer(
+                lines,
+                "",
+                &[k("←/→", "reason"), k("y", "withdraw"), k("Esc", "cancel")],
+            );
         }
     }
 }
@@ -959,7 +1015,11 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             "then ask vetters for their ticket codes and send each a request.",
         ));
         lines.push(Line::from(""));
-        lines.push(hint("n: new application"));
+        keymap::footer(
+            lines,
+            "",
+            &[k("n", "new application"), k("Tab", "the desk")],
+        );
         return;
     }
     for (i, app) in v.applications.iter().enumerate() {
@@ -1158,9 +1218,18 @@ fn applications(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         }
     }
     lines.push(Line::from(""));
-    lines.push(hint(
-        "n: new  f: face  r: ask a vetter  v: find vetters  c: send card  m: refresh requirements",
-    ));
+    keymap::footer(
+        lines,
+        "",
+        &[
+            k("n", "new"),
+            k("f", "face"),
+            k("r", "ask a vetter"),
+            k("v", "find vetters"),
+            k("c", "send card"),
+            k("m", "refresh requirements"),
+        ],
+    );
     lines.push(hint(
         "p: switch criterion or path (PCS ZKP / named) — before any vetting is held",
     ));
@@ -1289,11 +1358,26 @@ fn directory(lines: &mut Vec<Line<'static>>, v: &VettingState, view: &DirectoryV
             view.cursors.len().max(1)
         )));
     }
-    lines.push(hint(if f >= DIRECTORY_FIELDS {
-        "Enter or a: ask this vetter  ↑/↓: move  Esc: back"
+    let mut keys = if f >= DIRECTORY_FIELDS {
+        vec![k("Enter or a", "ask this vetter"), k("↑/↓", "move")]
     } else {
-        "Enter: search  ↑/↓ or Tab: move  ←/→: choose  Esc: back"
-    }));
+        vec![
+            k(keymap::TYPE, "filter"),
+            k("Enter", "search"),
+            k("↑/↓ or Tab", "move"),
+            k("←/→", "choose"),
+        ]
+    };
+    if view.searched && f >= DIRECTORY_FIELDS {
+        if view.next_cursor.is_some() {
+            keys.push(k("n", "next page"));
+        }
+        if view.cursors.len() > 1 {
+            keys.push(k("p", "previous page"));
+        }
+    }
+    keys.push(k("Esc", "back"));
+    keymap::footer(lines, "", &keys);
 }
 
 fn profile(lines: &mut Vec<Line<'static>>, v: &VettingState, form: &VetterProfileForm) {
@@ -1401,12 +1485,26 @@ fn profile(lines: &mut Vec<Line<'static>>, v: &VettingState, form: &VetterProfil
         lines.push(Line::from(error.clone()).fg(COLOR_WARNING_ACCESSIBLE_RED));
     }
     lines.push(Line::from(""));
-    lines.push(hint(
-        "↑/↓: move  type to edit  Space: tick  Enter on an event: edit  x: remove it",
-    ));
-    lines.push(hint(
-        "Enter elsewhere: publish  ←/→: community  Esc: cancel",
-    ));
+    keymap::footer(
+        lines,
+        "",
+        &[
+            k("↑/↓", "move"),
+            k(keymap::TYPE, "edit"),
+            k("Space", "tick"),
+            k("Enter", "edit (on an event)"),
+            k("x", "remove it"),
+        ],
+    );
+    keymap::footer(
+        lines,
+        "",
+        &[
+            k("Enter", "publish (elsewhere)"),
+            k("←/→", "community"),
+            k("Esc", "cancel"),
+        ],
+    );
 }
 
 fn event_form(lines: &mut Vec<Line<'static>>, event: &EventForm) {
@@ -1436,7 +1534,15 @@ fn event_form(lines: &mut Vec<Line<'static>>, event: &EventForm) {
         lines.push(Line::from(error.clone()).fg(COLOR_WARNING_ACCESSIBLE_RED));
     }
     lines.push(Line::from(""));
-    lines.push(hint("Enter: keep it  ↑/↓: move  Esc: back to the profile"));
+    keymap::footer(
+        lines,
+        "",
+        &[
+            k("Enter", "keep it"),
+            k("↑/↓", "move"),
+            k("Esc", "back to the profile"),
+        ],
+    );
 }
 
 fn send_card(
@@ -1496,7 +1602,15 @@ fn send_card(
         ));
         lines.push(hint("have seen it and pressed Enter again."));
         lines.push(Line::from(""));
-        lines.push(hint("Enter: preview  f: choose the face  Esc: not now"));
+        keymap::footer(
+            lines,
+            "",
+            &[
+                k("Enter", "preview"),
+                k("f", "choose the face"),
+                k("Esc", "not now"),
+            ],
+        );
         return;
     };
     lines.push(Line::from(" The card will show").fg(COLOR_SUCCESS));
@@ -1519,7 +1633,11 @@ fn send_card(
         "No document numbers or images are sent: the vetter looks at your document, not a copy.",
     ));
     lines.push(Line::from(""));
-    lines.push(hint("Enter: approve, sign and send  Esc: not now"));
+    keymap::footer(
+        lines,
+        "",
+        &[k("Enter", "approve, sign and send"), k("Esc", "not now")],
+    );
 }
 
 /// Draw `uri` as a QR code into `lines`, given the rows still unspent.
@@ -1594,7 +1712,15 @@ fn show_ticket(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize) {
         None => lines.push(hint("This ticket has no link to scan.")),
     }
     lines.push(Line::from(""));
-    lines.push(hint("Esc or Enter: back  (y: copy code  u: copy link)"));
+    keymap::footer(
+        lines,
+        "",
+        &[
+            k("Esc or Enter", "back"),
+            k("y", "copy code"),
+            k("u", "copy link"),
+        ],
+    );
 }
 
 /// The desk's header: what each community has made us, and what it holds of our
@@ -1707,7 +1833,7 @@ fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         lines.push(hint(
             "Requests arrive only with one of your tickets — hand them out under Tickets (→).",
         ));
-        lines.push(hint(DESK_KEYS));
+        keymap::footer(lines, "", &desk_keys());
         return;
     }
     for (i, row) in v.desk.iter().enumerate() {
@@ -1801,16 +1927,25 @@ fn desk(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     if !keys.is_empty() {
         lines.push(hint(keys));
     }
-    lines.push(hint(DESK_KEYS));
+    keymap::footer(lines, "", &desk_keys());
 }
 
 /// The keys every desk view carries, on its last line. `p`, `g` and `e` are the
 /// desk's, not any one view's — the profile, the vetter credential and a place
 /// at an event belong to the whole desk — and `←/→` is how the views are
 /// reached at all.
-const DESK_KEYS: &str = "p: your vetter profile  g: ask for your vetter credential again  \
-                         e: vet at an event  h: hidden vetting  k: get tokens  \
-                         ←/→: Requests · Tickets · Issued  Tab: Applications";
+/// The desk's own keys, under every desk view.
+fn desk_keys() -> Vec<keymap::Binding> {
+    vec![
+        k("p", "your vetter profile"),
+        k("g", "ask for your vetter credential again"),
+        k("e", "vet at an event"),
+        k("h", "hidden vetting"),
+        k("k", "get tokens"),
+        k("←/→", "Requests · Tickets · Issued"),
+        k("Tab", "Applications"),
+    ]
+}
 
 /// The hidden-vetting view: one community at a time, everything the schedule
 /// is doing for it.
@@ -1824,7 +1959,7 @@ fn hidden_vetting(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize
     let Some(row) = v.hidden.get(index) else {
         lines.push(hint("No community you vet for hides its vetters."));
         lines.push(Line::from(""));
-        lines.push(hint("Esc: back"));
+        keymap::footer(lines, "", &[k("Esc", "back")]);
         return;
     };
     let item = |name: &str, shown: String| {
@@ -1976,16 +2111,15 @@ fn hidden_vetting(lines: &mut Vec<Line<'static>>, v: &VettingState, index: usize
         lines.push(Line::from(format!("  Last refusal  {refusal}")).fg(COLOR_ORANGE));
     }
     lines.push(Line::from(""));
-    let check = if row.key.is_empty() {
-        ""
-    } else {
-        "r: check my key again  "
-    };
-    lines.push(hint(if v.hidden.len() > 1 {
-        format!("d or Enter: draw now  {check}←/→: community  Esc: back")
-    } else {
-        format!("d or Enter: draw now  {check}Esc: back")
-    }));
+    let mut keys = vec![k("d or Enter", "draw now")];
+    if !row.key.is_empty() {
+        keys.push(k("r", "check my key again"));
+    }
+    if v.hidden.len() > 1 {
+        keys.push(k("←/→", "community"));
+    }
+    keys.push(k("Esc", "back"));
+    keymap::footer(lines, "", &keys);
 }
 
 /// The drip's rate as the hidden-vetting view says it, with when it was read from the
@@ -2134,9 +2268,17 @@ fn attest(lines: &mut Vec<Line<'static>>, v: &VettingState, request_id: &str, fo
         false,
     ));
     lines.push(Line::from(""));
-    lines.push(hint(
-        "↑/↓: item  ←/→: choose  Space: tick  Enter: sign and send  Esc: cancel",
-    ));
+    keymap::footer(
+        lines,
+        "",
+        &[
+            k("↑/↓", "item"),
+            k("←/→", "choose"),
+            k("Space", "tick"),
+            k("Enter", "sign and send"),
+            k("Esc", "cancel"),
+        ],
+    );
 }
 
 fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
@@ -2144,9 +2286,13 @@ fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         lines.push(hint("You have no tickets out."));
         lines.push(Line::from(""));
         lines.push(hint(
-            "t: hand out a ticket — read the code to someone, or show them its QR code",
+            "t hands out a ticket — read the code to someone, or show them its QR code.",
         ));
-        lines.push(hint(DESK_KEYS));
+        keymap::footer(
+            lines,
+            "",
+            &[&[k("t", "new ticket")][..], &desk_keys()].concat(),
+        );
         return;
     }
     for (i, row) in v.tickets.iter().enumerate() {
@@ -2196,7 +2342,7 @@ fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         ]));
         lines.push(Line::from(""));
         lines.push(hint(
-            "Or let them scan this — ⏎ shows it full-screen. It carries the ticket and your DID:",
+            "Or let them scan this — Enter shows it full-screen. It carries the ticket and your DID:",
         ));
         lines.push(Line::from(""));
         // The tail below the code: a blank, the link (which wraps on a narrow
@@ -2209,17 +2355,25 @@ fn tickets(lines: &mut Vec<Line<'static>>, v: &VettingState) {
         lines.push(hint(uri.clone()));
     }
     lines.push(Line::from(""));
-    lines.push(hint(
-        "⏎: show the code full-screen  t: new ticket  y: copy code  u: copy link  d: delete",
-    ));
-    lines.push(hint(DESK_KEYS));
+    keymap::footer(
+        lines,
+        "",
+        &[
+            k("Enter", "show the code full-screen"),
+            k("t", "new ticket"),
+            k("y", "copy code"),
+            k("u", "copy link"),
+            k("d", "delete"),
+        ],
+    );
+    keymap::footer(lines, "", &desk_keys());
 }
 
 fn issued(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     if v.issued.is_empty() && v.declined.is_empty() && v.attested_hidden.is_empty() {
         lines.push(hint("You have not finished vetting anyone yet."));
         lines.push(Line::from(""));
-        lines.push(hint(DESK_KEYS));
+        keymap::footer(lines, "", &desk_keys());
         return;
     }
     if !v.issued.is_empty() {
@@ -2286,16 +2440,17 @@ fn issued(lines: &mut Vec<Line<'static>>, v: &VettingState) {
     lines.push(Line::from(""));
     // What `w` does for the highlighted statement: nothing once recorded, and
     // a resend while a withdrawal is still unconfirmed.
+    let mut keys = desk_keys();
     match v.issued.get(v.selected) {
         Some(row) if row.withdrawal_recorded => {}
         Some(row) if row.withdrawal.is_some() => {
-            lines.push(hint("w: send the withdrawal again"));
+            keys.insert(0, k("w", "send the withdrawal again"));
         }
-        Some(_) => lines.push(hint("w: withdraw")),
+        Some(_) => keys.insert(0, k("w", "withdraw")),
         // Nothing signed to withdraw: hidden attestations and declines have no statement.
         None => {}
     }
-    lines.push(hint(DESK_KEYS));
+    keymap::footer(lines, "", &keys);
 }
 
 #[cfg(test)]
@@ -2839,7 +2994,7 @@ mod desk_tests {
             "the list says what is short rather than drawing half a code: {listed}"
         );
         assert!(
-            listed.contains("⏎ shows it full-screen"),
+            listed.contains("Enter shows it full-screen"),
             "and points at the view that does fit: {listed}"
         );
 

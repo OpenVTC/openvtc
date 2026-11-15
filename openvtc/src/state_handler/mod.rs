@@ -3461,7 +3461,8 @@ impl StateHandler {
                     Action::DismissLoading | Action::CapabilitiesClose | Action::CapabilitiesUp |
                     Action::CapabilitiesDown | Action::CapabilitiesDetail |
                     Action::CapabilitiesToggleArm | Action::CapabilitiesToggleCancel |
-                    Action::CommunitySelect(..) | Action::CommunityConfirmDelete(..) |
+                    Action::CommunitySelect(..) | Action::TspSelect(..) |
+                    Action::CommunityConfirmDelete(..) |
                     Action::CommunityCancelDelete | Action::CommunityConfirmLeave(..) |
                     Action::CommunityCancelLeave | Action::CommunityConfirmWithdraw(..) |
                     Action::CommunityCancelWithdraw | Action::CommunityConfirmSend(..) |
@@ -4682,6 +4683,10 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
             if let Some(view) = state.main_page.content_panel.capabilities.view.as_mut() {
                 view.confirm_toggle = None;
             }
+        }
+        Action::TspSelect(i) => {
+            let tsp = &mut state.main_page.content_panel.tsp_relationships;
+            tsp.selected_index = (*i).min(tsp.rows.len().saturating_sub(1));
         }
         Action::CommunitySelect(i) => {
             state.main_page.content_panel.communities.selected_index = *i;

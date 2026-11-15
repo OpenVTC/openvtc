@@ -12,6 +12,7 @@ use crate::state_handler::{
     state::{ConnectionState, MediatorStatus},
 };
 use crate::ui::pages::main::MainPage;
+use crate::ui::pages::main::keymap::{self, k};
 use crossterm::event::{KeyCode, KeyEvent};
 use openvtc_core::display::display_identifier;
 use ratatui::{
@@ -83,6 +84,8 @@ pub fn render(state: &InboxState, connection: &ConnectionState) -> Vec<Line<'sta
 
     if state.tasks.is_empty() {
         lines.push(Line::from("No pending tasks").fg(COLOR_DARK_GRAY));
+        keymap::advertise(&[k("Esc", "back")]);
+        keymap::advertise(&[k("Esc", "back")]);
         lines.push(Line::from(""));
         lines.push(
             Line::from("Inbound messages will appear here automatically.").fg(COLOR_DARK_GRAY),
@@ -146,10 +149,17 @@ pub fn render(state: &InboxState, connection: &ConnectionState) -> Vec<Line<'sta
         if let Some(confirm) = &state.confirm {
             lines.push(confirm_prompt_line(confirm));
         } else {
-            lines.push(
-                Line::from("↑/↓ navigate  Enter: view  d: dismiss  c: clear all")
-                    .fg(COLOR_DARK_GRAY),
-            );
+            let mut keys = Vec::new();
+            if state.tasks.len() > 1 {
+                keys.push(k("↑/↓", "move"));
+            }
+            keys.extend([
+                k("Enter", "view"),
+                k("d", "dismiss"),
+                k("c", "clear all"),
+                k("Esc", "back"),
+            ]);
+            keymap::footer(&mut lines, "", &keys);
         }
     }
 
@@ -256,11 +266,16 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
                 Line::from("     can resolve and compare with other contacts.").fg(COLOR_ORANGE),
             );
             lines.push(Line::from(""));
-            lines.push(
-                Line::from(
-                    "a: accept (R-DID)  p: accept (persona DID)  r: reject  d: dismiss  Esc: back",
-                )
-                .fg(COLOR_DARK_GRAY),
+            keymap::footer(
+                &mut lines,
+                "",
+                &[
+                    k("a/A", "accept (R-DID)"),
+                    k("p", "accept (persona DID)"),
+                    k("r", "reject"),
+                    k("d", "dismiss"),
+                    k("Esc", "back"),
+                ],
             );
         }
         ActiveTaskView::VRCRequestInbound {
@@ -289,9 +304,15 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
                 Span::styled(task_id.clone(), Style::new().fg(COLOR_DARK_GRAY)),
             ]));
             lines.push(Line::from(""));
-            lines.push(
-                Line::from("a: accept (issue VRC)  r: reject  d: dismiss  Esc: back")
-                    .fg(COLOR_DARK_GRAY),
+            keymap::footer(
+                &mut lines,
+                "",
+                &[
+                    k("a", "accept (issue VRC)"),
+                    k("r", "reject"),
+                    k("d", "dismiss"),
+                    k("Esc", "back"),
+                ],
             );
         }
         ActiveTaskView::VRCIssued {
@@ -313,7 +334,15 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
                 Span::styled(task_id.clone(), Style::new().fg(COLOR_DARK_GRAY)),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from("a: accept (store)  d: dismiss  Esc: back").fg(COLOR_DARK_GRAY));
+            keymap::footer(
+                &mut lines,
+                "",
+                &[
+                    k("a", "accept (store)"),
+                    k("d", "dismiss"),
+                    k("Esc", "back"),
+                ],
+            );
         }
         ActiveTaskView::RelationshipRequestOutbound {
             task_id,
@@ -356,7 +385,7 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
                 Span::styled(task_id.clone(), dim),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from("d: dismiss  Esc: back").fg(COLOR_DARK_GRAY));
+            keymap::footer(&mut lines, "", &[k("d", "dismiss"), k("Esc", "back")]);
         }
         ActiveTaskView::VRCRequestOutbound {
             task_id,
@@ -381,7 +410,7 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
                 Span::styled(task_id.clone(), dim),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from("d: dismiss  Esc: back").fg(COLOR_DARK_GRAY));
+            keymap::footer(&mut lines, "", &[k("d", "dismiss"), k("Esc", "back")]);
         }
         ActiveTaskView::Info {
             task_id,
@@ -409,7 +438,7 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
                 Span::styled(task_id.clone(), dim),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from("d: dismiss  Esc: back").fg(COLOR_DARK_GRAY));
+            keymap::footer(&mut lines, "", &[k("d", "dismiss"), k("Esc", "back")]);
         }
     }
 

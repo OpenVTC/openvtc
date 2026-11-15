@@ -15,6 +15,7 @@ use crate::state_handler::main_page::content::{CapabilitiesPhase, ContentPanelSt
 use crate::state_handler::state::ConnectionState;
 
 use super::panel::Panel;
+use crate::ui::pages::main::keymap::{self, k};
 
 pub struct CapabilitiesPanel;
 
@@ -59,10 +60,7 @@ impl Panel for CapabilitiesPanel {
                     Style::default().fg(COLOR_ORANGE),
                 )));
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "    r retry   Esc back",
-                    Style::default().fg(COLOR_DARK_GRAY),
-                )));
+                keymap::footer(&mut lines, "    ", &bindings(view));
                 return lines;
             }
             CapabilitiesPhase::Loaded if view.items.is_empty() => {
@@ -148,11 +146,28 @@ impl Panel for CapabilitiesPanel {
         }
 
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "    ↑/↓ navigate   ⏎ details   e enable/disable (administrators)   r refresh   Esc back",
-            Style::default().fg(COLOR_DARK_GRAY),
-        )));
+        keymap::footer(&mut lines, "    ", &bindings(view));
         lines
+    }
+}
+
+/// The view's keys in each phase, gated as the handler gates them.
+fn bindings(
+    view: &crate::state_handler::main_page::content::CapabilitiesView,
+) -> Vec<keymap::Binding> {
+    match view.phase {
+        CapabilitiesPhase::Loading => vec![k("Esc", "back")],
+        CapabilitiesPhase::Failed(_) => vec![k("r", "retry"), k("Esc", "back")],
+        CapabilitiesPhase::Loaded if view.items.is_empty() => {
+            vec![k("r", "refresh"), k("Esc", "back")]
+        }
+        CapabilitiesPhase::Loaded => vec![
+            k("↑/↓ or j/k", "move"),
+            k("Enter", "details"),
+            k("e", "enable/disable (administrators)"),
+            k("r", "refresh"),
+            k("Esc", "back"),
+        ],
     }
 }
 
@@ -262,10 +277,17 @@ impl MainPage {
             }
             return true;
         }
+        let listed = matches!(view.phase, CapabilitiesPhase::Loaded) && !view.items.is_empty();
+        let loading = matches!(view.phase, CapabilitiesPhase::Loading);
         match key.code {
             KeyCode::Esc => {
                 let _ = self.action_tx.send(Action::CapabilitiesClose);
             }
+            _ if loading => return false,
+            KeyCode::Char('r') => {
+                let _ = self.action_tx.send(Action::CapabilitiesRefresh);
+            }
+            _ if !listed => return false,
             KeyCode::Up | KeyCode::Char('k') => {
                 let _ = self.action_tx.send(Action::CapabilitiesUp);
             }
@@ -274,9 +296,6 @@ impl MainPage {
             }
             KeyCode::Enter => {
                 let _ = self.action_tx.send(Action::CapabilitiesDetail);
-            }
-            KeyCode::Char('r') => {
-                let _ = self.action_tx.send(Action::CapabilitiesRefresh);
             }
             KeyCode::Char('e') => {
                 let _ = self.action_tx.send(Action::CapabilitiesToggleArm);

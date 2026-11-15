@@ -33,6 +33,7 @@ use openvtc_core::git_signing::{BinaryStatus, CheckoutSigning, MIN_BINARY};
 use openvtc_core::git_workspace::{self, CheckoutFacts, CredentialScope, RepoCoords};
 
 use super::panel::Panel;
+use crate::ui::pages::main::keymap::{self, k};
 
 pub struct ReposPanel;
 
@@ -52,9 +53,61 @@ fn heading(lines: &mut Vec<Line<'static>>, title: &str) {
     )));
 }
 
-fn hints(lines: &mut Vec<Line<'static>>, hints: &str) {
+fn hints(lines: &mut Vec<Line<'static>>, keys: &[keymap::Binding]) {
     lines.push(Line::from(""));
-    lines.push(Line::from(dim(format!("    {hints}"))));
+    keymap::footer(lines, "    ", keys);
+}
+
+/// The keys of the screen under any form: the list, or one repository, and
+/// what this machine can do for the highlighted one — the ones that apply
+/// now. The handler also takes the machine keys where they do not apply, and
+/// answers them with a status line saying why.
+pub(crate) fn screen_bindings(view: &ReposView) -> Vec<keymap::Binding> {
+    if !matches!(view.phase, ReposPhase::Loaded) {
+        return vec![k("r", "retry"), k("Esc", "back")];
+    }
+    let mut keys = Vec::new();
+    match &view.screen {
+        ReposScreen::List => {
+            keys.extend([k("↑/↓", "move"), k("Enter", "open")]);
+            if !view.creatable().is_empty() {
+                keys.push(k("n", "new repo"));
+            }
+        }
+        ReposScreen::Repo { resource } => {
+            if view.repo(resource).is_none() {
+                return vec![k("r", "refresh"), k("Esc", "back")];
+            }
+            keys.push(k("↑/↓", "move"));
+            if view.governs(resource) {
+                keys.extend([
+                    k("a", "add"),
+                    k("x/Del", "revoke"),
+                    k("t", "transfer"),
+                    k("A", "archive the repository"),
+                ]);
+                if !view.drift(resource).is_empty() {
+                    keys.push(k("v", "revert drift"));
+                }
+            } else {
+                keys.push(k("x/Del", "resign your right"));
+            }
+        }
+        ReposScreen::NewRepo(_) => return Vec::new(),
+    }
+    keys.push(k("l", "link account"));
+    let link_settled = view.link.as_ref().is_some_and(|l| {
+        matches!(
+            l.phase,
+            LinkPhase::Linked { .. } | LinkPhase::Expired | LinkPhase::Failed(_)
+        )
+    });
+    if link_settled {
+        keys.push(k("d", "dismiss the link"));
+    }
+    keys.extend([k("r", "refresh"), k("Esc", "back")]);
+    keys.extend(local_bindings(view));
+    keys
 }
 
 fn status_style(status: &RepoStatus) -> Style {
@@ -127,13 +180,13 @@ impl Panel for ReposPanel {
                 lines.push(Line::from(dim(
                     "    asking the community what it governs on the forges…",
                 )));
-                hints(&mut lines, "r retry   Esc back");
+                hints(&mut lines, &screen_bindings(view));
                 return lines;
             }
             ReposPhase::Failed(detail) => {
                 lines.push(Line::from(""));
                 error(&mut lines, detail);
-                hints(&mut lines, "r retry   Esc back");
+                hints(&mut lines, &screen_bindings(view));
                 return lines;
             }
             ReposPhase::Loaded => {}
@@ -157,6 +210,7 @@ impl Panel for ReposPanel {
                 Style::default().fg(COLOR_ORANGE).bold(),
             )));
             let class = armed.request.consent_class();
+            keymap::confirming();
             lines.push(Line::from(dim(format!(
                 "    {} change · signed by this persona · {}",
                 class.label(),
@@ -328,13 +382,9 @@ fn render_list(lines: &mut Vec<Line<'static>>, view: &ReposView, linked: &[Linke
     if view.workspace.form.is_some() {
         return;
     }
-    let mut keys = vec!["↑/↓ navigate", "⏎ open"];
-    if !view.creatable().is_empty() {
-        keys.push("n new repo");
+    if view.add.is_none() && view.confirm.is_none() && view.workspace.confirm.is_none() {
+        hints(lines, &screen_bindings(view));
     }
-    keys.extend(["l link account", "r refresh", "Esc back"]);
-    hints(lines, &keys.join("   "));
-    local_hints(lines, view);
 }
 
 fn render_accounts(lines: &mut Vec<Line<'static>>, view: &ReposView, linked: &[LinkedAccount]) {
@@ -677,39 +727,40 @@ fn render_signing(lines: &mut Vec<Line<'static>>, view: &ReposView) {
 }
 
 /// The local keys that apply to the highlighted or open repository.
-fn local_hints(lines: &mut Vec<Line<'static>>, view: &ReposView) {
+/// What this machine can do for the highlighted repository.
+fn local_bindings(view: &ReposView) -> Vec<keymap::Binding> {
     let ws = &view.workspace;
     let target = repos_workspace::target(view);
     let checkout = target.as_ref().and_then(|r| ws.checkouts.get(r));
     let mut keys = Vec::new();
     match checkout {
-        None if target.is_some() => keys.extend(["c clone", "u use existing"]),
+        None if target.is_some() => keys.extend([k("c", "clone"), k("u", "use existing")]),
         None => {}
         Some(c) => {
             if ws.signs_as_me(c) != Some(true) {
-                keys.push("e sign here");
+                keys.push(k("e", "sign here"));
             }
             if !matches!(c.signing, CheckoutSigning::Off) {
-                keys.push("E stop signing");
+                keys.push(k("E", "stop signing"));
             }
-            keys.push("p copy path");
+            keys.push(k("p", "copy path"));
         }
     }
-    keys.push("s set up signing");
+    keys.push(k("s", "set up signing"));
     if ws.health.as_ref().is_some_and(|h| h.identity.any()) {
-        keys.push("S remove");
+        keys.push(k("S", "remove"));
     }
     if let Some(t) = &target {
-        keys.push("f forge account");
+        keys.push(k("f", "forge account"));
         if ws.push_access.get(t).is_some_and(|(_, can)| !can) {
-            keys.push("F fork");
+            keys.push(k("F", "fork"));
         }
         if checkout.is_some_and(|c| push_needs_username(view, t, &c.facts)) {
-            keys.push("R remotes to SSH");
+            keys.push(k("R", "remotes to SSH"));
         }
     }
-    keys.push("w workspace");
-    lines.push(Line::from(dim(format!("    {}", keys.join("   ")))));
+    keys.push(k("w", "workspace"));
+    keys
 }
 
 /// Whether `git push` in this checkout would stop at "Username for
@@ -843,7 +894,7 @@ fn account_line(
             "▲",
             COLOR_ORANGE,
             &format!(
-                "This checkout is set to {}. f, then ⏎, writes the choice into it.",
+                "This checkout is set to {}. f, then Enter, writes the choice into it.",
                 sanitize_display(&applied.label(), 256)
             ),
         );
@@ -1034,7 +1085,15 @@ fn render_workspace_overlay(lines: &mut Vec<Line<'static>>, view: &ReposView) {
             if let Some(why) = why {
                 error(lines, why);
             }
-            hints(lines, "⏎ save   Tab automatic/HTTPS/SSH   Esc cancel");
+            hints(
+                lines,
+                &[
+                    k(keymap::TYPE, "the directory"),
+                    k("Enter", "save"),
+                    k("Tab/Shift+Tab", "automatic/HTTPS/SSH"),
+                    k("Esc", "cancel"),
+                ],
+            );
         }
         Some(WorkspaceForm::Account(form)) => render_account_form(lines, form),
         Some(WorkspaceForm::UsePath {
@@ -1057,7 +1116,14 @@ fn render_workspace_overlay(lines: &mut Vec<Line<'static>>, view: &ReposView) {
             if let Some(why) = why {
                 error(lines, why);
             }
-            hints(lines, "⏎ use   Esc cancel");
+            hints(
+                lines,
+                &[
+                    k(keymap::TYPE, "the path"),
+                    k("Enter", "use"),
+                    k("Esc", "cancel"),
+                ],
+            );
         }
         None => {}
     }
@@ -1068,6 +1134,7 @@ fn render_workspace_overlay(lines: &mut Vec<Line<'static>>, view: &ReposView) {
              signing, and its credential is revoked at the VTA.",
             Style::default().fg(COLOR_ORANGE).bold(),
         )));
+        keymap::confirming();
         lines.push(Line::from(dim(format!(
             "    {}",
             crate::ui::pages::main::confirm::KEYS
@@ -1152,16 +1219,26 @@ fn render_account_form(lines: &mut Vec<Line<'static>>, form: &AccountForm) {
     if let Some(why) = &form.error {
         error(lines, why);
     }
-    hints(
-        lines,
-        &format!(
-            "↑↓ choose   Tab {}   ⏎ save and apply   Esc cancel",
+    let mut keys = vec![
+        k("↑/↓", "choose"),
+        k(
+            "Tab/Shift+Tab",
             match form.scope {
                 CredentialScope::Repo => format!("all of {} in this community", form.forge),
                 CredentialScope::Forge => "this repository only".to_string(),
-            }
+            },
         ),
-    );
+    ];
+    if form.typing() {
+        keys.push(k(keymap::TYPE, "the path"));
+    } else if matches!(
+        form.picked(),
+        Some(crate::state_handler::main_page::repos::AccountOption::Gh { .. })
+    ) {
+        keys.push(k("a", "keep your own identity"));
+    }
+    keys.extend([k("Enter", "save and apply"), k("Esc", "cancel")]);
+    hints(lines, &keys);
 }
 
 // ****************************************************************************
@@ -1179,7 +1256,7 @@ fn render_repo(
         lines.push(Line::from(dim(format!(
             "    The community's view has no {resource} — r to refresh."
         ))));
-        hints(lines, "r refresh   Esc back");
+        hints(lines, &screen_bindings(view));
         return;
     };
     let status = RepoStatus::of(repo);
@@ -1328,15 +1405,9 @@ fn render_repo(
     if view.workspace.form.is_some() {
         return;
     }
-    let keys = if view.governs(resource) && !drift.is_empty() {
-        "↑/↓ navigate   a add   x revoke   t transfer   A archive   v revert drift   l link account   r refresh   Esc back"
-    } else if view.governs(resource) {
-        "↑/↓ navigate   a add   x revoke   t transfer   A archive   l link account   r refresh   Esc back"
-    } else {
-        "↑/↓ navigate   x resign your right   l link account   r refresh   Esc back"
-    };
-    hints(lines, keys);
-    local_hints(lines, view);
+    if view.confirm.is_none() && view.workspace.confirm.is_none() {
+        hints(lines, &screen_bindings(view));
+    }
 }
 
 fn field_label(lines: &mut Vec<Line<'static>>, label: &str, focused: bool) {
@@ -1478,7 +1549,24 @@ fn render_add(lines: &mut Vec<Line<'static>>, view: &ReposView, form: &AddPerson
         lines.push(Line::from(""));
         push_status(lines, err);
     }
-    hints(lines, "Tab next field   ↑/↓ choose   ⏎ grant   Esc cancel");
+    let mut keys = vec![k("Tab/Shift+Tab", "next/previous field")];
+    match form.field {
+        0 => {
+            keys.push(k(
+                keymap::TYPE,
+                if form.external { "a DID" } else { "filter" },
+            ));
+            if !form.external {
+                keys.push(k("↑/↓", "choose"));
+            }
+            keys.push(k("Ctrl+D", "paste a DID / pick a member"));
+        }
+        1 => keys.push(k("↑/↓/←/→", "right")),
+        2 => keys.push(k("←/→", "expiry")),
+        _ => keys.push(k(keymap::TYPE, "reason")),
+    }
+    keys.extend([k("Enter", "grant"), k("Esc", "cancel")]);
+    hints(lines, &keys);
 }
 
 // ****************************************************************************
@@ -1627,10 +1715,23 @@ fn render_new(lines: &mut Vec<Line<'static>>, view: &ReposView, form: &NewRepoFo
         lines.push(Line::from(""));
         push_status(lines, err);
     }
-    hints(
-        lines,
-        "Tab next field   ←/→ choose   Ctrl+A add owner   ⏎ create   Esc cancel",
-    );
+    let mut keys = vec![k("Tab/Shift+Tab", "next/previous field")];
+    match form.field {
+        0 => keys.push(k("↑/↓/←/→", "namespace")),
+        1 => keys.push(k(keymap::TYPE, "name")),
+        2 => keys.push(k("←/→/Space", "visibility")),
+        3 => keys.push(k(keymap::TYPE, "description")),
+        _ => {
+            keys.push(k(keymap::TYPE, "owner"));
+            if !form.owner_external {
+                keys.push(k("↑/↓", "choose"));
+            }
+            keys.push(k("Ctrl+A", "add owner"));
+            keys.push(k("Ctrl+D", "paste a DID / pick a member"));
+        }
+    }
+    keys.extend([k("Enter", "create"), k("Esc", "cancel")]);
+    hints(lines, &keys);
 }
 
 #[cfg(test)]
@@ -1703,7 +1804,7 @@ mod tests {
             out.contains("You can create repos in github.com/acme"),
             "{out}"
         );
-        assert!(out.contains("n new repo"), "{out}");
+        assert!(out.contains("n: new repo"), "{out}");
     }
 
     const KEY: &str = "did:webvh:QmBobScid2:acme-vtc.example:bob#key-0";
@@ -1815,7 +1916,10 @@ mod tests {
         let out = rendered(v.clone());
         assert!(out.contains("THIS MACHINE"), "{out}");
         assert!(out.contains("not cloned"), "{out}");
-        assert!(out.contains("c clone   u use existing"), "{out}");
+        assert!(
+            out.contains("c: clone") && out.contains("u: use existing"),
+            "{out}"
+        );
 
         let mut cloned = v;
         cloned.workspace.checkouts.insert(
@@ -1835,8 +1939,11 @@ mod tests {
             out.contains("/w/github.com/acme/gadgets · main · ↑2 ↓0 · 1 changed"),
             "{out}"
         );
-        assert!(out.contains("E stop signing   p copy path"), "{out}");
-        assert!(!out.contains("e sign here"), "{out}");
+        assert!(
+            out.contains("E: stop signing") && out.contains("p: copy path"),
+            "{out}"
+        );
+        assert!(!out.contains("e: sign here"), "{out}");
     }
 
     /// The rendered text with every wrap and indent collapsed to one space.
@@ -1916,7 +2023,7 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("R switches this checkout's"), "{out}");
-        assert!(out.contains("R remotes to SSH"), "{out}");
+        assert!(out.contains("R: remotes to SSH"), "{out}");
 
         // A helper applies: no warning.
         let mut helped = v.clone();
@@ -2058,7 +2165,7 @@ mod tests {
             out.contains("This checkout is set to gh account alice"),
             "{out}"
         );
-        assert!(out.contains("f forge account"), "{out}");
+        assert!(out.contains("f: forge account"), "{out}");
 
         v.workspace.form = Some(WorkspaceForm::Account(AccountForm::new(
             resource.into(),
@@ -2084,7 +2191,7 @@ mod tests {
         );
         assert!(out.contains("SSH key /h/.ssh/id_ed25519"), "{out}");
         assert!(out.contains("Another SSH key"), "{out}");
-        assert!(out.contains("Tab this repository only"), "{out}");
+        assert!(out.contains("Tab/Shift+Tab: this repository only"), "{out}");
         assert!(out.contains("a: keep your own identity"), "{out}");
     }
 
@@ -2173,8 +2280,11 @@ mod tests {
         assert!(out.contains("~/code"), "{out}");
         assert!(out.contains("protocol: SSH"), "{out}");
         assert!(out.contains("Use an absolute path"), "{out}");
-        assert!(out.contains("⏎ save"), "{out}");
-        assert!(!out.contains("⏎ open"), "a form owns the footer: {out}");
+        assert!(out.contains("Enter: save"), "{out}");
+        assert!(
+            !out.contains("Enter: open"),
+            "a form owns the footer: {out}"
+        );
 
         v.workspace.form = None;
         v.workspace.confirm = Some(WorkspaceChange::RemoveIdentity);
@@ -2322,7 +2432,10 @@ mod tests {
             out.contains("▸ ▲ protection weakened · forge shows force-push allowed"),
             "{out}"
         );
-        assert!(out.contains("v revert drift   l link account"), "{out}");
+        assert!(
+            out.contains("v: revert drift") && out.contains("l: link account"),
+            "{out}"
+        );
         assert!(!out.contains("o adopt"), "{out}");
         assert!(out.contains("do it from the admin console or cnm"), "{out}");
     }

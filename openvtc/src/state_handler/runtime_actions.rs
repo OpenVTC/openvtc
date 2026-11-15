@@ -1233,6 +1233,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::CapabilitiesToggleArm
         | Action::CapabilitiesToggleCancel
         | Action::CommunitySelect(..)
+        | Action::TspSelect(..)
         | Action::CommunityConfirmDelete(..)
         | Action::CommunityCancelDelete
         | Action::CommunityConfirmLeave(..)

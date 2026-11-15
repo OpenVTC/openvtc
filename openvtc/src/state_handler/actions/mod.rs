@@ -942,6 +942,9 @@ pub enum Action {
     /// Move the Communities-list selection to this index.
     CommunitySelect(usize),
 
+    /// Move the TSP Relationships cursor to this row.
+    TspSelect(usize),
+
     /// Make the Active community at this index the working context (D10 / R-C-6):
     /// the community-scoped main page (relationships/inbox/VRCs/identity) switches
     /// to its persona. No-op for a non-Active (read-only) community.

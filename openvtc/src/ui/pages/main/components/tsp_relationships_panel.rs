@@ -17,6 +17,7 @@ use crate::state_handler::{
     main_page::content::{ContentPanelState, TspRelationshipsState},
     state::ConnectionState,
 };
+use crate::ui::pages::main::keymap::{self, k};
 use openvtc_core::display::truncate_did_centered;
 use ratatui::{
     style::{Style, Stylize},
@@ -65,6 +66,8 @@ pub fn render(state: &TspRelationshipsState, panel_focused: bool) -> Vec<Line<'s
             "  No TSP relationships yet — join a community to form one.",
             label_style,
         )));
+        lines.push(Line::from(""));
+        keymap::footer(&mut lines, "  ", &bindings(state));
         return lines;
     }
 
@@ -102,6 +105,40 @@ pub fn render(state: &TspRelationshipsState, panel_focused: bool) -> Vec<Line<'s
         ]));
         lines.push(Line::from(""));
     }
+    keymap::footer(&mut lines, "  ", &bindings(state));
 
     lines
+}
+
+/// The panel's keys: it is focusable, so it moves its cursor and goes back.
+fn bindings(state: &TspRelationshipsState) -> Vec<keymap::Binding> {
+    let mut keys = Vec::new();
+    if state.rows.len() > 1 {
+        keys.push(k("↑/↓", "move"));
+    }
+    keys.push(k("Esc", "back"));
+    keys
+}
+
+impl crate::ui::pages::main::MainPage {
+    /// TSP Relationships keys (#580): the panel draws a cursor when focused,
+    /// so ↑/↓ move it, and Esc returns to the menu.
+    pub(in crate::ui::pages::main) fn handle_tsp_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) -> bool {
+        use crate::state_handler::actions::Action;
+        use crate::state_handler::main_page::MainPanel;
+        use crossterm::event::KeyCode;
+        let tsp = &self.props.main_page.content_panel.tsp_relationships;
+        let (selected, count) = (tsp.selected_index, tsp.rows.len());
+        let action = match key.code {
+            KeyCode::Up if count > 1 => Action::TspSelect(selected.saturating_sub(1)),
+            KeyCode::Down if count > 1 => Action::TspSelect((selected + 1).min(count - 1)),
+            KeyCode::Esc => Action::MainPanelSwitch(MainPanel::MainMenu),
+            _ => return false,
+        };
+        let _ = self.action_tx.send(action);
+        true
+    }
 }

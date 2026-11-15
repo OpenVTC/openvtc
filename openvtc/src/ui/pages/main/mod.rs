@@ -29,6 +29,9 @@ use tokio::sync::mpsc::UnboundedSender;
 
 pub mod components;
 pub(crate) mod confirm;
+pub(crate) mod keymap;
+#[cfg(test)]
+mod keymap_tests;
 mod secret_buffer;
 
 use secret_buffer::SecretBuffer;
@@ -58,6 +61,15 @@ pub struct MainPage {
     /// Identifier for the active content view (menu + mode). When it changes
     /// across frames, we reset `content_scroll` so a fresh view starts at top.
     last_view_id: String,
+    /// The focused view's keys, as its footer advertised them in the last
+    /// frame (see [`keymap`]). What `?` lists, and what decides whether an
+    /// unhandled key earns a hint.
+    panel_keys: std::cell::RefCell<Vec<keymap::Binding>>,
+    /// The `?` key overlay is open.
+    help_open: bool,
+    /// One line of feedback for a key that did nothing, shown in the footer
+    /// row until the next key.
+    key_feedback: Option<String>,
 }
 
 /// Number of lines to scroll per PageUp / PageDown press.
@@ -93,6 +105,9 @@ impl Component for MainPage {
             content_scroll: 0,
             content_scroll_max: Cell::new(0),
             last_view_id: view_id(&state.main_page),
+            panel_keys: std::cell::RefCell::new(Vec::new()),
+            help_open: false,
+            key_feedback: None,
         }
         .move_with_state(state)
     }
@@ -114,6 +129,13 @@ impl Component for MainPage {
 
     fn handle_key_event(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
+            return;
+        }
+        self.key_feedback = None;
+
+        // The key overlay is read, then dismissed by any key.
+        if self.help_open {
+            self.help_open = false;
             return;
         }
 
@@ -146,22 +168,41 @@ impl Component for MainPage {
             return;
         }
 
-        // Content panel key handling (when content panel is focused)
+        // `?` lists the focused view's keys — unless a text field has the
+        // focus, where `?` is a character like any other.
         let content_selected = self.props.main_page.content_panel.selected;
+        let typing = content_selected && self.typing();
+        if key.code == KeyCode::Char('?') && !typing {
+            self.help_open = true;
+            return;
+        }
+
+        // Content panel key handling (when content panel is focused)
         if content_selected && self.handle_content_key_event(key) {
             return;
         }
 
+        // A text field has the focus: a key the form did not take goes no
+        // further — it must not switch panels or reach the menu (#578).
+        if typing && key.code != KeyCode::F(10) {
+            self.key_feedback = Some(format!(
+                "{} does nothing in this field — Esc leaves it, ? lists the keys",
+                keymap::describe(&key)
+            ));
+            return;
+        }
+
+        let menu_focused = self.props.main_page.menu_panel.selected && !content_selected;
         match key.code {
             KeyCode::F(10) => {
                 let _ = self.action_tx.send(Action::Exit);
             }
-            KeyCode::Up if self.props.main_page.menu_panel.selected => {
+            KeyCode::Up | KeyCode::Char('k') if menu_focused => {
                 let _ = self.action_tx.send(Action::MainMenuSelected(
                     self.props.main_page.menu_panel.selected_menu.prev(),
                 ));
             }
-            KeyCode::Down if self.props.main_page.menu_panel.selected => {
+            KeyCode::Down | KeyCode::Char('j') if menu_focused => {
                 let _ = self.action_tx.send(Action::MainMenuSelected(
                     self.props.main_page.menu_panel.selected_menu.next(),
                 ));
@@ -180,9 +221,15 @@ impl Component for MainPage {
                     let _ = self
                         .action_tx
                         .send(Action::MainPanelSwitch(MainPanel::ContentPanel));
+                } else {
+                    self.key_feedback = Some(Self::unused(&key));
                 }
             }
-            _ => {}
+            // PgUp/PgDn/Home/End scroll the content panel from wherever the
+            // focus is; they are consumed above when it has the focus.
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {}
+            // A key that does nothing here says so, rather than vanishing.
+            _ => self.key_feedback = Some(Self::unused(&key)),
         }
     }
 
@@ -450,6 +497,95 @@ fn grant_form_text(form: &crate::state_handler::main_page::content::GrantForm) -
 }
 
 // ****************************************************************************
+// Key map: `?` overlay and feedback
+// ****************************************************************************
+impl MainPage {
+    /// Whether the focused view is a text field taking typing, by its own
+    /// advertised keys.
+    fn typing(&self) -> bool {
+        self.panel_keys
+            .borrow()
+            .iter()
+            .any(keymap::Binding::is_typing)
+    }
+
+    /// Feedback for a key the focused view does not take.
+    fn unused(key: &KeyEvent) -> String {
+        format!(
+            "{} does nothing here — ? lists this panel's keys",
+            keymap::describe(key)
+        )
+    }
+
+    /// The keys `?` lists: the focused view's, or the menu's.
+    fn help_bindings(&self) -> (String, Vec<keymap::Binding>) {
+        if self.props.main_page.content_panel.selected {
+            (
+                self.props.main_page.menu_panel.selected_menu.to_string(),
+                self.panel_keys.borrow().clone(),
+            )
+        } else {
+            ("Menu".to_string(), keymap::menu())
+        }
+    }
+
+    /// The `?` overlay: the focused view's keys, then the keys that work
+    /// everywhere — drawn from the same tables the footers are.
+    fn render_help_overlay(&self, frame: &mut Frame) {
+        use ratatui::layout::Rect;
+        use ratatui::widgets::Clear;
+        let (title, panel) = self.help_bindings();
+        let global = keymap::global();
+        let width_of = |b: &keymap::Binding| b.key.chars().count();
+        let key_col = panel
+            .iter()
+            .chain(global.iter())
+            .map(width_of)
+            .max()
+            .unwrap_or(4)
+            .max(4);
+        let row = |b: &keymap::Binding| {
+            Line::from(vec![
+                Span::styled(
+                    format!("  {:<key_col$}  ", b.key),
+                    ratatui::style::Style::default().fg(COLOR_SUCCESS),
+                ),
+                Span::styled(
+                    b.does.clone(),
+                    ratatui::style::Style::default().fg(COLOR_TEXT_DEFAULT),
+                ),
+            ])
+        };
+        let mut lines = vec![Line::from(format!(" {title}")).fg(COLOR_ORANGE).bold()];
+        if panel.is_empty() {
+            lines.push(Line::from("  (no keys of its own)").fg(COLOR_DARK_GRAY));
+        }
+        lines.extend(panel.iter().map(row));
+        lines.push(Line::from(""));
+        lines.push(Line::from(" Everywhere").fg(COLOR_ORANGE).bold());
+        lines.extend(global.iter().map(row));
+        lines.push(Line::from(""));
+        lines.push(Line::from(" any key: close").fg(COLOR_DARK_GRAY));
+
+        let area = frame.area();
+        let content_w = lines.iter().map(Line::width).max().unwrap_or(20) as u16 + 4;
+        let w = content_w.min(area.width);
+        let h = (lines.len() as u16 + 2).min(area.height);
+        let rect = Rect {
+            x: area.x + (area.width - w) / 2,
+            y: area.y + (area.height - h) / 2,
+            width: w,
+            height: h,
+        };
+        frame.render_widget(Clear, rect);
+        frame.render_widget(
+            Paragraph::new(lines).block(Block::bordered().fg(COLOR_SOFT_PURPLE).title(" Keys ")),
+            rect,
+        );
+    }
+}
+
+// ****************************************************************************
 // Content panel key event handling
 // ****************************************************************************
 impl MainPage {
@@ -482,6 +618,26 @@ impl MainPage {
             _ => {}
         }
 
+        // A Ctrl or Alt chord is never a letter (#578): it reaches the view
+        // only where the view lists that chord as one of its keys.
+        //
+        // Before the first frame nothing is advertised yet, and nothing is
+        // gated.
+        let advertised = !self.panel_keys.borrow().is_empty();
+        if advertised
+            && key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && matches!(key.code, KeyCode::Char(_))
+            && !self
+                .panel_keys
+                .borrow()
+                .iter()
+                .any(|b| !b.is_typing() && b.matches(&key))
+        {
+            return false;
+        }
+
         let menu = self.props.main_page.menu_panel.selected_menu.clone();
 
         match menu {
@@ -495,7 +651,8 @@ impl MainPage {
             MainMenu::Identity => self.handle_personas_key(key),
             MainMenu::Vta => self.handle_vta_key(key),
             MainMenu::Vetting => self.handle_vetting_key(key),
-            _ => false,
+            MainMenu::TspRelationships => self.handle_tsp_key(key),
+            MainMenu::Quit => false,
         }
     }
 
@@ -799,6 +956,7 @@ fn copy_to_clipboard(
 // ****************************************************************************
 impl ComponentRender<()> for MainPage {
     fn render(&self, frame: &mut Frame, _props: ()) {
+        keymap::begin_frame();
         let [main_top, main_middle, main_log, main_bottom] =
             Layout::vertical([Length(2), Min(0), Length(8), Length(1)]).areas(frame.area());
 
@@ -931,6 +1089,7 @@ impl ComponentRender<()> for MainPage {
             self.content_scroll,
         );
         self.content_scroll_max.set(max_scroll);
+        let mut keys = keymap::take_advertised();
 
         // Activity log panel
         let log_block = Block::bordered()
@@ -954,25 +1113,31 @@ impl ComponentRender<()> for MainPage {
             .collect();
         frame.render_widget(Paragraph::new(log_lines), log_inner);
 
-        // Bottom key hints (single line). A development trust-anchor override
-        // takes the front of the line for the whole session, so an overridden
-        // run cannot be mistaken for a normal one.
-        let hints = " <TAB> switch panels  <Ctrl+K> switch community  <PgUp/PgDn/Home/End> scroll  <F10> quit";
-        let bottom_line = match &self.props.main_page.dev_override {
-            Some(banner) => Line::from(vec![
-                Span::styled(
-                    format!(" {banner} "),
-                    ratatui::style::Style::default()
-                        .fg(ratatui::style::Color::Black)
-                        .bg(COLOR_WARNING_ACCESSIBLE_RED)
-                        .bold(),
-                ),
-                Span::from(hints).dark_gray(),
-            ]),
-            None => Line::from(hints).dark_gray(),
-        };
+        // Bottom row: the keys that work everywhere, from the same table `?`
+        // lists, quit first so it survives a narrow terminal (#576). Feedback
+        // for a key that did nothing takes the row until the next key. A
+        // development trust-anchor override takes the front of the line for
+        // the whole session, so an overridden run cannot be mistaken for a
+        // normal one.
+        let mut bottom = Vec::new();
+        if let Some(banner) = &self.props.main_page.dev_override {
+            bottom.push(Span::styled(
+                format!(" {banner} "),
+                ratatui::style::Style::default()
+                    .fg(ratatui::style::Color::Black)
+                    .bg(COLOR_WARNING_ACCESSIBLE_RED)
+                    .bold(),
+            ));
+        }
+        match &self.key_feedback {
+            Some(feedback) => bottom.push(Span::styled(
+                format!(" {feedback}"),
+                ratatui::style::Style::default().fg(COLOR_ORANGE),
+            )),
+            None => bottom.extend(keymap::line(" ", &keymap::global()).spans),
+        }
         frame.render_widget(
-            Paragraph::new(bottom_line).alignment(Alignment::Left),
+            Paragraph::new(Line::from(bottom)).alignment(Alignment::Left),
             main_bottom,
         );
 
@@ -991,6 +1156,18 @@ impl ComponentRender<()> for MainPage {
         // Agent-name manager overlay floats over everything when open.
         if let Some(overlay) = self.props.main_page.agent_names.as_ref() {
             self.render_agent_name_manager_overlay(frame, overlay);
+        }
+
+        // An overlay owns the keyboard while it is open, so its keys are the
+        // ones `?` and the feedback go by.
+        let overlay_keys = keymap::take_advertised();
+        if !overlay_keys.is_empty() {
+            keys = overlay_keys;
+        }
+        self.panel_keys.replace(keys);
+
+        if self.help_open {
+            self.render_help_overlay(frame);
         }
     }
 }
@@ -1058,10 +1235,11 @@ impl MainPage {
             })
             .collect();
         lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            "↑/↓ select   ⏎ switch   esc close",
-            Style::new().fg(COLOR_BORDER),
-        )));
+        lines.push(keymap::overlay_line(&[
+            keymap::k("↑/↓", "select"),
+            keymap::k("Enter", "switch"),
+            keymap::k("Esc/Ctrl+K", "close"),
+        ]));
 
         frame.render_widget(Paragraph::new(lines).block(block), popup_area);
     }
@@ -1223,15 +1401,24 @@ impl MainPage {
             );
         } else {
             let hint = match overlay.phase {
-                AgentNameManagerPhase::Working | AgentNameManagerPhase::Loading => "working…",
+                AgentNameManagerPhase::Working | AgentNameManagerPhase::Loading => {
+                    Line::from(Span::styled("working…", Style::new().fg(COLOR_BORDER)))
+                }
                 AgentNameManagerPhase::Ready => {
-                    "⏎ claim   ↑/↓ select   space park/resume   d remove   esc close"
+                    let mut keys = vec![
+                        keymap::k(keymap::TYPE, "a name"),
+                        keymap::k("Enter", "claim"),
+                        keymap::k("↑/↓", "select"),
+                    ];
+                    if !overlay.names.is_empty() {
+                        keys.push(keymap::k("Space", "park/resume"));
+                        keys.push(keymap::k("d/Del", "remove"));
+                    }
+                    keys.push(keymap::k("Esc", "close"));
+                    keymap::overlay_line(&keys)
                 }
             };
-            lines.push(Line::from(Span::styled(
-                hint,
-                Style::new().fg(COLOR_BORDER),
-            )));
+            lines.push(hint);
         }
 
         frame.render_widget(Paragraph::new(lines).block(block), popup_area);
@@ -1272,7 +1459,7 @@ impl MainPage {
         match overlay.phase {
             AddVicPhase::Input => {
                 lines.push(Line::from(Span::styled(
-                    "Paste an invitation credential (VIC) JSON, then press ⏎:",
+                    "Paste an invitation credential (VIC) JSON, then press Enter:",
                     Style::new().fg(COLOR_TEXT_DEFAULT),
                 )));
                 // The pasted JSON can be long; show a char count + short preview
@@ -1299,10 +1486,11 @@ impl MainPage {
                         Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
                     )));
                 }
-                lines.push(Line::from(Span::styled(
-                    "⏎ store   esc cancel",
-                    Style::new().fg(COLOR_BORDER),
-                )));
+                lines.push(keymap::overlay_line(&[
+                    keymap::k(keymap::TYPE, "paste the VIC"),
+                    keymap::k("Enter", "store"),
+                    keymap::k("Esc", "cancel"),
+                ]));
             }
             AddVicPhase::Working => {
                 for msg in &overlay.messages {
@@ -1318,10 +1506,10 @@ impl MainPage {
                     Style::new().fg(COLOR_SUCCESS).bold(),
                 )));
                 lines.push(Line::default());
-                lines.push(Line::from(Span::styled(
-                    "⏎/esc close",
-                    Style::new().fg(COLOR_BORDER),
-                )));
+                lines.push(keymap::overlay_line(&[keymap::k(
+                    "Enter/Esc",
+                    "close (so does any key)",
+                )]));
             }
             AddVicPhase::Failed => {
                 for msg in &overlay.messages {
@@ -1331,10 +1519,10 @@ impl MainPage {
                     )));
                 }
                 lines.push(Line::default());
-                lines.push(Line::from(Span::styled(
-                    "⏎/esc close",
-                    Style::new().fg(COLOR_BORDER),
-                )));
+                lines.push(keymap::overlay_line(&[keymap::k(
+                    "Enter/Esc",
+                    "close (so does any key)",
+                )]));
             }
         }
 
@@ -1456,7 +1644,7 @@ mod key_handler_tests {
 
     /// Build a focused `MainPage` on the given menu, after `mutate` populates the
     /// panel state. Returns the page and the receiver to read emitted actions.
-    fn page_for(
+    pub(super) fn page_for(
         menu: MainMenu,
         mutate: impl FnOnce(&mut State),
     ) -> (MainPage, UnboundedReceiver<Action>) {
@@ -1471,23 +1659,23 @@ mod key_handler_tests {
     }
 
     /// A `Press` key event (the only kind `handle_key_event` acts on).
-    fn press(code: KeyCode) -> KeyEvent {
+    pub(super) fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     /// A Ctrl-modified `Press` key event.
-    fn ctrl(code: KeyCode) -> KeyEvent {
+    pub(super) fn ctrl(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
     }
 
     /// A minimal Communities-panel summary row for key-routing tests.
-    fn community_summary(name: &str) -> CommunitySummary {
+    pub(super) fn community_summary(name: &str) -> CommunitySummary {
         community_summary_with(name, true, false, false)
     }
 
     /// A summary with explicit active/inactive/pending status, for the leave/
     /// cancel/archive/delete key-gating tests.
-    fn community_summary_with(
+    pub(super) fn community_summary_with(
         name: &str,
         is_active: bool,
         is_inactive: bool,
@@ -1528,7 +1716,7 @@ mod key_handler_tests {
         }
     }
 
-    fn switcher_item(name: &str, is_current: bool) -> SwitcherItem {
+    pub(super) fn switcher_item(name: &str, is_current: bool) -> SwitcherItem {
         SwitcherItem {
             vtc_did: format!("did:example:{name}"),
             persona_ref: openvtc_core::config::account::PersonaId::new(),
@@ -1538,7 +1726,7 @@ mod key_handler_tests {
         }
     }
 
-    fn rel_summary(remote_p_did: &str) -> RelationshipSummary {
+    pub(super) fn rel_summary(remote_p_did: &str) -> RelationshipSummary {
         RelationshipSummary {
             remote_p_did: remote_p_did.to_string(),
             alias: None,
@@ -1554,7 +1742,7 @@ mod key_handler_tests {
         }
     }
 
-    fn vrc_summary(vrc_id: &str) -> VrcSummary {
+    pub(super) fn vrc_summary(vrc_id: &str) -> VrcSummary {
         VrcSummary {
             vrc_id: vrc_id.to_string(),
             remote_p_did: "did:example:them".to_string(),
@@ -1578,7 +1766,7 @@ mod key_handler_tests {
         }
     }
 
-    fn task_summary(id: &str) -> TaskSummary {
+    pub(super) fn task_summary(id: &str) -> TaskSummary {
         TaskSummary {
             id: id.to_string(),
             type_display: "Trust Ping".to_string(),
@@ -2786,7 +2974,7 @@ mod key_handler_tests {
 
     // ----- Identity pane: personas ---------------------------------------------
 
-    fn persona(did: &str, label: &str, bound: usize) -> ManagedDid {
+    pub(super) fn persona(did: &str, label: &str, bound: usize) -> ManagedDid {
         ManagedDid {
             did: did.to_string(),
             did_locator: None,
@@ -3317,7 +3505,7 @@ mod key_handler_tests {
             "the example shows the outcome of the screen you are on: {drawn}"
         );
         assert!(
-            drawn.contains("esc: let the server pick"),
+            drawn.contains("Esc: let the server pick"),
             "the way out of the editor is the other outcome, not the label: {drawn}"
         );
     }
@@ -3749,7 +3937,7 @@ mod key_handler_tests {
         AddVicPhase, AddVicState, VicLifecycle, VicSummary,
     };
 
-    fn vic(id: &str, lifecycle: VicLifecycle) -> VicSummary {
+    pub(super) fn vic(id: &str, lifecycle: VicLifecycle) -> VicSummary {
         VicSummary {
             id: id.to_string(),
             issuer: "did:webvh:example:community".to_string(),
@@ -3761,7 +3949,7 @@ mod key_handler_tests {
     }
 
     /// The VIC list with the given rows, selected at index 0.
-    fn vta_vics(rows: Vec<VicSummary>) -> impl Fn(&mut State) {
+    pub(super) fn vta_vics(rows: Vec<VicSummary>) -> impl Fn(&mut State) {
         move |s: &mut State| {
             let vta = &mut s.main_page.content_panel.vta;
             vta.vics = rows.clone().into();
@@ -3786,9 +3974,9 @@ mod key_handler_tests {
     /// the identity pane there is one list left, and asking for it is the whole
     /// of what the key does.
     #[test]
-    fn vta_tab_asks_for_the_vic_listing() {
+    fn vta_r_asks_for_the_vic_listing() {
         let (mut page, mut rx) = page_for(MainMenu::Vta, |_| {});
-        page.handle_key_event(press(KeyCode::Tab));
+        page.handle_key_event(press(KeyCode::Char('r')));
         match rx.try_recv() {
             Ok(Action::VicRefresh) => {}
             _ => panic!("expected VicRefresh"),
@@ -4286,7 +4474,7 @@ mod key_handler_tests {
         assert!(text.contains("Example Ballots"), "{text}");
         assert!(text.contains("same operator"), "{text}");
         assert!(text.contains("prove how you voted"), "{text}");
-        assert!(text.contains("v vote"), "{text}");
+        assert!(text.contains("v: vote"), "{text}");
 
         let (page, _rx) = page_for(MainMenu::Communities, with_elections(Screen::Ballot));
         let text = drawn(&page);

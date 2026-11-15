@@ -15,6 +15,7 @@ use crate::state_handler::{
     },
     state::ConnectionState,
 };
+use crate::ui::pages::main::keymap::{self, k};
 use crate::ui::pages::main::{MainPage, edit_text};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -186,9 +187,16 @@ fn render_theme_picker(
             .push(Line::from(format!("Your themes live in {}", dir.display())).fg(COLOR_DARK_GRAY));
     }
     lines.push(Line::from(""));
-    lines.push(
-        Line::from("↑/↓ preview  Enter: use  c: copy to edit  r: reload  Esc: cancel")
-            .fg(COLOR_DARK_GRAY),
+    keymap::footer(
+        &mut lines,
+        "",
+        &[
+            k("↑/↓", "preview"),
+            k("Enter", "use"),
+            k("c", "copy to edit"),
+            k("r", "reload"),
+            k("Esc", "cancel"),
+        ],
     );
     lines
 }
@@ -269,7 +277,15 @@ fn render_wipe_confirm(state: &SettingsState, confirm_input: &str) -> Vec<Line<'
         ),
     ]));
     lines.push(Line::from(""));
-    lines.push(Line::from("  Esc: cancel  |  Enter: confirm").fg(COLOR_DARK_GRAY));
+    keymap::footer(
+        &mut lines,
+        "  ",
+        &[
+            k(keymap::TYPE, "the word"),
+            k("Enter", "confirm"),
+            k("Esc", "cancel"),
+        ],
+    );
     lines
 }
 
@@ -465,7 +481,11 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
     ]));
 
     lines.push(Line::from(""));
-    lines.push(Line::from("↑/↓ navigate  Enter: edit/open").fg(COLOR_DARK_GRAY));
+    keymap::footer(
+        &mut lines,
+        "",
+        &[k("↑/↓", "move"), k("Enter", "edit/open"), k("Esc", "back")],
+    );
 
     lines
 }
@@ -520,7 +540,11 @@ fn render_token_management(state: &SettingsState, selected_index: usize) -> Vec<
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("↑/↓ navigate  Enter: execute  Esc: back").fg(COLOR_DARK_GRAY));
+    keymap::footer(
+        &mut lines,
+        "",
+        &[k("↑/↓", "move"), k("Enter", "run"), k("Esc", "back")],
+    );
 
     lines
 }
@@ -584,13 +608,21 @@ fn render_token_reset_confirm(
         ),
     ]));
     lines.push(Line::from(""));
-    lines.push(Line::from("  Esc: cancel  |  Enter: confirm").fg(COLOR_DARK_GRAY));
+    keymap::footer(
+        &mut lines,
+        "  ",
+        &[
+            k(keymap::TYPE, "the word"),
+            k("Enter", "confirm"),
+            k("Esc", "cancel"),
+        ],
+    );
     lines
 }
 
 /// Render inline edit for a settings field.
 fn render_edit(label: &str, input: &str) -> Vec<Line<'static>> {
-    vec![
+    let mut lines = vec![
         Line::from(""),
         Line::from(format!("Editing: {}", label))
             .fg(COLOR_SUCCESS)
@@ -602,8 +634,17 @@ fn render_edit(label: &str, input: &str) -> Vec<Line<'static>> {
             Span::styled("▎", Style::new().fg(COLOR_SUCCESS)),
         ]),
         Line::from(""),
-        Line::from("Enter: save  Esc: cancel").fg(COLOR_DARK_GRAY),
-    ]
+    ];
+    keymap::footer(
+        &mut lines,
+        "",
+        &[
+            k(keymap::TYPE, "edit"),
+            k("Enter", "save"),
+            k("Esc", "cancel"),
+        ],
+    );
+    lines
 }
 
 /// Render a config form (export or import) with path and passphrase fields.
@@ -680,13 +721,28 @@ fn render_export_form(
 
     push_form_problem(&mut lines, problem);
     lines.push(Line::from(""));
-    lines.push(
-        Line::from(if confirm_len.is_some() {
-            "Tab: switch field  Enter (on confirm): export  Esc: cancel"
-        } else {
-            "Tab: switch field  Enter (on passphrase): import  Esc: cancel"
-        })
-        .fg(COLOR_DARK_GRAY),
+    let last = if confirm_len.is_some() { 2 } else { 1 };
+    let submit = if confirm_len.is_some() {
+        "export"
+    } else {
+        "import"
+    };
+    keymap::footer(
+        &mut lines,
+        "",
+        &[
+            k(keymap::TYPE, "this field"),
+            k("Tab/↑/↓", "switch field"),
+            k(
+                "Enter",
+                if active_field == last {
+                    submit
+                } else {
+                    "next field"
+                },
+            ),
+            k("Esc", "cancel"),
+        ],
     );
 
     lines
@@ -743,7 +799,15 @@ fn render_change_protection(
             )]));
         }
         lines.push(Line::from(""));
-        lines.push(Line::from("↑/↓ select  Enter: choose  Esc: cancel").fg(COLOR_DARK_GRAY));
+        keymap::footer(
+            &mut lines,
+            "",
+            &[
+                k(if selected_option == 0 { "↓" } else { "↑" }, "select"),
+                k("Enter", "choose"),
+                k("Esc", "cancel"),
+            ],
+        );
     } else {
         // Passphrase input mode — display masked lengths only
         lines.push(Line::from(vec![
@@ -800,9 +864,23 @@ fn render_change_protection(
         push_form_problem(&mut lines, problem);
 
         lines.push(Line::from(""));
-        lines.push(
-            Line::from("Tab: next field  Enter (on confirm): save  Esc: cancel")
-                .fg(COLOR_DARK_GRAY),
+        keymap::footer(
+            &mut lines,
+            "",
+            &[
+                k(keymap::TYPE, "passphrase"),
+                k("Tab", "switch field"),
+                k(if active_field == 1 { "↓" } else { "↑" }, "switch field"),
+                k(
+                    "Enter",
+                    if active_field == 2 {
+                        "save"
+                    } else {
+                        "next field"
+                    },
+                ),
+                k("Esc", "cancel"),
+            ],
         );
     }
 
@@ -1223,7 +1301,7 @@ impl MainPage {
                     .send(Action::Settings(SettingsAction::FormTabSwitch));
                 true
             }
-            KeyCode::Enter if active == 1 && confirm => {
+            KeyCode::Enter if active == 0 || (active == 1 && confirm) => {
                 let _ = self
                     .action_tx
                     .send(Action::Settings(SettingsAction::FormTabSwitch));

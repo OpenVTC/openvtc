@@ -11,6 +11,7 @@ use crate::state_handler::{
     state::ConnectionState,
 };
 use crate::ui::pages::main::MainPage;
+use crate::ui::pages::main::keymap;
 use crossterm::event::{KeyCode, KeyEvent};
 use openvtc_core::display::{display_identifier, truncate_did_centered};
 use ratatui::{
@@ -479,10 +480,14 @@ fn render_vics(state: &VtaState, panel_focused: bool, lines: &mut Vec<Line<'stat
             Line::from(if state.vic_loading {
                 "Reading the credential vault…"
             } else {
-                "No invitation credentials.   a: import a VIC   ·   i: show inactive"
+                "No invitation credentials."
             })
             .fg(COLOR_DARK_GRAY),
         );
+        if focused {
+            lines.push(Line::from(""));
+            keymap::footer(lines, "", &bindings(state));
+        }
         return;
     }
 
@@ -556,19 +561,43 @@ fn render_vics(state: &VtaState, panel_focused: bool, lines: &mut Vec<Line<'stat
             .bold(),
         );
     } else if focused {
-        let sel = state.vics.get(state.vic_selected_index);
-        let restore_verb = match sel.map(|v| v.lifecycle) {
-            Some(VicLifecycle::Archived) => "u: unarchive",
-            Some(VicLifecycle::Deleted) => "u: restore",
-            _ => "r: archive",
-        };
-        lines.push(
-            Line::from(format!(
-                "↑/↓ select   a: import   {restore_verb}   d: delete   p: purge   i: inactive"
-            ))
-            .fg(COLOR_DARK_GRAY),
-        );
+        crate::ui::pages::main::keymap::footer(lines, "", &bindings(state));
     }
+}
+
+/// The invitation-credential list's keys, gated as the handler gates them.
+pub(crate) fn bindings(state: &VtaState) -> Vec<crate::ui::pages::main::keymap::Binding> {
+    use crate::ui::pages::main::keymap::k;
+    let sel = state.vics.get(state.vic_selected_index);
+    let lifecycle = sel.map(|v| v.lifecycle);
+    let mut keys = Vec::new();
+    if !state.vics.is_empty() {
+        keys.push(k("↑/↓", "select"));
+    }
+    keys.push(k("a", "import"));
+    match lifecycle {
+        Some(VicLifecycle::Active) => keys.push(k("x", "archive")),
+        Some(VicLifecycle::Archived) => keys.push(k("u", "unarchive")),
+        Some(VicLifecycle::Deleted) => keys.push(k("u", "restore")),
+        None => {}
+    }
+    if sel.is_some() && lifecycle != Some(VicLifecycle::Deleted) {
+        keys.push(k("d/Del", "delete"));
+    }
+    if sel.is_some() {
+        keys.push(k("p", "purge"));
+    }
+    keys.push(k(
+        "v",
+        if state.vic_show_inactive {
+            "hide archived"
+        } else {
+            "show archived"
+        },
+    ));
+    keys.push(k("r", "refresh"));
+    keys.push(k("Esc", "back"));
+    keys
 }
 
 impl MainPage {
@@ -614,7 +643,10 @@ impl MainPage {
             // key that asks. It was Tab because Tab moved focus onto the list
             // and the load rode along; with one list left, the load is the
             // whole of what the key does.
-            KeyCode::Tab => {
+            //
+            // Refresh is `r` here as on every other panel (#580); Tab is the
+            // global panel switch again.
+            KeyCode::Char('r') => {
                 let _ = self.action_tx.send(Action::VicRefresh);
                 true
             }
@@ -622,7 +654,8 @@ impl MainPage {
                 let _ = self.action_tx.send(Action::StartAddVic);
                 true
             }
-            KeyCode::Char('i') => {
+            // `v` shows or hides archived rows, as on the Communities list.
+            KeyCode::Char('v') => {
                 let _ = self.action_tx.send(Action::VicToggleInactive);
                 true
             }
@@ -644,21 +677,23 @@ impl MainPage {
                     .send(Action::VicSelect((vic_selected + 1).min(vic_count - 1)));
                 true
             }
-            // r: archive an active VIC (reversible, so no confirm).
-            KeyCode::Char('r') if vic_lifecycle == Some(VicLifecycle::Active) => {
+            // x: archive an active VIC (reversible, so no confirm) — the
+            // archive key on every list (#580).
+            KeyCode::Char('x') if vic_lifecycle == Some(VicLifecycle::Active) => {
                 let _ = self.action_tx.send(Action::VicArchive(vic_selected));
                 true
             }
             // u: unarchive an archived VIC, or restore a soft-deleted one.
-            KeyCode::Char('u') => {
-                match vic_lifecycle {
-                    Some(VicLifecycle::Archived) => {
-                        let _ = self.action_tx.send(Action::VicUnarchive(vic_selected));
-                    }
-                    Some(VicLifecycle::Deleted) => {
-                        let _ = self.action_tx.send(Action::VicRestore(vic_selected));
-                    }
-                    _ => {}
+            KeyCode::Char('u')
+                if matches!(
+                    vic_lifecycle,
+                    Some(VicLifecycle::Archived | VicLifecycle::Deleted)
+                ) =>
+            {
+                if vic_lifecycle == Some(VicLifecycle::Archived) {
+                    let _ = self.action_tx.send(Action::VicUnarchive(vic_selected));
+                } else {
+                    let _ = self.action_tx.send(Action::VicRestore(vic_selected));
                 }
                 true
             }

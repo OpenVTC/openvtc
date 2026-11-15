@@ -16,7 +16,7 @@ use crate::ui::pages::main::grant_form_text;
 use crossterm::event::{KeyCode, KeyEvent};
 
 impl MainPage {
-    /// Communities overview keys (R-A-5 Stage 4): `j` starts the join flow
+    /// Communities overview keys (R-A-5 Stage 4): `n` starts the join flow
     /// (incl. from the empty state), ↑/↓ move the selection, `d`/Del removes the
     /// selected community. Returns true if consumed.
     pub(in crate::ui::pages::main) fn handle_communities_key(&mut self, key: KeyEvent) -> bool {
@@ -173,17 +173,19 @@ impl MainPage {
         let sel_own_context = comms.items.get(selected).is_some_and(|c| c.has_own_context);
 
         match key.code {
-            KeyCode::Char('j') => {
+            // `n` joins, as `n` starts something new on every other list;
+            // `j`/`k` move, as they do in rooms, elections and the menu (#580).
+            KeyCode::Char('n') => {
                 let _ = self.action_tx.send(Action::StartJoin);
                 true
             }
-            KeyCode::Up if rows > 0 => {
+            KeyCode::Up | KeyCode::Char('k') if rows > 0 => {
                 let _ = self
                     .action_tx
                     .send(Action::CommunitySelect(selected.saturating_sub(1)));
                 true
             }
-            KeyCode::Down if rows > 0 => {
+            KeyCode::Down | KeyCode::Char('j') if rows > 0 => {
                 let _ = self
                     .action_tx
                     .send(Action::CommunitySelect((selected + 1).min(rows - 1)));

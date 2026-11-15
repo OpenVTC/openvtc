@@ -25,6 +25,7 @@ pub(crate) fn is_yes(key: &KeyEvent) -> bool {
 /// A confirmation prompt: the question, then [`KEYS`].
 #[must_use]
 pub(crate) fn prompt(question: &str) -> String {
+    super::keymap::confirming();
     format!("{question}   {KEYS}")
 }
 

@@ -12,6 +12,7 @@ use crate::state_handler::{
     main_page::content::{ContentPanelState, RelationshipsMode, RelationshipsState},
     state::ConnectionState,
 };
+use crate::ui::pages::main::keymap::{self, k};
 use crate::ui::pages::main::{MainPage, edit_text};
 use crossterm::event::{KeyCode, KeyEvent};
 use openvtc_core::config::account::RelationshipIdentifierDefault;
@@ -140,7 +141,16 @@ fn render_list(state: &RelationshipsState) -> Vec<Line<'static>> {
         }
 
         lines.push(Line::from(""));
-        lines.push(Line::from("↑/↓ navigate  Enter: details  n: new request").fg(COLOR_DARK_GRAY));
+        let mut keys = Vec::new();
+        if state.relationships.len() > 1 {
+            keys.push(k("↑/↓", "move"));
+        }
+        keys.extend([
+            k("Enter", "details"),
+            k("n", "new request"),
+            k("Esc", "back"),
+        ]);
+        keymap::footer(&mut lines, "", &keys);
     }
 
     lines
@@ -423,12 +433,22 @@ fn render_detail(
             .bold(),
         );
     } else {
-        lines.push(
-            Line::from(
-                "e: edit alias  p: ping  v: request VRC  w: witness  d: remove  \u{2191}/\u{2193}: browse VRCs  Esc: back",
-            )
-            .fg(COLOR_DARK_GRAY),
-        );
+        let mut keys = vec![
+            k("e", "edit alias"),
+            k("p", "ping"),
+            k("v", "request VRC"),
+            k("w", "witness"),
+            k("d", "remove"),
+        ];
+        if state
+            .relationships
+            .get(index)
+            .is_some_and(|r| !r.vrcs_issued.is_empty() || !r.vrcs_received.is_empty())
+        {
+            keys.push(k("↑/↓", "browse VRCs"));
+        }
+        keys.push(k("Esc", "back"));
+        keymap::footer(&mut lines, "", &keys);
     }
 
     lines
@@ -459,7 +479,15 @@ fn render_edit_alias(
         Span::styled("▎", Style::new().fg(COLOR_SUCCESS)),
     ]));
     lines.push(Line::from(""));
-    lines.push(Line::from("Enter: save  Esc: cancel").fg(COLOR_DARK_GRAY));
+    keymap::footer(
+        &mut lines,
+        "",
+        &[
+            k(keymap::TYPE, "alias"),
+            k("Enter", "save"),
+            k("Esc", "cancel"),
+        ],
+    );
 
     lines
 }
@@ -546,8 +574,15 @@ fn render_witness(
         lines.push(Line::from(""));
     }
     lines.push(Line::from("A DID or an agent name, e.g. example.com/@witness").fg(COLOR_DARK_GRAY));
-    lines.push(
-        Line::from("Enter: witness  Tab: membership on/off  Esc: cancel").fg(COLOR_DARK_GRAY),
+    keymap::footer(
+        &mut lines,
+        "",
+        &[
+            k(keymap::TYPE, "witness"),
+            k("Enter", "witness"),
+            k("Tab", "membership on/off"),
+            k("Esc", "cancel"),
+        ],
     );
 
     lines
@@ -683,10 +718,20 @@ fn render_form(
     lines.push(
         Line::from("DID accepts an agent name too, e.g. example.com/@bob").fg(COLOR_DARK_GRAY),
     );
-    lines.push(
-        Line::from("Tab: next field  Space: change  Enter (on last field): submit  Esc: cancel")
-            .fg(COLOR_DARK_GRAY),
-    );
+    let mut keys = Vec::new();
+    if active_field < 3 {
+        keys.push(k(keymap::TYPE, "this field"));
+        keys.push(k("Enter/Tab/↓", "next field"));
+    } else {
+        keys.push(k("Space", "change"));
+        keys.push(k("Enter", "send request"));
+        keys.push(k("Tab", "first field"));
+    }
+    if active_field > 0 {
+        keys.push(k("↑", "previous field"));
+    }
+    keys.push(k("Esc", "cancel"));
+    keymap::footer(&mut lines, "", &keys);
 
     lines
 }
@@ -716,7 +761,11 @@ impl MainPage {
                             .send(Action::Relationship(RelationshipAction::CancelNewRequest));
                         true
                     }
-                    KeyCode::Tab => {
+                    // Enter on a text field moves on, as Tab does; on the last
+                    // field it submits (below).
+                    KeyCode::Tab | KeyCode::Enter
+                        if active_field < 3 || key.code == KeyCode::Tab =>
+                    {
                         // Cycle through fields 0->1->2->3->0
                         let next = (active_field + 1) % 4;
                         let _ = self
@@ -809,8 +858,12 @@ impl MainPage {
                     return true;
                 }
 
+                let has_vrcs = rels
+                    .relationships
+                    .get(index)
+                    .is_some_and(|r| !r.vrcs_issued.is_empty() || !r.vrcs_received.is_empty());
                 match key.code {
-                    KeyCode::Down => {
+                    KeyCode::Down if has_vrcs => {
                         if let Some(rel) = rels.relationships.get(index) {
                             let total = rel.vrcs_issued.len() + rel.vrcs_received.len();
                             if total > 0 {
@@ -830,7 +883,7 @@ impl MainPage {
                         }
                         true
                     }
-                    KeyCode::Up => {
+                    KeyCode::Up if has_vrcs => {
                         let next = match current_vrc {
                             Some(0) => None,
                             Some(n) => Some(n - 1),

@@ -17,6 +17,7 @@ use crate::state_handler::{
 };
 use crate::ui::pages::main::MainPage;
 use crate::ui::pages::main::copy_to_clipboard;
+use crate::ui::pages::main::keymap::{self, k};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -127,7 +128,7 @@ impl ContentPanelState {
                 MainMenu::Quit => {
                     vec![
                         Line::from(""),
-                        Line::from("Press <Enter> to quit the application")
+                        Line::from("Press Enter in the menu, or F10 anywhere, to quit.")
                             .fg(COLOR_WARNING_ACCESSIBLE_RED),
                     ]
                 }
@@ -346,19 +347,44 @@ fn render_status_help(
         );
     }
 
-    // Keyboard shortcuts section
+    // Keyboard shortcuts: the same tables the footer row and `?` use, so
+    // this list cannot drift from the keys that work (#580).
     lines.push(Line::from(""));
     lines.push(Line::from(" Keyboard Shortcuts").fg(COLOR_SUCCESS).bold());
     lines.push(Line::from(""));
-    lines.push(Line::from("  Up/Down        Navigate").fg(COLOR_TEXT_DEFAULT));
-    lines.push(Line::from("  Enter          Select / open").fg(COLOR_TEXT_DEFAULT));
-    lines.push(Line::from("  Tab / L / R    Switch panels").fg(COLOR_TEXT_DEFAULT));
-    lines.push(Line::from("  PgUp / PgDn    Scroll content").fg(COLOR_TEXT_DEFAULT));
-    lines.push(Line::from("  Home / End     Jump to top / bottom").fg(COLOR_TEXT_DEFAULT));
-    lines.push(Line::from("  Esc            Go back").fg(COLOR_TEXT_DEFAULT));
-    lines.push(Line::from("  F10            Quit").fg(COLOR_TEXT_DEFAULT));
+    let shortcut = |b: &keymap::Binding| {
+        Line::from(vec![
+            Span::styled(format!("  {:<12} ", b.key), Style::new().fg(COLOR_SUCCESS)),
+            Span::styled(b.does.clone(), Style::new().fg(COLOR_TEXT_DEFAULT)),
+        ])
+    };
+    lines.extend(keymap::global().iter().map(shortcut));
+    lines.push(Line::from(""));
+    lines.push(Line::from("  In the menu").fg(COLOR_DARK_GRAY));
+    lines.extend(keymap::menu().iter().map(shortcut));
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from("  Every panel lists its own keys at its foot; ? shows them all.")
+            .fg(COLOR_DARK_GRAY),
+    );
+    lines.push(Line::from("  Ctrl+C always quits.").fg(COLOR_DARK_GRAY));
+    lines.push(Line::from(""));
+    keymap::footer(&mut lines, " ", &help_bindings(settings));
 
     lines
+}
+
+/// The Help / Status view's own keys.
+fn help_bindings(
+    settings: &crate::state_handler::main_page::content::SettingsState,
+) -> Vec<keymap::Binding> {
+    let mut keys = vec![k("1", "copy persona DID"), k("2", "copy mediator DID")];
+    if settings.did_git_sign.is_some() {
+        keys.push(k("3", "copy signing principal"));
+        keys.push(k("4", "copy SSH key"));
+    }
+    keys.push(k("Esc", "back"));
+    keys
 }
 
 impl MainPage {
@@ -388,7 +414,15 @@ impl MainPage {
                 copy_to_clipboard(&did, "Mediator DID", &self.action_tx);
                 true
             }
-            KeyCode::Char('3') => {
+            KeyCode::Char('3')
+                if self
+                    .props
+                    .main_page
+                    .content_panel
+                    .settings
+                    .did_git_sign
+                    .is_some() =>
+            {
                 if let Some(info) = &self.props.main_page.content_panel.settings.did_git_sign {
                     copy_to_clipboard(
                         &info.did_key_id,
@@ -398,7 +432,15 @@ impl MainPage {
                 }
                 true
             }
-            KeyCode::Char('4') => {
+            KeyCode::Char('4')
+                if self
+                    .props
+                    .main_page
+                    .content_panel
+                    .settings
+                    .did_git_sign
+                    .is_some() =>
+            {
                 if let Some(info) = &self.props.main_page.content_panel.settings.did_git_sign {
                     copy_to_clipboard(
                         &info.ssh_public_key,
