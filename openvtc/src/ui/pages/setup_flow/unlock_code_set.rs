@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use crate::colors::{
     COLOR_BORDER, COLOR_DARK_GRAY, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,
     COLOR_WARNING_ACCESSIBLE_RED,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent};
-use openvtc_core::config::derive_passphrase_key;
+use openvtc_core::config::{MIN_PASSPHRASE_LENGTH, validate_passphrase};
 use ratatui::{
     Frame,
     layout::{
@@ -16,10 +14,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Padding, Paragraph},
 };
-use secrecy::SecretBox;
-use tracing::error;
+use secrecy::SecretString;
 use tui_input::{Input, backend::crossterm::EventHandler};
-use zeroize::Zeroizing;
 
 use crate::{
     state_handler::{actions::Action, setup_sequence::SetupState},
@@ -74,29 +70,22 @@ impl UnlockCodeSet {
                         Some("Unlock codes do not match.".to_string());
                     return;
                 }
-                // Copy into a Zeroizing<String> so the plain-text passphrase
-                // is wiped from memory before we return from this handler.
-                let passphrase_value =
-                    Zeroizing::new(state.unlock_code_set.passphrase.value().to_string());
-                let key = match derive_passphrase_key(
-                    passphrase_value.as_bytes(),
-                    b"openvtc-unlock-code-v1",
-                ) {
-                    Ok(k) => k,
-                    Err(e) => {
-                        error!(error = %e, "Argon2id passphrase KDF failed");
-                        state.unlock_code_set.error_msg =
-                            Some(format!("Couldn't derive unlock key: {e}"));
-                        return;
-                    }
-                };
+                // Every unlock path refuses a code below the minimum length,
+                // so a shorter one set here would lock the profile for good.
+                if validate_passphrase(state.unlock_code_set.passphrase.value()).is_err() {
+                    state.unlock_code_set.error_msg = Some(format!(
+                        "Unlock codes must be at least {MIN_PASSPHRASE_LENGTH} characters."
+                    ));
+                    return;
+                }
                 state.unlock_code_set.error_msg = None;
+                let passphrase =
+                    SecretString::from(state.unlock_code_set.passphrase.value().to_string());
+                // The action carries the secret; drop the plaintext from the
+                // input buffers.
+                state.unlock_code_set.passphrase.reset();
                 state.unlock_code_set.confirm.reset();
-                let passphrase_hash = Arc::new(SecretBox::new(Box::new(key.to_vec())));
-                let result = navigate(
-                    SetupEvent::UnlockCodeSet { passphrase_hash },
-                    &state.props.state,
-                );
+                let result = navigate(SetupEvent::UnlockCodeSet { passphrase }, &state.props.state);
                 handle_nav_result(result, state);
             }
             KeyCode::Esc => {
@@ -156,7 +145,7 @@ impl UnlockCodeSet {
                 ),
                 Line::default(),
                 Line::styled(
-                    "Create a strong unlock code:",
+                    "Create a strong unlock code (at least 8 characters):",
                     Style::new().fg(COLOR_BORDER).bold(),
                 ),
                 Line::styled(

@@ -1275,7 +1275,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::JoinClipboardFailed(..)
         | Action::JoinClearVic
         | Action::ImportConfig(..)
-        | Action::SetProtection(..)
+        | Action::SetUnlockCode(..)
         | Action::VtaSubmitDid(..)
         | Action::VtaStartProvision { .. }
         | Action::RecoverPlanContext

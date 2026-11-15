@@ -4057,6 +4057,9 @@ pub struct SettingsState {
     /// than on every config sync: answering it means reading the credential back
     /// out of the OS store, which is not something to do on every keystroke.
     pub storage_warning: Option<String>,
+    /// Why the open passphrase form was not submitted (a mismatch, a short
+    /// passphrase). Cleared by the next keystroke in the form.
+    pub form_problem: Option<String>,
     /// Currently selected setting index
     pub selected_index: usize,
     /// Current panel mode
@@ -4104,11 +4107,15 @@ pub enum SettingsMode {
     View,
     /// Editing the friendly name
     EditFriendlyName { input: String },
-    /// Export config form (path + passphrase length for masked display)
+    /// Export config form (path + passphrase + confirmation, lengths only for
+    /// masked display)
     ExportConfig {
         path_input: String,
         /// Length of the passphrase (actual value held only in UI component)
         passphrase_len: usize,
+        /// Length of the confirmation (actual value held only in UI component)
+        confirm_len: usize,
+        /// 0 = path, 1 = passphrase, 2 = confirm
         active_field: usize,
     },
     /// Import config form (path + passphrase length for masked display)
@@ -4132,6 +4139,17 @@ pub enum SettingsMode {
     /// Token management sub-screen
     #[cfg(feature = "openpgp-card")]
     TokenManagement { selected_index: usize },
+    /// Factory-reset confirmation for one named card. The operator types
+    /// `RESET` before the card is erased.
+    #[cfg(feature = "openpgp-card")]
+    TokenResetConfirm {
+        /// Application identifier of the card to erase.
+        ident: String,
+        manufacturer: String,
+        /// The card is the one this profile is protected by.
+        protects_profile: bool,
+        confirm_input: String,
+    },
     /// Wipe-profile confirmation. Operator must type the literal token
     /// `WIPE` (case-insensitive) into `confirm_input` before the wipe is
     /// permitted to proceed. Anything else just closes the dialog.

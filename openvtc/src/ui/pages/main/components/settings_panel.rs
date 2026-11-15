@@ -33,13 +33,28 @@ pub fn render(state: &SettingsState) -> Vec<Line<'static>> {
         SettingsMode::ExportConfig {
             path_input,
             passphrase_len,
+            confirm_len,
             active_field,
-        } => render_export_form("Export Config", path_input, *passphrase_len, *active_field),
+        } => render_export_form(
+            "Export Config",
+            path_input,
+            *passphrase_len,
+            Some(*confirm_len),
+            *active_field,
+            state.form_problem.as_deref(),
+        ),
         SettingsMode::ImportConfig {
             path_input,
             passphrase_len,
             active_field,
-        } => render_export_form("Import Config", path_input, *passphrase_len, *active_field),
+        } => render_export_form(
+            "Import Config",
+            path_input,
+            *passphrase_len,
+            None,
+            *active_field,
+            state.form_problem.as_deref(),
+        ),
         SettingsMode::ChangeProtection {
             selected_option,
             passphrase_len,
@@ -50,11 +65,19 @@ pub fn render(state: &SettingsState) -> Vec<Line<'static>> {
             *passphrase_len,
             *confirm_len,
             *active_field,
+            state.form_problem.as_deref(),
         ),
         #[cfg(feature = "openpgp-card")]
         SettingsMode::TokenManagement { selected_index } => {
             render_token_management(state, *selected_index)
         }
+        #[cfg(feature = "openpgp-card")]
+        SettingsMode::TokenResetConfirm {
+            ident,
+            manufacturer,
+            protects_profile,
+            confirm_input,
+        } => render_token_reset_confirm(ident, manufacturer, *protects_profile, confirm_input),
         SettingsMode::WipeConfirm { confirm_input } => render_wipe_confirm(state, confirm_input),
         SettingsMode::ThemePicker { rows, selected, .. } => {
             render_theme_picker(state, rows, *selected)
@@ -493,6 +516,69 @@ fn render_token_management(state: &SettingsState, selected_index: usize) -> Vec<
     lines
 }
 
+/// What the operator types to confirm a token factory reset. Shared with
+/// `settings_actions`, which checks it.
+#[cfg(feature = "openpgp-card")]
+pub(crate) const TOKEN_RESET_CONFIRM_TOKEN: &str = "RESET";
+
+#[cfg(feature = "openpgp-card")]
+fn render_token_reset_confirm(
+    ident: &str,
+    manufacturer: &str,
+    protects_profile: bool,
+    confirm_input: &str,
+) -> Vec<Line<'static>> {
+    let text = Style::new().fg(COLOR_TEXT_DEFAULT);
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(" Factory reset hardware token")
+            .fg(COLOR_WARNING_ACCESSIBLE_RED)
+            .bold(),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Token: ", text),
+            Span::styled(ident.to_string(), Style::new().fg(COLOR_ORANGE).bold()),
+            Span::styled(format!("  ({manufacturer})"), text),
+        ]),
+        Line::from(""),
+        Line::styled(
+            "  Every key and all data on this token will be erased. This cannot be undone.",
+            text,
+        ),
+    ];
+    if protects_profile {
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(
+                "  This token protects this profile. After a reset the profile can no longer \
+                 be unlocked.",
+            )
+            .fg(COLOR_WARNING_ACCESSIBLE_RED)
+            .bold(),
+        );
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  Type ", text),
+        Span::styled(
+            TOKEN_RESET_CONFIRM_TOKEN,
+            Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED).bold(),
+        ),
+        Span::styled(" to confirm and press Enter:", text),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  > ", Style::new().fg(COLOR_SOFT_PURPLE).bold()),
+        Span::styled(
+            confirm_input.to_string(),
+            Style::new().fg(COLOR_SOFT_PURPLE),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from("  Esc: cancel  |  Enter: confirm").fg(COLOR_DARK_GRAY));
+    lines
+}
+
 /// Render inline edit for a settings field.
 fn render_edit(label: &str, input: &str) -> Vec<Line<'static>> {
     vec![
@@ -512,11 +598,15 @@ fn render_edit(label: &str, input: &str) -> Vec<Line<'static>> {
 }
 
 /// Render a config form (export or import) with path and passphrase fields.
+/// The export and import forms. `confirm_len` is `Some` on export, which
+/// asks for the passphrase twice.
 fn render_export_form(
     title: &str,
     path_input: &str,
     passphrase_len: usize,
+    confirm_len: Option<usize>,
     active_field: usize,
+    problem: Option<&str>,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(""),
@@ -561,13 +651,44 @@ fn render_export_form(
         ),
     ]));
 
+    if let Some(confirm_len) = confirm_len {
+        let confirm_active = active_field == 2;
+        let confirm_style = if confirm_active {
+            Style::new().fg(COLOR_SUCCESS)
+        } else {
+            Style::new().fg(COLOR_TEXT_DEFAULT)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if confirm_active { "▸ " } else { "  " }, confirm_style),
+            Span::styled("Confirm:    ", confirm_style),
+            Span::styled("*".repeat(confirm_len), Style::new().fg(COLOR_SOFT_PURPLE)),
+            Span::styled(
+                if confirm_active { "▎" } else { "" },
+                Style::new().fg(COLOR_SUCCESS),
+            ),
+        ]));
+    }
+
+    push_form_problem(&mut lines, problem);
     lines.push(Line::from(""));
     lines.push(
-        Line::from("Tab: switch field  Enter (on passphrase): export  Esc: cancel")
-            .fg(COLOR_DARK_GRAY),
+        Line::from(if confirm_len.is_some() {
+            "Tab: switch field  Enter (on confirm): export  Esc: cancel"
+        } else {
+            "Tab: switch field  Enter (on passphrase): import  Esc: cancel"
+        })
+        .fg(COLOR_DARK_GRAY),
     );
 
     lines
+}
+
+/// Why the form was not submitted, under its fields.
+fn push_form_problem(lines: &mut Vec<Line<'static>>, problem: Option<&str>) {
+    if let Some(why) = problem {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("  {why}")).fg(COLOR_WARNING_ACCESSIBLE_RED));
+    }
 }
 
 fn render_change_protection(
@@ -575,6 +696,7 @@ fn render_change_protection(
     passphrase_len: usize,
     confirm_len: usize,
     active_field: usize,
+    problem: Option<&str>,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("")];
     lines.push(
@@ -654,12 +776,7 @@ fn render_change_protection(
             ),
         ]));
 
-        if passphrase_len > 0 && confirm_len > 0 && passphrase_len != confirm_len {
-            lines.push(Line::from(""));
-            lines.push(
-                Line::from("  Passphrases may not match (different lengths)").fg(COLOR_ORANGE),
-            );
-        }
+        push_form_problem(&mut lines, problem);
 
         lines.push(Line::from(""));
         lines.push(

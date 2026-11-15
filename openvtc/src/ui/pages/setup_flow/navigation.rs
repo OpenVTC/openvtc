@@ -4,14 +4,12 @@
 //! a `SetupEvent` and call `handle_nav_result(navigate(..), flow)` instead of
 //! directly setting `active_page` or sending `Action`s.
 
-use std::sync::Arc;
-
-use secrecy::SecretBox;
+use secrecy::SecretString;
 
 use super::SetupFlow;
 use crate::state_handler::{
     actions::Action,
-    setup_sequence::{ConfigProtection, SetupPage, SetupState},
+    setup_sequence::{SetupPage, SetupState},
 };
 
 /// Every page-exit event that requires a flow decision.
@@ -48,8 +46,10 @@ pub enum SetupEvent {
     // UnlockCode
     WantUnlockCode,
     SkipUnlockCode,
+    /// The unlock code, checked for length and confirmation. The key is
+    /// derived by the handler, off the render task.
     UnlockCodeSet {
-        passphrase_hash: Arc<SecretBox<Vec<u8>>>,
+        passphrase: SecretString,
     },
     ReturnToSetCode,
     AcceptNoCodeRisk,
@@ -66,8 +66,6 @@ pub enum NavResult {
     SendAction(Action),
     /// Send SetupCompleted (needs flow.clone()).
     CompleteSetup,
-    /// Send an action, then send SetupCompleted.
-    SendActionThenCompleteSetup(Action),
     /// Do nothing.
     // No navigation branch currently returns this no-op, but the dispatcher
     // handles it; kept so `navigate` can express "stay put" without a new arm.
@@ -130,15 +128,12 @@ pub fn navigate(event: SetupEvent, state: &SetupState) -> NavResult {
 
         // === UnlockCode ===
         // R-A-5: after protection is decided, create the account (State A) and
-        // land on FinalPage. SetProtection records the passcode + page; the
-        // trailing SetupCompleted runs `Config::create_account`.
+        // land on FinalPage. SetUnlockCode derives the key and then runs
+        // `Config::create_account` itself.
         SetupEvent::WantUnlockCode => NavResult::GoTo(SetupPage::UnlockCodeSet),
         SetupEvent::SkipUnlockCode => NavResult::GoTo(SetupPage::UnlockCodeWarn),
-        SetupEvent::UnlockCodeSet { passphrase_hash } => {
-            NavResult::SendActionThenCompleteSetup(Action::SetProtection(
-                ConfigProtection::Passcode(passphrase_hash),
-                SetupPage::FinalPage,
-            ))
+        SetupEvent::UnlockCodeSet { passphrase } => {
+            NavResult::SendAction(Action::SetUnlockCode(passphrase))
         }
         SetupEvent::ReturnToSetCode => NavResult::GoTo(SetupPage::UnlockCodeSet),
         SetupEvent::AcceptNoCodeRisk => NavResult::CompleteSetup,
@@ -183,12 +178,6 @@ pub fn handle_nav_result(result: NavResult, flow: &mut SetupFlow) {
                 .action_tx
                 .send(Action::SetupCompleted(Box::new(flow.clone())));
         }
-        NavResult::SendActionThenCompleteSetup(action) => {
-            let _ = flow.action_tx.send(action);
-            let _ = flow
-                .action_tx
-                .send(Action::SetupCompleted(Box::new(flow.clone())));
-        }
         NavResult::None => {}
     }
 }
@@ -212,10 +201,6 @@ mod tests {
 
     fn is_send_action(result: &NavResult) -> bool {
         matches!(result, NavResult::SendAction(_))
-    }
-
-    fn is_send_then_complete(result: &NavResult) -> bool {
-        matches!(result, NavResult::SendActionThenCompleteSetup(_))
     }
 
     fn is_complete(result: &NavResult) -> bool {
@@ -325,15 +310,14 @@ mod tests {
     }
 
     #[test]
-    fn unlock_code_set_sets_protection_then_completes() {
-        use secrecy::SecretBox;
+    fn unlock_code_set_hands_the_code_to_the_handler() {
         let r = navigate(
             SetupEvent::UnlockCodeSet {
-                passphrase_hash: Arc::new(SecretBox::new(Box::new(vec![0u8; 32]))),
+                passphrase: SecretString::from("correct horse"),
             },
             &empty_state(),
         );
-        assert!(is_send_then_complete(&r));
+        assert!(matches!(r, NavResult::SendAction(Action::SetUnlockCode(_))));
     }
 
     #[test]

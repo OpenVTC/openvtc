@@ -7,12 +7,13 @@ use chrono::Utc;
 use ed25519_dalek_bip32::ExtendedSigningKey;
 use openvtc_core::{
     config::{
-        Config, ConfigProtectionType, ExportedConfig, KeyBackend, KeyTypes,
+        Config, ConfigProtectionType, ExportedConfig, KeyBackend, KeyTypes, MIN_PASSPHRASE_LENGTH,
         account::{Account, KeyRef, PersonaId, PersonaRecord},
         derive_passphrase_key,
         protected_config::ProtectedConfig,
         public_config::PublicConfig,
         secured_config::{KeyInfoConfig, ProtectionMethod, passphrase_decrypt},
+        validate_passphrase,
     },
     identity::IdentityContext,
     logs::{LogFamily, LogMessage, Logs},
@@ -190,6 +191,17 @@ impl ConfigExtension for Config {
                 bail!("deserialization error");
             }
         };
+
+        // A profile protected by an unlock code is opened only by a code of the
+        // minimum length; saving it under a shorter one would lock it for good.
+        if matches!(config.pc.protection, ConfigProtectionType::Encrypted)
+            && validate_passphrase(new_unlock_passphrase.expose_secret()).is_err()
+        {
+            bail!(
+                "This backup is protected by an unlock code. Enter a new unlock code of at \
+                 least {MIN_PASSPHRASE_LENGTH} characters for this profile."
+            );
+        }
 
         let bip32_seed = config
             .sc

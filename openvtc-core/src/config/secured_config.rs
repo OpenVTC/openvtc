@@ -970,6 +970,23 @@ mod tests {
         }
     }
 
+    /// A short code set by a release that did not enforce the minimum still
+    /// opens its profile; `from_string` refuses it before trying.
+    #[test]
+    fn a_short_existing_code_still_unlocks() {
+        let unlock = UnlockCode::for_existing("hunter").unwrap();
+        let key = unlock.0.expose_secret().first_chunk::<32>().unwrap();
+        let blob = SecuredConfigFormat::PasswordEncrypted {
+            data: BASE64_URL_SAFE_NO_PAD.encode(unlock_code_encrypt(key, b"{}").unwrap()),
+        };
+        assert!(UnlockCode::from_string("hunter").is_err());
+        assert_eq!(
+            blob.check_unlock_code(&UnlockCode::for_existing("hunter").unwrap())
+                .unwrap(),
+            UnlockCodeCheck::Accepted
+        );
+    }
+
     /// The unlock prompt relies on this to count a wrong code of full length
     /// as a failed attempt. `UnlockCode::from_string` accepts any such code,
     /// so without it the prompt's attempt limit and backoff never applied.

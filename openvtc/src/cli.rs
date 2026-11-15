@@ -37,6 +37,10 @@ pub fn cli() -> Command {
             Arg::new("profile")
                 .short('p')
                 .long("profile")
+                // Global, so `openvtc health --profile work` works as well as
+                // `openvtc --profile work health` — the diagnostics print the
+                // former.
+                .global(true)
                 .help("Config profile to use")
                 .default_value("default"),
             Arg::new("monochrome")
@@ -179,6 +183,86 @@ pub fn get_user_pin() -> anyhow::Result<SecretString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `openvtc …` command the startup diagnostics tell a user to run
+    /// must be one this CLI accepts. They are read when something is already
+    /// broken; a hint that clap rejects sends the user further astray.
+    #[test]
+    fn every_command_the_diagnostics_suggest_parses() {
+        use openvtc_core::{
+            diagnostics::{DiagnosisContext, diagnose},
+            errors::{OpenVTCError, SecureStoreFault},
+        };
+
+        let store = |fault| OpenVTCError::SecureStore {
+            fault,
+            profile: "work".into(),
+            detail: "x".into(),
+        };
+        let errors = [
+            store(SecureStoreFault::Missing),
+            store(SecureStoreFault::Unavailable),
+            store(SecureStoreFault::Ambiguous),
+            store(SecureStoreFault::Corrupt),
+            store(SecureStoreFault::Rejected),
+            OpenVTCError::Decrypt("x".into()),
+            OpenVTCError::ConfigNotFound("x".into(), std::io::Error::other("x")),
+            OpenVTCError::ConfigVersionUnsupported {
+                found: 1,
+                expected: 2,
+            },
+            OpenVTCError::Vta("x".into()),
+            OpenVTCError::Auth("x".into()),
+            OpenVTCError::Resolver("x".into()),
+            OpenVTCError::Config("x".into()),
+        ];
+
+        let mut commands = Vec::new();
+        for err in &errors {
+            let d = diagnose(err, &DiagnosisContext::new("work"));
+            commands.extend(
+                d.checks
+                    .iter()
+                    .filter(|c| c.starts_with("openvtc "))
+                    .cloned(),
+            );
+            for text in d.remedies.iter().chain([&d.cause, &d.headline]) {
+                // Backticked spans: every odd-numbered piece.
+                for span in text.split('`').skip(1).step_by(2) {
+                    if span == "openvtc" || span.starts_with("openvtc ") {
+                        commands.push(span.to_string());
+                    }
+                }
+            }
+        }
+        assert!(!commands.is_empty(), "no commands found to check");
+        for command in commands {
+            // Drop a trailing shell comment, then split on whitespace (no
+            // quoting is used in these hints).
+            let words: Vec<&str> = command
+                .split('#')
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .collect();
+            assert!(
+                cli().try_get_matches_from(&words).is_ok(),
+                "diagnostics suggest `{command}`, which the CLI rejects"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_is_accepted_before_or_after_a_subcommand() {
+        for args in [
+            &["openvtc", "--profile", "work", "health"][..],
+            &["openvtc", "health", "--profile", "work"][..],
+        ] {
+            // `resolve_profile` reads the top-level matches.
+            let m = cli().try_get_matches_from(args).unwrap();
+            assert_eq!(m.get_one::<String>("profile").unwrap(), "work");
+        }
+    }
 
     /// `--monochrome` is a global switch: accepted before or after a
     /// subcommand, and off unless given.

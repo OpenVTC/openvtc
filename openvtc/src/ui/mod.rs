@@ -213,8 +213,7 @@ fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     // mode on the alternate screen.
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = reset_terminal(&mut io::stdout());
         original_hook(info);
     }));
 
@@ -225,15 +224,21 @@ fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
+    reset_terminal(terminal.backend_mut())
+}
+
+/// Undoes everything `setup_terminal` turned on. The normal exit and the panic
+/// hook both use it, so a panic no longer leaves bracketed paste on or the
+/// cursor hidden.
+fn reset_terminal(out: &mut impl io::Write) -> anyhow::Result<()> {
     disable_raw_mode()?;
-
     execute!(
-        terminal.backend_mut(),
+        out,
         LeaveAlternateScreen,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        crossterm::cursor::Show
     )?;
-
-    Ok(terminal.show_cursor()?)
+    Ok(())
 }
 
 #[cfg(test)]
