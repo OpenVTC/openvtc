@@ -1806,6 +1806,13 @@ impl StateHandler {
                             let vtc_did = if openvtc_core::agent_name::looks_like_agent_name(
                                 &vtc_did,
                             ) {
+                                // Say what the wait is for: a name costs a
+                                // redirect, a resolve and a check (bounded by
+                                // IDENTIFIER_RESOLVE_TIMEOUT).
+                                state.join.messages.push(MessageType::Info(format!(
+                                    "Resolving {vtc_did}…"
+                                )));
+                                let _ = self.state_tx.send(state.clone());
                                 match openvtc_core::agent_name::resolve_identifier(
                                     tdk.did_resolver(),
                                     &vtc_did,

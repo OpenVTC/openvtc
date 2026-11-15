@@ -36,6 +36,7 @@ pub mod display;
 pub mod dtg;
 pub mod elections;
 pub mod errors;
+mod foreign_http;
 pub mod forge_credential;
 pub mod git_ns;
 pub mod git_signing;

@@ -2140,20 +2140,27 @@ pub async fn send_message_via(
     // Pack as the sending identity. `MessageTransport::send` takes already-packed
     // bytes — packing is the protocol's concern, not the transport's — so this
     // needs that identity's own ATM, which is why the wire is kept per listener.
-    let packed = {
+    //
+    // The ATM and DID are cloned out and the guard dropped before packing:
+    // `pack_encrypted` can resolve the recipient over the network, and holding
+    // the read lock across that would park every later reader — the main loop
+    // included — behind any queued writer (tokio's RwLock is write-preferring;
+    // R1.3).
+    let (atm, from_did) = {
         let identities = service.inner.identities.read().await;
         let wire = identities
             .get(listener_id)
             .ok_or_else(|| MessagingError::UnknownListener(listener_id.to_string()))?;
-        wire.atm
-            .pack_encrypted(message, to_did, Some(&wire.did), Some(&wire.did))
-            .await
-            .map_err(|e| MessagingError::Pack {
-                recipient: to_did.to_string(),
-                reason: e.to_string(),
-            })?
-            .0
+        (wire.atm.clone(), wire.did.clone())
     };
+    let packed = atm
+        .pack_encrypted(message, to_did, Some(&from_did), Some(&from_did))
+        .await
+        .map_err(|e| MessagingError::Pack {
+            recipient: to_did.to_string(),
+            reason: e.to_string(),
+        })?
+        .0;
 
     // `Guaranteed`, not `BestEffort`. The framework call this replaces
     // (`send_message_with_retry`) retried on a disconnected listener; `BestEffort`

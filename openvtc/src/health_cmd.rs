@@ -605,16 +605,26 @@ impl VtaAccess {
     }
 }
 
-/// The last path segment of a `did:webvh`, which is the part humans recognise
-/// (`…:dids.example.dev:legend-swear` → `legend-swear`). Falls back to the whole
-/// string for DID methods with no path.
+/// A short label for a DID: the last path segment of a `did:webvh` (or of the
+/// one a `did:scid` locator names), which is the part humans recognise. A
+/// `did:scid` with no locator is labelled by its SCID, a path-less `did:webvh`
+/// by its host; anything else is shown whole.
 fn short_tail(did: &str) -> String {
-    // A did:scid DID URL names its path in `?src=`; a bare one has only its SCID.
-    if let Some(src) = vta_sdk::did_scid::src(did) {
-        return src.rsplit('/').next().unwrap_or(src).to_string();
+    if let Some(tail) = openvtc_core::display::webvh_path_tail(did) {
+        return tail;
     }
-    let did = vta_sdk::did_scid::identity(did);
-    did.rsplit(':').next().unwrap_or(&did).to_string()
+    if vta_sdk::did_scid::is_scid(did)
+        && let Some(scid) = vta_sdk::did_scid::scid_of(did)
+    {
+        return scid.to_string();
+    }
+    match didwebvh_rs::url::WebVHURL::parse_did_url(did) {
+        Ok(url) => match url.port {
+            Some(port) => format!("{}:{port}", url.domain),
+            None => url.domain,
+        },
+        Err(_) => did.to_string(),
+    }
 }
 
 /// Which transport URLs this run is willing to dial.
@@ -1126,7 +1136,12 @@ mod tests {
     /// A DID with no path must not render as an empty label.
     #[test]
     fn short_tail_falls_back_for_pathless_dids() {
-        assert_eq!(short_tail("did:key:z6Mkabc"), "z6Mkabc");
+        assert_eq!(short_tail("did:key:z6Mkabc"), "did:key:z6Mkabc");
+        assert_eq!(short_tail("did:webvh:QmScid:example.com"), "example.com");
+        assert_eq!(
+            short_tail("did:webvh:QmScid:example.com%3A8443"),
+            "example.com:8443"
+        );
         assert_eq!(
             short_tail("did:scid:vh:1:QmScid?src=dids.example.dev/legend-swear"),
             "legend-swear"

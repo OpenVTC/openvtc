@@ -39,6 +39,7 @@ use crate::{
     config::{
         KeyTypes,
         account::{Account, CommunityRecord, CommunityStatus, PersonaId, PersonaRecord, VtcDid},
+        context_path::build_sub_context_id,
         secured_config::{KeyInfoConfig, KeySourceMaterial},
     },
     rebuild::RebuildPlan,
@@ -258,17 +259,20 @@ pub fn apply(plan: &RebuildPlan, keys: &[KeyCandidate], now: DateTime<Utc>) -> R
             continue;
         };
 
+        let Some(sub_context) = sub_context_id(&plan.top_context_id, &membership.vtc_did) else {
+            warn!(
+                vtc = %membership.vtc_did,
+                "rebuild: no valid sub-context id for this community — skipping"
+            );
+            continue;
+        };
         let vtc_did = VtcDid::from(membership.vtc_did.clone());
         let mut record = CommunityRecord::new_pending(
             vtc_did.clone(),
             None,
             // The sub-context naming convention; the real one is restored with
             // the rest of the soft state once E2 lands.
-            format!(
-                "{}/{}",
-                plan.top_context_id,
-                short_tail(&membership.vtc_did)
-            ),
+            sub_context,
             persona_id,
             uuid::Uuid::new_v4(),
             now,
@@ -291,13 +295,19 @@ pub fn apply(plan: &RebuildPlan, keys: &[KeyCandidate], now: DateTime<Utc>) -> R
     }
 }
 
-/// Last path segment of a DID, used to name a sub-context.
+/// The sub-context a community is rebuilt under: `<top>/<slug>`, built by
+/// [`build_sub_context_id`] so it meets the VTA's context-id rules.
 ///
-/// A did:scid names a sub-context by its SCID: the identity, never its `?src=`
-/// locator, whose `?` and `/` have no place in a context id (VTI-KEY-160).
-fn short_tail(did: &str) -> String {
-    let did = vta_sdk::did_scid::identity(did);
-    did.rsplit(':').next().unwrap_or(&did).to_string()
+/// A `did:webvh` is named by the last segment of its path; one with no path,
+/// and every `did:scid`, by its SCID — the identity, never a `?src=` locator
+/// (VTI-KEY-160). `None` when no valid id can be formed.
+fn sub_context_id(top_context_id: &str, vtc_did: &str) -> Option<String> {
+    let name = if vta_sdk::did_scid::is_scid(vtc_did) {
+        None
+    } else {
+        crate::display::webvh_path_tail(vtc_did)
+    };
+    build_sub_context_id(top_context_id, name.as_deref(), vtc_did, |_| false).ok()
 }
 
 #[cfg(test)]
@@ -308,11 +318,23 @@ mod tests {
     #[test]
     fn a_did_scid_community_names_its_sub_context_by_its_scid() {
         assert_eq!(
-            short_tail("did:scid:vh:1:QmV?src=vtc.example.com/acme"),
-            "QmV"
+            sub_context_id("top", "did:scid:vh:1:QmV?src=vtc.example.com/acme").as_deref(),
+            Some("top/qmv")
         );
-        assert_eq!(short_tail("did:scid:vh:1:QmV"), "QmV");
-        assert_eq!(short_tail(VTC), "acme");
+        assert_eq!(
+            sub_context_id("top", "did:scid:vh:1:QmV").as_deref(),
+            Some("top/qmv")
+        );
+        assert_eq!(sub_context_id("top", VTC).as_deref(), Some("top/acme"));
+    }
+
+    /// A path-less community is named by its SCID, not by `host%3Aport`.
+    #[test]
+    fn a_pathless_webvh_community_is_named_by_its_scid() {
+        assert_eq!(
+            sub_context_id("top", "did:webvh:QmV:vtc.example.com%3A8443").as_deref(),
+            Some("top/qmv")
+        );
     }
 
     const ALICE: &str = "did:webvh:QmA:example.com:alice";

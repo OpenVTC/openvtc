@@ -299,16 +299,29 @@ pub enum IdentifierError {
 /// persist the returned **DID**, never the name — a name is a mutable web
 /// redirect, and persisting one would let a redirect change silently repoint a
 /// saved identity.
+///
+/// Bounded by [`IDENTIFIER_RESOLVE_TIMEOUT`] (R1.2): a name pointing at a slow
+/// host comes back as [`IdentifierError::Unreachable`] rather than holding the
+/// caller — often the state-handler loop — for as long as the resolver's own
+/// per-step timeouts add up to.
 pub async fn resolve_identifier(
     resolver: &DIDCacheClient,
     input: &str,
 ) -> Result<String, IdentifierError> {
     let input = input.trim();
-    match resolver.resolve_any(input).await {
-        Ok(resp) => Ok(resp.did),
-        Err(e) => Err(classify(input, e)),
+    match tokio::time::timeout(IDENTIFIER_RESOLVE_TIMEOUT, resolver.resolve_any(input)).await {
+        Ok(Ok(resp)) => Ok(resp.did),
+        Ok(Err(e)) => Err(classify(input, e)),
+        Err(_) => Err(IdentifierError::Unreachable {
+            input: input.to_string(),
+        }),
     }
 }
+
+/// The most [`resolve_identifier`] waits. A name costs a redirect fetch, a DID
+/// resolve and the `alsoKnownAs` check; each is bounded by the resolver, and
+/// this bounds the whole.
+pub const IDENTIFIER_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Map a [`DIDCacheError`] onto the operator-facing [`IdentifierError`], using
 /// whether the input looked like a name to disambiguate the parse/DID buckets.

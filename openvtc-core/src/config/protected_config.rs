@@ -274,6 +274,15 @@ pub struct ProtectedConfig {
     #[serde(default)]
     pub agent_names: HashMap<String, CachedAgentName>,
 
+    /// DIDs whose cached name in [`Self::agent_names`] arrived through VTA
+    /// state sync and has not yet been verified on this device. Such a name is
+    /// not displayed (see [`Self::cached_agent_name`]) until the background
+    /// sweep has done the full round-trip here; the sweep's write clears the
+    /// mark. Local only — not projected into a sync record — so the synced
+    /// entry itself stays byte-identical and is not pushed back.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub agent_names_unverified: std::collections::BTreeSet<String>,
+
     /// Peer identity vetting: our applications, and our desk as a vetter
     /// ([`crate::vetting`]). Skipped when empty, so a config that has never
     /// vetted round-trips byte-identically.
@@ -339,6 +348,9 @@ impl ProtectedConfig {
     /// needs it before a `Config` exists.
     #[must_use]
     pub fn cached_agent_name(&self, did: &str) -> Option<&str> {
+        if self.agent_names_unverified.contains(did) {
+            return None;
+        }
         self.agent_names.get(did).and_then(|c| c.name.as_deref())
     }
 
@@ -375,6 +387,7 @@ impl Default for ProtectedConfig {
             vrcs_issued: Vrcs::default(),
             vrcs_received: Vrcs::default(),
             agent_names: HashMap::default(),
+            agent_names_unverified: std::collections::BTreeSet::new(),
             vetting: VettingBook::default(),
             seen_documents: SeenDocuments::default(),
             deferred_inbound: Vec::new(),

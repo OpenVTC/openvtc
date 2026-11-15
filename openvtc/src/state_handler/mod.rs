@@ -4273,16 +4273,6 @@ fn spawn_agent_name_job(
 
     let job = agent_name_actions::AgentNameJob {
         vta: admin_vta.clone(),
-        // The host the overlay derived from the persona's locator when it
-        // opened, which a bare did:scid cannot supply on its own.
-        host: state
-            .main_page
-            .agent_names
-            .as_ref()
-            .map(|o| o.host.clone())
-            .filter(|host| !host.is_empty())
-            .or_else(|| agent_name_manage::derive_host(&persona_did))
-            .unwrap_or_default(),
         persona_did,
         verb,
     };

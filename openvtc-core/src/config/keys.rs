@@ -240,10 +240,9 @@ impl Config {
             None
         };
 
-        // PERF: VtaManaged `get_key_secret` calls stay sequential — see the note
-        // in `regenerate_persona_keys`: concurrent fetches on a single
-        // DIDComm-backed session race on the shared live-stream cursor and can
-        // drop each other's responses.
+        // Sequential: this runs once after setup, for one persona's few keys.
+        // Concurrent fetches on one session are safe since vta-sdk demuxes
+        // replies by `thid` (see `regenerate_persona_keys`).
         for (key_id, key_info) in &self.key_info {
             if !key_id.starts_with(self.persona_did()) {
                 continue;
@@ -330,102 +329,19 @@ impl Config {
         // Rehydrate DID keys referenced by Verification Methods in the DID
         // Document.
         //
-        // PERF: the VtaManaged `get_key_secret` round-trips below are kept
-        // SEQUENTIAL on purpose. When `vta_client` is DIDComm-backed (the
-        // default for a VTA backend), all cloned `VtaClient`s share ONE
-        // `Arc<ATM>`/`Arc<ATMProfile>` and therefore ONE WebSocket live-stream
-        // cursor. `vta_sdk`'s `send_and_wait` reads that cursor with
-        // `live_stream_next` and DROPS (`continue`) any message whose `thid`
-        // doesn't match the request it is waiting on — so two concurrent
-        // fetches on the same session race: one can consume and discard the
-        // other's response, making that fetch time out. Parallelising here
-        // would risk dropped persona keys at startup. (REST-backed sessions
-        // would be safe, but the transport isn't known here.) See
-        // `vta-sdk/src/didcomm_session.rs::send_and_wait`.
-        for vm in &doc.verification_method {
-            let Some(kp) = sc.key_info.get(vm.id.as_str()) else {
-                // The account knows about this persona but the secured config
-                // has no key for it: the two halves of a save disagree.
-                warn!(
-                    key_id = %vm.id,
-                    "no key material recorded for this verification method"
-                );
-                return Err(DegradedReason::MissingKeyInfo {
-                    key_id: vm.id.to_string(),
-                });
-            };
-
-            // need to match this to VM purpose
-            let k_purpose = if doc.contains_key_agreement(vm.id.as_str()) {
-                KeyPurpose::Encryption
-            } else if doc.contains_authentication(vm.id.as_str()) {
-                KeyPurpose::Authentication
-            } else if doc.contains_assertion_method(vm.id.as_str()) {
-                KeyPurpose::Signing
-            } else {
-                warn!("Unknown DID VM ({}) found", vm.id);
-                continue;
-            };
-
-            let mut secret = match &kp.path {
-                KeySourceMaterial::Derived { path } => {
-                    let KeyBackend::Bip32 { root, .. } = key_backend else {
-                        return Err(DegradedReason::KeyUnavailable {
-                            detail: "a derived key needs the BIP32 backend, but this account \
-                                     uses VTA-managed keys"
-                                .to_string(),
-                        });
-                    };
-                    root.get_secret_from_path(path, k_purpose).map_err(|e| {
-                        DegradedReason::KeyUnavailable {
-                            detail: format!("could not derive {path}: {e}"),
-                        }
-                    })?
-                }
-                KeySourceMaterial::Imported { seed } => {
-                    Secret::from_multibase(seed.expose_secret(), None).map_err(|e| {
-                        DegradedReason::KeyUnavailable {
-                            detail: format!("stored key material is not valid multibase: {e}"),
-                        }
-                    })?
-                }
-                KeySourceMaterial::VtaManaged { key_id } => {
-                    // Use pre-authenticated VTA client
-                    let client = vta_client.ok_or_else(|| DegradedReason::KeyUnavailable {
-                        detail: "this persona's keys are held by the VTA, and no VTA session \
-                                 is open"
-                            .to_string(),
-                    })?;
-
-                    let key_secret = client.get_key_secret(key_id).await.map_err(|e| {
-                        // The VTA answered and said no: a different fault from
-                        // not reaching it, and one a restart does not clear.
-                        if matches!(
-                            e,
-                            VtaError::Forbidden(_) | VtaError::NotFound(_) | VtaError::Gone(_)
-                        ) {
-                            DegradedReason::KeyNotAccessible {
-                                detail: format!("key {key_id}: {e}"),
-                            }
-                        } else {
-                            DegradedReason::KeyUnavailable {
-                                detail: format!("the VTA would not return key {key_id}: {e}"),
-                            }
-                        }
-                    })?;
-
-                    secret_from_vta_response(&key_secret, k_purpose).map_err(|e| {
-                        DegradedReason::KeyUnavailable {
-                            detail: format!("the VTA returned an unusable key {key_id}: {e}"),
-                        }
-                    })?
-                }
-            };
-
-            // Set the Secret key ID correctly
-            secret.id = vm.id.to_string();
-
-            // Load the secret into the TDK Secrets resolver
+        // The VTA round-trips run concurrently on the one session: vta-sdk's
+        // DIDComm session demuxes each reply to its own waiter by `thid`
+        // (`didcomm_session.rs`, the F5 fix), so concurrent `get_key_secret`s no
+        // longer consume each other's answers. A persona's keys are a handful,
+        // so the fan-out is small. Nothing is inserted unless every key loads,
+        // which leaves no half-keyed persona behind.
+        let secrets = futures_util::future::try_join_all(
+            doc.verification_method
+                .iter()
+                .map(|vm| secret_for_vm(sc, key_backend, doc, vm, vta_client)),
+        )
+        .await?;
+        for secret in secrets.into_iter().flatten() {
             tdk.get_shared_state()
                 .secrets_resolver()
                 .insert(secret)
@@ -433,6 +349,96 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// The private key for one verification method of `doc`, from wherever the
+/// account keeps it. `Ok(None)` for a method of no purpose this client uses.
+async fn secret_for_vm(
+    sc: &SecuredConfig,
+    key_backend: &KeyBackend,
+    doc: &Document,
+    vm: &affinidi_tdk::did_common::verification_method::VerificationMethod,
+    vta_client: Option<&vta_sdk::client::VtaClient>,
+) -> Result<Option<Secret>, DegradedReason> {
+    let Some(kp) = sc.key_info.get(vm.id.as_str()) else {
+        // The account knows about this persona but the secured config
+        // has no key for it: the two halves of a save disagree.
+        warn!(
+            key_id = %vm.id,
+            "no key material recorded for this verification method"
+        );
+        return Err(DegradedReason::MissingKeyInfo {
+            key_id: vm.id.to_string(),
+        });
+    };
+
+    // need to match this to VM purpose
+    let k_purpose = if doc.contains_key_agreement(vm.id.as_str()) {
+        KeyPurpose::Encryption
+    } else if doc.contains_authentication(vm.id.as_str()) {
+        KeyPurpose::Authentication
+    } else if doc.contains_assertion_method(vm.id.as_str()) {
+        KeyPurpose::Signing
+    } else {
+        warn!("Unknown DID VM ({}) found", vm.id);
+        return Ok(None);
+    };
+
+    let mut secret = match &kp.path {
+        KeySourceMaterial::Derived { path } => {
+            let KeyBackend::Bip32 { root, .. } = key_backend else {
+                return Err(DegradedReason::KeyUnavailable {
+                    detail: "a derived key needs the BIP32 backend, but this account \
+                                 uses VTA-managed keys"
+                        .to_string(),
+                });
+            };
+            root.get_secret_from_path(path, k_purpose).map_err(|e| {
+                DegradedReason::KeyUnavailable {
+                    detail: format!("could not derive {path}: {e}"),
+                }
+            })?
+        }
+        KeySourceMaterial::Imported { seed } => Secret::from_multibase(seed.expose_secret(), None)
+            .map_err(|e| DegradedReason::KeyUnavailable {
+                detail: format!("stored key material is not valid multibase: {e}"),
+            })?,
+        KeySourceMaterial::VtaManaged { key_id } => {
+            // Use pre-authenticated VTA client
+            let client = vta_client.ok_or_else(|| DegradedReason::KeyUnavailable {
+                detail: "this persona's keys are held by the VTA, and no VTA session \
+                             is open"
+                    .to_string(),
+            })?;
+
+            let key_secret = client.get_key_secret(key_id).await.map_err(|e| {
+                // The VTA answered and said no: a different fault from
+                // not reaching it, and one a restart does not clear.
+                if matches!(
+                    e,
+                    VtaError::Forbidden(_) | VtaError::NotFound(_) | VtaError::Gone(_)
+                ) {
+                    DegradedReason::KeyNotAccessible {
+                        detail: format!("key {key_id}: {e}"),
+                    }
+                } else {
+                    DegradedReason::KeyUnavailable {
+                        detail: format!("the VTA would not return key {key_id}: {e}"),
+                    }
+                }
+            })?;
+
+            secret_from_vta_response(&key_secret, k_purpose).map_err(|e| {
+                DegradedReason::KeyUnavailable {
+                    detail: format!("the VTA returned an unusable key {key_id}: {e}"),
+                }
+            })?
+        }
+    };
+
+    // Set the Secret key ID correctly
+    secret.id = vm.id.to_string();
+    Ok(Some(secret))
 }
 
 /// Converts a VTA `GetKeySecretResponse` into a TDK `Secret`.

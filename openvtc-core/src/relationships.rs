@@ -39,6 +39,9 @@ use uuid::Uuid;
 // Relationship Structures
 // ****************************************************************************
 
+/// How many relationship keys are fetched from the VTA at once at startup.
+const VTA_KEY_FETCH_CONCURRENCY: usize = 8;
+
 /// State machine for the lifecycle of a relationship between two parties.
 #[derive(Clone, Debug, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RelationshipState {
@@ -462,19 +465,26 @@ impl Relationships {
                 }
             }
 
-            // Fetch all VTA secrets concurrently — VtaClient is Clone so cloned
-            // clients share the HTTP connection pool and auth tokens.
+            // Fetch the VTA secrets concurrently — VtaClient is Clone so cloned
+            // clients share the session and auth — but at most
+            // `VTA_KEY_FETCH_CONCURRENCY` at once, so a large account does not
+            // trip the VTA's rate limits at startup (R1.4).
             if let Some(client) = vta_client
                 && !vta_fetches.is_empty()
             {
                 debug!("fetching {} VTA secrets concurrently", vta_fetches.len());
+                let permits =
+                    std::sync::Arc::new(tokio::sync::Semaphore::new(VTA_KEY_FETCH_CONCURRENCY));
                 let mut handles = Vec::with_capacity(vta_fetches.len());
                 for fetch in &vta_fetches {
                     let client = client.clone();
                     let key_id = fetch.key_id.clone();
-                    handles.push(tokio::spawn(
-                        async move { client.get_key_secret(&key_id).await },
-                    ));
+                    let permits = permits.clone();
+                    handles.push(tokio::spawn(async move {
+                        // The semaphore is never closed, so this cannot fail.
+                        let _permit = permits.acquire_owned().await;
+                        client.get_key_secret(&key_id).await
+                    }));
                 }
                 for (fetch, handle) in vta_fetches.iter().zip(handles) {
                     match handle.await {

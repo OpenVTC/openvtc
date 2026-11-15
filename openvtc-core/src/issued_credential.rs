@@ -181,9 +181,9 @@ async fn check_status(
     now: DateTime<Utc>,
 ) -> Result<(), IssuedCredentialError> {
     use crate::status_list::{StatusCheck, check_credential_status};
-    use crate::vetting::status::{STATUS_FETCH_TIMEOUT, fetch_owned, status_client};
+    use crate::vetting::status::{fetch_owned, shared_status_client};
 
-    let client = status_client(true, STATUS_FETCH_TIMEOUT).map_err(|e| {
+    let client = shared_status_client().map_err(|e| {
         debug!(reason = %e, "issued credential: no HTTP client for the status list");
         IssuedCredentialError::StatusUnknown(e)
     })?;
