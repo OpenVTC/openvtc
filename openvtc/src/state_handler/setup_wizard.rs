@@ -5,14 +5,18 @@ use crate::{
     state_handler::{
         SetupWizardExit, StateHandler,
         actions::Action,
-        setup_sequence::{Completion, MessageType, SetupPage, config::ConfigExtension},
+        setup_sequence::{
+            Completion, ConfigProtection, MessageType, SetupPage, config::ConfigExtension,
+        },
         setup_vta_actions,
         state::{ActivePage, State},
     },
 };
 use anyhow::Result;
-use openvtc_core::config::Config;
-use secrecy::SecretString;
+use std::sync::Arc;
+
+use openvtc_core::config::{Config, derive_passphrase_key_blocking};
+use secrecy::{ExposeSecret, SecretBox, SecretString};
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
 
 impl StateHandler {
@@ -51,13 +55,17 @@ impl StateHandler {
                     let import_unlock_passphrase = SecretString::new(import_unlock_passphrase.into());
                     let new_unlock_passphrase = SecretString::new(new_unlock_passphrase.into());
                     state.setup.active_page = SetupPage::ConfigImport;
-                    match Config::import(
+                    // The import runs Argon2id twice (~1 s each). `block_in_place`
+                    // hands this worker's other tasks — the render task among
+                    // them — to another thread while it does.
+                    let imported = tokio::task::block_in_place(|| Config::import(
                         state, &self.state_tx,
                         &import_unlock_passphrase,
                         &new_unlock_passphrase,
                         &filename,
                         &self.profile,
-                    ) {
+                    ));
+                    match imported {
                         Ok(()) => {
                             state.setup.config_import.completed = Completion::CompletedOK;
                             state.setup.config_import.messages.push(MessageType::Info("Configuration import completed successfully.".to_string()));
@@ -80,9 +88,29 @@ impl StateHandler {
                         state.setup.final_page.messages.push(MessageType::Error("Setup Wizard completed but no configuration was created.".to_string()));
                     }
                 },
-                Action::SetProtection(protection, next_page) => {
-                    state.setup.protection = protection;
-                    state.setup.active_page = next_page;
+                Action::SetUnlockCode(passphrase) => {
+                    // Argon2id takes ~1 s at these parameters, so it runs on
+                    // the blocking pool rather than this loop or the render task.
+                    state.setup.active_page = SetupPage::FinalPage;
+                    state.setup.final_page.messages.push(MessageType::Info("Deriving the encryption key from your unlock code...".to_string()));
+                    let _ = self.state_tx.send(state.clone());
+                    match derive_passphrase_key_blocking(
+                        passphrase.expose_secret().as_bytes().to_vec(),
+                        b"openvtc-unlock-code-v1".to_vec(),
+                    ).await {
+                        Ok(key) => {
+                            state.setup.protection = ConfigProtection::Passcode(Arc::new(SecretBox::new(Box::new(key.to_vec()))));
+                            if let Some(cfg) = self.create_account(state).await {
+                                config = Some(cfg);
+                            }
+                        }
+                        Err(e) => {
+                            // Never fall through to account creation here: the
+                            // protection is still the default (plaintext).
+                            state.setup.final_page.completed = Completion::CompletedFail;
+                            state.setup.final_page.messages.push(MessageType::Error(format!("Couldn't derive the unlock key: {e}")));
+                        }
+                    }
                 },
                 Action::VtaSubmitDid(vta_did) => {
                     setup_vta_actions::handle_vta_submit_did(state, &self.state_tx, vta_did).await?;
@@ -147,24 +175,8 @@ impl StateHandler {
                     setup_token_actions::handle_set_token_name(state, &self.state_tx, token, &name);
                 },
                 Action::SetupCompleted(_setup_flow) => {
-                    state.setup.active_page = SetupPage::FinalPage;
-                    state.setup.final_page.messages.push(MessageType::Info("Creating your account configuration...".to_string()));
-                    state.setup.final_page.messages.push(MessageType::Info("Securing sensitive data for storage...".to_string()));
-                    state.setup.final_page.messages.push(MessageType::Info("Your device may prompt for authentication to access OS secure storage.".to_string()));
-                    let _ = self.state_tx.send(state.clone());
-                    // R-A-5: setup now bootstraps a State-A account (VTA admin
-                    // credential + top-level context, no persona/community). A
-                    // persona is minted later by the State-B join flow.
-                    match Config::create_account(&state.setup, &self.profile).await {
-                        Ok(cfg) => {
-                            state.setup.final_page.completed = Completion::CompletedOK;
-                            state.setup.final_page.messages.push(MessageType::Info("Account setup completed successfully.".to_string()));
-                            config = Some(cfg);
-                        },
-                        Err(e) => {
-                            state.setup.final_page.completed = Completion::CompletedFail;
-                            state.setup.final_page.messages.push(MessageType::Error(format!("Couldn't create OpenVTC account. Reason: {e}")));
-                        }
+                    if let Some(cfg) = self.create_account(state).await {
+                        config = Some(cfg);
                     }
                 },
                 _ => {}
@@ -186,5 +198,44 @@ impl StateHandler {
         }
 
         exit
+    }
+
+    /// Creates the State-A account from the choices made in the wizard and
+    /// reports the outcome on the final page.
+    async fn create_account(&self, state: &mut State) -> Option<Config> {
+        state.setup.active_page = SetupPage::FinalPage;
+        state.setup.final_page.messages.push(MessageType::Info(
+            "Creating your account configuration...".to_string(),
+        ));
+        state.setup.final_page.messages.push(MessageType::Info(
+            "Securing sensitive data for storage...".to_string(),
+        ));
+        state.setup.final_page.messages.push(MessageType::Info(
+            "Your device may prompt for authentication to access OS secure storage.".to_string(),
+        ));
+        let _ = self.state_tx.send(state.clone());
+        // R-A-5: setup bootstraps a State-A account (VTA admin credential +
+        // top-level context, no persona/community). A persona is minted later
+        // by the State-B join flow.
+        match Config::create_account(&state.setup, &self.profile).await {
+            Ok(cfg) => {
+                state.setup.final_page.completed = Completion::CompletedOK;
+                state.setup.final_page.messages.push(MessageType::Info(
+                    "Account setup completed successfully.".to_string(),
+                ));
+                Some(cfg)
+            }
+            Err(e) => {
+                state.setup.final_page.completed = Completion::CompletedFail;
+                state
+                    .setup
+                    .final_page
+                    .messages
+                    .push(MessageType::Error(format!(
+                        "Couldn't create OpenVTC account. Reason: {e}"
+                    )));
+                None
+            }
+        }
     }
 }

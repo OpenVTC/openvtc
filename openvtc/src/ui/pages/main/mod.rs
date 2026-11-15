@@ -298,11 +298,17 @@ impl Component for MainPage {
                                     value: updated,
                                 },
                             ));
-                        } else {
+                        } else if *active_field == 1 {
                             // Passphrase field — append to secure buffer
                             self.passphrase_buffer.push_str(trimmed);
                             let _ = self.action_tx.send(Action::Settings(
                                 SettingsAction::PassphraseLen(self.passphrase_buffer.len()),
+                            ));
+                        } else {
+                            // Export's confirmation field
+                            self.confirm_buffer.push_str(trimmed);
+                            let _ = self.action_tx.send(Action::Settings(
+                                SettingsAction::ExportConfirmLen(self.confirm_buffer.len()),
                             ));
                         }
                     }
@@ -372,6 +378,23 @@ impl Component for MainPage {
             }
             _ => {}
         }
+    }
+}
+
+/// Why a new passphrase and its confirmation cannot be submitted, if they
+/// cannot. Checked before anything leaves the form.
+fn passphrase_problem(passphrase: &str, confirm: &str) -> Option<String> {
+    if passphrase.is_empty() {
+        Some("Enter a passphrase.".to_string())
+    } else if openvtc_core::config::validate_passphrase(passphrase).is_err() {
+        Some(format!(
+            "Passphrases must be at least {} characters.",
+            openvtc_core::config::MIN_PASSPHRASE_LENGTH
+        ))
+    } else if passphrase != confirm {
+        Some("The passphrases do not match.".to_string())
+    } else {
+        None
     }
 }
 
@@ -2608,7 +2631,7 @@ impl MainPage {
             } => {
                 let active = *active_field;
                 let path = path_input.clone();
-                self.handle_config_form_key(key, active, path, |path, passphrase| {
+                self.handle_config_form_key(key, active, path, true, |path, passphrase| {
                     SettingsAction::ExportConfig { path, passphrase }
                 })
             }
@@ -2673,17 +2696,26 @@ impl MainPage {
                             .send(Action::Settings(SettingsAction::ProtectionTabSwitch(2)));
                         true
                     }
+                    KeyCode::Enter if active == 1 => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::ProtectionTabSwitch(2)));
+                        true
+                    }
                     KeyCode::Enter if active == 2 => {
-                        // Submit passphrase
-                        if self.passphrase_buffer == self.confirm_buffer
-                            && !self.passphrase_buffer.is_empty()
-                        {
-                            let passphrase = std::mem::take(&mut self.passphrase_buffer);
-                            self.confirm_buffer.clear();
-                            let _ = self.action_tx.send(Action::Settings(
-                                SettingsAction::SetPassphrase { passphrase },
-                            ));
-                        }
+                        // Submit passphrase — or say why not. An Enter that
+                        // silently does nothing reads as a frozen form.
+                        let action =
+                            match passphrase_problem(&self.passphrase_buffer, &self.confirm_buffer)
+                            {
+                                Some(why) => SettingsAction::FormProblem(why),
+                                None => {
+                                    let passphrase = std::mem::take(&mut self.passphrase_buffer);
+                                    self.confirm_buffer.clear();
+                                    SettingsAction::SetPassphrase { passphrase }
+                                }
+                            };
+                        let _ = self.action_tx.send(Action::Settings(action));
                         true
                     }
                     code if active >= 1 => {
@@ -2747,7 +2779,7 @@ impl MainPage {
                             1 => {
                                 let _ = self
                                     .action_tx
-                                    .send(Action::Settings(SettingsAction::TokenFactoryReset));
+                                    .send(Action::Settings(SettingsAction::TokenFactoryResetStart));
                             }
                             _ => {}
                         }
@@ -2763,7 +2795,7 @@ impl MainPage {
             } => {
                 let active = *active_field;
                 let path = path_input.clone();
-                self.handle_config_form_key(key, active, path, |path, passphrase| {
+                self.handle_config_form_key(key, active, path, false, |path, passphrase| {
                     SettingsAction::ImportConfig { path, passphrase }
                 })
             }
@@ -2842,6 +2874,21 @@ impl MainPage {
                 let _ = self.action_tx.send(Action::Settings(action));
                 true
             }
+            #[cfg(feature = "openpgp-card")]
+            SettingsMode::TokenResetConfirm { confirm_input, .. } => {
+                let current = confirm_input.clone();
+                let action = match key.code {
+                    // Back to the token screen — nothing is erased.
+                    KeyCode::Esc => SettingsAction::TokenManagement,
+                    KeyCode::Enter => SettingsAction::TokenFactoryReset,
+                    code => match edit_text(code, &current) {
+                        Some(next) => SettingsAction::TokenFactoryResetInput(next),
+                        None => return false,
+                    },
+                };
+                let _ = self.action_tx.send(Action::Settings(action));
+                true
+            }
             SettingsMode::WipeConfirm { confirm_input } => {
                 let current = confirm_input.clone();
                 match key.code {
@@ -2881,11 +2928,16 @@ impl MainPage {
         key: KeyEvent,
         active: usize,
         path: String,
+        confirm: bool,
         make_submit: impl FnOnce(String, String) -> SettingsAction,
     ) -> bool {
+        // The field Enter submits from: the confirmation on export, the
+        // passphrase on import.
+        let last = if confirm { 2 } else { 1 };
         match key.code {
             KeyCode::Esc => {
                 self.passphrase_buffer.clear();
+                self.confirm_buffer.clear();
                 let _ = self
                     .action_tx
                     .send(Action::Settings(SettingsAction::CancelEdit));
@@ -2897,11 +2949,29 @@ impl MainPage {
                     .send(Action::Settings(SettingsAction::FormTabSwitch));
                 true
             }
-            KeyCode::Enter if active == 1 => {
-                let passphrase = std::mem::take(&mut self.passphrase_buffer);
+            KeyCode::Enter if active == 1 && confirm => {
                 let _ = self
                     .action_tx
-                    .send(Action::Settings(make_submit(path, passphrase)));
+                    .send(Action::Settings(SettingsAction::FormTabSwitch));
+                true
+            }
+            KeyCode::Enter if active == last => {
+                // A typo in an export passphrase makes a backup nobody can
+                // open, discovered only when it is needed.
+                let problem = if confirm {
+                    passphrase_problem(&self.passphrase_buffer, &self.confirm_buffer)
+                } else {
+                    None
+                };
+                let action = match problem {
+                    Some(why) => SettingsAction::FormProblem(why),
+                    None => {
+                        let passphrase = std::mem::take(&mut self.passphrase_buffer);
+                        self.confirm_buffer.clear();
+                        make_submit(path, passphrase)
+                    }
+                };
+                let _ = self.action_tx.send(Action::Settings(action));
                 true
             }
             code => {
@@ -2916,20 +2986,27 @@ impl MainPage {
                         None => false,
                     }
                 } else {
+                    let buffer = if active == 1 {
+                        &mut self.passphrase_buffer
+                    } else {
+                        &mut self.confirm_buffer
+                    };
                     match code {
                         KeyCode::Backspace => {
-                            self.passphrase_buffer.pop();
+                            buffer.pop();
                         }
                         KeyCode::Char(c) => {
-                            self.passphrase_buffer.push(c);
+                            buffer.push(c);
                         }
                         _ => return false,
                     }
-                    let _ = self
-                        .action_tx
-                        .send(Action::Settings(SettingsAction::PassphraseLen(
-                            self.passphrase_buffer.len(),
-                        )));
+                    let len = buffer.len();
+                    let action = if active == 1 {
+                        SettingsAction::PassphraseLen(len)
+                    } else {
+                        SettingsAction::ExportConfirmLen(len)
+                    };
+                    let _ = self.action_tx.send(Action::Settings(action));
                     true
                 }
             }
@@ -3427,6 +3504,8 @@ fn view_id(page: &MainPageState) -> String {
             SettingsMode::ChangeProtection { .. } => "protect",
             #[cfg(feature = "openpgp-card")]
             SettingsMode::TokenManagement { .. } => "token",
+            #[cfg(feature = "openpgp-card")]
+            SettingsMode::TokenResetConfirm { .. } => "token-reset",
             SettingsMode::WipeConfirm { .. } => "wipe",
             SettingsMode::ThemePicker { .. } => "theme",
         },

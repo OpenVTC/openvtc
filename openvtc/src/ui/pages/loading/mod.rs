@@ -468,7 +468,7 @@ impl LoadingScreen {
                 );
                 advice.push(
                     "If you have an encrypted export from before the interruption, restoring \
-                     it (Settings -> Import / Restore Backup) is the way to get the persona \
+                     it (Settings -> Import Config) is the way to get the persona \
                      back."
                         .to_string(),
                 );

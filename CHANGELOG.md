@@ -15,6 +15,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Setup and backup import refuse an unlock code shorter than 8 characters**
+  ([#574](https://github.com/OpenVTC/openvtc/issues/574)). Every unlock path already
+  required 8, so a profile set up with a shorter code could never be opened again. A
+  profile that already has a short code now unlocks, with a prompt to set a longer
+  one under Settings -> Protection.
+- **Setting an unlock code no longer freezes the screen**
+  ([#563](https://github.com/OpenVTC/openvtc/issues/563)). The ~1 s key derivation in
+  setup and backup import now runs off the render task.
+- **Hardware-token Factory Reset asks first** ([#575](https://github.com/OpenVTC/openvtc/issues/575)).
+  It names the card (identifier and manufacturer), warns when that card protects the
+  profile, and erases it only after `RESET` is typed. With more than one card connected
+  it refuses rather than picking one.
+- **Failure messages are no longer drawn in success green**
+  ([#577](https://github.com/OpenVTC/openvtc/issues/577)). A status message worded as a
+  failure ("Couldn't …", "… unavailable", "… not available", …) is red; any other message
+  uses the plain text colour instead of green.
+- **Export asks for the passphrase twice; passphrase forms say why Enter did nothing**
+  ([#586](https://github.com/OpenVTC/openvtc/issues/586)). Export Config has a
+  confirmation field, and Export and Change Protection report an empty, short or
+  mismatched passphrase instead of ignoring Enter. The Import form's footer no longer
+  says "export".
+- **Startup diagnostics name commands that exist**
+  ([#581](https://github.com/OpenVTC/openvtc/issues/581)): `openvtc setup` (not
+  `--setup`), Restore Backup in setup, and Settings -> Protection. `--profile` is now
+  accepted after a subcommand too (`openvtc health --profile work`).
+- **`openvtc health --json` writes only JSON to stdout**
+  ([#583](https://github.com/OpenVTC/openvtc/issues/583)). The profile notices go to
+  stderr. The interactive interface no longer starts when stdin or stdout is not a
+  terminal; it points at the headless commands instead.
+- **SIGTERM and SIGHUP shut down like F10** ([#587](https://github.com/OpenVTC/openvtc/issues/587)):
+  the terminal is restored, the last change saved and the profile lock released. A panic
+  now also turns bracketed paste off and shows the cursor again. F10 is heard on the
+  join screen while a DID resolves. A quit you asked for no longer prints "exited per user
+  request"; other exits explain themselves on stderr.
 - **Peer messages are handled only as the sender the transport authenticated.** The
   inbound dispatcher used to fall back to a message's `from` header when the transport
   bound no sender to it (anoncrypt DIDComm, or an authcrypt whose `from` its sealing key

@@ -14,6 +14,7 @@ use openvtc_core::{
         Config, ConfigProtectionType, MIN_PASSPHRASE_LENGTH, UnlockCode,
         public_config::PublicConfig,
         secured_config::{SecuredConfig, UnlockCodeCheck},
+        validate_passphrase,
     },
     errors::OpenVTCError,
     process_lock::{check_duplicate_instance, remove_lock_file},
@@ -397,17 +398,17 @@ fn resolve_profile(matches: &clap::ArgMatches) -> Result<String> {
     let profile = if let Ok(env_profile) = env::var("OPENVTC_CONFIG_PROFILE") {
         // ENV Profile will override the CLI Argument
         if cli_profile != "default" && cli_profile != env_profile {
-            println!("{}",
+            eprintln!("{}",
                 style("WARNING: Using both ENV OPENVTC_CONFIG_PROFILE and CLI profile! These do not match!").themed(CLI_CAUTION)
             );
-            println!(
+            eprintln!(
                 "{} {}",
                 style("WARNING: Using CLI Profile:").themed(CLI_CAUTION),
                 style(&cli_profile).themed(CLI_EXAMPLE)
             );
             cli_profile
         } else {
-            println!(
+            eprintln!(
                 "{}{}{}",
                 style("Using profile (").themed(CLI_INFO),
                 style(&env_profile).themed(CLI_EXAMPLE),
@@ -620,6 +621,21 @@ async fn main() -> Result<()> {
         return result;
     }
 
+    // Everything past here is interactive: the unlock prompt and the TUI. With
+    // stdout redirected the TUI's escape sequences would land in the file, and
+    // with stdin redirected nothing could answer it.
+    {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            remove_lock_file(&lock_file);
+            bail!(
+                "the interactive interface needs a terminal on stdin and stdout. For scripted \
+                 use, run a headless command: `openvtc setup`, `openvtc health`, \
+                 `openvtc community join` or `openvtc repo` (see `openvtc --help`)"
+            );
+        }
+    }
+
     let mut starting_mode = StartingMode::NotSet;
 
     // Is there a CLI command to force setup wizard?
@@ -733,20 +749,18 @@ async fn main() -> Result<()> {
     )
     .await?;
 
+    // A quit the user asked for needs no explanation; anything else does, on
+    // stderr so it never mixes with command output.
     match interrupt_rx.recv().await {
-        Ok(reason) => match reason {
-            Interrupted::UserInt => println!("exited per user request"),
-            Interrupted::OsSigInt => println!("exited because of an os sig int"),
-            Interrupted::SystemError(reason) => {
-                println!(
-                    "exited because of a system error: {}",
-                    redact_paths(&reason)
-                )
-            }
-        },
-        _ => {
-            println!("exited because of an unexpected error");
+        Ok(Interrupted::UserInt) => {}
+        Ok(Interrupted::OsSignal(name)) => eprintln!("exited on {name}"),
+        Ok(Interrupted::SystemError(reason)) => {
+            eprintln!(
+                "exited because of a system error: {}",
+                redact_paths(&reason)
+            )
         }
+        Err(_) => eprintln!("exited because of an unexpected error"),
     }
 
     remove_lock_file(&lock_file);
@@ -759,7 +773,8 @@ async fn main() -> Result<()> {
 
 #[derive(Debug, Clone)]
 pub enum Interrupted {
-    OsSigInt,
+    /// SIGINT, SIGTERM or SIGHUP, by name.
+    OsSignal(&'static str),
     UserInt,
     SystemError(String),
 }
@@ -866,19 +881,38 @@ where
     Ok(())
 }
 
+/// Turns SIGINT, SIGTERM and SIGHUP into the same graceful shutdown as F10:
+/// the terminal is restored, the last change saved and the profile lock
+/// released. Without SIGTERM and SIGHUP, `kill` or a dropped SSH session left
+/// the terminal in raw mode and the lock file behind.
 #[cfg(unix)]
 async fn terminate_by_unix_signal(mut terminator: Terminator) {
-    let mut interrupt_signal = match signal(tokio::signal::unix::SignalKind::interrupt()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Failed to create interrupt signal stream: {e}");
-            return;
+    use tokio::signal::unix::{Signal, SignalKind};
+
+    fn listen(kind: SignalKind, name: &str) -> Option<Signal> {
+        signal(kind)
+            .inspect_err(|e| tracing::error!("Failed to listen for {name}: {e}"))
+            .ok()
+    }
+    /// Waits on a stream that may not exist; a missing one never fires.
+    async fn next(stream: &mut Option<Signal>) -> Option<()> {
+        match stream {
+            Some(s) => s.recv().await,
+            None => std::future::pending().await,
         }
+    }
+
+    let mut int = listen(SignalKind::interrupt(), "SIGINT");
+    let mut term = listen(SignalKind::terminate(), "SIGTERM");
+    let mut hup = listen(SignalKind::hangup(), "SIGHUP");
+    let name = tokio::select! {
+        Some(()) = next(&mut int) => "SIGINT",
+        Some(()) = next(&mut term) => "SIGTERM",
+        Some(()) = next(&mut hup) => "SIGHUP",
+        else => return,
     };
 
-    interrupt_signal.recv().await;
-
-    if let Err(e) = terminator.terminate(Interrupted::OsSigInt) {
+    if let Err(e) = terminator.terminate(Interrupted::OsSignal(name)) {
         tracing::error!("Failed to send interrupt signal: {e}");
     }
 }
@@ -936,13 +970,17 @@ fn prompt_unlock_code(profile: &str) -> Result<UnlockCode, OpenVTCError> {
                 eprintln!("Failed to read passphrase input: {e}");
                 OpenVTCError::Config(format!("Passphrase input failed: {e}"))
             })?;
-        let problem = match UnlockCode::from_string(&input) {
-            Ok(code) if !unlock_code_rejected(profile, &code) => return Ok(code),
-            Ok(_) => "That unlock code didn't work.".to_string(),
-            Err(_) => format!(
+        let code = UnlockCode::for_existing(&input)?;
+        let problem = if !unlock_code_rejected(profile, &code) {
+            warn_if_short_unlock_code(&input);
+            return Ok(code);
+        } else if validate_passphrase(&input).is_err() {
+            format!(
                 "That code is too short. Unlock codes are at least \
                  {MIN_PASSPHRASE_LENGTH} characters."
-            ),
+            )
+        } else {
+            "That unlock code didn't work.".to_string()
         };
         let remaining = MAX_UNLOCK_ATTEMPTS - attempt;
         if remaining == 0 {
@@ -958,6 +996,22 @@ fn prompt_unlock_code(profile: &str) -> Result<UnlockCode, OpenVTCError> {
         );
     }
     Err(OpenVTCError::UnlockCodeRejected)
+}
+
+/// A short code that still opened the profile was set by a release that did
+/// not enforce the minimum. It is accepted so the profile is not locked out,
+/// and the user is asked to replace it.
+fn warn_if_short_unlock_code(code: &str) {
+    if validate_passphrase(code).is_err() {
+        eprintln!(
+            "{}",
+            style(format!(
+                "Your unlock code is shorter than {MIN_PASSPHRASE_LENGTH} characters. Set a \
+                 longer one under Settings -> Protection."
+            ))
+            .themed(CLI_CAUTION)
+        );
+    }
 }
 
 /// True only when the stored config is passphrase-protected and `code` does not
@@ -1018,7 +1072,7 @@ fn load_fast(
                         .themed(CLI_CAUTION)
                     );
                 }
-                let code = UnlockCode::from_string(&supplied.passphrase)?;
+                let code = UnlockCode::for_existing(&supplied.passphrase)?;
                 if unlock_code_rejected(profile, &code) {
                     eprintln!(
                         "{}",
@@ -1027,6 +1081,7 @@ fn load_fast(
                     eprint_unlock_recovery_hint(profile);
                     return Err(OpenVTCError::UnlockCodeRejected);
                 }
+                warn_if_short_unlock_code(&supplied.passphrase);
                 Some(code)
             } else {
                 Some(prompt_unlock_code(profile)?)
@@ -1131,14 +1186,17 @@ mod tests {
         let ui = ui_until_interrupted(rx.resubscribe());
         let mut inner = terminator.clone();
         let handler = async move {
-            inner.terminate(Interrupted::OsSigInt)?;
-            Ok(Interrupted::OsSigInt)
+            inner.terminate(Interrupted::OsSignal("SIGINT"))?;
+            Ok(Interrupted::OsSignal("SIGINT"))
         };
 
         run_session(handler, ui, terminator, Duration::from_secs(5))
             .await
             .expect("a clean stop");
-        assert!(matches!(rx.recv().await, Ok(Interrupted::OsSigInt)));
+        assert!(matches!(
+            rx.recv().await,
+            Ok(Interrupted::OsSignal("SIGINT"))
+        ));
         assert!(
             rx.try_recv().is_err(),
             "nothing was sent after the handler's own reason"

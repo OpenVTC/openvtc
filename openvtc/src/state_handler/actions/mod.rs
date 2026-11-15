@@ -3,17 +3,13 @@ use std::sync::Arc;
 
 #[cfg(feature = "openpgp-card")]
 use openpgp_card::{Card, state::Open};
-#[cfg(feature = "openpgp-card")]
 use secrecy::SecretString;
 #[cfg(feature = "openpgp-card")]
 use tokio::sync::Mutex;
 
 use crate::{
     Interrupted,
-    state_handler::{
-        main_page::{MainPanel, menu::MainMenu},
-        setup_sequence::{ConfigProtection, SetupPage},
-    },
+    state_handler::main_page::{MainPanel, menu::MainMenu},
     ui::pages::setup_flow::SetupFlow,
 };
 
@@ -188,6 +184,10 @@ pub enum SettingsAction {
     ProtectionConfirmLen(usize),
     ProtectionTabSwitch(usize),
     PassphraseLen(usize),
+    /// Length of the export form's confirmation field.
+    ExportConfirmLen(usize),
+    /// Why the open passphrase form was not submitted; shown in the form.
+    FormProblem(String),
     SubmitEdit {
         value: String,
     },
@@ -219,6 +219,13 @@ pub enum SettingsAction {
     TokenManagement,
     #[cfg(feature = "openpgp-card")]
     TokenDetect,
+    /// Open the factory-reset confirmation for the one connected card.
+    #[cfg(feature = "openpgp-card")]
+    TokenFactoryResetStart,
+    /// Update the live "type RESET to confirm" input.
+    #[cfg(feature = "openpgp-card")]
+    TokenFactoryResetInput(String),
+    /// Confirmed: erase the card named in the confirmation.
     #[cfg(feature = "openpgp-card")]
     TokenFactoryReset,
     #[cfg(feature = "openpgp-card")]
@@ -1122,10 +1129,10 @@ pub enum Action {
     /// Filename, config_unlock_passphrase, new_unlock_passphrase
     ImportConfig(String, String, String),
 
-    /// How is the Config file protected?
-    /// 1. Send the Protection Method
-    /// 2. The next page to render
-    SetProtection(ConfigProtection, SetupPage),
+    /// The unlock code chosen in the setup wizard, already checked against
+    /// the minimum length. The handler derives the key on the blocking pool,
+    /// records it as the protection, and creates the account.
+    SetUnlockCode(SecretString),
 
     // ************************************************************************
     // VTA Actions
