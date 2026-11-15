@@ -1,5 +1,8 @@
 use super::*;
+use crate::state_handler::community_request::send_failed;
+use crate::state_handler::main_page::elections::Pending;
 use openvtc_core::elections::{Refusal, TicketRequest};
+use openvtc_core::pending_replies::ReplyKind;
 use serde_json::{Value, json};
 
 const VTC: &str = "did:key:zVtc";
@@ -588,13 +591,16 @@ fn an_answer_taken_or_failed_is_no_longer_awaited_at_the_gate() {
     arm(&mut state, Purpose::List);
     pending.record("t1", VTC, election);
     let persona = view(&mut state).persona;
-    ElectionsOutcome {
-        vtc_did: VTC.into(),
-        persona,
-        thid: "t1".into(),
-        result: Err("unreachable".into()),
-    }
-    .apply(&mut state, &mut pending);
+    send_failed::<Elections>(
+        &mut state,
+        &mut pending,
+        SendOutcome {
+            vtc_did: VTC.into(),
+            persona,
+            thid: "t1".into(),
+            result: Err("unreachable".into()),
+        },
+    );
     assert!(!pending.is_awaited(ReplyKind::ElectionAnswer, VTC, "t1"));
     assert!(view(&mut state).pending.is_none());
 }

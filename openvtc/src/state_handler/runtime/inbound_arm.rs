@@ -291,14 +291,18 @@ impl Runtime {
                 if !git_ns_replies.is_empty()
                     && repos_actions::apply_replies(state, config, git_ns_replies)
                 {
-                    repos_actions::Loop {
-                        state,
-                        config,
-                        tdk,
-                        dispatch_tx,
-                        in_flight,
-                    }
-                    .refresh(true)
+                    repos_actions::refresh(
+                        &mut repos_actions::Loop {
+                            state,
+                            config,
+                            tdk,
+                            vta: admin_vta.as_ref(),
+                            dispatch_tx,
+                            in_flight,
+                            pending_replies,
+                        },
+                        true,
+                    )
                     .await;
                 }
                 // The answer names the repositories to look for
@@ -306,7 +310,9 @@ impl Runtime {
                 repos_workspace::probe_if_due(state, dispatch_tx, in_flight);
                 // Data-room answers for the Rooms panel; each may call for the
                 // next step of a refresh or an acceptance.
-                if !rooms_replies.is_empty() && rooms_actions::apply_replies(state, rooms_replies) {
+                if !rooms_replies.is_empty()
+                    && rooms_actions::apply_replies(state, pending_replies, rooms_replies)
+                {
                     rooms_actions::advance(&mut rooms_actions::Loop {
                         state,
                         config,
@@ -314,6 +320,7 @@ impl Runtime {
                         vta: admin_vta.as_ref(),
                         dispatch_tx,
                         in_flight,
+                        pending_replies,
                     })
                     .await;
                 }

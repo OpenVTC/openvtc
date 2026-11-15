@@ -330,11 +330,11 @@ pub(crate) enum DispatchOutcome {
         info: Option<crate::state_handler::main_page::content::DidGitSignInfo>,
     },
     /// A `vtc/rooms/*` request was sent to a community (or failed to send).
-    Rooms(crate::state_handler::rooms_actions::RoomsOutcome),
+    Rooms(crate::state_handler::community_request::SendOutcome),
     /// The member's VTA answered the Rooms panel.
     RoomsVta(crate::state_handler::rooms_actions::RoomsVtaOutcome),
     /// A `vtc/elections/*` request was sent to a community (or failed to send).
-    Elections(crate::state_handler::elections_actions::ElectionsOutcome),
+    Elections(crate::state_handler::community_request::SendOutcome),
     /// The member's VTA answered the Elections panel.
     ElectionsVta(crate::state_handler::elections_actions::ElectionsVtaOutcome),
     /// A cast reached its ballot box (or did not).
@@ -662,9 +662,15 @@ pub(crate) fn apply_outcome(
         DispatchOutcome::DidGitSign { persona_did, info } => {
             crate::state_handler::settings_actions::apply_did_git_sign(state, persona_did, info);
         }
-        DispatchOutcome::Rooms(outcome) => outcome.apply(state),
+        DispatchOutcome::Rooms(outcome) => crate::state_handler::community_request::send_failed::<
+            crate::state_handler::rooms_actions::Rooms,
+        >(state, pending_replies, outcome),
         DispatchOutcome::RoomsVta(outcome) => outcome.apply(state),
-        DispatchOutcome::Elections(outcome) => outcome.apply(state, pending_replies),
+        DispatchOutcome::Elections(outcome) => {
+            crate::state_handler::community_request::send_failed::<
+                crate::state_handler::elections_actions::Elections,
+            >(state, pending_replies, outcome)
+        }
         DispatchOutcome::ElectionsVta(outcome) => outcome.apply(state),
         DispatchOutcome::ElectionsCast(outcome) => outcome.apply(state),
         // Merged, not replaced. A sweep only carries the targets it was given,

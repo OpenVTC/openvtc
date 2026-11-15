@@ -52,6 +52,7 @@ use vta_sdk::client::VtaClient;
 
 use crate::state_handler::actions::WorkspaceAction as W;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
+use crate::state_handler::community_request::capitalise;
 use crate::state_handler::main_page::repos::{
     AccountForm, CheckoutView, ReposScreen, ReposView, Severity, SignerHealth, WorkspaceChange,
     WorkspaceForm,
@@ -1418,13 +1419,6 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
     background_dispatch::spawn_dispatch(ctx.dispatch_tx.clone(), DOMAIN, async move {
         DispatchOutcome::Workspace(job.run().await)
     });
-}
-
-fn capitalise(s: &str) -> String {
-    let mut c = s.chars();
-    c.next()
-        .map(|f| f.to_uppercase().chain(c).collect())
-        .unwrap_or_default()
 }
 
 /// How a checkout reads, in a few words, for the list.

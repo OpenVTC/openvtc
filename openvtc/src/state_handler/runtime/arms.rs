@@ -197,6 +197,7 @@ impl Runtime {
             vta: admin_vta.as_ref(),
             dispatch_tx,
             in_flight,
+            pending_replies,
         })
         .await;
         // The same for the Elections panel.

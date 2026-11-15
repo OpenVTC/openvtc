@@ -40,8 +40,10 @@ impl Runtime {
             state,
             config,
             tdk,
+            vta: admin_vta.as_ref(),
             dispatch_tx,
             in_flight,
+            pending_replies,
         })
         .await;
         // The Rooms panel: reply windows, and a step left on a busy lane.
@@ -52,6 +54,7 @@ impl Runtime {
             vta: admin_vta.as_ref(),
             dispatch_tx,
             in_flight,
+            pending_replies,
         })
         .await;
         // The Elections panel: the same.

@@ -272,6 +272,7 @@ mod background_dispatch;
 mod capability_actions;
 mod community_actions;
 mod community_context_actions;
+pub(crate) mod community_request;
 mod create_persona;
 mod credential_actions;
 mod elections_actions;
