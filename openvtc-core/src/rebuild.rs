@@ -320,7 +320,7 @@ pub async fn active_keys(
                 Some(context_id),
             )
             .await
-            .map_err(|e| OpenVTCError::Vta(format!("could not list keys in {context_id}: {e}")))?;
+            .map_err(|e| OpenVTCError::vta(format!("could not list keys in {context_id}"), &e))?;
         keys.extend(page.keys);
         match page.next_cursor {
             Some(c) => cursor = Some(c),
@@ -348,7 +348,7 @@ pub async fn plan(
     let dids = client
         .list_dids_webvh(Some(context_id), None)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("could not list DIDs in {context_id}: {e}")))?
+        .map_err(|e| OpenVTCError::vta(format!("could not list DIDs in {context_id}"), &e))?
         .dids;
 
     let personas: Vec<RebuiltPersona> = dids

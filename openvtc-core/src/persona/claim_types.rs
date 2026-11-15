@@ -419,9 +419,7 @@ impl Registry {
         {
             Ok(value) => Ok(Self::from_wire(&value)),
             Err(VtaError::UnsupportedTaskType { .. }) => Ok(Self::vendored()),
-            Err(e) => Err(OpenVTCError::Vta(format!(
-                "persona claim-types list failed: {e}"
-            ))),
+            Err(e) => Err(OpenVTCError::vta("persona claim-types list failed", &e)),
         }
     }
 

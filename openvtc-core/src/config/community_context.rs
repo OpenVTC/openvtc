@@ -298,9 +298,10 @@ pub async fn ensure_context(
             Ok(_) => continue,
             Err(VtaError::NotFound(_)) => {}
             Err(e) => {
-                return Err(OpenVTCError::Vta(format!(
-                    "could not look up context {path}: {e}"
-                )));
+                return Err(OpenVTCError::vta(
+                    format!("could not look up context {path}"),
+                    &e,
+                ));
             }
         }
         let Some((parent, slug)) = parse_sub_context_id(path) else {
@@ -318,9 +319,10 @@ pub async fn ensure_context(
             Ok(_) => created = true,
             Err(VtaError::Conflict(_)) => {}
             Err(e) => {
-                return Err(OpenVTCError::Vta(format!(
-                    "could not create context {path}: {e}"
-                )));
+                return Err(OpenVTCError::vta(
+                    format!("could not create context {path}"),
+                    &e,
+                ));
             }
         }
     }
@@ -750,25 +752,28 @@ pub(crate) fn vta_failure(action: &str, e: VtaError) -> OpenVTCError {
         // Not "could not reach": the request was sent, and it is the reply that
         // is missing — which, repeated, is a session whose inbox is not being
         // collected, with its own remedy (R6.4, `vta_receive_leg`).
-        ref e if crate::vta_receive_leg::is_reply_timeout(e) => OpenVTCError::Vta(format!(
-            "the request to {action} was sent, but no reply from your VTA reached this app \
-             in time: {e}"
-        )),
+        ref e if crate::vta_receive_leg::is_reply_timeout(e) => OpenVTCError::vta(
+            format!(
+                "the request to {action} was sent, but no reply from your VTA reached this app \
+             in time"
+            ),
+            e,
+        ),
         VtaError::Network(_) | VtaError::DidcommTransport(_) | VtaError::TspTransport(_) => {
-            OpenVTCError::Vta(format!("could not reach your VTA to {action}: {e}"))
+            OpenVTCError::vta(format!("could not reach your VTA to {action}"), &e)
         }
         VtaError::Server { .. } => {
-            OpenVTCError::Vta(format!("your VTA failed while trying to {action}: {e}"))
+            OpenVTCError::vta(format!("your VTA failed while trying to {action}"), &e)
         }
-        VtaError::Auth(_) => OpenVTCError::Auth(format!(
-            "your VTA did not accept this session to {action}: {e}"
-        )),
-        VtaError::Forbidden(_) => OpenVTCError::Auth(format!(
-            "your VTA does not allow this session to {action}: {e}"
-        )),
-        other => OpenVTCError::Vta(format!(
-            "your VTA rejected the request to {action}: {other}"
-        )),
+        VtaError::Auth(_) => OpenVTCError::vta(
+            format!("your VTA did not accept this session to {action}"),
+            &e,
+        ),
+        VtaError::Forbidden(_) => OpenVTCError::vta(
+            format!("your VTA does not allow this session to {action}"),
+            &e,
+        ),
+        other => OpenVTCError::vta(format!("your VTA rejected the request to {action}"), &other),
     }
 }
 
@@ -1353,14 +1358,19 @@ mod tests {
     /// Unreachable, not accepted, and refused read differently.
     #[test]
     fn a_vta_failure_says_which_kind_it_was() {
-        let unreachable = vta_failure("x", VtaError::DidcommTransport("timeout".into()));
-        assert!(matches!(unreachable, OpenVTCError::Vta(ref m) if m.contains("could not reach")));
+        use crate::errors::ErrorClass;
+        let unreachable = vta_failure("x", VtaError::DidcommTransport("refused".into()));
+        assert_eq!(unreachable.class(), ErrorClass::Unreachable);
+        assert!(unreachable.to_string().contains("could not reach"));
         let auth = vta_failure("x", VtaError::Auth("expired".into()));
-        assert!(matches!(auth, OpenVTCError::Auth(ref m) if m.contains("did not accept")));
+        assert_eq!(auth.class(), ErrorClass::AuthRejected);
+        assert!(auth.to_string().contains("did not accept"));
         let forbidden = vta_failure("x", VtaError::Forbidden("no".into()));
-        assert!(matches!(forbidden, OpenVTCError::Auth(ref m) if m.contains("does not allow")));
+        assert_eq!(forbidden.class(), ErrorClass::AuthRejected);
+        assert!(forbidden.to_string().contains("does not allow"));
         let rejected = vta_failure("x", VtaError::Validation("bad".into()));
-        assert!(matches!(rejected, OpenVTCError::Vta(ref m) if m.contains("rejected")));
+        assert_eq!(rejected.class(), ErrorClass::Refused);
+        assert!(rejected.to_string().contains("rejected"));
         // A reply timeout is none of the three: the request was sent.
         for timeout in [
             VtaError::TspTransport(
@@ -1368,14 +1378,12 @@ mod tests {
             ),
             VtaError::DidcommTransport("timeout waiting for DIDComm response".into()),
         ] {
-            match vta_failure("x", timeout) {
-                OpenVTCError::Vta(m) => {
-                    assert!(m.contains("was sent, but no reply"), "{m}");
-                    assert!(!m.contains("could not reach"), "{m}");
-                    assert!(!m.contains("rejected"), "{m}");
-                }
-                other => panic!("expected Vta, got {other:?}"),
-            }
+            let e = vta_failure("x", timeout);
+            assert_eq!(e.class(), ErrorClass::Timeout);
+            let m = e.to_string();
+            assert!(m.contains("was sent, but no reply"), "{m}");
+            assert!(!m.contains("could not reach"), "{m}");
+            assert!(!m.contains("rejected"), "{m}");
         }
     }
 

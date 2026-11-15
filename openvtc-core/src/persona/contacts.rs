@@ -132,7 +132,7 @@ pub async fn list(
     let value = client
         .persona_contact_list(context_id, None, None, None, None)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona contact list failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona contact list failed", &e))?;
     let mut rows: Vec<ContactSummary> = value
         .get("contacts")
         .and_then(Value::as_array)
@@ -152,7 +152,7 @@ pub async fn get(
     let value = client
         .persona_contact_get(context_id, contact_id, None, history)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona contact get failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona contact get failed", &e))?;
     let summary = ContactSummary::from_wire(&value);
     let mut earlier: Vec<ContactRevision> = value
         .get("history")
@@ -223,7 +223,7 @@ pub async fn put(
             notes,
         )
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona contact put failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona contact put failed", &e))?;
     Ok(value
         .get("contactId")
         .and_then(Value::as_str)
@@ -240,7 +240,7 @@ pub async fn delete(
     client
         .persona_contact_delete(context_id, contact_id)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona contact delete failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona contact delete failed", &e))?;
     Ok(())
 }
 

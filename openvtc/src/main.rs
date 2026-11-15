@@ -691,14 +691,26 @@ async fn main() -> Result<()> {
                 }
                 starting_mode = StartingMode::SetupWizard;
             }
-            Err(e @ (OpenVTCError::Vta(_) | OpenVTCError::Auth(_))) => {
+            Err(
+                e @ (OpenVTCError::Vta(_)
+                | OpenVTCError::Auth(_)
+                | OpenVTCError::Remote {
+                    service: openvtc_core::errors::RemoteService::Vta,
+                    ..
+                }),
+            ) => {
                 // R18: a VTA connection/auth failure is a retryable runtime fault,
-                // NOT config corruption. Surface "check VTA / re-auth" guidance and
-                // reserve reset-style messaging for genuine `Config` errors below.
-                let hint = if matches!(e, OpenVTCError::Auth(_)) {
-                    "Check that your credentials are still valid and re-authenticate, then try again."
-                } else {
-                    "Check that your VTA is reachable and try again."
+                // NOT config corruption. Surface guidance for the failure's own
+                // class (R6.4) and reserve reset-style messaging for genuine
+                // `Config` errors below.
+                let hint = match e.class() {
+                    openvtc_core::errors::ErrorClass::AuthRejected => {
+                        "Check that your credentials are still valid and re-authenticate, then try again."
+                    }
+                    openvtc_core::errors::ErrorClass::Unreachable => {
+                        "Check that your VTA is reachable and try again."
+                    }
+                    other => other.remedy(),
                 };
                 eprintln!(
                     "{} {}",

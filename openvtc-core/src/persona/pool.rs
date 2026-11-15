@@ -382,7 +382,7 @@ pub async fn list(
     let value = client
         .persona_attribute_list(None, include_values, include_sensitive, None, None, None)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona attribute list failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona attribute list failed", &e))?;
 
     let mut attributes: Vec<PoolAttribute> = value
         .get("attributes")
@@ -422,16 +422,23 @@ pub async fn reveal(
         .await
     {
         Ok(response) => Ok(Some(PoolAttribute::from_wire(
-            &serde_json::to_value(&response.attribute)
-                .map_err(|e| OpenVTCError::Vta(format!("persona attribute get: {e}")))?,
+            &serde_json::to_value(&response.attribute).map_err(|e| {
+                OpenVTCError::remote(
+                    crate::errors::RemoteService::Vta,
+                    crate::errors::RemoteKind::Contract,
+                    format!("persona attribute get: {e}"),
+                )
+            })?,
         ))),
         // `notFound` is the answer to "is it still there", not a failure: the
         // pane asks about a row the holder is looking at, and the row can have
         // gone since it was drawn.
-        Err(e) if format!("{e}").contains("notFound") => Ok(None),
-        Err(e) => Err(OpenVTCError::Vta(format!(
-            "persona attribute reveal failed: {e}"
-        ))),
+        Err(e)
+            if crate::errors::RemoteKind::from_vta(&e) == crate::errors::RemoteKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(OpenVTCError::vta("persona attribute reveal failed", &e)),
     }
 }
 
@@ -451,7 +458,7 @@ pub async fn put(client: &VtaClient, draft: AttributeDraft) -> Result<AttributeE
             draft.expected_version,
         )
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona attribute write failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona attribute write failed", &e))?;
 
     Ok(AttributeEdit::Written(
         response
@@ -478,7 +485,7 @@ pub async fn delete(
     client
         .persona_attribute_delete(attribute_id, cascade, None)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona attribute delete failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona attribute delete failed", &e))?;
     Ok(())
 }
 
@@ -508,7 +515,7 @@ pub async fn purge_versions(
     let value = client
         .persona_attribute_purge_version(attribute_id, versions)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona attribute purge failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona attribute purge failed", &e))?;
     Ok(Purged {
         versions: value.purged.iter().map(|v| v.0.get()).collect(),
         stale_pins: value.stale_pins.len(),

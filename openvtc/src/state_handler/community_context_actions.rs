@@ -65,6 +65,7 @@ fn panel(state: &mut State) -> &mut CommunitiesState {
 fn reason(e: &OpenVTCError) -> String {
     match e {
         OpenVTCError::Config(m) | OpenVTCError::Vta(m) | OpenVTCError::Auth(m) => m.clone(),
+        OpenVTCError::Remote { detail, .. } => detail.clone(),
         other => other.to_string(),
     }
 }

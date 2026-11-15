@@ -95,6 +95,30 @@ pub enum DiscoverError {
     WrongSigner { proven: String },
 }
 
+impl DiscoverError {
+    /// The remote-failure kind, for a caller that reports it by class
+    /// ([`crate::errors::ErrorClass`]). `None` for [`Self::NoEndpoint`] and
+    /// [`Self::Blocked`]: nothing remote failed, there was nothing (usable)
+    /// to ask.
+    #[must_use]
+    pub fn kind(&self) -> Option<crate::errors::RemoteKind> {
+        use crate::errors::RemoteKind;
+        match self {
+            Self::NoEndpoint | Self::Blocked(_) => None,
+            Self::Unreachable(_) => Some(RemoteKind::Unreachable),
+            Self::Refused { status, code, .. } => Some(match code {
+                Some(code) => RemoteKind::from_refusal_code(code),
+                None => RemoteKind::from_http_status(*status),
+            }),
+            Self::Unreadable(_) => Some(RemoteKind::Contract),
+            // It answered, but not with a document this client can accept as
+            // the community's: a mismatch to report, not a credential of ours
+            // refused.
+            Self::Unproven(_) | Self::WrongSigner { .. } => Some(RemoteKind::Contract),
+        }
+    }
+}
+
 impl std::fmt::Display for DiscoverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

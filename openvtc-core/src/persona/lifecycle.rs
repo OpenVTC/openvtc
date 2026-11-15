@@ -79,7 +79,7 @@ pub async fn compose(
     let out: crate::specs::persona::profile::compose::v1_1::Response =
         crate::vta_task::call(client, &payload, PERSONA_TIMEOUT_SECS)
             .await
-            .map_err(|e| OpenVTCError::Vta(format!("could not make the face: {e}")))?;
+            .map_err(|e| OpenVTCError::vta("could not make the face", &e))?;
     Ok(Composed {
         profile_id: out.profile_id.to_string(),
         local: out.scope.to_string() == "local",
@@ -94,7 +94,7 @@ pub async fn retire(client: &VtaClient, profile_id: &str) -> Result<usize, OpenV
         .persona_profile_retire(profile_id, None, None)
         .await
         .map(|r| r.unbound.len())
-        .map_err(|e| OpenVTCError::Vta(format!("could not retire the face: {e}")))
+        .map_err(|e| OpenVTCError::vta("could not retire the face", &e))
 }
 
 /// Make a retired face wearable again. It is worn nowhere afterwards.
@@ -103,7 +103,7 @@ pub async fn reinstate(client: &VtaClient, profile_id: &str) -> Result<(), OpenV
         .persona_profile_reinstate(profile_id, None, None)
         .await
         .map(|_| ())
-        .map_err(|e| OpenVTCError::Vta(format!("could not reinstate the face: {e}")))
+        .map_err(|e| OpenVTCError::vta("could not reinstate the face", &e))
 }
 
 /// The holder's retired faces — out of every picker, and listed here so one
@@ -112,7 +112,7 @@ pub async fn list_retired(client: &VtaClient) -> Result<Vec<ProfileSummary>, Ope
     let value = client
         .persona_profile_list(None, None, true)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona profile list failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona profile list failed", &e))?;
     let mut faces: Vec<ProfileSummary> = value
         .get("profiles")
         .and_then(Value::as_array)
@@ -201,7 +201,7 @@ pub async fn history(client: &VtaClient, profile_id: &str) -> Result<FaceHistory
     let usage = client
         .persona_profile_usage(profile_id, None)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("could not read where the face is worn: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("could not read where the face is worn", &e))?;
     let mut events = Vec::new();
     let mut cursor: Option<String> = None;
     // Bounded, so a far side that never ends a listing cannot hang the pane.
@@ -209,7 +209,7 @@ pub async fn history(client: &VtaClient, profile_id: &str) -> Result<FaceHistory
         let page = client
             .persona_profile_timeline(profile_id, None, None, cursor.as_deref(), Some(500))
             .await
-            .map_err(|e| OpenVTCError::Vta(format!("could not read the face's history: {e}")))?;
+            .map_err(|e| OpenVTCError::vta("could not read the face's history", &e))?;
         let page = serde_json::to_value(&page).unwrap_or(Value::Null);
         for e in page
             .get("events")
@@ -298,7 +298,7 @@ pub async fn local_faces(
     let listing = client
         .persona_local_profile_list(context_id, std::num::NonZeroU64::new(500), None)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("could not list the faces made here: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("could not list the faces made here", &e))?;
     let mut faces = Vec::new();
     for summary in listing
         .get("profiles")
@@ -312,7 +312,7 @@ pub async fn local_faces(
         let read = client
             .persona_local_profile_get(context_id, id)
             .await
-            .map_err(|e| OpenVTCError::Vta(format!("could not read a face made here: {e}")))?;
+            .map_err(|e| OpenVTCError::vta("could not read a face made here", &e))?;
         let profile = read.get("profile").unwrap_or(&Value::Null);
         faces.push(LocalFace {
             profile_id: id.to_string(),
@@ -383,7 +383,7 @@ pub async fn local_face_put(
     let value = client
         .persona_local_profile_put(context_id, name, entries, profile_id, expected_version)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona local profile write failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona local profile write failed", &e))?;
     Ok(value
         .get("profileId")
         .and_then(Value::as_str)
@@ -405,7 +405,7 @@ pub async fn local_face_delete(
     client
         .persona_local_profile_delete(context_id, profile_id, unbind)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona local profile delete failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona local profile delete failed", &e))?;
     Ok(())
 }
 
@@ -438,7 +438,7 @@ pub async fn promote(
     .map_err(|e| OpenVTCError::Vta(format!("not a request this build can make: {e}")))?;
     let out: promote::Response = crate::vta_task::call(client, &payload, PERSONA_TIMEOUT_SECS)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("could not make the values reusable: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("could not make the values reusable", &e))?;
     Ok(Promoted {
         reused: out.promoted.iter().filter(|p| !p.was_created).count(),
         rebound: out.rebound_persona_dids.len(),

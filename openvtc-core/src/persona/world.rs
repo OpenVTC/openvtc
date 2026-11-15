@@ -330,7 +330,7 @@ pub async fn list(client: &VtaClient) -> Result<Vec<World>, OpenVTCError> {
         {
             Ok(value) => value,
             Err(VtaError::UnsupportedTaskType { .. }) => return Ok(Vec::new()),
-            Err(e) => return Err(OpenVTCError::Vta(format!("persona world list failed: {e}"))),
+            Err(e) => return Err(OpenVTCError::vta("persona world list failed", &e)),
         };
 
         worlds.extend(
@@ -389,7 +389,7 @@ pub async fn put(client: &VtaClient, draft: WorldDraft) -> Result<WorldWrite, Op
             WORLD_TIMEOUT,
         )
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona world write failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona world write failed", &e))?;
 
     Ok(WorldWrite {
         world_id: value
@@ -424,7 +424,7 @@ pub async fn delete(
             WORLD_TIMEOUT,
         )
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona world delete failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona world delete failed", &e))?;
 
     Ok(Deletion {
         existed: value

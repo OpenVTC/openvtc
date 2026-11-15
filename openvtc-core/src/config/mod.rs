@@ -1581,15 +1581,15 @@ async fn enable_tsp_with_resolver(
 /// callers can keep distinguishing retryable transport/auth failures from
 /// genuine config corruption (R18). An empty `vta_url` on the REST path comes
 /// back as [`vta_sdk::error::VtaError::Validation`] — that is a bad on-disk
-/// config, so it maps to [`OpenVTCError::Config`]; auth rejection maps to
-/// [`OpenVTCError::Auth`]; everything else (network, DIDComm session open) is a
-/// live-VTA reachability problem, [`OpenVTCError::Vta`].
+/// config, so it maps to [`OpenVTCError::Config`]; everything else is a live-VTA
+/// failure, [`OpenVTCError::Remote`] classified from the SDK error (auth
+/// rejected, unreachable, timed out, …).
 fn map_connect_error(e: vta_sdk::error::VtaError) -> OpenVTCError {
     use vta_sdk::error::VtaError;
     match e {
         VtaError::Validation(msg) => OpenVTCError::Config(msg),
-        VtaError::Auth(msg) => OpenVTCError::Auth(format!("VTA authentication failed: {msg}")),
-        other => OpenVTCError::Vta(format!("VTA connection failed: {other}")),
+        other @ VtaError::Auth(_) => OpenVTCError::vta("VTA authentication failed", &other),
+        other => OpenVTCError::vta("VTA connection failed", &other),
     }
 }
 

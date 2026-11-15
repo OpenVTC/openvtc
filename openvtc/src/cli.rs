@@ -214,6 +214,16 @@ mod tests {
             },
             OpenVTCError::Vta("x".into()),
             OpenVTCError::Auth("x".into()),
+            OpenVTCError::remote(
+                openvtc_core::errors::RemoteService::Vta,
+                openvtc_core::errors::RemoteKind::AuthRejected,
+                "x",
+            ),
+            OpenVTCError::remote(
+                openvtc_core::errors::RemoteService::Vta,
+                openvtc_core::errors::RemoteKind::Timeout,
+                "x",
+            ),
             OpenVTCError::Resolver("x".into()),
             OpenVTCError::Config("x".into()),
         ];

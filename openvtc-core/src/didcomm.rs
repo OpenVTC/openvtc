@@ -86,6 +86,21 @@ pub enum MessagingError {
     Send(String),
 }
 
+impl MessagingError {
+    /// The class of this failure (R6.4): a listener that would not come up or
+    /// a send the delivery layer refused is the mediator unreachable; a send
+    /// to a listener that is not installed, or a message that would not pack,
+    /// is local.
+    #[must_use]
+    pub fn class(&self) -> crate::errors::ErrorClass {
+        use crate::errors::ErrorClass;
+        match self {
+            MessagingError::Listener { .. } | MessagingError::Send(_) => ErrorClass::Unreachable,
+            MessagingError::UnknownListener(_) | MessagingError::Pack { .. } => ErrorClass::Local,
+        }
+    }
+}
+
 /// How a listener is described, independently of the framework that runs it.
 ///
 /// The delivery-layer swap replaces `ListenerConfig` (a

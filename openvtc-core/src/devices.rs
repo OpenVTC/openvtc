@@ -229,15 +229,19 @@ pub async fn register(
         Ok(response) => response,
         Err(e) if is_already_registered(&e) => return Ok(Registration::AlreadyRegistered),
         Err(e) => {
-            return Err(OpenVTCError::Vta(format!(
-                "device registration failed: {e}"
-            )));
+            return Err(OpenVTCError::vta("device registration failed", &e));
         }
     };
 
     parse_binding(&response)
         .map(Registration::Claimed)
-        .ok_or_else(|| OpenVTCError::Vta("device registration returned no binding".to_string()))
+        .ok_or_else(|| {
+            OpenVTCError::remote(
+                crate::errors::RemoteService::Vta,
+                crate::errors::RemoteKind::Contract,
+                "device registration returned no binding",
+            )
+        })
 }
 
 /// Whether a `device/register` failure is "this DID is already registered".
@@ -291,7 +295,7 @@ pub async fn heartbeat(
                 .await,
         )
         .map(|_| ())
-        .map_err(|e| OpenVTCError::Vta(format!("device heartbeat failed: {e}")))
+        .map_err(|e| OpenVTCError::vta("device heartbeat failed", &e))
 }
 
 /// Whether `row` — this install's own binding — is showing a stale name.
@@ -320,12 +324,18 @@ pub async fn list(
 ) -> Result<Vec<DeviceRecord>, OpenVTCError> {
     let response = receive
         .observe(client.device_list(serde_json::json!({})).await)
-        .map_err(|e| OpenVTCError::Vta(format!("device list failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("device list failed", &e))?;
 
     let devices = response
         .get("devices")
         .and_then(|d| d.as_array())
-        .ok_or_else(|| OpenVTCError::Vta("device list returned no `devices` array".to_string()))?;
+        .ok_or_else(|| {
+            OpenVTCError::remote(
+                crate::errors::RemoteService::Vta,
+                crate::errors::RemoteKind::Contract,
+                "device list returned no `devices` array",
+            )
+        })?;
 
     // One unparseable row must not lose the rest of the listing: this is a
     // diagnostic surface, and a partial answer beats none.

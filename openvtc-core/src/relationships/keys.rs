@@ -284,12 +284,12 @@ async fn create_relationship_keys(
         })
     })
     .await
-    .map_err(|e| OpenVTCError::Vta(format!("Failed to create signing key: {e}")))?;
+    .map_err(|e| OpenVTCError::vta("Failed to create signing key", &e))?;
     let sign_secret_resp = crate::vta_task::retry("get relationship signing key secret", || {
         client.get_key_secret(&sign_resp.key_id)
     })
     .await
-    .map_err(|e| OpenVTCError::Vta(format!("Failed to get signing key secret: {e}")))?;
+    .map_err(|e| OpenVTCError::vta("Failed to get signing key secret", &e))?;
     let mut v_secret = vta_sdk::did_key::secret_from_key_response(&sign_secret_resp)
         .map_err(|e| OpenVTCError::Secret(format!("{e:?}")))?;
     v_secret.id = v_secret
@@ -312,12 +312,12 @@ async fn create_relationship_keys(
         })
     })
     .await
-    .map_err(|e| OpenVTCError::Vta(format!("Failed to create encryption key: {e}")))?;
+    .map_err(|e| OpenVTCError::vta("Failed to create encryption key", &e))?;
     let enc_secret_resp = crate::vta_task::retry("get relationship encryption key secret", || {
         client.get_key_secret(&enc_resp.key_id)
     })
     .await
-    .map_err(|e| OpenVTCError::Vta(format!("Failed to get encryption key secret: {e}")))?;
+    .map_err(|e| OpenVTCError::vta("Failed to get encryption key secret", &e))?;
     let mut e_secret = vta_sdk::did_key::secret_from_key_response(&enc_secret_resp)
         .map_err(|e| OpenVTCError::Secret(format!("{e:?}")))?;
     e_secret.id = e_secret
