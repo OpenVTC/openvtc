@@ -17,39 +17,25 @@ no-default-features = false
 [advisories]
 version = 2
 yanked = "deny"
+# Keep this list and `.cargo/audit.toml` in step: same IDs, same reasons. The
+# one deliberate difference is RUSTSEC-2026-0330/0331 (libcrux-kem), which only
+# cargo-audit sees; see the note there. Prune an entry as soon as it stops
+# matching: cargo-deny warns `advisory-not-detected` when one never fires.
+# Last checked against the graph: 2026-11-15.
 ignore = [
-    # RUSTSEC-2023-0071: Marvin Attack — timing sidechannel in the `rsa`
-    # crate's RSA key operations. There is no upstream patch yet; the
-    # affected code is reachable only through `pgp`/`openpgp-card-rpgp`/
-    # `ssh-key`. We don't perform RSA operations against attacker-observable
-    # network timing — the relevant call sites are local OpenPGP card
-    # unlock and SSH key parsing — so the residual exposure is limited.
-    # Re-evaluate when the `rsa` crate ships a constant-time implementation.
+    # rsa: Marvin Attack timing side channel; no patched release. Reached only
+    # through `pgp` / `openpgp-card-rpgp` (local OpenPGP card operations, not
+    # network-observable RSA). Re-check when `pgp` moves.
     "RUSTSEC-2023-0071",
-    # RUSTSEC-2024-0436: paste is unmaintained. Build-time proc-macro
-    # pulled transitively via vta-service/vti-common (utoipa-axum). No
-    # runtime code; falls off when utoipa migrates off paste.
-    "RUSTSEC-2024-0436",
-    # RUSTSEC-2026-0173: proc-macro-error2 is unmaintained. Same shape as
-    # the `paste` entry above and narrower in reach: a build-time
-    # proc-macro with no runtime code, and it enters only through the
-    # **dev** graph — vta-service 0.24 -> vti-rooms -> openmls_rust_crypto
-    # -> hpke-rs -> libcrux-sha3 -> hax-lib. Nothing the shipped binary
-    # links reaches it. It arrived with the vta-sdk 0.34 refresh, which is
-    # when vta-service grew the rooms crates; it falls off when hax-lib
-    # migrates off the macro.
+    # proc-macro-error2: unmaintained build-time proc-macro, no runtime code.
+    # Dev graph only: vta-service -> vti-rooms -> openmls_rust_crypto ->
+    # hpke-rs -> libcrux-* -> hax-lib-macros. Re-check on the next vta-service bump.
     "RUSTSEC-2026-0173",
-    # RUSTSEC-2026-0387: crypto-bigint timing variability, fixed in 0.7.6.
-    # The 0.7 line is updated; what remains is crypto-bigint 0.5.5, reached
-    # only through pgp 0.20 (and openpgp-card-rpgp on top of it) via
-    # elliptic-curve 0.13 and cx448. No 0.5.x patch exists. Falls off when
-    # pgp moves to elliptic-curve 0.14 — re-check on the next pgp bump.
+    # crypto-bigint 0.5.5: timing variability, fixed only on the 0.7 line.
+    # Reached only through `pgp` 0.20 (cx448, elliptic-curve 0.13); no 0.5.x
+    # patch exists. Re-check when `pgp` moves.
     "RUSTSEC-2026-0387",
 ]
-# Removed with the vta-sdk 0.34 refresh: RUSTSEC-2025-0134 (rustls-pemfile
-# unmaintained) no longer matches anything in the graph, and cargo-deny warns
-# about an ignore that never fires — an ignore list that keeps entries after
-# their crate is gone stops being a record of accepted risk.
 
 [licenses]
 version = 2
@@ -100,9 +86,9 @@ deny = []
 # so we suppress the warning for the whole subtree.
 skip = []
 skip-tree = [
-    # Crypto stack still bridges rand 0.8 + rand 0.9 + rand 0.10 (see
-    # workspace Cargo.toml for the rationale; revisit when aes-gcm /
-    # ed25519-dalek-bip32 / pgp move off rand_core 0.6).
+    # rand 0.8 / 0.9 / 0.10 coexist: this workspace and `pgp` 0.20 are on 0.8
+    # (see the root `Cargo.toml`); the SDK stack is on the newer lines.
+    # Revisit when `pgp` moves off rand_core 0.6.
     { name = "rand", version = "0.8" },
 ]
 
@@ -110,25 +96,7 @@ skip-tree = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Empty, and that is the finished state rather than an oversight.
-#
-# This list is the second half of every `[patch.crates-io]` entry in the root
-# `Cargo.toml`: `unknown-git = "deny"` means a patch added there without an entry
-# here fails this check rather than quietly resolving to a source nobody
-# reviewed. So the two files are edited together, or the build says so.
-#
-# Three entries lived here while the stack was mid-flight — VGI (for
-# `did-git-sign` / `vgi-core`), the trust registry (for `trql-client`, reached
-# only through VGI), and VTI (for `vta-sdk` ahead of the release carrying
-# `persona/facet/*`). All three are published now and the patch block is gone,
-# so every dependency resolves from crates.io.
-#
-# Adding one back means adding it in both places, and writing down here what has
-# to happen for it to leave again. The entries that were removed each carried
-# that note, and it is the only reason the unwind was tractable six minors later.
-# Both entries are gone again, and for the reason the paragraph above describes:
-# VTI published `vta-sdk` 0.37 with the `vta-service` 0.26 closure behind it, and
-# VGI published `did-git-sign` 0.4.9. The patch block at the foot of the root
-# `Cargo.toml` went with them, so nothing resolves from a git source and there is
-# nothing left to allow.
+# Empty: everything resolves from crates.io. This is the other half of any
+# `[patch.crates-io]` git entry in the root `Cargo.toml` (`unknown-git = "deny"`
+# fails a patch with no entry here), so the two are edited together.
 allow-git = []

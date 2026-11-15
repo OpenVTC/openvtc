@@ -21,7 +21,7 @@ use std::{
     process,
     str::FromStr,
 };
-use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// Checks whether another instance of openvtc is already running for `profile`.
 ///
@@ -76,20 +76,29 @@ pub fn check_duplicate_instance(profile: &str) -> Result<PathBuf, OpenVTCError> 
         .map_err(|e| OpenVTCError::LockFile(format!("couldn't read lock file: {e}")))?;
     let pid_str = pid_str.trim_end();
 
-    let system = System::new_with_specifics(
-        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
-    )
-    .map_err(|e| OpenVTCError::LockFile(format!("couldn't read the process list: {e}")))?;
     let pid = Pid::from_str(pid_str)
         .map_err(|e| OpenVTCError::LockFile(format!("invalid PID in lock file: {e}")))?;
 
-    if system.process(pid).is_some() {
+    if pid_is_alive(pid)? {
         return Err(OpenVTCError::DuplicateInstance(profile.to_string()));
     }
 
     // Stale lock file — overwrite with our PID
     create_lock_file(&lock_file)?;
     Ok(lock_file)
+}
+
+/// Whether `pid` names a live process. Refreshes only that one PID rather than
+/// building a `System` over the whole process table.
+fn pid_is_alive(pid: Pid) -> Result<bool, OpenVTCError> {
+    let mut system = System::new()
+        .map_err(|e| OpenVTCError::LockFile(format!("couldn't read the process list: {e}")))?;
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    Ok(system.process(pid).is_some())
 }
 
 /// Returns the canonical path to the lock file for `profile`.
@@ -163,4 +172,15 @@ pub(crate) fn create_lock_file<P: AsRef<Path>>(lock_file: P) -> Result<(), OpenV
 /// application shutdown, where there is no meaningful recovery path.
 pub fn remove_lock_file<P: AsRef<Path>>(lock_file: P) {
     let _ = fs::remove_file(lock_file);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_process_is_alive() {
+        let pid = Pid::from_u32(process::id());
+        assert!(pid_is_alive(pid).unwrap());
+    }
 }

@@ -1,53 +1,31 @@
-# Advisories to ignore (transitive dependencies we cannot directly update).
+# Advisories cargo-audit (the CI `audit` job) ignores.
 #
-# All entries below are in crates pulled transitively through affinidi-tdk,
-# vta-sdk, didwebvh-rs, and other third-party workspace dependencies — not
-# in anything openvtc depends on directly. Each entry is reviewed when a
-# fix becomes available upstream.
+# Keep this list and `deny.toml`'s `[advisories] ignore` in step: same IDs, same
+# reasons. The one deliberate difference is RUSTSEC-2026-0330/0331 below, which
+# cargo-deny never sees. Prune an entry as soon as it stops matching.
+# Last checked against `Cargo.lock`: 2026-11-15.
 [advisories]
 ignore = [
-    # rsa: Marvin Attack timing sidechannel — no patch available yet.
-    # Transitive dep via affinidi crates; not used directly for RSA operations.
+    # rsa: Marvin Attack timing side channel; no patched release. Reached only
+    # through `pgp` / `openpgp-card-rpgp` (local OpenPGP card operations, not
+    # network-observable RSA). Re-check when `pgp` moves.
     "RUSTSEC-2023-0071",
 
-    # rand 0.8: unsound with custom logger using rand::rng().
-    # Pinned to 0.8 because aes-gcm 0.10 requires rand_core 0.6.
-    # We do not use a custom logger that calls rand::rng().
-    "RUSTSEC-2026-0097",
+    # proc-macro-error2: unmaintained build-time proc-macro, no runtime code.
+    # Dev graph only: vta-service -> vti-rooms -> openmls_rust_crypto ->
+    # hpke-rs -> libcrux-* -> hax-lib-macros. Re-check on the next vta-service bump.
+    "RUSTSEC-2026-0173",
 
-    # proc-macro-error: unmaintained.
-    # Pulled via static-regular-grammar → xsd-types → ssi-caips → affinidi
-    # crates. No security impact; awaiting upstream migration to
-    # proc-macro-error2.
-    "RUSTSEC-2024-0370",
-
-    # rustls-pemfile: unmaintained (both 1.x via reqwest 0.11 and 2.x via
-    # tonic). No security impact identified; purely a maintenance advisory.
-    "RUSTSEC-2025-0134",
-
-    # quick-xml DoS vectors, fixed in 0.41. Pulled only via the Linux
-    # clipboard stack (arboard → wl-clipboard-rs → wayland-scanner), which
-    # pins quick-xml 0.39 and parses local Wayland protocol XML at build
-    # time — never attacker-supplied input. Re-check when wayland-scanner
-    # moves to quick-xml >= 0.41.
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
-
-    # paste: unmaintained build-time proc-macro via vta-service/vti-common
-    # (utoipa-axum). No runtime code.
-    "RUSTSEC-2024-0436",
+    # crypto-bigint 0.5.5: timing variability, fixed only on the 0.7 line.
+    # Reached only through `pgp` 0.20 (cx448, elliptic-curve 0.13); no 0.5.x
+    # patch exists. Re-check when `pgp` moves.
+    "RUSTSEC-2026-0387",
 
     # libcrux-kem 0.0.9: panics on short hybrid-KEM seeds / keys, fixed in
-    # 0.0.10. Reached only through the vta-service *dev*-dependency (MockVta →
-    # vti-rooms → openmls_rust_crypto → hpke-rs → hpke-rs-libcrux), so it is
-    # in the test build and not in any shipped binary. Needs a vti-rooms /
-    # openmls release on hpke-rs-libcrux >= 0.8; re-check on the next
-    # vta-service bump.
+    # 0.0.10. Audit-only: it is in `Cargo.lock` as an optional dependency of
+    # `hpke-rs-libcrux` (dev graph, under vta-service), but no enabled feature
+    # builds it, so cargo-deny (which checks the built graph) does not report
+    # it. Re-check on the next vta-service bump.
     "RUSTSEC-2026-0330",
     "RUSTSEC-2026-0331",
-
-    # crypto-bigint 0.5.5: timing variability, fixed only in 0.7.6 (0.7 is
-    # updated). 0.5 is reached only through pgp 0.20 (elliptic-curve 0.13,
-    # cx448); no 0.5.x patch exists. Re-check on the next pgp bump.
-    "RUSTSEC-2026-0387",
 ]
