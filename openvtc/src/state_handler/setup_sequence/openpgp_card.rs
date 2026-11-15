@@ -2,6 +2,8 @@
  *   Handles writing of data to the OpenPGP Card
  */
 
+use crate::state_handler::state::PublishState;
+
 use anyhow::{Result, bail};
 use ed25519_dalek_bip32::VerifyingKey;
 use openpgp_card::{
@@ -29,7 +31,7 @@ use crate::state_handler::{setup_sequence::MessageType, state::State};
 /// Writes keys to the card
 pub fn write_keys_to_card(
     state: &mut State,
-    action_tx: &watch::Sender<State>,
+    action_tx: &watch::Sender<std::sync::Arc<State>>,
     card: Arc<Mutex<Card<Open>>>,
 ) -> Result<()> {
     state
@@ -45,7 +47,7 @@ pub fn write_keys_to_card(
     state.setup.token_reset.messages.push(MessageType::Info(
         "Unlocking token in admin mode...".to_string(),
     ));
-    let _ = action_tx.send(state.clone());
+    let _ = action_tx.publish(state);
     // Try unlocking the card with the admin PIN
     let mut lock = card
         .try_lock()
@@ -63,13 +65,13 @@ pub fn write_keys_to_card(
     if let Some(last) = state.setup.token_reset.messages.last_mut() {
         *last = MessageType::Info("✓ Unlocked token in admin mode".to_string());
     }
-    let _ = action_tx.send(state.clone());
+    let _ = action_tx.publish(state);
 
     // Create a PGP secret key packet
     state.setup.token_reset.messages.push(MessageType::Info(
         "Writing signing key to token...".to_string(),
     ));
-    let _ = action_tx.send(state.clone());
+    let _ = action_tx.publish(state);
     let uk = create_pgp_secret_packet(&keys.signing, KeyPurpose::Signing)?;
     card.import_key(&uk, KeyType::Signing)?;
     if let Some(last) = state.setup.token_reset.messages.last_mut() {
@@ -79,7 +81,7 @@ pub fn write_keys_to_card(
     state.setup.token_reset.messages.push(MessageType::Info(
         "Writing authentication key to token...".to_string(),
     ));
-    let _ = action_tx.send(state.clone());
+    let _ = action_tx.publish(state);
     let uk = create_pgp_secret_packet(&keys.authentication, KeyPurpose::Authentication)?;
     card.import_key(&uk, KeyType::Authentication)?;
     if let Some(last) = state.setup.token_reset.messages.last_mut() {
@@ -89,7 +91,7 @@ pub fn write_keys_to_card(
     state.setup.token_reset.messages.push(MessageType::Info(
         "Writing decryption key to token...".to_string(),
     ));
-    let _ = action_tx.send(state.clone());
+    let _ = action_tx.publish(state);
     let uk = create_pgp_secret_packet(&keys.decryption, KeyPurpose::Encryption)?;
     card.import_key(&uk, KeyType::Decryption)?;
     if let Some(last) = state.setup.token_reset.messages.last_mut() {
@@ -222,7 +224,7 @@ fn create_pgp_secret_packet(key: &KeyInfo, kp: KeyPurpose) -> Result<UploadableK
 
 pub fn set_signing_touch_policy(
     state: &mut State,
-    action_tx: &watch::Sender<State>,
+    action_tx: &watch::Sender<std::sync::Arc<State>>,
     card: Arc<Mutex<Card<Open>>>,
 ) -> Result<()> {
     let mut lock = card
@@ -242,7 +244,7 @@ pub fn set_signing_touch_policy(
     state.setup.token_set_touch.messages.push(MessageType::Info(
         "Setting touch policy on signing key...".to_string(),
     ));
-    let _ = action_tx.send(state.clone());
+    let _ = action_tx.publish(state);
 
     card.set_touch_policy(KeyType::Signing, TouchPolicy::On)?;
     state.setup.token_set_touch.messages.push(MessageType::Info(
@@ -256,7 +258,7 @@ pub fn set_signing_touch_policy(
 /// name: Max length is 39 characters
 pub fn set_cardholder_name(
     state: &mut State,
-    action_tx: &watch::Sender<State>,
+    action_tx: &watch::Sender<std::sync::Arc<State>>,
     card: Arc<Mutex<Card<Open>>>,
     name: &str,
 ) -> Result<()> {
@@ -281,7 +283,7 @@ pub fn set_cardholder_name(
         .push(MessageType::Info(format!(
             "Setting cardholder name to ({name})..."
         )));
-    let _ = action_tx.send(state.clone());
+    let _ = action_tx.publish(state);
     card.set_cardholder_name(name)?;
     state
         .setup

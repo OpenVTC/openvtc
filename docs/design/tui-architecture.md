@@ -79,7 +79,8 @@ the real work is decomposed into focused modules (declared at `mod.rs:50`):
 | `persona_actions.rs` | The identity pane. `apply(&mut State, &PersonaAction)` is pure and returns a `PersonaEffect` naming any network work; the loop spawns it and folds the result back through `PersonaOutcome::apply`. Reads and writes share one `DispatchDomain`. |
 | `didcomm.rs` | `DIDCommService` integration: service start, listener config/ids, the `DIDCommEvent` enum, lifecycle logging. |
 | `main_page/` | Maps `Config` → display state (`sync_from_config`), menu/content models. |
-| `setup_wizard.rs`, `setup_sequence/`, `setup_*_actions.rs`, `join.rs`, `join_flow.rs` | The setup and join sub-flows (each runs its own scoped `select!` loop, then returns control to `main_loop`). |
+| `setup_wizard.rs`, `setup_sequence/`, `setup_*_actions.rs` | The setup sub-flow (runs its own scoped `select!` loop, then returns control to `main_loop`). |
+| `join.rs`, `join_flow.rs`, `join_flow/driver.rs` | The join flow. `join.rs` is its page state; `join_flow.rs` its pure page logic and the bounded sends it makes while waiting on a community; `driver.rs` the `JoinDriver` state machine the runtime loop (and the State-A loop) drives — no loop of its own (see §4). |
 | `dispatch_util.rs` | Shared helpers + test fixtures (`test_config`). |
 
 **Protocol logic does not live here.** The pure validators, handlers (join-receipt,
@@ -102,11 +103,16 @@ or disk I/O parks the *whole* UI. Two mechanisms keep the loop live:
 for network-bound actions (mediator reconnect, relationship create/ping/remove,
 inbox accept/reject, context-DID delete):
 
-1. The action's loop arm claims a `DispatchDomain` via
-   `InFlight::try_begin` (a per-domain busy-guard; a second action on a busy
-   domain is rejected with a status, not queued).
-2. Cheap loop-thread prep builds a `…Job`; `spawn_dispatch` runs the job's **I/O
-   only** off-thread.
+1. Cheap loop-thread prep builds a `…Job` from owned values: a type
+   implementing `background_dispatch::Job`, which names its `DispatchDomain`
+   and its **I/O only** (`execute`, returning the `DispatchOutcome`).
+2. `background_dispatch::dispatch(job, in_flight, dispatch_tx, on_busy)` claims
+   the job's domain via `InFlight::try_begin` (a per-domain busy-guard) and
+   spawns it off-thread. A job for a busy domain is dropped unrun and
+   `on_busy` gets the busy message, to show or to remember as a deferred
+   retry — a second action is rejected or deferred, never run alongside. Work
+   due only once the claim succeeded (locking an overlay, arming a view on a
+   thread id) is done by the caller when `dispatch` returns `true`.
 3. The job returns a `DispatchOutcome` over an mpsc the loop owns. The dedicated
    `Some(outcome) = dispatch_rx.recv()` arm calls `apply_outcome`, which mutates
    `State`/`Config` **on the loop thread** and clears the busy-flag. Mutation
@@ -129,6 +135,38 @@ background job on the `DispatchDomain::AgentName` domain (one job, not one per
 DID: the busy-guard is per-domain). Inside the job the DIDs resolve with bounded
 concurrency (a sliding window of 4). The job does I/O only; `apply_outcome` folds
 the verified `(did, name)` results into `Config::agent_names` on the loop thread.
+
+**The join flow** ([`join_flow/driver.rs`](../../openvtc/src/state_handler/join_flow/driver.rs)) —
+the largest user of the pattern, and the one that used to break the rule: it
+ran its own nested `select!` loop that the runtime loop awaited inline, so
+saves, VTA supervision, inbound messages and timers all stopped while the join
+screen was up (#529). It is now a `JoinDriver` state machine the loop drives:
+
+1. While a join is open the loop's action arm hands every action to
+   `JoinDriver::on_action`; page logic runs there, on the loop.
+2. Network work — resolving an agent name, reading a community (invitations,
+   manifest, DID document), and each stage of a launch — runs as one job at a
+   time on `DispatchDomain::Join`. The result comes back as
+   `DispatchOutcome::Join` and progress lines as `ProgressUpdate::Join`, both
+   carrying the job's generation; the loop gives them to the driver *before*
+   `apply_outcome`, and the driver ignores any that are not for the job it is
+   waiting on (an aborted one).
+3. Join actions that arrive while a job is in flight are queued and replayed
+   in order when it finishes. `JoinCancel`, `Exit` and `UXError` are not: they
+   abort the job at once (`AbortHandle`; the driver frees the domain).
+4. A launch is a saga (`openvtc_core::join::saga::JoinSaga`): context
+   registered → persona minted → listener up → submitted → persisted, with
+   on-loop applies between off-loop stages. Any failure, cancel or interrupt
+   undoes the launch from `JoinSaga::compensations` — remove the listener it
+   installed, forget the persona it minted (never a reused one) — rather than
+   from wherever a dropped future happened to stop.
+
+Short, bounded sends (asking a community for its requirements, a challenge, a
+wallet session — each behind a 15 s timeout) and the VTA reads behind the
+Answers page stay inline awaits, as elsewhere in the runtime. Everything the
+join does over the network, to disk or through a live messaging account goes
+through the `JoinIo` trait, so tests drive whole launches offline and fail them
+at each stage.
 
 ## 5. Recipes
 
@@ -154,9 +192,12 @@ the verified `(did, name)` results into `Config::agent_names` on the loop thread
    - **Local business logic** → add an arm that calls into the matching
      `*_actions::dispatch`.
    - **Network/blocking work** → follow the background-dispatch pattern (§4):
-     claim a `DispatchDomain`, `spawn_dispatch` the I/O, and apply the result in
-     `apply_outcome` (extend `DispatchOutcome` if it is a new kind of work).
-4. If the handler mutates `Config`, call `save.mark_dirty()` (not an inline save).
+     implement `Job` for the work, hand it to `background_dispatch::dispatch`,
+     and apply the result in `apply_outcome` (extend `DispatchOutcome` if it is
+     a new kind of work).
+4. If the handler mutates `Config`, call `save.mark_dirty()` (not an inline
+   save); where the change must be on disk before success is reported, await
+   `save.flush(&config)`. Every TUI save goes through the `SaveScheduler`.
 
 ### Add a (DIDComm) message type
 

@@ -14,6 +14,7 @@ use crate::{
 use affinidi_tdk::{TDK, messaging::profiles::ATMProfile};
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
 use ed25519_dalek_bip32::ExtendedSigningKey;
+use futures_util::StreamExt;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use std::collections::BTreeMap;
 use tracing::{debug, info, warn};
@@ -123,6 +124,206 @@ fn record_degraded(
         created_at: record.map_or_else(chrono::Utc::now, |p| p.created_at),
         reason,
     });
+}
+
+/// How many personas are hydrated at once at startup. Each is a few VTA
+/// round-trips (and a DID resolve when uncached); a small bound keeps a
+/// many-persona account from bursting the VTA (R1.4).
+const PERSONA_HYDRATE_CONCURRENCY: usize = 3;
+
+/// Run `f` over `items` at most `limit` at a time, and return the results in
+/// the order of `items` — not the order they finished in — so whatever is done
+/// with them afterwards is deterministic.
+async fn map_bounded_in_order<I, T, F, Fut>(items: I, limit: usize, mut f: F) -> Vec<T>
+where
+    I: IntoIterator,
+    F: FnMut(I::Item) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let mut results: Vec<(usize, T)> =
+        futures_util::stream::iter(items.into_iter().enumerate().map(|(index, item)| {
+            let fut = f(item);
+            async move { (index, fut.await) }
+        }))
+        .buffer_unordered(limit.max(1))
+        .collect()
+        .await;
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
+}
+
+/// One persona as the account records it, for hydration: id, DID, mediator,
+/// cached DID document, and a did:scid persona's DID URL with `src`.
+type PersonaSeed = (
+    PersonaId,
+    std::sync::Arc<String>,
+    String,
+    Option<affinidi_tdk::did_common::Document>,
+    Option<String>,
+);
+
+/// What every persona's hydration shares. All shared references: nothing here
+/// is changed per persona, so several can run at once.
+struct HydrateContext<'a> {
+    tdk: &'a TDK,
+    sc: &'a SecuredConfig,
+    key_backend: &'a KeyBackend,
+    vta_client: Option<&'a vta_sdk::client::VtaClient>,
+    on_progress: Option<ProgressFn<'a>>,
+}
+
+impl HydrateContext<'_> {
+    fn progress(&self, major: &str, sub: &str) {
+        if let Some(f) = self.on_progress {
+            f(major, sub);
+        }
+    }
+}
+
+/// What hydrating one persona came to.
+enum PersonaHydration {
+    /// Keys loaded and a messaging profile registered.
+    Loaded(Box<crate::identity::IdentityContext>),
+    /// This persona cannot be brought up this session; the others are not
+    /// affected. Recorded by the caller, in account order.
+    Degraded(DegradedReason),
+}
+
+/// Bring one persona up: its DID document (cached, else resolved), its keys
+/// into the TDK, and its messaging profile registered with ATM. A fault in the
+/// persona is [`PersonaHydration::Degraded`]; `Err` is only for a fault no
+/// persona can work around (the ATM service missing), which fails the load.
+async fn hydrate_persona(
+    ctx: &HydrateContext<'_>,
+    seed: &PersonaSeed,
+    profile_label: String,
+) -> Result<PersonaHydration, OpenVTCError> {
+    let (persona_id, persona_did, persona_mediator, cached_document, did_locator) = seed;
+    let tdk = ctx.tdk;
+    // A did:scid persona's bare DID resolves only through a source
+    // the resolver holds, and the resolver forgets its sources on
+    // restart: seed it with the one recorded at mint (VTI-KEY-162).
+    // It is also the DID the persona sends as, so a peer meeting it
+    // for the first time can resolve it (VTI-KEY-163).
+    if let Some(locator) = did_locator {
+        tdk.did_resolver().scid_sources().add_source(locator);
+    }
+    let presented_did: &str = did_locator.as_deref().unwrap_or(persona_did.as_str());
+
+    // PERF #3: prefer the persisted persona DID document over a fresh
+    // network resolve (~1s). did:webvh docs change rarely between
+    // launches; a stale doc only matters if the persona rotated keys
+    // out-of-band — rare, and recoverable on the next mint/resolve.
+    let document = if let Some(doc) = cached_document.clone() {
+        ctx.progress("Identity", "Loading DID document (cached)");
+        doc
+    } else {
+        ctx.progress("Identity", "Resolving DID document");
+        match tdk.did_resolver().resolve(presented_did).await {
+            Ok(resolved) => resolved.doc,
+            // Isolated, not fatal: this persona has no usable
+            // document, but the others may.
+            Err(e) => {
+                return Ok(PersonaHydration::Degraded(
+                    DegradedReason::DocumentUnresolvable {
+                        detail: e.to_string(),
+                    },
+                ));
+            }
+        }
+    };
+
+    // Final mediator resolution. If neither the persona record nor
+    // the account carried a mediator, recover it from the DID
+    // document itself — the persona DID was minted with a
+    // DIDCommMessaging service whose endpoint IS the mediator, so it
+    // is always authoritative. Without this the persona listener
+    // fails with "No Mediator is configured" and reconnect-loops.
+    let persona_mediator = if persona_mediator.is_empty() {
+        match super::did::mediator_from_document(&document) {
+            Some(m) => {
+                warn!(
+                    persona = %persona_did,
+                    mediator = %m,
+                    "recovered persona mediator from its DID document"
+                );
+                m
+            }
+            None => {
+                warn!(
+                    persona = %persona_did,
+                    "persona has no mediator anywhere (record, account, \
+                     or DID document) — its listener will not connect"
+                );
+                persona_mediator.clone()
+            }
+        }
+    } else {
+        persona_mediator.clone()
+    };
+
+    ctx.progress("Identity", "Fetching persona keys");
+    // THE isolation point. A persona recorded in the account with no
+    // `key_info` — the signature of a save that wrote the config file
+    // and then died before the credential store — used to return here
+    // and fail the ENTIRE profile: every other persona, every
+    // community, every relationship. Now it costs exactly the persona
+    // that has the fault.
+    if let Err(reason) =
+        Config::regenerate_persona_keys(tdk, ctx.sc, ctx.key_backend, &document, ctx.vta_client)
+            .await
+    {
+        return Ok(PersonaHydration::Degraded(reason));
+    }
+
+    ctx.progress("Identity", "Building messaging profiles");
+    // The ATM service itself is account-wide, not per persona: if it
+    // is missing, no persona can work and degrading each in turn
+    // would report the same fault N times as though N things broke.
+    let atm = tdk
+        .atm
+        .clone()
+        .ok_or_else(|| OpenVTCError::Config("TDK ATM service not initialized".to_string()))?;
+    let persona_profile = match ATMProfile::new(
+        &atm,
+        Some(profile_label),
+        presented_did.to_string(),
+        Some(persona_mediator.clone()),
+    )
+    .await
+    {
+        Ok(profile) => profile,
+        Err(e) => {
+            return Ok(PersonaHydration::Degraded(
+                DegradedReason::MessagingUnavailable {
+                    detail: e.to_string(),
+                },
+            ));
+        }
+    };
+
+    // Register the persona profile with the TDK ATM Service but do
+    // NOT open a WebSocket — the DIDComm service owns connections.
+    let persona_profile = match atm.profile_add(&persona_profile, false).await {
+        Ok(profile) => profile,
+        Err(e) => {
+            return Ok(PersonaHydration::Degraded(
+                DegradedReason::MessagingUnavailable {
+                    detail: e.to_string(),
+                },
+            ));
+        }
+    };
+
+    Ok(PersonaHydration::Loaded(Box::new(
+        crate::identity::IdentityContext {
+            persona_id: *persona_id,
+            did: persona_did.to_string(),
+            document,
+            profile: persona_profile,
+            mediator_did: Some(persona_mediator),
+        },
+    )))
 }
 
 /// Cross-check the account against what actually loaded.
@@ -425,15 +626,8 @@ impl Config {
         // Resolve a runtime identity for EVERY persona in the account, not just
         // the first: each persona gets its own DIDComm listener at runtime, so
         // all of them must be hydrated here (keys regenerated + an ATM messaging
-        // profile registered). A State-A account has zero personas, so the loop
-        // below never runs and `identities` stays empty.
-        type PersonaSeed = (
-            crate::config::account::PersonaId,
-            std::sync::Arc<String>,
-            String,
-            Option<affinidi_tdk::did_common::Document>,
-            Option<String>,
-        );
+        // profile registered). A State-A account has zero personas, so nothing
+        // is hydrated below and `identities` stays empty.
         let personas: Vec<PersonaSeed> = account
             .personas
             .values()
@@ -509,168 +703,47 @@ impl Config {
         let mut integrity = LoadIntegrity::default();
 
         let hydrate: Result<(), OpenVTCError> = async {
-            for (persona_id, persona_did, persona_mediator, cached_document, did_locator) in
-                &personas
-            {
-                // A did:scid persona's bare DID resolves only through a source
-                // the resolver holds, and the resolver forgets its sources on
-                // restart: seed it with the one recorded at mint (VTI-KEY-162).
-                // It is also the DID the persona sends as, so a peer meeting it
-                // for the first time can resolve it (VTI-KEY-163).
-                if let Some(locator) = did_locator {
-                    tdk.did_resolver().scid_sources().add_source(locator);
-                }
-                let presented_did: &str = did_locator.as_deref().unwrap_or(persona_did.as_str());
-                // Name the persona's messaging profile after its community AND
-                // its own DID, so two personas in one community are still
-                // distinguishable. Shares one helper
-                // with the runtime label (`Config::persona_profile_label`) —
-                // this used to be a second copy of the expression, which is how
-                // the two could drift.
+            // Personas are independent until they are recorded: each resolves its
+            // own document, fetches its own keys and registers its own profile,
+            // through shared handles (`&TDK`, the one VTA session — whose replies
+            // vta-sdk demuxes by `thid`). So they are hydrated a few at a time,
+            // then recorded in account order, so the degraded report reads the
+            // same whichever finished first.
+            let shared_tdk: &TDK = tdk;
+            let ctx = HydrateContext {
+                tdk: shared_tdk,
+                sc: &sc,
+                key_backend: &key_backend,
+                vta_client: vta_client.as_ref(),
+                on_progress,
+            };
+            let hydrated = map_bounded_in_order(&personas, PERSONA_HYDRATE_CONCURRENCY, |seed| {
+                let (persona_id, persona_did, _, _, _) = seed;
+                // Name the persona's messaging profile after its community
+                // AND its own DID, so two personas in one community are still
+                // distinguishable. Shares one helper with the runtime label
+                // (`Config::persona_profile_label`) — this used to be a second
+                // copy of the expression, which is how the two could drift.
                 //
-                // No `Config` exists yet here, so the verified-name lookup goes
-                // through `private_cfg` directly.
+                // No `Config` exists yet here, so the verified-name lookup
+                // goes through `private_cfg` directly.
                 let profile_label = crate::config::membership_profile_label(
                     account.memberships().find(|c| c.persona_ref == *persona_id),
                     persona_did,
                     |did| private_cfg.cached_agent_name(did).map(ToString::to_string),
                 );
-
-                // PERF #3: prefer the persisted persona DID document over a fresh
-                // network resolve (~1s). did:webvh docs change rarely between
-                // launches; a stale doc only matters if the persona rotated keys
-                // out-of-band — rare, and recoverable on the next mint/resolve.
-                let document = if let Some(doc) = cached_document.clone() {
-                    report_progress(&on_progress, "Identity", "Loading DID document (cached)");
-                    doc
-                } else {
-                    report_progress(&on_progress, "Identity", "Resolving DID document");
-                    match tdk.did_resolver().resolve(presented_did).await {
-                        Ok(resolved) => resolved.doc,
-                        Err(e) => {
-                            // Isolated, not fatal: this persona has no usable
-                            // document, but the others may.
-                            record_degraded(
-                                &mut integrity,
-                                &account,
-                                *persona_id,
-                                persona_did,
-                                DegradedReason::DocumentUnresolvable {
-                                    detail: e.to_string(),
-                                },
-                            );
-                            continue;
-                        }
+                hydrate_persona(&ctx, seed, profile_label)
+            })
+            .await;
+            for ((persona_id, persona_did, _, _, _), outcome) in personas.iter().zip(hydrated) {
+                match outcome? {
+                    PersonaHydration::Loaded(identity) => {
+                        identities.insert(*persona_id, *identity);
                     }
-                };
-
-                // Final mediator resolution. If neither the persona record nor
-                // the account carried a mediator, recover it from the DID
-                // document itself — the persona DID was minted with a
-                // DIDCommMessaging service whose endpoint IS the mediator, so it
-                // is always authoritative. Without this the persona listener
-                // fails with "No Mediator is configured" and reconnect-loops.
-                let persona_mediator = if persona_mediator.is_empty() {
-                    match super::did::mediator_from_document(&document) {
-                        Some(m) => {
-                            warn!(
-                                persona = %persona_did,
-                                mediator = %m,
-                                "recovered persona mediator from its DID document"
-                            );
-                            m
-                        }
-                        None => {
-                            warn!(
-                                persona = %persona_did,
-                                "persona has no mediator anywhere (record, account, \
-                                 or DID document) — its listener will not connect"
-                            );
-                            persona_mediator.clone()
-                        }
+                    PersonaHydration::Degraded(reason) => {
+                        record_degraded(&mut integrity, &account, *persona_id, persona_did, reason);
                     }
-                } else {
-                    persona_mediator.clone()
-                };
-
-                report_progress(&on_progress, "Identity", "Fetching persona keys");
-                // THE isolation point. A persona recorded in the account with no
-                // `key_info` — the signature of a save that wrote the config file
-                // and then died before the credential store — used to return here
-                // and fail the ENTIRE profile: every other persona, every
-                // community, every relationship. Now it costs exactly the persona
-                // that has the fault.
-                if let Err(reason) = Config::regenerate_persona_keys(
-                    tdk,
-                    &sc,
-                    &key_backend,
-                    &document,
-                    vta_client.as_ref(),
-                )
-                .await
-                {
-                    record_degraded(&mut integrity, &account, *persona_id, persona_did, reason);
-                    continue;
                 }
-
-                report_progress(&on_progress, "Identity", "Building messaging profiles");
-                // The ATM service itself is account-wide, not per persona: if it
-                // is missing, no persona can work and degrading each in turn
-                // would report the same fault N times as though N things broke.
-                let atm = tdk.atm.clone().ok_or_else(|| {
-                    OpenVTCError::Config("TDK ATM service not initialized".to_string())
-                })?;
-                let persona_profile = match ATMProfile::new(
-                    &atm,
-                    Some(profile_label.clone()),
-                    presented_did.to_string(),
-                    Some(persona_mediator.clone()),
-                )
-                .await
-                {
-                    Ok(profile) => profile,
-                    Err(e) => {
-                        record_degraded(
-                            &mut integrity,
-                            &account,
-                            *persona_id,
-                            persona_did,
-                            DegradedReason::MessagingUnavailable {
-                                detail: e.to_string(),
-                            },
-                        );
-                        continue;
-                    }
-                };
-
-                // Register the persona profile with the TDK ATM Service but do
-                // NOT open a WebSocket — the DIDComm service owns connections.
-                let persona_profile = match atm.profile_add(&persona_profile, false).await {
-                    Ok(profile) => profile,
-                    Err(e) => {
-                        record_degraded(
-                            &mut integrity,
-                            &account,
-                            *persona_id,
-                            persona_did,
-                            DegradedReason::MessagingUnavailable {
-                                detail: e.to_string(),
-                            },
-                        );
-                        continue;
-                    }
-                };
-
-                identities.insert(
-                    *persona_id,
-                    crate::identity::IdentityContext {
-                        persona_id: *persona_id,
-                        did: persona_did.to_string(),
-                        document,
-                        profile: persona_profile,
-                        mediator_did: Some(persona_mediator.clone()),
-                    },
-                );
             }
 
             // Register relationship (R-DID) profiles ONCE, excluding ALL persona
@@ -1267,5 +1340,43 @@ mod tests {
             !output.contains(MARKER),
             "decrypted private-config contents leaked into log output: {output}"
         );
+    }
+}
+
+#[cfg(test)]
+mod hydrate_concurrency_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Personas are hydrated a few at a time, never more than the bound, and
+    /// the results come back in account order whichever finished first — so
+    /// the degraded report and the identities are recorded deterministically.
+    #[tokio::test(start_paused = true)]
+    async fn map_bounded_in_order_bounds_concurrency_and_keeps_input_order() {
+        let running = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let items: Vec<u64> = (0..10).collect();
+        let out = map_bounded_in_order(&items, 3, |n| {
+            let (running, peak) = (&running, &peak);
+            async move {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                // Later items finish first.
+                tokio::time::sleep(Duration::from_millis(100 - n * 10)).await;
+                running.fetch_sub(1, Ordering::SeqCst);
+                *n * 2
+            }
+        })
+        .await;
+        assert_eq!(out, (0..10).map(|n| n * 2).collect::<Vec<_>>());
+        assert_eq!(peak.load(Ordering::SeqCst), 3, "at most the bound at once");
+    }
+
+    /// A zero bound is treated as one rather than hanging.
+    #[tokio::test]
+    async fn map_bounded_in_order_with_zero_limit_still_runs() {
+        let out = map_bounded_in_order([1, 2, 3], 0, |n| async move { n + 1 }).await;
+        assert_eq!(out, vec![2, 3, 4]);
     }
 }

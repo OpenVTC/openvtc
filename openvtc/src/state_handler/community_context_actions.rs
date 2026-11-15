@@ -24,7 +24,6 @@
 //! [`reduce`], which both loops share.
 
 use crate::state_handler::main_page::status::Status;
-use std::future::Future;
 
 use chrono::Utc;
 use openvtc_core::community_access::{self, DeviceGrant, EXPIRY_CHOICES, Revoked};
@@ -33,11 +32,12 @@ use openvtc_core::config::account::{CommunityRecord, PersonaId};
 use openvtc_core::config::community_context::{
     self, ContextDeletion, ContextDeletionPreview, DELETE_CONFIRMATION,
 };
+use openvtc_core::didcomm::Messaging;
 use openvtc_core::errors::OpenVTCError;
 use vta_sdk::client::VtaClient;
 
 use crate::state_handler::actions::CommunityContextAction as Act;
-use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
+use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome};
 use crate::state_handler::main_page::content::{
     CommunitiesState, ContextDeletePhase, ContextDeleteView, DeviceAccessView, GrantForm,
     GrantListing,
@@ -239,23 +239,175 @@ fn community_name(config: &Config, membership: &CommunityRecord) -> String {
     )
 }
 
-/// Claim the domain and the VTA session for a job, or say why not.
-fn claim(ctx: &mut ActionCtx<'_>, what: &str) -> Result<VtaClient, String> {
-    let Some(client) = ctx.admin_vta else {
-        return Err(format!(
-            "VTA session unavailable — cannot {what} right now."
-        ));
-    };
-    if !ctx.in_flight.try_begin(DOMAIN) {
-        return Err(InFlight::busy_message(DOMAIN));
-    }
-    Ok(client.clone())
+/// The VTA session a job needs, or why there is none.
+fn session(ctx: &ActionCtx<'_>, what: &str) -> Result<VtaClient, String> {
+    ctx.admin_vta
+        .cloned()
+        .ok_or_else(|| format!("VTA session unavailable — cannot {what} right now."))
 }
 
-fn spawn(ctx: &ActionCtx<'_>, job: impl Future<Output = ContextOutcome> + Send + 'static) {
-    background_dispatch::spawn_dispatch(ctx.dispatch_tx.clone(), DOMAIN, async move {
-        DispatchOutcome::CommunityContext(job.await)
-    });
+/// Claim the domain for `job` and spawn it. On a busy domain the job is
+/// dropped and `on_busy` given the reason; returns whether it started.
+fn start(
+    ctx: &mut ActionCtx<'_>,
+    job: ContextJob,
+    on_busy: impl FnOnce(&mut State, String),
+) -> bool {
+    let state = &mut *ctx.state;
+    background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |busy| {
+        on_busy(state, busy);
+    })
+}
+
+/// One context job, resolved on the loop. I/O only.
+enum ContextJob {
+    /// What deleting `context_id` would remove.
+    Preview {
+        client: VtaClient,
+        top: String,
+        context_id: String,
+    },
+    /// Delete the context (and the persona that goes with it), then tear the
+    /// persona's listener down if its DID went.
+    Delete {
+        client: VtaClient,
+        service: Messaging,
+        top: String,
+        deletion: ContextDeletion,
+        vtc_did: String,
+        persona: PersonaId,
+        community: String,
+    },
+    /// Read `context_id`'s device grants.
+    List {
+        client: VtaClient,
+        context_id: String,
+    },
+    /// Grant `did` access, then re-read the grants.
+    Grant {
+        client: VtaClient,
+        top: String,
+        context_id: String,
+        did: String,
+        label: String,
+        expires: chrono::DateTime<Utc>,
+    },
+    /// Revoke `did`'s access, then re-read the grants.
+    Revoke {
+        client: VtaClient,
+        context_id: String,
+        did: String,
+    },
+}
+
+impl background_dispatch::Job for ContextJob {
+    fn domain(&self) -> DispatchDomain {
+        DOMAIN
+    }
+
+    async fn execute(self) -> DispatchOutcome {
+        DispatchOutcome::CommunityContext(self.run().await)
+    }
+}
+
+impl ContextJob {
+    async fn run(self) -> ContextOutcome {
+        match self {
+            ContextJob::Preview {
+                client,
+                top,
+                context_id,
+            } => {
+                let result =
+                    community_context::preview_context_deletion(&client, &top, &context_id)
+                        .await
+                        .map_err(|e| reason(&e));
+                ContextOutcome::Previewed { context_id, result }
+            }
+            ContextJob::Delete {
+                client,
+                service,
+                top,
+                deletion,
+                vtc_did,
+                persona,
+                community,
+            } => {
+                let report =
+                    community_context::delete_community_context(&client, &top, &deletion).await;
+                if report.persona_removed
+                    && let Some(taken) = &deletion.persona
+                {
+                    // The DID is gone, so the persona's listener has nothing left to
+                    // receive — the same teardown deleting a persona does.
+                    service
+                        .remove_listener(&openvtc_core::didcomm::persona_listener_id(&taken.did))
+                        .await;
+                }
+                ContextOutcome::Deleted {
+                    vtc_did,
+                    persona,
+                    community,
+                    persona_removed: report.persona_removed,
+                    result: report.result.map_err(|e| reason(&e)),
+                    deletion,
+                }
+            }
+            ContextJob::List { client, context_id } => {
+                let result = community_access::list_device_grants(&client, &context_id)
+                    .await
+                    .map_err(|e| reason(&e));
+                ContextOutcome::Listed { context_id, result }
+            }
+            ContextJob::Grant {
+                client,
+                top,
+                context_id,
+                did,
+                label,
+                expires,
+            } => {
+                let result = community_access::grant_device(
+                    &client,
+                    &top,
+                    &context_id,
+                    &did,
+                    &label,
+                    expires,
+                )
+                .await
+                .map_err(|e| reason(&e));
+                // Re-read whatever the grant did, so the list is the VTA's answer.
+                let listing = community_access::list_device_grants(&client, &context_id)
+                    .await
+                    .map_err(|e| reason(&e));
+                ContextOutcome::Granted {
+                    context_id,
+                    did,
+                    result,
+                    listing,
+                }
+            }
+            ContextJob::Revoke {
+                client,
+                context_id,
+                did,
+            } => {
+                let result = community_access::revoke_device_grant(&client, &context_id, &did)
+                    .await
+                    .map_err(|e| reason(&e));
+                let listing = community_access::list_device_grants(&client, &context_id)
+                    .await
+                    .map_err(|e| reason(&e));
+                ContextOutcome::Revoked {
+                    context_id,
+                    did,
+                    result,
+                    listing,
+                }
+            }
+        }
+    }
 }
 
 /// Report a grant or revoke that could not start — always a refusal.
@@ -291,25 +443,24 @@ fn start_deletion(ctx: &mut ActionCtx<'_>, index: usize) {
         phase: ContextDeletePhase::Previewing,
         typed: String::new(),
     };
-    let context_id = deletion.context_id;
-    let top = config.account.top_context_id.clone();
-    let client = match claim(ctx, "delete a context") {
-        Ok(client) => client,
-        Err(message) => {
-            panel(ctx.state).status_message = Some(Status::error(message));
-            return;
-        }
+    let refuse = |state: &mut State, message: String| {
+        panel(state).status_message = Some(Status::error(message));
     };
+    let job = match session(ctx, "delete a context") {
+        Ok(client) => ContextJob::Preview {
+            client,
+            top: config.account.top_context_id.clone(),
+            context_id: deletion.context_id,
+        },
+        Err(message) => return refuse(ctx.state, message),
+    };
+    if !start(ctx, job, refuse) {
+        return;
+    }
     let communities = panel(ctx.state);
     communities.device_access = None;
     communities.status_message = None;
     communities.context_delete = Some(view);
-    spawn(ctx, async move {
-        let result = community_context::preview_context_deletion(&client, &top, &context_id)
-            .await
-            .map_err(|e| reason(&e));
-        ContextOutcome::Previewed { context_id, result }
-    });
 }
 
 fn confirm_deletion(ctx: &mut ActionCtx<'_>) {
@@ -355,17 +506,13 @@ fn confirm_deletion(ctx: &mut ActionCtx<'_>) {
         communities.status_message = Some(Status::warning(problem));
         return;
     }
-    let top = config.account.top_context_id.clone();
-    let client = match claim(ctx, "delete a context") {
-        Ok(client) => client,
-        Err(message) => {
-            panel(ctx.state).status_message = Some(Status::error(message));
-            return;
-        }
+    let refuse = |state: &mut State, message: String| {
+        panel(state).status_message = Some(Status::error(message));
     };
-    if let Some(open) = panel(ctx.state).context_delete.as_mut() {
-        open.phase = ContextDeletePhase::Deleting;
-    }
+    let client = match session(ctx, "delete a context") {
+        Ok(client) => client,
+        Err(message) => return refuse(ctx.state, message),
+    };
     let deletion = view.deletion();
     let ContextDeleteView {
         vtc_did,
@@ -373,27 +520,21 @@ fn confirm_deletion(ctx: &mut ActionCtx<'_>) {
         community,
         ..
     } = view;
-    let service = ctx.didcomm_service.clone();
-    spawn(ctx, async move {
-        let report = community_context::delete_community_context(&client, &top, &deletion).await;
-        if report.persona_removed
-            && let Some(taken) = &deletion.persona
-        {
-            // The DID is gone, so the persona's listener has nothing left to
-            // receive — the same teardown deleting a persona does.
-            service
-                .remove_listener(&openvtc_core::didcomm::persona_listener_id(&taken.did))
-                .await;
-        }
-        ContextOutcome::Deleted {
-            vtc_did,
-            persona,
-            community,
-            persona_removed: report.persona_removed,
-            result: report.result.map_err(|e| reason(&e)),
-            deletion,
-        }
-    });
+    let job = ContextJob::Delete {
+        client,
+        service: ctx.didcomm_service.clone(),
+        top: config.account.top_context_id.clone(),
+        deletion,
+        vtc_did,
+        persona,
+        community,
+    };
+    if !start(ctx, job, refuse) {
+        return;
+    }
+    if let Some(open) = panel(ctx.state).context_delete.as_mut() {
+        open.phase = ContextDeletePhase::Deleting;
+    }
 }
 
 /// The persona OpenVTC is acting as — the one selected, or, with no selection,
@@ -441,24 +582,25 @@ fn open_devices(ctx: &mut ActionCtx<'_>, index: usize) {
 }
 
 fn read_grants(ctx: &mut ActionCtx<'_>, context_id: String) {
-    let client = match claim(ctx, "read device access") {
+    let client = match session(ctx, "read device access") {
         Ok(client) => client,
         Err(message) => return set_view_message(ctx.state, message),
     };
+    let job = ContextJob::List {
+        client,
+        context_id: context_id.clone(),
+    };
+    if !start(ctx, job, set_view_message) {
+        return;
+    }
     let communities = panel(ctx.state);
     communities
         .device_grants
-        .entry(context_id.clone())
+        .entry(context_id)
         .or_insert(GrantListing::Loading);
     if let Some(view) = communities.device_access.as_mut() {
         view.busy = true;
     }
-    spawn(ctx, async move {
-        let result = community_access::list_device_grants(&client, &context_id)
-            .await
-            .map_err(|e| reason(&e));
-        ContextOutcome::Listed { context_id, result }
-    });
 }
 
 fn submit_grant(ctx: &mut ActionCtx<'_>) {
@@ -478,35 +620,26 @@ fn submit_grant(ctx: &mut ActionCtx<'_>) {
     };
     let expires = community_access::expires_at(Utc::now(), form.expiry);
     let label = community_access::grant_label(&form.name, &view.community);
-    let top = ctx.config.account.top_context_id.clone();
-    let client = match claim(ctx, "grant device access") {
+    let client = match session(ctx, "grant device access") {
         Ok(client) => client,
         Err(message) => return set_view_message(ctx.state, message),
     };
+    let progress = format!("Granting {}…", shorten_did(&did, 40));
+    let job = ContextJob::Grant {
+        client,
+        top: ctx.config.account.top_context_id.clone(),
+        context_id: view.context_id,
+        did,
+        label,
+        expires,
+    };
+    if !start(ctx, job, set_view_message) {
+        return;
+    }
     if let Some(open) = panel(ctx.state).device_access.as_mut() {
         open.busy = true;
-        open.message = Some(Status::progress(format!(
-            "Granting {}…",
-            shorten_did(&did, 40)
-        )));
+        open.message = Some(Status::progress(progress));
     }
-    let context_id = view.context_id;
-    spawn(ctx, async move {
-        let result =
-            community_access::grant_device(&client, &top, &context_id, &did, &label, expires)
-                .await
-                .map_err(|e| reason(&e));
-        // Re-read whatever the grant did, so the list is the VTA's answer.
-        let listing = community_access::list_device_grants(&client, &context_id)
-            .await
-            .map_err(|e| reason(&e));
-        ContextOutcome::Granted {
-            context_id,
-            did,
-            result,
-            listing,
-        }
-    });
 }
 
 fn confirm_revoke(ctx: &mut ActionCtx<'_>) {
@@ -527,31 +660,23 @@ fn confirm_revoke(ctx: &mut ActionCtx<'_>) {
     else {
         return;
     };
-    let client = match claim(ctx, "revoke device access") {
+    let client = match session(ctx, "revoke device access") {
         Ok(client) => client,
         Err(message) => return set_view_message(ctx.state, message),
     };
+    let progress = format!("Revoking {}…", shorten_did(&grant.did, 40));
+    let job = ContextJob::Revoke {
+        client,
+        context_id,
+        did: grant.did,
+    };
+    if !start(ctx, job, set_view_message) {
+        return;
+    }
     if let Some(open) = panel(ctx.state).device_access.as_mut() {
         open.busy = true;
-        open.message = Some(Status::progress(format!(
-            "Revoking {}…",
-            shorten_did(&grant.did, 40)
-        )));
+        open.message = Some(Status::progress(progress));
     }
-    spawn(ctx, async move {
-        let result = community_access::revoke_device_grant(&client, &context_id, &grant.did)
-            .await
-            .map_err(|e| reason(&e));
-        let listing = community_access::list_device_grants(&client, &context_id)
-            .await
-            .map_err(|e| reason(&e));
-        ContextOutcome::Revoked {
-            context_id,
-            did: grant.did,
-            result,
-            listing,
-        }
-    });
 }
 
 // ****************************************************************************
@@ -860,6 +985,54 @@ pub(crate) fn sweep_targets(config: &Config) -> Vec<String> {
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+/// One device-grant sweep, by [`sweep`].
+pub(crate) struct DeviceGrantSweepJob {
+    pub(crate) client: VtaClient,
+    pub(crate) contexts: Vec<String>,
+}
+
+impl crate::state_handler::background_dispatch::Job for DeviceGrantSweepJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        DispatchDomain::DeviceGrantSweep
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        sweep(self.client, self.contexts).await
+    }
+}
+
+/// Registering the contexts memberships name at the VTA: each is read, and
+/// created under `top_context_id` when missing.
+pub(crate) struct ContextRegistrationJob {
+    pub(crate) client: VtaClient,
+    pub(crate) top_context_id: String,
+    pub(crate) contexts: Vec<String>,
+}
+
+impl crate::state_handler::background_dispatch::Job for ContextRegistrationJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        DispatchDomain::CommunityContexts
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        let mut results = Vec::with_capacity(self.contexts.len());
+        for context_id in self.contexts {
+            let name = openvtc_core::config::context_path::parse_sub_context_id(&context_id)
+                .map_or(context_id.clone(), |(_, slug)| slug.to_string());
+            let result = community_context::ensure_context(
+                &self.client,
+                &self.top_context_id,
+                &context_id,
+                &name,
+            )
+            .await
+            .map_err(|e| e.to_string());
+            results.push((context_id, result));
+        }
+        DispatchOutcome::CommunityContexts(results)
+    }
 }
 
 /// Read the device grants of every context in `contexts`.

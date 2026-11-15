@@ -6,8 +6,6 @@
 //! surfaces too — the member portal, `pnm` — and a record kept here would be the one place
 //! they disagree ([`openvtc_core::community_rooms`]).
 
-use std::time::Instant;
-
 use openvtc_core::community_rooms::{Offer, Renewal, RoomMembership, Standing};
 use openvtc_core::config::account::PersonaId;
 
@@ -36,12 +34,7 @@ pub enum Purpose {
 }
 
 /// A request to the community awaiting its answer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pending {
-    pub thid: String,
-    pub sent_at: Instant,
-    pub purpose: Purpose,
-}
+pub type Pending = crate::state_handler::community_request::Pending<Purpose>;
 
 /// One room, as every surface shows it.
 #[derive(Clone, Debug)]

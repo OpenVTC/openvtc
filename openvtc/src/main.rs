@@ -326,6 +326,16 @@ fn redact_paths(msg: &str) -> String {
     }
 }
 
+/// The size at which `OPENVTC_DEBUG_LOG` is rotated when it is opened: 50 MiB.
+const DEBUG_LOG_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+/// The one rotated generation of the debug log: `<path>.1`.
+fn rotated_debug_log_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".1");
+    std::path::PathBuf::from(name)
+}
+
 /// Open the `OPENVTC_DEBUG_LOG` file for appending, owner-only on unix.
 ///
 /// Append, never truncate. `File::create` truncated on every launch, so the
@@ -343,7 +353,12 @@ fn redact_paths(msg: &str) -> String {
 /// * **A symlink is refused.** Creating through a link planted in a
 ///   world-writable directory would append this process's log to a file of the
 ///   planter's choosing, so a symlink at `path` is an error, not a target.
-fn open_debug_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+///
+/// And one bound: a file already larger than `max_bytes` is moved to `<path>.1`
+/// (replacing any earlier rotated file) and a fresh one started, so a long run of
+/// debug sessions keeps at most two files rather than growing without limit. The
+/// check is made at open only; one run can still write past the cap.
+fn open_debug_log(path: &std::path::Path, max_bytes: u64) -> std::io::Result<std::fs::File> {
     // `symlink_metadata` does not follow the final component, so this sees the
     // link itself rather than what it points at. A missing path is the normal
     // case: it is about to be created.
@@ -353,6 +368,12 @@ fn open_debug_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
                 std::io::ErrorKind::InvalidInput,
                 "refusing to write the debug log through a symlink",
             ));
+        }
+        // Over the cap: keep it as the one rotated generation. `rename` replaces
+        // the destination entry itself (a link planted at `<path>.1` is replaced,
+        // not followed), and the previous runs' evidence survives in `<path>.1`.
+        Ok(meta) if meta.is_file() && meta.len() > max_bytes => {
+            std::fs::rename(path, rotated_debug_log_path(path))?;
         }
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -448,7 +469,7 @@ async fn main() -> Result<()> {
     // Log level defaults to this workspace's own crates but can be overridden
     // with RUST_LOG.
     if let Ok(log_path) = env::var("OPENVTC_DEBUG_LOG") {
-        match open_debug_log(std::path::Path::new(&log_path)) {
+        match open_debug_log(std::path::Path::new(&log_path), DEBUG_LOG_MAX_BYTES) {
             Ok(log_file) => {
                 // Default to this workspace's own spans. The previous default
                 // was a bare "debug", which also turned on every dependency —
@@ -1263,7 +1284,7 @@ mod tests {
 
         let dir = temp_dir("mode");
         let path = dir.join("openvtc.log");
-        let file = open_debug_log(&path).expect("a fresh path opens");
+        let file = open_debug_log(&path, DEBUG_LOG_MAX_BYTES).expect("a fresh path opens");
         drop(file);
 
         let mode = std::fs::metadata(&path)
@@ -1290,7 +1311,7 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
             .expect("loosen the log");
 
-        let file = open_debug_log(&path).expect("an existing path opens");
+        let file = open_debug_log(&path, DEBUG_LOG_MAX_BYTES).expect("an existing path opens");
         drop(file);
 
         let mode = std::fs::metadata(&path)
@@ -1313,6 +1334,41 @@ mod tests {
     }
 
     #[test]
+    fn debug_log_rotates_once_over_the_cap() {
+        let dir = temp_dir("rotate");
+        let path = dir.join("openvtc.log");
+        let rotated = rotated_debug_log_path(&path);
+        let _ = std::fs::remove_file(&rotated);
+
+        // Under the cap: appended to, nothing rotated.
+        std::fs::write(&path, b"small\n").expect("seed the log");
+        drop(open_debug_log(&path, 16).expect("opens under the cap"));
+        assert_eq!(std::fs::read(&path).expect("read"), b"small\n");
+        assert!(!rotated.exists(), "no rotation under the cap");
+
+        // Over the cap: moved to `.1`, a fresh empty file started.
+        std::fs::write(&path, b"run one, which is over the cap\n").expect("grow the log");
+        drop(open_debug_log(&path, 16).expect("opens over the cap"));
+        assert_eq!(std::fs::read(&path).expect("read").len(), 0);
+        assert_eq!(
+            std::fs::read(&rotated).expect("read rotated"),
+            b"run one, which is over the cap\n"
+        );
+
+        // Over again: the previous rotated generation is replaced, not kept.
+        std::fs::write(&path, b"run two, also over the cap\n").expect("grow again");
+        drop(open_debug_log(&path, 16).expect("opens over the cap again"));
+        assert_eq!(
+            std::fs::read(&rotated).expect("read rotated"),
+            b"run two, also over the cap\n",
+            "only one rotated file is kept"
+        );
+        assert!(!dir.join("openvtc.log.2").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn debug_log_refuses_a_symlink() {
         let dir = temp_dir("symlink");
@@ -1322,7 +1378,8 @@ mod tests {
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&target, &link).expect("create the symlink");
 
-        let err = open_debug_log(&link).expect_err("a symlink must be refused");
+        let err =
+            open_debug_log(&link, DEBUG_LOG_MAX_BYTES).expect_err("a symlink must be refused");
         assert_eq!(
             err.kind(),
             std::io::ErrorKind::InvalidInput,

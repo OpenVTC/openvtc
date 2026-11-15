@@ -75,15 +75,9 @@ pub enum Purpose {
     Issue { election: String },
 }
 
-/// A request to the community awaiting its answer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pending {
-    pub thid: String,
-    pub sent_at: Instant,
-    pub purpose: Purpose,
-    /// The community it went to: the panel's own, or the one holding a notified election.
-    pub to: String,
-}
+/// A request to the community awaiting its answer: to the panel's own community, or the
+/// one holding a notified election.
+pub type Pending = crate::state_handler::community_request::Pending<Purpose>;
 
 /// An election read presenting a membership is offered, waiting for the member's choice.
 #[derive(Clone, Debug, PartialEq, Eq)]

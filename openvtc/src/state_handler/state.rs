@@ -8,6 +8,29 @@ use secrecy::SecretString;
 
 use crate::state_handler::{join::JoinState, main_page::MainPageState, setup_sequence::SetupState};
 
+/// How the state handler publishes [`State`] to the UI (#556).
+///
+/// The channel carries an `Arc`: publishing clones the state once, into the
+/// `Arc`, and the UI's copies of the snapshot share it instead of cloning it
+/// again. Every publish still sends — there is no dirty tracking, so the UI is
+/// never left showing a stale state (the reason R23 was declined).
+pub(crate) trait PublishState {
+    /// Send a snapshot of `state`. Errs only when the UI has gone.
+    fn publish(
+        &self,
+        state: &State,
+    ) -> Result<(), tokio::sync::watch::error::SendError<Arc<State>>>;
+}
+
+impl PublishState for tokio::sync::watch::Sender<Arc<State>> {
+    fn publish(
+        &self,
+        state: &State,
+    ) -> Result<(), tokio::sync::watch::error::SendError<Arc<State>>> {
+        self.send(Arc::new(state.clone()))
+    }
+}
+
 /// State holds the state of the application
 #[derive(Default, Debug, Clone)]
 pub struct State {

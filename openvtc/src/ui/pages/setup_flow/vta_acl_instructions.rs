@@ -1071,7 +1071,7 @@ mod tests {
     #[test]
     fn enter_starts_step_two_and_clears_the_banner() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut flow = SetupFlow::new(&State::default(), tx);
+        let mut flow = SetupFlow::new(&std::sync::Arc::new(State::default()), tx);
         flow.vta_acl_instructions = back_with(ProvisionFailure::NotAuthorised, None);
         flow.vta_acl_instructions.context_id = Input::new("  my-ctx ".to_string());
 
@@ -1095,7 +1095,7 @@ mod tests {
     #[test]
     fn tab_picks_an_advertised_transport_and_enter_carries_it() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut flow = SetupFlow::new(&State::default(), tx);
+        let mut flow = SetupFlow::new(&std::sync::Arc::new(State::default()), tx);
         flow.props.state.vta.advertised = vec![Protocol::Tsp, Protocol::Rest];
 
         press(&mut flow, KeyCode::Tab);
@@ -1122,7 +1122,7 @@ mod tests {
     #[test]
     fn a_single_transport_offers_no_choice() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut flow = SetupFlow::new(&State::default(), tx);
+        let mut flow = SetupFlow::new(&std::sync::Arc::new(State::default()), tx);
         flow.props.state.vta.advertised = vec![Protocol::DidComm];
         press(&mut flow, KeyCode::Tab);
         assert_eq!(flow.vta_acl_instructions.transport, None);
@@ -1143,7 +1143,7 @@ mod tests {
     #[test]
     fn typing_keeps_the_banner() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut flow = SetupFlow::new(&State::default(), tx);
+        let mut flow = SetupFlow::new(&std::sync::Arc::new(State::default()), tx);
         flow.vta_acl_instructions = back_with(ProvisionFailure::NotAuthorised, None);
         press(&mut flow, KeyCode::Char('x'));
         assert!(flow.vta_acl_instructions.retry_reason.is_some());
@@ -1155,7 +1155,7 @@ mod tests {
     fn esc_walks_back_through_the_wizard_keeping_the_input() {
         use crate::ui::component::Component as _;
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut flow = SetupFlow::new(&State::default(), tx);
+        let mut flow = SetupFlow::new(&std::sync::Arc::new(State::default()), tx);
         flow.props.state.active_page = SetupPage::VtaAclInstructions;
         flow.vta_acl_instructions.context_id = Input::new("my-ctx".to_string());
         let esc = KeyEvent {

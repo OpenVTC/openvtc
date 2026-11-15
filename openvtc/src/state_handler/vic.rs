@@ -250,10 +250,39 @@ impl VicVerb {
     }
 }
 
+/// One backgrounded VIC-list refresh: the vault query, with the filter it was
+/// asked under.
+pub(crate) struct VicRefreshJob {
+    pub(crate) admin_vta: VtaClient,
+    pub(crate) include_inactive: bool,
+}
+
+impl crate::state_handler::background_dispatch::Job for VicRefreshJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Vic
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Vic(
+            VicRefreshOutcome::run(self.admin_vta, self.include_inactive).await,
+        )
+    }
+}
+
 /// One backgrounded vault mutation.
 pub(crate) struct VicJob {
     pub(crate) admin_vta: VtaClient,
     pub(crate) verb: VicVerb,
+}
+
+impl crate::state_handler::background_dispatch::Job for VicJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Vic
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::VicMutation(self.run().await)
+    }
 }
 
 impl VicJob {

@@ -6,7 +6,7 @@
 //! that VIC on the clean join-as-subject path (the VIC subject is one of our own
 //! personas, so no subject-linkage proof is needed).
 //!
-//! This is the join flow's mint sub-sequence (`join_flow::run_join_sequence`)
+//! This is the join launch's mint stage (`join_flow::driver`)
 //! minus the community/submit parts: pick a WebVH server, mint the DID via the
 //! VTA, then persist through the shared [`ConfigExtension::mint_persona_into`].
 //! The minted persona is an orphan (no community) until a join reuses it, and
@@ -261,13 +261,12 @@ impl MintedPersona {
     /// Write the persona into the config, recording the context it was minted
     /// in as its origin. Runs on the loop thread, from whichever loop is live —
     /// a first persona is minted in State A.
-    pub(crate) async fn persist(
-        &self,
-        config: &mut Config,
-        tdk: &TDK,
-        profile: &str,
-    ) -> Result<PersonaId> {
-        let persona_id = Config::mint_persona_into(config, &self.setup, tdk, profile).await?;
+    ///
+    /// In memory only: the caller persists it, the TUI loops through
+    /// [`SaveScheduler::flush`](crate::state_handler::save_coalesce::SaveScheduler::flush)
+    /// (the one persistence path), the headless join with its own save.
+    pub(crate) async fn write_into(&self, config: &mut Config, tdk: &TDK) -> Result<PersonaId> {
+        let persona_id = Config::mint_persona_in_memory(config, &self.setup, tdk).await?;
         if let Some(record) = config.account.personas.get_mut(&persona_id) {
             record.origin_context_id = self.context_id.clone();
         }
@@ -294,6 +293,18 @@ pub(crate) struct MintJob {
     pub(crate) progress_tx: tokio::sync::mpsc::UnboundedSender<
         crate::state_handler::background_dispatch::DispatchOutcome,
     >,
+}
+
+impl crate::state_handler::background_dispatch::Job for MintJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Persona
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Persona(Box::new(
+            self.run().await,
+        ))
+    }
 }
 
 impl MintJob {

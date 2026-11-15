@@ -17,7 +17,7 @@ use super::hidden::{cannot_attest_hidden, vetter_context};
 use super::jobs::Sent;
 use super::send::{sign_and_send, spawn_send};
 use super::words::community_display;
-use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome};
+use crate::state_handler::background_dispatch;
 use crate::state_handler::hidden_vetting_vta::{PcsDone, PcsJob, PcsOutcome, PcsWork};
 use crate::state_handler::main_page::sanitize_display;
 use crate::state_handler::runtime_actions::ActionCtx;
@@ -80,23 +80,19 @@ pub(crate) fn start_pcs_work(ctx: &mut ActionCtx<'_>, extra: Vec<PcsWork>) -> bo
         ctx.config.private.vetting.pcs_due = false;
         return true;
     }
-    if !ctx.in_flight.try_begin(DispatchDomain::HiddenVetting) {
-        // The job running now takes what it carried; this is asked for when it is back.
-        ctx.config.private.vetting.pcs_due = true;
-        return false;
-    }
-    ctx.config.private.vetting.pcs_due = false;
     let job = PcsJob {
         client,
         inbox_taken,
         work,
     };
-    background_dispatch::spawn_dispatch(
-        ctx.dispatch_tx.clone(),
-        DispatchDomain::HiddenVetting,
-        async move { DispatchOutcome::HiddenVetting(Box::new(job.run().await)) },
-    );
-    true
+    let started = background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |_| {
+        // The job running now takes what it carried; this is asked for when it is back.
+        ctx.config.private.vetting.pcs_due = true;
+    });
+    if started {
+        ctx.config.private.vetting.pcs_due = false;
+    }
+    started
 }
 
 /// The call that hands `item` to the VTA, with what it needs that the item does not carry.

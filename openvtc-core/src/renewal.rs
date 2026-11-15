@@ -43,10 +43,6 @@
 //! [`crate::members`]); the community drops it on renewal. The caller sends a
 //! fresh one for the new grant, as the join flow does on admission.
 
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
-
 use crate::specs::vtc::members::renew::v0_1 as renew;
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use affinidi_tdk::secrets_resolver::secrets::Secret;
@@ -75,87 +71,30 @@ pub const MEMBERS_RENEW_RESPONSE_TYPE: &str =
 pub const RENEW_NOT_MEMBER: &str = renew::error_codes::NOT_MEMBER.code;
 
 // ─── Outstanding requests ────────────────────────────────────────────────
+//
+// Renewals we have asked for are recorded in the caller's
+// [`crate::pending_replies::PendingReplies`] (kind `Renewal`): request id →
+// who asked whom, and when. In memory — a renewal is this process's, and an
+// answer arriving after a restart is not taken; the member asks again, which
+// is harmless (renewal is idempotent on the community's side, re-minting into
+// the same status-list slot).
 
-/// Renewals we have asked for: request id → who asked whom, and when.
-///
-/// In memory, like the community-profile questions in [`crate::join`]: a
-/// renewal is this process's, and an answer arriving after a restart is not
-/// taken — the member asks again, which is harmless (renewal is idempotent on
-/// the community's side, re-minting into the same status-list slot).
-static PENDING: LazyLock<Mutex<HashMap<Uuid, Pending>>> = LazyLock::new(Default::default);
-
-struct Pending {
-    vtc_did: String,
-    member_did: String,
-    at: Instant,
-}
-
-/// How long a renewal waits for its answer.
-const PENDING_TTL: Duration = Duration::from_secs(600);
-
-/// Most renewals outstanding at once.
-const MAX_PENDING: usize = 64;
-
-/// The request id a reply's `thid` names. The request is sent with its
-/// document id as the DIDComm message id (`urn:uuid:<id>`), and a community
-/// may thread on either form.
-fn request_id_of(thid: &str) -> Option<Uuid> {
-    Uuid::parse_str(thid.strip_prefix("urn:uuid:").unwrap_or(thid)).ok()
-}
-
-/// Record that `member_did` asked `vtc_did` to renew, under `request_id` — the
-/// id the reply threads on. [`request_renewal`] does this itself; it is exposed
-/// for a caller that delivers the document by another route (and for tests of
-/// the reply's handling).
-pub fn record_request(request_id: Uuid, vtc_did: &str, member_did: &str) {
-    if let Ok(mut pending) = PENDING.lock() {
-        pending.retain(|_, p| p.at.elapsed() < PENDING_TTL);
-        if pending.len() < MAX_PENDING {
-            pending.insert(
-                request_id,
-                Pending {
-                    vtc_did: vtc_did.to_string(),
-                    member_did: member_did.to_string(),
-                    at: Instant::now(),
-                },
-            );
-        }
-    }
-}
-
-fn forget(request_id: Uuid) {
-    if let Ok(mut pending) = PENDING.lock() {
-        pending.remove(&request_id);
-    }
-}
-
-/// Whether `thid` answers a renewal we asked `vtc_did` for, still unanswered.
-/// Does not consume it: a reply is taken ([`take_pending`]) only once it has
-/// been verified.
-#[must_use]
-pub fn is_pending(vtc_did: &str, thid: &str) -> bool {
-    let Some(id) = request_id_of(thid) else {
-        return false;
-    };
-    PENDING.lock().is_ok_and(|pending| {
-        pending
-            .get(&id)
-            .is_some_and(|p| p.vtc_did == vtc_did && p.at.elapsed() < PENDING_TTL)
-    })
-}
-
-/// Take the renewal `thid` answers, if it is one we asked `vtc_did` for.
-/// Returns the member DID that asked. Consumes it: a renewal is answered once.
-#[must_use]
-pub fn take_pending(vtc_did: &str, thid: &str) -> Option<String> {
-    let id = request_id_of(thid)?;
-    let mut pending = PENDING.lock().ok()?;
-    match pending.get(&id) {
-        Some(p) if p.vtc_did == vtc_did && p.at.elapsed() < PENDING_TTL => {
-            pending.remove(&id).map(|p| p.member_did)
-        }
-        _ => None,
-    }
+/// Record in `pending` that `member_did` asked `vtc_did` to renew, under
+/// `request_id` — the id the reply threads on. Returns whether it was recorded
+/// (not past the table's cap for renewals).
+pub fn record_request(
+    pending: &mut crate::pending_replies::PendingReplies,
+    request_id: Uuid,
+    vtc_did: &str,
+    member_did: &str,
+) -> bool {
+    pending.record(
+        &request_id.to_string(),
+        vtc_did,
+        crate::pending_replies::Purpose::Renewal {
+            member_did: member_did.to_string(),
+        },
+    )
 }
 
 // ─── The request ─────────────────────────────────────────────────────────
@@ -169,25 +108,20 @@ pub fn take_pending(vtc_did: &str, thid: &str) -> Option<String> {
 /// asked for them. It rides the DIDComm binding envelope like every other
 /// member verb ([`crate::members::submit_member_vmc`]).
 ///
-/// Returns the request id the community's reply threads on. Nothing is awaited:
+/// `request_id` is the id the community's reply threads on. The caller records
+/// it ([`record_request`]) in the table its inbound handling consumes from
+/// *before* calling this — so a reply quicker than the return from the send
+/// still finds its request — and forgets it if this fails. Nothing is awaited:
 /// the reply arrives asynchronously and is verified by
 /// [`verify_renewal_response`].
 pub async fn request_renewal(
     route: &crate::members::Delivery<'_>,
     signer: &Secret,
-) -> Result<Uuid, OpenVTCError> {
-    let request_id = Uuid::new_v4();
+    request_id: Uuid,
+) -> Result<(), OpenVTCError> {
     let document_id = format!("urn:uuid:{request_id}");
     let body = build_renew_request(route.member_did, route.vtc_did, &document_id, signer).await?;
-
-    // Remembered before the send, so a reply quicker than the return from
-    // the send still finds its request.
-    record_request(request_id, route.vtc_did, route.member_did);
-    if let Err(e) = crate::community_send::send_document(route, document_id, body).await {
-        forget(request_id);
-        return Err(e);
-    }
-    Ok(request_id)
+    crate::community_send::send_document(route, document_id, body).await
 }
 
 /// Build the signed `vtc/members/renew/0.1` document — split out from
@@ -714,21 +648,6 @@ mod tests {
         assert_eq!(doc["recipient"], "did:example:vtc");
         assert!(doc.get("issuedAt").is_some());
         assert_eq!(doc["proof"]["proofPurpose"], "authentication");
-    }
-
-    /// A reply is taken only for a renewal we asked that community for, and
-    /// only once — on either form of the thread id.
-    #[test]
-    fn a_reply_is_bound_to_the_request_it_answers() {
-        let id = Uuid::new_v4();
-        record_request(id, "did:example:vtc", MEMBER);
-        assert!(!is_pending("did:example:other", &id.to_string()));
-        assert!(is_pending("did:example:vtc", &format!("urn:uuid:{id}")));
-        assert_eq!(
-            take_pending("did:example:vtc", &id.to_string()).as_deref(),
-            Some(MEMBER)
-        );
-        assert!(take_pending("did:example:vtc", &id.to_string()).is_none());
     }
 
     /// **Success.** A verified renewal stores both credentials, clears the

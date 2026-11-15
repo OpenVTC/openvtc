@@ -93,7 +93,7 @@ pub(crate) async fn handle_factory_reset(state: &mut State, token: Option<Arc<Mu
 #[cfg(feature = "openpgp-card")]
 pub(crate) async fn handle_token_write_keys(
     state: &mut State,
-    state_tx: &watch::Sender<State>,
+    state_tx: &watch::Sender<std::sync::Arc<State>>,
     token: Option<Arc<Mutex<Card<Open>>>>,
 ) {
     use crate::state_handler::setup_sequence::openpgp_card::write_keys_to_card;
@@ -148,7 +148,7 @@ pub(crate) async fn handle_token_write_keys(
 #[cfg(feature = "openpgp-card")]
 pub(crate) fn handle_set_touch_policy(
     state: &mut State,
-    state_tx: &watch::Sender<State>,
+    state_tx: &watch::Sender<std::sync::Arc<State>>,
     token: Option<Arc<Mutex<Card<Open>>>>,
 ) {
     use crate::state_handler::setup_sequence::openpgp_card::set_signing_touch_policy;
@@ -180,7 +180,7 @@ pub(crate) fn handle_set_touch_policy(
 #[cfg(feature = "openpgp-card")]
 pub(crate) fn handle_set_token_name(
     state: &mut State,
-    state_tx: &watch::Sender<State>,
+    state_tx: &watch::Sender<std::sync::Arc<State>>,
     token: Option<Arc<Mutex<Card<Open>>>>,
     name: &str,
 ) {

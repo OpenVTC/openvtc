@@ -27,6 +27,23 @@
 
 use crate::state_handler::main_page::content::AdvertisedTransports;
 
+/// One probe of `vta_did`, by [`probe`].
+pub(crate) struct VtaTransportsProbe {
+    pub(crate) vta_did: String,
+}
+
+impl crate::state_handler::background_dispatch::Job for VtaTransportsProbe {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::VtaTransports
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::VtaTransports(
+            probe(self.vta_did).await,
+        )
+    }
+}
+
 /// Ceiling on one probe. `resolve_vta` resolves a DID document through the
 /// resolver cache and sets no deadline of its own, so the bound is imposed here
 /// (VTI R1.2): a hung publication endpoint must produce an error the panel can

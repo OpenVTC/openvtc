@@ -39,7 +39,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 use vta_sdk::client::VtaClient;
 
-use crate::state_handler::repos_actions::{Sender, sender};
+use crate::state_handler::community_request::{Sender, sender};
 
 /// How many hand-overs run at once. One beyond that is not handed over and not answered, so
 /// its sender delivers it again later — a burst never queues unbounded work here.

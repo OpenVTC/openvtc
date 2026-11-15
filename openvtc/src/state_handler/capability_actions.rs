@@ -20,7 +20,7 @@
 //!
 //! Building the document here is what fixes its id — the thread the reply is
 //! matched on — before the send is spawned, so the view is armed with it
-//! straight away ([`CapabilitySend::arm`]). Armed only when the send reported
+//! straight away ([`CapabilitySend::arming`]). Armed only when the send reported
 //! back, a community answering within a millisecond (a refusal from a host
 //! that offers no capability management does) beat it: the reply found no
 //! pending thread, was dropped, and the view sat out the 30 s reply window to
@@ -126,25 +126,45 @@ pub(crate) struct CapabilitySend {
     signing_secret: Box<Secret>,
 }
 
+impl crate::state_handler::background_dispatch::Job for CapabilitySend {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Capabilities
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Capabilities(self.run().await)
+    }
+}
+
 impl CapabilitySend {
     /// The thread the community's reply will carry.
     pub(crate) fn thread(&self) -> &str {
         openvtc_core::capabilities::correlation_thread(&self.doc)
     }
 
-    /// Arm the view to await this request's reply. Called on the loop, before
-    /// the send is spawned, so a reply that overtakes the send's own report is
+    /// An owned closure that arms the view to await this request's reply.
+    ///
+    /// Detached from the send so the caller can hand the send to
+    /// [`dispatch`](crate::state_handler::background_dispatch::dispatch) and
+    /// arm only once the claim has succeeded. Called on the loop in the same
+    /// turn as the spawn, so a reply that overtakes the send's own report is
     /// still matched.
-    pub(crate) fn arm(&self, state: &mut State) {
-        arm(
-            state,
-            &self.vtc_did,
-            self.persona,
-            self.thread(),
-            self.toggle
-                .as_ref()
-                .map(|(slug, enable)| (slug.as_str(), *enable)),
-        );
+    pub(crate) fn arming(&self) -> impl FnOnce(&mut State) + use<> {
+        let vtc_did = self.vtc_did.clone();
+        let persona = self.persona;
+        let thid = self.thread().to_string();
+        let toggle = self.toggle.clone();
+        move |state: &mut State| {
+            arm(
+                state,
+                &vtc_did,
+                persona,
+                &thid,
+                toggle
+                    .as_ref()
+                    .map(|(slug, enable)| (slug.as_str(), *enable)),
+            );
+        }
     }
 
     /// Sign and send. I/O only.

@@ -39,6 +39,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Joining a community no longer freezes the rest of the app**
+  ([#529](https://github.com/OpenVTC/openvtc/issues/529)). The join runs as a job on the
+  main loop instead of a nested event loop, so saves, inbound messages, VTA supervision
+  and timers carry on while it runs. Esc, F10 or an error cancels a resolve, discovery or
+  launch at once, and the steps already taken are undone in reverse — except once the
+  join request is being sent: then the exit waits for it, so the request is recorded and
+  the persona the community now holds is kept. Messages from that community wait until
+  the request is recorded, so a fast answer is not dropped. A join job that
+  panics reports "Joining a community failed (internal error)."
+- **The runtime loop is a `Runtime` struct with one method per event**
+  ([#528](https://github.com/OpenVTC/openvtc/issues/528)), and its arms are tested on
+  their own. Rooms and elections share one community request/reply engine, and the
+  replies awaited by thread are held in a `PendingReplies` table the runtime owns
+  instead of three process-wide statics
+  ([#534](https://github.com/OpenVTC/openvtc/issues/534)). Every TUI save goes through the
+  save scheduler, and background work is spawned through one `Job` / `dispatch` shape
+  ([#535](https://github.com/OpenVTC/openvtc/issues/535), in part).
+- **Less work per loop turn** ([#555](https://github.com/OpenVTC/openvtc/issues/555),
+  [#556](https://github.com/OpenVTC/openvtc/issues/556),
+  [#565](https://github.com/OpenVTC/openvtc/issues/565),
+  [#557](https://github.com/OpenVTC/openvtc/issues/557)). The published state is shared
+  (`Arc<State>`) rather than copied three times a turn, and two idle timers no longer
+  re-publish it. Config sync no longer reads did-git-sign's files or re-checks every VRC
+  for post-quantum proofs; persona labels, membership counts and relationship keys are
+  looked up by map. Personas load three at a time at startup, and one that fails no
+  longer stops the rest (their progress lines can interleave). VTA retries are jittered,
+  and `OPENVTC_DEBUG_LOG` is rotated once it passes 50 MiB.
+- **CI runs the `#[ignore]`d end-to-end suites on every PR**
+  ([#537](https://github.com/OpenVTC/openvtc/issues/537)); CONTRIBUTING states when a
+  test may be ignored.
+
 - **One confirmation rule** ([#579](https://github.com/OpenVTC/openvtc/issues/579)). A destructive or outward-facing action
   is armed by its key and committed by `y` alone; Enter — the key that opened the view —
   now cancels like any other key. Every prompt ends "y: confirm · any other key:
@@ -149,6 +180,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fix that needs one can be backported to a release branch as it is.
 
 ### Fixed
+
+- **A failed join submit no longer deletes a persona the join reused**
+  ([#529](https://github.com/OpenVTC/openvtc/issues/529)). Only a persona the join itself
+  minted is rolled back.
+- **A standalone persona mint is written to disk in one save**, including its origin
+  context ([#535](https://github.com/OpenVTC/openvtc/issues/535)), and the save no longer
+  blocks the event loop.
 
 - **Nothing essential is clipped at 80x24** ([#576](https://github.com/OpenVTC/openvtc/issues/576)): all twelve menu items fit
   (the activity log shrinks to 4 rows below 32 rows; the menu scrolls to the selection

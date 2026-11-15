@@ -32,6 +32,7 @@ use affinidi_tdk::messaging::ATM;
 use openvtc_core::config::Config;
 use openvtc_core::config::account::{PersonaId, VtcDid};
 use openvtc_core::didcomm::MessagingTransport;
+use openvtc_core::pending_replies::PendingReplies;
 use tracing::debug;
 
 /// Cap on profile asks emitted per tick (R1.4 — bound the fan-out).
@@ -145,41 +146,65 @@ impl ProfilePacer {
     }
 }
 
-/// Send each ask, one at a time. The reply is asynchronous — it arrives on the
-/// persona's listener and is applied by inbound dispatch — so nothing is awaited
-/// beyond the send, and a failure is logged rather than surfaced: this is
-/// background metadata the operator did not initiate, and the value only seeds a
-/// form default whose absence is harmless.
-pub(crate) async fn send_all(atm: ATM, asks: Vec<Ask>) {
-    for ask in asks {
-        // Never sent unsigned: an ask with no key is dropped.
-        let Some(signer) = ask.signer.as_ref() else {
-            debug!(vtc = %ask.vtc_did, "no key to sign the profile ask; skipped");
-            continue;
-        };
-        let tsp_mediator = if ask.over_tsp {
-            openvtc_core::config::peer_tsp_mediator(&ask.vtc_did).await
-        } else {
-            None
-        };
-        match openvtc_core::join::send_community_profile_show(
-            &atm,
-            &ask.profile,
-            &ask.persona_did,
-            signer,
-            &ask.vtc_did,
-            &ask.mediator_did,
-            tsp_mediator.as_deref(),
-        )
-        .await
-        {
-            Ok(()) => debug!(vtc = %ask.vtc_did, "asked the community for its profile"),
-            Err(e) => debug!(
-                vtc = %ask.vtc_did,
-                error = %e,
-                "could not ask the community for its profile; will retry next launch"
-            ),
+/// Open each ask's question in `pending` — here, on the loop thread that owns
+/// the table, so an answer racing the send is still recognised — and return the
+/// sends, one at a time, for the caller to spawn. The reply is asynchronous — it
+/// arrives on the persona's listener and is applied by inbound dispatch — so
+/// nothing is awaited beyond the send, and a failure is logged rather than
+/// surfaced: this is background metadata the operator did not initiate, and the
+/// value only seeds a form default whose absence is harmless.
+pub(crate) fn send_all(
+    atm: ATM,
+    asks: Vec<Ask>,
+    pending: &mut PendingReplies,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let opened: Vec<(Ask, String)> = asks
+        .into_iter()
+        .filter_map(|ask| {
+            // Never sent unsigned: an ask with no key is dropped.
+            if ask.signer.is_none() {
+                debug!(vtc = %ask.vtc_did, "no key to sign the profile ask; skipped");
+                return None;
+            }
+            let document_id = openvtc_core::join::open_profile_query(pending, &ask.vtc_did);
+            Some((ask, document_id))
+        })
+        .collect();
+    async move {
+        for (ask, document_id) in opened {
+            send_one(&atm, ask, document_id).await;
         }
+    }
+}
+
+/// Send one ask whose question is already open.
+async fn send_one(atm: &ATM, ask: Ask, document_id: String) {
+    let Some(signer) = ask.signer.as_ref() else {
+        return;
+    };
+    let tsp_mediator = if ask.over_tsp {
+        openvtc_core::config::peer_tsp_mediator(&ask.vtc_did).await
+    } else {
+        None
+    };
+    match openvtc_core::join::send_community_profile_show(
+        atm,
+        &ask.profile,
+        &ask.persona_did,
+        signer,
+        &ask.vtc_did,
+        &ask.mediator_did,
+        tsp_mediator.as_deref(),
+        document_id,
+    )
+    .await
+    {
+        Ok(()) => debug!(vtc = %ask.vtc_did, "asked the community for its profile"),
+        Err(e) => debug!(
+            vtc = %ask.vtc_did,
+            error = %e,
+            "could not ask the community for its profile; will retry next launch"
+        ),
     }
 }
 

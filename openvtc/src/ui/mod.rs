@@ -26,6 +26,7 @@ pub mod badges;
 pub mod component;
 pub mod journey;
 pub mod pages;
+pub mod shared;
 
 pub struct UiManager {
     action_tx: mpsc::UnboundedSender<Action>,
@@ -55,7 +56,7 @@ impl UiManager {
 
     pub async fn main_loop(
         self,
-        mut state_rx: watch::Receiver<State>,
+        mut state_rx: watch::Receiver<std::sync::Arc<State>>,
         mut interrupt_rx: broadcast::Receiver<Interrupted>,
     ) -> Result<Interrupted> {
         let Self {

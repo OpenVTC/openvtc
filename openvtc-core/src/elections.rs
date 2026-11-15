@@ -968,53 +968,13 @@ impl BallotDraft {
 // Answers from a community this persona is not a member of
 // ****************************************************************************
 
-/// How long an answer from a community this persona holds no membership with is waited for.
-const AWAITING_TTL: Duration = Duration::from_secs(120);
-
-/// The most such requests outstanding at once.
-const MAX_AWAITING: usize = 64;
-
-/// Requests sent to a community this persona holds no membership with, by thread: an election
-/// put to the members of a party the persona belongs to, held by a community it does not
-/// (VTI-NTF-061, VTI-NTF-063). The inbound gate admits that community's answer only on a
-/// thread recorded here; any other document from it has no standing.
-static AWAITING: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
-> = std::sync::LazyLock::new(Default::default);
-
-fn thread_key(thid: &str) -> &str {
-    thid.strip_prefix("urn:uuid:").unwrap_or(thid)
-}
-
-/// Record that `thid` was sent to `community`, so its answer is admitted.
-pub fn expect_answer(community: &str, thid: &str) {
-    if let Ok(mut a) = AWAITING.lock() {
-        a.retain(|_, (_, at)| at.elapsed() < AWAITING_TTL);
-        if a.len() < MAX_AWAITING {
-            a.insert(
-                thread_key(thid).to_string(),
-                (community.to_string(), std::time::Instant::now()),
-            );
-        }
-    }
-}
-
-/// Whether `thid` answers a request sent to `community` and still waited for.
-#[must_use]
-pub fn is_awaited(community: &str, thid: &str) -> bool {
-    AWAITING.lock().is_ok_and(|a| {
-        a.get(thread_key(thid)).is_some_and(|(c, at)| {
-            at.elapsed() < AWAITING_TTL && vta_sdk::did_scid::same_reference(c, community)
-        })
-    })
-}
-
-/// The answer on `thid` was taken, or is no longer waited for.
-pub fn answered(thid: &str) {
-    if let Ok(mut a) = AWAITING.lock() {
-        a.remove(thread_key(thid));
-    }
-}
+// Requests sent to a community this persona holds no membership with — an
+// election put to the members of a party the persona belongs to, held by a
+// community it does not (VTI-NTF-061, VTI-NTF-063) — are recorded by thread in
+// the caller's [`crate::pending_replies::PendingReplies`] (kind
+// `ElectionAnswer`, 120 s, at most 64). The inbound gate admits that
+// community's answer only on a thread recorded there; any other document from
+// it has no standing.
 
 // ****************************************************************************
 // The member's VTA

@@ -13,10 +13,13 @@
 //!
 //! Three arms stay in the loop, because they are not about acting on state:
 //! `Exit` and `UXError` signal the terminator and `break` with the loop's own
-//! outcome type, and `StartJoin` drives the join flow's own action loop with the
-//! receiver this one is selecting on.
+//! outcome type, and `StartJoin` opens the join, which the loop then drives
+//! (`join_flow::JoinDriver`): while a join is open every action is the
+//! driver's, and never reaches this module.
 
 use crate::state_handler::main_page::status::Status;
+#[allow(unused_imports)]
+use crate::state_handler::state::PublishState;
 use tokio::sync::{mpsc::UnboundedSender, watch};
 
 use crate::state_handler::actions::Action;
@@ -57,10 +60,14 @@ pub(crate) struct ActionCtx<'a> {
     /// state rather than `State`: it is a stopwatch, not something the UI
     /// renders, and it is read by the inbound arm that stays in the loop.
     pub(crate) ping_sent_at: &'a mut Option<std::time::Instant>,
-    pub(crate) state_tx: &'a watch::Sender<State>,
+    pub(crate) state_tx: &'a watch::Sender<std::sync::Arc<State>>,
     pub(crate) profile: &'a str,
     /// Where the inbound arm hands a witness's answers to a witnessing in progress.
     pub(crate) witness_router: &'a openvtc_core::witness::ReplyRouter,
+    /// The replies the runtime waits on by thread — the inbound gate admits
+    /// them only because we asked. Recorded here, on the loop thread, before
+    /// a send is spawned.
+    pub(crate) pending_replies: &'a mut openvtc_core::pending_replies::PendingReplies,
 }
 
 /// What the loop must do after an action was handled.
@@ -585,6 +592,21 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                             Some(Status::progress(
                                 "Asking the community to renew your membership…".to_string(),
                             ));
+                        // Waited on from before the send, so a reply quicker than
+                        // the send's return still finds it — and only when the
+                        // job will run: a busy dispatcher sends nothing.
+                        let request_id = uuid::Uuid::new_v4();
+                        if !ctx
+                            .in_flight
+                            .is_busy(background_dispatch::DispatchDomain::Community)
+                        {
+                            openvtc_core::renewal::record_request(
+                                ctx.pending_replies,
+                                request_id,
+                                &vtc,
+                                &member_did,
+                            );
+                        }
                         spawn_community_job(
                             ctx.dispatch_tx,
                             ctx.in_flight,
@@ -603,6 +625,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                                 persona: persona_id,
                                 verb: community_actions::Verb::Renew {
                                     document_signer: Box::new(keys.authentication.secret.clone()),
+                                    request_id,
                                 },
                             },
                         )
@@ -947,7 +970,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 if let Some(overlay) = ctx.state.main_page.create_persona.as_mut() {
                     overlay.copied = copied;
                 }
-                let _ = ctx.state_tx.send(ctx.state.clone());
+                let _ = ctx.state_tx.publish(ctx.state);
             }
         }
         Action::Inbox(ia) => {
@@ -1315,8 +1338,8 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::TokenWriteKeys(..) => {}
 
         // Owned by the loop: `Exit` and `UXError` signal the terminator and
-        // break with its outcome type, and the two `StartJoin` verbs drive the
-        // join flow's own action loop using the receiver this one selects on.
+        // break with its outcome type, and the two `StartJoin` verbs open the
+        // join the loop then drives (`join_flow::JoinDriver`).
         // Listed so the match stays exhaustive — the guarantee is that a NEW
         // variant cannot be added without a decision here, and these already
         // have one.
@@ -1510,8 +1533,9 @@ mod tests {
         didcomm_service: Messaging,
         session_manager: SessionManager,
         ping_sent_at: Option<std::time::Instant>,
-        state_tx: watch::Sender<State>,
+        state_tx: watch::Sender<std::sync::Arc<State>>,
         witness_router: openvtc_core::witness::ReplyRouter,
+        pending_replies: openvtc_core::pending_replies::PendingReplies,
     }
 
     impl Harness {
@@ -1522,7 +1546,7 @@ mod tests {
         /// thing as one that succeeds.
         async fn new(with_session: bool) -> Self {
             let (dispatch_tx, dispatch_rx) = mpsc::unbounded_channel();
-            let (state_tx, _state_rx) = watch::channel(State::default());
+            let (state_tx, _state_rx) = watch::channel(std::sync::Arc::new(State::default()));
             let (event_tx, _event_rx) = mpsc::unbounded_channel();
             Self {
                 state: State::default(),
@@ -1542,6 +1566,7 @@ mod tests {
                 ping_sent_at: None,
                 state_tx,
                 witness_router: openvtc_core::witness::ReplyRouter::default(),
+                pending_replies: Default::default(),
             }
         }
 
@@ -1560,6 +1585,7 @@ mod tests {
                 state_tx: &self.state_tx,
                 profile: "test",
                 witness_router: &self.witness_router,
+                pending_replies: &mut self.pending_replies,
             };
             handle_action(&mut ctx, action).await
         }

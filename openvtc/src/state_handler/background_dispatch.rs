@@ -111,6 +111,12 @@ pub(crate) enum DispatchDomain {
     /// only. Its own domain so a periodic read never makes a member's key
     /// press wait.
     GitWorkspaceProbe,
+    /// Detecting the did-git-sign install for the persona, for Help / Status
+    /// and Settings: two small file reads on a blocking thread. Never claimed
+    /// by a key press, so a refresh asked for while one runs is queued
+    /// ([`SettingsState::did_git_sign_wanted`](crate::state_handler::main_page::content::SettingsState::did_git_sign_wanted))
+    /// rather than reported as busy.
+    DidGitSign,
     /// A `vtc/rooms/*` request sent to a community from the Rooms panel. The answer
     /// arrives on the inbound channel; this serialises the sends.
     Rooms,
@@ -169,6 +175,13 @@ pub(crate) enum DispatchDomain {
     /// to the witness, each waited on for up to a minute. Its own domain so the wait never
     /// holds up a ping or a VRC request on the same relationship.
     Witness,
+    /// The join flow's network work: resolving an agent name, reading a
+    /// community, and each stage of a launch (#529). One job at a time — the
+    /// join driver serialises them and queues the page's keys behind one — and
+    /// never claimed by a key press directly. Its outcomes are the driver's,
+    /// matched by generation, and an aborted job's domain is freed by the
+    /// driver that aborted it.
+    Join,
 }
 
 impl DispatchDomain {
@@ -189,6 +202,7 @@ impl DispatchDomain {
             DispatchDomain::GitNs => "Repository request",
             DispatchDomain::GitWorkspace => "Checkout or signing change",
             DispatchDomain::GitWorkspaceProbe => "Checkout check",
+            DispatchDomain::DidGitSign => "Signing install check",
             DispatchDomain::Rooms => "Data room request",
             DispatchDomain::RoomsVta => "Data room keys at your VTA",
             DispatchDomain::Elections => "Election request",
@@ -204,6 +218,7 @@ impl DispatchDomain {
             DispatchDomain::VettingStatus => "Vetter grant check",
             DispatchDomain::HiddenVetting => "Hidden-vetting work at your VTA",
             DispatchDomain::Witness => "Witnessing",
+            DispatchDomain::Join => "Joining a community",
         }
     }
 }
@@ -307,12 +322,19 @@ pub(crate) enum DispatchOutcome {
     Workspace(crate::state_handler::repos_workspace::WorkspaceOutcome),
     /// A Repos-panel checkout and signing read finished.
     WorkspaceProbe(crate::state_handler::repos_workspace::ProbeOutcome),
+    /// The did-git-sign install was read for `persona_did`. Display-only.
+    DidGitSign {
+        /// The persona DID the detection was for.
+        persona_did: String,
+        /// What it found; `None` when did-git-sign is not set up for it.
+        info: Option<crate::state_handler::main_page::content::DidGitSignInfo>,
+    },
     /// A `vtc/rooms/*` request was sent to a community (or failed to send).
-    Rooms(crate::state_handler::rooms_actions::RoomsOutcome),
+    Rooms(crate::state_handler::community_request::SendOutcome),
     /// The member's VTA answered the Rooms panel.
     RoomsVta(crate::state_handler::rooms_actions::RoomsVtaOutcome),
     /// A `vtc/elections/*` request was sent to a community (or failed to send).
-    Elections(crate::state_handler::elections_actions::ElectionsOutcome),
+    Elections(crate::state_handler::community_request::SendOutcome),
     /// The member's VTA answered the Elections panel.
     ElectionsVta(crate::state_handler::elections_actions::ElectionsVtaOutcome),
     /// A cast reached its ballot box (or did not).
@@ -364,6 +386,11 @@ pub(crate) enum DispatchOutcome {
     ),
     /// A witnessing finished (or failed).
     Witness(crate::state_handler::witness_actions::WitnessOutcome),
+    /// A join-flow job finished. The owning loop hands it to its
+    /// [`JoinDriver`](crate::state_handler::join_flow::JoinDriver) before
+    /// [`apply_outcome`] sees it; reaching `apply_outcome` it only frees the
+    /// domain.
+    Join(Box<crate::state_handler::join_flow::JoinOutcome>),
 }
 
 impl DispatchOutcome {
@@ -387,6 +414,7 @@ impl DispatchOutcome {
             DispatchOutcome::Repos(_) => DispatchDomain::GitNs,
             DispatchOutcome::Workspace(_) => DispatchDomain::GitWorkspace,
             DispatchOutcome::WorkspaceProbe(_) => DispatchDomain::GitWorkspaceProbe,
+            DispatchOutcome::DidGitSign { .. } => DispatchDomain::DidGitSign,
             DispatchOutcome::Rooms(_) => DispatchDomain::Rooms,
             DispatchOutcome::RoomsVta(_) => DispatchDomain::RoomsVta,
             DispatchOutcome::Elections(_) => DispatchDomain::Elections,
@@ -403,6 +431,7 @@ impl DispatchOutcome {
             DispatchOutcome::CommunityContext(_) => DispatchDomain::CommunityAccess,
             DispatchOutcome::DeviceGrantSweep(_) => DispatchDomain::DeviceGrantSweep,
             DispatchOutcome::Witness(_) => DispatchDomain::Witness,
+            DispatchOutcome::Join(_) => DispatchDomain::Join,
             DispatchOutcome::Panicked(domain) => *domain,
         }
     }
@@ -416,6 +445,9 @@ pub(crate) enum ProgressUpdate {
     PersonaMint(String),
     /// A step of a witnessing, for the relationships panel's status line.
     Witness(String),
+    /// A line from a running join job, for the join page — said only while
+    /// that job (`generation`) is still the one the join is waiting on.
+    Join { generation: u64, line: String },
 }
 
 impl ProgressUpdate {
@@ -425,6 +457,7 @@ impl ProgressUpdate {
         match self {
             ProgressUpdate::PersonaMint(_) => DispatchDomain::Persona,
             ProgressUpdate::Witness(_) => DispatchDomain::Witness,
+            ProgressUpdate::Join { .. } => DispatchDomain::Join,
         }
     }
 }
@@ -452,6 +485,51 @@ pub(crate) fn spawn_dispatch<F>(
         };
         let _ = tx.send(outcome);
     });
+}
+
+/// One unit of off-loop work: the domain it serialises on, and the I/O that
+/// produces its [`DispatchOutcome`].
+///
+/// Every job is built on the loop thread from owned values (no borrow of
+/// `State` or `Config` survives into it), then handed to [`dispatch`], which
+/// is the one place a job is claimed and spawned. `execute` does I/O only; the
+/// outcome it returns is applied on the loop by [`apply_outcome`].
+pub(crate) trait Job: Send + 'static {
+    /// The domain this job holds while it runs.
+    fn domain(&self) -> DispatchDomain;
+
+    /// Run the job's I/O and wrap its result as the outcome the loop applies.
+    fn execute(self) -> impl std::future::Future<Output = DispatchOutcome> + Send;
+}
+
+/// Claim `job`'s domain and spawn it, or refuse it.
+///
+/// The single spawn shape for off-loop work:
+///
+/// * If the domain is free it is claimed ([`InFlight::try_begin`]) and the job
+///   is spawned through [`spawn_dispatch`] (so a panic still frees the
+///   domain); returns `true`.
+/// * If the domain is busy the job is dropped unrun, `on_busy` is called with
+///   the domain's [`InFlight::busy_message`] — each caller decides where that
+///   is shown, or whether a deferred retry is remembered instead — and it
+///   returns `false`.
+///
+/// Work the loop must do only once the claim has succeeded (locking an
+/// overlay, setting a loading flag) is done by the caller on `true`: the
+/// outcome is applied by the same loop, so it can never overtake that work.
+pub(crate) fn dispatch<J: Job>(
+    job: J,
+    in_flight: &mut InFlight,
+    dispatch_tx: &tokio::sync::mpsc::UnboundedSender<DispatchOutcome>,
+    on_busy: impl FnOnce(String),
+) -> bool {
+    let domain = job.domain();
+    if !in_flight.try_begin(domain) {
+        on_busy(InFlight::busy_message(domain));
+        return false;
+    }
+    spawn_dispatch(dispatch_tx.clone(), domain, job.execute());
+    true
 }
 
 /// Apply a completed [`DispatchOutcome`] to `state` and clear the domain's
@@ -509,6 +587,7 @@ pub(crate) fn apply_outcome(
     config: &mut Config,
     save: &mut SaveScheduler,
     in_flight: &mut InFlight,
+    pending_replies: &mut openvtc_core::pending_replies::PendingReplies,
     outcome: DispatchOutcome,
 ) -> AfterApply {
     let domain = outcome.domain();
@@ -527,6 +606,9 @@ pub(crate) fn apply_outcome(
                 state.main_page.content_panel.relationships.status_message =
                     Some(Status::progress(step));
             }
+            // The join driver's, intercepted by the owning loop; a line that
+            // reaches here belongs to no open join.
+            ProgressUpdate::Join { .. } => {}
         }
         return AfterApply::Nothing;
     }
@@ -593,7 +675,7 @@ pub(crate) fn apply_outcome(
         }
         DispatchOutcome::AgentNameManage(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Community(outcome) => {
-            let pending = outcome.apply(state, config, save);
+            let pending = outcome.apply(state, config, save, pending_replies);
             in_flight.finish(domain);
             return match pending {
                 Some((vtc, persona)) => AfterApply::Deregister(vtc, persona),
@@ -615,11 +697,25 @@ pub(crate) fn apply_outcome(
         DispatchOutcome::Credential(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Capabilities(outcome) => outcome.apply(state),
         DispatchOutcome::Repos(outcome) => outcome.apply(state),
-        DispatchOutcome::Workspace(outcome) => outcome.apply(state),
+        DispatchOutcome::Workspace(outcome) => {
+            outcome.apply(state);
+            // A clone, a signing set-up or a removal may have changed the
+            // did-git-sign install Help / Status shows: read it again.
+            state.main_page.content_panel.settings.did_git_sign_wanted = true;
+        }
         DispatchOutcome::WorkspaceProbe(outcome) => outcome.apply(state),
-        DispatchOutcome::Rooms(outcome) => outcome.apply(state),
+        DispatchOutcome::DidGitSign { persona_did, info } => {
+            crate::state_handler::settings_actions::apply_did_git_sign(state, persona_did, info);
+        }
+        DispatchOutcome::Rooms(outcome) => crate::state_handler::community_request::send_failed::<
+            crate::state_handler::rooms_actions::Rooms,
+        >(state, pending_replies, outcome),
         DispatchOutcome::RoomsVta(outcome) => outcome.apply(state),
-        DispatchOutcome::Elections(outcome) => outcome.apply(state),
+        DispatchOutcome::Elections(outcome) => {
+            crate::state_handler::community_request::send_failed::<
+                crate::state_handler::elections_actions::Elections,
+            >(state, pending_replies, outcome)
+        }
         DispatchOutcome::ElectionsVta(outcome) => outcome.apply(state),
         DispatchOutcome::ElectionsCast(outcome) => outcome.apply(state),
         // Merged, not replaced. A sweep only carries the targets it was given,
@@ -668,6 +764,9 @@ pub(crate) fn apply_outcome(
         DispatchOutcome::Vic(outcome) => outcome.apply(state, config),
         DispatchOutcome::VicMutation(outcome) => outcome.apply(state),
         DispatchOutcome::Witness(outcome) => outcome.apply(state, config, save),
+        // The owning loop's join driver applies these; one that reaches here
+        // has no open join to apply to, so its domain is only freed.
+        DispatchOutcome::Join(_) => {}
         // Handled above, before the domain is finished. Listed because the
         // match must stay exhaustive.
         DispatchOutcome::Progress(_) => unreachable!("progress returns before this match"),
@@ -774,6 +873,7 @@ mod tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::MediatorReconnect(ReconnectOutcome::Connected),
         );
 
@@ -803,6 +903,7 @@ mod tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::MediatorReconnect(ReconnectOutcome::Failed {
                 reason: "dead mediator".into(),
                 class: openvtc_core::errors::ErrorClass::Unreachable,
@@ -837,6 +938,7 @@ mod tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::Panicked(DispatchDomain::Relationship),
         );
 
@@ -863,6 +965,102 @@ mod tests {
             outcome,
             DispatchOutcome::Panicked(DispatchDomain::Inbox)
         ));
+    }
+
+    /// A test job: holds `domain`, and answers with a `Panicked` outcome for it
+    /// (the simplest outcome that names a domain) once `release` fires.
+    struct TestJob {
+        domain: DispatchDomain,
+        release: tokio::sync::oneshot::Receiver<()>,
+    }
+
+    impl Job for TestJob {
+        fn domain(&self) -> DispatchDomain {
+            self.domain
+        }
+
+        async fn execute(self) -> DispatchOutcome {
+            let _ = self.release.await;
+            DispatchOutcome::Panicked(self.domain)
+        }
+    }
+
+    /// `dispatch` claims the job's own domain and spawns it: the domain is busy
+    /// until the outcome is applied, the outcome arrives on the channel, and
+    /// applying it frees the domain again.
+    #[tokio::test]
+    async fn dispatch_claims_the_jobs_domain_and_spawns_it() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DispatchOutcome>();
+        let mut in_flight = InFlight::default();
+        let (release, gate) = tokio::sync::oneshot::channel();
+
+        let mut busy = None;
+        let started = dispatch(
+            TestJob {
+                domain: DispatchDomain::Vic,
+                release: gate,
+            },
+            &mut in_flight,
+            &tx,
+            |msg| busy = Some(msg),
+        );
+        assert!(started);
+        assert!(busy.is_none(), "a free domain must not report busy");
+        assert!(in_flight.is_busy(DispatchDomain::Vic));
+        assert!(
+            !in_flight.is_busy(DispatchDomain::Community),
+            "only the job's own domain is claimed"
+        );
+
+        release.send(()).unwrap();
+        let outcome = rx.recv().await.expect("the spawned job reports back");
+        assert_eq!(outcome.domain(), DispatchDomain::Vic);
+
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+        apply_outcome(
+            &mut state,
+            &mut config,
+            &mut save,
+            &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
+            outcome,
+        );
+        assert!(!in_flight.is_busy(DispatchDomain::Vic));
+    }
+
+    /// A job for a busy domain is refused: not spawned, `on_busy` told why in
+    /// the domain's own words, and the running job's claim left untouched.
+    #[tokio::test]
+    async fn dispatch_rejects_a_job_for_a_busy_domain() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DispatchOutcome>();
+        let mut in_flight = InFlight::default();
+        assert!(in_flight.try_begin(DispatchDomain::Community));
+
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let mut busy = None;
+        let started = dispatch(
+            TestJob {
+                domain: DispatchDomain::Community,
+                release: gate,
+            },
+            &mut in_flight,
+            &tx,
+            |msg| busy = Some(msg),
+        );
+        assert!(!started);
+        assert_eq!(
+            busy.as_deref(),
+            Some(InFlight::busy_message(DispatchDomain::Community).as_str())
+        );
+        assert!(in_flight.is_busy(DispatchDomain::Community));
+
+        // The refused job never ran: its gate was dropped with it, and nothing
+        // reaches the channel.
+        assert!(release.send(()).is_err(), "a refused job is dropped unrun");
+        drop(tx);
+        assert!(rx.recv().await.is_none());
     }
 
     /// The busy message names the domain so the UI tells the user *what* is
@@ -938,7 +1136,14 @@ mod tests {
                     }
                 }
                 Some(outcome) = dispatch_rx.recv() => {
-                    apply_outcome(&mut state, &mut config, &mut save, &mut in_flight, outcome);
+                    apply_outcome(
+                        &mut state,
+                        &mut config,
+                        &mut save,
+                        &mut in_flight,
+                        &mut openvtc_core::pending_replies::PendingReplies::default(),
+                        outcome,
+                    );
                 }
             }
         };
@@ -976,6 +1181,7 @@ mod tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::AgentName(vec![
                 (
                     "did:webvh:example.com:alice".to_string(),
@@ -1011,6 +1217,7 @@ mod tests {
             &mut config,
             &mut save2,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::AgentName(vec![
                 (
                     "did:webvh:example.com:alice".to_string(),
@@ -1052,6 +1259,7 @@ mod progress_tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::Progress(ProgressUpdate::PersonaMint("Minting the DID…".into())),
         );
 
@@ -1085,6 +1293,7 @@ mod progress_tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::Progress(ProgressUpdate::PersonaMint("Minting…".into())),
         );
 

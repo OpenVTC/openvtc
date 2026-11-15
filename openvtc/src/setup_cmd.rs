@@ -108,7 +108,7 @@ pub async fn run(args: &ArgMatches, profile: &str) -> Result<()> {
     let mut state = State::default();
     state.setup.protection = ConfigProtection::Passcode(Arc::new(key));
     // Nothing renders state here; sends to a closed channel are ignored.
-    let (state_tx, _) = watch::channel(State::default());
+    let (state_tx, _) = watch::channel(std::sync::Arc::new(State::default()));
 
     // 2. Resolve the VTA and mint the setup DID.
     step(format!("Resolving VTA {vta_did}"));

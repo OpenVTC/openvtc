@@ -4,9 +4,15 @@
 //! Each step here touches only [`Config`] and the network; what the person is
 //! shown about it (the TUI's join page, the headless command's progress lines)
 //! stays with the caller, which applies the step's result. Moved from the CLI
-//! (issue #530). The rest of the sequence — minting a persona, choosing and
-//! presenting an invitation, answering a community's questions — still lives
-//! in the CLI's `join_flow` and moves with the join-flow rework (#529).
+//! (issue #530).
+//!
+//! Each network step comes in two halves where the TUI needs them apart
+//! (#529): an owned I/O half that runs off the runtime loop
+//! ([`fetch_over_http`], [`resolve_document`], [`submit_prepared`]) and an
+//! apply half that takes `&mut Config` on the loop ([`learn_fetched`],
+//! [`note_signing`], [`prepare_submit`]). The one-call forms
+//! ([`learn_over_http`], [`learn_signing`], [`submit`]) are those halves in
+//! sequence, for callers that own their `Config` outright (`community join`).
 
 use std::time::Duration;
 
@@ -77,7 +83,24 @@ pub async fn learn_over_http(
     tdk: &TDK,
     vtc_did: &str,
 ) -> Result<(), NotLearned> {
-    let resolver = tdk.did_resolver();
+    let fetched = fetch_over_http(tdk.did_resolver(), vtc_did).await?;
+    learn_fetched(config, vtc_did, fetched);
+    Ok(())
+}
+
+/// A community's manifest, read from its REST endpoint, with the DID document
+/// it was found through — what [`learn_fetched`] records.
+pub struct OverHttp {
+    fetched: discover::FetchedManifest,
+    document: affinidi_tdk::did_common::Document,
+}
+
+/// The I/O half of [`learn_over_http`]: resolve `vtc_did` and read its
+/// manifest. Needs no `Config`, so it can run off the runtime loop.
+pub async fn fetch_over_http(
+    resolver: &affinidi_tdk::did_resolver::DIDCacheClient,
+    vtc_did: &str,
+) -> Result<OverHttp, NotLearned> {
     let resolved = tokio::time::timeout(RESOLVE_TIMEOUT, resolver.resolve(vtc_did))
         .await
         .map_err(|_| {
@@ -92,15 +115,28 @@ pub async fn learn_over_http(
         .map_err(|e| NotLearned::Unresolvable(format!("it could not be resolved ({e})")))?;
     let doc = serde_json::to_value(&resolved.doc)
         .map_err(|e| NotLearned::Unanswered(format!("its DID document could not be read ({e})")))?;
-    let discover::FetchedManifest {
-        manifest,
-        raw,
-        protocol,
-        meta,
-    } = discover::fetch_manifest(&doc, vtc_did, resolver, ProbePolicy::PublicOnly)
+    let fetched = discover::fetch_manifest(&doc, vtc_did, resolver, ProbePolicy::PublicOnly)
         .await
         .map_err(|e| NotLearned::Unanswered(e.to_string()))?;
+    Ok(OverHttp {
+        fetched,
+        document: resolved.doc,
+    })
+}
 
+/// The apply half of [`learn_over_http`]: the book learns the manifest, and any
+/// application to this community adopts it.
+pub fn learn_fetched(config: &mut Config, vtc_did: &str, fetched: OverHttp) {
+    let OverHttp {
+        fetched:
+            discover::FetchedManifest {
+                manifest,
+                raw,
+                protocol,
+                meta,
+            },
+        document,
+    } = fetched;
     let now = Utc::now();
     let before = config.private.vetting.vetter_mode(vtc_did).mode();
     config
@@ -118,7 +154,7 @@ pub async fn learn_over_http(
         .learn_mode(vtc_did, &raw, before, now);
     // The document is in hand already, so how the community signs is free to
     // learn — and before joining it is the only evidence there is.
-    note_signing(config, vtc_did, &resolved.doc);
+    note_signing(config, vtc_did, &document);
     let book = &mut config.private.vetting;
     for application in book
         .applications
@@ -131,7 +167,6 @@ pub async fn learn_over_http(
             warn!(community = %vtc_did, error = %e, "community manifest not adopted");
         }
     }
-    Ok(())
 }
 
 /// Record how `vtc_did` signs, from its resolved DID document: whether it lists
@@ -157,16 +192,31 @@ pub async fn learn_signing(config: &mut Config, tdk: &TDK, vtc_did: &str) {
     if config.private.vetting.post_quantum_key(vtc_did).is_some() {
         return;
     }
-    match tokio::time::timeout(RESOLVE_TIMEOUT, tdk.did_resolver().resolve(vtc_did)).await {
-        Ok(Ok(resolved)) => note_signing(config, vtc_did, &resolved.doc),
+    if let Some(doc) = resolve_document(tdk.did_resolver(), vtc_did).await {
+        note_signing(config, vtc_did, &doc);
+    }
+}
+
+/// The I/O half of [`learn_signing`]: resolve `vtc_did`'s DID document,
+/// bounded by [`RESOLVE_TIMEOUT`]. `None` when it did not resolve in time.
+pub async fn resolve_document(
+    resolver: &affinidi_tdk::did_resolver::DIDCacheClient,
+    vtc_did: &str,
+) -> Option<affinidi_tdk::did_common::Document> {
+    match tokio::time::timeout(RESOLVE_TIMEOUT, resolver.resolve(vtc_did)).await {
+        Ok(Ok(resolved)) => Some(resolved.doc),
         Ok(Err(e)) => {
             debug!(community = %vtc_did, error = %e, "community DID not resolved; signing not checked");
+            None
         }
-        Err(_) => debug!(
-            community = %vtc_did,
-            timeout_secs = RESOLVE_TIMEOUT.as_secs(),
-            "community DID resolve timed out; signing not checked"
-        ),
+        Err(_) => {
+            debug!(
+                community = %vtc_did,
+                timeout_secs = RESOLVE_TIMEOUT.as_secs(),
+                "community DID resolve timed out; signing not checked"
+            );
+            None
+        }
     }
 }
 
@@ -362,7 +412,29 @@ pub async fn submit(
     route: &SubmitRoute,
     presentation: crate::join::JoinPresentation,
 ) -> Result<Uuid, SubmitError> {
-    let atm = tdk.atm.as_ref().ok_or(SubmitError::NoMessaging)?;
+    let prepared = prepare_submit(config, tdk, persona_id).await?;
+    submit_prepared(&prepared, vtc_did, route, presentation).await
+}
+
+/// What sending a join request needs from the config, read out of it so the
+/// send can run without it: the messaging runtime, the persona's messaging
+/// identity, and the key that signs the request.
+pub struct PreparedSubmit {
+    atm: affinidi_tdk::messaging::ATM,
+    profile: std::sync::Arc<affinidi_tdk::messaging::profiles::ATMProfile>,
+    persona_did: String,
+    mediator: String,
+    signer: affinidi_tdk::secrets_resolver::secrets::Secret,
+}
+
+/// The config half of [`submit`]: no network (the key is read from the local
+/// secrets the persona was loaded with).
+pub async fn prepare_submit(
+    config: &Config,
+    tdk: &TDK,
+    persona_id: PersonaId,
+) -> Result<PreparedSubmit, SubmitError> {
+    let atm = tdk.atm.clone().ok_or(SubmitError::NoMessaging)?;
     let identity = config
         .identities
         .get(&persona_id)
@@ -377,13 +449,29 @@ pub async fn submit(
         .authentication
         .secret
         .clone();
-    let applicant = crate::join::Applicant {
+    Ok(PreparedSubmit {
         atm,
-        profile: &profile,
-        persona_did: &persona_did,
-        signer: &signer,
+        profile,
+        persona_did,
+        mediator,
+        signer,
+    })
+}
+
+/// The send half of [`submit`]: sign and send the request along `route`.
+pub async fn submit_prepared(
+    prepared: &PreparedSubmit,
+    vtc_did: &str,
+    route: &SubmitRoute,
+    presentation: crate::join::JoinPresentation,
+) -> Result<Uuid, SubmitError> {
+    let applicant = crate::join::Applicant {
+        atm: &prepared.atm,
+        profile: &prepared.profile,
+        persona_did: &prepared.persona_did,
+        signer: &prepared.signer,
         vtc_did,
-        mediator_did: &mediator,
+        mediator_did: &prepared.mediator,
         tsp_mediator_did: route.tsp_mediator.as_deref(),
     };
     crate::join::submit_join_request(&applicant, presentation)

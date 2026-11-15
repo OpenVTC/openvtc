@@ -125,6 +125,29 @@ jobs:
           cargo check -p openvtc-core --locked --no-default-features --features arbitrary
           cargo test -p openvtc-core --locked --features arbitrary --lib
 
+  # The `#[ignore]`d tests (#537): the e2e suites that boot an in-process
+  # mediator or VTA (~1-30 s each). Policy: a test is `#[ignore]`d only for
+  # being slow or needing an in-process service — never for being flaky or
+  # broken — and every one of them gates PRs here. The coverage job also runs
+  # them, but it has no threshold, so a failure there did not fail a PR.
+  test-ignored:
+    name: Test (ignored e2e suites)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/add-swap
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libdbus-1-dev
+      - run: cargo test --workspace --locked -- --ignored
+
   test-dev-overrides:
     name: Test (dev-overrides)
     runs-on: ubuntu-latest

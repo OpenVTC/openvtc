@@ -137,6 +137,9 @@ impl Config {
     /// (via the TDK Ed25519 routine), under its assertionMethod verification
     /// method. Used when joining under a different/fresh DID than the invited one.
     ///
+    /// [`Self::subject_signer`] then [`SubjectSigner::sign`], for a caller that
+    /// holds the config across the VTA round trip.
+    ///
     /// Errors if `subject_did` is not one of our personas (we can't prove
     /// control of a key we don't hold).
     pub async fn build_subject_linkage(
@@ -146,6 +149,20 @@ impl Config {
         vic_id: &str,
         presenter_did: &str,
     ) -> Result<crate::join::SubjectLinkage, OpenVTCError> {
+        self.subject_signer(subject_did)?
+            .sign(vta_client, vic_id, presenter_did)
+            .await
+    }
+
+    /// Read what signing a subject-linkage proof as `subject_did` needs out of
+    /// the config: its assertionMethod verification method and where its
+    /// signing key comes from. No I/O — a key derived or imported locally is
+    /// resolved here; a VTA-managed one is fetched by [`SubjectSigner::sign`],
+    /// which needs no config and so can run off the caller's loop (#529).
+    ///
+    /// Errors if `subject_did` is not one of our personas, has no cached DID
+    /// document or assertionMethod, or has no signing key this config can reach.
+    pub fn subject_signer(&self, subject_did: &str) -> Result<SubjectSigner, OpenVTCError> {
         // The subject persona's assertionMethod VM id (the VTC resolves it to
         // verify the signature).
         let persona = self
@@ -169,24 +186,21 @@ impl Config {
                 OpenVTCError::Config("subject persona has no assertionMethod".to_string())
             })?
             .to_string();
-
-        let seed = self.persona_signing_seed(subject_did, vta_client).await?;
-        crate::join::sign_subject_linkage(&seed, vm, vic_id, presenter_did)
+        let key = self.persona_signing_key(subject_did)?;
+        Ok(SubjectSigner { vm, key })
     }
 
-    /// Resolve a persona's Ed25519 signing-key seed (32 bytes) by DID, from
+    /// Where a persona's Ed25519 signing key comes from, found by DID, from
     /// whichever backing the key uses (BIP32-derived / imported / VTA-managed).
-    /// Mirrors the per-key resolution in [`Self::load_persona_secrets`].
-    async fn persona_signing_seed(
-        &self,
-        persona_did: &str,
-        vta_client: Option<&vta_sdk::client::VtaClient>,
-    ) -> Result<[u8; 32], OpenVTCError> {
+    /// A local key is resolved here; a VTA-managed one is named, for
+    /// [`SubjectSigner::sign`] to fetch. Mirrors the per-key resolution in
+    /// [`Self::load_persona_secrets`].
+    fn persona_signing_key(&self, persona_did: &str) -> Result<SigningKey, OpenVTCError> {
         for (key_id, ki) in &self.key_info {
             if !key_id.starts_with(persona_did) || !matches!(ki.purpose, KeyTypes::PersonaSigning) {
                 continue;
             }
-            let secret = match &ki.path {
+            return match &ki.path {
                 KeySourceMaterial::Derived { path } => {
                     let KeyBackend::Bip32 { root, .. } = &self.key_backend else {
                         return Err(OpenVTCError::Config(
@@ -194,29 +208,20 @@ impl Config {
                         ));
                     };
                     root.get_secret_from_path(path, KeyPurpose::Signing)
+                        .map(SigningKey::Local)
                         .map_err(|e| {
                             OpenVTCError::Secret(format!("derive subject signing key: {e}"))
-                        })?
+                        })
                 }
                 KeySourceMaterial::Imported { seed } => {
                     Secret::from_multibase(seed.expose_secret(), None)
-                        .map_err(|e| OpenVTCError::Secret(format!("imported signing key: {e}")))?
+                        .map(SigningKey::Local)
+                        .map_err(|e| OpenVTCError::Secret(format!("imported signing key: {e}")))
                 }
                 KeySourceMaterial::VtaManaged { key_id: vta_key_id } => {
-                    let client = vta_client.ok_or_else(|| {
-                        OpenVTCError::Config(
-                            "VTA-managed signing key requires a VTA client".to_string(),
-                        )
-                    })?;
-                    let resp = client.get_key_secret(vta_key_id).await.map_err(|e| {
-                        OpenVTCError::Config(format!("fetch subject signing key: {e}"))
-                    })?;
-                    secret_from_vta_response(&resp, KeyPurpose::Signing)?
+                    Ok(SigningKey::Vta(vta_key_id.clone()))
                 }
             };
-            return secret.get_private_bytes().try_into().map_err(|_| {
-                OpenVTCError::Secret("signing key is not a 32-byte Ed25519 seed".to_string())
-            });
         }
         Err(OpenVTCError::Config(format!(
             "no signing key found for persona {persona_did}"
@@ -320,7 +325,7 @@ impl Config {
     /// them apart. Previously both were `OpenVTCError::Config` and either one
     /// failed the entire profile load.
     pub(crate) async fn regenerate_persona_keys(
-        tdk: &mut TDK,
+        tdk: &TDK,
         sc: &SecuredConfig,
         key_backend: &KeyBackend,
         doc: &Document,
@@ -441,6 +446,57 @@ async fn secret_for_vm(
     Ok(Some(secret))
 }
 
+/// Everything signing a subject-linkage proof needs, read out of a [`Config`]
+/// by [`Config::subject_signer`] so the signing — and, for a VTA-managed key,
+/// the round trip that fetches it — can run without the config.
+pub struct SubjectSigner {
+    /// The subject persona's assertionMethod verification method.
+    vm: String,
+    key: SigningKey,
+}
+
+/// Where a subject's signing key comes from.
+enum SigningKey {
+    /// Derived or imported: already in hand.
+    Local(Secret),
+    /// Held by the VTA under this key id.
+    Vta(String),
+}
+
+impl SubjectSigner {
+    /// Sign the subject-linkage proof authorizing `presenter_did` to redeem
+    /// the invitation `vic_id`. A VTA-managed key is fetched through
+    /// `vta_client`, which it then requires.
+    pub async fn sign(
+        &self,
+        vta_client: Option<&vta_sdk::client::VtaClient>,
+        vic_id: &str,
+        presenter_did: &str,
+    ) -> Result<crate::join::SubjectLinkage, OpenVTCError> {
+        let fetched;
+        let secret = match &self.key {
+            SigningKey::Local(secret) => secret,
+            SigningKey::Vta(vta_key_id) => {
+                let client = vta_client.ok_or_else(|| {
+                    OpenVTCError::Config(
+                        "VTA-managed signing key requires a VTA client".to_string(),
+                    )
+                })?;
+                let resp = client
+                    .get_key_secret(vta_key_id)
+                    .await
+                    .map_err(|e| OpenVTCError::Config(format!("fetch subject signing key: {e}")))?;
+                fetched = secret_from_vta_response(&resp, KeyPurpose::Signing)?;
+                &fetched
+            }
+        };
+        let seed: [u8; 32] = secret.get_private_bytes().try_into().map_err(|_| {
+            OpenVTCError::Secret("signing key is not a 32-byte Ed25519 seed".to_string())
+        })?;
+        crate::join::sign_subject_linkage(&seed, self.vm.clone(), vic_id, presenter_did)
+    }
+}
+
 /// Converts a VTA `GetKeySecretResponse` into a TDK `Secret`.
 ///
 /// Supports Ed25519 (signing/authentication) and X25519 (encryption) key types.
@@ -482,5 +538,26 @@ pub(crate) fn secret_from_vta_response(
         other => Err(OpenVTCError::Secret(format!(
             "{other:?} key type is not supported for OpenVTC secrets"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::test_config;
+
+    /// The split read refuses exactly what the one-call form refused, before
+    /// any signing: a subject that is none of our personas.
+    #[tokio::test]
+    async fn a_stranger_subject_is_refused_by_both_forms() {
+        let config = test_config();
+        let Err(split) = config.subject_signer("did:example:stranger") else {
+            panic!("a stranger has no signer");
+        };
+        let joined = config
+            .build_subject_linkage("did:example:stranger", None, "urn:vic:1", "did:example:me")
+            .await
+            .expect_err("a stranger cannot be signed for");
+        assert_eq!(split.to_string(), joined.to_string());
+        assert!(split.to_string().contains("is not one of your personas"));
     }
 }

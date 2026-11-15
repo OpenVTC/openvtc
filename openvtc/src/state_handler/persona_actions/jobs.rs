@@ -205,6 +205,16 @@ pub(crate) struct PersonaReadJob {
     pub(crate) needs_claim_types: bool,
 }
 
+impl crate::state_handler::background_dispatch::Job for PersonaReadJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::PersonaManage
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::PersonaManage(self.run().await)
+    }
+}
+
 impl PersonaReadJob {
     /// The targets a read should ask about: one per membership.
     pub(crate) fn targets(state: &State) -> Vec<BindingTarget> {
@@ -270,6 +280,16 @@ impl PersonaReadJob {
 pub(crate) struct PersonaJobRun {
     pub(crate) admin_vta: VtaClient,
     pub(crate) job: PersonaJob,
+}
+
+impl crate::state_handler::background_dispatch::Job for PersonaJobRun {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::PersonaManage
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::PersonaManage(self.run().await)
+    }
 }
 
 impl PersonaJobRun {

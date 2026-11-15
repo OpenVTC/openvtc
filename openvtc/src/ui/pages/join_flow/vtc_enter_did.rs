@@ -32,8 +32,8 @@ pub struct VtcEnterDid;
 impl VtcEnterDid {
     pub fn handle_key_event(state: &mut JoinFlow, key: KeyEvent) {
         // Input is locked while the background sequence runs, except F10: a
-        // quit must always be heard. It is acted on once the in-flight
-        // resolve ends (each step is bounded by a timeout).
+        // quit must always be heard. The loop hears it at once — a resolve or
+        // a community read runs off the loop, and is aborted.
         if state.props.state.processing && key.code != KeyCode::F(10) {
             return;
         }
@@ -439,7 +439,7 @@ mod tests {
         use tokio::sync::mpsc::unbounded_channel;
 
         let (tx, _rx) = unbounded_channel();
-        let mut flow = JoinFlow::new(&State::default(), tx);
+        let mut flow = JoinFlow::new(&std::sync::Arc::new(State::default()), tx);
         VtcEnterDid::handle_key_event(
             &mut flow,
             KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
@@ -465,7 +465,7 @@ mod tests {
         use tokio::sync::mpsc::unbounded_channel;
 
         let (tx, mut rx) = unbounded_channel();
-        let mut flow = JoinFlow::new(&State::default(), tx);
+        let mut flow = JoinFlow::new(&std::sync::Arc::new(State::default()), tx);
 
         flow.apply_entry_paste("  did:webvh:QmRoot:vtc.example.com  ");
         assert_eq!(flow.vtc_did.value(), "did:webvh:QmRoot:vtc.example.com");
@@ -497,7 +497,7 @@ mod tests {
         use tokio::sync::mpsc::unbounded_channel;
 
         let (tx, mut rx) = unbounded_channel();
-        let mut flow = JoinFlow::new(&State::default(), tx);
+        let mut flow = JoinFlow::new(&std::sync::Arc::new(State::default()), tx);
         VtcEnterDid::handle_key_event(
             &mut flow,
             KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),

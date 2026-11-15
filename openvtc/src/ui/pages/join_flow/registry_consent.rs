@@ -422,7 +422,10 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         let mut state = crate::state_handler::state::State::default();
         state.join.registry = Some(choice(false));
-        let mut flow = <JoinFlow as crate::ui::component::Component>::new(&state, tx);
+        let mut flow = <JoinFlow as crate::ui::component::Component>::new(
+            &std::sync::Arc::new(state.clone()),
+            tx,
+        );
         let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
         for c in ['y', 'Y', 'p', 'x'] {

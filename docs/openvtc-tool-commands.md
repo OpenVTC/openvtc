@@ -61,7 +61,7 @@ None of these appear in `--help`.
 | `OPENVTC_THEME` | Theme for one session. |
 | `OPENVTC_NVIM` | Path to Neovim for `theme import nvim:<name>`, if `nvim` is not on `PATH`. |
 | `NO_COLOR` | Draw without colour. |
-| `OPENVTC_DEBUG_LOG` | Write debug logs to this file. |
+| `OPENVTC_DEBUG_LOG` | Write debug logs to this file (appended; moved to `<path>.1` at startup once over 50 MiB). |
 | `OPENVTC_FRIENDLY_NAME` | Display name override. |
 | `OPENVTC_VTA_URL`, `OPENVTC_VTA_DID`, `OPENVTC_MEDIATOR_DID` | Honoured only by builds with the `dev-overrides` feature. Release builds ignore them. |
 

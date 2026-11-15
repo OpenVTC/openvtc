@@ -96,6 +96,68 @@ pub struct MainPageState {
     /// trust-anchor override (see `crate::env_overrides`). Rendered at the front
     /// of the bottom bar, so the run cannot be mistaken for a normal one.
     pub dev_override: Option<String>,
+
+    /// Whether each VRC row is post-quantum signed, remembered across syncs so a
+    /// credential is serialised for the check once rather than on every sync.
+    post_quantum: PostQuantumMemo,
+}
+
+/// The post-quantum flag of every VRC row, by credential id, kept from one
+/// [`MainPageState::sync_from_config`] to the next.
+///
+/// Answering it for a VRC means serialising the credential, and the sync runs on
+/// every config mutation — once per inbound message in a redelivery burst. A VRC's
+/// id is its proof value, so the id fixes the proofs the flag is read from: an id
+/// seen before has the same answer. Bounded by the credentials on display: each
+/// sync keeps only the ids it showed ([`Self::finish_sync`]).
+///
+/// JSON-held credentials (membership, role, vetting) are not remembered: their
+/// check is a walk of a value already in memory, with nothing to serialise.
+#[derive(Debug, Default)]
+struct PostQuantumMemo {
+    /// What the previous sync answered.
+    previous: std::collections::HashMap<String, bool>,
+    /// What this sync has answered so far.
+    current: std::collections::HashMap<String, bool>,
+}
+
+/// A cache, so a clone starts empty: `MainPageState` is cloned to the UI on every
+/// change, and the UI's copy never syncs.
+impl Clone for PostQuantumMemo {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PostQuantumMemo {
+    /// Whether the credential `id` carries a post-quantum proof.
+    fn post_quantum(&mut self, id: &str, raw: &content::RawCredential) -> bool {
+        self.post_quantum_with(id, raw, content::RawCredential::signed_post_quantum)
+    }
+
+    /// [`Self::post_quantum`], answering a miss with `check`.
+    fn post_quantum_with(
+        &mut self,
+        id: &str,
+        raw: &content::RawCredential,
+        check: impl FnOnce(&content::RawCredential) -> bool,
+    ) -> bool {
+        if matches!(raw, content::RawCredential::Value(_)) {
+            return check(raw);
+        }
+        if let Some(&known) = self.current.get(id) {
+            return known;
+        }
+        let answer = self.previous.remove(id).unwrap_or_else(|| check(raw));
+        self.current.insert(id.to_string(), answer);
+        answer
+    }
+
+    /// End a sync: what it answered is what the next one may reuse, and ids it
+    /// did not show are forgotten.
+    fn finish_sync(&mut self) {
+        self.previous = std::mem::take(&mut self.current);
+    }
 }
 
 impl MainPageState {
@@ -478,8 +540,11 @@ impl MainPageState {
             .collect();
 
         // Sync credentials (scoped to the working community's persona)
+        let memo = &mut self.post_quantum;
+        let persona_labels = persona_labels_by_did(config);
         self.content_panel.credentials.received = finish_credential_rows(
-            config,
+            &persona_labels,
+            memo,
             collect_vrcs(
                 &config.private.vrcs_received,
                 config,
@@ -489,7 +554,8 @@ impl MainPageState {
         )
         .into();
         self.content_panel.credentials.issued = finish_credential_rows(
-            config,
+            &persona_labels,
+            memo,
             collect_vrcs(
                 &config.private.vrcs_issued,
                 config,
@@ -499,9 +565,11 @@ impl MainPageState {
         )
         .into();
         self.content_panel.credentials.membership =
-            finish_credential_rows(config, collect_membership_creds(config)).into();
+            finish_credential_rows(&persona_labels, memo, collect_membership_creds(config)).into();
         self.content_panel.credentials.vetting =
-            finish_credential_rows(config, collect_vetting_statements(config)).into();
+            finish_credential_rows(&persona_labels, memo, collect_vetting_statements(config))
+                .into();
+        memo.finish_sync();
         self.content_panel.credentials.retired_vrcs = config.private.vrcs_received.retired()
             + config.private.vrcs_issued.retired()
             + config
@@ -517,7 +585,11 @@ impl MainPageState {
         self.content_panel.settings.persona_agent_name = config
             .agent_name_for(config.persona_did())
             .map(str::to_owned);
-        self.content_panel.settings.did_git_sign = detect_did_git_sign_info(config.persona_did());
+        // did-git-sign is detected off the loop (it reads files); the sync only
+        // makes sure info detected for another persona is never shown for this one.
+        if self.content_panel.settings.did_git_sign_for.as_deref() != Some(config.persona_did()) {
+            self.content_panel.settings.did_git_sign = None;
+        }
         self.content_panel.settings.context_id = config.account.top_context_id.clone();
         // Sync VTA info
         self.content_panel.vta.persona_did = config.persona_did().to_string();
@@ -634,6 +706,12 @@ impl MainPageState {
         // DID is the holder's identity, not a property of the agent that
         // happens to host its keys, and the pane that manages it is the pane
         // that should list it.
+        // Memberships per persona, counted in one pass over the memberships.
+        let mut bound_communities: std::collections::HashMap<PersonaId, usize> =
+            std::collections::HashMap::new();
+        for c in config.account.memberships() {
+            *bound_communities.entry(c.persona_ref).or_default() += 1;
+        }
         let mut personas: Vec<content::ManagedDid> = config
             .account
             .personas
@@ -645,11 +723,7 @@ impl MainPageState {
                 did: p.did.clone(),
                 did_locator: p.did_locator.clone(),
                 label: p.label.clone().unwrap_or_default(),
-                bound_communities: config
-                    .account
-                    .memberships()
-                    .filter(|c| c.persona_ref == p.persona_id)
-                    .count(),
+                bound_communities: bound_communities.get(&p.persona_id).copied().unwrap_or(0),
                 is_active: p.did.as_str() == persona_did,
             })
             .collect();
@@ -1066,20 +1140,36 @@ fn collect_vrcs(
 /// What every credential row needs that its collector does not compute: the
 /// persona it was issued to, by name, and whether it is post-quantum signed.
 /// One pass here rather than in each collector, so no list can miss it.
-fn finish_credential_rows(config: &Config, mut rows: Vec<VrcSummary>) -> Vec<VrcSummary> {
+fn finish_credential_rows(
+    persona_labels: &std::collections::HashMap<&str, Option<&str>>,
+    post_quantum: &mut PostQuantumMemo,
+    mut rows: Vec<VrcSummary>,
+) -> Vec<VrcSummary> {
     for row in &mut rows {
-        row.post_quantum = row.raw_json.signed_post_quantum();
+        row.post_quantum = post_quantum.post_quantum(&row.vrc_id, &row.raw_json);
         if row.subject_is_self {
-            row.subject_label = config
-                .account
-                .personas
-                .values()
-                .find(|p| p.did == row.subject)
-                .and_then(|p| p.label.as_deref())
+            row.subject_label = persona_labels
+                .get(row.subject.as_str())
+                .copied()
+                .flatten()
                 .map(|l| sanitize_display(l, 64));
         }
     }
     rows
+}
+
+/// Each persona DID's own label (`None` when it has none), built once per sync
+/// so a credential row finds its subject's label by lookup rather than a scan
+/// of the personas. Where two personas share a DID the first in iteration order
+/// wins, as the scan's `find` did.
+fn persona_labels_by_did(config: &Config) -> std::collections::HashMap<&str, Option<&str>> {
+    let mut labels = std::collections::HashMap::with_capacity(config.account.personas.len());
+    for p in config.account.personas.values() {
+        labels
+            .entry(p.did.as_str())
+            .or_insert_with(|| p.label.as_deref());
+    }
+    labels
 }
 
 fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
@@ -1625,7 +1715,8 @@ pub fn sanitize_display(input: &str, max_len: usize) -> String {
 /// `None` if did-git-sign is not configured for this persona, or if the
 /// state on disk is malformed.
 ///
-/// Reads files synchronously and is cheap (single small file open + read).
+/// Reads files synchronously, so it runs on a blocking thread
+/// (`settings_actions::refresh_did_git_sign`), never in `sync_from_config`.
 /// Sourced from disk rather than re-derived from runtime key material so
 /// the help screen reflects what `did-git-sign` itself would actually use
 /// — i.e. if the config was hand-edited, the help view stays consistent
@@ -3219,6 +3310,108 @@ mod tests {
 
         let lazy = content::RawCredential::Vrc(Arc::new(vrc)).to_pretty_json();
         assert_eq!(lazy, eager, "lazy VRC JSON must match the old eager output");
+    }
+
+    /// The per-sync lookup answers what the per-row scan did: a persona's label
+    /// by its DID, `None` for a persona without one or a DID that is not ours.
+    #[test]
+    fn persona_labels_by_did_matches_the_scan() {
+        use openvtc_core::config::account::PersonaRecord;
+        let mut config = crate::state_handler::dispatch_util::test_config();
+        for (did, label) in [
+            ("did:webvh:scid:example.com:a", Some("Alice")),
+            ("did:webvh:scid:example.com:b", None),
+        ] {
+            let id = PersonaId::new();
+            config.account.personas.insert(
+                id,
+                PersonaRecord {
+                    extra: serde_json::Map::new(),
+                    persona_id: id,
+                    did: did.into(),
+                    did_document: None,
+                    did_locator: None,
+                    key_refs: vec![],
+                    mediator_did: None,
+                    origin_context_id: "ctx".into(),
+                    created_at: chrono::Utc::now(),
+                    label: label.map(Into::into),
+                },
+            );
+        }
+        let labels = persona_labels_by_did(&config);
+        for did in [
+            "did:webvh:scid:example.com:a",
+            "did:webvh:scid:example.com:b",
+            "did:webvh:scid:example.com:other",
+        ] {
+            let scan = config
+                .account
+                .personas
+                .values()
+                .find(|p| p.did == did)
+                .and_then(|p| p.label.as_deref());
+            assert_eq!(labels.get(did).copied().flatten(), scan, "{did}");
+        }
+        assert_eq!(
+            labels
+                .get("did:webvh:scid:example.com:a")
+                .copied()
+                .flatten(),
+            Some("Alice")
+        );
+    }
+
+    /// A VRC is checked for post-quantum proofs once, then answered from the
+    /// memo on later syncs; an id a sync no longer shows is forgotten; JSON-held
+    /// credentials are always checked (there is nothing to serialise).
+    #[test]
+    fn post_quantum_memo_checks_a_vrc_once_across_syncs() {
+        use chrono::{TimeZone, Utc};
+        use dtg_credentials::DTGCredential;
+        use std::cell::Cell;
+
+        let vrc = content::RawCredential::Vrc(Arc::new(DTGCredential::new_vrc(
+            "did:test:issuer".to_string(),
+            dtg_credentials::IssuerScope::Pairwise,
+            "did:test:subject".to_string(),
+            Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap(),
+            None,
+        )));
+        let value = content::RawCredential::Value(Arc::new(serde_json::json!({})));
+        let checks = Cell::new(0u32);
+        let check = |answer: bool| {
+            let checks = &checks;
+            move |_: &content::RawCredential| {
+                checks.set(checks.get() + 1);
+                answer
+            }
+        };
+
+        let mut memo = PostQuantumMemo::default();
+        // First sync: the check runs once, even when the row appears twice.
+        assert!(memo.post_quantum_with("vrc-1", &vrc, check(true)));
+        assert!(memo.post_quantum_with("vrc-1", &vrc, check(false)));
+        memo.finish_sync();
+        assert_eq!(checks.get(), 1);
+
+        // Second sync: answered from the memo, not re-checked.
+        assert!(memo.post_quantum_with("vrc-1", &vrc, check(false)));
+        memo.finish_sync();
+        assert_eq!(checks.get(), 1);
+
+        // A sync without it forgets it, so the memo stays bounded by what is shown.
+        memo.finish_sync();
+        assert!(!memo.post_quantum_with("vrc-1", &vrc, check(false)));
+        assert_eq!(checks.get(), 2);
+
+        // JSON-held credentials are always asked.
+        memo.post_quantum_with("vc-1", &value, check(true));
+        memo.post_quantum_with("vc-1", &value, check(true));
+        assert_eq!(checks.get(), 4);
+
+        // The UI's clone of the state does not carry the cache.
+        assert!(memo.clone().previous.is_empty() && memo.clone().current.is_empty());
     }
 
     /// The lazy `RawCredential::Value` path (membership/role credentials) must

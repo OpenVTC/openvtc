@@ -21,19 +21,14 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use affinidi_tdk::TDK;
-use affinidi_tdk::messaging::ATM;
-use affinidi_tdk::messaging::profiles::ATMProfile;
-use affinidi_tdk::secrets_resolver::secrets::Secret;
 use chrono::Utc;
 use openvtc_core::capabilities::{RequestDocument, correlation_thread};
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
 use openvtc_core::git_ns::{self, GitRight, Reply, Request};
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::state_handler::actions::ReposAction as Act;
-use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
+use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome};
 use crate::state_handler::main_page::repos::{
     AddPersonForm, ArmedChange, CreatedRepo, EXPIRY_CHOICES, LinkFlow, LinkPhase, LinkedAccount,
     NewRepoForm, Pending, Purpose, ReposPhase, ReposScreen, ReposView, Severity, Status,
@@ -42,10 +37,13 @@ use crate::state_handler::main_page::sanitize_display;
 use crate::state_handler::runtime_actions::ActionCtx;
 use crate::state_handler::state::State;
 
-const DOMAIN: DispatchDomain = DispatchDomain::GitNs;
+pub(crate) use crate::state_handler::community_request::CommunityLoop as Loop;
+pub(crate) use crate::state_handler::community_request::REPLY_WINDOW;
+use crate::state_handler::community_request::{
+    Sender, answered_by, capitalise, sender, sign_and_send,
+};
 
-/// How long a request waits for the community's answer (R1.2).
-pub(crate) const REPLY_WINDOW: Duration = Duration::from_secs(30);
+const DOMAIN: DispatchDomain = DispatchDomain::GitNs;
 
 /// How long `account/link` waits: the VTC itself waits up to 30 s for its
 /// bridge to begin the forge's flow, and the answer then has to travel back.
@@ -62,19 +60,6 @@ pub(crate) fn reply_window(purpose: &Purpose) -> Duration {
 /// A `git-ns` answer as it arrived, threaded on the request it answers
 /// ([`openvtc_core::inbound::ThreadedReply`]).
 pub(crate) type InboundReply = openvtc_core::inbound::ThreadedReply<Reply>;
-
-/// The DID part of a DID or DID URL.
-fn did_part(did: &str) -> &str {
-    did.split('#').next().unwrap_or(did)
-}
-
-/// Whether a `git-ns` answer is the community's own: sent by `vtc` and issued
-/// by it. A thread id is a correlation key, not a credential. Compared by DID:
-/// a did:scid community may name itself with the `?src=` it is resolved through.
-pub(crate) fn answered_by(vtc: &str, from: &str, issuer: Option<&str>) -> bool {
-    let is_vtc = |did: &str| vta_sdk::did_scid::same_reference(did_part(did), vtc);
-    is_vtc(from) && issuer.is_some_and(is_vtc)
-}
 
 /// Longest text kept in a form field. Past every schema limit (a repository
 /// name is 100, a DID 2048, a reason 1024), so an over-long paste is refused
@@ -524,93 +509,9 @@ fn arm_drift(view: &mut ReposView, action: git_ns::DriftAction) {
     view.confirm = Some(ArmedChange { summary, request });
 }
 
-fn capitalise(s: &str) -> String {
-    let mut c = s.chars();
-    c.next()
-        .map(|f| f.to_uppercase().chain(c).collect())
-        .unwrap_or_default()
-}
-
 // ****************************************************************************
 // Loop-side actions
 // ****************************************************************************
-
-/// Everything a send needs, resolved on the loop thread.
-pub(crate) struct Sender {
-    pub(crate) atm: ATM,
-    pub(crate) profile: Arc<ATMProfile>,
-    pub(crate) persona_did: String,
-    pub(crate) mediator: String,
-    /// The membership was joined over TSP, so its requests go over TSP: the
-    /// community answers on the transport a request arrived on, and a persona
-    /// that joined over TSP may not collect a DIDComm answer at all.
-    pub(crate) over_tsp: bool,
-    pub(crate) signer: Box<Secret>,
-}
-
-/// Resolve the persona's messaging identity and signing key. The key comes
-/// from the TDK secrets resolver, an in-memory store populated at startup —
-/// not I/O — which is what lets the job own a plain `Secret`.
-pub(crate) async fn sender(
-    config: &Config,
-    tdk: &TDK,
-    persona: PersonaId,
-    vtc_did: &str,
-) -> Result<Sender, String> {
-    let id = config
-        .identities
-        .get(&persona)
-        .ok_or_else(|| "this persona has no messaging identity".to_string())?;
-    let atm = tdk
-        .atm
-        .as_ref()
-        .ok_or_else(|| "messaging is unavailable".to_string())?
-        .clone();
-    let keys = config
-        .get_persona_keys_for(persona, tdk)
-        .await
-        .map_err(|e| format!("couldn't read this persona's signing key: {e}"))?;
-    Ok(Sender {
-        atm,
-        profile: id.profile().clone(),
-        persona_did: id.persona_did().to_string(),
-        mediator: id.mediator_did.clone().unwrap_or_default(),
-        over_tsp: config
-            .account
-            .membership(vtc_did, persona)
-            .is_some_and(|c| c.joined_over_tsp()),
-        signer: Box::new(keys.authentication.secret.clone()),
-    })
-}
-
-/// Sign `doc` as the persona and send it to `vtc_did`, over TSP when the
-/// membership was joined over it.
-pub(crate) async fn sign_and_send(
-    s: &Sender,
-    vtc_did: &str,
-    doc: &mut RequestDocument,
-) -> Result<(), String> {
-    async {
-        openvtc_core::capabilities::sign_document(doc, &s.signer).await?;
-        let tsp_mediator =
-            openvtc_core::community_send::tsp_mediator_for(s.over_tsp, vtc_did).await;
-        openvtc_core::capabilities::send_capability_document(
-            &openvtc_core::community_send::Delivery {
-                atm: &s.atm,
-                profile: &s.profile,
-                member_did: &s.persona_did,
-                vtc_did,
-                mediator_did: &s.mediator,
-                tsp_mediator_did: tsp_mediator.as_deref(),
-            },
-            doc,
-        )
-        .await
-    }
-    .await
-    .map(|_| ())
-    .map_err(|e| e.to_string())
-}
 
 /// One `git-ns/*` send, off the loop.
 pub(crate) struct ReposJob {
@@ -621,6 +522,16 @@ pub(crate) struct ReposJob {
     /// with before this job was spawned, and signing does not change it.
     doc: RequestDocument,
     purpose: Purpose,
+}
+
+impl background_dispatch::Job for ReposJob {
+    fn domain(&self) -> DispatchDomain {
+        DOMAIN
+    }
+
+    async fn execute(self) -> DispatchOutcome {
+        DispatchOutcome::Repos(self.run().await)
+    }
 }
 
 impl ReposJob {
@@ -743,117 +654,101 @@ impl ReposOutcome {
     }
 }
 
-/// The resources a send needs from the loop, borrowed. Both the action path
-/// ([`ActionCtx`]) and the loop's own tick and reply arms build one.
-pub(crate) struct Loop<'a> {
-    pub(crate) state: &'a mut State,
-    pub(crate) config: &'a Config,
-    pub(crate) tdk: &'a TDK,
-    pub(crate) dispatch_tx: &'a UnboundedSender<DispatchOutcome>,
-    pub(crate) in_flight: &'a mut InFlight,
-}
-
-impl Loop<'_> {
-    /// Send `request` for the open view. `quiet` suppresses the busy message,
-    /// for sends nobody pressed a key for (polls, refresh after a change).
-    /// Returns whether the send was dispatched; every early return says why
-    /// in the view, unless `quiet`.
-    async fn send(&mut self, request: Request, purpose: Purpose, quiet: bool) -> bool {
-        let Some((vtc_did, persona, waiting)) = self
-            .state
-            .main_page
-            .content_panel
-            .repos
-            .view
-            .as_ref()
-            .map(|v| (v.vtc_did.clone(), v.persona, v.pending.clone()))
-        else {
-            return false;
-        };
-        // One request awaits its answer at a time. A second would take the
-        // pending slot, and the first answer — a grant, say — would then match
-        // nothing and be dropped unannounced. Polls have their own slot.
-        if purpose != Purpose::LinkPoll
-            && let Some(waiting) = waiting
-        {
-            if !quiet && let Some(view) = view_mut(self.state) {
-                view.note(
-                    Severity::Warning,
-                    match waiting.purpose {
-                        Purpose::Change(what) => {
-                            format!("Still waiting for the community's answer ({what}).")
-                        }
-                        _ => "Still waiting for the community's answer.".into(),
-                    },
-                );
-            }
-            return false;
-        }
-        let sender = match sender(self.config, self.tdk, persona, &vtc_did).await {
-            Ok(s) => s,
-            Err(e) => {
-                if let Some(view) = view_mut(self.state) {
-                    if view.data.is_none() && purpose == Purpose::View {
-                        view.phase = ReposPhase::Failed(e);
-                    } else {
-                        view.note(Severity::Error, e);
+/// Send `request` for the open view. `quiet` suppresses the busy message,
+/// for sends nobody pressed a key for (polls, refresh after a change).
+/// Returns whether the send was dispatched; every early return says why
+/// in the view, unless `quiet`.
+async fn send(lp: &mut Loop<'_>, request: Request, purpose: Purpose, quiet: bool) -> bool {
+    let Some((vtc_did, persona, waiting)) = lp
+        .state
+        .main_page
+        .content_panel
+        .repos
+        .view
+        .as_ref()
+        .map(|v| (v.vtc_did.clone(), v.persona, v.pending.clone()))
+    else {
+        return false;
+    };
+    // One request awaits its answer at a time. A second would take the
+    // pending slot, and the first answer — a grant, say — would then match
+    // nothing and be dropped unannounced. Polls have their own slot.
+    if purpose != Purpose::LinkPoll
+        && let Some(waiting) = waiting
+    {
+        if !quiet && let Some(view) = view_mut(lp.state) {
+            view.note(
+                Severity::Warning,
+                match waiting.purpose {
+                    Purpose::Change(what) => {
+                        format!("Still waiting for the community's answer ({what}).")
                     }
-                }
-                return false;
-            }
-        };
-        // Built here rather than in the job so its id — the thread the answer
-        // carries — is known before the send is spawned, and the view can wait
-        // on it at once (see `arm`).
-        let doc = match git_ns::build(&request, &sender.persona_did, &vtc_did) {
-            Ok(doc) => doc,
-            Err(e) => {
-                if let Some(view) = view_mut(self.state) {
-                    let e = match &purpose {
-                        Purpose::Change(what) => format!("couldn't send ({what}): {e}"),
-                        _ => format!("couldn't send: {e}"),
-                    };
-                    if view.data.is_none() && purpose == Purpose::View {
-                        view.phase = ReposPhase::Failed(e);
-                    } else {
-                        view.note(Severity::Error, e);
-                    }
-                }
-                return false;
-            }
-        };
-        if !self.in_flight.try_begin(DOMAIN) {
-            if !quiet && let Some(view) = view_mut(self.state) {
-                view.note(Severity::Warning, InFlight::busy_message(DOMAIN));
-            }
-            return false;
-        }
-        if let Some(view) = view_mut(self.state) {
-            arm(
-                view,
-                correlation_thread(&doc).to_string(),
-                purpose.clone(),
-                Instant::now(),
+                    _ => "Still waiting for the community's answer.".into(),
+                },
             );
         }
-        let job = ReposJob {
-            sender,
-            vtc_did,
-            persona,
-            doc,
-            purpose,
-        };
-        background_dispatch::spawn_dispatch(self.dispatch_tx.clone(), DOMAIN, async move {
-            DispatchOutcome::Repos(job.run().await)
-        });
-        true
+        return false;
     }
+    let sender = match sender(lp.config, lp.tdk, persona, &vtc_did).await {
+        Ok(s) => s,
+        Err(e) => {
+            if let Some(view) = view_mut(lp.state) {
+                if view.data.is_none() && purpose == Purpose::View {
+                    view.phase = ReposPhase::Failed(e);
+                } else {
+                    view.note(Severity::Error, e);
+                }
+            }
+            return false;
+        }
+    };
+    // Built here rather than in the job so its id — the thread the answer
+    // carries — is known before the send is spawned, and the view can wait
+    // on it at once (see `arm`).
+    let doc = match git_ns::build(&request, &sender.persona_did, &vtc_did) {
+        Ok(doc) => doc,
+        Err(e) => {
+            if let Some(view) = view_mut(lp.state) {
+                let e = match &purpose {
+                    Purpose::Change(what) => format!("couldn't send ({what}): {e}"),
+                    _ => format!("couldn't send: {e}"),
+                };
+                if view.data.is_none() && purpose == Purpose::View {
+                    view.phase = ReposPhase::Failed(e);
+                } else {
+                    view.note(Severity::Error, e);
+                }
+            }
+            return false;
+        }
+    };
+    let thid = correlation_thread(&doc).to_string();
+    let job = ReposJob {
+        sender,
+        vtc_did,
+        persona,
+        doc,
+        purpose: purpose.clone(),
+    };
+    let started = background_dispatch::dispatch(job, lp.in_flight, lp.dispatch_tx, |msg| {
+        if !quiet && let Some(view) = view_mut(lp.state) {
+            view.note(Severity::Warning, msg);
+        }
+    });
+    if !started {
+        return false;
+    }
+    // Armed in the same loop turn as the spawn, so the answer — applied by
+    // this loop — always finds the view waiting on it.
+    if let Some(view) = view_mut(lp.state) {
+        arm(view, thid, purpose, Instant::now());
+    }
+    true
+}
 
-    /// Read the view again.
-    pub(crate) async fn refresh(&mut self, quiet: bool) {
-        self.send(Request::View { resource: None }, Purpose::View, quiet)
-            .await;
-    }
+/// Read the view again.
+pub(crate) async fn refresh(lp: &mut Loop<'_>, quiet: bool) {
+    send(lp, Request::View { resource: None }, Purpose::View, quiet).await;
 }
 
 /// Service an action that reads the config or sends a task.
@@ -875,13 +770,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
         }
         _ => {}
     }
-    let mut lp = Loop {
-        state: &mut *ctx.state,
-        config: ctx.config,
-        tdk: ctx.tdk,
-        dispatch_tx: ctx.dispatch_tx,
-        in_flight: &mut *ctx.in_flight,
-    };
+    let mut lp = Loop::from_ctx(ctx);
     match action {
         Act::Open(_) | Act::Refresh => {
             if let Some(view) = view_mut(lp.state) {
@@ -890,7 +779,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
                 }
                 view.status = None;
             }
-            lp.refresh(false).await;
+            refresh(&mut lp, false).await;
         }
         Act::NewSubmit => submit_new(&mut lp).await,
         Act::AddSubmit => submit_add(&mut lp).await,
@@ -898,7 +787,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
             let armed = view_mut(lp.state).and_then(|v| v.confirm.take());
             if let Some(armed) = armed {
                 let what = describe(&armed.request);
-                lp.send(armed.request, Purpose::Change(what), false).await;
+                send(&mut lp, armed.request, Purpose::Change(what), false).await;
             }
         }
         Act::LinkStart => start_link(&mut lp).await,
@@ -1029,7 +918,7 @@ async fn submit_new(lp: &mut Loop<'_>) {
         return;
     }
     let what = describe(&request);
-    lp.send(request, Purpose::Change(what), false).await;
+    send(lp, request, Purpose::Change(what), false).await;
 }
 
 /// Add the owner picker's highlighted candidate, or its pasted DID, to the
@@ -1119,7 +1008,7 @@ async fn submit_add(lp: &mut Loop<'_>) {
         return;
     }
     let what = describe(&request);
-    lp.send(request, Purpose::Change(what), false).await;
+    send(lp, request, Purpose::Change(what), false).await;
 }
 
 async fn start_link(lp: &mut Loop<'_>) {
@@ -1147,15 +1036,15 @@ async fn start_link(lp: &mut Loop<'_>) {
     // The attempt is shown only once its request is actually on its way: a
     // send refused here (still waiting, busy, no signing key) says why and
     // leaves no "starting…" line that nothing will ever answer.
-    if lp
-        .send(
-            Request::Link {
-                forge: forge.clone(),
-            },
-            Purpose::LinkStart,
-            false,
-        )
-        .await
+    if send(
+        lp,
+        Request::Link {
+            forge: forge.clone(),
+        },
+        Purpose::LinkStart,
+        false,
+    )
+    .await
         && let Some(view) = view_mut(lp.state)
     {
         view.link = Some(LinkFlow::starting(forge));
@@ -1576,10 +1465,13 @@ pub(crate) async fn tick(lp: &mut Loop<'_>) {
         }
     }
     if let Some(link_id) = poll {
-        lp.send(Request::LinkStatus { link_id }, Purpose::LinkPoll, true)
-            .await;
+        send(lp, Request::LinkStatus { link_id }, Purpose::LinkPoll, true).await;
     }
     super::repos_workspace::probe_if_due(lp.state, lp.dispatch_tx, lp.in_flight);
+    // The did-git-sign install as Help / Status and Settings show it: read off
+    // the loop when it is due (a persona switch, a signing change made here,
+    // either view opened), never in `sync_from_config`.
+    super::settings_actions::maybe_refresh_did_git_sign(lp.state, lp.in_flight, lp.dispatch_tx);
 }
 
 #[cfg(test)]
@@ -1587,7 +1479,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use crate::state_handler::background_dispatch::InFlight;
     use openvtc_core::git_ns::{Refusal, view};
+    use openvtc_core::pending_replies::PendingReplies;
     use serde_json::json;
 
     const VTC: &str = "did:webvh:QmVtcScid7:acme-vtc.example";
@@ -2474,14 +2368,18 @@ mod tests {
         let tdk = crate::state_handler::dispatch_util::test_tdk().await;
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut in_flight = InFlight::default();
-        Loop {
-            state: &mut state,
-            config: &config,
-            tdk: &tdk,
-            dispatch_tx: &tx,
-            in_flight: &mut in_flight,
-        }
-        .refresh(false)
+        refresh(
+            &mut Loop {
+                state: &mut state,
+                config: &config,
+                tdk: &tdk,
+                vta: None,
+                dispatch_tx: &tx,
+                in_flight: &mut in_flight,
+                pending_replies: &mut PendingReplies::default(),
+            },
+            false,
+        )
         .await;
         let v = view(&state);
         assert_eq!(v.pending.as_ref().unwrap().thid, "grant-1");
@@ -2508,8 +2406,10 @@ mod tests {
             state: &mut state,
             config: &config,
             tdk: &tdk,
+            vta: None,
             dispatch_tx: &tx,
             in_flight: &mut in_flight,
+            pending_replies: &mut PendingReplies::default(),
         })
         .await;
         let v = view(&state);
@@ -2529,12 +2429,15 @@ mod tests {
         let tdk = crate::state_handler::dispatch_util::test_tdk().await;
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut in_flight = InFlight::default();
+        let mut pending_replies = PendingReplies::default();
         let mut lp = Loop {
             state,
             config: &config,
             tdk: &tdk,
+            vta: None,
             dispatch_tx: &tx,
             in_flight: &mut in_flight,
+            pending_replies: &mut pending_replies,
         };
         f(&mut lp).await;
     }

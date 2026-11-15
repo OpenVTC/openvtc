@@ -275,7 +275,7 @@ mod tests {
             let mut state = State::default();
             state.join.processing = true;
             state.join.waiting_on_challenge = waiting;
-            (JoinFlow::new(&state, tx), rx)
+            (JoinFlow::new(&std::sync::Arc::new(state.clone()), tx), rx)
         };
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
 

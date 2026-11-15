@@ -26,40 +26,29 @@
 //! replies and outcomes, takes it. After an acceptance ends, either way, the view is read
 //! again: the community and the VTA are the record.
 
-use std::time::{Duration, Instant};
-
-use affinidi_tdk::TDK;
-use openvtc_core::capabilities::{RequestDocument, correlation_thread};
 use openvtc_core::community_rooms::{
     self, Joined, Offer, Prepared, Renewal, Reply, Request, RoomCondition, Standing,
 };
-use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
-use tokio::sync::mpsc::UnboundedSender;
 use vta_sdk::client::VtaClient;
 
 use crate::state_handler::actions::RoomsAction as Act;
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
+pub(crate) use crate::state_handler::community_request::CommunityLoop as Loop;
+use crate::state_handler::community_request::{self, CommunityFeature, Doc, SendOutcome, sender};
 use crate::state_handler::main_page::rooms::{
-    AcceptFlow, AcceptStep, Next, Pending, Purpose, RoomsPhase, RoomsView, Severity,
+    AcceptFlow, AcceptStep, Next, Purpose, RoomsPhase, RoomsView, Severity,
 };
-use crate::state_handler::repos_actions::{Sender, sender};
 use crate::state_handler::runtime_actions::ActionCtx;
 use crate::state_handler::state::State;
+use openvtc_core::pending_replies::PendingReplies;
 
 const SEND: DispatchDomain = DispatchDomain::Rooms;
 const KEYS: DispatchDomain = DispatchDomain::RoomsVta;
 
-/// How long a request waits for the community's answer (R1.2).
-pub(crate) const REPLY_WINDOW: Duration = Duration::from_secs(30);
-
 /// A `vtc/rooms/*` answer as it arrived, threaded on the request it answers
 /// ([`openvtc_core::inbound::ThreadedReply`]).
 pub(crate) type InboundReply = openvtc_core::inbound::ThreadedReply<Reply>;
-
-fn did_part(did: &str) -> &str {
-    did.split('#').next().unwrap_or(did)
-}
 
 fn view_mut(state: &mut State) -> Option<&mut RoomsView> {
     state.main_page.content_panel.rooms.view.as_mut()
@@ -90,139 +79,165 @@ pub(crate) fn reduce(state: &mut State, action: &Act) -> bool {
 // The loop's side
 // ****************************************************************************
 
-/// What a send or a VTA call needs from the loop.
-pub(crate) struct Loop<'a> {
-    pub(crate) state: &'a mut State,
-    pub(crate) config: &'a Config,
-    pub(crate) tdk: &'a TDK,
-    pub(crate) vta: Option<&'a VtaClient>,
-    pub(crate) dispatch_tx: &'a UnboundedSender<DispatchOutcome>,
-    pub(crate) in_flight: &'a mut InFlight,
+/// The Rooms panel, on the shared request/reply plumbing
+/// ([`community_request`]).
+pub(crate) struct Rooms;
+
+impl CommunityFeature for Rooms {
+    type View = RoomsView;
+    type Purpose = Purpose;
+    type Reply = Reply;
+    type Next = Next;
+    const NAME: &'static str = "rooms";
+    const SEND: DispatchDomain = SEND;
+    /// Only a community the persona belongs to answers the Rooms panel.
+    const RECORDS_THREAD: bool = false;
+
+    fn view_mut(state: &mut State) -> Option<&mut RoomsView> {
+        view_mut(state)
+    }
+    fn pending_mut(view: &mut RoomsView) -> &mut Option<community_request::Pending<Purpose>> {
+        &mut view.pending
+    }
+    fn next_mut(view: &mut RoomsView) -> &mut Option<Next> {
+        &mut view.next
+    }
+    fn community(view: &RoomsView) -> (&str, PersonaId) {
+        (&view.vtc_did, view.persona)
+    }
+    fn note(view: &mut RoomsView, severity: Severity, text: String) {
+        view.note(severity, text);
+    }
+    fn outcome(outcome: SendOutcome) -> DispatchOutcome {
+        DispatchOutcome::Rooms(outcome)
+    }
+    fn is_refusal(reply: &Reply) -> bool {
+        matches!(reply, Reply::Refused(_))
+    }
+    fn take_reply(view: &mut RoomsView, reply: Reply, purpose: Purpose) {
+        take_reply(view, reply, purpose);
+    }
+    fn timed_out(view: &mut RoomsView, purpose: Purpose, secs: u64) {
+        timed_out(view, purpose, secs);
+    }
+    fn failed(view: &mut RoomsView, purpose: &Purpose, why: String) {
+        failed(view, purpose, why);
+    }
+    fn end_flow(view: &mut RoomsView) {
+        view.accept = None;
+    }
+    async fn step(lp: &mut Loop<'_>, next: Next) -> bool {
+        step(lp, next).await
+    }
 }
 
-impl Loop<'_> {
-    /// Send `request` to the open view's community, armed on `purpose`. Returns whether
-    /// it was dispatched; every early return says why in the view.
-    async fn send(&mut self, request: Request, purpose: Purpose) -> bool {
-        let Some((vtc_did, persona, waiting)) = self
-            .state
-            .main_page
-            .content_panel
-            .rooms
-            .view
-            .as_ref()
-            .map(|v| (v.vtc_did.clone(), v.persona, v.pending.is_some()))
-        else {
-            return false;
-        };
-        if waiting {
-            if let Some(view) = view_mut(self.state) {
-                view.note(
-                    Severity::Warning,
-                    "Still waiting for the community's answer.",
-                );
-            }
-            return false;
+/// Send `request` to the open view's community, armed on `purpose`. Returns whether
+/// it was dispatched; every early return says why in the view.
+async fn send(lp: &mut Loop<'_>, request: Request, purpose: Purpose) -> bool {
+    let Some((vtc_did, persona, waiting)) = lp
+        .state
+        .main_page
+        .content_panel
+        .rooms
+        .view
+        .as_ref()
+        .map(|v| (v.vtc_did.clone(), v.persona, v.pending.is_some()))
+    else {
+        return false;
+    };
+    if waiting {
+        if let Some(view) = view_mut(lp.state) {
+            view.note(
+                Severity::Warning,
+                "Still waiting for the community's answer.",
+            );
         }
-        let sender = match sender(self.config, self.tdk, persona, &vtc_did).await {
-            Ok(s) => s,
-            Err(e) => {
-                fail(self.state, &purpose, e);
-                return false;
-            }
-        };
-        let doc = match community_rooms::build(&request, &sender.persona_did, &vtc_did) {
-            Ok(doc) => doc,
-            Err(e) => {
-                fail(self.state, &purpose, format!("couldn't send: {e}"));
-                return false;
-            }
-        };
-        if !self.in_flight.try_begin(SEND) {
+        return false;
+    }
+    let sender = match sender(lp.config, lp.tdk, persona, &vtc_did).await {
+        Ok(s) => s,
+        Err(e) => {
+            community_request::fail::<Rooms>(lp.state, &purpose, e);
             return false;
         }
-        let thid = correlation_thread(&doc).to_string();
-        if let Some(view) = view_mut(self.state) {
-            view.pending = Some(Pending {
-                thid,
-                sent_at: Instant::now(),
-                purpose,
-            });
+    };
+    let doc = match community_rooms::build(&request, &sender.persona_did, &vtc_did) {
+        Ok(doc) => doc,
+        Err(e) => {
+            community_request::fail::<Rooms>(lp.state, &purpose, format!("couldn't send: {e}"));
+            return false;
         }
-        let job = SendJob {
-            sender,
+    };
+    lp.spawn_send::<Rooms>(
+        sender,
+        vtc_did,
+        persona,
+        Doc::Unsigned(Box::new(doc)),
+        purpose,
+    )
+}
+
+/// Ask the VTA. Returns whether it was dispatched.
+fn ask_vta(lp: &mut Loop<'_>, ask: VtaAsk) -> bool {
+    let Some(vta) = lp.vta.cloned() else {
+        return false;
+    };
+    let Some((vtc_did, persona)) = lp
+        .state
+        .main_page
+        .content_panel
+        .rooms
+        .view
+        .as_ref()
+        .map(|v| (v.vtc_did.clone(), v.persona))
+    else {
+        return false;
+    };
+    if !lp.in_flight.try_begin(KEYS) {
+        return false;
+    }
+    background_dispatch::spawn_dispatch(lp.dispatch_tx.clone(), KEYS, async move {
+        DispatchOutcome::RoomsVta(RoomsVtaOutcome {
             vtc_did,
             persona,
-            doc,
-        };
-        background_dispatch::spawn_dispatch(self.dispatch_tx.clone(), SEND, async move {
-            DispatchOutcome::Rooms(job.run().await)
-        });
-        true
-    }
+            answer: ask.run(&vta).await,
+        })
+    });
+    true
+}
 
-    /// Ask the VTA. Returns whether it was dispatched.
-    fn ask_vta(&mut self, ask: VtaAsk) -> bool {
-        let Some(vta) = self.vta.cloned() else {
-            return false;
-        };
-        let Some((vtc_did, persona)) = self
-            .state
-            .main_page
-            .content_panel
-            .rooms
-            .view
-            .as_ref()
-            .map(|v| (v.vtc_did.clone(), v.persona))
-        else {
-            return false;
-        };
-        if !self.in_flight.try_begin(KEYS) {
-            return false;
+/// Read the community's record and the VTA's custody again.
+pub(crate) async fn refresh(lp: &mut Loop<'_>) {
+    let me = match view_mut(lp.state) {
+        Some(view) => {
+            view.restart_pages();
+            view.me.clone()
         }
-        background_dispatch::spawn_dispatch(self.dispatch_tx.clone(), KEYS, async move {
-            DispatchOutcome::RoomsVta(RoomsVtaOutcome {
-                vtc_did,
-                persona,
-                answer: ask.run(&vta).await,
-            })
-        });
-        true
-    }
-
-    /// Read the community's record and the VTA's custody again.
-    pub(crate) async fn refresh(&mut self) {
-        let me = match view_mut(self.state) {
-            Some(view) => {
-                view.restart_pages();
-                view.me.clone()
-            }
-            None => return,
-        };
-        if self.vta.is_none() {
-            if let Some(view) = view_mut(self.state) {
-                view.held = None;
-                view.held_error = Some(
-                    "no VTA is connected, so which rooms it holds keys for can't be shown".into(),
-                );
-            }
-        } else if !self.ask_vta(VtaAsk::Held { member: me })
-            && let Some(view) = view_mut(self.state)
-        {
-            // Busy with an acceptance step; the record still refreshes.
-            view.held_error
-                .get_or_insert_with(|| "your VTA is busy".into());
+        None => return,
+    };
+    if lp.vta.is_none() {
+        if let Some(view) = view_mut(lp.state) {
+            view.held = None;
+            view.held_error =
+                Some("no VTA is connected, so which rooms it holds keys for can't be shown".into());
         }
-        self.send(Request::Memberships { cursor: None }, Purpose::Memberships)
-            .await;
+    } else if !ask_vta(lp, VtaAsk::Held { member: me })
+        && let Some(view) = view_mut(lp.state)
+    {
+        // Busy with an acceptance step; the record still refreshes.
+        view.held_error
+            .get_or_insert_with(|| "your VTA is busy".into());
     }
+    send(
+        lp,
+        Request::Memberships { cursor: None },
+        Purpose::Memberships,
+    )
+    .await;
 }
 
 /// Say a request never left, where the view shows it.
-fn fail(state: &mut State, purpose: &Purpose, why: String) {
-    let Some(view) = view_mut(state) else {
-        return;
-    };
+fn failed(view: &mut RoomsView, purpose: &Purpose, why: String) {
     match purpose {
         Purpose::Memberships if view.rooms.is_empty() => view.phase = RoomsPhase::Failed(why),
         Purpose::Memberships => view.note(Severity::Error, why),
@@ -240,14 +255,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
     if let Act::Open(index) = action {
         open(ctx, index);
     }
-    let mut lp = Loop {
-        state: &mut *ctx.state,
-        config: ctx.config,
-        tdk: ctx.tdk,
-        vta: ctx.admin_vta,
-        dispatch_tx: ctx.dispatch_tx,
-        in_flight: &mut *ctx.in_flight,
-    };
+    let mut lp = Loop::from_ctx(ctx);
     match action {
         Act::Open(_) | Act::Refresh => {
             if let Some(view) = view_mut(lp.state) {
@@ -256,7 +264,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
                 }
                 view.status = None;
             }
-            lp.refresh().await;
+            refresh(&mut lp).await;
         }
         Act::Accept => start_accept(&mut lp).await,
         Act::Back | Act::Select(_) => {}
@@ -373,9 +381,12 @@ async fn start_accept(lp: &mut Loop<'_>) {
             community_rooms::display_label(&row.room)
         ),
     );
-    if !lp
-        .send(Request::Offers { cursor: None }, Purpose::Offers { room })
-        .await
+    if !send(
+        lp,
+        Request::Offers { cursor: None },
+        Purpose::Offers { room },
+    )
+    .await
         && let Some(view) = view_mut(lp.state)
         && view.pending.is_none()
     {
@@ -386,12 +397,14 @@ async fn start_accept(lp: &mut Loop<'_>) {
 }
 
 /// Take the step the view's last answer called for, if its lane is free. The loop calls
-/// this after applying replies and dispatch outcomes, and on its tick.
+/// this after applying replies and outcomes, and on its tick.
 pub(crate) async fn advance(lp: &mut Loop<'_>) {
-    let Some(next) = view_mut(lp.state).and_then(|v| v.next.take()) else {
-        return;
-    };
-    let taken = match next.clone() {
+    community_request::advance::<Rooms>(lp).await;
+}
+
+/// Take one step. Returns whether it was taken (a busy lane keeps it).
+async fn step(lp: &mut Loop<'_>, next: Next) -> bool {
+    match next {
         Next::Refresh => {
             if lp.in_flight.is_busy(SEND)
                 || lp
@@ -405,12 +418,13 @@ pub(crate) async fn advance(lp: &mut Loop<'_>) {
             {
                 false
             } else {
-                lp.refresh().await;
+                refresh(lp).await;
                 true
             }
         }
         Next::MembershipsPage { cursor } => {
-            lp.send(
+            send(
+                lp,
                 Request::Memberships {
                     cursor: Some(cursor),
                 },
@@ -419,7 +433,8 @@ pub(crate) async fn advance(lp: &mut Loop<'_>) {
             .await
         }
         Next::OffersPage { room, cursor } => {
-            lp.send(
+            send(
+                lp,
                 Request::Offers {
                     cursor: Some(cursor),
                 },
@@ -445,12 +460,13 @@ pub(crate) async fn advance(lp: &mut Loop<'_>) {
                         })
                 });
             match ask {
-                Some(ask) => lp.ask_vta(ask),
+                Some(ask) => ask_vta(lp, ask),
                 None => true,
             }
         }
         Next::SendAccept { room, key_package } => {
-            lp.send(
+            send(
+                lp,
                 Request::Accept {
                     room_id: room.clone(),
                     key_package,
@@ -469,21 +485,21 @@ pub(crate) async fn advance(lp: &mut Loop<'_>) {
                 .and_then(|a| a.offer.as_ref())
                 .map(|o| o.credentials.invitation.to_string());
             match invitation {
-                Some(invitation) => lp.ask_vta(VtaAsk::Join {
-                    room,
-                    invitation,
-                    welcome,
-                    ratchet_tree,
-                }),
+                Some(invitation) => ask_vta(
+                    lp,
+                    VtaAsk::Join {
+                        room,
+                        invitation,
+                        welcome,
+                        ratchet_tree,
+                    },
+                ),
                 None => true,
             }
         }
         // Without a VTA there is nowhere to store a renewal, so nothing to read.
         Next::CheckRenewals if lp.vta.is_none() => true,
-        Next::CheckRenewals => {
-            lp.send(Request::Offers { cursor: None }, Purpose::Renewals)
-                .await
-        }
+        Next::CheckRenewals => send(lp, Request::Offers { cursor: None }, Purpose::Renewals).await,
         Next::Renew => {
             let ask = view_mut(lp.state).map(|v| VtaAsk::Renew {
                 renewals: std::mem::take(&mut v.renewals),
@@ -491,10 +507,13 @@ pub(crate) async fn advance(lp: &mut Loop<'_>) {
             });
             match ask {
                 Some(VtaAsk::Renew { renewals, member }) if !renewals.is_empty() => {
-                    let taken = lp.ask_vta(VtaAsk::Renew {
-                        renewals: renewals.clone(),
-                        member,
-                    });
+                    let taken = ask_vta(
+                        lp,
+                        VtaAsk::Renew {
+                            renewals: renewals.clone(),
+                            member,
+                        },
+                    );
                     if !taken && let Some(view) = view_mut(lp.state) {
                         view.renewals = renewals;
                     }
@@ -503,196 +522,74 @@ pub(crate) async fn advance(lp: &mut Loop<'_>) {
                 _ => true,
             }
         }
-    };
-    // A lane that was busy: keep the step for the next tick.
-    if !taken && let Some(view) = view_mut(lp.state) {
-        view.next.get_or_insert(next);
     }
 }
 
 /// The loop's periodic pass: reply windows, and any step left waiting on a busy lane.
 pub(crate) async fn tick(lp: &mut Loop<'_>) {
-    let now = Instant::now();
-    if let Some(view) = view_mut(lp.state)
-        && view
-            .pending
-            .as_ref()
-            .is_some_and(|p| now.duration_since(p.sent_at) > REPLY_WINDOW)
-        && let Some(p) = view.pending.take()
-    {
-        let secs = REPLY_WINDOW.as_secs();
-        match p.purpose {
-            Purpose::Memberships if view.rooms.is_empty() => {
-                // A community that does not serve the record still answers, with a
-                // refusal shown in words, so silence means the request or its answer was
-                // lost (R6.4).
-                view.phase = RoomsPhase::Failed(format!(
-                    "no reply within {secs}s. A community that does not serve data rooms says \
+    community_request::tick::<Rooms>(lp).await;
+}
+
+/// The request made for `purpose` went unanswered for `secs` seconds.
+fn timed_out(view: &mut RoomsView, purpose: Purpose, secs: u64) {
+    match purpose {
+        Purpose::Memberships if view.rooms.is_empty() => {
+            // A community that does not serve the record still answers, with a
+            // refusal shown in words, so silence means the request or its answer was
+            // lost (R6.4).
+            view.phase = RoomsPhase::Failed(format!(
+                "no reply within {secs}s. A community that does not serve data rooms says \
                      so, so this is not that: the request or its answer was lost — the \
                      community's VTC is offline or unreachable, or it answered on a route this \
                      persona does not collect. Press r to try again."
-                ));
-            }
-            Purpose::Memberships => {
-                view.note(
-                    Severity::Error,
-                    format!("no reply to the refresh within {secs}s"),
-                );
-            }
-            Purpose::Offers { .. } | Purpose::Accept { .. } => {
-                view.accept = None;
-                view.note(
-                    Severity::Error,
-                    format!(
-                        "No reply within {secs}s. Accepting again is safe: it finishes whatever \
+            ));
+        }
+        Purpose::Memberships => {
+            view.note(
+                Severity::Error,
+                format!("no reply to the refresh within {secs}s"),
+            );
+        }
+        Purpose::Offers { .. } | Purpose::Accept { .. } => {
+            view.accept = None;
+            view.note(
+                Severity::Error,
+                format!(
+                    "No reply within {secs}s. Accepting again is safe: it finishes whatever \
                          was done, here or elsewhere. Refresh (r) first to see where it stands."
-                    ),
-                );
-            }
-            Purpose::Renewals => {
-                view.note(
-                    Severity::Warning,
-                    format!(
-                        "no reply within {secs}s to the check for renewed access; refresh (r) to \
+                ),
+            );
+        }
+        Purpose::Renewals => {
+            view.note(
+                Severity::Warning,
+                format!(
+                    "no reply within {secs}s to the check for renewed access; refresh (r) to \
                          check again"
-                    ),
-                );
-            }
-        }
-    }
-    advance(lp).await;
-}
-
-/// A job ended without an outcome (it panicked): end what it was part of.
-pub(crate) fn job_lost(state: &mut State, msg: &str) {
-    if let Some(view) = view_mut(state) {
-        view.pending = None;
-        view.accept = None;
-        view.next = None;
-        view.note(Severity::Error, msg.to_string());
-    }
-}
-
-// ****************************************************************************
-// Sending to the community
-// ****************************************************************************
-
-/// One `vtc/rooms/*` send, off the loop.
-pub(crate) struct SendJob {
-    sender: Sender,
-    vtc_did: String,
-    persona: PersonaId,
-    doc: RequestDocument,
-}
-
-impl SendJob {
-    async fn run(mut self) -> RoomsOutcome {
-        let thid = correlation_thread(&self.doc).to_string();
-        let s = &self.sender;
-        let result = async {
-            openvtc_core::capabilities::sign_document(&mut self.doc, &s.signer).await?;
-            let tsp_mediator =
-                openvtc_core::community_send::tsp_mediator_for(s.over_tsp, &self.vtc_did).await;
-            openvtc_core::capabilities::send_capability_document(
-                &openvtc_core::community_send::Delivery {
-                    atm: &s.atm,
-                    profile: &s.profile,
-                    member_did: &s.persona_did,
-                    vtc_did: &self.vtc_did,
-                    mediator_did: &s.mediator,
-                    tsp_mediator_did: tsp_mediator.as_deref(),
-                },
-                &self.doc,
-            )
-            .await
-        }
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string());
-        RoomsOutcome {
-            vtc_did: self.vtc_did,
-            persona: self.persona,
-            thid,
-            result,
-        }
-    }
-}
-
-/// What a send did. Applied on the loop.
-pub(crate) struct RoomsOutcome {
-    vtc_did: String,
-    persona: PersonaId,
-    thid: String,
-    result: Result<(), String>,
-}
-
-impl RoomsOutcome {
-    /// Say the send never left — while the view still waits on this request.
-    pub(crate) fn apply(self, state: &mut State) {
-        let Err(e) = self.result else {
-            return;
-        };
-        let Some(view) = view_mut(state) else {
-            return;
-        };
-        if view.vtc_did != self.vtc_did
-            || view.persona != self.persona
-            || view.pending.as_ref().is_none_or(|p| p.thid != self.thid)
-        {
-            tracing::debug!(thid = %self.thid, "rooms send failed for a request no longer awaited: {e}");
-            return;
-        }
-        if let Some(p) = view.pending.take() {
-            fail(
-                state,
-                &p.purpose,
-                format!("couldn't reach the community: {e}"),
+                ),
             );
         }
     }
 }
 
-/// Apply the community's answers. Returns whether any was taken, so the loop
-/// [`advance`]s.
-pub(crate) fn apply_replies(state: &mut State, replies: Vec<InboundReply>) -> bool {
-    let mut taken = false;
-    for inbound in replies {
-        let Some(vtc) = view_mut(state).map(|v| v.vtc_did.clone()) else {
-            continue;
-        };
-        // A thread id is a correlation key, not a credential: an answer is taken only
-        // from the community the view is asking — sent by it and issued by it.
-        // By DID: a did:scid community may name itself with the `?src=` it is
-        // resolved through (VTI-KEY-163).
-        let from_vtc = vta_sdk::did_scid::same_reference(did_part(&inbound.from), &vtc);
-        let issued_by_vtc = inbound
-            .issuer
-            .as_deref()
-            .map(did_part)
-            .is_some_and(|issuer| vta_sdk::did_scid::same_reference(issuer, &vtc));
-        if !(from_vtc && issued_by_vtc) {
-            tracing::warn!(from = %inbound.from, thid = %inbound.thid, "rooms reply not from the community the view is asking — dropped");
-            continue;
-        }
-        taken |= apply_reply(state, &inbound.thid, inbound.reply);
-    }
-    taken
+/// A job ended without an outcome (it panicked): end what it was part of.
+pub(crate) fn job_lost(state: &mut State, msg: &str) {
+    community_request::job_lost::<Rooms>(state, msg);
 }
 
-fn apply_reply(state: &mut State, thid: &str, reply: Reply) -> bool {
-    let Some(view) = view_mut(state) else {
-        return false;
-    };
-    if view.pending.as_ref().is_none_or(|p| p.thid != thid) {
-        if !matches!(reply, Reply::Refused(_)) {
-            tracing::warn!(%thid, "rooms reply matches no pending request — dropped");
-        }
-        return false;
-    }
-    let Some(pending) = view.pending.take() else {
-        return false;
-    };
-    match (reply, pending.purpose) {
+/// Apply the community's answers. Returns whether any was taken, so the loop
+/// [`advance`]s.
+pub(crate) fn apply_replies(
+    state: &mut State,
+    pending_replies: &mut PendingReplies,
+    replies: Vec<InboundReply>,
+) -> bool {
+    community_request::apply_replies::<Rooms>(state, pending_replies, replies)
+}
+
+/// Take the answer to the request made for `purpose`.
+fn take_reply(view: &mut RoomsView, reply: Reply, purpose: Purpose) {
+    match (reply, purpose) {
         (Reply::Memberships(page), Purpose::Memberships) => {
             let next = page.next_cursor.as_ref().map(|c| c.as_str().to_string());
             view.take_page(page.items, next.is_none());
@@ -813,7 +710,6 @@ fn apply_reply(state: &mut State, thid: &str, reply: Reply) -> bool {
             );
         }
     }
-    true
 }
 
 // ****************************************************************************
@@ -987,8 +883,10 @@ impl RoomsVtaOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state_handler::main_page::rooms::Pending;
     use openvtc_core::community_rooms::Reply;
     use serde_json::json;
+    use std::time::Instant;
 
     fn state_with_view() -> State {
         let mut state = State::default();
@@ -1006,6 +904,7 @@ mod tests {
             thid: "t1".into(),
             sent_at: Instant::now(),
             purpose,
+            to: "did:key:zVtc".into(),
         });
     }
 
@@ -1047,6 +946,7 @@ mod tests {
         arm(&mut state, Purpose::Memberships);
         assert!(apply_replies(
             &mut state,
+            &mut PendingReplies::default(),
             vec![inbound(page(
                 json!([room("did:key:zR1", "admitted", true)]),
                 Some("c1")
@@ -1064,6 +964,7 @@ mod tests {
         arm(&mut state, Purpose::Memberships);
         apply_replies(
             &mut state,
+            &mut PendingReplies::default(),
             vec![inbound(page(
                 json!([room("did:key:zR2", "offered", false)]),
                 None,
@@ -1086,7 +987,11 @@ mod tests {
         arm(&mut state, Purpose::Memberships);
         let mut forged = inbound(page(json!([]), None));
         forged.from = "did:key:zMallory".into();
-        assert!(!apply_replies(&mut state, vec![forged]));
+        assert!(!apply_replies(
+            &mut state,
+            &mut PendingReplies::default(),
+            vec![forged]
+        ));
         assert!(view_mut(&mut state).unwrap().pending.is_some());
     }
 
@@ -1133,7 +1038,11 @@ mod tests {
                 message: None,
             };
         assert!(refusal.is_already_accepted());
-        apply_replies(&mut state, vec![inbound(Reply::Refused(refusal))]);
+        apply_replies(
+            &mut state,
+            &mut PendingReplies::default(),
+            vec![inbound(Reply::Refused(refusal))],
+        );
         let view = view_mut(&mut state).unwrap();
         assert!(view.accept.is_none());
         assert!(view.status.as_ref().unwrap().text.contains("re-admit"));
@@ -1148,6 +1057,7 @@ mod tests {
         arm(&mut state, Purpose::Memberships);
         apply_replies(
             &mut state,
+            &mut PendingReplies::default(),
             vec![inbound(page(
                 json!([room("did:key:zR1", "admitted", false)]),
                 None,
@@ -1175,7 +1085,11 @@ mod tests {
             }))
             .unwrap(),
         ));
-        apply_replies(&mut state, vec![inbound(offers)]);
+        apply_replies(
+            &mut state,
+            &mut PendingReplies::default(),
+            vec![inbound(offers)],
+        );
         let view = view_mut(&mut state).unwrap();
         assert_eq!(view.next, Some(Next::Renew));
         assert_eq!(view.renewals.len(), 1);
@@ -1187,7 +1101,11 @@ mod tests {
         let none: Reply = Reply::Offers(Box::new(
             serde_json::from_value(json!({ "items": [], "renewals": [] })).unwrap(),
         ));
-        apply_replies(&mut state, vec![inbound(none)]);
+        apply_replies(
+            &mut state,
+            &mut PendingReplies::default(),
+            vec![inbound(none)],
+        );
         let view = view_mut(&mut state).unwrap();
         assert_eq!(view.next, None);
         assert!(view.status.is_none());
@@ -1203,7 +1121,11 @@ mod tests {
         r["suspendedAt"] = json!("2026-11-02T10:00:00Z");
         r["roomState"] = json!("archived");
         r["roomAccess"] = json!("noAccess");
-        apply_replies(&mut state, vec![inbound(page(json!([r]), None))]);
+        apply_replies(
+            &mut state,
+            &mut PendingReplies::default(),
+            vec![inbound(page(json!([r]), None))],
+        );
         let view = view_mut(&mut state).unwrap();
         let row = &view.rows()[0];
         assert_eq!(row.standing, Standing::Suspended);

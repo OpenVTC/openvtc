@@ -22,11 +22,12 @@ use openvtc_core::didcomm::{self, DIDCommEvent, Messaging};
 use openvtc_core::git_ns::{self, GitRight, Reply, Request};
 use openvtc_core::git_workspace::{self, CLONE_TIMEOUT, RepoCoords, WorkspaceSettings};
 use openvtc_core::messaging::SeenMessages;
+use openvtc_core::pending_replies::PendingReplies;
 use tokio::sync::mpsc;
 
 use crate::colors::{CLI_ERROR, CLI_INFO, Themed};
 use crate::headless::{self, Admin, Membership, progress, save, warn};
-use crate::state_handler::{DeferredLoad, repos_actions};
+use crate::state_handler::{DeferredLoad, community_request};
 use openvtc_core::inbound::apply_inline as apply_inbound;
 
 /// How long a request waits for the community's answer (as the panel does).
@@ -333,7 +334,7 @@ async fn ask(
         progress("Connecting to the mediator…");
         headless::connect_persona(&service, config, &tdk, target.persona, CONNECT_WINDOW).await?;
 
-        let sender = repos_actions::sender(config, &tdk, target.persona, &target.vtc_did)
+        let sender = community_request::sender(config, &tdk, target.persona, &target.vtc_did)
             .await
             .map_err(|e| anyhow!(e))?;
         let mut doc = git_ns::build(&request, &sender.persona_did, &target.vtc_did)?;
@@ -343,7 +344,7 @@ async fn ask(
             request.type_uri().trim_start_matches(git_ns::TYPE_PREFIX),
             if sender.over_tsp { "TSP" } else { "DIDComm" }
         ));
-        repos_actions::sign_and_send(&sender, &target.vtc_did, &mut doc)
+        community_request::sign_and_send(&sender, &target.vtc_did, &mut doc)
             .await
             .map_err(|e| anyhow!("couldn't send the request: {e}"))?;
 
@@ -387,6 +388,10 @@ async fn ask(
 #[derive(Default)]
 struct Others {
     seen: SeenMessages,
+    /// Replies this command waits on by thread. It asks nothing the inbound
+    /// gate admits only on a recorded thread, so this stays empty; it is the
+    /// command's own, as the runtime loop's is its own.
+    pending: PendingReplies,
     handled: usize,
 }
 
@@ -452,6 +457,7 @@ async fn await_reply(
                     tdk,
                     messaging,
                     &mut others.seen,
+                    &mut others.pending,
                     &message,
                     authenticated.as_deref(),
                 )
@@ -489,7 +495,7 @@ async fn take_reply(
         Err(e) => return Some(Err(format!("not accepted from this sender: {e}"))),
     };
     let from = from.as_str();
-    if !repos_actions::answered_by(vtc_did, from, doc.issuer.as_deref()) {
+    if !community_request::answered_by(vtc_did, from, doc.issuer.as_deref()) {
         return Some(Err(format!(
             "sent by {from}, not the community it was asked of"
         )));

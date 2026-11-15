@@ -188,6 +188,9 @@ OPENVTC_DEBUG_LOG=/tmp/openvtc.log openvtc
 ```
 
 This writes timestamped tracing output at `debug` level to the specified file.
+The file is appended to across runs. When it is already larger than 50 MiB at
+startup it is moved to `<path>.1` (replacing any earlier `.1`) and a fresh file
+is started, so at most two files are kept.
 For finer control, combine with `RUST_LOG`:
 
 ```bash

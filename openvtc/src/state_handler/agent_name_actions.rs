@@ -59,6 +59,18 @@ pub(crate) struct AgentNameJob {
     pub(crate) verb: Verb,
 }
 
+impl crate::state_handler::background_dispatch::Job for AgentNameJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::AgentNameManage
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::AgentNameManage(
+            self.run().await,
+        )
+    }
+}
+
 impl AgentNameJob {
     /// Run the verb, then re-read the registry. I/O only — no `State`, no
     /// `Config`, nothing that has to be mutated on the loop.

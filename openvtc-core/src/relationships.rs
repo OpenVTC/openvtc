@@ -27,8 +27,9 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Display,
+    ops::Bound,
     sync::Arc,
     time::SystemTime,
 };
@@ -43,6 +44,34 @@ use uuid::Uuid;
 
 /// How many relationship keys are fetched from the VTA at once at startup.
 const VTA_KEY_FETCH_CONCURRENCY: usize = 8;
+
+/// The entries of an id-sorted map whose id starts with `prefix`.
+///
+/// Every string that starts with `prefix` sorts at or after it, and they are
+/// contiguous, so this is exactly `map.iter().filter(|(k, _)| k.starts_with(prefix))`
+/// at O(log n + matches) rather than a scan of the whole map. Sorting `key_info`
+/// once and querying it per relationship keeps the startup passes
+/// O((keys + relationships) log keys) instead of O(keys × relationships).
+fn entries_with_prefix<'a, K, V>(
+    sorted: &'a BTreeMap<K, V>,
+    prefix: &'a str,
+) -> impl Iterator<Item = (&'a K, &'a V)> + 'a
+where
+    K: std::borrow::Borrow<str> + Ord,
+{
+    sorted
+        .range::<str, _>((Bound::Included(prefix), Bound::Unbounded))
+        .take_while(move |(k, _)| (*k).borrow().starts_with(prefix))
+}
+
+/// Whether any id in the sorted set starts with `prefix` — exactly
+/// `ids.iter().any(|k| k.starts_with(prefix))`, by the argument on
+/// [`entries_with_prefix`]: the first id at or after `prefix` decides it.
+fn any_with_prefix(ids: &BTreeSet<String>, prefix: &str) -> bool {
+    ids.range::<str, _>((Bound::Included(prefix), Bound::Unbounded))
+        .next()
+        .is_some_and(|k| k.starts_with(prefix))
+}
 
 /// State machine for the lifecycle of a relationship between two parties.
 #[derive(Clone, Debug, Hash, Serialize, Deserialize, PartialEq, Eq)]
@@ -412,6 +441,10 @@ impl Relationships {
             let mut all_secrets: Vec<Secret> = Vec::new();
             let mut vta_fetches: Vec<PendingVtaFetch> = Vec::new();
 
+            // `key_info` by id, sorted once, so each R-DID's keys are one range.
+            let key_info_sorted: BTreeMap<&str, &KeyInfoConfig> =
+                key_info.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
             for our_did in &r_did_entries {
                 // Skip any R-DID that has no canonical key-agreement (encryption)
                 // entry in `key_info`. Registering a messaging profile for such a
@@ -422,10 +455,8 @@ impl Relationships {
                 // older build's id bug); flag it for the user to re-establish
                 // rather than spin. Recoverable R-DIDs were re-keyed to
                 // `{r_did}#key-2` by the repair pass and pass this check.
-                let has_key_agreement = key_info.iter().any(|(k, v)| {
-                    k.starts_with(our_did.as_str())
-                        && matches!(v.purpose, KeyTypes::RelationshipEncryption)
-                });
+                let has_key_agreement = entries_with_prefix(&key_info_sorted, our_did.as_str())
+                    .any(|(_, v)| matches!(v.purpose, KeyTypes::RelationshipEncryption));
                 if !has_key_agreement {
                     warn!(
                         r_did = %our_did,
@@ -442,10 +473,8 @@ impl Relationships {
                 profiles.insert(our_did.clone(), atm.profile_add(&profile, false).await?);
 
                 // Collect secrets for this DID
-                for (k, v) in key_info.iter() {
-                    if !k.starts_with(our_did.as_str()) {
-                        continue;
-                    }
+                for (k, v) in entries_with_prefix(&key_info_sorted, our_did.as_str()) {
+                    let k = (*k).to_string();
                     let kp = match v.purpose {
                         KeyTypes::RelationshipVerification => KeyPurpose::Signing,
                         KeyTypes::RelationshipEncryption => KeyPurpose::Encryption,
@@ -590,11 +619,14 @@ impl Relationships {
         let path_pointer = self.path_pointer;
         // remote_p_dids to flag once the immutable snapshot above is consumed.
         let mut to_flag: Vec<Arc<String>> = Vec::new();
+        // The `key_info` ids, sorted, kept in step with every insert/remove below
+        // so the "already canonical" check is a range lookup, not a full scan.
+        let mut key_ids: BTreeSet<String> = key_info.keys().cloned().collect();
 
         for (remote_p_did, r_did) in targets {
             // Already canonical (created post-fix or previously repaired): a
-            // cheap string scan keeps the whole pass idempotent.
-            if key_info.keys().any(|k| k.starts_with(r_did.as_str())) {
+            // cheap prefix lookup keeps the whole pass idempotent.
+            if any_with_prefix(&key_ids, r_did.as_str()) {
                 continue;
             }
 
@@ -653,7 +685,9 @@ impl Relationships {
                     && old != new_id
                 {
                     key_info.remove(&old);
+                    key_ids.remove(&old);
                 }
+                key_ids.insert(new_id.clone());
                 key_info.insert(new_id, new_ki);
                 report.repaired += 1;
             }
@@ -1105,6 +1139,55 @@ mod tests {
     use super::*;
     use ed25519_dalek_bip32::ExtendedSigningKey;
     use secrecy::SecretString;
+
+    #[test]
+    fn prefix_lookups_match_a_starts_with_scan() {
+        // Ids shaped like `key_info`: `{did}#key-N`, plus the awkward cases a
+        // `#`-split grouping would get wrong — a DID that is a prefix of another
+        // DID, an id equal to the DID, and ids that are not DID-shaped at all.
+        let ids = [
+            "did:peer:2.Vabc#key-1",
+            "did:peer:2.Vabc#key-2",
+            "did:peer:2.Vabcd#key-1",
+            "did:peer:2.Vab",
+            "did:peer:2.Vb#key-1",
+            "did:webvh:Q:example.com#key-0",
+            "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "x25519",
+            "",
+        ];
+        let sorted: BTreeMap<&str, usize> = ids.iter().enumerate().map(|(i, k)| (*k, i)).collect();
+        let set: BTreeSet<String> = ids.iter().map(|k| (*k).to_string()).collect();
+        let prefixes = [
+            "did:peer:2.Vabc",
+            "did:peer:2.Vab",
+            "did:peer:2.Vabcd#key-1",
+            "did:peer:2.Vz",
+            "did:webvh:Q:example.com",
+            "did:",
+            "z6Mk",
+            "x25519",
+            "zzz",
+            "",
+        ];
+        for prefix in prefixes {
+            let mut expected: Vec<&str> = ids
+                .iter()
+                .copied()
+                .filter(|k| k.starts_with(prefix))
+                .collect();
+            expected.sort_unstable();
+            let got: Vec<&str> = entries_with_prefix(&sorted, prefix)
+                .map(|(k, _)| *k)
+                .collect();
+            assert_eq!(got, expected, "entries_with_prefix({prefix:?})");
+            assert_eq!(
+                any_with_prefix(&set, prefix),
+                !expected.is_empty(),
+                "any_with_prefix({prefix:?})"
+            );
+        }
+    }
 
     fn make_relationship(
         task_id: &str,
