@@ -4124,7 +4124,22 @@ pub struct SettingsState {
     /// git commit signing. Surfaced on the Help/Status panel so the operator
     /// can copy the SSH public key into their git host's signing-key
     /// settings.
+    ///
+    /// Detecting it reads files, so it is not done in `sync_from_config`: it is
+    /// refreshed off the loop (`settings_actions::refresh_did_git_sign`) and kept
+    /// here between refreshes.
     pub did_git_sign: Option<DidGitSignInfo>,
+    /// The persona DID [`did_git_sign`](Self::did_git_sign) was detected for;
+    /// `None` before the first detection. When it differs from
+    /// [`persona_did`](Self::persona_did) — a persona switch — the sync hides the
+    /// old persona's info and a refresh is due.
+    pub did_git_sign_for: Option<String>,
+    /// A refresh was asked for — an install changed, or a refresh was wanted
+    /// while one was already running — and has not started yet.
+    pub did_git_sign_wanted: bool,
+    /// Whether Help / Status or Settings was on screen at the last refresh
+    /// check, so opening either refreshes once rather than on every check.
+    pub did_git_sign_viewing: bool,
 }
 
 /// Snapshot of the local did-git-sign install for this persona.

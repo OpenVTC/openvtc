@@ -585,7 +585,11 @@ impl MainPageState {
         self.content_panel.settings.persona_agent_name = config
             .agent_name_for(config.persona_did())
             .map(str::to_owned);
-        self.content_panel.settings.did_git_sign = detect_did_git_sign_info(config.persona_did());
+        // did-git-sign is detected off the loop (it reads files); the sync only
+        // makes sure info detected for another persona is never shown for this one.
+        if self.content_panel.settings.did_git_sign_for.as_deref() != Some(config.persona_did()) {
+            self.content_panel.settings.did_git_sign = None;
+        }
         self.content_panel.settings.context_id = config.account.top_context_id.clone();
         // Sync VTA info
         self.content_panel.vta.persona_did = config.persona_did().to_string();
@@ -1711,7 +1715,8 @@ pub fn sanitize_display(input: &str, max_len: usize) -> String {
 /// `None` if did-git-sign is not configured for this persona, or if the
 /// state on disk is malformed.
 ///
-/// Reads files synchronously and is cheap (single small file open + read).
+/// Reads files synchronously, so it runs on a blocking thread
+/// (`settings_actions::refresh_did_git_sign`), never in `sync_from_config`.
 /// Sourced from disk rather than re-derived from runtime key material so
 /// the help screen reflects what `did-git-sign` itself would actually use
 /// — i.e. if the config was hand-edited, the help view stays consistent

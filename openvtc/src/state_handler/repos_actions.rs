@@ -1580,6 +1580,10 @@ pub(crate) async fn tick(lp: &mut Loop<'_>) {
             .await;
     }
     super::repos_workspace::probe_if_due(lp.state, lp.dispatch_tx, lp.in_flight);
+    // The did-git-sign install as Help / Status and Settings show it: read off
+    // the loop when it is due (a persona switch, a signing change made here,
+    // either view opened), never in `sync_from_config`.
+    super::settings_actions::maybe_refresh_did_git_sign(lp.state, lp.in_flight, lp.dispatch_tx);
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 //! Settings action handlers for the TUI.
 
+use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
 use crate::state_handler::main_page::status::Status;
 #[allow(unused_imports)]
 use crate::state_handler::state::PublishState;
@@ -145,7 +146,7 @@ use crate::state_handler::{
     state::{self, State},
 };
 use crate::ui::pages::main::components::settings_panel as rows;
-use tokio::sync::watch;
+use tokio::sync::{mpsc::UnboundedSender, watch};
 
 fn handle_select(state: &mut State, index: usize) {
     #[cfg(feature = "openpgp-card")]
@@ -589,6 +590,108 @@ fn handle_wipe_confirm(state: &mut State, config: &Config, profile: &str) -> boo
 
     state.main_page.log("Profile wiped — exiting.");
     true
+}
+
+/// Detect the did-git-sign install for the persona shown in Settings, off the
+/// loop: the read is two small files, but on a slow or network home directory
+/// that is the stall, and `sync_from_config` used to do it on every config
+/// change. The answer arrives as [`DispatchOutcome::DidGitSign`] and is stored by
+/// [`apply_did_git_sign`].
+///
+/// Call it at startup, and whenever the install may have changed. When a
+/// detection is already running this one is queued
+/// ([`SettingsState::did_git_sign_wanted`]) and started by the next
+/// [`maybe_refresh_did_git_sign`], so the answer reflects the latest change.
+///
+/// [`SettingsState::did_git_sign_wanted`]: crate::state_handler::main_page::content::SettingsState::did_git_sign_wanted
+pub(crate) fn refresh_did_git_sign(
+    state: &mut State,
+    in_flight: &mut InFlight,
+    dispatch_tx: &UnboundedSender<DispatchOutcome>,
+) {
+    let settings = &mut state.main_page.content_panel.settings;
+    let persona_did = settings.persona_did.clone();
+    // No persona (a zero-persona account, or before the first sync): nothing
+    // can be configured for it, and there is nothing to read.
+    if persona_did.is_empty() {
+        settings.did_git_sign = None;
+        settings.did_git_sign_for = Some(persona_did);
+        settings.did_git_sign_wanted = false;
+        return;
+    }
+    if !in_flight.try_begin(DispatchDomain::DidGitSign) {
+        settings.did_git_sign_wanted = true;
+        return;
+    }
+    settings.did_git_sign_wanted = false;
+    background_dispatch::spawn_dispatch(
+        dispatch_tx.clone(),
+        DispatchDomain::DidGitSign,
+        async move {
+            let info = detect_did_git_sign_off_loop(persona_did.clone()).await;
+            DispatchOutcome::DidGitSign { persona_did, info }
+        },
+    );
+}
+
+/// [`detect_did_git_sign_info`](crate::state_handler::main_page::detect_did_git_sign_info)
+/// on a blocking thread. A detection that panics reads as "not set up".
+pub(crate) async fn detect_did_git_sign_off_loop(
+    persona_did: String,
+) -> Option<crate::state_handler::main_page::content::DidGitSignInfo> {
+    crate::state_handler::repos_workspace::blocking(move || {
+        crate::state_handler::main_page::detect_did_git_sign_info(&persona_did)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Whether the did-git-sign info should be read again, and note what is on
+/// screen: due when it was never read for the current persona (startup, a
+/// persona switch), when a refresh was asked for, or when Help / Status or
+/// Settings has just been opened. Cheap — no I/O — so it can run on every pass
+/// of the loop.
+fn did_git_sign_refresh_due(state: &mut State) -> bool {
+    let viewing = matches!(
+        state.main_page.menu_panel.selected_menu,
+        crate::state_handler::main_page::menu::MainMenu::Help
+            | crate::state_handler::main_page::menu::MainMenu::Settings
+    );
+    let settings = &mut state.main_page.content_panel.settings;
+    let opened = viewing && !settings.did_git_sign_viewing;
+    settings.did_git_sign_viewing = viewing;
+    opened
+        || settings.did_git_sign_wanted
+        || settings.did_git_sign_for.as_deref() != Some(settings.persona_did.as_str())
+}
+
+/// [`refresh_did_git_sign`] when one is due (see [`did_git_sign_refresh_due`]).
+/// Meant for the loop: after an action or on a tick. Starts nothing while a
+/// detection is running.
+pub(crate) fn maybe_refresh_did_git_sign(
+    state: &mut State,
+    in_flight: &mut InFlight,
+    dispatch_tx: &UnboundedSender<DispatchOutcome>,
+) {
+    if did_git_sign_refresh_due(state) && !in_flight.is_busy(DispatchDomain::DidGitSign) {
+        refresh_did_git_sign(state, in_flight, dispatch_tx);
+    }
+}
+
+/// Store a finished detection — unless the persona changed while it ran, in
+/// which case it describes a persona no longer shown and is dropped; the
+/// current persona is still unread, so the next check refreshes it.
+pub(crate) fn apply_did_git_sign(
+    state: &mut State,
+    persona_did: String,
+    info: Option<crate::state_handler::main_page::content::DidGitSignInfo>,
+) {
+    let settings = &mut state.main_page.content_panel.settings;
+    if settings.persona_did == persona_did {
+        settings.did_git_sign = info;
+        settings.did_git_sign_for = Some(persona_did);
+    }
 }
 
 /// The did-git-sign identities this profile's personas sign with: each
@@ -1100,6 +1203,144 @@ pub(crate) async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git_sign_info(did_key_id: &str) -> crate::state_handler::main_page::content::DidGitSignInfo {
+        crate::state_handler::main_page::content::DidGitSignInfo {
+            did_key_id: did_key_id.into(),
+            ssh_public_key: String::new(),
+            config_path: String::new(),
+        }
+    }
+
+    /// A detection that finished after the persona changed is dropped, so one
+    /// persona's signing key is never shown as another's; a sync for another
+    /// persona hides what was detected for the last one.
+    #[test]
+    fn did_git_sign_info_is_only_shown_for_the_persona_it_was_read_for() {
+        let mut state = State::default();
+        state.main_page.content_panel.settings.persona_did = "did:example:b".into();
+
+        apply_did_git_sign(
+            &mut state,
+            "did:example:a".into(),
+            Some(git_sign_info("did:example:a#key-0")),
+        );
+        let settings = &state.main_page.content_panel.settings;
+        assert!(settings.did_git_sign.is_none());
+        assert_eq!(settings.did_git_sign_for, None);
+
+        apply_did_git_sign(
+            &mut state,
+            "did:example:b".into(),
+            Some(git_sign_info("did:example:b#key-0")),
+        );
+        let settings = &state.main_page.content_panel.settings;
+        assert!(settings.did_git_sign.is_some());
+        assert_eq!(settings.did_git_sign_for.as_deref(), Some("did:example:b"));
+
+        // A sync for a persona the info was not read for hides it.
+        let config = crate::state_handler::dispatch_util::test_config();
+        state.main_page.sync_from_config(&config);
+        let settings = &state.main_page.content_panel.settings;
+        if config.persona_did() != "did:example:b" {
+            assert!(settings.did_git_sign.is_none());
+        }
+    }
+
+    /// When a refresh is due: never read for this persona, asked for, or Help /
+    /// Settings just opened — and not again while it stays open.
+    #[test]
+    fn did_git_sign_refresh_is_due_on_switch_request_and_open() {
+        use crate::state_handler::main_page::menu::MainMenu;
+        let mut state = State::default();
+        state.main_page.content_panel.settings.persona_did = "did:example:a".into();
+        assert!(did_git_sign_refresh_due(&mut state), "never read");
+
+        apply_did_git_sign(&mut state, "did:example:a".into(), None);
+        assert!(
+            !did_git_sign_refresh_due(&mut state),
+            "read, nothing changed"
+        );
+
+        state.main_page.content_panel.settings.did_git_sign_wanted = true;
+        assert!(did_git_sign_refresh_due(&mut state), "asked for");
+        state.main_page.content_panel.settings.did_git_sign_wanted = false;
+
+        state.main_page.menu_panel.selected_menu = MainMenu::Help;
+        assert!(did_git_sign_refresh_due(&mut state), "Help opened");
+        assert!(!did_git_sign_refresh_due(&mut state), "still open");
+        state.main_page.menu_panel.selected_menu = MainMenu::Settings;
+        assert!(!did_git_sign_refresh_due(&mut state), "Help to Settings");
+        state.main_page.menu_panel.selected_menu = MainMenu::Logs;
+        assert!(!did_git_sign_refresh_due(&mut state), "closed");
+        state.main_page.menu_panel.selected_menu = MainMenu::Settings;
+        assert!(did_git_sign_refresh_due(&mut state), "Settings reopened");
+
+        state.main_page.content_panel.settings.persona_did = "did:example:b".into();
+        assert!(did_git_sign_refresh_due(&mut state), "persona switched");
+    }
+
+    /// A refresh runs off the loop and comes back as an outcome for the persona
+    /// it was started for; one asked for while it runs is queued, not dropped.
+    #[tokio::test]
+    async fn did_git_sign_refresh_runs_as_a_dispatch_and_queues_a_second() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut in_flight = InFlight::default();
+        let mut state = State::default();
+        state.main_page.content_panel.settings.persona_did = "did:example:none".into();
+
+        maybe_refresh_did_git_sign(&mut state, &mut in_flight, &tx);
+        assert!(in_flight.is_busy(DispatchDomain::DidGitSign));
+        refresh_did_git_sign(&mut state, &mut in_flight, &tx);
+        assert!(state.main_page.content_panel.settings.did_git_sign_wanted);
+
+        let outcome = rx.recv().await.expect("the detection reports");
+        assert_eq!(outcome.domain(), DispatchDomain::DidGitSign);
+        let DispatchOutcome::DidGitSign { persona_did, .. } = &outcome else {
+            panic!("a did-git-sign outcome");
+        };
+        assert_eq!(persona_did, "did:example:none");
+        let mut config = crate::state_handler::dispatch_util::test_config();
+        let mut save = crate::state_handler::save_coalesce::SaveScheduler::new("test");
+        background_dispatch::apply_outcome(
+            &mut state,
+            &mut config,
+            &mut save,
+            &mut in_flight,
+            outcome,
+        );
+        assert!(!in_flight.is_busy(DispatchDomain::DidGitSign));
+        assert_eq!(
+            state
+                .main_page
+                .content_panel
+                .settings
+                .did_git_sign_for
+                .as_deref(),
+            Some("did:example:none")
+        );
+
+        // The queued one starts on the next check.
+        maybe_refresh_did_git_sign(&mut state, &mut in_flight, &tx);
+        assert!(in_flight.is_busy(DispatchDomain::DidGitSign));
+        assert!(!state.main_page.content_panel.settings.did_git_sign_wanted);
+        assert!(rx.recv().await.is_some());
+
+        // No persona: answered without a read.
+        let mut in_flight = InFlight::default();
+        state.main_page.content_panel.settings.persona_did.clear();
+        refresh_did_git_sign(&mut state, &mut in_flight, &tx);
+        assert!(!in_flight.is_busy(DispatchDomain::DidGitSign));
+        assert_eq!(
+            state
+                .main_page
+                .content_panel
+                .settings
+                .did_git_sign_for
+                .as_deref(),
+            Some("")
+        );
+    }
 
     /// The picker previews as it moves, keeps what Enter chose, and puts back
     /// what was in use when cancelled. One test, because the active theme is

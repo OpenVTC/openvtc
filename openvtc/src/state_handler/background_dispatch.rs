@@ -111,6 +111,12 @@ pub(crate) enum DispatchDomain {
     /// only. Its own domain so a periodic read never makes a member's key
     /// press wait.
     GitWorkspaceProbe,
+    /// Detecting the did-git-sign install for the persona, for Help / Status
+    /// and Settings: two small file reads on a blocking thread. Never claimed
+    /// by a key press, so a refresh asked for while one runs is queued
+    /// ([`SettingsState::did_git_sign_wanted`](crate::state_handler::main_page::content::SettingsState::did_git_sign_wanted))
+    /// rather than reported as busy.
+    DidGitSign,
     /// A `vtc/rooms/*` request sent to a community from the Rooms panel. The answer
     /// arrives on the inbound channel; this serialises the sends.
     Rooms,
@@ -189,6 +195,7 @@ impl DispatchDomain {
             DispatchDomain::GitNs => "Repository request",
             DispatchDomain::GitWorkspace => "Checkout or signing change",
             DispatchDomain::GitWorkspaceProbe => "Checkout check",
+            DispatchDomain::DidGitSign => "Signing install check",
             DispatchDomain::Rooms => "Data room request",
             DispatchDomain::RoomsVta => "Data room keys at your VTA",
             DispatchDomain::Elections => "Election request",
@@ -307,6 +314,13 @@ pub(crate) enum DispatchOutcome {
     Workspace(crate::state_handler::repos_workspace::WorkspaceOutcome),
     /// A Repos-panel checkout and signing read finished.
     WorkspaceProbe(crate::state_handler::repos_workspace::ProbeOutcome),
+    /// The did-git-sign install was read for `persona_did`. Display-only.
+    DidGitSign {
+        /// The persona DID the detection was for.
+        persona_did: String,
+        /// What it found; `None` when did-git-sign is not set up for it.
+        info: Option<crate::state_handler::main_page::content::DidGitSignInfo>,
+    },
     /// A `vtc/rooms/*` request was sent to a community (or failed to send).
     Rooms(crate::state_handler::rooms_actions::RoomsOutcome),
     /// The member's VTA answered the Rooms panel.
@@ -387,6 +401,7 @@ impl DispatchOutcome {
             DispatchOutcome::Repos(_) => DispatchDomain::GitNs,
             DispatchOutcome::Workspace(_) => DispatchDomain::GitWorkspace,
             DispatchOutcome::WorkspaceProbe(_) => DispatchDomain::GitWorkspaceProbe,
+            DispatchOutcome::DidGitSign { .. } => DispatchDomain::DidGitSign,
             DispatchOutcome::Rooms(_) => DispatchDomain::Rooms,
             DispatchOutcome::RoomsVta(_) => DispatchDomain::RoomsVta,
             DispatchOutcome::Elections(_) => DispatchDomain::Elections,
@@ -615,8 +630,16 @@ pub(crate) fn apply_outcome(
         DispatchOutcome::Credential(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Capabilities(outcome) => outcome.apply(state),
         DispatchOutcome::Repos(outcome) => outcome.apply(state),
-        DispatchOutcome::Workspace(outcome) => outcome.apply(state),
+        DispatchOutcome::Workspace(outcome) => {
+            outcome.apply(state);
+            // A clone, a signing set-up or a removal may have changed the
+            // did-git-sign install Help / Status shows: read it again.
+            state.main_page.content_panel.settings.did_git_sign_wanted = true;
+        }
         DispatchOutcome::WorkspaceProbe(outcome) => outcome.apply(state),
+        DispatchOutcome::DidGitSign { persona_did, info } => {
+            crate::state_handler::settings_actions::apply_did_git_sign(state, persona_did, info);
+        }
         DispatchOutcome::Rooms(outcome) => outcome.apply(state),
         DispatchOutcome::RoomsVta(outcome) => outcome.apply(state),
         DispatchOutcome::Elections(outcome) => outcome.apply(state),
