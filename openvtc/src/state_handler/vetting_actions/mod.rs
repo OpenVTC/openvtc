@@ -8663,7 +8663,7 @@ mod tests {
     /// first-vtc's live manifest: `vetted-member` runs PCS ZKP alongside named vetters.
     fn first_vtc_book() -> (VettingBook, String) {
         let document: Value = serde_json::from_str(include_str!(
-            "../../../openvtc-core/tests/fixtures/first-vtc-manifest-0.3.json"
+            "../../../../openvtc-core/tests/fixtures/first-vtc-manifest-0.3.json"
         ))
         .unwrap();
         let payload = document["payload"].clone();
