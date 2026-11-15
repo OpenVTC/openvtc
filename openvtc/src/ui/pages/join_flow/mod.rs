@@ -11,6 +11,7 @@
 //! `Input` lives on this component (mirroring how `vta_enter_did` holds its
 //! input), and persists across re-renders via `move_with_state`.
 
+use crate::ui::shared::Shared;
 use crate::{
     state_handler::{
         actions::Action,
@@ -81,7 +82,7 @@ pub struct JoinFlow {
 
 #[derive(Clone)]
 pub struct Props {
-    pub state: JoinState,
+    pub state: Shared<JoinState>,
     /// The create-persona overlay, while one is open.
     ///
     /// Page-level state shared with the main page rather than a copy of its
@@ -90,14 +91,14 @@ pub struct Props {
     /// entering the community's DID a second time on the way back. The same
     /// overlay, the same phases, the same keys — floated over whichever page
     /// asked for it.
-    pub create_persona: Option<CreatePersonaState>,
+    pub create_persona: Shared<Option<CreatePersonaState>>,
 }
 
-impl From<&State> for Props {
-    fn from(state: &State) -> Self {
+impl From<&std::sync::Arc<State>> for Props {
+    fn from(state: &std::sync::Arc<State>) -> Self {
         Props {
-            state: state.join.clone(),
-            create_persona: state.main_page.create_persona.clone(),
+            state: Shared::new(state, |s| &s.join),
+            create_persona: Shared::new(state, |s| &s.main_page.create_persona),
         }
     }
 }
@@ -176,7 +177,7 @@ impl JoinFlow {
 }
 
 impl Component for JoinFlow {
-    fn new(state: &State, action_tx: UnboundedSender<Action>) -> Self
+    fn new(state: &std::sync::Arc<State>, action_tx: UnboundedSender<Action>) -> Self
     where
         Self: Sized,
     {
@@ -196,7 +197,7 @@ impl Component for JoinFlow {
         .move_with_state(state)
     }
 
-    fn move_with_state(self, state: &State) -> Self
+    fn move_with_state(self, state: &std::sync::Arc<State>) -> Self
     where
         Self: Sized,
     {
@@ -304,7 +305,7 @@ mod tests {
 
     fn flow() -> JoinFlow {
         let (tx, _rx) = unbounded_channel();
-        JoinFlow::new(&State::default(), tx)
+        JoinFlow::new(&std::sync::Arc::new(State::default()), tx)
     }
 
     /// Set an issuer on the state and push it through the same path the runtime
@@ -312,7 +313,7 @@ mod tests {
     fn broadcast(flow: JoinFlow, issuer: Option<&str>) -> JoinFlow {
         let mut state = State::default();
         state.join.invitation_issuer = issuer.map(str::to_string);
-        flow.move_with_state(&state)
+        flow.move_with_state(&std::sync::Arc::new(state.clone()))
     }
 
     /// Each fresh entry into the flow starts with an empty box; a redraw within
@@ -322,11 +323,11 @@ mod tests {
         let mut state = State::default();
         let mut flow = flow();
         flow.vtc_did = Input::new("did:webvh:last.join".to_string());
-        let mut flow = flow.move_with_state(&state);
+        let mut flow = flow.move_with_state(&std::sync::Arc::new(state.clone()));
         assert_eq!(flow.vtc_did.value(), "did:webvh:last.join", "same entry");
 
         state.join.reset();
-        flow = flow.move_with_state(&state);
+        flow = flow.move_with_state(&std::sync::Arc::new(state.clone()));
         assert_eq!(flow.vtc_did.value(), "", "a new entry starts empty");
     }
 
@@ -338,7 +339,7 @@ mod tests {
         let mut state = State::default();
         state.join.reset();
         state.join.invitation_issuer = Some(ISSUER.to_string());
-        let flow = flow.move_with_state(&state);
+        let flow = flow.move_with_state(&std::sync::Arc::new(state.clone()));
         assert_eq!(flow.vtc_did.value(), ISSUER);
     }
 

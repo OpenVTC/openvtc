@@ -1,6 +1,8 @@
 //! Settings action handlers for the TUI.
 
 use crate::state_handler::main_page::status::Status;
+#[allow(unused_imports)]
+use crate::state_handler::state::PublishState;
 use anyhow::Result;
 #[cfg(feature = "openpgp-card")]
 use openvtc_core::config::ConfigProtectionType;
@@ -325,7 +327,7 @@ fn handle_submit_edit(
 async fn handle_export_config_action(
     config: &mut Box<Config>,
     state: &mut State,
-    state_tx: &watch::Sender<State>,
+    state_tx: &watch::Sender<std::sync::Arc<State>>,
     save: &mut SaveScheduler,
     profile: &str,
     path: &str,
@@ -338,7 +340,7 @@ async fn handle_export_config_action(
     // drawing this status (the runtime is no longer pegged by the KDF).
     state.main_page.content_panel.settings.status_message =
         Some(Status::progress("Deriving encryption key…".to_string()));
-    let _ = state_tx.send(state.clone());
+    let _ = state_tx.publish(state);
 
     match export_config(config, path, passphrase).await {
         Ok(()) => {
@@ -432,7 +434,7 @@ fn handle_change_protection(state: &mut State) {
 async fn handle_set_passphrase(
     config: &mut Box<Config>,
     state: &mut State,
-    state_tx: &watch::Sender<State>,
+    state_tx: &watch::Sender<std::sync::Arc<State>>,
     save: &mut SaveScheduler,
     profile: &str,
     passphrase: &SecretString,
@@ -443,7 +445,7 @@ async fn handle_set_passphrase(
     // `spawn_blocking` derive, during which the render task keeps drawing.
     state.main_page.content_panel.settings.status_message =
         Some(Status::progress("Deriving encryption key…".to_string()));
-    let _ = state_tx.send(state.clone());
+    let _ = state_tx.publish(state);
 
     // R11 force-flush: a protection change re-derives the unlock key and rewrites
     // the secured config; it MUST be persisted before reporting success (the
@@ -991,7 +993,7 @@ pub(crate) async fn dispatch(
     action: SettingsAction,
     config: &mut Box<Config>,
     state: &mut State,
-    state_tx: &watch::Sender<State>,
+    state_tx: &watch::Sender<std::sync::Arc<State>>,
     save: &mut SaveScheduler,
     profile: &str,
 ) -> SettingsOutcome {
@@ -1230,7 +1232,7 @@ mod tests {
         let mut config = Box::new(crate::state_handler::dispatch_util::test_config());
         let mut state = State::default();
         let mut save = crate::state_handler::save_coalesce::SaveScheduler::new("test");
-        let (state_tx, _rx) = watch::channel(State::default());
+        let (state_tx, _rx) = watch::channel(std::sync::Arc::new(State::default()));
 
         for idx in [
             rows::FRIENDLY_NAME_ROW,

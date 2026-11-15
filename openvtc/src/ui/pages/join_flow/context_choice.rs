@@ -212,7 +212,7 @@ mod tests {
             },
         ];
         state.join.context_selected = selected;
-        (JoinFlow::new(&state, tx), rx)
+        (JoinFlow::new(&std::sync::Arc::new(state.clone()), tx), rx)
     }
 
     fn press(code: KeyCode) -> KeyEvent {

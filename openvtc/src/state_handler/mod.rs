@@ -1,4 +1,6 @@
 use crate::state_handler::main_page::status::Status;
+#[allow(unused_imports)]
+use crate::state_handler::state::PublishState;
 use crate::{
     Interrupted, Terminator,
     state_handler::{
@@ -341,7 +343,7 @@ pub enum StartingMode {
 }
 
 pub struct StateHandler {
-    state_tx: tokio::sync::watch::Sender<State>,
+    state_tx: tokio::sync::watch::Sender<std::sync::Arc<State>>,
     profile: String,
     starting_mode: StartingMode,
     /// Invitation credential (VIC) supplied at launch via `--invitation`, seeded
@@ -461,8 +463,9 @@ impl StateHandler {
     pub fn new(
         profile: &str,
         starting_mode: StartingMode,
-    ) -> (Self, tokio::sync::watch::Receiver<State>) {
-        let (state_tx, state_rx) = tokio::sync::watch::channel(State::default());
+    ) -> (Self, tokio::sync::watch::Receiver<std::sync::Arc<State>>) {
+        let (state_tx, state_rx) =
+            tokio::sync::watch::channel(std::sync::Arc::new(State::default()));
 
         (
             StateHandler {
@@ -533,7 +536,7 @@ impl StateHandler {
                         state.main_page.sync_from_config(&config);
                         state.connection.status =
                             state::MediatorStatus::Initializing("Loading credentials...".into());
-                        let _ = self.state_tx.send(state.clone());
+                        let _ = self.state_tx.publish(&state);
 
                         // The setup wizard saved the config but the TDK secrets
                         // resolver is empty. Load persona key secrets so the
@@ -584,7 +587,7 @@ impl StateHandler {
                     community: String::new(),
                 };
                 state.connection.status = state::MediatorStatus::Initializing("Starting...".into());
-                let _ = self.state_tx.send(state.clone());
+                let _ = self.state_tx.publish(&state);
 
                 // Spawn TDK init + config load as a background task with
                 // hierarchical progress reporting: each event is (major, sub).
@@ -693,13 +696,13 @@ impl StateHandler {
                                 state::MediatorStatus::Initializing(
                                     format!("{major} — {sub}"),
                                 );
-                            let _ = self.state_tx.send(state.clone());
+                            let _ = self.state_tx.publish(&state);
                         }
                         // Token-touch notifications arrive through the dedicated channel
                         // so that state is mutated only here, inside the StateHandler loop.
                         Some(pending) = token_touch_rx.recv() => {
                             state.token_touch_pending = pending;
-                            self.state_tx.send(state.clone())?;
+                            self.state_tx.publish(&state)?;
                         }
                         result = &mut load_handle => {
                             match result {
@@ -715,7 +718,7 @@ impl StateHandler {
                                     state.connection.status = state::MediatorStatus::Failed(
                                         state::ConnectionFailure::of(&e),
                                     );
-                                    let _ = self.state_tx.send(state.clone());
+                                    let _ = self.state_tx.publish(&state);
                                     // No config loaded here — join is unavailable.
                                     return self
                                         .run_degraded_loop_terminal(
@@ -741,7 +744,7 @@ impl StateHandler {
                                             openvtc_core::errors::ErrorClass::Local,
                                         ),
                                     );
-                                    let _ = self.state_tx.send(state.clone());
+                                    let _ = self.state_tx.publish(&state);
                                     return self
                                         .run_degraded_loop_terminal(
                                             &mut action_rx,
@@ -1050,7 +1053,7 @@ impl StateHandler {
         // to receive the approval credential.
         let (tdk, config, admin_vta) = if config.active_identity().is_none() {
             state.connection.status = state::MediatorStatus::NoActiveCommunity;
-            let _ = self.state_tx.send(state.clone());
+            let _ = self.state_tx.publish(&state);
             // No persona yet (State A). Hand the always-on admin session to the
             // degraded loop so the Communities `j` → join flow (R-A-5 Stage 4)
             // can reuse it; the loop closes it on exit (or hands it back on a
@@ -1326,7 +1329,7 @@ impl StateHandler {
                             } else {
                                 "Starting secure messaging…"
                             });
-                            let _ = self.state_tx.send(state.clone());
+                            let _ = self.state_tx.publish(state);
                             break DegradedOutcome::Joined(Box::new(
                                 join_ctx
                                     .take()
@@ -1724,7 +1727,7 @@ impl StateHandler {
                         state
                             .main_page
                             .log("Persona created — starting secure messaging…");
-                        let _ = self.state_tx.send(state.clone());
+                        let _ = self.state_tx.publish(state);
                         break DegradedOutcome::Joined(Box::new(
                             join_ctx
                                 .take()
@@ -1752,7 +1755,7 @@ impl StateHandler {
                     break DegradedOutcome::Exit(interrupted);
                 }
             }
-            let _ = self.state_tx.send(state.clone());
+            let _ = self.state_tx.publish(state);
         };
 
         // Close the always-on admin VTA session owned by the join context, if

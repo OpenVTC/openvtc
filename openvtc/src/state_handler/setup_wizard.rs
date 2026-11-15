@@ -1,5 +1,7 @@
 #[cfg(feature = "openpgp-card")]
 use crate::state_handler::setup_token_actions;
+#[allow(unused_imports)]
+use crate::state_handler::state::PublishState;
 use crate::{
     Interrupted,
     state_handler::{
@@ -40,7 +42,7 @@ impl StateHandler {
         // `?` error out of a handler below — and never leaks (the LeakGuard).
         let exit: Result<SetupWizardExit> = async {
             Ok(loop {
-            let _ = self.state_tx.send(state.clone());
+            let _ = self.state_tx.publish(state);
             tokio::select! {
             Some(action) = action_rx.recv() => match action {
                 Action::Exit => {
@@ -90,7 +92,7 @@ impl StateHandler {
                     // the blocking pool rather than this loop or the render task.
                     state.setup.active_page = SetupPage::FinalPage;
                     state.setup.final_page.messages.push(MessageType::Info("Deriving the encryption key from your unlock code...".to_string()));
-                    let _ = self.state_tx.send(state.clone());
+                    let _ = self.state_tx.publish(state);
                     // A fresh random salt per profile (#566), written beside
                     // the ciphertext by the first save.
                     match UnlockKey::derive_blocking(passphrase).await {
@@ -209,7 +211,7 @@ impl StateHandler {
         state.setup.final_page.messages.push(MessageType::Info(
             "Your device may prompt for authentication to access OS secure storage.".to_string(),
         ));
-        let _ = self.state_tx.send(state.clone());
+        let _ = self.state_tx.publish(state);
         // R-A-5: setup bootstraps a State-A account (VTA admin credential +
         // top-level context, no persona/community). A persona is minted later
         // by the State-B join flow.

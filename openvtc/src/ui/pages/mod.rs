@@ -57,12 +57,12 @@ impl AppRouter {
 }
 
 impl Component for AppRouter {
-    fn new(state: &State, action_tx: UnboundedSender<Action>) -> Self
+    fn new(state: &std::sync::Arc<State>, action_tx: UnboundedSender<Action>) -> Self
     where
         Self: Sized,
     {
         AppRouter {
-            props: Props::from(state),
+            props: Props::from(&**state),
             //
             main_page: MainPage::new(state, action_tx.clone()),
             setup_flow: SetupFlow::new(state, action_tx.clone()),
@@ -72,12 +72,12 @@ impl Component for AppRouter {
         .move_with_state(state)
     }
 
-    fn move_with_state(self, state: &State) -> Self
+    fn move_with_state(self, state: &std::sync::Arc<State>) -> Self
     where
         Self: Sized,
     {
         AppRouter {
-            props: Props::from(state),
+            props: Props::from(&**state),
             //
             main_page: self.main_page.move_with_state(state),
             setup_flow: self.setup_flow.move_with_state(state),

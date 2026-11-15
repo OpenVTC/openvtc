@@ -663,7 +663,7 @@ mod tests {
         let mut state = State::default();
         state.join.page = JoinPage::Vetting;
         state.join.vetting = Some(view(phase));
-        (JoinFlow::new(&state, tx), rx)
+        (JoinFlow::new(&std::sync::Arc::new(state.clone()), tx), rx)
     }
 
     fn press(flow: &mut JoinFlow, code: KeyCode) {

@@ -1,4 +1,6 @@
 use crate::env_overrides::WizardUrlOverride;
+#[allow(unused_imports)]
+use crate::state_handler::state::PublishState;
 use crate::state_handler::{
     setup_sequence::{Completion, MessageType, RebuildOutcome, SetupPage},
     state::State,
@@ -100,7 +102,7 @@ fn kept_mediator(connected: Option<String>, advertised_didcomm: Option<String>) 
 /// failure we stay on `VtaEnterDid` so the operator can edit and resubmit.
 pub(crate) async fn handle_vta_submit_did(
     state: &mut State,
-    state_tx: &watch::Sender<State>,
+    state_tx: &watch::Sender<std::sync::Arc<State>>,
     vta_did: String,
 ) -> anyhow::Result<()> {
     // The transition from StartAsk → VtaEnterDid is a UI-only navigation
@@ -132,7 +134,7 @@ pub(crate) async fn handle_vta_submit_did(
             "DEV OVERRIDE: {VTA_URL_OVERRIDE_ENV} set — using REST endpoint {url} \
              (skipping DID resolution)."
         )));
-        let _ = state_tx.send(state.clone());
+        let _ = state_tx.publish(state);
         state.setup.vta.vta_url = url;
         state.setup.vta.advertised = vec![Protocol::Rest];
         // The URL is pinned, but the account still needs the mediator its
@@ -154,7 +156,7 @@ pub(crate) async fn handle_vta_submit_did(
         state.setup.vta.messages.push(MessageType::Info(
             "Resolving VTA service endpoint…".to_string(),
         ));
-        let _ = state_tx.send(state.clone());
+        let _ = state_tx.publish(state);
 
         // Use `resolve_vta` (not `resolve_vta_url`) so we get an honest answer:
         // `rest_url` is `Some` only when the DID document advertises a `#vta-rest`
@@ -236,7 +238,7 @@ pub(crate) async fn handle_vta_submit_did(
     state.setup.vta.setup_key = Some(setup_key);
     state.setup.vta.completed = Completion::CompletedOK;
     state.setup.active_page = SetupPage::VtaAclInstructions;
-    let _ = state_tx.send(state.clone());
+    let _ = state_tx.publish(state);
 
     Ok(())
 }
@@ -256,7 +258,7 @@ pub(crate) async fn handle_vta_submit_did(
 /// in-flight responses). Returns `Ok(None)` if provisioning did not complete.
 pub(crate) async fn handle_vta_start_provision(
     state: &mut State,
-    state_tx: &watch::Sender<State>,
+    state_tx: &watch::Sender<std::sync::Arc<State>>,
     context_id: String,
     transport: Option<Protocol>,
 ) -> anyhow::Result<Option<VtaClient>> {
@@ -288,7 +290,7 @@ pub(crate) async fn handle_vta_start_provision(
     state.setup.vta.diagnostics.clear();
     state.setup.vta.credential_did.clear();
     state.setup.vta.completed = Completion::NotFinished;
-    let _ = state_tx.send(state.clone());
+    let _ = state_tx.publish(state);
 
     // AdminRotated mints a fresh long-term admin DID on the VTA side; the
     // ephemeral setup did:key only authenticates the bootstrap call. The reply
@@ -327,12 +329,12 @@ pub(crate) async fn handle_vta_start_provision(
                     "URL-direct provisioning failed: {e}"
                 )));
                 state.setup.vta.completed = Completion::CompletedFail;
-                let _ = state_tx.send(state.clone());
+                let _ = state_tx.publish(state);
             }
         }
     } else {
         state.setup.vta.diagnostics = pending_list();
-        let _ = state_tx.send(state.clone());
+        let _ = state_tx.publish(state);
 
         let (tx, mut rx) = mpsc::unbounded_channel::<VtaEvent>();
         let runner_vta_did = vta_did.clone();
@@ -393,13 +395,13 @@ pub(crate) async fn handle_vta_start_provision(
                         .messages
                         .push(MessageType::Error(reason.clone()));
                     state.setup.vta.completed = Completion::CompletedFail;
-                    let _ = state_tx.send(state.clone());
+                    let _ = state_tx.publish(state);
                 }
                 // `VtaEvent` is non-exhaustive (vta-sdk #2196): an event this
                 // build does not know carries nothing the setup page acts on.
                 _ => {}
             }
-            let _ = state_tx.send(state.clone());
+            let _ = state_tx.publish(state);
         }
     }
 
@@ -409,7 +411,7 @@ pub(crate) async fn handle_vta_start_provision(
                 "Provisioning ended without an admin credential.".to_string(),
             ));
             state.setup.vta.completed = Completion::CompletedFail;
-            let _ = state_tx.send(state.clone());
+            let _ = state_tx.publish(state);
         }
         return Ok(None);
     };
@@ -450,14 +452,14 @@ pub(crate) async fn handle_vta_start_provision(
                         "{label} transport selected but no mediator DID was advertised."
                     )));
                     state.setup.vta.completed = Completion::CompletedFail;
-                    let _ = state_tx.send(state.clone());
+                    let _ = state_tx.publish(state);
                     return Ok(None);
                 }
             };
             state.setup.vta.messages.push(MessageType::Info(format!(
                 "Opening {label} session as rotated admin DID…"
             )));
-            let _ = state_tx.send(state.clone());
+            let _ = state_tx.publish(state);
 
             let rest_fallback = if state.setup.vta.vta_url.is_empty() {
                 None
@@ -497,7 +499,7 @@ pub(crate) async fn handle_vta_start_provision(
                         "{label} session open failed: {e}"
                     )));
                     state.setup.vta.completed = Completion::CompletedFail;
-                    let _ = state_tx.send(state.clone());
+                    let _ = state_tx.publish(state);
                     return Ok(None);
                 }
             }
@@ -512,7 +514,7 @@ pub(crate) async fn handle_vta_start_provision(
                     .to_string(),
             ));
             state.setup.vta.completed = Completion::CompletedFail;
-            let _ = state_tx.send(state.clone());
+            let _ = state_tx.publish(state);
             return Ok(None);
         }
         PostBootstrapAuth::Rest => {
@@ -521,7 +523,7 @@ pub(crate) async fn handle_vta_start_provision(
                 .vta
                 .messages
                 .push(MessageType::Info("Authenticating with VTA…".to_string()));
-            let _ = state_tx.send(state.clone());
+            let _ = state_tx.publish(state);
 
             let vta_url = state.setup.vta.vta_url.clone();
             match vta::authenticate(
@@ -578,7 +580,7 @@ pub(crate) async fn handle_vta_start_provision(
                         .messages
                         .push(MessageType::Error(format!("Authentication failed: {e}")));
                     state.setup.vta.completed = Completion::CompletedFail;
-                    let _ = state_tx.send(state.clone());
+                    let _ = state_tx.publish(state);
                     return Ok(None);
                 }
             }
@@ -613,7 +615,7 @@ pub(crate) async fn handle_vta_start_provision(
     // Stay on VtaProvisioning so the operator can see the admin DID rotation
     // result (ephemeral setup DID → long-term admin DID) before advancing on
     // Enter.
-    let _ = state_tx.send(state.clone());
+    let _ = state_tx.publish(state);
 
     // Hand the live admin session back to the wizard. It is kept open and reused
     // for the key/DID-creation steps (one mediator connection for the whole
@@ -634,7 +636,7 @@ pub(crate) async fn handle_vta_start_provision(
 /// a listing failed would be a worse outcome than a page that explains itself.
 pub(crate) async fn handle_recover_plan_context(
     state: &mut State,
-    state_tx: &watch::Sender<State>,
+    state_tx: &watch::Sender<std::sync::Arc<State>>,
     client: &vta_sdk::client::VtaClient,
 ) {
     let context_id = state.setup.vta.context_id.clone().unwrap_or_default();
@@ -642,7 +644,7 @@ pub(crate) async fn handle_recover_plan_context(
 
     state.setup.active_page = SetupPage::RecoverConfirm;
     state.setup.vta.rebuild = None;
-    let _ = state_tx.send(state.clone());
+    let _ = state_tx.publish(state);
 
     let outcome = match openvtc_core::rebuild::plan(client, &context_id, now).await {
         Ok(plan) => {
@@ -675,7 +677,7 @@ pub(crate) async fn handle_recover_plan_context(
                 Err(e) => {
                     state.setup.vta.rebuild =
                         Some(Err(format!("could not list this context's keys: {e}")));
-                    let _ = state_tx.send(state.clone());
+                    let _ = state_tx.publish(state);
                     return;
                 }
             };
@@ -687,7 +689,7 @@ pub(crate) async fn handle_recover_plan_context(
     };
 
     state.setup.vta.rebuild = Some(outcome);
-    let _ = state_tx.send(state.clone());
+    let _ = state_tx.publish(state);
 }
 
 #[cfg(test)]

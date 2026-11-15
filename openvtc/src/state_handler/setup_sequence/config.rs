@@ -1,5 +1,7 @@
 /*! Contains specific Config extensions for the CLI Application. */
 
+use crate::state_handler::state::PublishState;
+
 use affinidi_tdk::{TDK, messaging::profiles::ATMProfile, secrets_resolver::SecretsResolver};
 use anyhow::{Result, bail};
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
@@ -40,7 +42,7 @@ pub trait ConfigExtension {
     /// profile: Profile name to import the configuration into
     fn import(
         state: &mut State,
-        state_tx: &watch::Sender<State>,
+        state_tx: &watch::Sender<std::sync::Arc<State>>,
         import_unlock_passphrase: &SecretString,
         new_unlock_passphrase: &SecretString,
         file: &str,
@@ -131,7 +133,7 @@ impl ConfigExtension for Config {
     /// Import previously exported configuration settings from an encrypted file
     fn import(
         state: &mut State,
-        state_tx: &watch::Sender<State>,
+        state_tx: &watch::Sender<std::sync::Arc<State>>,
         import_unlock_passphrase: &SecretString,
         new_unlock_passphrase: &SecretString,
         file: &str,
@@ -147,7 +149,7 @@ impl ConfigExtension for Config {
                     .push(MessageType::Error(format!(
                         "Couldn't read from file ({file}). Reason: {e}"
                     )));
-                let _ = state_tx.send(state.clone());
+                let _ = state_tx.publish(state);
                 bail!("File read error");
             }
         };
@@ -162,7 +164,7 @@ impl ConfigExtension for Config {
                     .push(MessageType::Error(format!(
                         "Couldn't base64 decode file content. Reason: {e}"
                     )));
-                let _ = state_tx.send(state.clone());
+                let _ = state_tx.publish(state);
                 bail!("base64 decoding error");
             }
         };
@@ -187,7 +189,7 @@ impl ConfigExtension for Config {
                     .push(MessageType::Error(format!(
                         "Couldn't deserialize configuration settings. Reason: {e}"
                     )));
-                let _ = state_tx.send(state.clone());
+                let _ = state_tx.publish(state);
                 bail!("deserialization error");
             }
         };
@@ -259,7 +261,7 @@ impl ConfigExtension for Config {
                         .push(MessageType::Info(
                             "Please touch token hardware to unlock keys".to_string(),
                         ));
-                    let _ = state_tx_clone.send(state_mut);
+                    let _ = state_tx_clone.publish(&state_mut);
                 })
                 .map_err(|e| anyhow::anyhow!("Couldn't save Secured Config: {e}"))?;
         }

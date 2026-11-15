@@ -441,7 +441,7 @@ mod tests {
 
     fn flow(state: SetupState) -> (SetupFlow, UnboundedReceiver<Action>) {
         let (tx, rx) = unbounded_channel();
-        let mut flow = SetupFlow::new(&State::default(), tx);
+        let mut flow = SetupFlow::new(&std::sync::Arc::new(State::default()), tx);
         flow.props.state = state;
         (flow, rx)
     }

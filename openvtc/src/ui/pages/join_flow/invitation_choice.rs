@@ -317,7 +317,7 @@ mod tests {
         state.join.page = JoinPage::InvitationChoice;
         state.join.invitation_options = vec![vic("urn:uuid:one")];
         mutate(&mut state.join);
-        (JoinFlow::new(&state, tx), rx)
+        (JoinFlow::new(&std::sync::Arc::new(state.clone()), tx), rx)
     }
 
     fn press(code: KeyCode) -> KeyEvent {

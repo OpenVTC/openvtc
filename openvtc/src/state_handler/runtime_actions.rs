@@ -17,6 +17,8 @@
 //! receiver this one is selecting on.
 
 use crate::state_handler::main_page::status::Status;
+#[allow(unused_imports)]
+use crate::state_handler::state::PublishState;
 use tokio::sync::{mpsc::UnboundedSender, watch};
 
 use crate::state_handler::actions::Action;
@@ -57,7 +59,7 @@ pub(crate) struct ActionCtx<'a> {
     /// state rather than `State`: it is a stopwatch, not something the UI
     /// renders, and it is read by the inbound arm that stays in the loop.
     pub(crate) ping_sent_at: &'a mut Option<std::time::Instant>,
-    pub(crate) state_tx: &'a watch::Sender<State>,
+    pub(crate) state_tx: &'a watch::Sender<std::sync::Arc<State>>,
     pub(crate) profile: &'a str,
     /// Where the inbound arm hands a witness's answers to a witnessing in progress.
     pub(crate) witness_router: &'a openvtc_core::witness::ReplyRouter,
@@ -947,7 +949,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 if let Some(overlay) = ctx.state.main_page.create_persona.as_mut() {
                     overlay.copied = copied;
                 }
-                let _ = ctx.state_tx.send(ctx.state.clone());
+                let _ = ctx.state_tx.publish(ctx.state);
             }
         }
         Action::Inbox(ia) => {
@@ -1510,7 +1512,7 @@ mod tests {
         didcomm_service: Messaging,
         session_manager: SessionManager,
         ping_sent_at: Option<std::time::Instant>,
-        state_tx: watch::Sender<State>,
+        state_tx: watch::Sender<std::sync::Arc<State>>,
         witness_router: openvtc_core::witness::ReplyRouter,
     }
 
@@ -1522,7 +1524,7 @@ mod tests {
         /// thing as one that succeeds.
         async fn new(with_session: bool) -> Self {
             let (dispatch_tx, dispatch_rx) = mpsc::unbounded_channel();
-            let (state_tx, _state_rx) = watch::channel(State::default());
+            let (state_tx, _state_rx) = watch::channel(std::sync::Arc::new(State::default()));
             let (event_tx, _event_rx) = mpsc::unbounded_channel();
             Self {
                 state: State::default(),

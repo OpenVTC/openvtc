@@ -1,6 +1,8 @@
 //! The runtime's periodic sweeps.
 
 use super::*;
+#[allow(unused_imports)]
+use crate::state_handler::state::PublishState;
 use crate::state_handler::*;
 
 impl Runtime {
@@ -323,7 +325,7 @@ impl Runtime {
                 expired.len(),
                 if expired.len() == 1 { "" } else { "s" },
             ));
-            let _ = handler.state_tx.send(state.clone());
+            let _ = handler.state_tx.publish(state);
         }
 
         // The other thing that lapses by the clock: our own `vetter`
@@ -370,7 +372,7 @@ impl Runtime {
             }
             save.mark_dirty();
             state.main_page.sync_from_config(config);
-            let _ = handler.state_tx.send(state.clone());
+            let _ = handler.state_tx.publish(state);
         }
     }
 

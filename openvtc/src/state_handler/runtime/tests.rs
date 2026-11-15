@@ -23,7 +23,7 @@ struct Handles {
     interrupt_tx: broadcast::Sender<Interrupted>,
     /// Subscribed before the runtime starts, so it hears the terminator.
     interrupt_seen: broadcast::Receiver<Interrupted>,
-    state_rx: watch::Receiver<State>,
+    state_rx: watch::Receiver<std::sync::Arc<State>>,
     _event_tx: mpsc::UnboundedSender<didcomm::DIDCommEvent>,
     _presence_tx: mpsc::UnboundedSender<device_presence::PresenceReport>,
 }
@@ -189,7 +189,7 @@ async fn a_dispatch_outcome_frees_its_domain() {
 #[tokio::test]
 async fn a_vta_sync_tick_without_a_session_starts_nothing() {
     let (mut rt, _h) = runtime().await;
-    rt.on_vta_sync_tick().await;
+    assert!(!rt.on_vta_sync_tick().await, "quiet: nothing started");
     assert!(rt.vta_sync_rx.try_recv().is_err());
 }
 

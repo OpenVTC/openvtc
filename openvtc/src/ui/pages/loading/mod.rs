@@ -10,6 +10,7 @@
 //! struct mapped `From<&State>` carries everything the screen renders, so the
 //! component itself stays free of business logic.
 
+use crate::state_handler::state::ActivePage;
 use crate::{
     colors::{
         COLOR_BORDER, COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS,
@@ -117,24 +118,28 @@ pub struct LoadingScreen {
 }
 
 impl Component for LoadingScreen {
-    fn new(state: &State, action_tx: UnboundedSender<Action>) -> Self
+    fn new(state: &std::sync::Arc<State>, action_tx: UnboundedSender<Action>) -> Self
     where
         Self: Sized,
     {
         LoadingScreen {
             action_tx,
-            props: Props::from(state),
+            props: Props::from(&**state),
             scroll: 0,
             rendered_lines: std::cell::Cell::new(0),
         }
     }
 
-    fn move_with_state(self, state: &State) -> Self
+    fn move_with_state(self, state: &std::sync::Arc<State>) -> Self
     where
         Self: Sized,
     {
+        // Only while the loading screen is up (#556): it is not drawn after.
+        if !matches!(state.active_page, ActivePage::Loading) {
+            return self;
+        }
         LoadingScreen {
-            props: Props::from(state),
+            props: Props::from(&**state),
             ..self
         }
     }
@@ -800,7 +805,7 @@ mod tests {
 
     fn screen(state: &State) -> LoadingScreen {
         let (tx, _rx) = unbounded_channel();
-        LoadingScreen::new(state, tx)
+        LoadingScreen::new(&std::sync::Arc::new(state.clone()), tx)
     }
 
     #[test]

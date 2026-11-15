@@ -1,13 +1,15 @@
+use std::sync::Arc;
+
 use crate::state_handler::{actions::Action, state::State};
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub trait Component {
-    fn new(state: &State, action_tx: UnboundedSender<Action>) -> Self
+    fn new(state: &Arc<State>, action_tx: UnboundedSender<Action>) -> Self
     where
         Self: Sized;
-    fn move_with_state(self, state: &State) -> Self
+    fn move_with_state(self, state: &Arc<State>) -> Self
     where
         Self: Sized;
 

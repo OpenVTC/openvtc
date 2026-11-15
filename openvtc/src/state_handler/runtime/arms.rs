@@ -3,6 +3,8 @@
 //! supervisor, listener lifecycle, the TSP store, saves and VTA account sync.
 
 use super::*;
+#[allow(unused_imports)]
+use crate::state_handler::state::PublishState;
 use crate::state_handler::*;
 
 impl Runtime {
@@ -278,7 +280,7 @@ impl Runtime {
                     );
                 }
                 state.live_siblings = siblings;
-                let _ = handler.state_tx.send(state.clone());
+                let _ = handler.state_tx.publish(state);
             }
             device_presence::PresenceReport::Failing {
                 what,
@@ -409,7 +411,9 @@ impl Runtime {
         }
     }
 
-    pub(super) async fn on_session_reconcile(&mut self) {
+    /// The backstop for the edge-triggered listener-status stream. Returns
+    /// whether a session's status changed.
+    pub(super) async fn on_session_reconcile(&mut self) -> bool {
         let Runtime {
             state,
             didcomm_service,
@@ -418,7 +422,7 @@ impl Runtime {
         } = self;
         // The loop tail broadcasts `state`, so a change here reaches
         // the UI without an explicit send.
-        reconcile_sessions(session_manager, didcomm_service, state);
+        reconcile_sessions(session_manager, didcomm_service, state)
     }
 
     /// A background TSP relationship write (an invite recorded by the
@@ -495,7 +499,9 @@ impl Runtime {
         save.finish(result.is_ok());
     }
 
-    pub(super) async fn on_vta_sync_tick(&mut self) {
+    /// Start a VTA account-sync cycle when one is due. Returns whether one
+    /// started.
+    pub(super) async fn on_vta_sync_tick(&mut self) -> bool {
         let Runtime {
             config,
             admin_vta,
@@ -522,7 +528,9 @@ impl Runtime {
                 let ex = openvtc_core::vta_sync::exchange(&client, &context_id, since, out).await;
                 let _ = tx.send(ex);
             });
+            return true;
         }
+        false
     }
 
     pub(super) async fn on_vta_sync_exchange(&mut self, ex: openvtc_core::vta_sync::Exchange) {

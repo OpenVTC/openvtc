@@ -12,6 +12,8 @@
 //! is surfaced into the join log as a [`MessageType::Error`] — the loop never
 //! `?`-bubbles a sequence error in a way that would kill the app.
 
+#[allow(unused_imports)]
+use crate::state_handler::state::PublishState;
 use std::time::Duration;
 
 use affinidi_tdk::TDK;
@@ -1459,7 +1461,7 @@ impl StateHandler {
                     )
                     .await
                 {
-                    let _ = self.state_tx.send(state.clone());
+                    let _ = self.state_tx.publish(state);
                     return Ok(exit);
                 }
             }
@@ -1567,19 +1569,19 @@ impl StateHandler {
                 }
             }
         }
-        let _ = self.state_tx.send(state.clone());
+        let _ = self.state_tx.publish(state);
 
         loop {
             // A launch that stopped to ask a hidden-vetting community for its
             // challenge leaves the flow here, whichever page or entry started
             // it: only the caller's loop hears the answer.
             if let Some(awaiting) = state.join.challenge_wait.take() {
-                let _ = self.state_tx.send(state.clone());
+                let _ = self.state_tx.publish(state);
                 return Ok(JoinExit::AwaitChallenge(awaiting));
             }
             // Likewise a wallet session: the runtime loop hears its answers.
             if let Some(awaiting) = state.join.wallet_wait.take() {
-                let _ = self.state_tx.send(state.clone());
+                let _ = self.state_tx.publish(state);
                 return Ok(JoinExit::AwaitWallet(awaiting));
             }
             tokio::select! {
@@ -1618,7 +1620,7 @@ impl StateHandler {
                                 .invitation_credential
                                 .as_ref()
                                 .and_then(|vic| foreign_invitation_subject(config, vic));
-                            let _ = self.state_tx.send(state.clone());
+                            let _ = self.state_tx.publish(state);
                         }
                         Action::JoinClipboardFailed(why) => {
                             // Only the failure reaches the loop: `[Ctrl+V]` reads
@@ -1631,7 +1633,7 @@ impl StateHandler {
                                  this screen instead — that works over SSH, where reading \
                                  the clipboard cannot."
                             )));
-                            let _ = self.state_tx.send(state.clone());
+                            let _ = self.state_tx.publish(state);
                         }
                         Action::JoinClearVic => {
                             // Explicit "proceed without a VIC": drop the loaded
@@ -1643,7 +1645,7 @@ impl StateHandler {
                             state.join.invitation_foreign_subject = None;
                             state.join.vic_cleared = true;
                             state.join.messages.clear();
-                            let _ = self.state_tx.send(state.clone());
+                            let _ = self.state_tx.publish(state);
                         }
                         Action::JoinSubmitVtc(vtc_did) => {
                             let vtc_did = match validate_join_input(&vtc_did) {
@@ -1653,7 +1655,7 @@ impl StateHandler {
                                 // that reads as a frozen screen (issue #29).
                                 Err(why) => {
                                     state.join.messages.push(MessageType::Error(why));
-                                    let _ = self.state_tx.send(state.clone());
+                                    let _ = self.state_tx.publish(state);
                                     continue;
                                 }
                             };
@@ -1671,7 +1673,7 @@ impl StateHandler {
                                 state.join.messages.push(MessageType::Info(format!(
                                     "Resolving {vtc_did}…"
                                 )));
-                                let _ = self.state_tx.send(state.clone());
+                                let _ = self.state_tx.publish(state);
                                 match openvtc_core::agent_name::resolve_identifier(
                                     tdk.did_resolver(),
                                     &vtc_did,
@@ -1681,7 +1683,7 @@ impl StateHandler {
                                     Ok(did) => did,
                                     Err(e) => {
                                         state.join.fail(e.to_string());
-                                        let _ = self.state_tx.send(state.clone());
+                                        let _ = self.state_tx.publish(state);
                                         continue;
                                     }
                                 }
@@ -1702,7 +1704,7 @@ impl StateHandler {
                                 )
                                 .await
                             {
-                                let _ = self.state_tx.send(state.clone());
+                                let _ = self.state_tx.publish(state);
                                 return Ok(exit);
                             }
                         }
@@ -1711,12 +1713,12 @@ impl StateHandler {
                             state.join.identity_selected = i.min(state.join.mint_row());
                             // Moving the highlight dismisses any armed warning.
                             state.join.reuse_confirm = None;
-                            let _ = self.state_tx.send(state.clone());
+                            let _ = self.state_tx.publish(state);
                         }
                         Action::JoinNewPersonaMethodCycle => {
                             state.join.new_persona_did_method =
                                 next_did_method(state.join.new_persona_did_method);
-                            let _ = self.state_tx.send(state.clone());
+                            let _ = self.state_tx.publish(state);
                         }
                         Action::JoinIdentityChoose => {
                             if state.join.mint_row_selected() {
@@ -1749,7 +1751,7 @@ impl StateHandler {
                             {
                                 // Arm the cross-community linkage warning (D1).
                                 state.join.reuse_confirm = Some(opt.id);
-                                let _ = self.state_tx.send(state.clone());
+                                let _ = self.state_tx.publish(state);
                             }
                         }
                         Action::JoinReuseConfirm => {
@@ -1763,17 +1765,17 @@ impl StateHandler {
                             }
                             state.join.reuse_confirm = None;
                             open_invitation_choice(state, config, persona_id);
-                            let _ = self.state_tx.send(state.clone());
+                            let _ = self.state_tx.publish(state);
                         }
                         Action::JoinReuseCancel => {
                             state.join.reuse_confirm = None;
-                            let _ = self.state_tx.send(state.clone());
+                            let _ = self.state_tx.publish(state);
                         }
                         Action::JoinInvitationSelect(i) => {
                             // Rows: 0..len an invitation, len = paste, len+1 = without.
                             let max = state.join.invitation_without_row();
                             state.join.invitation_use_selected = i.min(max);
-                            let _ = self.state_tx.send(state.clone());
+                            let _ = self.state_tx.publish(state);
                         }
                         Action::JoinInvitationChoose => {
                             let Some(vtc_did) = state.join.pending_vtc.clone() else {
@@ -1804,7 +1806,7 @@ impl StateHandler {
                                         )));
                                     }
                                 }
-                                let _ = self.state_tx.send(state.clone());
+                                let _ = self.state_tx.publish(state);
                                 continue;
                             }
                             // A selected invitation row presents that VIC; the
@@ -1857,7 +1859,7 @@ impl StateHandler {
                                      then join again."
                                         .into(),
                                 );
-                                let _ = self.state_tx.send(state.clone());
+                                let _ = self.state_tx.publish(state);
                                 continue;
                             };
                             let missing = answers.unanswered();
@@ -1867,7 +1869,7 @@ impl StateHandler {
                                      Pick another face, or add it to this one under Identity.",
                                     missing.join(", ")
                                 ));
-                                let _ = self.state_tx.send(state.clone());
+                                let _ = self.state_tx.publish(state);
                                 continue;
                             }
                             // What the holder approves is these values, exactly.
@@ -2027,7 +2029,7 @@ impl StateHandler {
                                             .join
                                             .messages
                                             .push(MessageType::Error(e.to_string()));
-                                        let _ = self.state_tx.send(state.clone());
+                                        let _ = self.state_tx.publish(state);
                                         continue;
                                     }
                                 }
@@ -2074,7 +2076,7 @@ impl StateHandler {
                                     "{}: {why}",
                                     option.label
                                 )));
-                                let _ = self.state_tx.send(state.clone());
+                                let _ = self.state_tx.publish(state);
                                 continue;
                             }
                             // A route that starts with the join doing something:
@@ -2089,7 +2091,7 @@ impl StateHandler {
                                 state.join.messages.clear();
                                 state.join.resume_route = Some(option.route);
                                 super::handle_nav_action(state, &Action::StartCreatePersona);
-                                let _ = self.state_tx.send(state.clone());
+                                let _ = self.state_tx.publish(state);
                                 continue;
                             }
                             if let Some(exit) = self
@@ -2250,7 +2252,7 @@ impl StateHandler {
                                 && let Ok(awaiting) =
                                     ask_requirements(state, config, tdk, messaging, &vtc_did).await
                             {
-                                let _ = self.state_tx.send(state.clone());
+                                let _ = self.state_tx.publish(state);
                                 return Ok(JoinExit::AwaitRequirements(awaiting));
                             }
                         }
@@ -2261,7 +2263,7 @@ impl StateHandler {
                     return Ok(JoinExit::Exit(interrupted));
                 }
             }
-            let _ = self.state_tx.send(state.clone());
+            let _ = self.state_tx.publish(state);
         }
     }
 
@@ -2531,11 +2533,11 @@ impl StateHandler {
         let Some(job) = super::advance_persona_overlay(state, config, tdk, admin_vta, &progress_tx)
         else {
             // A phase moved on, or refused and said why on the overlay.
-            let _ = self.state_tx.send(state.clone());
+            let _ = self.state_tx.publish(state);
             return None;
         };
         drop(progress_tx);
-        let _ = self.state_tx.send(state.clone());
+        let _ = self.state_tx.publish(state);
 
         let run = job.run();
         tokio::pin!(run);
@@ -2547,7 +2549,7 @@ impl StateHandler {
                         && let Some(o) = state.main_page.create_persona.as_mut()
                     {
                         o.messages.push(line);
-                        let _ = self.state_tx.send(state.clone());
+                        let _ = self.state_tx.publish(state);
                     }
                 }
                 Ok(interrupted) = interrupt_rx.recv() => return Some(interrupted),
@@ -2603,7 +2605,7 @@ impl StateHandler {
                 }
             }
         }
-        let _ = self.state_tx.send(state.clone());
+        let _ = self.state_tx.publish(state);
         None
     }
 
@@ -2664,7 +2666,7 @@ impl StateHandler {
             state.join.reuse_confirm = None;
             state.join.page = JoinPage::IdentityChoice;
         }
-        let _ = self.state_tx.send(state.clone());
+        let _ = self.state_tx.publish(state);
         None
     }
 
@@ -2698,7 +2700,7 @@ impl StateHandler {
             .is_some_and(|a| a.approved.is_some());
         if !asked.is_empty() && !answered {
             open_answers(state, admin_vta, asked, (choice, vtc_did, context_id)).await;
-            let _ = self.state_tx.send(state.clone());
+            let _ = self.state_tx.publish(state);
             return None;
         }
 
@@ -2714,7 +2716,7 @@ impl StateHandler {
                 "{name} published a statement of what its member directory would show about                  you, and it could not be read ({}). Nothing has been sent: joining without                  seeing it is not offered. Ask the community to fix it, then try again.",
                 sanitize_display(why, 200)
             ));
-            let _ = self.state_tx.send(state.clone());
+            let _ = self.state_tx.publish(state);
             return None;
         }
 
@@ -2745,7 +2747,7 @@ impl StateHandler {
                 registry.review = Some(review);
                 registry.directory = directory;
             }
-            let _ = self.state_tx.send(state.clone());
+            let _ = self.state_tx.publish(state);
             return None;
         }
 
@@ -2759,7 +2761,7 @@ impl StateHandler {
             });
             state.join.page = JoinPage::Wallet;
             state.join.processing = false;
-            let _ = self.state_tx.send(state.clone());
+            let _ = self.state_tx.publish(state);
             return None;
         }
 
@@ -2805,7 +2807,7 @@ impl StateHandler {
                 }
                 Err(reason) => state.join.fail(challenge_failed_words(&name, &reason)),
             }
-            let _ = self.state_tx.send(state.clone());
+            let _ = self.state_tx.publish(state);
             return None;
         }
 
@@ -2815,7 +2817,7 @@ impl StateHandler {
         state.join.completed = Completion::NotFinished;
         state.join.messages.clear();
         state.join.info(format!("Joining {vtc_did}…"));
-        let _ = self.state_tx.send(state.clone());
+        let _ = self.state_tx.publish(state);
 
         // R15: race the multi-step VTA sequence against the interrupt so Ctrl-C /
         // Exit stay live for its whole (network-bound) duration. On interrupt the
@@ -2869,12 +2871,12 @@ impl StateHandler {
                 "Join cancelled. Any partially-minted persona was rolled back; a sub-context may remain at the VTA.",
             );
             state.main_page.log("Join cancelled by user.");
-            let _ = self.state_tx.send(state.clone());
+            let _ = self.state_tx.publish(state);
             return Some(interrupted);
         }
 
         state.join.processing = false;
-        let _ = self.state_tx.send(state.clone());
+        let _ = self.state_tx.publish(state);
         None
     }
 }
@@ -3553,7 +3555,7 @@ async fn run_join_sequence(
     state
         .join
         .info(format!("Community reachable over {peer_preferred}."));
-    let _ = handler.state_tx.send(state.clone());
+    let _ = handler.state_tx.publish(state);
 
     let top_context_id = config.account.top_context_id.clone();
 
@@ -3574,7 +3576,7 @@ async fn run_join_sequence(
             return;
         }
     }
-    let _ = handler.state_tx.send(state.clone());
+    let _ = handler.state_tx.publish(state);
 
     // Resolve the persona to present: reuse an existing account persona (R-B-3)
     // or mint a fresh, self-contained one (D6). Only a *minted* persona is
@@ -3606,7 +3608,7 @@ async fn run_join_sequence(
                 }
                 let did = ident.persona_did().to_string();
                 state.join.info(format!("Reusing persona {did}…"));
-                let _ = handler.state_tx.send(state.clone());
+                let _ = handler.state_tx.publish(state);
                 (persona_id, did)
             }
             None => {
@@ -3635,7 +3637,7 @@ async fn run_join_sequence(
             state
                 .join
                 .info("Creating persona keys (signing, authentication, encryption)…");
-            let _ = handler.state_tx.send(state.clone());
+            let _ = handler.state_tx.publish(state);
             match vta::create_persona_keys(admin_vta, Some(&context_id)).await {
                 Ok(keys) => state.setup.did_keys = Some(keys),
                 Err(e) => {
@@ -3647,7 +3649,7 @@ async fn run_join_sequence(
             }
             // WebVH update keys.
             state.join.info("Creating DID update keys…");
-            let _ = handler.state_tx.send(state.clone());
+            let _ = handler.state_tx.publish(state);
             match vta::create_update_keys(admin_vta, Some(&context_id)).await {
                 Ok((update, next_update)) => {
                     state.setup.vta.update_secret = Some(update);
@@ -3663,7 +3665,7 @@ async fn run_join_sequence(
 
             // Pick the first WebVH server. Serverless mint is a deliberate follow-up.
             state.join.info("Finding a DID hosting server…");
-            let _ = handler.state_tx.send(state.clone());
+            let _ = handler.state_tx.publish(state);
             let server_id = match vta::list_webvh_servers(admin_vta).await {
                 Ok(servers) => match servers.into_iter().next() {
                     Some(s) => s.id,
@@ -3686,7 +3688,7 @@ async fn run_join_sequence(
             state
                 .join
                 .info(format!("Creating persona DID via {server_id}…"));
-            let _ = handler.state_tx.send(state.clone());
+            let _ = handler.state_tx.publish(state);
             // How the new persona is presented: the operator's choice on the
             // identity page, else the account's preference (VTI-VTA-036).
             let presentation = openvtc_core::config::account::persona_presentation(
@@ -3762,7 +3764,7 @@ async fn run_join_sequence(
             }
             let persona_did = state.setup.webvh_address.did.clone();
             state.join.info(format!("Persona created: {persona_did}"));
-            let _ = handler.state_tx.send(state.clone());
+            let _ = handler.state_tx.publish(state);
             (persona_id, persona_did)
         }
     };
@@ -3786,7 +3788,7 @@ async fn run_join_sequence(
     // handler lands, the request message id is the correlation handle
     // stored on the Pending record.
     state.join.info("Submitting join request…");
-    let _ = handler.state_tx.send(state.clone());
+    let _ = handler.state_tx.publish(state);
 
     if tdk.atm.is_none() {
         state
@@ -3947,7 +3949,7 @@ async fn run_join_sequence(
     }
     // (When the operator chose to join without an invitation, the note was
     // already surfaced above where the VIC was suppressed.)
-    let _ = handler.state_tx.send(state.clone());
+    let _ = handler.state_tx.publish(state);
     // Subject-linkage (#1b): when the presenting DID differs from the VIC
     // subject, prove the subject authorized this presenter (signed with the
     // subject persona's key). On the join-as-subject path (#1a) this is `None`.
@@ -3989,7 +3991,7 @@ async fn run_join_sequence(
             state
                 .join
                 .info("Answering the community's questions from your face…");
-            let _ = handler.state_tx.send(state.clone());
+            let _ = handler.state_tx.publish(state);
             let answered = answer_from_face(
                 admin_vta,
                 &sub_context_id,
@@ -4095,7 +4097,7 @@ async fn run_join_sequence(
             .await;
     if let Some(note) = route.note {
         state.join.info(note.describe());
-        let _ = handler.state_tx.send(state.clone());
+        let _ = handler.state_tx.publish(state);
     }
     let submit_transport = route.transport();
     // Last gate before the request goes out: the socket started above has had
@@ -4298,14 +4300,14 @@ async fn start_persona_listener(
             "Couldn't open this persona's mediator session ({e}) — submitting anyway; the \
              community's reply will be collected when it connects."
         ));
-        let _ = handler.state_tx.send(state.clone());
+        let _ = handler.state_tx.publish(state);
         return None;
     }
 
     state
         .join
         .info("Connecting the new persona to its mediator…");
-    let _ = handler.state_tx.send(state.clone());
+    let _ = handler.state_tx.publish(state);
     Some(listener_id)
 }
 
@@ -4391,7 +4393,7 @@ async fn await_persona_online(
             false
         }
     };
-    let _ = handler.state_tx.send(state.clone());
+    let _ = handler.state_tx.publish(state);
     online
 }
 

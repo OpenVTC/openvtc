@@ -439,7 +439,7 @@ mod tests {
         use tokio::sync::mpsc::unbounded_channel;
 
         let (tx, _rx) = unbounded_channel();
-        let mut flow = JoinFlow::new(&State::default(), tx);
+        let mut flow = JoinFlow::new(&std::sync::Arc::new(State::default()), tx);
         VtcEnterDid::handle_key_event(
             &mut flow,
             KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
@@ -465,7 +465,7 @@ mod tests {
         use tokio::sync::mpsc::unbounded_channel;
 
         let (tx, mut rx) = unbounded_channel();
-        let mut flow = JoinFlow::new(&State::default(), tx);
+        let mut flow = JoinFlow::new(&std::sync::Arc::new(State::default()), tx);
 
         flow.apply_entry_paste("  did:webvh:QmRoot:vtc.example.com  ");
         assert_eq!(flow.vtc_did.value(), "did:webvh:QmRoot:vtc.example.com");
@@ -497,7 +497,7 @@ mod tests {
         use tokio::sync::mpsc::unbounded_channel;
 
         let (tx, mut rx) = unbounded_channel();
-        let mut flow = JoinFlow::new(&State::default(), tx);
+        let mut flow = JoinFlow::new(&std::sync::Arc::new(State::default()), tx);
         VtcEnterDid::handle_key_event(
             &mut flow,
             KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),

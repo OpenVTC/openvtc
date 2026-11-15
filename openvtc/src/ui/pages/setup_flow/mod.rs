@@ -102,7 +102,7 @@ impl From<&State> for Props {
 }
 
 impl Component for SetupFlow {
-    fn new(state: &State, action_tx: UnboundedSender<Action>) -> Self
+    fn new(state: &std::sync::Arc<State>, action_tx: UnboundedSender<Action>) -> Self
     where
         Self: Sized,
     {
@@ -134,17 +134,26 @@ impl Component for SetupFlow {
             final_page: FinalPage::default(),
 
             // set the props
-            props: Props::from(state),
+            props: Props::from(&**state),
         }
         .move_with_state(state)
     }
 
-    fn move_with_state(self, state: &State) -> Self
+    fn move_with_state(self, state: &std::sync::Arc<State>) -> Self
     where
         Self: Sized,
     {
+        // Copied only while the wizard is on screen (#556): its props are a
+        // working copy the pages edit, and an update that arrives while
+        // another page is up has nothing here to refresh.
+        if !matches!(
+            state.active_page,
+            crate::state_handler::state::ActivePage::Setup
+        ) {
+            return self;
+        }
         SetupFlow {
-            props: Props::from(state),
+            props: Props::from(&**state),
             // propagate the update to the child components
             ..self
         }

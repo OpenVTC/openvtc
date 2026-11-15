@@ -22,6 +22,8 @@
 //! The single-mutator invariant is unchanged: only these methods touch
 //! `state` and `config`, and they all run on the loop's task.
 
+#[allow(unused_imports)]
+use crate::state_handler::state::PublishState;
 mod arms;
 mod inbound_arm;
 #[cfg(test)]
@@ -53,6 +55,11 @@ use crate::{
 pub(super) enum Flow {
     /// Carry on: run the end-of-iteration work and wait for the next event.
     Continue,
+    /// The arm provably changed nothing: skip the end-of-iteration work,
+    /// including the state broadcast (#556). Only for arms that touched
+    /// neither `state` nor `config` — there is no dirty tracking, so an arm
+    /// that might have changed something returns [`Flow::Continue`].
+    Quiet,
     /// Stop the loop with this outcome. The arm has already told the
     /// terminator when that is its job (an `Exit` action does; an interrupt,
     /// which came *from* the terminator, does not).
@@ -211,7 +218,7 @@ impl Runtime {
         } else {
             state::MediatorStatus::NoActiveCommunity
         };
-        let _ = handler.state_tx.send(state.clone());
+        let _ = handler.state_tx.publish(&state);
 
         // Install this account's listeners on the runtime started above. Skips
         // any that already exist, so a State-A join's own persona listener is
@@ -324,7 +331,7 @@ impl Runtime {
                 .log("No community membership yet — no community session to connect."),
             _ => state.main_page.log("Connecting to the mediator…"),
         }
-        let _ = handler.state_tx.send(state.clone());
+        let _ = handler.state_tx.publish(&state);
 
         // Background-dispatch plumbing (R13). Network-bound actions whose await
         // would otherwise park the whole select loop are spawned as background
@@ -532,8 +539,11 @@ impl Runtime {
                     Flow::Continue
                 }
                 _ = self.session_reconcile_tick.tick() => {
-                    self.on_session_reconcile().await;
-                    Flow::Continue
+                    if self.on_session_reconcile().await {
+                        Flow::Continue
+                    } else {
+                        Flow::Quiet
+                    }
                 }
                 _ = self.capabilities_sweep.tick() => {
                     self.on_capabilities_sweep().await;
@@ -571,9 +581,13 @@ impl Runtime {
                     self.on_save_done(result).await;
                     Flow::Continue
                 }
+                // Every two seconds, and almost always with nothing to start.
                 _ = self.vta_sync_tick.tick() => {
-                    self.on_vta_sync_tick().await;
-                    Flow::Continue
+                    if self.on_vta_sync_tick().await {
+                        Flow::Continue
+                    } else {
+                        Flow::Quiet
+                    }
                 }
                 Some(ex) = self.vta_sync_rx.recv() => {
                     self.on_vta_sync_exchange(ex).await;
@@ -583,8 +597,10 @@ impl Runtime {
                 // Catch and handle interrupt signal to gracefully shutdown
                 Ok(interrupted) = self.interrupt_rx.recv() => Flow::Exit(interrupted),
             };
-            if let Flow::Exit(interrupted) = flow {
-                break interrupted;
+            match flow {
+                Flow::Exit(interrupted) => break interrupted,
+                Flow::Quiet => continue,
+                Flow::Continue => {}
             }
             if let Some(interrupted) = self.end_of_iteration().await {
                 break interrupted;
@@ -693,7 +709,7 @@ impl Runtime {
             self.config.set_active_persona(active_persona);
             self.state.main_page.sync_from_config(&self.config);
         }
-        let _ = self.handler.state_tx.send(self.state.clone());
+        let _ = self.handler.state_tx.publish(&self.state);
         None
     }
 

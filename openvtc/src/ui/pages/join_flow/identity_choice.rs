@@ -275,7 +275,7 @@ mod tests {
             },
         ];
         mutate(&mut state.join);
-        (JoinFlow::new(&state, tx), rx)
+        (JoinFlow::new(&std::sync::Arc::new(state.clone()), tx), rx)
     }
 
     fn press(code: KeyCode) -> KeyEvent {

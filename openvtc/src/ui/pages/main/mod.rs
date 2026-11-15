@@ -2,6 +2,7 @@ use crate::colors::{
     COLOR_BORDER, COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS,
     COLOR_TEXT_DEFAULT, COLOR_WARNING_ACCESSIBLE_RED,
 };
+use crate::ui::shared::Shared;
 use crate::{
     state_handler::{
         actions::{Action, SettingsAction},
@@ -80,21 +81,21 @@ pub struct MainPage {
 const CONTENT_PAGE: u16 = 10;
 
 struct Props {
-    main_page: MainPageState,
-    connection: ConnectionState,
+    main_page: Shared<MainPageState>,
+    connection: Shared<ConnectionState>,
 }
 
-impl From<&State> for Props {
-    fn from(state: &State) -> Self {
+impl From<&std::sync::Arc<State>> for Props {
+    fn from(state: &std::sync::Arc<State>) -> Self {
         Props {
-            main_page: state.main_page.clone(),
-            connection: state.connection.clone(),
+            main_page: Shared::new(state, |s| &s.main_page),
+            connection: Shared::new(state, |s| &s.connection),
         }
     }
 }
 
 impl Component for MainPage {
-    fn new(state: &State, action_tx: UnboundedSender<Action>) -> Self
+    fn new(state: &std::sync::Arc<State>, action_tx: UnboundedSender<Action>) -> Self
     where
         Self: Sized,
     {
@@ -117,7 +118,7 @@ impl Component for MainPage {
         .move_with_state(state)
     }
 
-    fn move_with_state(mut self, state: &State) -> Self
+    fn move_with_state(mut self, state: &std::sync::Arc<State>) -> Self
     where
         Self: Sized,
     {
@@ -1526,7 +1527,7 @@ mod key_handler_tests {
         // The content panel must be focused for keys to route to its handler.
         state.main_page.content_panel.selected = true;
         mutate(&mut state);
-        let page = MainPage::new(&state, tx);
+        let page = MainPage::new(&std::sync::Arc::new(state.clone()), tx);
         (page, rx)
     }
 
