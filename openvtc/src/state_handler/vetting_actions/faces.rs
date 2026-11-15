@@ -17,7 +17,6 @@ use super::jobs::{CardJob, CardStep, FaceJob, Presenting};
 use super::outcome::VettingOutcome;
 use super::send::{abandon, begin, resolver};
 use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome};
-use crate::state_handler::join_flow;
 use crate::state_handler::main_page::content::{
     CardPreview, FaceChoice, NewFaceForm, NewFaceStep, PoolRow, VettingMode,
 };
@@ -306,7 +305,7 @@ pub(super) fn application_context(
         .filter(|home| community_context::is_sub_context(home, top))
     {
         Some(home) => home.to_string(),
-        None => join_flow::suggested_context(config, &app.community.clone()),
+        None => openvtc_core::join::sequence::suggested_context(config, &app.community.clone()),
     };
     if let Some(app) = config.private.vetting.application_by_id_mut(application_id) {
         app.context_id = Some(id.clone());

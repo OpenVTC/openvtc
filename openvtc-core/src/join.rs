@@ -31,6 +31,9 @@ use vta_sdk::protocols::join_requests::{
 
 use crate::errors::OpenVTCError;
 
+pub mod sequence;
+pub mod status_poll;
+
 /// Ceiling on a join submit's serialized body, guarded before it goes out.
 ///
 /// Mirrors the inbound `MAX_MESSAGE_BODY_SIZE` (1 MiB): a submit larger than the

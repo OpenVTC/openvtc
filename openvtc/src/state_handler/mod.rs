@@ -298,7 +298,6 @@ mod inbox_actions;
 pub mod join;
 pub(crate) mod join_cmd;
 mod join_flow;
-mod join_status_poll;
 pub mod main_page;
 mod notification_actions;
 mod relationship_actions;
@@ -1307,7 +1306,7 @@ impl StateHandler {
         // pacer, so a minute-by-minute tick does not mean a minute-by-minute
         // poll; ticks over an account with no Pending join do no work at all.
         let mut join_status_tick = tokio::time::interval(std::time::Duration::from_secs(60));
-        let mut join_status_pacer = join_status_poll::PollPacer::default();
+        let mut join_status_pacer = openvtc_core::join::status_poll::PollPacer::default();
 
         // Ask each Active community, once per session, for its declared
         // `relationshipIdentifierDefault` (issue #241). The pacer asks each
@@ -2513,7 +2512,7 @@ impl StateHandler {
                     }
                     // Ask each community about a join it has not resolved —
                     // every Pending join, including one that never got any
-                    // reply, which is asked id-less; see `join_status_poll`.
+                    // reply, which is asked id-less; see `openvtc_core::join::status_poll`.
                     //
                     // Spawned detached rather than through `background_dispatch`:
                     // there is no outcome to apply on the loop thread (the reply
@@ -2525,9 +2524,9 @@ impl StateHandler {
                         && let Some(atm) = tdk.atm.clone()
                     {
                         let due = join_status_pacer.due(candidates, std::time::Instant::now());
-                        let polls = join_status_poll::build(&config, &tdk, due).await;
+                        let polls = openvtc_core::join::status_poll::build(&config, &tdk, due).await;
                         if !polls.is_empty() {
-                            tokio::spawn(join_status_poll::send_all(atm, polls));
+                            tokio::spawn(openvtc_core::join::status_poll::send_all(atm, polls));
                         }
                     }
                 },

@@ -11,7 +11,7 @@
 //!
 //! ## Pacing: once per session, not backed off
 //!
-//! Unlike [`super::join_status_poll`], there is nothing to reconcile toward — the
+//! Unlike [`openvtc_core::join::status_poll`], there is nothing to reconcile toward — the
 //! value is near-static community metadata, not a lifecycle that resolves. So a
 //! community is asked **once per process session** and then left alone: the reply
 //! caches on every membership of that community
