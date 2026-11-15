@@ -437,7 +437,7 @@ pub async fn reveal(
         // misrouted request) is a failure, and is reported as one.
         Err(e)
             if e.rejection_code()
-                .is_some_and(|code| code.rsplit(':').next() == Some("notFound")) =>
+                .is_some_and(|code| code.contains("notFound")) =>
         {
             Ok(None)
         }
