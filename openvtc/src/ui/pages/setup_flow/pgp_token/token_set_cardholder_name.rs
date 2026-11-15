@@ -79,7 +79,7 @@ impl TokenSetCardholderName {
             Block::bordered()
                 .fg(COLOR_BORDER)
                 .padding(Padding::proportional(1))
-                .title(" Step 6/6: Set token cardholder name "),
+                .title(" Set token cardholder name "),
             middle,
         );
 

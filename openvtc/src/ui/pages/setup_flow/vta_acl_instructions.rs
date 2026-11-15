@@ -259,7 +259,7 @@ impl VtaAclInstructions {
             Block::bordered()
                 .fg(COLOR_BORDER)
                 .padding(Padding::proportional(1))
-                .title(" Step 1 of 2 — Run the PNM command "),
+                .title(" Run the PNM command "),
             middle,
         );
 
@@ -423,7 +423,7 @@ impl VtaAclInstructions {
                 key("[PgUp/PgDn]"),
                 text(" scroll · "),
                 key("[ESC]"),
-                text(" reset"),
+                text(" back"),
             ]),
             None => Line::from(vec![
                 key("[F10]"),
@@ -433,7 +433,7 @@ impl VtaAclInstructions {
                 key("[ENTER]"),
                 text(" I've run it  |  "),
                 key("[ESC]"),
-                text(" reset context"),
+                text(" back"),
             ]),
         };
         frame.render_widget(
@@ -932,7 +932,7 @@ mod tests {
     #[test]
     fn the_page_is_a_numbered_action_with_a_visible_success_signal() {
         let text = flat(&VtaAclInstructions::default());
-        assert!(text.contains("Step 1 of 2"), "{text}");
+        assert!(text.contains("Run the PNM command"), "{text}");
         assert!(text.contains("This step is required"), "{text}");
         assert!(text.contains("1. Copy"), "{text}");
         assert!(text.contains("2. Run it in your PNM session"), "{text}");
@@ -1148,5 +1148,34 @@ mod tests {
         press(&mut flow, KeyCode::Char('x'));
         assert!(flow.vta_acl_instructions.retry_reason.is_some());
         assert!(rx.try_recv().is_err());
+    }
+    /// Esc goes back a page, through the whole VTA leg, keeping what was
+    /// typed — it no longer clears the field (#588).
+    #[test]
+    fn esc_walks_back_through_the_wizard_keeping_the_input() {
+        use crate::ui::component::Component as _;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut flow = SetupFlow::new(&State::default(), tx);
+        flow.props.state.active_page = SetupPage::VtaAclInstructions;
+        flow.vta_acl_instructions.context_id = Input::new("my-ctx".to_string());
+        let esc = KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        flow.handle_key_event(esc);
+        assert!(matches!(
+            flow.props.state.active_page,
+            SetupPage::VtaEnterDid
+        ));
+        assert_eq!(flow.vta_acl_instructions.context_id.value(), "my-ctx");
+        flow.handle_key_event(esc);
+        assert!(matches!(flow.props.state.active_page, SetupPage::StartAsk));
+        flow.handle_key_event(esc);
+        assert!(
+            matches!(flow.props.state.active_page, SetupPage::StartAsk),
+            "the first page has nowhere to go back to"
+        );
     }
 }

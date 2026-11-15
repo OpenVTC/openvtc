@@ -143,6 +143,38 @@ pub fn navigate(event: SetupEvent, state: &SetupState) -> NavResult {
     }
 }
 
+/// The page Esc goes back to (#588), or `None` where there is no way back.
+///
+/// Back stops at the VTA: once its admin credential is issued, the one-time
+/// grant is spent, so the protection pages do not lead back into provisioning.
+/// Within a run going back keeps what was entered and the setup DID, so a
+/// grant already made for it still applies.
+#[must_use]
+pub fn previous_page(page: SetupPage) -> Option<SetupPage> {
+    match page {
+        SetupPage::StartAsk | SetupPage::FinalPage => None,
+        SetupPage::ConfigImport | SetupPage::VtaEnterDid => Some(SetupPage::StartAsk),
+        SetupPage::VtaAclInstructions => Some(SetupPage::VtaEnterDid),
+        SetupPage::VtaProvisioning | SetupPage::ContextOccupied => {
+            Some(SetupPage::VtaAclInstructions)
+        }
+        SetupPage::RecoverConfirm => Some(SetupPage::ContextOccupied),
+        #[cfg(feature = "openpgp-card")]
+        SetupPage::TokenStart | SetupPage::TokenSetTouch | SetupPage::TokenSetCardholderName => {
+            None
+        }
+        #[cfg(feature = "openpgp-card")]
+        SetupPage::TokenSelect => Some(SetupPage::TokenStart),
+        #[cfg(feature = "openpgp-card")]
+        SetupPage::TokenFactoryReset => Some(SetupPage::TokenSelect),
+        #[cfg(feature = "openpgp-card")]
+        SetupPage::UnlockCodeAsk => Some(SetupPage::TokenStart),
+        #[cfg(not(feature = "openpgp-card"))]
+        SetupPage::UnlockCodeAsk => None,
+        SetupPage::UnlockCodeSet | SetupPage::UnlockCodeWarn => Some(SetupPage::UnlockCodeAsk),
+    }
+}
+
 /// Entry point into the config-protection sub-flow (token setup on openpgp-card
 /// builds, otherwise the unlock-code prompt). Reached straight after VTA
 /// provisioning.

@@ -49,7 +49,7 @@ impl TokenStart {
         let block = Block::bordered()
             .fg(COLOR_BORDER)
             .padding(Padding::proportional(1))
-            .title(" Step 1/6: Set up hardware token ");
+            .title(" Set up hardware token ");
 
         let lines = vec![
             Line::styled(

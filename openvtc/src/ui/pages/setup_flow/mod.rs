@@ -155,6 +155,18 @@ impl Component for SetupFlow {
             return;
         }
 
+        // Esc goes back a page on every wizard page that has one (#588). Step
+        // 2 decides its own way back, because it carries the reason for step
+        // 1's banner; every other page's Esc is this one.
+        let page = self.props.state.active_page;
+        if key.code == crossterm::event::KeyCode::Esc
+            && !matches!(page, SetupPage::VtaProvisioning)
+            && let Some(previous) = navigation::previous_page(page)
+        {
+            self.props.state.active_page = previous;
+            return;
+        }
+
         match self.props.state.active_page {
             SetupPage::StartAsk => StartAskPanel::handle_key_event(self, key),
             SetupPage::ConfigImport => ConfigImport::handle_key_event(self, key),

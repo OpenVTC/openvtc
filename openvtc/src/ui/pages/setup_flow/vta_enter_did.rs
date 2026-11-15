@@ -172,7 +172,7 @@ impl VtaEnterDid {
                 Line::default(),
                 Line::from(vec![
                     Span::styled("[ESC]", Style::new().fg(COLOR_BORDER).bold()),
-                    Span::styled(" to clear input  |  ", Style::new().fg(COLOR_TEXT_DEFAULT)),
+                    Span::styled(" to go back  |  ", Style::new().fg(COLOR_TEXT_DEFAULT)),
                     Span::styled("[ENTER]", Style::new().fg(COLOR_BORDER).bold()),
                     Span::styled(" to continue", Style::new().fg(COLOR_TEXT_DEFAULT)),
                 ]),

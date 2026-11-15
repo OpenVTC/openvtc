@@ -136,7 +136,9 @@ impl UnlockCodeWarn {
 
         let bottom_line = Line::from(vec![
             Span::styled("[F10]", Style::new().fg(COLOR_BORDER).bold()),
-            Span::styled(" to quit", Style::new().fg(COLOR_TEXT_DEFAULT)),
+            Span::styled(" to quit  |  ", Style::new().fg(COLOR_TEXT_DEFAULT)),
+            Span::styled("[ESC]", Style::new().fg(COLOR_BORDER).bold()),
+            Span::styled(" to go back", Style::new().fg(COLOR_TEXT_DEFAULT)),
         ]);
 
         frame.render_widget(

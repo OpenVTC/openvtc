@@ -39,10 +39,7 @@ impl UnlockCodeAsk {
 
     fn spec() -> ChoiceSpec {
         ChoiceSpec {
-            title: [
-                " Step 1/2: Set up unlock code ",
-                " Step 1/2: Set up unlock code ",
-            ],
+            title: [" Set up unlock code ", " Set up unlock code "],
             intro: vec![
                 Line::styled(
                     "An unlock code encrypts your cryptographic keys, configuration, and private data stored by OpenVTC.",

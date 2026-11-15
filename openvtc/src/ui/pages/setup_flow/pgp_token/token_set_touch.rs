@@ -81,7 +81,7 @@ impl TokenSetTouch {
         let block = Block::bordered()
             .fg(COLOR_BORDER)
             .padding(Padding::proportional(1))
-            .title(" Step 5/6: Set token touch policy ");
+            .title(" Set token touch policy ");
 
         let mut lines = vec![
             Line::styled(
