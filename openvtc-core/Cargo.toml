@@ -1,7 +1,6 @@
 [package]
 name = "openvtc-core"
 description = "Core library for OpenVTC (Open Verifiable Trust Communities): configuration, DID personas, VTA client, DIDComm/TSP messaging and verifiable credentials"
-homepage = "https://github.com/OpenVTC/openvtc"
 documentation = "https://docs.rs/openvtc-core"
 keywords = ["did", "credentials", "didcomm", "trust", "identity"]
 categories = ["cryptography", "authentication"]
