@@ -1,6 +1,6 @@
 /*! Library interface for OpenVTC
  *! Allows for other applications to use the same data structures and routines
-*/
+ */
 #![deny(unsafe_code)]
 
 use crate::errors::OpenVTCError;
