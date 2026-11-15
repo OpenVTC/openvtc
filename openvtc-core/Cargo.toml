@@ -121,14 +121,14 @@ affinidi-messaging-test-mediator = "0.50"
 # manifest's `vta-sdk` line: an older one pulls a second sdk into the dev graph
 # and the generated wire types the tests assert on stop unifying. Check:
 # `cargo tree -i vti-common` and `-i vta-sdk` (one node each).
-vta-service = { version = "0.73.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
+vta-service = { version = "0.78.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
 # The community's half of hidden vetting, in process (`vtc::Vtc`, feature
 # `harness`), for `tests/hidden_vetting_onboarding.rs`. The PCS engine is the
 # VTA's; this client holds no PCS key. Same `vta-sdk` line as `vta-service`.
-vti-vetting-pcs = { version = "0.13", features = ["harness"] }
+vti-vetting-pcs = { version = "0.18", features = ["harness"] }
 # The registrar and ballot box of an election, in process, for
 # `tests/elections_vote_e2e.rs`. The line `vta-service` itself runs.
-vti-voting = "0.9"
+vti-voting = "0.14"
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }
