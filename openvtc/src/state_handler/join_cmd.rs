@@ -2,7 +2,7 @@
 //!
 //! Covers the two ways in that need no questions answered: presenting an
 //! invitation, or sending an open request. The submit mirrors
-//! `join_flow::run_join_sequence` for an existing persona; the wait reuses
+//! the TUI's join launch (`join_flow::driver`) for an existing persona; the wait reuses
 //! core's inbound dispatch and join status poll, so a verdict is applied exactly
 //! as the runtime loop would apply it.
 
@@ -221,7 +221,7 @@ impl Job<'_> {
             .await;
         if let Err(e) = submitted {
             // A persona minted for this join and left unreferenced by a
-            // membership is taken back out, as `rollback_minted_persona` does.
+            // membership is taken back out, as the TUI launch's saga does.
             if let Some((keys, prior_friendly_name)) = minted
                 && config.account.membership(vtc_did, persona_id).is_none()
             {
@@ -411,7 +411,7 @@ impl Job<'_> {
         }
     }
 
-    /// `run_join_sequence` for an existing persona: context, listener,
+    /// The TUI's join launch for an existing persona: context, listener,
     /// presentation, transport, submit, pending record.
     async fn submit(
         &self,

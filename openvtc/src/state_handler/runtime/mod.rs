@@ -159,6 +159,10 @@ pub(crate) struct Runtime {
     pub(super) hidden_vetting_pacer: hidden_vetting_poll::HiddenVettingPacer,
 
     // ── The join flow ──
+    /// The open join, if any (#529): a state machine this loop drives — its
+    /// actions, its off-loop jobs' outcomes — rather than a loop of its own
+    /// that would park this one.
+    pub(super) join: join_flow::JoinDriver,
     /// The join flow to enter at the end of this iteration.
     pub(super) join_entry: Option<join_flow::JoinEntry>,
     /// A join waiting on a community's requirements (see `join_flow::AwaitingRequirements`).
@@ -496,6 +500,7 @@ impl Runtime {
             // catches up the ticks it missed.
             hidden_vetting_tick,
             hidden_vetting_pacer: hidden_vetting_poll::HiddenVettingPacer::default(),
+            join: join_flow::JoinDriver::new(true),
             join_entry: None,
             awaiting_requirements: None,
             awaiting_challenge: None,
@@ -514,7 +519,7 @@ impl Runtime {
         );
         let result = loop {
             let flow = tokio::select! {
-                Some(action) = self.action_rx.recv() => {
+                Some(action) = self.join.next_action(&mut self.action_rx) => {
                     let flow = self.on_action(action).await;
                     // A view that shows did-git-sign may just have opened: no
                     // I/O here, only whether a refresh is due.
@@ -532,8 +537,7 @@ impl Runtime {
                     Flow::Continue
                 }
                 Some(outcome) = self.dispatch_rx.recv() => {
-                    self.on_dispatch_outcome(outcome).await;
-                    Flow::Continue
+                    self.on_dispatch_outcome(outcome).await
                 }
                 Some(report) = self.presence_rx.recv() => {
                     self.on_presence(report).await;
@@ -615,7 +619,12 @@ impl Runtime {
                 Ok(interrupted) = self.interrupt_rx.recv() => Flow::Exit(interrupted),
             };
             match flow {
-                Flow::Exit(interrupted) => break interrupted,
+                Flow::Exit(interrupted) => {
+                    // An open join is undone before the loop stops: a launch
+                    // in flight rolls back what it made, as a cancel does.
+                    self.cancel_join().await;
+                    break interrupted;
+                }
                 Flow::Quiet => continue,
                 Flow::Continue => {}
             }
@@ -638,71 +647,10 @@ impl Runtime {
             self.awaiting_requirements = None;
             self.awaiting_challenge = None;
             self.awaiting_wallet = None;
-            match self
-                .handler
-                .join_flow(
-                    &mut self.action_rx,
-                    &mut self.interrupt_rx,
-                    &mut self.state,
-                    &self.tdk,
-                    &mut self.config,
-                    self.admin_vta.as_ref(),
-                    self.handler.profile.as_str(),
-                    Some(&self.didcomm_service),
-                    entry,
-                )
-                .await
-            {
-                Ok(join_flow::JoinExit::Returned(joined)) => {
-                    self.state.active_page = state::ActivePage::Main;
-                    // R-B-5 / D11: bring the new community's session up live
-                    // so the VTC's async receipt is received now, not only
-                    // after a restart.
-                    if let Some(joined) = joined {
-                        super::register_joined_session(
-                            &mut self.session_manager,
-                            &self.didcomm_service,
-                            &self.tdk,
-                            &self.config,
-                            joined,
-                            &mut self.state,
-                        )
-                        .await;
-                        // What the new community's persona wears, now rather than at the
-                        // next sweep — until then its row could only say it had not
-                        // been read.
-                        super::dispatch_binding_refresh(
-                            &self.config,
-                            self.admin_vta.as_ref(),
-                            &mut self.in_flight,
-                            &self.dispatch_tx,
-                        );
-                    }
-                }
-                Ok(join_flow::JoinExit::AwaitRequirements(awaiting)) => {
-                    self.awaiting_requirements = Some(awaiting);
-                }
-                Ok(join_flow::JoinExit::AwaitChallenge(awaiting)) => {
-                    self.awaiting_challenge = Some(awaiting);
-                }
-                Ok(join_flow::JoinExit::AwaitWallet(awaiting)) => {
-                    self.awaiting_wallet = Some(awaiting);
-                }
-                // F10 on a join page lands here. Like every other exit it
-                // must tell the UI to stop: the UI leaves its loop only on
-                // an interrupt, so breaking without one stopped this loop
-                // and left the screen up reading keys nobody acted on —
-                // the "join page freezes, even F10 and Esc" report.
-                Ok(join_flow::JoinExit::Exit(interrupted)) => {
-                    if let Err(e) = self.terminator.terminate(interrupted.clone()) {
-                        debug!("Failed to send terminate signal: {e}");
-                    }
-                    return Some(interrupted);
-                }
-                Err(e) => {
-                    self.state.main_page.log_error("Join flow failed", &e);
-                    self.state.active_page = state::ActivePage::Main;
-                }
+            let (join, mut ctx) = self.join_parts();
+            let step = join.enter(&mut ctx, entry).await;
+            if let Some(interrupted) = self.apply_join_step(step).await {
+                return Some(interrupted);
             }
         }
         // Keep the working-context selection valid against any account change
@@ -728,6 +676,105 @@ impl Runtime {
         }
         let _ = self.handler.state_tx.publish(&self.state);
         None
+    }
+
+    /// Do what a join step asks of this loop. `Some` when it ends the
+    /// application.
+    pub(super) async fn apply_join_step(
+        &mut self,
+        step: join_flow::JoinStep,
+    ) -> Option<Interrupted> {
+        match step {
+            join_flow::JoinStep::Continue => {}
+            join_flow::JoinStep::Returned(joined) => {
+                self.state.active_page = state::ActivePage::Main;
+                // R-B-5 / D11: bring the new community's session up live so the
+                // VTC's async receipt is received now, not only after a restart.
+                if let Some(joined) = joined {
+                    super::register_joined_session(
+                        &mut self.session_manager,
+                        &self.didcomm_service,
+                        &self.tdk,
+                        &self.config,
+                        joined,
+                        &mut self.state,
+                    )
+                    .await;
+                    // What the new community's persona wears, now rather than at
+                    // the next sweep — until then its row could only say it had
+                    // not been read.
+                    super::dispatch_binding_refresh(
+                        &self.config,
+                        self.admin_vta.as_ref(),
+                        &mut self.in_flight,
+                        &self.dispatch_tx,
+                    );
+                }
+            }
+            join_flow::JoinStep::AwaitRequirements(awaiting) => {
+                self.awaiting_requirements = Some(awaiting);
+            }
+            join_flow::JoinStep::AwaitChallenge(awaiting) => {
+                self.awaiting_challenge = Some(awaiting);
+            }
+            join_flow::JoinStep::AwaitWallet(awaiting) => {
+                self.awaiting_wallet = Some(awaiting);
+            }
+            // F10 on a join page lands here. Like every other exit it must tell
+            // the UI to stop: the UI leaves its loop only on an interrupt, so
+            // breaking without one stopped this loop and left the screen up
+            // reading keys nobody acted on — the "join page freezes, even F10
+            // and Esc" report.
+            join_flow::JoinStep::Exit(interrupted) => {
+                if let Err(e) = self.terminator.terminate(interrupted.clone()) {
+                    debug!("Failed to send terminate signal: {e}");
+                }
+                return Some(interrupted);
+            }
+        }
+        None
+    }
+
+    /// End an open join, undoing a launch in flight — the loop is stopping.
+    async fn cancel_join(&mut self) {
+        if !self.join.is_active() {
+            return;
+        }
+        let (join, mut ctx) = self.join_parts();
+        join.cancel(&mut ctx).await;
+        let _ = self.handler.state_tx.publish(&self.state);
+    }
+
+    /// The join driver, and everything it acts on, borrowed apart.
+    pub(super) fn join_parts(&mut self) -> (&mut join_flow::JoinDriver, join_flow::JoinCtx<'_>) {
+        let Runtime {
+            join,
+            state,
+            config,
+            tdk,
+            admin_vta,
+            didcomm_service,
+            save,
+            dispatch_tx,
+            in_flight,
+            handler,
+            ..
+        } = self;
+        (
+            join,
+            join_flow::JoinCtx {
+                state,
+                config,
+                tdk,
+                admin_vta: admin_vta.as_ref(),
+                messaging: Some(didcomm_service),
+                profile: handler.profile.as_str(),
+                save,
+                dispatch_tx,
+                in_flight,
+                state_tx: &handler.state_tx,
+            },
+        )
     }
 
     /// Everything the loop owns, borrowed for an action handler.

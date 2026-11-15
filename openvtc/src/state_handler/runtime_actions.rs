@@ -13,8 +13,9 @@
 //!
 //! Three arms stay in the loop, because they are not about acting on state:
 //! `Exit` and `UXError` signal the terminator and `break` with the loop's own
-//! outcome type, and `StartJoin` drives the join flow's own action loop with the
-//! receiver this one is selecting on.
+//! outcome type, and `StartJoin` opens the join, which the loop then drives
+//! (`join_flow::JoinDriver`): while a join is open every action is the
+//! driver's, and never reaches this module.
 
 use crate::state_handler::main_page::status::Status;
 #[allow(unused_imports)]
@@ -1317,8 +1318,8 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::TokenWriteKeys(..) => {}
 
         // Owned by the loop: `Exit` and `UXError` signal the terminator and
-        // break with its outcome type, and the two `StartJoin` verbs drive the
-        // join flow's own action loop using the receiver this one selects on.
+        // break with its outcome type, and the two `StartJoin` verbs open the
+        // join the loop then drives (`join_flow::JoinDriver`).
         // Listed so the match stays exhaustive — the guarantee is that a NEW
         // variant cannot be added without a decision here, and these already
         // have one.

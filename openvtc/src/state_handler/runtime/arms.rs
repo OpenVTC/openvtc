@@ -9,8 +9,17 @@ use crate::state_handler::*;
 
 impl Runtime {
     /// A UI action. Everything but leaving and the join flow's entry points is
-    /// `runtime_actions::handle_action`'s.
+    /// `runtime_actions::handle_action`'s — and while a join is open, every
+    /// action is the join's, as the screen is.
     pub(super) async fn on_action(&mut self, action: Action) -> Flow {
+        if self.join.is_active() {
+            let (join, mut ctx) = self.join_parts();
+            let step = join.on_action(&mut ctx, action).await;
+            return match self.apply_join_step(step).await {
+                Some(interrupted) => Flow::Exit(interrupted),
+                None => Flow::Continue,
+            };
+        }
         let Runtime {
             state,
             config,
@@ -41,23 +50,18 @@ impl Runtime {
 
             Action::StartJoin => {
                 // State-B join from the live runtime: reuse the always-on
-                // admin VTA session. The DIDComm service keeps running in
-                // the background; the join flow owns the screen until the
-                // user returns. Entered at the loop's tail, which is also
-                // where a join waiting on a community's requirements is
-                // entered again.
-                *join_entry = Some(join_flow::JoinEntry::Fresh {
-                    hears_replies: true,
-                });
+                // admin VTA session. The DIDComm service keeps running, and
+                // so does this loop: the join is driven from here, and owns
+                // the screen until the user returns. Entered at the loop's
+                // tail, which is also where a join waiting on a community's
+                // requirements is entered again.
+                *join_entry = Some(join_flow::JoinEntry::Fresh);
             }
             // The same join, for a community already chosen: `j` on a
             // vetting application resumes the join that application was
             // made for, without going back for its DID.
             Action::StartJoinFor(vtc_did) => {
-                *join_entry = Some(join_flow::JoinEntry::ForCommunity {
-                    vtc_did,
-                    hears_replies: true,
-                });
+                *join_entry = Some(join_flow::JoinEntry::ForCommunity { vtc_did });
             }
             // A join waiting on a community's requirements keeps its screen
             // up while this loop hears the answer, so the two keys that
@@ -139,7 +143,27 @@ impl Runtime {
     pub(super) async fn on_dispatch_outcome(
         &mut self,
         outcome: background_dispatch::DispatchOutcome,
-    ) {
+    ) -> Flow {
+        // The join's own jobs, before the shared applier: the driver matches
+        // each to the job it is waiting for.
+        let outcome = match outcome {
+            background_dispatch::DispatchOutcome::Join(outcome) => {
+                let (join, mut ctx) = self.join_parts();
+                let step = join.on_outcome(&mut ctx, *outcome).await;
+                return match self.apply_join_step(step).await {
+                    Some(interrupted) => Flow::Exit(interrupted),
+                    None => Flow::Continue,
+                };
+            }
+            background_dispatch::DispatchOutcome::Progress(
+                background_dispatch::ProgressUpdate::Join { generation, line },
+            ) => {
+                self.join.on_progress(&mut self.state, generation, line);
+                return Flow::Continue;
+            }
+            outcome => outcome,
+        };
+        let mut minted = None;
         let Runtime {
             state,
             config,
@@ -202,9 +226,7 @@ impl Runtime {
             // It has no community, so — like a community-less identity
             // at startup — it gets a listener but no session-manager
             // entry (that is per (persona, community)).
-            AfterSettle::PersonaMinted(persona_id) => {
-                install_persona_listener(didcomm_service, tdk, config, persona_id, state).await;
-            }
+            AfterSettle::PersonaMinted(persona_id) => minted = Some(persona_id),
             AfterSettle::HiddenVetting(outcome) => {
                 let mut ctx = runtime_actions::ActionCtx {
                     state,
@@ -244,6 +266,24 @@ impl Runtime {
                 persona_actions::PersonaEffect::Read,
             );
         }
+        if let Some(persona_id) = minted {
+            if self.join.is_active() {
+                // Minted from the join's own create-persona overlay: the join
+                // offers it as a way in, and brings it online itself.
+                let (join, mut ctx) = self.join_parts();
+                join.on_persona_minted(&mut ctx, persona_id).await;
+            } else {
+                install_persona_listener(
+                    &self.didcomm_service,
+                    &self.tdk,
+                    &self.config,
+                    persona_id,
+                    &mut self.state,
+                )
+                .await;
+            }
+        }
+        Flow::Continue
     }
 
     /// D13 presence: another install using this account, or a

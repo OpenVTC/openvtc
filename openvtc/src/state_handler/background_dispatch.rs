@@ -175,6 +175,13 @@ pub(crate) enum DispatchDomain {
     /// to the witness, each waited on for up to a minute. Its own domain so the wait never
     /// holds up a ping or a VRC request on the same relationship.
     Witness,
+    /// The join flow's network work: resolving an agent name, reading a
+    /// community, and each stage of a launch (#529). One job at a time — the
+    /// join driver serialises them and queues the page's keys behind one — and
+    /// never claimed by a key press directly. Its outcomes are the driver's,
+    /// matched by generation, and an aborted job's domain is freed by the
+    /// driver that aborted it.
+    Join,
 }
 
 impl DispatchDomain {
@@ -211,6 +218,7 @@ impl DispatchDomain {
             DispatchDomain::VettingStatus => "Vetter grant check",
             DispatchDomain::HiddenVetting => "Hidden-vetting work at your VTA",
             DispatchDomain::Witness => "Witnessing",
+            DispatchDomain::Join => "Joining a community",
         }
     }
 }
@@ -378,6 +386,11 @@ pub(crate) enum DispatchOutcome {
     ),
     /// A witnessing finished (or failed).
     Witness(crate::state_handler::witness_actions::WitnessOutcome),
+    /// A join-flow job finished. The owning loop hands it to its
+    /// [`JoinDriver`](crate::state_handler::join_flow::JoinDriver) before
+    /// [`apply_outcome`] sees it; reaching `apply_outcome` it only frees the
+    /// domain.
+    Join(Box<crate::state_handler::join_flow::JoinOutcome>),
 }
 
 impl DispatchOutcome {
@@ -418,6 +431,7 @@ impl DispatchOutcome {
             DispatchOutcome::CommunityContext(_) => DispatchDomain::CommunityAccess,
             DispatchOutcome::DeviceGrantSweep(_) => DispatchDomain::DeviceGrantSweep,
             DispatchOutcome::Witness(_) => DispatchDomain::Witness,
+            DispatchOutcome::Join(_) => DispatchDomain::Join,
             DispatchOutcome::Panicked(domain) => *domain,
         }
     }
@@ -431,6 +445,9 @@ pub(crate) enum ProgressUpdate {
     PersonaMint(String),
     /// A step of a witnessing, for the relationships panel's status line.
     Witness(String),
+    /// A line from a running join job, for the join page — said only while
+    /// that job (`generation`) is still the one the join is waiting on.
+    Join { generation: u64, line: String },
 }
 
 impl ProgressUpdate {
@@ -440,6 +457,7 @@ impl ProgressUpdate {
         match self {
             ProgressUpdate::PersonaMint(_) => DispatchDomain::Persona,
             ProgressUpdate::Witness(_) => DispatchDomain::Witness,
+            ProgressUpdate::Join { .. } => DispatchDomain::Join,
         }
     }
 }
@@ -542,6 +560,9 @@ pub(crate) fn apply_outcome(
                 state.main_page.content_panel.relationships.status_message =
                     Some(Status::progress(step));
             }
+            // The join driver's, intercepted by the owning loop; a line that
+            // reaches here belongs to no open join.
+            ProgressUpdate::Join { .. } => {}
         }
         return AfterApply::Nothing;
     }
@@ -691,6 +712,9 @@ pub(crate) fn apply_outcome(
         DispatchOutcome::Vic(outcome) => outcome.apply(state, config),
         DispatchOutcome::VicMutation(outcome) => outcome.apply(state),
         DispatchOutcome::Witness(outcome) => outcome.apply(state, config, save),
+        // The owning loop's join driver applies these; one that reaches here
+        // has no open join to apply to, so its domain is only freed.
+        DispatchOutcome::Join(_) => {}
         // Handled above, before the domain is finished. Listed because the
         // match must stay exhaustive.
         DispatchOutcome::Progress(_) => unreachable!("progress returns before this match"),

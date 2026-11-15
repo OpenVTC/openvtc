@@ -6,7 +6,7 @@
 //! that VIC on the clean join-as-subject path (the VIC subject is one of our own
 //! personas, so no subject-linkage proof is needed).
 //!
-//! This is the join flow's mint sub-sequence (`join_flow::run_join_sequence`)
+//! This is the join launch's mint stage (`join_flow::driver`)
 //! minus the community/submit parts: pick a WebVH server, mint the DID via the
 //! VTA, then persist through the shared [`ConfigExtension::mint_persona_into`].
 //! The minted persona is an orphan (no community) until a join reuses it, and

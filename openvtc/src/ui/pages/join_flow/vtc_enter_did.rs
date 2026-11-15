@@ -32,8 +32,8 @@ pub struct VtcEnterDid;
 impl VtcEnterDid {
     pub fn handle_key_event(state: &mut JoinFlow, key: KeyEvent) {
         // Input is locked while the background sequence runs, except F10: a
-        // quit must always be heard. It is acted on once the in-flight
-        // resolve ends (each step is bounded by a timeout).
+        // quit must always be heard. The loop hears it at once — a resolve or
+        // a community read runs off the loop, and is aborted.
         if state.props.state.processing && key.code != KeyCode::F(10) {
             return;
         }

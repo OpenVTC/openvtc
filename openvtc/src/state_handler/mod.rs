@@ -1136,19 +1136,24 @@ impl StateHandler {
     /// without a restart (hot-start). All other exits return
     /// [`DegradedOutcome::Exit`] after closing the admin session.
     ///
-    /// # Invariant: this loop must never own a live listener across an iteration
+    /// The join is driven from here exactly as the runtime loop drives it — a
+    /// [`join_flow::JoinDriver`] whose network work runs off the loop — with
+    /// the one capability this loop lacks switched off: it has no inbound arm,
+    /// so the driver is told it cannot hear a community's answer and never
+    /// waits for one.
     ///
-    /// Its `select!` has exactly two arms — `action_rx` and `interrupt_rx`. There
-    /// is **no inbound arm**: nothing here drains the DIDComm event channel that
-    /// `dispatch_inbound` feeds. A listener opened here is therefore a socket
-    /// whose mail the SDK acknowledges (and the mediator then deletes) while no
-    /// consumer runs — inbound survives only as far as the channel's 256-slot
-    /// buffer, and only until the runtime loop drains it.
+    /// # Invariant: this loop must not stay put holding a listener
     ///
-    /// So every path that opens a listener must exit via
-    /// [`DegradedOutcome::Joined`] in the same iteration. The `StartJoin` arm
-    /// enforces this for itself *and* re-checks `list_listeners()` as a backstop,
-    /// because the cost of getting it wrong is silent, permanent message loss
+    /// There is **no inbound arm**: nothing here drains the DIDComm event
+    /// channel that `dispatch_inbound` feeds. A listener a join opens here (the
+    /// applicant's, brought up before the submit; or a persona minted from the
+    /// join's overlay) queues its mail on that unbounded channel for as long as
+    /// the join is open, and only the runtime loop drains it.
+    ///
+    /// So when a join ends, a loop holding any listener exits via
+    /// [`DegradedOutcome::Joined`] at once. [`Self::degraded_join_step`] enforces this
+    /// for every way a join ends *and* re-checks `list_listeners()` as a
+    /// backstop, because the cost of getting it wrong is a mailbox nobody reads
     /// that looks like a community that never answered.
     ///
     /// `vta_supervisor` watches the admin session held in `join_ctx` and
@@ -1167,9 +1172,10 @@ impl StateHandler {
         messaging: Option<&didcomm::Messaging>,
         vta_supervisor: &mut vta_recovery::AdminVtaSupervisor,
     ) -> Result<DegradedOutcome> {
-        // R11: the degraded loop persists only via `remove_community` (State-A
-        // community withdrawal); `join_flow` saves itself synchronously. Coalesce
-        // here too and force-flush on every exit path so a withdrawal isn't lost.
+        // R11: the degraded loop persists via `remove_community` (State-A
+        // community withdrawal) and the join's own durable points, which flush
+        // this scheduler. Coalesce here too and force-flush on every exit path
+        // so a withdrawal isn't lost.
         let mut save = save_coalesce::SaveScheduler::new(self.profile.clone());
         // State A reaches the VTA panel too (an account with no community still
         // manages personas and VICs there), so it needs the same off-loop path
@@ -1180,9 +1186,41 @@ impl StateHandler {
         let (dispatch_tx, mut dispatch_rx) =
             tokio::sync::mpsc::unbounded_channel::<background_dispatch::DispatchOutcome>();
         let mut in_flight = background_dispatch::InFlight::default();
+        // The join, driven from here. This loop has no inbound arm, so the join
+        // cannot wait on a community's answer.
+        let mut join = join_flow::JoinDriver::new(false);
         let result = loop {
             tokio::select! {
-                Some(action) = action_rx.recv() => match action {
+                Some(action) = join.next_action(action_rx) => match action {
+                    // An open join owns the screen, and with it every action.
+                    action if join.is_active() => {
+                        let Some(ctx) = join_ctx.as_mut() else {
+                            continue;
+                        };
+                        let step = join
+                            .on_action(
+                                &mut join_flow::JoinCtx {
+                                    state,
+                                    config: &mut ctx.config,
+                                    tdk: &ctx.tdk,
+                                    admin_vta: ctx.admin_vta.as_ref(),
+                                    messaging,
+                                    profile: ctx.profile.as_str(),
+                                    save: &mut save,
+                                    dispatch_tx: &dispatch_tx,
+                                    in_flight: &mut in_flight,
+                                    state_tx: &self.state_tx,
+                                },
+                                action,
+                            )
+                            .await;
+                        if let Some(outcome) = self
+                            .degraded_join_step(step, state, &mut join_ctx, messaging, terminator)
+                            .await
+                        {
+                            break outcome;
+                        }
+                    }
                     // Shared nav reducer first — degraded mode now routes the exact
                     // same pure-state nav set as the runtime loop (previously these
                     // arms were duplicated here and the VTA DID-manager nav arms were
@@ -1222,119 +1260,47 @@ impl StateHandler {
                     // page it opens on differs, so they share this arm and its
                     // listener invariant below.
                     Action::StartJoin | Action::StartJoinFor(_) => {
-                        let entry = match &action {
-                            Action::StartJoinFor(vtc_did) => join_flow::JoinEntry::ForCommunity {
-                                vtc_did: vtc_did.clone(),
-                                // This loop has no inbound arm, so the flow
-                                // cannot wait here for a community's answer.
-                                hears_replies: false,
-                            },
-                            _ => join_flow::JoinEntry::Fresh {
-                                hears_replies: false,
-                            },
-                        };
-                        // Set when a join succeeded: the loop then breaks `Joined`
-                        // so `run()` can start messaging.
-                        let mut joined_a_community = false;
-                        if let Some(ctx) = join_ctx.as_mut() {
-                            match self
-                                .join_flow(
-                                    action_rx,
-                                    interrupt_rx,
-                                    state,
-                                    &ctx.tdk,
-                                    &mut ctx.config,
-                                    ctx.admin_vta.as_ref(),
-                                    ctx.profile.as_str(),
-                                    // The live runtime, so the applicant persona
-                                    // is connected before the submit goes out and
-                                    // an auto-admitted join's reply is streamed
-                                    // rather than stored unread. `None` only for
-                                    // the early load-failure callers, which
-                                    // cannot reach a join anyway.
-                                    messaging,
-                                    entry,
-                                )
-                                .await
-                            {
-                                // The joined session is ignored here: a join from
-                                // State A flips `joined_a_community`, breaking
-                                // `Joined` so `run()` restarts into the full pipeline,
-                                // whose startup registration (`IdentityRegistry`)
-                                // brings the new session up (R-B-5). Live in-loop
-                                // registration is only needed in the runtime loop.
-                                Ok(join_flow::JoinExit::Returned(joined)) => {
-                                    // Back on the main page; resume the degraded loop.
-                                    state.active_page = state::ActivePage::Main;
-                                    // Gated on the *join*, never on whether it minted
-                                    // the account's first identity. This used to read
-                                    // `!had_identity && …`, on the assumption that the
-                                    // only way to already hold an identity here was the
-                                    // messaging-startup-failure path. It is not: the
-                                    // `CreatePersonaSubmit` arm below mints one in this
-                                    // very loop, and `active_identity()` falls back to
-                                    // the first persona in the map — so the ordinary
-                                    // first-run order (create persona, *then* join)
-                                    // left `had_identity` true, skipped the hand-off,
-                                    // and stranded the account in a loop that has no
-                                    // inbound arm. The community's reply was ACKed by
-                                    // the SDK, deleted at the mediator, and dropped.
-                                    joined_a_community =
-                                        joined.is_some() && ctx.config.active_identity().is_some();
-                                }
-                                // Neither is returned without `hears_replies`.
-                                Ok(
-                                    join_flow::JoinExit::AwaitRequirements(_)
-                                    | join_flow::JoinExit::AwaitChallenge(_)
-                                    | join_flow::JoinExit::AwaitWallet(_),
-                                ) => {
-                                    state.active_page = state::ActivePage::Main;
-                                }
-                                Ok(join_flow::JoinExit::Exit(interrupted)) => {
-                                    if let Err(e) = terminator.terminate(interrupted.clone()) {
-                                        debug!("Failed to send terminate signal: {e}");
-                                    }
-                                    break DegradedOutcome::Exit(interrupted);
-                                }
-                                Err(e) => {
-                                    state
-                                        .main_page
-                                        .log_error("Join flow failed", &e);
-                                    state.active_page = state::ActivePage::Main;
-                                }
+                        let entry = match action {
+                            Action::StartJoinFor(vtc_did) => {
+                                join_flow::JoinEntry::ForCommunity { vtc_did }
                             }
-                        } else {
+                            _ => join_flow::JoinEntry::Fresh,
+                        };
+                        let Some(ctx) = join_ctx.as_mut() else {
                             state
                                 .main_page
                                 .log("Cannot join: no active VTA session.");
-                        }
-                        // Hot-start: the borrow on `join_ctx` has ended, so take
-                        // the context and hand it back to `run()`, which brings up
-                        // the new persona's DIDComm listener without a restart.
-                        //
-                        // `holds_listener` is the backstop for the same class of
-                        // bug the condition above fixes: this loop has no inbound
-                        // arm, so *any* live listener it owns is a mailbox nobody
-                        // reads. Whatever opened one — this join, or some future
-                        // arm — the only safe move is to hand off to the runtime
-                        // loop that drains the event channel. See the invariant on
-                        // `run_degraded_loop`.
-                        let holds_listener = match messaging {
-                            Some(m) => !m.list_listeners().await.is_empty(),
-                            None => false,
-                        };
-                        if must_hand_off(joined_a_community, holds_listener, join_ctx.is_some()) {
-                            state.main_page.log(if joined_a_community {
-                                "Joined — starting secure messaging…"
-                            } else {
-                                "Starting secure messaging…"
-                            });
                             let _ = self.state_tx.publish(state);
-                            break DegradedOutcome::Joined(Box::new(
-                                join_ctx
-                                    .take()
-                                    .expect("join_ctx present, just checked is_some"),
-                            ));
+                            continue;
+                        };
+                        let step = join
+                            .enter(
+                                &mut join_flow::JoinCtx {
+                                    state,
+                                    config: &mut ctx.config,
+                                    tdk: &ctx.tdk,
+                                    admin_vta: ctx.admin_vta.as_ref(),
+                                    // The live runtime, so the applicant persona
+                                    // is connected before the submit goes out
+                                    // and an auto-admitted join's reply is
+                                    // streamed rather than stored unread. `None`
+                                    // only for the early load-failure callers,
+                                    // which cannot reach a join anyway.
+                                    messaging,
+                                    profile: ctx.profile.as_str(),
+                                    save: &mut save,
+                                    dispatch_tx: &dispatch_tx,
+                                    in_flight: &mut in_flight,
+                                    state_tx: &self.state_tx,
+                                },
+                                entry,
+                            )
+                            .await;
+                        if let Some(outcome) = self
+                            .degraded_join_step(step, state, &mut join_ctx, messaging, terminator)
+                            .await
+                        {
+                            break outcome;
                         }
                     }
                     Action::CreatePersonaSubmit => {
@@ -1603,8 +1569,10 @@ impl StateHandler {
                     Action::StartAddVic | Action::AddVicInput(..) | Action::AddVicPaste(..) |
                     Action::AddVicClose => {}
 
-                    // Owned by the join-flow and setup-wizard sub-loops, which
-                    // run their own action loops and never delegate to this one.
+                    // Join actions reach the join driver (the guard arm above)
+                    // while a join is open; here there is none, so they are
+                    // stale keys. The rest are the setup wizard's, which runs
+                    // its own action loop and never delegates to this one.
                     Action::ActivateMainMenu | Action::JoinSubmitVtc(..) |
                     Action::JoinIdentitySelect(..) | Action::JoinIdentityChoose |
                     Action::JoinNewPersonaMethodCycle |
@@ -1679,6 +1647,47 @@ impl StateHandler {
                     }
                 },
                 Some(outcome) = dispatch_rx.recv() => {
+                    // The join's own jobs, before the shared applier.
+                    let outcome = match outcome {
+                        background_dispatch::DispatchOutcome::Join(outcome) => {
+                            if let Some(ctx) = join_ctx.as_mut() {
+                                let step = join
+                                    .on_outcome(
+                                        &mut join_flow::JoinCtx {
+                                            state,
+                                            config: &mut ctx.config,
+                                            tdk: &ctx.tdk,
+                                            admin_vta: ctx.admin_vta.as_ref(),
+                                            messaging,
+                                            profile: ctx.profile.as_str(),
+                                            save: &mut save,
+                                            dispatch_tx: &dispatch_tx,
+                                            in_flight: &mut in_flight,
+                                            state_tx: &self.state_tx,
+                                        },
+                                        *outcome,
+                                    )
+                                    .await;
+                                if let Some(outcome) = self
+                                    .degraded_join_step(step, state, &mut join_ctx, messaging, terminator)
+                                    .await
+                                {
+                                    break outcome;
+                                }
+                                let _ = self.state_tx.publish(state);
+                                continue;
+                            }
+                            background_dispatch::DispatchOutcome::Join(outcome)
+                        }
+                        background_dispatch::DispatchOutcome::Progress(
+                            background_dispatch::ProgressUpdate::Join { generation, line },
+                        ) => {
+                            join.on_progress(state, generation, line);
+                            let _ = self.state_tx.publish(state);
+                            continue;
+                        }
+                        outcome => outcome,
+                    };
                     // Applying needs the config the outcome is annotated against.
                     // It lives in `join_ctx`, which is `take`n on hand-off to the
                     // runtime loop — a listing that lands in that window has
@@ -1719,7 +1728,33 @@ impl StateHandler {
                             // Reuses the tested hot-start path rather than telling
                             // the operator to restart. The borrow on `join_ctx`
                             // ends with this match, so the break below can take it.
-                            minted_persona = matches!(settled, AfterSettle::PersonaMinted(_));
+                            //
+                            // Unless the persona was minted from an open join's
+                            // own overlay: the join offers it as a way in and
+                            // brings it online itself, and the hand-off waits
+                            // for the join to end (`degraded_join_step`).
+                            if let AfterSettle::PersonaMinted(persona_id) = settled {
+                                if join.is_active() {
+                                    join.on_persona_minted(
+                                        &mut join_flow::JoinCtx {
+                                            state,
+                                            config: &mut ctx.config,
+                                            tdk: &ctx.tdk,
+                                            admin_vta: ctx.admin_vta.as_ref(),
+                                            messaging,
+                                            profile: ctx.profile.as_str(),
+                                            save: &mut save,
+                                            dispatch_tx: &dispatch_tx,
+                                            in_flight: &mut in_flight,
+                                            state_tx: &self.state_tx,
+                                        },
+                                        persona_id,
+                                    )
+                                    .await;
+                                } else {
+                                    minted_persona = true;
+                                }
+                            }
                         }
                         None => in_flight.finish(outcome.domain()),
                     }
@@ -1752,6 +1787,25 @@ impl StateHandler {
                     }
                 }
                 Ok(interrupted) = interrupt_rx.recv() => {
+                    // An open join is undone first: a launch in flight rolls
+                    // back what it made, as a cancel does.
+                    if join.is_active()
+                        && let Some(ctx) = join_ctx.as_mut()
+                    {
+                        join.cancel(&mut join_flow::JoinCtx {
+                            state,
+                            config: &mut ctx.config,
+                            tdk: &ctx.tdk,
+                            admin_vta: ctx.admin_vta.as_ref(),
+                            messaging,
+                            profile: ctx.profile.as_str(),
+                            save: &mut save,
+                            dispatch_tx: &dispatch_tx,
+                            in_flight: &mut in_flight,
+                            state_tx: &self.state_tx,
+                        })
+                        .await;
+                    }
                     break DegradedOutcome::Exit(interrupted);
                 }
             }
@@ -1769,6 +1823,89 @@ impl StateHandler {
         }
 
         Ok(result)
+    }
+
+    /// What the State-A loop does with a join step. `Some` is the outcome the
+    /// loop breaks with.
+    ///
+    /// Nothing while the join goes on. When it ends, back to the main page —
+    /// and, when the join succeeded or a listener is held, hand the runtime
+    /// context back to `run()`, which brings up the new persona's DIDComm
+    /// listener without a restart (hot-start). See the invariant on
+    /// [`Self::run_degraded_loop`].
+    async fn degraded_join_step(
+        &self,
+        step: join_flow::JoinStep,
+        state: &mut State,
+        join_ctx: &mut Option<DegradedJoinContext>,
+        messaging: Option<&didcomm::Messaging>,
+        terminator: &mut Terminator,
+    ) -> Option<DegradedOutcome> {
+        // Set when a join succeeded: the loop then breaks `Joined` so `run()`
+        // can start messaging.
+        let joined_a_community = match step {
+            join_flow::JoinStep::Continue => return None,
+            // The joined session itself is not registered here: breaking
+            // `Joined` restarts into the full pipeline, whose startup
+            // registration (`IdentityRegistry`) brings the new session up
+            // (R-B-5). Live in-loop registration is only needed in the runtime
+            // loop.
+            join_flow::JoinStep::Returned(joined) => {
+                // Back on the main page; resume the degraded loop.
+                state.active_page = state::ActivePage::Main;
+                // Gated on the *join*, never on whether it minted the account's
+                // first identity. This used to read `!had_identity && …`, on the
+                // assumption that the only way to already hold an identity here
+                // was the messaging-startup-failure path. It is not: the
+                // `CreatePersonaSubmit` arm mints one in this very loop, and
+                // `active_identity()` falls back to the first persona in the map
+                // — so the ordinary first-run order (create persona, *then*
+                // join) left `had_identity` true, skipped the hand-off, and
+                // stranded the account in a loop that has no inbound arm. The
+                // community's reply was ACKed by the SDK, deleted at the
+                // mediator, and dropped.
+                joined.is_some()
+                    && join_ctx
+                        .as_ref()
+                        .is_some_and(|ctx| ctx.config.active_identity().is_some())
+            }
+            // Never returned by a driver that cannot hear replies.
+            join_flow::JoinStep::AwaitRequirements(_)
+            | join_flow::JoinStep::AwaitChallenge(_)
+            | join_flow::JoinStep::AwaitWallet(_) => {
+                state.active_page = state::ActivePage::Main;
+                false
+            }
+            join_flow::JoinStep::Exit(interrupted) => {
+                if let Err(e) = terminator.terminate(interrupted.clone()) {
+                    debug!("Failed to send terminate signal: {e}");
+                }
+                return Some(DegradedOutcome::Exit(interrupted));
+            }
+        };
+        // `holds_listener` is the backstop for the same class of bug the
+        // condition above fixes: this loop has no inbound arm, so *any* live
+        // listener it owns is a mailbox nobody reads. Whatever opened one — the
+        // join, or some future arm — the only safe move is to hand off to the
+        // runtime loop that drains the event channel.
+        let holds_listener = match messaging {
+            Some(m) => !m.list_listeners().await.is_empty(),
+            None => false,
+        };
+        if must_hand_off(joined_a_community, holds_listener, join_ctx.is_some()) {
+            state.main_page.log(if joined_a_community {
+                "Joined — starting secure messaging…"
+            } else {
+                "Starting secure messaging…"
+            });
+            let _ = self.state_tx.publish(state);
+            return Some(DegradedOutcome::Joined(Box::new(
+                join_ctx
+                    .take()
+                    .expect("join_ctx present, just checked is_some"),
+            )));
+        }
+        None
     }
 
     /// Run the degraded loop for a path that cannot hot-start (no loaded config),
@@ -1810,7 +1947,8 @@ impl StateHandler {
     }
 }
 
-/// Runtime context the degraded loop hands to [`StateHandler::join_flow`].
+/// Runtime context the degraded loop lends the join it drives
+/// ([`join_flow::JoinDriver`]).
 ///
 /// Owns the live `Config` (mutated + persisted by a successful join), the TDK,
 /// the always-on admin VTA session, and the profile name. The admin session is
@@ -3029,7 +3167,7 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
 ///
 /// On the common path the listener is **already installed**: the join sequence
 /// brings the applicant online before it submits, so a reply that arrives during
-/// the submit is not stranded at the mediator (`join_flow::start_persona_listener`).
+/// the submit is not stranded at the mediator (`join_flow::driver::applicant_listener`).
 /// This is then the step that binds the community's session to it. The install
 /// arm still matters — a State-A join, a listener that could not be opened before
 /// the submit, or a reused persona whose session was dropped all land here.
