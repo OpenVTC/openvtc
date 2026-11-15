@@ -15,6 +15,7 @@
 //! community to deregister — and the runtime loop performs it. The degraded
 //! loop has no sessions to tear down and ignores the answer.
 
+use crate::state_handler::main_page::status::Status;
 use std::sync::Arc;
 
 use affinidi_tdk::messaging::ATM;
@@ -256,7 +257,7 @@ impl CommunityOutcome {
     ) -> Option<(String, PersonaId)> {
         // Set through a local rather than a long-lived `&mut` into `state`:
         // two of the arms also want to log, which needs `main_page` again.
-        fn status(state: &mut State, msg: String) {
+        fn status(state: &mut State, msg: Status) {
             state.main_page.content_panel.communities.status_message = Some(msg);
         }
         match (self.error, self.performed) {
@@ -269,7 +270,7 @@ impl CommunityOutcome {
                     c.leave();
                 }
                 save.mark_dirty();
-                status(state, "Left the community.".to_string());
+                status(state, Status::success("Left the community."));
                 state.main_page.sync_from_config(config);
                 return Some((self.vtc_did, self.persona));
             }
@@ -294,8 +295,10 @@ impl CommunityOutcome {
                 // about the difference.
                 status(
                     state,
-                    "Membership credential sent — waiting for the community to acknowledge it."
-                        .to_string(),
+                    Status::progress(
+                        "Membership credential sent — waiting for the community to acknowledge it."
+                            .to_string(),
+                    ),
                 );
             }
             (None, Performed::RequestPersonhoodChallenge) => {
@@ -304,14 +307,19 @@ impl CommunityOutcome {
                 // waited for rather than implying the ceremony has moved on.
                 status(
                     state,
-                    "Asked the community for a personhood challenge — waiting for its reply."
-                        .to_string(),
+                    Status::progress(
+                        "Asked the community for a personhood challenge — waiting for its reply."
+                            .to_string(),
+                    ),
                 );
             }
             (None, Performed::AssertPersonhood) => {
                 status(
                     state,
-                    "Personhood assertion sent — waiting for the community's decision.".to_string(),
+                    Status::progress(
+                        "Personhood assertion sent — waiting for the community's decision."
+                            .to_string(),
+                    ),
                 );
             }
             (None, Performed::Renew) => {
@@ -319,14 +327,16 @@ impl CommunityOutcome {
                 // community's reply, which replaces this line with the outcome.
                 status(
                     state,
-                    "Renewal requested — waiting for the community to re-issue your \
+                    Status::progress(
+                        "Renewal requested — waiting for the community to re-issue your \
                      credentials."
-                        .to_string(),
+                            .to_string(),
+                    ),
                 );
             }
             (Some(e), Performed::Leave) => {
                 state.main_page.log_error("Leave failed", e.as_str());
-                status(state, format!("Couldn't leave: {e}"));
+                status(state, Status::error(format!("Couldn't leave: {e}")));
             }
             (Some(e), Performed::IssueVmc) => {
                 state
@@ -334,20 +344,23 @@ impl CommunityOutcome {
                     .log_error("Issue membership credential failed", e.as_str());
                 status(
                     state,
-                    format!("Couldn't issue the membership credential: {e}"),
+                    Status::error(format!("Couldn't issue the membership credential: {e}")),
                 );
             }
             (Some(e), Performed::RequestPersonhoodChallenge) => {
                 state
                     .main_page
                     .log_error("Personhood challenge request failed", e.as_str());
-                status(state, format!("Couldn't ask for a challenge: {e}"));
+                status(
+                    state,
+                    Status::error(format!("Couldn't ask for a challenge: {e}")),
+                );
             }
             (Some(e), Performed::Renew) => {
                 state
                     .main_page
                     .log_error("Membership renewal request failed", e.as_str());
-                status(state, format!("Couldn't ask to renew: {e}"));
+                status(state, Status::error(format!("Couldn't ask to renew: {e}")));
             }
             (Some(e), Performed::AssertPersonhood) => {
                 // The challenge is single-use, but a send that never left does
@@ -356,7 +369,10 @@ impl CommunityOutcome {
                 state
                     .main_page
                     .log_error("Personhood assertion failed", e.as_str());
-                status(state, format!("Couldn't assert personhood: {e}"));
+                status(
+                    state,
+                    Status::error(format!("Couldn't assert personhood: {e}")),
+                );
             }
         }
         None
@@ -387,7 +403,8 @@ mod tests {
             .content_panel
             .communities
             .status_message
-            .as_deref()
+            .as_ref()
+            .map(|s| s.text.as_str())
     }
 
     /// A successful leave asks the loop to tear the session down. Nothing else
@@ -425,7 +442,8 @@ mod tests {
                 .content_panel
                 .communities
                 .status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("Couldn't leave")),
         );
     }
@@ -449,7 +467,8 @@ mod tests {
                 .content_panel
                 .communities
                 .status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 // The status must say the credential was *sent*, not accepted:
                 // a DIDComm `Ok` is a local hand-off. This assertion used to
                 // look for "issued", which is what the old wording claimed.

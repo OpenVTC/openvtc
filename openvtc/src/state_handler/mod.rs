@@ -1,3 +1,4 @@
+use crate::state_handler::main_page::status::Status;
 use crate::{
     Interrupted, Terminator,
     state_handler::{
@@ -1643,13 +1644,13 @@ impl StateHandler {
                                         match_code: reply.match_code.clone(),
                                         expires_at: reply.expires_at,
                                     });
-                                state.main_page.content_panel.communities.status_message = Some(
+                                state.main_page.content_panel.communities.status_message = Some(Status::info(
                                     format!(
                                         "Personhood challenge received — confirm the code {} with \
                                          whoever is vetting you, then assert.",
                                         reply.match_code
                                     ),
-                                );
+                                ));
                             }
 
                             // How a renewal the member asked for ended: on the
@@ -1666,8 +1667,14 @@ impl StateHandler {
                                         &format!("{vtc}: {line}"),
                                     ),
                                 }
+                                let severity = match &outcome {
+                                    openvtc_core::renewal::RenewalOutcome::Renewed { .. } => {
+                                        crate::state_handler::main_page::status::Severity::Success
+                                    }
+                                    _ => crate::state_handler::main_page::status::Severity::Error,
+                                };
                                 state.main_page.content_panel.communities.status_message =
-                                    Some(line);
+                                    Some(Status::new(severity, line));
                             }
 
                             match dispatched
@@ -2339,9 +2346,9 @@ impl StateHandler {
                                 "no reply within 30s — the community's governance host may be offline".to_string(),
                             );
                         } else {
-                            view.status_message = Some(
+                            view.status_message = Some(Status::error(
                                 "no reply to the change within 30s — refresh (r) to re-check".to_string(),
-                            );
+                            ));
                         }
                     }
                 }
@@ -3502,11 +3509,11 @@ impl StateHandler {
                     // and no restart is needed any more: creating a persona brings
                     // messaging up on its own.
                     Action::Vetting(..) => {
-                        state.main_page.content_panel.vetting.status_message = Some(
+                        state.main_page.content_panel.vetting.status_message = Some(Status::warning(
                             "Vetting needs a persona. Create one under My Identity — it is the \
                              DID you apply and vet as — and vetting comes online automatically."
                                 .to_string(),
-                        );
+                        ));
                     }
 
                     // Genuinely unavailable: these need a live community and the
@@ -3773,10 +3780,10 @@ fn apply_capability_replies(
                 if let Some(item) = view.items.iter_mut().find(|i| i.slug == capability) {
                     item.enabled = enabled;
                 }
-                view.status_message = Some(format!(
+                view.status_message = Some(Status::success(format!(
                     "{capability} is now {}",
                     if enabled { "enabled" } else { "disabled" }
-                ));
+                )));
                 view.phase = CapabilitiesPhase::Loaded;
             }
             CapabilityReply::Rejected { code, message } => {
@@ -3784,8 +3791,9 @@ fn apply_capability_replies(
                 match view.phase {
                     CapabilitiesPhase::Loaded => {
                         // A rejected toggle: keep the listing, surface why.
-                        view.status_message =
-                            Some(capability_actions::toggle_refusal(&code, &detail));
+                        view.status_message = Some(Status::error(
+                            capability_actions::toggle_refusal(&code, &detail),
+                        ));
                     }
                     _ => {
                         view.phase = CapabilitiesPhase::Failed(match code.as_str() {
@@ -4046,8 +4054,9 @@ fn spawn_community_job(
 ) {
     let domain = background_dispatch::DispatchDomain::Community;
     if !in_flight.try_begin(domain) {
-        state.main_page.content_panel.communities.status_message =
-            Some(background_dispatch::InFlight::busy_message(domain));
+        state.main_page.content_panel.communities.status_message = Some(Status::warning(
+            background_dispatch::InFlight::busy_message(domain),
+        ));
         return;
     }
     background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {
@@ -4111,7 +4120,9 @@ fn spawn_capability_job(
     let domain = background_dispatch::DispatchDomain::Capabilities;
     if !in_flight.try_begin(domain) {
         if let Some(view) = state.main_page.content_panel.capabilities.view.as_mut() {
-            view.status_message = Some(background_dispatch::InFlight::busy_message(domain));
+            view.status_message = Some(Status::warning(
+                background_dispatch::InFlight::busy_message(domain),
+            ));
         }
         return;
     }
@@ -4579,11 +4590,11 @@ fn remove_community(
             save.mark_dirty();
             state.main_page.sync_from_config(config);
             state.main_page.content_panel.communities.status_message =
-                Some("Community removed.".to_string());
+                Some(Status::success("Community removed.".to_string()));
         }
         Err(e) => {
             state.main_page.content_panel.communities.status_message =
-                Some(format!("Could not remove community: {e}"));
+                Some(Status::error(format!("Could not remove community: {e}")));
         }
     }
 }

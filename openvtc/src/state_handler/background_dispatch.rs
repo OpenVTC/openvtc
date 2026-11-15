@@ -31,6 +31,7 @@
 //! R13 migrates the mediator change/reconnect path as the single proving case;
 //! R14 migrates the remaining network dispatches onto the same mechanism.
 
+use crate::state_handler::main_page::status::Status;
 use openvtc_core::config::Config;
 
 use crate::state_handler::didcomm::ReconnectOutcome;
@@ -523,7 +524,8 @@ pub(crate) fn apply_outcome(
                 }
             }
             ProgressUpdate::Witness(step) => {
-                state.main_page.content_panel.relationships.status_message = Some(step);
+                state.main_page.content_panel.relationships.status_message =
+                    Some(Status::progress(step));
             }
         }
         return AfterApply::Nothing;

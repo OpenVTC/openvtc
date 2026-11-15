@@ -1,6 +1,7 @@
 //! Vetter tickets: whether one may be issued, issuing and minting them,
 //! settling those waiting on a mode reading, and deleting them.
 
+use crate::state_handler::main_page::status::Status;
 use chrono::{DateTime, Utc};
 use openvtc_core::config::Config;
 use openvtc_core::vetting::VettingBook;
@@ -44,7 +45,7 @@ pub(super) fn delete_ticket(ctx: &mut ActionCtx<'_>, ticket_id: &str) {
         .cloned()
     else {
         back(page(ctx));
-        return status(ctx, "That ticket is already gone.");
+        return status(ctx, Status::warning("That ticket is already gone."));
     };
     ctx.config
         .private
@@ -183,13 +184,17 @@ pub(super) async fn issue_ticket(
         let name = waiting.membership.name.clone();
         return status(
             ctx,
-            format!("Still asking {name} how it vets, for the last ticket — a moment."),
+            Status::progress(format!(
+                "Still asking {name} how it vets, for the last ticket — a moment."
+            )),
         );
     }
     let Some(did) = persona_did(ctx.config, membership.persona) else {
         return status(
             ctx,
-            "No ticket issued: the persona you vet for that community as is not available.",
+            Status::error(
+                "No ticket issued: the persona you vet for that community as is not available.",
+            ),
         );
     };
     if !begin(ctx) {
@@ -216,7 +221,7 @@ pub(super) async fn issue_ticket(
         let words = ticket_unconfirmed(&membership.name, &failure, &reading, now);
         ctx.in_flight.finish(DispatchDomain::Vetting);
         ctx.state.main_page.log(words.clone());
-        return status(ctx, words);
+        return status(ctx, Status::error(words));
     }
     let name = membership.name.clone();
     page(ctx).pending_ticket = Some(PendingTicket {
@@ -226,10 +231,10 @@ pub(super) async fn issue_ticket(
     });
     status(
         ctx,
-        format!(
+        Status::progress(format!(
             "Asking {name} how it vets now — named vetting or PCS ZKP — before issuing the \
              ticket…"
-        ),
+        )),
     );
 }
 
@@ -359,7 +364,7 @@ pub(crate) fn settle_pending_tickets(
             };
             let v = &mut state.main_page.content_panel.vetting;
             v.pending_ticket = None;
-            v.status_message = Some(words.clone());
+            v.status_message = Some(Status::warning(words.clone()));
             state.main_page.log(words);
         }
         (Some(_), Some(TicketCheck::Refused(why))) => {
@@ -369,12 +374,13 @@ pub(crate) fn settle_pending_tickets(
             };
             let v = &mut state.main_page.content_panel.vetting;
             v.pending_ticket = None;
-            v.status_message = Some(words.clone());
+            v.status_message = Some(Status::error(words.clone()));
             state.main_page.log(words);
         }
         _ => {
             if !said.is_empty() {
-                state.main_page.content_panel.vetting.status_message = Some(said.join(" "));
+                state.main_page.content_panel.vetting.status_message =
+                    Some(Status::info(said.join(" ")));
             }
         }
     }
@@ -438,7 +444,11 @@ mod tests {
         assert_eq!(tickets[0].mode, Some(VetterMode::Named));
         let v = &state.main_page.content_panel.vetting;
         assert!(v.pending_ticket.is_none());
-        let said = v.status_message.as_deref().unwrap_or_default();
+        let said = v
+            .status_message
+            .as_ref()
+            .map(|s| s.text.as_str())
+            .unwrap_or_default();
         assert!(
             said.starts_with("first-vtc switched from PCS ZKP to named vetting."),
             "{said}"

@@ -842,7 +842,7 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         lines.push(Line::from(""));
         render_face_history(state, lines);
         if !detail.is_editable_here() {
-            super::status::push_status(lines, &detail.refusal(), " ");
+            super::status::push_error(lines, &detail.refusal(), " ");
             lines.push(Line::from(""));
         }
         if detail.resolved.is_empty() {
@@ -1347,7 +1347,7 @@ fn push_agent_state(state: &IdentityState, lines: &mut Vec<Line<'static>>, noun:
                 lines.push(Line::from(line).fg(COLOR_ORANGE));
             }
         } else {
-            super::status::push_status(lines, error, " ");
+            super::status::push_error(lines, error, " ");
         }
         lines.push(Line::from(""));
         lines.push(Line::from(" r: try again").fg(COLOR_DARK_GRAY));
@@ -1425,7 +1425,7 @@ fn render_attribute_form(form: &AttributeForm) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
     if let Some(error) = &form.error {
-        super::status::push_status(&mut lines, error, " ");
+        super::status::push_error(&mut lines, error, " ");
         lines.push(Line::from(""));
     }
     lines.push(
@@ -1543,7 +1543,7 @@ fn render_profile_form(state: &IdentityState, form: &ProfileForm) -> Vec<Line<'s
 
     lines.push(Line::from(""));
     if let Some(error) = &form.error {
-        super::status::push_status(&mut lines, error, " ");
+        super::status::push_error(&mut lines, error, " ");
         lines.push(Line::from(""));
     }
     lines.push(
@@ -2271,7 +2271,7 @@ fn render_world_form(form: &WorldForm) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
 
     if let Some(error) = &form.error {
-        super::status::push_status(&mut lines, error, " ");
+        super::status::push_error(&mut lines, error, " ");
         lines.push(Line::from(""));
     }
     lines.push(
@@ -2322,7 +2322,7 @@ fn render_face_placer(state: &IdentityState, picker: &FacePlacer) -> Vec<Line<'s
 
     lines.push(Line::from(""));
     if let Some(error) = &picker.error {
-        super::status::push_status(&mut lines, error, " ");
+        super::status::push_error(&mut lines, error, " ");
         lines.push(Line::from(""));
     }
     lines.push(
@@ -2394,7 +2394,7 @@ fn render_bind_picker(state: &IdentityState, picker: &BindPicker) -> Vec<Line<'s
 
     lines.push(Line::from(""));
     if let Some(error) = &picker.error {
-        super::status::push_status(&mut lines, error, " ");
+        super::status::push_error(&mut lines, error, " ");
         lines.push(Line::from(""));
     }
     lines.push(

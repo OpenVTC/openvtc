@@ -4,6 +4,7 @@
 //! relationship requests, accept VRCs, dismiss tasks). They operate on
 //! `&mut Config` and `&TDK` owned by the StateHandler.
 
+use crate::state_handler::main_page::status::Status;
 use std::sync::Arc;
 
 use affinidi_tdk::TDK;
@@ -710,14 +711,16 @@ async fn prepare_accept_relationship(
         .secret;
 
     if generate_r_did {
-        state.main_page.content_panel.inbox.status_message =
-            Some("Accepting with R-DID — creating keys...".to_string());
+        state.main_page.content_panel.inbox.status_message = Some(Status::progress(
+            "Accepting with R-DID — creating keys...".to_string(),
+        ));
         state
             .main_page
             .log("Accepting relationship request (creating R-DID)...");
     } else {
-        state.main_page.content_panel.inbox.status_message =
-            Some("Accepting relationship request...".to_string());
+        state.main_page.content_panel.inbox.status_message = Some(Status::progress(
+            "Accepting relationship request...".to_string(),
+        ));
         state.main_page.log("Accepting relationship request...");
     }
 
@@ -758,8 +761,9 @@ fn prepare_reject_relationship(
     let persona_did = config.persona_did_arc();
     let listener_id = super::didcomm::listener_id_for_did(&persona_did, config);
     let msg = build_reject_message(&persona_did, &from_did, reason, &task_id)?;
-    state.main_page.content_panel.inbox.status_message =
-        Some("Rejecting relationship request...".to_string());
+    state.main_page.content_panel.inbox.status_message = Some(Status::progress(
+        "Rejecting relationship request...".to_string(),
+    ));
     Ok(InboxJob::Send(InboxSend {
         service: service.clone(),
         listener_id,
@@ -873,7 +877,8 @@ async fn prepare_accept_vrc_request(
     let msg = vrc.message(&our_r_did, &their_r_did, Some(&task_id))?;
     let listener_id = super::didcomm::listener_id_for_did(&our_r_did, config);
 
-    state.main_page.content_panel.inbox.status_message = Some("Issuing VRC...".to_string());
+    state.main_page.content_panel.inbox.status_message =
+        Some(Status::progress("Issuing VRC...".to_string()));
 
     Ok(InboxJob::Send(InboxSend {
         service: service.clone(),
@@ -931,7 +936,7 @@ fn prepare_reject_vrc_request(
     )?;
     let listener_id = super::didcomm::listener_id_for_did(&our_r_did, config);
     state.main_page.content_panel.inbox.status_message =
-        Some("Rejecting VRC request...".to_string());
+        Some(Status::progress("Rejecting VRC request...".to_string()));
     Ok(InboxJob::Send(InboxSend {
         service: service.clone(),
         listener_id,
@@ -1131,7 +1136,8 @@ mod r14_tests {
                 .content_panel
                 .inbox
                 .status_message
-                .as_deref(),
+                .as_ref()
+                .map(|s| s.text.as_str()),
             Some("Relationship request accepted")
         );
     }
@@ -1176,6 +1182,7 @@ mod r14_tests {
             .inbox
             .status_message
             .clone()
+            .map(|s| s.text)
             .unwrap_or_default();
         assert!(status.starts_with("Error:"), "got: {status}");
     }
@@ -1209,7 +1216,8 @@ mod r14_tests {
                 .content_panel
                 .inbox
                 .status_message
-                .as_deref(),
+                .as_ref()
+                .map(|s| s.text.as_str()),
             Some("Relationship request rejected")
         );
     }

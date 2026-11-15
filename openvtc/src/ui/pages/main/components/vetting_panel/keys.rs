@@ -3,6 +3,7 @@
 
 use crate::state_handler::actions::Action;
 use crate::state_handler::main_page::MainPanel;
+use crate::state_handler::main_page::status::Status;
 use crate::ui::pages::main::{MainPage, edit_text};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -53,10 +54,10 @@ impl MainPage {
                     // Reading the OS clipboard cannot work over SSH, where a
                     // bracketed paste still can — so the refusal says that
                     // rather than only that it failed.
-                    Err(why) => V::Status(format!(
+                    Err(why) => V::Status(Status::error(format!(
                         "Could not read the clipboard ({why}). Paste directly into this screen \
                          instead — that works over SSH, where reading the clipboard cannot."
-                    )),
+                    ))),
                 };
                 let _ = self.action_tx.send(Action::Vetting(action));
                 return true;
@@ -238,8 +239,10 @@ impl MainPage {
                     return true;
                 };
                 let status = match crate::clipboard::copy_to_clipboard(&uri) {
-                    Ok(method) => format!("Ticket link copied via {}.", method.label()),
-                    Err(e) => format!("Could not copy the link: {e}"),
+                    Ok(method) => {
+                        Status::success(format!("Ticket link copied via {}.", method.label()))
+                    }
+                    Err(e) => Status::error(format!("Could not copy the link: {e}")),
                 };
                 V::Status(status)
             }
@@ -248,8 +251,10 @@ impl MainPage {
                     return true;
                 };
                 let status = match crate::clipboard::copy_to_clipboard(&ticket.code) {
-                    Ok(method) => format!("Ticket code copied via {}.", method.label()),
-                    Err(e) => format!("Could not copy the code: {e}"),
+                    Ok(method) => {
+                        Status::success(format!("Ticket code copied via {}.", method.label()))
+                    }
+                    Err(e) => Status::error(format!("Could not copy the code: {e}")),
                 };
                 V::Status(status)
             }

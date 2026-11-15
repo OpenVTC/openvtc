@@ -23,6 +23,7 @@
 //! changes — typing, moving the highlight, opening the grant form — go through
 //! [`reduce`], which both loops share.
 
+use crate::state_handler::main_page::status::Status;
 use std::future::Future;
 
 use chrono::Utc;
@@ -257,9 +258,10 @@ fn spawn(ctx: &ActionCtx<'_>, job: impl Future<Output = ContextOutcome> + Send +
     });
 }
 
+/// Report a grant or revoke that could not start — always a refusal.
 fn set_view_message(state: &mut State, message: String) {
     if let Some(view) = panel(state).device_access.as_mut() {
-        view.message = Some(message);
+        view.message = Some(Status::error(message));
     }
 }
 
@@ -276,7 +278,7 @@ fn start_deletion(ctx: &mut ActionCtx<'_>, index: usize) {
     ) {
         Ok(deletion) => deletion,
         Err(refusal) => {
-            panel(ctx.state).status_message = Some(refusal.describe());
+            panel(ctx.state).status_message = Some(Status::warning(refusal.describe()));
             return;
         }
     };
@@ -294,7 +296,7 @@ fn start_deletion(ctx: &mut ActionCtx<'_>, index: usize) {
     let client = match claim(ctx, "delete a context") {
         Ok(client) => client,
         Err(message) => {
-            panel(ctx.state).status_message = Some(message);
+            panel(ctx.state).status_message = Some(Status::error(message));
             return;
         }
     };
@@ -318,10 +320,10 @@ fn confirm_deletion(ctx: &mut ActionCtx<'_>) {
         return;
     }
     if !community_context::confirms_deletion(&view.typed) {
-        panel(ctx.state).status_message = Some(format!(
+        panel(ctx.state).status_message = Some(Status::info(format!(
             "Type {DELETE_CONFIRMATION} in capitals to delete {}.",
             view.context_id
-        ));
+        )));
         return;
     }
     // Checked again, against the config as it is now: the preview may have
@@ -350,14 +352,14 @@ fn confirm_deletion(ctx: &mut ActionCtx<'_>) {
     if let Some(problem) = problem {
         let communities = panel(ctx.state);
         communities.context_delete = None;
-        communities.status_message = Some(problem);
+        communities.status_message = Some(Status::warning(problem));
         return;
     }
     let top = config.account.top_context_id.clone();
     let client = match claim(ctx, "delete a context") {
         Ok(client) => client,
         Err(message) => {
-            panel(ctx.state).status_message = Some(message);
+            panel(ctx.state).status_message = Some(Status::error(message));
             return;
         }
     };
@@ -414,11 +416,11 @@ fn open_devices(ctx: &mut ActionCtx<'_>, index: usize) {
         &membership.sub_context_id,
         &config.account.top_context_id,
     ) {
-        panel(ctx.state).status_message = Some(
+        panel(ctx.state).status_message = Some(Status::warning(
             "This community lives in your top context. Device access is scoped to a \
              community's own context, and access to the top context would reach every community."
                 .to_string(),
-        );
+        ));
         return;
     }
     let view = DeviceAccessView {
@@ -483,7 +485,10 @@ fn submit_grant(ctx: &mut ActionCtx<'_>) {
     };
     if let Some(open) = panel(ctx.state).device_access.as_mut() {
         open.busy = true;
-        open.message = Some(format!("Granting {}…", shorten_did(&did, 40)));
+        open.message = Some(Status::progress(format!(
+            "Granting {}…",
+            shorten_did(&did, 40)
+        )));
     }
     let context_id = view.context_id;
     spawn(ctx, async move {
@@ -528,7 +533,10 @@ fn confirm_revoke(ctx: &mut ActionCtx<'_>) {
     };
     if let Some(open) = panel(ctx.state).device_access.as_mut() {
         open.busy = true;
-        open.message = Some(format!("Revoking {}…", shorten_did(&grant.did, 40)));
+        open.message = Some(Status::progress(format!(
+            "Revoking {}…",
+            shorten_did(&grant.did, 40)
+        )));
     }
     spawn(ctx, async move {
         let result = community_access::revoke_device_grant(&client, &context_id, &grant.did)
@@ -628,9 +636,9 @@ impl ContextOutcome {
                     Ok(preview) => view.phase = ContextDeletePhase::Ready(preview),
                     Err(e) => {
                         communities.context_delete = None;
-                        communities.status_message = Some(format!(
+                        communities.status_message = Some(Status::error(format!(
                             "Couldn't ask your VTA what deleting {context_id} would remove: {e}"
-                        ));
+                        )));
                         state
                             .main_page
                             .log_error("Context deletion preview failed", e.as_str());
@@ -699,7 +707,7 @@ impl ContextOutcome {
                             && config.account.delete_membership(&vtc_did, persona).is_ok();
                         let communities = panel(state);
                         communities.device_grants.remove(context_id);
-                        communities.status_message = Some(match taken {
+                        communities.status_message = Some(Status::success(match taken {
                             Some(t) if membership_removed => format!(
                                 "Deleted context {context_id}, persona {} and your membership of {community}.",
                                 t.name
@@ -708,7 +716,7 @@ impl ContextOutcome {
                                 format!("Deleted context {context_id} and persona {}.", t.name)
                             }
                             None => format!("Deleted context {context_id} and everything in it."),
-                        });
+                        }));
                         save.mark_dirty();
                         state.main_page.sync_from_config(config);
                         state.main_page.log(format!(
@@ -719,14 +727,14 @@ impl ContextOutcome {
                         ));
                     }
                     Err(e) => {
-                        panel(state).status_message = Some(match taken {
+                        panel(state).status_message = Some(Status::error(match taken {
                             Some(t) => format!(
                                 "Removed persona {}'s DID, but couldn't delete {context_id}: {e} \
                                  The context can be deleted again from here.",
                                 t.name
                             ),
                             None => format!("Couldn't delete {context_id}: {e}"),
-                        });
+                        }));
                         state
                             .main_page
                             .log_error("Context deletion failed", e.as_str());
@@ -748,7 +756,7 @@ impl ContextOutcome {
                             "Granted {did} the {} role in {context_id}",
                             grant.role
                         ));
-                        format!(
+                        Status::success(format!(
                             "Granted {} {} in this context{}.",
                             shorten_did(&did, 40),
                             grant.role,
@@ -756,13 +764,13 @@ impl ContextOutcome {
                                 .expires_at
                                 .map(|at| format!(" until {}", at.format("%Y-%m-%d %H:%M UTC")))
                                 .unwrap_or_default()
-                        )
+                        ))
                     }
                     Err(e) => {
                         state
                             .main_page
                             .log_error("Device access grant failed", e.as_str());
-                        format!("Couldn't grant access: {e}")
+                        Status::error(format!("Couldn't grant access: {e}"))
                     }
                 };
                 store_listing(state, &context_id, listing);
@@ -785,7 +793,7 @@ impl ContextOutcome {
                         state
                             .main_page
                             .log(format!("Revoked {did}'s access in {context_id}"));
-                        match revoked {
+                        Status::success(match revoked {
                             Revoked::Deleted => format!("Revoked {short}'s access."),
                             Revoked::Narrowed(rest) => format!(
                                 "Removed {short} from this community; it keeps access in {}.",
@@ -794,13 +802,13 @@ impl ContextOutcome {
                             Revoked::AlreadyGone => {
                                 format!("{short} had no access left at your VTA.")
                             }
-                        }
+                        })
                     }
                     Err(e) => {
                         state
                             .main_page
                             .log_error("Device access revocation failed", e.as_str());
-                        format!("Couldn't revoke access: {e}")
+                        Status::error(format!("Couldn't revoke access: {e}"))
                     }
                 };
                 store_listing(state, &context_id, listing);
@@ -1118,7 +1126,8 @@ mod tests {
         assert!(
             communities
                 .status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("could not reach"))
         );
     }
@@ -1185,7 +1194,8 @@ mod tests {
         assert!(
             communities
                 .status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("Deleted context"))
         );
     }
@@ -1211,7 +1221,8 @@ mod tests {
         assert!(
             panel(&mut state)
                 .status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("Couldn't delete"))
         );
     }
@@ -1292,7 +1303,11 @@ mod tests {
         assert!(!config.account.personas.contains_key(&persona));
         assert_eq!(config.account.memberships().count(), 0);
         assert!(save.is_pending());
-        let status = panel(&mut state).status_message.clone().unwrap_or_default();
+        let status = panel(&mut state)
+            .status_message
+            .clone()
+            .map(|s| s.text)
+            .unwrap_or_default();
         assert!(
             status.contains("persona Kernel me") && status.contains("membership of Acme"),
             "{status}"
@@ -1320,7 +1335,11 @@ mod tests {
             .next()
             .expect("the record stays");
         assert_eq!(membership.sub_context_id, CTX);
-        let status = panel(&mut state).status_message.clone().unwrap_or_default();
+        let status = panel(&mut state)
+            .status_message
+            .clone()
+            .map(|s| s.text)
+            .unwrap_or_default();
         assert!(status.contains("can be deleted again"), "{status}");
     }
 
@@ -1368,7 +1387,8 @@ mod tests {
         assert!(!view.busy && view.form.is_none());
         assert!(
             view.message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("Granted"))
         );
         assert_eq!(communities.device_grants[CTX].grants().len(), 1);
@@ -1394,7 +1414,7 @@ mod tests {
         .apply(&mut state, &mut config, &mut save);
         let view = panel(&mut state).device_access.clone().unwrap();
         assert!(view.form.is_some());
-        assert!(view.message.unwrap().contains("already has access"));
+        assert!(view.message.unwrap().text.contains("already has access"));
     }
 
     #[test]
@@ -1417,7 +1437,7 @@ mod tests {
         let view = panel(&mut state).device_access.clone().unwrap();
         assert!(!view.busy);
         assert_eq!(view.selected, 0, "the highlight stays on the list");
-        assert!(view.message.unwrap().contains("openvtc/work"));
+        assert!(view.message.unwrap().text.contains("openvtc/work"));
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub mod elections;
 pub mod menu;
 pub mod repos;
 pub mod rooms;
+pub mod status;
 
 /// Maximum number of activity log entries to keep in the UI.
 const MAX_ACTIVITY_LOG_ENTRIES: usize = 100;

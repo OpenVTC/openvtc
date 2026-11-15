@@ -1,6 +1,7 @@
 //! The face an application wears: listing, creating and wearing faces at the
 //! VTA, saving attributes for them, and sending the vetting card.
 
+use crate::state_handler::main_page::status::Status;
 use std::future::Future;
 
 use chrono::Utc;
@@ -81,7 +82,7 @@ pub(super) fn open_new_face(ctx: &mut ActionCtx<'_>, application_id: &str, requi
     if !begin(ctx) {
         return;
     }
-    status(ctx, "Reading your attributes…");
+    status(ctx, Status::progress("Reading your attributes…"));
     let job = FaceJob::Pool {
         client,
         application_id: application_id.to_string(),
@@ -122,13 +123,13 @@ pub(super) fn create_face(ctx: &mut ActionCtx<'_>, mut form: NewFaceForm) {
     let application_id = form.application_id.clone();
     let (context_id, persona_did) = match application_context(ctx.config, &application_id) {
         Ok(found) => found,
-        Err(e) => return status(ctx, format!("Cannot make a face: {e}")),
+        Err(e) => return status(ctx, Status::error(format!("Cannot make a face: {e}"))),
     };
     if !begin(ctx) {
         return;
     }
     page(ctx).mode = VettingMode::List;
-    status(ctx, format!("Making {name}…"));
+    status(ctx, Status::progress(format!("Making {name}…")));
     let job = FaceJob::Create {
         client,
         top_context_id: ctx.config.account.top_context_id.clone(),
@@ -270,7 +271,9 @@ fn admin_client(ctx: &mut ActionCtx<'_>) -> Option<VtaClient> {
     if client.is_none() {
         status(
             ctx,
-            "Faces live in your VTA, and it is not connected — try again once it is.",
+            Status::error(
+                "Faces live in your VTA, and it is not connected — try again once it is.",
+            ),
         );
     }
     client
@@ -328,12 +331,12 @@ pub(super) fn list_faces(ctx: &mut ActionCtx<'_>, application_id: &str) {
     };
     let (context_id, persona_did) = match application_context(ctx.config, application_id) {
         Ok(found) => found,
-        Err(e) => return status(ctx, format!("Cannot choose a face: {e}")),
+        Err(e) => return status(ctx, Status::error(format!("Cannot choose a face: {e}"))),
     };
     if !begin(ctx) {
         return;
     }
-    status(ctx, "Reading your faces…");
+    status(ctx, Status::progress("Reading your faces…"));
     let job = FaceJob::List {
         client,
         context_id,
@@ -346,7 +349,7 @@ pub(super) fn list_faces(ctx: &mut ActionCtx<'_>, application_id: &str) {
 /// Wear `face` in the application's context.
 pub(super) fn wear_face(ctx: &mut ActionCtx<'_>, application_id: &str, face: Option<FaceChoice>) {
     let Some(face) = face else {
-        return status(ctx, "Make a face under My Identity first.");
+        return status(ctx, Status::warning("Make a face under My Identity first."));
     };
     if face.worn {
         let v = page(ctx);
@@ -356,7 +359,10 @@ pub(super) fn wear_face(ctx: &mut ActionCtx<'_>, application_id: &str, face: Opt
             .map_or(VettingMode::List, card_mode);
         return status(
             ctx,
-            format!("{} is already the face you show vetters.", face.name),
+            Status::warning(format!(
+                "{} is already the face you show vetters.",
+                face.name
+            )),
         );
     }
     let Some(client) = admin_client(ctx) else {
@@ -364,13 +370,13 @@ pub(super) fn wear_face(ctx: &mut ActionCtx<'_>, application_id: &str, face: Opt
     };
     let (context_id, persona_did) = match application_context(ctx.config, application_id) {
         Ok(found) => found,
-        Err(e) => return status(ctx, format!("Cannot wear that face: {e}")),
+        Err(e) => return status(ctx, Status::error(format!("Cannot wear that face: {e}"))),
     };
     if !begin(ctx) {
         return;
     }
     page(ctx).mode = VettingMode::List;
-    status(ctx, format!("Wearing {}…", face.name));
+    status(ctx, Status::progress(format!("Wearing {}…", face.name)));
     let job = FaceJob::Wear {
         client,
         top_context_id: ctx.config.account.top_context_id.clone(),
@@ -405,30 +411,33 @@ pub(super) async fn send_card(
         .session(session_id)
         .map(|(vetter, s)| (vetter.to_string(), s.expires_at))
     else {
-        return status(ctx, "That session has closed.");
+        return status(ctx, Status::warning("That session has closed."));
     };
     if expires_at <= Utc::now() {
         return status(
             ctx,
-            "The session has expired — ask the vetter to open another.",
+            Status::warning("The session has expired — ask the vetter to open another."),
         );
     }
     if let Some(problem) = preview.as_ref().and_then(|p| p.problem.clone()) {
-        return status(ctx, problem);
+        return status(ctx, Status::warning(problem));
     }
     let Some(client) = admin_client(ctx) else {
         return;
     };
     let context_id = match application_context(ctx.config, application_id) {
         Ok((id, _)) => id,
-        Err(e) => return status(ctx, format!("Cannot send a card: {e}")),
+        Err(e) => return status(ctx, Status::error(format!("Cannot send a card: {e}"))),
     };
     if !begin(ctx) {
         return;
     }
     let step = match preview {
         None => {
-            status(ctx, "Asking your VTA what your face shows this vetter…");
+            status(
+                ctx,
+                Status::progress("Asking your VTA what your face shows this vetter…"),
+            );
             CardStep::Preview
         }
         Some(preview) => {
@@ -446,7 +455,7 @@ pub(super) async fn send_card(
                 ),
                 Err(e) => return abandon(ctx, "Could not sign the card", e),
             };
-            status(ctx, "Releasing and signing your card…");
+            status(ctx, Status::progress("Releasing and signing your card…"));
             CardStep::Present(Box::new(Presenting {
                 preview_id: preview.preview_id,
                 signer,

@@ -1,5 +1,5 @@
 use super::panel::Panel;
-use super::status::{push_status, push_wrapped};
+use super::status::{Status, push_status, push_wrapped};
 use crate::colors::{
     COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,
     COLOR_WARNING_ACCESSIBLE_RED,
@@ -348,7 +348,9 @@ fn render_transports(state: &VtaState, lines: &mut Vec<Line<'static>>) {
     if let Some(err) = t.advertised.as_ref().and_then(|a| a.error.as_deref()) {
         push_status(
             lines,
-            &format!("Could not read the VTA's advertised transports: {err}"),
+            &Status::error(format!(
+                "Could not read the VTA's advertised transports: {err}"
+            )),
             "    ",
         );
     }

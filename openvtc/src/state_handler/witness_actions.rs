@@ -11,6 +11,7 @@
 //! hands each one to the [`ReplyRouter`], which passes it to the job waiting on that session's
 //! thread; the job verifies it as the witness's before reading it.
 
+use crate::state_handler::main_page::status::Status;
 use std::sync::Arc;
 
 use affinidi_tdk::TDK;
@@ -360,12 +361,13 @@ impl WitnessOutcome {
                         selected_vrc: None,
                     };
                 }
-                rels.status_message = Some(line.clone());
+                rels.status_message = Some(Status::success(line.clone()));
                 state.main_page.log(line);
             }
             Err(e) => {
                 let line = format!("Witnessing failed: {e}");
-                state.main_page.content_panel.relationships.status_message = Some(line.clone());
+                state.main_page.content_panel.relationships.status_message =
+                    Some(Status::error(line.clone()));
                 state.main_page.log(line);
             }
         }
@@ -709,7 +711,7 @@ mod tests {
             .status_message
             .clone();
         assert_eq!(
-            status.as_deref(),
+            status.as_ref().map(|s| s.text.as_str()),
             Some("Witnessing failed: the witness refused")
         );
         assert!(matches!(

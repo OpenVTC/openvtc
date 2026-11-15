@@ -180,7 +180,7 @@ pub struct CapabilitiesView {
     /// When the in-flight request was sent (reply-timeout sweep).
     pub sent_at: Option<std::time::Instant>,
     /// Transient status message.
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
 }
 
 impl CapabilitiesView {
@@ -237,7 +237,7 @@ pub struct CommunitiesState {
     /// Number of communities raising the actions-required indicator (R-C-3).
     pub actions_required: usize,
     /// Transient status message.
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
     /// When `Some(index)`, a removal of that community is awaiting `y`/`n`
     /// confirmation (the panel shows a prompt and other keys are suppressed).
     pub confirm_delete: Option<usize>,
@@ -366,7 +366,7 @@ pub struct DeviceAccessView {
     /// A read, grant or revoke is running.
     pub busy: bool,
     /// The last result or problem.
-    pub message: Option<String>,
+    pub message: Option<crate::state_handler::main_page::status::Status>,
 }
 
 /// The new-grant form.
@@ -1615,7 +1615,7 @@ pub struct IdentityState {
     pub confirm: PersonaConfirm,
     pub mode: PersonaMode,
     /// Transient status line.
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
 }
 
 impl IdentityState {
@@ -2244,7 +2244,7 @@ pub struct VettingState {
     pub desk_view: DeskView,
     pub selected: usize,
     pub mode: VettingMode,
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
     pub applications: Arc<[ApplicationRow]>,
     pub desk: Arc<[DeskRow]>,
     pub tickets: Arc<[TicketRow]>,
@@ -3549,7 +3549,7 @@ pub struct InboxState {
     /// When viewing a specific task's details
     pub active_task: Option<ActiveTaskView>,
     /// Transient status message (e.g., "Task accepted", "Error: ...")
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
     /// When `Some`, a destructive inbox action (dismiss one task, or clear all)
     /// is awaiting `y`/`n` confirmation; the panel shows a prompt and other keys
     /// are suppressed. Mirrors the Communities/VTA-DID confirm pattern (R25).
@@ -3739,7 +3739,7 @@ pub struct RelationshipsState {
     /// Current panel mode (list, detail, new request form)
     pub mode: RelationshipsMode,
     /// Transient status message
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
     /// When `Some(remote_p_did)`, removal of that relationship is awaiting
     /// `y`/`n` confirmation (armed from the detail view). Mirrors the
     /// Communities/VTA-DID confirm pattern (R25).
@@ -3888,7 +3888,7 @@ pub struct CredentialsState {
     /// Current panel mode
     pub mode: CredentialsMode,
     /// Transient status message
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
     /// Stored VRCs set aside on load because they pre-date DTG Credentials v1
     /// ([`openvtc_core::vrc::Vrcs::retired`]), across every store. Shown as a
     /// warning so the member knows to ask those peers for fresh ones.
@@ -4065,7 +4065,7 @@ pub struct SettingsState {
     /// Current panel mode
     pub mode: SettingsMode,
     /// Transient status message
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
     /// Hardware token management state
     #[cfg(feature = "openpgp-card")]
     pub token: TokenManagementState,

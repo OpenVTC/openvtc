@@ -26,6 +26,7 @@
 //! pending thread, was dropped, and the view sat out the 30 s reply window to
 //! report a host that had in fact answered.
 
+use crate::state_handler::main_page::status::Status;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -195,10 +196,10 @@ fn arm(
     view.pending_thid = Some(thid.to_string());
     view.sent_at = Some(Instant::now());
     if let Some((slug, enable)) = toggle {
-        view.status_message = Some(format!(
+        view.status_message = Some(Status::progress(format!(
             "{} {slug}… awaiting the community's reply",
             if enable { "enabling" } else { "disabling" }
-        ));
+        )));
     }
 }
 
@@ -245,7 +246,7 @@ impl CapabilityOutcome {
             // A failed *write* keeps the list on screen — it is still valid,
             // the change simply did not go out.
             Some(_) => {
-                view.status_message = Some(format!("couldn't send the change: {e}"));
+                view.status_message = Some(Status::error(format!("couldn't send the change: {e}")));
                 tracing::error!("capability toggle failed: {e}");
             }
             // A failed *query* has nothing to show, so the view says so.
@@ -422,7 +423,10 @@ mod tests {
 
         let v = view(&state);
         assert!(v.pending_thid.is_none());
-        assert_eq!(v.status_message.as_deref(), Some("chat is now enabled"));
+        assert_eq!(
+            v.status_message.as_ref().map(|s| s.text.as_str()),
+            Some("chat is now enabled")
+        );
     }
 
     /// A query that never left has nothing to show, so the view fails outright.
@@ -477,7 +481,8 @@ mod tests {
         );
         assert!(
             v.status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("couldn't send")),
             "{:?}",
             v.status_message
@@ -531,7 +536,7 @@ mod tests {
 
         let v = view(&state);
         assert_eq!(
-            v.status_message.as_deref(),
+            v.status_message.as_ref().map(|s| s.text.as_str()),
             Some("only the community's administrators can enable or disable capabilities")
         );
         assert!(

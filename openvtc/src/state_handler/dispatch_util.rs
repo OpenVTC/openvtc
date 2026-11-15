@@ -17,6 +17,7 @@
 use openvtc_core::config::Config;
 
 use crate::state_handler::main_page::MainPageState;
+use crate::state_handler::main_page::status::Status;
 use crate::state_handler::save_coalesce::SaveScheduler;
 
 /// Activity-log entry to write after an action completes.
@@ -80,11 +81,11 @@ pub(crate) fn save_and_sync(
     config: &Config,
     save: &mut SaveScheduler,
     persist: Persist,
-    status: impl FnOnce(&mut MainPageState) -> &mut Option<String>,
+    status: impl FnOnce(&mut MainPageState) -> &mut Option<Status>,
     success_status: impl Into<String>,
     log: SyncLog,
 ) {
-    *status(main_page) = Some(success_status.into());
+    *status(main_page) = Some(Status::success(success_status));
     persist.apply(main_page, config, save);
     log.write(main_page);
 }
@@ -93,11 +94,11 @@ pub(crate) fn save_and_sync(
 /// (reached via `status`) and log the error with `context`.
 pub(crate) fn record_error(
     main_page: &mut MainPageState,
-    status: impl FnOnce(&mut MainPageState) -> &mut Option<String>,
+    status: impl FnOnce(&mut MainPageState) -> &mut Option<Status>,
     context: impl Into<String>,
     err: &anyhow::Error,
 ) {
-    *status(main_page) = Some(format!("Error: {err:#}"));
+    *status(main_page) = Some(Status::error(format!("Error: {err:#}")));
     main_page.log_error(context, err);
 }
 

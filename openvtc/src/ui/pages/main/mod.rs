@@ -775,16 +775,20 @@ fn copy_to_clipboard(
     match crate::clipboard::copy_to_clipboard(text) {
         Ok(method) => {
             tracing::info!(label, method = method.label(), "copied to clipboard");
-            let _ = action_tx.send(Action::Settings(SettingsAction::ClipboardCopied(format!(
-                "✓ {label} copied via {}",
-                method.label()
-            ))));
+            let _ = action_tx.send(Action::Settings(SettingsAction::ClipboardCopied(
+                crate::state_handler::main_page::status::Status::success(format!(
+                    "✓ {label} copied via {}",
+                    method.label()
+                )),
+            )));
         }
         Err(e) => {
             tracing::warn!(label, error = %e, "failed to copy to clipboard");
-            let _ = action_tx.send(Action::Settings(SettingsAction::ClipboardCopied(format!(
-                "✗ Copy failed: {e}"
-            ))));
+            let _ = action_tx.send(Action::Settings(SettingsAction::ClipboardCopied(
+                crate::state_handler::main_page::status::Status::error(format!(
+                    "✗ Copy failed: {e}"
+                )),
+            )));
         }
     }
 }

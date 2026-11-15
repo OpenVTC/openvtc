@@ -443,7 +443,8 @@ mod vrc_request_tests {
                 .content_panel
                 .credentials
                 .status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("unreachable")),
         );
     }

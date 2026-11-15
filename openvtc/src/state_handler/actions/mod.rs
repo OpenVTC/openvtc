@@ -233,7 +233,7 @@ pub enum SettingsAction {
     #[cfg(feature = "openpgp-card")]
     TokenBack,
     /// Clipboard copy result message for display on the status panel.
-    ClipboardCopied(String),
+    ClipboardCopied(crate::state_handler::main_page::status::Status),
     /// Open the theme picker.
     ThemeOpen,
     /// Highlight — and preview — the theme at this row.
@@ -410,7 +410,7 @@ pub enum VettingAction {
     /// Commit the open form.
     Submit,
     /// Show a status line (e.g. a clipboard result).
-    Status(String),
+    Status(crate::state_handler::main_page::status::Status),
     /// Pasted text that is a `vetting-ticket:` link, for the request form.
     PasteTicket(String),
     // ── Applicant ────────────────────────────────────────────────────────

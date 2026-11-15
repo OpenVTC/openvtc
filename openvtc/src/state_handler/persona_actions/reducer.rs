@@ -2,6 +2,7 @@
 //! and names the network work it needs as a [`PersonaEffect`]; plus answering
 //! an armed confirmation.
 
+use crate::state_handler::main_page::status::Status;
 use openvtc_core::persona::{lifecycle, pool, world};
 
 use super::form::{form_for, form_for_world, form_submit, step};
@@ -131,7 +132,7 @@ pub(crate) fn apply(state: &mut State, action: &PersonaAction) -> PersonaEffect 
                 if let pool::AttributeEdit::Refused(why) =
                     pool::AttributeEdit::refusal(attr.provenance)
                 {
-                    p.status_message = Some(why);
+                    p.status_message = Some(Status::error(why));
                 }
                 return PersonaEffect::None;
             }
@@ -1170,7 +1171,8 @@ mod tests {
         assert!(
             personas(&state)
                 .status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("comes from a credential")),
             "the refusal has to say why"
         );
@@ -1607,7 +1609,8 @@ mod tests {
         assert!(
             personas(&state)
                 .status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("worn by 1 persona outside"))
         );
         match apply(&mut state, &PersonaAction::ConfirmYes) {

@@ -62,12 +62,7 @@ fn wrap(lines: &mut Vec<Line<'static>>, body: &str, indent: usize, style: Style)
 }
 
 fn push_status(lines: &mut Vec<Line<'static>>, status: &Status) {
-    let style = match status.severity {
-        Severity::Info | Severity::Progress => Style::default().fg(COLOR_TEXT_DEFAULT),
-        Severity::Success => Style::default().fg(COLOR_SUCCESS),
-        Severity::Warning => Style::default().fg(COLOR_ORANGE),
-        Severity::Error => Style::default().fg(COLOR_WARNING_ACCESSIBLE_RED).bold(),
-    };
+    let style = super::status::severity_style(status.severity);
     wrap(lines, &status.text, 4, style);
 }
 

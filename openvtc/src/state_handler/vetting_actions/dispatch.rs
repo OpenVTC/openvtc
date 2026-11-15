@@ -1,6 +1,7 @@
 //! Maps each `VettingAction` onto the page: the action dispatcher, form
 //! navigation, and form submission.
 
+use crate::state_handler::main_page::status::Status;
 use chrono::Utc;
 use openvtc_core::vetting::vetter::DeskState;
 use vta_sdk::protocols::vetting::VettingMethod;
@@ -37,8 +38,9 @@ pub(super) fn page<'a>(ctx: &'a mut ActionCtx<'_>) -> &'a mut VettingState {
     &mut ctx.state.main_page.content_panel.vetting
 }
 
-pub(super) fn status(ctx: &mut ActionCtx<'_>, message: impl Into<String>) {
-    page(ctx).status_message = Some(message.into());
+/// Set the vetting page's status line, with the severity the caller knows.
+pub(super) fn status(ctx: &mut ActionCtx<'_>, message: Status) {
+    page(ctx).status_message = Some(message);
 }
 
 /// Persist the book and show `message`.
@@ -100,8 +102,9 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             } else {
                 // Finished or abandoned between the panel drawing it and the
                 // key arriving: say so where the holder is looking.
-                ctx.state.main_page.content_panel.communities.status_message =
-                    Some("That application is no longer in progress.".to_string());
+                ctx.state.main_page.content_panel.communities.status_message = Some(
+                    Status::warning("That application is no longer in progress.".to_string()),
+                );
             }
         }
         VettingAction::CloseJourney => {
@@ -164,8 +167,10 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             if page(ctx).resend_candidates.is_empty() {
                 status(
                     ctx,
-                    "Every community you are an active member of has already sent you a live \
+                    Status::warning(
+                        "Every community you are an active member of has already sent you a live \
                      vetter credential — or you are not an active member of any.",
+                    ),
                 );
             } else {
                 page(ctx).mode = VettingMode::Resend { index: 0 };
@@ -175,8 +180,10 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             if page(ctx).event_offers.is_empty() {
                 status(
                     ctx,
-                    "No community you vet for is running an event. Event mode is the exception, \
+                    Status::warning(
+                        "No community you vet for is running an event. Event mode is the exception, \
                      not the setting — an ordinary week is the slow drip.",
+                    ),
                 );
             } else {
                 page(ctx).mode = VettingMode::EventMode { index: 0 };
@@ -230,7 +237,9 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             if page(ctx).personas.is_empty() {
                 status(
                     ctx,
-                    "Create a persona under My Identity first — it is the DID you join with.",
+                    Status::warning(
+                        "Create a persona under My Identity first — it is the DID you join with.",
+                    ),
                 );
             } else {
                 page(ctx).mode = VettingMode::NewApplication {
@@ -302,8 +311,10 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             if page(ctx).hidden.is_empty() {
                 status(
                     ctx,
-                    "None of the communities you vet for hides its vetters, so there is no \
+                    Status::warning(
+                        "None of the communities you vet for hides its vetters, so there is no \
                      hidden vetting to show.",
+                    ),
                 );
             } else {
                 page(ctx).mode = VettingMode::HiddenVetting { index: 0 };
@@ -325,19 +336,19 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 ctx.save.mark_dirty();
                 status(
                     ctx,
-                    format!(
+                    Status::progress(format!(
                         "Asking {name} which hidden-vetting key it holds for you, to restore it \
                          at your VTA…"
-                    ),
+                    )),
                 );
                 refresh_vetter_side(ctx).await;
             } else {
                 status(
                     ctx,
-                    format!(
+                    Status::warning(format!(
                         "Nothing to check at {name}: your hidden-vetting key is not in question, \
                          or a check is already running."
-                    ),
+                    )),
                 );
             }
         }
@@ -367,13 +378,13 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             refresh_vetter_side(ctx).await;
             status(
                 ctx,
-                if words.is_empty() {
+                Status::info(if words.is_empty() {
                     "None of the communities you vet for proves vetting with PCS ZKP, so there \
                      are no tokens to get — hand out tickets with t."
                         .to_string()
                 } else {
                     format!("Getting tokens — {}", words.join(" "))
-                },
+                }),
             );
         }
         VettingAction::ReviewCard => {
@@ -389,15 +400,17 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                         preview: None,
                     };
                 }
-                None => status(ctx, "No vetter is waiting for your card."),
+                None => status(ctx, Status::warning("No vetter is waiting for your card.")),
             }
         }
         VettingAction::NewTicket => {
             if page(ctx).memberships.is_empty() {
                 status(
                     ctx,
-                    "You can hand out tickets once a community you belong to has named you a \
+                    Status::warning(
+                        "You can hand out tickets once a community you belong to has named you a \
                      vetter — ask its admins for the vetter role.",
+                    ),
                 );
             } else {
                 page(ctx).mode = VettingMode::NewTicket {
@@ -411,7 +424,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
             let v = page(ctx);
             match v.tickets.get(v.selected).cloned() {
                 Some(row) => v.mode = VettingMode::ConfirmDeleteTicket { ticket_id: row.id },
-                None => status(ctx, "Highlight a ticket to delete."),
+                None => status(ctx, Status::warning("Highlight a ticket to delete.")),
             }
         }
         VettingAction::OpenSession => {
@@ -423,7 +436,10 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                         method_index: 0,
                     };
                 }
-                Some(_) => status(ctx, "That request has moved past opening a session."),
+                Some(_) => status(
+                    ctx,
+                    Status::warning("That request has moved past opening a session."),
+                ),
                 None => {}
             }
         }
@@ -458,7 +474,10 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                         },
                     };
                 }
-                Some(_) => status(ctx, "You can attest once their card has arrived."),
+                Some(_) => status(
+                    ctx,
+                    Status::warning("You can attest once their card has arrived."),
+                ),
                 None => {}
             }
         }
@@ -473,7 +492,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                         field: 0,
                     };
                 }
-                Some(_) => status(ctx, "That request is already closed."),
+                Some(_) => status(ctx, Status::warning("That request is already closed.")),
                 None => {}
             }
         }
@@ -485,7 +504,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                         application_id: row.id,
                     };
                 }
-                None => status(ctx, "Highlight an application to abandon."),
+                None => status(ctx, Status::warning("Highlight an application to abandon.")),
             }
         }
         VettingAction::ArmWithdraw => {
@@ -503,7 +522,9 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: VettingAction) {
                 }
                 Some(_) => status(
                     ctx,
-                    "That statement is already withdrawn — the community recorded it.",
+                    Status::warning(
+                        "That statement is already withdrawn — the community recorded it.",
+                    ),
                 ),
                 None => {}
             }
@@ -732,7 +753,9 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
         VettingMode::HiddenVetting { .. } => {
             status(
                 ctx,
-                "Reading each community's requirements again and drawing what the schedule owes…",
+                Status::progress(
+                    "Reading each community's requirements again and drawing what the schedule owes…",
+                ),
             );
             refresh_vetter_side(ctx).await;
         }
@@ -762,11 +785,11 @@ async fn submit(ctx: &mut ActionCtx<'_>) {
             if message.chars().count() > DECLINE_MESSAGE_MAX {
                 return status(
                     ctx,
-                    format!(
+                    Status::warning(format!(
                         "The note is {} characters; a decline carries at most \
                          {DECLINE_MESSAGE_MAX}.",
                         message.chars().count()
-                    ),
+                    )),
                 );
             }
             let message = (!message.is_empty()).then(|| message.to_string());

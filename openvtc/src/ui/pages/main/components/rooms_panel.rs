@@ -31,12 +31,7 @@ fn text(text: impl Into<String>) -> Span<'static> {
 }
 
 fn push_status(lines: &mut Vec<Line<'static>>, status: &Status) {
-    let style = match status.severity {
-        Severity::Info | Severity::Progress => Style::default().fg(COLOR_TEXT_DEFAULT),
-        Severity::Success => Style::default().fg(COLOR_SUCCESS),
-        Severity::Warning => Style::default().fg(COLOR_ORANGE),
-        Severity::Error => Style::default().fg(COLOR_WARNING_ACCESSIBLE_RED).bold(),
-    };
+    let style = super::status::severity_style(status.severity);
     for part in super::status::wrap_text(
         &status.text,
         super::status::content_width().saturating_sub(6).max(20),
