@@ -1,13 +1,13 @@
 /*! Contains the OpenVTC CLI Tool Configuration
-*
-* Configuration is spread across four different contexts:
-* 1. [Config]: Represents the active in-memory application config
-* 2. [secured_config::SecuredConfig]: Represents [Config] info that is stored securely (key info)
-* 3. [public_config::PublicConfig]: Represents [Config] info that is stored in plaintext on disk
-* 4. [protected_config::ProtectedConfig]: Represents [Config] info that is encryoted and stored on disk
-*
-* NOTE: Secure Config information is saved item by item as needed to the secure storage
-*/
+ *
+ * Configuration is spread across four different contexts:
+ * 1. [Config]: Represents the active in-memory application config
+ * 2. [secured_config::SecuredConfig]: Represents [Config] info that is stored securely (key info)
+ * 3. [public_config::PublicConfig]: Represents [Config] info that is stored in plaintext on disk
+ * 4. [protected_config::ProtectedConfig]: Represents [Config] info that is encryoted and stored on disk
+ *
+ * NOTE: Secure Config information is saved item by item as needed to the secure storage
+ */
 
 use crate::{
     config::{

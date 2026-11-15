@@ -1,6 +1,6 @@
 /*!
-*   Handles writing of data to the OpenPGP Card
-*/
+ *   Handles writing of data to the OpenPGP Card
+ */
 
 use anyhow::{Result, bail};
 use ed25519_dalek_bip32::VerifyingKey;

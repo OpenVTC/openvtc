@@ -1,6 +1,6 @@
 /*! Configuration information that needs to be protected
-*   but is not as critical as private key information which is stored in the OS Secure Store
-*/
+ *   but is not as critical as private key information which is stored in the OS Secure Store
+ */
 
 use crate::operational::SeenDocuments;
 use crate::witness::Witnessings;

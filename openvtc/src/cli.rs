@@ -1,5 +1,5 @@
 /*! Command Line Interface configuration
-*/
+ */
 
 use anyhow::Context;
 use clap::{Arg, Command};
