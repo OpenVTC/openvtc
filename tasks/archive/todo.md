@@ -1,7 +1,7 @@
 # Task List — Multi-Community Support
 
 Live checklist. See [`tasks/plan.md`](./plan.md) for rationale, dependency
-graph, and checkpoints; [`docs/design/multi-community-support.md`](../docs/design/multi-community-support.md)
+graph, and checkpoints; [`docs/design/multi-community-support.md`](../../docs/design/multi-community-support.md)
 for the spec and requirement IDs.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done

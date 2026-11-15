@@ -1,14 +1,19 @@
 # openvtc
 
-A terminal user interface (TUI) for managing OpenVTC identities, relationships,
-and verifiable credentials. Built with [ratatui](https://ratatui.rs/).
+The client for [OpenVTC](https://github.com/OpenVTC/openvtc) (Open Verifiable
+Trust Communities): a terminal user interface (TUI) for joining verifiable
+trust communities and managing your identities, relationships and verifiable
+credentials, plus headless subcommands. Built with [ratatui](https://ratatui.rs/).
 
 ## Overview
 
 `openvtc` is the OpenVTC client, providing a rich TUI experience with:
 
-- **Setup wizard** — Guided multi-step setup flow with real-time feedback
-- **Main dashboard** — View relationships, contacts, tasks, and VRCs at a glance
+- **Setup wizard** — Connects to your Verifiable Trust Agent (VTA) and
+  authorises OpenVTC from your Personal Network Manager (PNM)
+- **Main menu** — Communities, Inbox, My Relationships, My Credentials,
+  Vetting, My Identity, Settings, VTA Service, TSP Relationships, Logs and
+  Help / Status
 - **DIDComm messaging** — Live WebSocket-based message handling with visual status
 - **Keyboard-driven navigation** — Fast interaction without leaving the terminal
 
@@ -30,14 +35,16 @@ The application follows an actor model with unidirectional data flow:
 ## Installation
 
 ```bash
-cargo install --path openvtc
+cargo install openvtc
 ```
 
-Or build without hardware token support:
+Or install without hardware token support:
 
 ```bash
-cargo install --path openvtc --no-default-features
+cargo install openvtc --no-default-features
 ```
+
+From a checkout of the repository, use `cargo install --path openvtc`.
 
 ## Usage
 
@@ -50,11 +57,17 @@ openvtc setup
 
 # Use a named profile
 openvtc -p my-profile
+
+# Check the messaging chain (read-only)
+openvtc health
 ```
+
+See the [command reference](https://github.com/OpenVTC/openvtc/blob/main/docs/openvtc-tool-commands.md)
+for every subcommand and flag.
 
 ## Configuration
 
-- Default location: `~/.config/openvtc/`
+- Default location: `~/.config/openvtc/` (`%APPDATA%\openvtc\` on Windows)
 - Override: `OPENVTC_CONFIG_PATH` and `OPENVTC_CONFIG_PROFILE` environment variables
 
 ### Secure Storage
@@ -203,5 +216,7 @@ Useful patterns to look for in the logs:
 
 ## Documentation
 
-- [Command Reference](../docs/openvtc-tool-commands.md)
-- [Relationships and VRCs Guide](../docs/relationships-vrcs.md)
+- [Command Reference](https://github.com/OpenVTC/openvtc/blob/main/docs/openvtc-tool-commands.md)
+- [Relationships and VRCs Guide](https://github.com/OpenVTC/openvtc/blob/main/docs/relationships-vrcs.md)
+- [Backup and Restore](https://github.com/OpenVTC/openvtc/blob/main/docs/backup-restore.md)
+- [Themes](https://github.com/OpenVTC/openvtc/blob/main/docs/themes.md)

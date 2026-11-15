@@ -36,20 +36,40 @@ Include the following in your report:
 
 The following are in scope:
 
-- All crates in the `openvtc` workspace (`openvtc-core`, `openvtc`, `did-git-sign`)
+- All crates in the `openvtc` workspace (`openvtc-core`, `openvtc`)
 - Cryptographic operations (key derivation, encryption, signing)
 - Secret handling and memory management
-- DIDComm protocol implementation
+- DIDComm and TSP messaging as implemented in this repository
 - Configuration storage and protection
 - Hardware token (OpenPGP card) integration
+
+Out of scope here, but reportable to the same address:
+
+- The `did-git-sign` commit signer, developed in
+  [verifiable-git-infrastructure](https://github.com/OpenVTC/verifiable-git-infrastructure).
+- The VTA, VTC and other services, developed in
+  [verifiable-trust-infrastructure](https://github.com/OpenVTC/verifiable-trust-infrastructure).
 
 ## Security Design
 
 OpenVTC employs defense-in-depth for secret protection:
 
-1. **Secured Config** — Private key material stored in OS keyring (macOS Keychain, Linux Secret Service, Windows Credential Manager) or hardware tokens
-2. **Protected Config** — Relationship and contact data encrypted at rest with AES-256-GCM
-3. **Public Config** — Only non-sensitive metadata stored in plaintext
+1. **Key backend** — By default, persona keys are managed by the VTA and
+   fetched when needed. OpenVTC stores a VTA credential bundle, which it uses
+   to authenticate to the VTA. Older profiles may use the legacy BIP32 backend,
+   which derives keys from a locally stored seed.
+2. **Secured Config** — Local secret material (the VTA credential bundle, a
+   legacy BIP32 seed, and the key for the protected config) is kept in the OS
+   credential store (macOS Keychain, Linux Secret Service, Windows Credential
+   Manager). On Linux, `OPENVTC_SECURE_STORE=file` selects an encrypted file
+   store instead; it refuses to hold a profile that has no passphrase or
+   hardware token. The secured config is encrypted under the unlock code or an
+   OpenPGP hardware token, unless the user chooses plaintext protection after
+   a warning.
+3. **Protected Config** — The account, contacts, relationships and credentials,
+   encrypted at rest with AES-256-GCM.
+4. **Public Config** — Settings and the activity log, stored in plaintext. The
+   activity log can name contacts and DIDs.
 
 Cryptographic primitives used:
 

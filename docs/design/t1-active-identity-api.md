@@ -1,9 +1,10 @@
 # T1 — Active-Identity & Session-Manager API Sketch
 
-> Status: **FOR REVIEW** — API shapes only, no implementation. Sign-off gate
-> before writing T1 foundation code. Companion to
-> [`multi-community-support.md`](./multi-community-support.md) (spec) and
-> [`../../tasks/todo.md`](../../tasks/todo.md) (T1).
+> Status: **IMPLEMENTED** — T1 shipped (`PersonaId` and `CommunityRecord` in
+> `openvtc-core/src/config/account.rs`, `openvtc/src/state_handler/session_manager.rs`).
+> Originally written as the API-shapes sign-off gate before T1 foundation code.
+> Companion to [`multi-community-support.md`](./multi-community-support.md)
+> (spec) and [`../../tasks/archive/todo.md`](../../tasks/archive/todo.md) (T1).
 
 This sketch pins down the three new surfaces T1 introduces and how the existing
 singleton consumers map onto them. Names are proposals; types reference the

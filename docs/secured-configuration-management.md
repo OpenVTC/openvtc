@@ -1,65 +1,118 @@
 # Handling Secured Configuration
 
-The OpenVTC CLI tool securely stores the sensitive configuration in a Base64 format in the OS secure storage layer of your device. The configuration contains the following information:
+The OpenVTC CLI tool keeps its most sensitive configuration, the
+`SecuredConfig`, in a secure store on your device. The stored value is a
+single-line JSON envelope whose payloads are base64url-encoded (see
+[Storage format](#storage-format-and-why-it-is-one-line)).
 
-On macOS this uses the system Keychain. On Linux this uses the system keyring (for example GNOME Keyring or KWallet). On Windows, secrets are stored using the Windows Credential Manager via the `keyring` crate integration used by OpenVTC.
+## Where it is stored
 
-- BIP32 seed used to create the cryptographic keys to generate Decentralised Identifiers (DIDs), specifically your Persona DID.
+By default OpenVTC uses the OS credential store, under service `openvtc` with
+the profile name as the account:
 
-- Key Info containing the following details:
-  - Derivation path for BIP32 or the multi-encoded private key of the DID when configured with a hardware token.
+- macOS: the system Keychain.
+- Windows: Windows Credential Manager.
+- Linux: the Secret Service (for example GNOME Keyring, KWallet or KeePassXC).
 
-  - Date and time of when the key info was first created.
+If the OS credential store cannot be opened, OpenVTC exits with an
+explanation. It does not fall back to another store on its own.
 
-OpenVTC stores the configuration details in the OS secure storage in three different ways:
+On a Linux machine with no keyring daemon, you can choose an encrypted file
+store instead:
+
+```bash
+OPENVTC_SECURE_STORE=file openvtc
+```
+
+The secret is then written to the `secrets/` folder in the profile directory
+(`~/.config/openvtc/secrets/` by default), with file mode `0600`. The file
+store refuses a profile that has no unlock code or hardware token, so key
+material is never written to disk unencrypted.
+
+`OPENVTC_SECURE_STORE=keyutils` (the Linux kernel keyring) is deprecated and
+exists only to migrate a profile written by an older OpenVTC. The kernel
+keyring is held in memory and is lost on reboot. Any other value is an error.
+See the Secure Storage section of [`openvtc/README.md`](../openvtc/README.md).
+
+## What it contains
+
+- **VTA key backend (the normal case):** the VTA credential bundle OpenVTC
+  uses to authenticate to the VTA, the VTA's DID, its URL (absent for
+  DIDComm-only VTAs) and its DIDComm mediator DID. Persona and relationship
+  keys are held by the VTA, not on this device.
+- **Legacy BIP32 backend:** the BIP32 seed from which keys are derived. It is
+  present only in BIP32-based configs; setup no longer creates them.
+- The key that encrypts the protected config (`protected_key`).
+- Key info: for each key ID, where the key came from (a BIP32 derivation
+  path, an imported multi-encoded private key, or a VTA key ID), when it was
+  created, and its purpose.
+
+OpenVTC protects this configuration in one of three ways.
 
 ## Hardware Token
 
-During setup, the tool can utilise a hardware token that implements the OpenPGP card standard to securely store the cryptographic key pair associated with your Persona DID.
+During setup, the tool can use a hardware token that implements the OpenPGP
+card standard.
 
-After generating the key pair, the tool performs the following steps:
+To save the configuration, the tool:
 
-1. Generates a random 32-byte seed, which serves as the random session key.
+1. Generates a random 32-byte session key.
 
-2. Uses the seed to create an AES-256 key and encrypt the configuration data using AES-GCM, which includes the BIP32 seed and key information.
+2. Encrypts the configuration with AES-256-GCM, using a key derived from the
+   session key with HKDF-SHA256.
 
-3. Encrypts the seed using the public key generated for your DID, producing an Encrypted Session Key (ESK).
+3. Encrypts the session key with the public key in the token's decryption
+   slot, producing an Encrypted Session Key (ESK).
 
-The ESK and the encrypted configuration are securely stored in the OS secure storage, ensuring that sensitive key material remains protected.
+The ESK and the encrypted configuration are stored together in the secure
+store.
 
-When the tool later needs to retrieve the configuration:
+To read the configuration later, the tool:
 
-1. It requires the presence of the hardware token to decrypt the ESK using the private key on the token.
+1. Asks the token to decrypt the ESK with its private key. The token must be
+   present, and its user PIN is required.
 
-2. Uses the decrypted session key to create an AES-256 key.
-
-3. Decrypt the encrypted configuration using the AES-256 key using AES-GCM, allowing access to the BIP32 seed and key information.
+2. Uses the recovered session key to decrypt the configuration with
+   AES-256-GCM.
 
 ## Unlock Code
 
-If you choose not to use a hardware token during the setup, you can nominate your unlock code to protect your configuration.
+If you do not use a hardware token, you can set an unlock code to protect the
+configuration. It must be at least 8 characters.
 
-Using the unlock code, the tool performs the following steps:
+The unlock code is not stored. To save the configuration, the tool:
 
-1. It hashes the unlock code entered by the user.
+1. Derives a 32-byte key from the unlock code with Argon2id (128 MiB of
+   memory, 4 iterations, 1 lane). The salt is fixed: the SHA-256 hash of the
+   label `openvtc-unlock-code-v1`. The same unlock code therefore always gives
+   the same key (`derive_passphrase_key` in `openvtc-core/src/config/mod.rs`).
 
-2. Creates an AES-256 key from the hashed unlock code.
+2. Generates a random 12-byte nonce and derives an AES-256-GCM key from the
+   Argon2id key with HKDF-SHA256 (nonce as salt).
 
-3. Uses the AES-256 key to encrypt the configuration data using AES-GCM, which includes the BIP32 seed and key information.
+3. Encrypts the configuration with AES-256-GCM and stores
+   `nonce | ciphertext + tag`.
 
-The encrypted configuration is securely stored in the OS’s secure storage, ensuring that sensitive key material remains protected.
+To read the configuration later, the tool asks for the unlock code, derives
+the same Argon2id key, and decrypts. A wrong unlock code fails the AES-GCM
+authentication check. The tool checks the code at the prompt, so a wrong code
+can be entered again.
 
-When the tool later needs to retrieve the configuration:
-
-1. It requires the user to enter the unlock code.
-
-2. Hashes the unlock code and creates an AES-256 key.
-
-3. Uses the AES-256 key to decrypt the encrypted configuration using AES-GCM, allowing access to the BIP32 seed and key information.
+Exported config files use a different format: a random 16-byte Argon2id salt
+is generated for each export and stored in the file
+(`derive_passphrase_key_v2` and `passphrase_encrypt_v2`). Imports still
+accept the older fixed-salt export format.
 
 ## Plaintext
 
-The plaintext option stores the configuration in plaintext format in the OS's secure storage. The plaintext option is not part of the OpenVTC setup by default.
+The plaintext option stores the configuration unencrypted in the secure store,
+protected only by the store itself. Setup offers it only after a warning, and
+it can also be chosen later by removing the passphrase in Settings. The file
+store refuses plaintext profiles.
+
+On load, the tool checks that the stored format matches the protection the
+profile expects. A plaintext blob found where an encrypted one is expected is
+refused.
 
 ## Storage format (and why it is one line)
 

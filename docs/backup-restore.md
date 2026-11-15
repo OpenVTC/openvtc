@@ -1,64 +1,51 @@
-# Backup and Restore Configurations
+# Backup and Restore
 
-The tool provides functionality to backup your profile configurations, including PGP keys, so you can transfer them to another machine or restore previous settings when needed.
+A profile has two halves: the config file on disk and its secrets in the
+credential store (see the [`openvtc` README](../openvtc/README.md#secure-storage)).
+A backup holds both, so it can move a profile to another machine or bring one
+back after a loss.
 
-## Backup Configurations
+There are no `export` or `import` subcommands. Backup and restore happen in the
+TUI.
 
-To back up the configuration for your profile, run the following command:
+## Back up a profile
 
-```bash
-openvtc export settings --file ~/Downloads/openvtc-export.openvtc --passphrase MyPassphrase
-```
+1. Launch the TUI: `openvtc` (or `openvtc -p <profile>`).
+2. Open **Settings** and choose **Export Config**.
+3. Enter a file path and a passphrase, then confirm.
 
-The command will:
+The backup holds the public config (with the encrypted protected config inside
+it) and the secured config, including the key material from the credential
+store. It is encrypted with AES-256-GCM under a key derived from the passphrase
+with Argon2id, using a fresh random salt for each export. On Unix the file is
+written with mode `0600`.
 
-- Export the default profile configuration, including key materials stored in the OS’s secure storage.
-- Save the encrypted backup to `~/Downloads/openvtc-export.openvtc`.
-- Encrypt the backup using the passphrase provided.
+Keep the backup and its passphrase somewhere safe. Anyone with both has the
+profile's secrets.
 
-**Important:** Store the backup file in a secure location for future recovery.
+## Restore a profile
 
-## Restore Configurations
+1. Run `openvtc setup` (add `-p <profile>` to restore into a named profile).
+2. Choose **Recover from backup**.
+3. Enter the backup file path, the backup passphrase (blank if it had none),
+   and a new unlock code for this profile (blank for none).
+4. Exit and start OpenVTC again to load the restored profile.
 
-To restore the backup on another machine or recover your previous setup, run the following command:
+Settings has no import action. Importing into a running profile is not
+supported; use the setup wizard.
 
-```bash
-openvtc setup import --file ~/Downloads/openvtc-export.openvtc --passphrase MyPassphrase
-```
+## Recover from the VTA
 
-The command will:
+Without a backup, part of an account can be rebuilt from its VTA Trust Context.
 
-- Import the configurations from the backup file.
-- Recreate the default profile (if no `--profile` option), including secured configuration stored in the OS’s secure storage.
+- `openvtc health --recoverable` reports, read-only, whether this account could
+  be rebuilt from its Trust Context if this machine were lost.
+- During `openvtc setup`, if the Trust Context you are setting up into already
+  holds an account, the wizard offers **[R] Recover this account**. It lists
+  what will be restored (identities and memberships) and, at the same weight,
+  what will not. Nothing is written until you confirm.
 
-This process is helpful in use cases, such as:
-
-- Transferring OpenVTC configuration to a new machine.
-- Recovering access after losing the original machine.
-- Resetting the OpenVTC configuration.
-
-## DID Secrets Recovery
-
-To restore the same DID and associated secrets, use the **24-word recovery phrase** generated during the previous setup. This recovery phrase allows you to regenerate the DID secrets and an option to retain the same DID value. To do this:
-
-1. Run the setup command:
-
-   ```bash
-   openvtc setup
-   ```
-
-   > Optionally, run the setup command with the `--profile` to setup another profile.
-
-2. The first prompt will ask you if you would like to recover your DID secrets using the 24-word recovery phrase, select `yes`.
-
-   ```bash
-   ? Recover Secrets from 24 word recovery phrase? (y/n) › yes
-   ```
-
-3. Enter the 24-word recovery phrase to generate the DID secrets.
-
-4. After you entered the recovery phrase, one of the steps will ask if you would like to use your existing DID, select `yes`.
-
-This process will allow you to retain the same DID and DID secrets, including the DID document.
-
-**Note:** The recovery phrase only restores the DID and its secrets, not the full profile configuration, such as contacts, relationships, and logs.
+The rebuild itself does not restore community names and flags, relationships,
+contacts or activity history. Copies of the first three that were synced to the
+VTA return on first launch; anything never synced, and the activity history, is
+lost. Make a backup if you need it.
