@@ -6,9 +6,6 @@ use affinidi_tdk::secrets_resolver::secrets::Secret;
 use anyhow::Result;
 use chrono::Utc;
 use openvtc_core::config::{KeyInfo, PersonaDIDKeys, secured_config::KeySourceMaterial};
-use std::future::Future;
-use std::time::Duration;
-use tracing::warn;
 use vta_sdk::{
     client::{CreateDidWebvhRequest, CreateKeyRequest, DidPresentation, VtaClient},
     error::VtaError,
@@ -18,59 +15,7 @@ use vta_sdk::{
     webvh::WebvhServerRecord,
 };
 
-/// Max attempts for a single VTA round-trip before giving up (1 try + 2 retries).
-const VTA_MAX_ATTEMPTS: usize = 3;
-
-/// Base back-off between retries; doubles each attempt (0.5s, then 1s). Short,
-/// because the dominant retryable fault is a stale DIDComm socket that ATM
-/// re-establishes almost immediately — we just need a beat before re-sending.
-const VTA_RETRY_BASE: Duration = Duration::from_millis(500);
-
-/// True for errors a retry might clear: transport/timeout faults where the
-/// request most likely never reached the VTA (or its reply never came back).
-///
-/// The motivating case is a stale always-on DIDComm session — the mediator
-/// dropped the idle WebSocket, the first `send_and_wait` packed into a dead
-/// socket and timed out, but ATM auto-reconnects underneath, so the *next* send
-/// lands on a live socket and succeeds. REST `Network` and 5xx `Server` errors
-/// are transient the same way. Deterministic faults (validation, conflict,
-/// not-found, auth, gone) are never retried — re-sending can't change them.
-fn vta_retryable(e: &VtaError) -> bool {
-    matches!(
-        e,
-        VtaError::DidcommTransport(_) | VtaError::Network(_) | VtaError::Server { .. }
-    )
-}
-
-/// Run a single VTA round-trip with bounded retry on transient transport faults
-/// (see [`vta_retryable`]). `op` is re-invoked from scratch each attempt, so it
-/// must rebuild any by-value request — and the caller must be content with a
-/// possible duplicate on the rare "VTA processed it but the reply was lost"
-/// timeout. That's a non-issue for reads (`get_key_secret`, `list_*`) and cheap
-/// for `create_key` (at worst an orphan key); the join flow already rolls back a
-/// half-minted persona. `label` names the op for the retry log line.
-pub(crate) async fn vta_retry<T, F, Fut>(label: &str, mut op: F) -> Result<T, VtaError>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, VtaError>>,
-{
-    let mut attempt = 1;
-    loop {
-        match op().await {
-            Ok(v) => return Ok(v),
-            Err(e) if attempt < VTA_MAX_ATTEMPTS && vta_retryable(&e) => {
-                let backoff = VTA_RETRY_BASE * (1 << (attempt - 1));
-                warn!(
-                    "VTA '{label}' failed (attempt {attempt}/{VTA_MAX_ATTEMPTS}): {e} — \
-                     retrying in {backoff:?}"
-                );
-                tokio::time::sleep(backoff).await;
-                attempt += 1;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
+pub(crate) use openvtc_core::vta_task::retry as vta_retry;
 
 /// The message prefix every TSP reply-timeout carries, from the SDK's own
 /// `TSP_REPLY_TIMEOUT_PREFIX`. Matched as a literal because the SDK keeps both
@@ -575,79 +520,6 @@ pub async fn create_did_via_server(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
-
-    #[test]
-    fn retryable_covers_transport_and_5xx_only() {
-        // Transient transport / server faults — retry may clear them.
-        assert!(vta_retryable(&VtaError::DidcommTransport("timeout".into())));
-        assert!(vta_retryable(&VtaError::Server {
-            status: 503,
-            body: String::new(),
-        }));
-        // Deterministic faults — re-sending can't change the outcome.
-        assert!(!vta_retryable(&VtaError::Validation("bad".into())));
-        assert!(!vta_retryable(&VtaError::Conflict("dup".into())));
-        assert!(!vta_retryable(&VtaError::NotFound("gone".into())));
-        assert!(!vta_retryable(&VtaError::Auth("expired".into())));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn returns_immediately_on_success() {
-        let calls = Cell::new(0u32);
-        let out: Result<u8, VtaError> = vta_retry("ok", || {
-            calls.set(calls.get() + 1);
-            async { Ok(7) }
-        })
-        .await;
-        assert_eq!(out.unwrap(), 7);
-        assert_eq!(calls.get(), 1, "no retry when the first attempt succeeds");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn retries_transient_then_succeeds() {
-        // Models a stale socket: first send times out, ATM reconnects, second
-        // send lands. The op should be retried and ultimately succeed.
-        let calls = Cell::new(0u32);
-        let out: Result<u8, VtaError> = vta_retry("stale-then-ok", || {
-            let n = calls.get() + 1;
-            calls.set(n);
-            async move {
-                if n < 2 {
-                    Err(VtaError::DidcommTransport("stale socket".into()))
-                } else {
-                    Ok(9)
-                }
-            }
-        })
-        .await;
-        assert_eq!(out.unwrap(), 9);
-        assert_eq!(calls.get(), 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn gives_up_after_max_attempts() {
-        let calls = Cell::new(0u32);
-        let out: Result<u8, VtaError> = vta_retry("always-down", || {
-            calls.set(calls.get() + 1);
-            async { Err(VtaError::DidcommTransport("down".into())) }
-        })
-        .await;
-        assert!(out.is_err());
-        assert_eq!(calls.get(), VTA_MAX_ATTEMPTS as u32);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn does_not_retry_deterministic_error() {
-        let calls = Cell::new(0u32);
-        let out: Result<u8, VtaError> = vta_retry("validation", || {
-            calls.set(calls.get() + 1);
-            async { Err(VtaError::Validation("nope".into())) }
-        })
-        .await;
-        assert!(out.is_err());
-        assert_eq!(calls.get(), 1, "deterministic faults are not retried");
-    }
 
     /// The failure that cost an hour of log-reading: the VTA relayed the
     /// mint onward to the DID hosting server, the hosting server answered

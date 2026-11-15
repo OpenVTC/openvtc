@@ -137,8 +137,9 @@ ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
-# `net`: the loopback listener in the `health` tests.
-tokio = { workspace = true, features = ["net"] }
+# `net`: the loopback listener in the `health` tests. `test-util`: the paused
+# clock for the VTA retry back-off tests.
+tokio = { workspace = true, features = ["net", "test-util"] }
 # Mock HTTP server for the agent-name resolve→verify e2e: it serves the
 # `/@name` → 302 → DID redirect the `HttpRedirectResolver` follows, so the whole
 # chain is exercised without a live host.

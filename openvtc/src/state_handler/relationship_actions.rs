@@ -3,24 +3,12 @@
 use std::sync::Arc;
 
 use crate::state_handler::setup_sequence::vta;
-use affinidi_tdk::{
-    TDK,
-    affinidi_crypto::ed25519::ed25519_private_to_x25519,
-    didcomm::Message,
-    dids::{DID, PeerKeyRole},
-    secrets_resolver::{SecretsResolver, secrets::Secret},
-};
+use affinidi_tdk::{TDK, didcomm::Message, secrets_resolver::secrets::Secret};
 use anyhow::Result;
-use base64::Engine;
 use chrono::Utc;
-use ed25519_dalek_bip32::DerivationPath;
 use openvtc_core::didcomm::Messaging;
 use openvtc_core::{
-    config::{
-        Config, KeyBackend, KeyTypes,
-        account::RelationshipIdentifierDefault,
-        secured_config::{KeyInfoConfig, KeySourceMaterial},
-    },
+    config::{Config, account::RelationshipIdentifierDefault, secured_config::KeyInfoConfig},
     logs::LogFamily,
     relationships::{RelationshipRequestBody, RelationshipState, did_binding_proofs},
     tasks::TaskType,
@@ -45,285 +33,6 @@ fn build_ping_message(from: &str, to: &str) -> Result<Message> {
     .created_time(now)
     .expires_time(now + 60 * 5)
     .finalize())
-}
-
-/// Loop-thread plan for creating a relationship DID, plus everything the
-/// *I/O-only* [`RDidPlan::create_io`] needs to run off the loop without touching
-/// `Config`. Building this is the only step that reads/mutates `Config` (the
-/// BIP32 path-pointer reservation); the actual key creation (VTA round-trip or
-/// BIP32 derivation), did:peer build, and resolver insert all run in the task.
-pub(crate) enum RDidPlan {
-    /// BIP32: paths reserved on the loop thread (pointer already advanced); the
-    /// task derives the keys from a clone of the root. The root is boxed to keep
-    /// the enum compact (it is the largest field by far).
-    Bip32 {
-        root: Box<ed25519_dalek_bip32::ExtendedSigningKey>,
-        v_path: String,
-        e_path: String,
-        mediator: String,
-    },
-    /// VTA: the task creates the keys on the always-on admin session (cloned —
-    /// cheap, shares the connection pool).
-    Vta {
-        admin_vta: vta_sdk::client::VtaClient,
-        mediator: String,
-    },
-}
-
-/// The created relationship DID plus the `key_info` entries to record in
-/// `Config` on the loop thread. The secrets themselves were already inserted into
-/// the (shared, `Arc`-based) TDK resolver inside the task, so they are visible to
-/// the loop's TDK; only the `Config` bookkeeping is left for `apply`.
-pub(crate) struct CreatedRDid {
-    pub(crate) r_did: String,
-    pub(crate) key_info: Vec<(String, KeyInfoConfig)>,
-}
-
-/// Build the [`RDidPlan`] on the loop thread. For BIP32 this reserves two unique
-/// derivation paths and advances `path_pointer` (the only `Config` mutation the
-/// pre-send step makes); for VTA it just snapshots the owned client/backend.
-pub(crate) fn plan_relationship_did(
-    config: &mut Config,
-    mediator: &str,
-    admin_vta: Option<&vta_sdk::client::VtaClient>,
-) -> Result<RDidPlan> {
-    match &config.key_backend {
-        KeyBackend::Bip32 { seed, .. } => {
-            // `ExtendedSigningKey` (ed25519-dalek-bip32 0.3) is not `Clone`, so
-            // reconstruct an owned root from the persisted seed — the same
-            // derivation the load path uses, and a pure function of the seed, so
-            // the rebuilt root is identical to the live one.
-            let root = Box::new(
-                ed25519_dalek_bip32::ExtendedSigningKey::from_seed(
-                    &base64::prelude::BASE64_URL_SAFE_NO_PAD
-                        .decode(secrecy::ExposeSecret::expose_secret(seed))
-                        .map_err(|e| anyhow::anyhow!("couldn't decode BIP32 seed: {e}"))?,
-                )
-                .map_err(|e| anyhow::anyhow!("couldn't rebuild BIP32 root: {e}"))?,
-            );
-            let v_path = format!("m/3'/1'/1'/{}'", config.private.relationships.path_pointer);
-            config.private.relationships.path_pointer += 1;
-            let e_path = format!("m/3'/1'/1'/{}'", config.private.relationships.path_pointer);
-            config.private.relationships.path_pointer += 1;
-            Ok(RDidPlan::Bip32 {
-                root,
-                v_path,
-                e_path,
-                mediator: mediator.to_string(),
-            })
-        }
-        KeyBackend::Vta { .. } => {
-            // The runtime always holds an admin VTA session for a VTA backend
-            // (built at startup). If it doesn't, R-DID creation can't proceed —
-            // surface that up front rather than parking the loop to open one.
-            let admin_vta = admin_vta.cloned().ok_or_else(|| {
-                anyhow::anyhow!("no VTA session available to create a relationship DID")
-            })?;
-            Ok(RDidPlan::Vta {
-                admin_vta,
-                mediator: mediator.to_string(),
-            })
-        }
-    }
-}
-
-impl RDidPlan {
-    fn mediator(&self) -> &str {
-        match self {
-            RDidPlan::Bip32 { mediator, .. } | RDidPlan::Vta { mediator, .. } => mediator,
-        }
-    }
-
-    /// I/O-only relationship-DID creation, run inside the spawned task. Creates
-    /// the keys (BIP32 derivation or VTA round-trip), builds the did:peer,
-    /// registers the secrets in the shared TDK resolver, **and registers the new
-    /// R-DID listener** (built from the just-minted secrets — no resolver lookup,
-    /// no `Config`). Returns the `Config` `key_info` entries for the loop thread
-    /// to record. Never touches `Config`.
-    ///
-    /// `service` + `remote_p_did` are only used to register the post-establishment
-    /// R-DID listener, exactly as the old inline path did right after key creation.
-    pub(crate) async fn create_io(
-        self,
-        tdk: &TDK,
-        service: &Messaging,
-        remote_p_did: &str,
-    ) -> Result<CreatedRDid> {
-        let mediator = self.mediator().to_string();
-        // Mint the keys and capture each one's *source material* (BIP32 path or
-        // VTA key id) in verification-then-encryption order. Note we do NOT record
-        // the secret ids yet: a freshly generated `Secret` carries a placeholder id
-        // (`generate_ed25519` → a random base64 string, `generate_x25519` →
-        // `"x25519"`), and `generate_did_peer_from_secrets` below rewrites those
-        // ids to the did:peer verification-method ids. `key_info` must be built
-        // from the *rewritten* ids — see the comment on that step.
-        let (mut v_secret, mut e_secret, v_source, e_source) = match self {
-            RDidPlan::Bip32 {
-                root,
-                v_path,
-                e_path,
-                ..
-            } => {
-                let v_key = root.derive(&v_path.parse::<DerivationPath>()?)?;
-                let e_key = root.derive(&e_path.parse::<DerivationPath>()?)?;
-                let v_secret = Secret::generate_ed25519(None, Some(v_key.signing_key.as_bytes()));
-                let e_secret = Secret::generate_x25519(
-                    None,
-                    Some(&ed25519_private_to_x25519(e_key.signing_key.as_bytes())),
-                )?;
-                // NOTE: v_key/e_key hold BIP32-derived signing-key bytes on the
-                // stack; ed25519-dalek-bip32 does not Zeroize, a known limitation.
-                drop(v_key);
-                drop(e_key);
-                (
-                    v_secret,
-                    e_secret,
-                    KeySourceMaterial::Derived { path: v_path },
-                    KeySourceMaterial::Derived { path: e_path },
-                )
-            }
-            RDidPlan::Vta { admin_vta, .. } => {
-                let (v_secret, e_secret, sign_key_id, enc_key_id) =
-                    create_relationship_keys(&admin_vta).await?;
-                (
-                    v_secret,
-                    e_secret,
-                    KeySourceMaterial::VtaManaged {
-                        key_id: sign_key_id,
-                    },
-                    KeySourceMaterial::VtaManaged { key_id: enc_key_id },
-                )
-            }
-        };
-
-        // Build the did:peer from the secrets. This REWRITES each secret's `id` to
-        // the did:peer verification-method id (`{did}#key-1` for verification,
-        // `{did}#key-2` for the key-agreement key).
-        let mut keys = vec![
-            (PeerKeyRole::Verification, &mut v_secret),
-            (PeerKeyRole::Encryption, &mut e_secret),
-        ];
-        let r_did = DID::generate_did_peer_from_secrets(&mut keys, Some(mediator.clone()))
-            .map_err(|e| anyhow::anyhow!("Failed to create relationship DID: {e}"))?;
-        drop(keys);
-
-        // Record `key_info` under the FINAL did:peer-relative secret ids (set by
-        // the call above), pairing each with its source material. This MUST run
-        // after the did:peer mint: the reload path (`Relationships::
-        // generate_profiles`) only re-registers a stored secret when its id
-        // `starts_with` the R-DID, and packs DIDComm as the R-DID using the
-        // `#key-1`/`#key-2` verification-method ids. Persisting the pre-mint
-        // placeholder ids (the historical bug) left the reloaded R-DID with no
-        // usable key-agreement secret, so mediator authentication looped forever
-        // ("sender has no usable key agreement key").
-        let key_info: Vec<(String, KeyInfoConfig)> = vec![
-            (
-                v_secret.id.clone(),
-                KeyInfoConfig {
-                    path: v_source,
-                    create_time: Utc::now(),
-                    purpose: KeyTypes::RelationshipVerification,
-                },
-            ),
-            (
-                e_secret.id.clone(),
-                KeyInfoConfig {
-                    path: e_source,
-                    create_time: Utc::now(),
-                    purpose: KeyTypes::RelationshipEncryption,
-                },
-            ),
-        ];
-
-        // Register the new R-DID listener from the just-minted secrets (the old
-        // inline path did this right after key creation; failure is non-fatal).
-        let listener_config = super::didcomm::relationship_listener_config_from_secrets(
-            &r_did,
-            remote_p_did,
-            &mediator,
-            vec![v_secret.clone(), e_secret.clone()],
-        );
-        if let Err(e) = super::didcomm::add_listener(service, &listener_config).await {
-            tracing::warn!(did = %r_did, error = %e, "failed to add R-DID listener");
-        }
-
-        // Register the secrets in the shared TDK resolver (visible to the loop's
-        // TDK — same `Arc`-backed resolver).
-        tdk.get_shared_state()
-            .secrets_resolver()
-            .insert(v_secret)
-            .await;
-        tdk.get_shared_state()
-            .secrets_resolver()
-            .insert(e_secret)
-            .await;
-
-        Ok(CreatedRDid { r_did, key_info })
-    }
-}
-
-/// Create a relationship's signing (Ed25519) + encryption (X25519) keys via the
-/// VTA and fetch their secrets, on the given (admin) session. Returns
-/// `(v_secret, e_secret, signing_key_id, encryption_key_id)`.
-async fn create_relationship_keys(
-    client: &vta_sdk::client::VtaClient,
-) -> Result<(Secret, Secret, String, String)> {
-    use vta_sdk::client::CreateKeyRequest;
-    use vta_sdk::keys::KeyType;
-
-    info!("creating Ed25519 signing key via VTA...");
-    let sign_resp = vta::vta_retry("create relationship signing key", || {
-        client.create_key(CreateKeyRequest {
-            // Absent is today's behaviour. `Some(true)` mints a
-            // non-extractable key that cannot be recovered from
-            // the mnemonic or any backup — never a default.
-            internal: None,
-            key_type: KeyType::Ed25519,
-            derivation_path: None,
-            key_id: None,
-            mnemonic: None,
-            label: Some("relationship-signing".to_string()),
-            context_id: None,
-        })
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create signing key: {e}"))?;
-    let sign_secret_resp = vta::vta_retry("get relationship signing key secret", || {
-        client.get_key_secret(&sign_resp.key_id)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to get signing key secret: {e}"))?;
-    let mut v_secret = vta_sdk::did_key::secret_from_key_response(&sign_secret_resp)
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    v_secret.id = v_secret.get_public_keymultibase()?;
-
-    info!("creating X25519 encryption key via VTA...");
-    let enc_resp = vta::vta_retry("create relationship encryption key", || {
-        client.create_key(CreateKeyRequest {
-            // Absent is today's behaviour. `Some(true)` mints a
-            // non-extractable key that cannot be recovered from
-            // the mnemonic or any backup — never a default.
-            internal: None,
-            key_type: KeyType::X25519,
-            derivation_path: None,
-            key_id: None,
-            mnemonic: None,
-            label: Some("relationship-encryption".to_string()),
-            context_id: None,
-        })
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create encryption key: {e}"))?;
-    let enc_secret_resp = vta::vta_retry("get relationship encryption key secret", || {
-        client.get_key_secret(&enc_resp.key_id)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to get encryption key secret: {e}"))?;
-    let mut e_secret = vta_sdk::did_key::secret_from_key_response(&enc_secret_resp)
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    e_secret.id = e_secret.get_public_keymultibase()?;
-
-    Ok((v_secret, e_secret, sign_resp.key_id, enc_resp.key_id))
 }
 
 /// Insert a brand-new contact for `did` with `alias`, mirroring the insert tail
@@ -400,23 +109,6 @@ async fn create_request_message(
     Ok(msg)
 }
 
-/// The key that proves control of `our_did` for a handshake: the persona's own
-/// authentication key when `our_did` is the persona, else the R-DID's signing
-/// key from the TDK's resolver.
-pub(crate) async fn relationship_did_signer(
-    tdk: &TDK,
-    our_did: &str,
-    persona_did: &str,
-    persona_auth: &Secret,
-) -> Result<Secret> {
-    if our_did == persona_did {
-        return Ok(persona_auth.clone());
-    }
-    openvtc_core::relationships::relationship_signing_secret(tdk, our_did)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("the relationship DID's signing key is not loaded"))
-}
-
 // ============================================================
 // State-handler dispatch wrappers
 // ============================================================
@@ -479,7 +171,7 @@ pub(crate) struct CreateJob {
     tdk: TDK,
     service: Messaging,
     /// `Some` ⇒ mint an R-DID first; `None` ⇒ use the persona DID directly.
-    rdid_plan: Option<RDidPlan>,
+    rdid_plan: Option<openvtc_core::relationships::keys::RDidPlan>,
     /// Our persona DID (message `from`, and the listener the request is sent via).
     persona_did: Arc<String>,
     /// The persona's authentication key, which signs the DID binding.
@@ -566,8 +258,13 @@ impl CreateJob {
         // 2. Build + send the request via the persona listener (handshake uses
         //    persona DIDs for routing; the R-DID is carried in the body).
         let msg = match async {
-            let did_signer =
-                relationship_did_signer(&tdk, &our_did, &persona_did, &persona_auth).await?;
+            let did_signer = openvtc_core::relationships::keys::relationship_did_signer(
+                &tdk,
+                &our_did,
+                &persona_did,
+                &persona_auth,
+            )
+            .await?;
             create_request_message(
                 &msg_id,
                 &persona_did,
@@ -1269,7 +966,9 @@ async fn prepare_submit(
     // mutation; the VTA round-trip / derivation runs in the task).
     let rdid_plan = if generate_r_did {
         let mediator = config.mediator_did().to_string();
-        Some(plan_relationship_did(config, &mediator, admin_vta)?)
+        Some(openvtc_core::relationships::keys::plan_relationship_did(
+            config, &mediator, admin_vta,
+        )?)
     } else {
         None
     };
@@ -1783,6 +1482,7 @@ mod tests {
 
     use super::*;
     use crate::state_handler::dispatch_util::test_config;
+    use openvtc_core::config::{KeyTypes, secured_config::KeySourceMaterial};
 
     /// Build a relationship record (persona DID used as our_did, so it is *not*
     /// an R-DID) and register it in `config`. Returns the shared Arc.
