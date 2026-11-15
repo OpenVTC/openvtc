@@ -90,7 +90,11 @@ cargo clippy --workspace --all-targets -- -D warnings
    cargo fmt --all --check
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
+   cargo test --workspace -- --ignored   # the e2e suites (in-process mediator / VTA)
    ```
+   A test is `#[ignore]`d only because it is slow or boots an in-process
+   service, never because it is flaky or broken, and its `ignore = "…"` reason
+   says which. CI's `test-ignored` job runs every one of them and gates the PR.
 4. **Open the PR** with a clear title and description summarizing the change
 5. **Link related issues** using `Closes #123` or `Fixes #123` in the PR body
 6. **Respond to review feedback** promptly

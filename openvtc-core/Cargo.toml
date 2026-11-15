@@ -69,7 +69,6 @@ affinidi-messaging-sdk = { workspace = true }
 futures-util = { workspace = true }
 agent-names.workspace = true
 base64.workspace = true
-bip39.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 didwebvh-rs.workspace = true
@@ -108,6 +107,8 @@ byteorder = { workspace = true, optional = true }
 trust-tasks-build.workspace = true
 
 [dev-dependencies]
+# Mnemonic fixtures in the BIP32 tests.
+bip39.workspace = true
 # Scratch directories for the git-workspace tests (a real clone, read back).
 tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }
