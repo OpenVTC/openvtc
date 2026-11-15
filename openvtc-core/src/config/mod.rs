@@ -625,13 +625,19 @@ impl Config {
     }
 
     /// Record a verified agent-name lookup (positive or negative) for `did`,
-    /// stamped `now`. Overwrites any prior entry.
+    /// stamped `now`. Overwrites any prior entry, and clears a mark that the
+    /// entry arrived by sync unverified.
+    ///
+    /// Only a name that went through the full round-trip
+    /// ([`crate::agent_name::resolve_verified_name`] or the background sweep)
+    /// may be passed here.
     pub fn set_cached_agent_name(
         &mut self,
         did: &str,
         name: Option<String>,
         now: chrono::DateTime<chrono::Utc>,
     ) {
+        self.private.agent_names_unverified.remove(did);
         self.private.agent_names.insert(
             did.to_string(),
             crate::agent_name::CachedAgentName {
@@ -639,6 +645,14 @@ impl Config {
                 checked_at: now,
             },
         );
+    }
+
+    /// Drop the cached agent name for `did`, so the next background sweep
+    /// treats it as uncached and verifies it afresh. Returns whether an entry
+    /// was removed.
+    pub fn forget_cached_agent_name(&mut self, did: &str) -> bool {
+        self.private.agent_names_unverified.remove(did);
+        self.private.agent_names.remove(did).is_some()
     }
 
     /// Every DID the UI displays that needs an agent-name lookup — those with no
@@ -688,10 +702,12 @@ impl Config {
         }
         dids.into_iter()
             .filter(|did| {
-                self.private
-                    .agent_names
-                    .get(did)
-                    .is_none_or(|cached| cached.is_stale(now))
+                self.private.agent_names_unverified.contains(did)
+                    || self
+                        .private
+                        .agent_names
+                        .get(did)
+                        .is_none_or(|cached| cached.is_stale(now))
             })
             .collect()
     }
@@ -962,6 +978,29 @@ impl std::fmt::Debug for RuntimeVtaConnect {
 /// DIDComm, which is exactly where it was before.
 const TSP_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The resolver the transport-discovery helpers below share.
+///
+/// One for the process, so its document cache is actually used: these run on
+/// every TSP community send and on the 60 s polls, and a resolver built per
+/// call always started cold — a full did:webvh resolve each time. The
+/// resolver's own TTL provides the freshness discovery wants (a VTC that gains
+/// or loses `#tsp` is still picked up without a restart). Local mode only, so
+/// it holds no task tied to the runtime that created it.
+async fn discovery_resolver()
+-> Result<&'static affinidi_did_resolver_cache_sdk::DIDCacheClient, String> {
+    static RESOLVER: tokio::sync::OnceCell<affinidi_did_resolver_cache_sdk::DIDCacheClient> =
+        tokio::sync::OnceCell::const_new();
+    RESOLVER
+        .get_or_try_init(|| async {
+            affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
+                affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
+            )
+            .await
+            .map_err(|e| e.to_string())
+        })
+        .await
+}
+
 /// Move the Trust-Task surface onto TSP when the VTA advertises `#tsp`.
 ///
 /// Only the **trust-task** surface moves. `rpc`/`rpc_void` — key management,
@@ -982,18 +1021,14 @@ const TSP_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// degrade silently to the previous behaviour rather than failing a startup that
 /// would otherwise have succeeded.
 async fn enable_tsp_if_advertised(client: &mut vta_sdk::client::VtaClient, vta_did: &str) {
-    let resolver = match affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
-        affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
-    )
-    .await
-    {
+    let resolver = match discovery_resolver().await {
         Ok(resolver) => resolver,
         Err(e) => {
             tracing::debug!("TSP discovery resolver init failed ({e}); staying on DIDComm");
             return;
         }
     };
-    enable_tsp_with_resolver(client, vta_did, &resolver).await;
+    enable_tsp_with_resolver(client, vta_did, resolver).await;
 }
 
 /// The TSP mediator `peer_did` advertises, if any — for a **VTC**, not the VTA.
@@ -1010,14 +1045,10 @@ async fn enable_tsp_if_advertised(client: &mut vta_sdk::client::VtaClient, vta_d
 /// unlike the VTA panel there is nothing here to render it into.
 ///
 /// Discovery is deliberately per-send rather than cached on the community: the
-/// resolver caches the document, so a repeat is cheap, and a VTC that gains or
-/// loses `#tsp` is picked up without a restart or a migration.
+/// shared resolver caches the document, so a repeat is cheap, and a VTC that
+/// gains or loses `#tsp` is picked up without a restart or a migration.
 pub async fn peer_tsp_mediator(peer_did: &str) -> Option<String> {
-    let resolver = match affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
-        affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
-    )
-    .await
-    {
+    let resolver = match discovery_resolver().await {
         Ok(resolver) => resolver,
         Err(e) => {
             tracing::debug!(
@@ -1027,7 +1058,7 @@ pub async fn peer_tsp_mediator(peer_did: &str) -> Option<String> {
             return None;
         }
     };
-    match discover_tsp_mediator(peer_did, &resolver).await {
+    match discover_tsp_mediator(peer_did, resolver).await {
         TspDiscovery::Advertised(mediator) => {
             tracing::info!(
                 peer = %peer_did,
@@ -1097,11 +1128,7 @@ impl PeerTransports {
 /// and is the peer's defect to fix, not ours to work around. What this buys is
 /// refusing the genuinely impossible case (a peer advertising nothing) early.
 pub async fn peer_messaging_transports(peer_did: &str) -> PeerTransports {
-    let Ok(resolver) = affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
-        affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
-    )
-    .await
-    else {
+    let Ok(resolver) = discovery_resolver().await else {
         // Resolver init failure is not "the peer offers nothing" — say nothing
         // rather than block a join on a local fault.
         tracing::debug!(peer = %peer_did, "transport discovery resolver init failed");
@@ -1113,7 +1140,7 @@ pub async fn peer_messaging_transports(peer_did: &str) -> PeerTransports {
 
     match tokio::time::timeout(
         TSP_DISCOVERY_TIMEOUT,
-        vta_sdk::provision_client::resolve_vta_with_resolver(peer_did, &resolver),
+        vta_sdk::provision_client::resolve_vta_with_resolver(peer_did, resolver),
     )
     .await
     {
@@ -1215,11 +1242,7 @@ pub async fn our_mediator_carries_tsp(mediator_did: &str) -> Option<bool> {
     if mediator_did.is_empty() {
         return None;
     }
-    let resolver = match affinidi_did_resolver_cache_sdk::DIDCacheClient::new(
-        affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
-    )
-    .await
-    {
+    let resolver = match discovery_resolver().await {
         Ok(resolver) => resolver,
         Err(e) => {
             tracing::debug!(
@@ -1229,7 +1252,7 @@ pub async fn our_mediator_carries_tsp(mediator_did: &str) -> Option<bool> {
             return None;
         }
     };
-    match mediator_tsp_carriage(mediator_did, &resolver).await {
+    match mediator_tsp_carriage(mediator_did, resolver).await {
         TspCarriage::Serves => Some(true),
         TspCarriage::Absent => {
             tracing::debug!(

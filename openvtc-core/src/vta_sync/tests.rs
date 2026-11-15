@@ -877,3 +877,31 @@ async fn a_received_vrc_pulled_live_is_filed_under_the_relationship_key() {
         Some(1)
     );
 }
+
+/// A name another device verified arrives in the cache but is not shown here
+/// until this device's own sweep has verified it (#571). The synced entry is
+/// kept as it arrived, so it projects to the same record and is not pushed back.
+#[test]
+fn a_synced_agent_name_is_not_shown_until_verified_here() {
+    use crate::agent_name::CachedAgentName;
+
+    let did = "did:webvh:QmA:example.com:alice";
+    let entry = CachedAgentName {
+        name: Some("example.com/@alice".to_string()),
+        checked_at: Utc::now(),
+    };
+    let value = serde_json::json!({ "did": did, "entry": serde_json::to_value(&entry).unwrap() });
+    let key = records::simple_key(RecordKind::AgentName, did);
+
+    let mut d = Device::default();
+    {
+        let (mut parts, _) = d.parts();
+        records::apply(&mut parts, &key, Some(&value)).unwrap();
+    }
+    assert_eq!(d.private.cached_agent_name(did), None);
+    assert!(d.private.agent_names_unverified.contains(did));
+
+    // Unchanged by the apply, so nothing to push back.
+    let (parts, _) = d.parts();
+    assert_eq!(records::project(&parts.view()).get(&key), Some(&value));
+}

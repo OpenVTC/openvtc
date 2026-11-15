@@ -219,6 +219,30 @@ pub struct FetchedManifest {
     pub meta: Vec<CriterionMeta>,
 }
 
+/// The client for manifest fetches under `policy`, built once per policy and
+/// reused, so repeated fetches share connections and TLS setup (R1.2).
+fn manifest_client(policy: ProbePolicy) -> Result<reqwest::Client, String> {
+    static PUBLIC_ONLY: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    static ALLOW_PRIVATE: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let cell = match policy {
+        ProbePolicy::PublicOnly => &PUBLIC_ONLY,
+        ProbePolicy::AllowPrivate => &ALLOW_PRIVATE,
+    };
+    if let Some(client) = cell.get() {
+        return Ok(client.clone());
+    }
+    let mut builder = reqwest::Client::builder()
+        .timeout(FETCH_TIMEOUT)
+        .connect_timeout(FETCH_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if policy == ProbePolicy::PublicOnly {
+        builder = builder.dns_resolver(affinidi_did_web::guarded_dns_resolver());
+    }
+    let client = builder.build().map_err(|e| e.to_string())?;
+    Ok(cell.get_or_init(|| client).clone())
+}
+
 /// Read `community_did`'s join manifest (`manifest/0.4`).
 pub async fn fetch_manifest(
     doc: &Value,
@@ -230,17 +254,7 @@ pub async fn fetch_manifest(
     let endpoint = rest_endpoint(doc).ok_or(DiscoverError::NoEndpoint)?;
     let url = trust_tasks_url(&endpoint, policy)?;
 
-    let mut builder = reqwest::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .connect_timeout(FETCH_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy();
-    if policy == ProbePolicy::PublicOnly {
-        builder = builder.dns_resolver(affinidi_did_web::guarded_dns_resolver());
-    }
-    let client = builder
-        .build()
-        .map_err(|e| DiscoverError::Blocked(e.to_string()))?;
+    let client = manifest_client(policy).map_err(DiscoverError::Blocked)?;
 
     let response = client
         .post(url)
@@ -250,10 +264,19 @@ pub async fn fetch_manifest(
         .map_err(|e| DiscoverError::Unreachable(e.to_string()))?;
 
     let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| DiscoverError::Unreachable(e.to_string()))?;
+    // Read before the proof is checked — before anything about this endpoint
+    // is trusted — so the size is capped.
+    let body =
+        crate::foreign_http::read_text_capped(response, crate::foreign_http::MAX_FOREIGN_ANSWER)
+            .await
+            .map_err(|e| match e {
+                crate::foreign_http::CappedRead::TooLarge { .. } => {
+                    DiscoverError::Unreadable(e.to_string())
+                }
+                crate::foreign_http::CappedRead::Read(_) => {
+                    DiscoverError::Unreachable(e.to_string())
+                }
+            })?;
     if !status.is_success() {
         let (code, detail) = refusal_detail(&body);
         return Err(DiscoverError::Refused {
