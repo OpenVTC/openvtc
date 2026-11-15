@@ -39,6 +39,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The UI says *community* for a community and *VTC* only for the service behind it**
+  ([#554](https://github.com/OpenVTC/openvtc/issues/554)), as the README's glossary has
+  it: the Communities and TSP panels label the community's DID "community", and the CLI
+  help asks for "the community's DID".
 - **Every vetting, repos, rooms and elections view, and every overlay, takes exactly
   the keys its footer lists** ([#580](https://github.com/OpenVTC/openvtc/issues/580)).
   Vetting forms take Tab/↑/↓ only where there is another field, ←/→ only on a choice and

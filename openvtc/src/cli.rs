@@ -96,7 +96,7 @@ pub fn cli() -> Command {
                         .value_name("DID")
                         .action(clap::ArgAction::Append)
                         .help(
-                            "A community VTC DID to include. Repeatable. Communities \
+                            "A community's DID to include. Repeatable. Communities \
                              already in the account are included automatically; use this \
                              to check one before joining, or when the account cannot be \
                              loaded.",

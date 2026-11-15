@@ -273,7 +273,7 @@ fn match_community(active: &[(&str, &str)], wanted: Option<&str>) -> Result<usiz
         [i] => Ok(*i),
         [] => Err(format!("no community '{wanted}'. Communities:{}", names())),
         _ => Err(format!(
-            "more than one community is called '{wanted}'; name it by VTC DID. Communities:{}",
+            "more than one community is called '{wanted}'; name it by its DID. Communities:{}",
             names()
         )),
     }

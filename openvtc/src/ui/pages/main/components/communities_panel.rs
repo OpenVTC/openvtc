@@ -290,7 +290,7 @@ pub fn render(
                 .into_owned(),
             ));
             lines.push(kv(
-                "VTC:",
+                "Community:",
                 openvtc_core::display::display_identifier(
                     c.vtc_agent_name.as_deref(),
                     &c.vtc_did,

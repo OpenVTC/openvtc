@@ -90,14 +90,14 @@ pub fn render(state: &TspRelationshipsState, panel_focused: bool) -> Vec<Line<'s
             Span::styled(row.state.clone(), Style::new().fg(state_color).bold()),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("      VTC:     ", label_style),
+            Span::styled("      community: ", label_style),
             Span::styled(
                 truncate_did_centered(&row.vtc_did, DID_WIDTH).into_owned(),
                 Style::new().fg(COLOR_SOFT_PURPLE),
             ),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("      persona: ", label_style),
+            Span::styled("      persona:   ", label_style),
             Span::styled(
                 truncate_did_centered(&row.persona_did, DID_WIDTH).into_owned(),
                 Style::new().fg(COLOR_SOFT_PURPLE),
