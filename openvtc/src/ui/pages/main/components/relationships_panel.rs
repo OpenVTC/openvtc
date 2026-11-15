@@ -12,8 +12,8 @@ use crate::state_handler::{
     main_page::content::{ContentPanelState, RelationshipsMode, RelationshipsState},
     state::ConnectionState,
 };
+use crate::ui::pages::main::MainPage;
 use crate::ui::pages::main::keymap::{self, k};
-use crate::ui::pages::main::{MainPage, edit_text};
 use crossterm::event::{KeyCode, KeyEvent};
 use openvtc_core::config::account::RelationshipIdentifierDefault;
 use openvtc_core::display::display_identifier;
@@ -473,11 +473,13 @@ fn render_edit_alias(
         Span::styled(rel.remote_p_did.clone(), Style::new().fg(COLOR_SOFT_PURPLE)),
     ]));
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("▸ Alias: ", Style::new().fg(COLOR_SUCCESS)),
-        Span::styled(alias_input.to_string(), Style::new().fg(COLOR_SOFT_PURPLE)),
-        Span::styled("▎", Style::new().fg(COLOR_SUCCESS)),
-    ]));
+    let mut alias = vec![Span::styled("▸ Alias: ", Style::new().fg(COLOR_SUCCESS))];
+    alias.extend(crate::ui::pages::main::text_input::cursor_spans(
+        alias_input,
+        true,
+        Style::new().fg(COLOR_SOFT_PURPLE),
+    ));
+    lines.push(Line::from(alias));
     lines.push(Line::from(""));
     keymap::footer(
         &mut lines,
@@ -526,14 +528,16 @@ fn render_witness(
         Span::styled(name, Style::new().fg(COLOR_SOFT_PURPLE)),
     ]));
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("▸ Witness: ", Style::new().fg(COLOR_SUCCESS)),
-        Span::styled(
-            witness_input.to_string(),
-            Style::new().fg(COLOR_SOFT_PURPLE),
-        ),
-        Span::styled("▎", Style::new().fg(COLOR_SUCCESS)),
-    ]));
+    lines.push(Line::from(
+        vec![Span::styled("▸ Witness: ", Style::new().fg(COLOR_SUCCESS))]
+            .into_iter()
+            .chain(crate::ui::pages::main::text_input::cursor_spans(
+                witness_input,
+                true,
+                Style::new().fg(COLOR_SOFT_PURPLE),
+            ))
+            .collect::<Vec<_>>(),
+    ));
     lines.push(Line::from(""));
     for text in [
         "  Your VTA presents the relationship credential you issued to the witness, which",
@@ -613,7 +617,6 @@ fn render_form(
 
     for (i, (label, value)) in fields.iter().enumerate() {
         let is_active = i == active_field;
-        let cursor = if is_active { "▎" } else { "" };
         let field_style = if is_active {
             Style::new().fg(COLOR_SUCCESS)
         } else {
@@ -625,12 +628,19 @@ fn render_form(
             Style::new().fg(COLOR_DARK_GRAY)
         };
 
-        lines.push(Line::from(vec![
-            Span::styled(if is_active { "▸ " } else { "  " }, field_style),
-            Span::styled(label.to_string(), field_style),
-            Span::styled(value.to_string(), value_style),
-            Span::styled(cursor, Style::new().fg(COLOR_SUCCESS)),
-        ]));
+        lines.push(Line::from(
+            vec![
+                Span::styled(if is_active { "▸ " } else { "  " }, field_style),
+                Span::styled(label.to_string(), field_style),
+            ]
+            .into_iter()
+            .chain(crate::ui::pages::main::text_input::cursor_spans(
+                value,
+                is_active,
+                value_style,
+            ))
+            .collect::<Vec<_>>(),
+        ));
     }
 
     // R-DID toggle (field index 3)
@@ -811,25 +821,6 @@ impl MainPage {
                         ));
                         true
                     }
-                    code if active_field < 3 => {
-                        let current = match active_field {
-                            0 => did_input,
-                            1 => alias_input,
-                            _ => reason_input,
-                        };
-                        match edit_text(code, current) {
-                            Some(value) => {
-                                let _ = self.action_tx.send(Action::Relationship(
-                                    RelationshipAction::InputUpdate {
-                                        field: active_field,
-                                        value,
-                                    },
-                                ));
-                                true
-                            }
-                            None => false,
-                        }
-                    }
                     _ => false,
                 }
             }
@@ -987,15 +978,8 @@ impl MainPage {
                         ));
                         true
                     }
-                    code => match edit_text(code, witness_input) {
-                        Some(value) => {
-                            let _ = self.action_tx.send(Action::Relationship(
-                                RelationshipAction::WitnessInputUpdate(value),
-                            ));
-                            true
-                        }
-                        None => false,
-                    },
+                    // Typing is the field's (`text_input`).
+                    _ => false,
                 }
             }
             RelationshipsMode::EditAlias { index, alias_input } => {
@@ -1018,15 +1002,8 @@ impl MainPage {
                         }
                         true
                     }
-                    code => match edit_text(code, alias_input) {
-                        Some(value) => {
-                            let _ = self.action_tx.send(Action::Relationship(
-                                RelationshipAction::EditAliasUpdate(value),
-                            ));
-                            true
-                        }
-                        None => false,
-                    },
+                    // Typing is the field's (`text_input`).
+                    _ => false,
                 }
             }
             RelationshipsMode::List => {

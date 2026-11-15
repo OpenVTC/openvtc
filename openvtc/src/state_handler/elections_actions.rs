@@ -140,6 +140,11 @@ pub(crate) fn reduce(state: &mut State, action: &Act) -> bool {
                 f.type_char(s.manifest(), *c);
             }
         }
+        Act::BallotText(text) => {
+            if let (Some(f), Some(s)) = (view.form.as_mut(), view.shown.as_ref()) {
+                f.set_text(s.manifest(), text);
+            }
+        }
         Act::BallotBackspace => {
             if let Some(f) = view.form.as_mut() {
                 f.backspace();

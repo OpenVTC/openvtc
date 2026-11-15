@@ -566,6 +566,8 @@ pub enum ElectionsAction {
     BallotAdjust(i64),
     /// Ballot: a character typed into a text answer.
     BallotChar(char),
+    /// Ballot: the focused text answer, as edited (cursor editing, paste).
+    BallotText(String),
     /// Ballot: delete the last character of a text answer.
     BallotBackspace,
     /// Ballot: leave the focused (optional) question blank, or answer it again.

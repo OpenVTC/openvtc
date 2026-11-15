@@ -15,9 +15,9 @@ use crate::state_handler::{
     },
     state::ConnectionState,
 };
+use crate::ui::pages::main::MainPage;
 use crate::ui::pages::main::keymap::{self, k};
-use crate::ui::pages::main::{MainPage, edit_text};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     style::{Style, Stylize},
     text::{Line, Span},
@@ -628,11 +628,16 @@ fn render_edit(label: &str, input: &str) -> Vec<Line<'static>> {
             .fg(COLOR_SUCCESS)
             .bold(),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(input.to_string(), Style::new().fg(COLOR_SOFT_PURPLE)),
-            Span::styled("▎", Style::new().fg(COLOR_SUCCESS)),
-        ]),
+        Line::from(
+            vec![Span::styled("  ", Style::default())]
+                .into_iter()
+                .chain(crate::ui::pages::main::text_input::cursor_spans(
+                    input,
+                    true,
+                    Style::new().fg(COLOR_SOFT_PURPLE),
+                ))
+                .collect::<Vec<_>>(),
+        ),
         Line::from(""),
     ];
     keymap::footer(
@@ -671,15 +676,19 @@ fn render_export_form(
     } else {
         Style::new().fg(COLOR_TEXT_DEFAULT)
     };
-    lines.push(Line::from(vec![
-        Span::styled(if path_active { "▸ " } else { "  " }, path_style),
-        Span::styled("File path:  ", path_style),
-        Span::styled(path_input.to_string(), Style::new().fg(COLOR_SOFT_PURPLE)),
-        Span::styled(
-            if path_active { "▎" } else { "" },
-            Style::new().fg(COLOR_SUCCESS),
-        ),
-    ]));
+    lines.push(Line::from(
+        vec![
+            Span::styled(if path_active { "▸ " } else { "  " }, path_style),
+            Span::styled("File path:  ", path_style),
+        ]
+        .into_iter()
+        .chain(crate::ui::pages::main::text_input::cursor_spans(
+            path_input,
+            path_active,
+            Style::new().fg(COLOR_SOFT_PURPLE),
+        ))
+        .collect::<Vec<_>>(),
+    ));
 
     // Passphrase field (index 1) — display masked length only
     let pass_active = active_field == 1;
@@ -953,15 +962,8 @@ impl MainPage {
                             }));
                         true
                     }
-                    code => match edit_text(code, &current) {
-                        Some(v) => {
-                            let _ = self
-                                .action_tx
-                                .send(Action::Settings(SettingsAction::FieldUpdate(v)));
-                            true
-                        }
-                        None => false,
-                    },
+                    // Typing is the field's (`text_input`).
+                    _ => false,
                 }
             }
             SettingsMode::ExportConfig {
@@ -1082,7 +1084,11 @@ impl MainPage {
                             KeyCode::Backspace => {
                                 buffer.pop();
                             }
-                            KeyCode::Char(c) => {
+                            KeyCode::Char(c)
+                                if !key
+                                    .modifiers
+                                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                            {
                                 buffer.push(c);
                             }
                             _ => return false,
@@ -1227,22 +1233,18 @@ impl MainPage {
                 true
             }
             #[cfg(feature = "openpgp-card")]
-            SettingsMode::TokenResetConfirm { confirm_input, .. } => {
-                let current = confirm_input.clone();
+            SettingsMode::TokenResetConfirm { .. } => {
                 let action = match key.code {
                     // Back to the token screen — nothing is erased.
                     KeyCode::Esc => SettingsAction::TokenManagement,
                     KeyCode::Enter => SettingsAction::TokenFactoryReset,
-                    code => match edit_text(code, &current) {
-                        Some(next) => SettingsAction::TokenFactoryResetInput(next),
-                        None => return false,
-                    },
+                    // Typing is the field's (`text_input`).
+                    _ => return false,
                 };
                 let _ = self.action_tx.send(Action::Settings(action));
                 true
             }
-            SettingsMode::WipeConfirm { confirm_input } => {
-                let current = confirm_input.clone();
+            SettingsMode::WipeConfirm { .. } => {
                 match key.code {
                     KeyCode::Esc => {
                         // Drop back to the Settings list — wipe is cancelled.
@@ -1257,15 +1259,8 @@ impl MainPage {
                             .send(Action::Settings(SettingsAction::WipeProfileConfirm));
                         true
                     }
-                    code => match edit_text(code, &current) {
-                        Some(next) => {
-                            let _ = self
-                                .action_tx
-                                .send(Action::Settings(SettingsAction::WipeProfileInput(next)));
-                            true
-                        }
-                        None => false,
-                    },
+                    // Typing is the field's (`text_input`).
+                    _ => false,
                 }
             }
         }
@@ -1331,15 +1326,8 @@ impl MainPage {
             }
             code => {
                 if active == 0 {
-                    match edit_text(code, &path) {
-                        Some(value) => {
-                            let _ = self.action_tx.send(Action::Settings(
-                                SettingsAction::FormFieldUpdate { field: 0, value },
-                            ));
-                            true
-                        }
-                        None => false,
-                    }
+                    // Typing is the field's (`text_input`).
+                    false
                 } else {
                     let buffer = if active == 1 {
                         &mut self.passphrase_buffer
@@ -1350,7 +1338,11 @@ impl MainPage {
                         KeyCode::Backspace => {
                             buffer.pop();
                         }
-                        KeyCode::Char(c) => {
+                        KeyCode::Char(c)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
                             buffer.push(c);
                         }
                         _ => return false,

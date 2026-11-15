@@ -1422,16 +1422,20 @@ fn field_label(lines: &mut Vec<Line<'static>>, label: &str, focused: bool) {
 }
 
 fn input(lines: &mut Vec<Line<'static>>, value: &str, focused: bool, placeholder: &str) {
-    let shown = if value.is_empty() {
-        dim(placeholder.to_string())
+    let mut spans = vec![Span::raw("        ")];
+    if value.is_empty() {
+        if focused {
+            spans.push(Span::raw("▏"));
+        }
+        spans.push(dim(placeholder.to_string()));
     } else {
-        text(value.to_string())
-    };
-    lines.push(Line::from(vec![
-        Span::raw("        "),
-        shown,
-        Span::raw(if focused { "▏" } else { "" }),
-    ]));
+        spans.extend(crate::ui::pages::main::text_input::cursor_spans(
+            value,
+            focused,
+            text(String::new()).style,
+        ));
+    }
+    lines.push(Line::from(spans));
 }
 
 fn render_add(lines: &mut Vec<Line<'static>>, view: &ReposView, form: &AddPersonForm) {

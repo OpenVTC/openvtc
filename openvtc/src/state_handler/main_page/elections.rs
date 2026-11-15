@@ -341,6 +341,35 @@ impl BallotForm {
         self.error = None;
     }
 
+    /// The focused text answer as edited, cut to its length; control
+    /// characters are dropped.
+    pub fn set_text(&mut self, manifest: &Manifest, value: &str) {
+        let Some(Question::Text { max_length, .. }) = self.focused(manifest) else {
+            return;
+        };
+        let max = usize::try_from(max_length.get()).unwrap_or(usize::MAX);
+        if let Some((_, AnswerDraft::Text(text), abstain)) =
+            self.draft.answers.get_mut(self.question)
+        {
+            *text = value
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(max)
+                .collect();
+            *abstain = false;
+        }
+        self.error = None;
+    }
+
+    /// The focused text answer, if the focused question takes text.
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        match self.draft.answers.get(self.question) {
+            Some((_, AnswerDraft::Text(text), _)) => Some(text),
+            _ => None,
+        }
+    }
+
     pub fn backspace(&mut self) {
         if let Some((_, AnswerDraft::Text(text), _)) = self.draft.answers.get_mut(self.question) {
             text.pop();

@@ -72,16 +72,10 @@ impl Binding {
     }
 }
 
-/// Whether `key` is a keystroke a text field takes: a character without Ctrl
-/// or Alt, or Backspace.
+/// Whether `key` is a keystroke a text field takes: a character, Backspace/Del,
+/// ←/→, Home/End, or an editing chord (see `text_input`).
 pub(crate) fn is_text_edit(key: &KeyEvent) -> bool {
-    match key.code {
-        KeyCode::Char(_) => !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
-        KeyCode::Backspace => true,
-        _ => false,
-    }
+    super::text_input::is_edit_key(key)
 }
 
 /// Parse a key label into the keys it stands for. Alternatives are separated
@@ -354,7 +348,8 @@ mod tests {
         let t = k(TYPE, "edit");
         assert!(t.matches(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
         assert!(t.matches(&KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT)));
-        assert!(!t.matches(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)));
+        assert!(t.matches(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
+        assert!(!t.matches(&KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)));
         assert!(!t.matches(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
     }
 }

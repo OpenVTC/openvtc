@@ -378,3 +378,85 @@ fn community_sub_views_keys_are_exactly_their_footers() {
         );
     }
 }
+
+// ----- One text-input behaviour (#578) ----------------------------------
+
+fn alias_form(s: &mut State) {
+    s.main_page.content_panel.relationships.relationships = three(rel_summary);
+    s.main_page.content_panel.relationships.mode = RelationshipsMode::EditAlias {
+        index: 0,
+        alias_input: "Al".into(),
+    };
+}
+
+fn alias_sent(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Action>) -> Option<String> {
+    let mut last = None;
+    while let Ok(action) = rx.try_recv() {
+        if let Action::Relationship(
+            crate::state_handler::actions::RelationshipAction::EditAliasUpdate(v),
+        ) = action
+        {
+            last = Some(v);
+        }
+    }
+    last
+}
+
+/// ← moves the cursor inside the field, and typing inserts there.
+#[test]
+fn arrows_move_the_cursor_and_typing_inserts_at_it() {
+    let (mut page, mut rx) = page_for(MainMenu::Relationships, alias_form);
+    let _ = advertised(&page);
+    page.handle_key_event(press(KeyCode::Left));
+    assert_eq!(alias_sent(&mut rx), None, "a move sends nothing");
+    page.handle_key_event(press(KeyCode::Char('x')));
+    assert_eq!(alias_sent(&mut rx).as_deref(), Some("Axl"));
+}
+
+/// A paste lands at the cursor, as typing does.
+#[test]
+fn a_paste_is_inserted_at_the_cursor() {
+    let (mut page, mut rx) = page_for(MainMenu::Relationships, alias_form);
+    let _ = advertised(&page);
+    page.handle_key_event(press(KeyCode::Home));
+    page.handle_paste_event("Big");
+    assert_eq!(alias_sent(&mut rx).as_deref(), Some("BigAl"));
+}
+
+/// A Ctrl chord edits or does nothing; it never types its letter.
+#[test]
+fn ctrl_chords_never_type_their_letter() {
+    let (mut page, mut rx) = page_for(MainMenu::Relationships, alias_form);
+    let _ = advertised(&page);
+    page.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    assert_eq!(
+        alias_sent(&mut rx).as_deref(),
+        Some(""),
+        "Ctrl+U clears the line"
+    );
+    let (mut page, mut rx) = page_for(MainMenu::Relationships, alias_form);
+    let _ = advertised(&page);
+    page.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    assert_eq!(alias_sent(&mut rx), None, "Ctrl+T is not a letter");
+}
+
+/// The cursor is drawn where it is.
+#[test]
+fn the_cursor_is_drawn_in_the_field() {
+    let (mut page, _rx) = page_for(MainMenu::Relationships, alias_form);
+    let _ = advertised(&page);
+    page.handle_key_event(press(KeyCode::Left));
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut terminal = Terminal::new(TestBackend::new(140, 60)).expect("test terminal");
+    terminal
+        .draw(|frame| page.render(frame, ()))
+        .expect("render");
+    let drawn: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+    assert!(drawn.contains("A▏l"), "{drawn}");
+}

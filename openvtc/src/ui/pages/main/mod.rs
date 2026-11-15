@@ -4,7 +4,7 @@ use crate::colors::{
 };
 use crate::{
     state_handler::{
-        actions::{Action, CredentialAction, RelationshipAction, SettingsAction},
+        actions::{Action, SettingsAction},
         main_page::{MainPageState, MainPanel, menu::MainMenu},
         state::{ConnectionState, MediatorStatus, State},
     },
@@ -33,6 +33,7 @@ pub(crate) mod keymap;
 #[cfg(test)]
 mod keymap_tests;
 mod secret_buffer;
+pub(crate) mod text_input;
 
 use secret_buffer::SecretBuffer;
 
@@ -70,6 +71,9 @@ pub struct MainPage {
     /// One line of feedback for a key that did nothing, shown in the footer
     /// row until the next key.
     key_feedback: Option<String>,
+    /// The focused text field's cursor: the field, the text it held after
+    /// the last edit, and the cursor (in characters). See [`text_input`].
+    field_cursor: Option<(String, String, usize)>,
 }
 
 /// Number of lines to scroll per PageUp / PageDown press.
@@ -108,6 +112,7 @@ impl Component for MainPage {
             panel_keys: std::cell::RefCell::new(Vec::new()),
             help_open: false,
             key_feedback: None,
+            field_cursor: None,
         }
         .move_with_state(state)
     }
@@ -234,9 +239,7 @@ impl Component for MainPage {
     }
 
     fn handle_paste_event(&mut self, text: &str) {
-        use crate::state_handler::main_page::content::{
-            CredentialsMode, RelationshipsMode, SettingsMode,
-        };
+        use crate::state_handler::main_page::content::SettingsMode;
 
         // The add-VIC overlay owns paste while open — the operator pastes the VIC
         // JSON straight into the import field (checked before the panel guard).
@@ -254,98 +257,33 @@ impl Component for MainPage {
         let menu = self.props.main_page.menu_panel.selected_menu.clone();
         let trimmed = text.trim();
 
-        match menu {
-            MainMenu::Relationships => {
-                if let RelationshipsMode::EditAlias { alias_input, .. } =
-                    &self.props.main_page.content_panel.relationships.mode
-                {
-                    let updated = format!("{}{}", alias_input, trimmed);
-                    let _ = self.action_tx.send(Action::Relationship(
-                        RelationshipAction::EditAliasUpdate(updated),
-                    ));
-                    return;
-                }
-                if let RelationshipsMode::NewRequest {
-                    did_input,
-                    alias_input,
-                    reason_input,
-                    active_field,
-                    ..
-                } = &self.props.main_page.content_panel.relationships.mode
-                {
-                    // Paste into the currently active field
-                    let current = match active_field {
-                        0 => format!("{}{}", did_input, trimmed),
-                        1 => format!("{}{}", alias_input, trimmed),
-                        2 => format!("{}{}", reason_input, trimmed),
-                        _ => return,
-                    };
-                    let _ = self.action_tx.send(Action::Relationship(
-                        RelationshipAction::InputUpdate {
-                            field: *active_field,
-                            value: current,
-                        },
-                    ));
-                }
-            }
-            MainMenu::Credentials => {
-                if let CredentialsMode::NewRequest { reason_input, .. } =
-                    &self.props.main_page.content_panel.credentials.mode
-                {
-                    let updated = format!("{}{}", reason_input, trimmed);
-                    let _ = self
-                        .action_tx
-                        .send(Action::Credential(CredentialAction::ReasonUpdate(updated)));
-                }
-            }
-            MainMenu::Vetting => {
-                let mode = &self.props.main_page.content_panel.vetting.mode;
-                // A ticket link pasted into the request form fills the whole
-                // form, whichever field has the focus.
-                if matches!(
-                    mode,
-                    crate::state_handler::main_page::content::VettingMode::RequestVetter { .. }
-                ) && trimmed.to_ascii_lowercase().starts_with("vetting-ticket:")
-                {
-                    let _ = self.action_tx.send(Action::Vetting(
-                        crate::state_handler::actions::VettingAction::PasteTicket(
-                            trimmed.to_string(),
-                        ),
-                    ));
-                } else if let Some(current) = mode.focused_text() {
-                    let updated = format!("{current}{trimmed}");
-                    let _ = self.action_tx.send(Action::Vetting(
-                        crate::state_handler::actions::VettingAction::Input(updated),
-                    ));
-                }
-            }
-            MainMenu::Settings => {
+        // A ticket link pasted into the request form fills the whole form,
+        // whichever field has the focus.
+        if menu == MainMenu::Vetting
+            && matches!(
+                self.props.main_page.content_panel.vetting.mode,
+                crate::state_handler::main_page::content::VettingMode::RequestVetter { .. }
+            )
+            && trimmed.to_ascii_lowercase().starts_with("vetting-ticket:")
+        {
+            let _ = self.action_tx.send(Action::Vetting(
+                crate::state_handler::actions::VettingAction::PasteTicket(trimmed.to_string()),
+            ));
+            return;
+        }
+        // Every other text field: inserted at the cursor (#578).
+        if self.paste_into_focused_field(trimmed) {
+            return;
+        }
+
+        // Passphrase fields: the secure buffers take the paste. The path
+        // field is a focused text field, handled above.
+        if menu == MainMenu::Settings {
+            {
                 match &self.props.main_page.content_panel.settings.mode {
-                    SettingsMode::EditFriendlyName { input } => {
-                        let updated = format!("{}{}", input, trimmed);
-                        let _ = self
-                            .action_tx
-                            .send(Action::Settings(SettingsAction::FieldUpdate(updated)));
-                    }
-                    SettingsMode::ExportConfig {
-                        path_input,
-                        active_field,
-                        ..
-                    }
-                    | SettingsMode::ImportConfig {
-                        path_input,
-                        active_field,
-                        ..
-                    } => {
-                        if *active_field == 0 {
-                            let updated = format!("{}{}", path_input, trimmed);
-                            let _ = self.action_tx.send(Action::Settings(
-                                SettingsAction::FormFieldUpdate {
-                                    field: 0,
-                                    value: updated,
-                                },
-                            ));
-                        } else if *active_field == 1 {
+                    SettingsMode::ExportConfig { active_field, .. }
+                    | SettingsMode::ImportConfig { active_field, .. } => {
+                        if *active_field == 1 {
                             // Passphrase field — append to secure buffer
                             self.passphrase_buffer.push_str(trimmed);
                             let _ = self.action_tx.send(Action::Settings(
@@ -377,114 +315,8 @@ impl Component for MainPage {
                     _ => {}
                 }
             }
-            // A pasted did:key lands in the grant form's focused text field. The
-            // deletion confirmation takes no paste: typing it is the point.
-            MainMenu::Communities => {
-                // A text answer on a ballot takes the paste, character by character.
-                if let Some(view) = self.props.main_page.content_panel.elections.view.as_ref() {
-                    let typing = view.screen
-                        == crate::state_handler::main_page::elections::Screen::Ballot
-                        && view
-                            .form
-                            .as_ref()
-                            .zip(view.shown.as_ref())
-                            .is_some_and(|(f, s)| f.typing(s.manifest()));
-                    if typing {
-                        for c in trimmed.chars() {
-                            let _ = self.action_tx.send(Action::Elections(
-                                crate::state_handler::actions::ElectionsAction::BallotChar(c),
-                            ));
-                        }
-                    }
-                    return;
-                }
-                if let Some(view) = self.props.main_page.content_panel.repos.view.as_ref() {
-                    if let Some(action) = repos_paste(view, trimmed) {
-                        let _ = self.action_tx.send(Action::Repos(action));
-                    }
-                    return;
-                }
-                if let Some(form) = self
-                    .props
-                    .main_page
-                    .content_panel
-                    .communities
-                    .device_access
-                    .as_ref()
-                    .filter(|v| !v.busy)
-                    .and_then(|v| v.form.as_ref())
-                    .filter(|f| f.field < 2)
-                {
-                    let _ = self.action_tx.send(Action::CommunityContext(
-                        crate::state_handler::actions::CommunityContextAction::GrantInput {
-                            field: form.field,
-                            value: format!("{}{trimmed}", grant_form_text(form)),
-                        },
-                    ));
-                }
-            }
-            _ => {}
         }
     }
-}
-
-/// Paste into the Repos view's focused text field, if one is open.
-fn repos_paste(
-    view: &crate::state_handler::main_page::repos::ReposView,
-    text: &str,
-) -> Option<crate::state_handler::actions::ReposAction> {
-    use crate::state_handler::actions::ReposAction as R;
-    use crate::state_handler::main_page::repos::ReposScreen;
-    if view.confirm.is_some() {
-        return None;
-    }
-    {
-        use crate::state_handler::actions::WorkspaceAction as W;
-        use crate::state_handler::main_page::repos::WorkspaceForm;
-        let text = text.trim_end_matches(['\n', '\r']);
-        match &view.workspace.form {
-            Some(WorkspaceForm::Settings { root, .. }) => {
-                return Some(R::Workspace(W::SettingsInput(format!("{root}{text}"))));
-            }
-            Some(WorkspaceForm::UsePath { path, .. }) => {
-                return Some(R::Workspace(W::UseInput(format!("{path}{text}"))));
-            }
-            Some(WorkspaceForm::Account(form)) => {
-                return form
-                    .typing()
-                    .then(|| R::Workspace(W::AccountInput(format!("{}{text}", form.path))));
-            }
-            None => {}
-        }
-    }
-    if let Some(form) = &view.add {
-        return match form.field {
-            0 => Some(R::AddInput {
-                field: 0,
-                value: format!("{}{text}", form.query),
-            }),
-            3 => Some(R::AddInput {
-                field: 3,
-                value: format!("{}{text}", form.reason),
-            }),
-            _ => None,
-        };
-    }
-    if let ReposScreen::NewRepo(form) = &view.screen {
-        return match form.field {
-            1 => Some(R::NewInput {
-                field: 1,
-                value: format!("{}{text}", form.name),
-            }),
-            3 => Some(R::NewInput {
-                field: 3,
-                value: format!("{}{text}", form.description),
-            }),
-            4 => Some(R::NewOwnerQuery(format!("{}{text}", form.owner_query))),
-            _ => None,
-        };
-    }
-    None
 }
 
 /// The grant form's focused text field: the DID, or the device's name.
@@ -592,6 +424,23 @@ impl MainPage {
     /// Handle key events when the content panel is focused.
     /// Returns true if the event was consumed.
     fn handle_content_key_event(&mut self, key: KeyEvent) -> bool {
+        // A focused text field takes its editing keys — characters, ←/→,
+        // Home/End, Backspace/Del and the editing chords — before anything
+        // else, so ←/→ move the cursor instead of switching panels (#578). A
+        // Ctrl or Alt chord the view lists as its own stays the view's.
+        let chord = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let listed = chord
+            && self
+                .panel_keys
+                .borrow()
+                .iter()
+                .any(|b| !b.is_typing() && b.matches(&key));
+        if !listed && self.edit_focused_field(&key) {
+            return true;
+        }
+
         // Vertical scroll for the content panel is handled centrally here,
         // before per-menu dispatch, so it works uniformly on every view
         // without conflicting with Up/Down selection bindings.
@@ -786,26 +635,6 @@ impl MainPage {
     }
 }
 
-/// Apply one text-editing keystroke to `current`, returning the new value when
-/// the key edits the buffer, or `None` otherwise. Append-only semantics
-/// (printable char appends at the end; Backspace removes the last char) — these
-/// inline editors have no cursor, matching the prior behavior exactly.
-fn edit_text(code: KeyCode, current: &str) -> Option<String> {
-    match code {
-        KeyCode::Char(c) => {
-            let mut s = current.to_string();
-            s.push(c);
-            Some(s)
-        }
-        KeyCode::Backspace => {
-            let mut s = current.to_string();
-            s.pop();
-            Some(s)
-        }
-        _ => None,
-    }
-}
-
 /// Stable identifier for the currently-displayed content view, derived from
 /// the active menu and its per-panel mode. When this changes across frames
 /// (e.g. list → detail, or switching menus), the content panel scroll offset
@@ -957,6 +786,7 @@ fn copy_to_clipboard(
 impl ComponentRender<()> for MainPage {
     fn render(&self, frame: &mut Frame, _props: ()) {
         keymap::begin_frame();
+        text_input::set_cursor(self.focused_field().map(|f| self.field_cursor(&f)));
         let [main_top, main_middle, main_log, main_bottom] =
             Layout::vertical([Length(2), Min(0), Length(8), Length(1)]).areas(frame.area());
 
@@ -1631,7 +1461,9 @@ mod key_handler_tests {
     //! `Action` and its sub-enums derive neither `PartialEq` nor `Debug`, so
     //! assertions pattern-match the expected variant rather than `assert_eq!`.
     use super::*;
-    use crate::state_handler::actions::{InboxAction, PersonaAction};
+    use crate::state_handler::actions::{
+        CredentialAction, InboxAction, PersonaAction, RelationshipAction,
+    };
     use crate::state_handler::main_page::content::{
         CommunitySend, CommunitySummary, CommunitySwitcherState, CredentialTab, CredentialsMode,
         InboxConfirm, ManagedDid, PersonaConfirm, PersonaMode, PersonaTab, RawCredential,
@@ -1944,11 +1776,14 @@ mod key_handler_tests {
         // Opened ready, so the focus is on the name; move to the claim row.
         page.handle_key_event(press(KeyCode::Down));
         assert!(matches!(vetting_action(&mut rx), V::NextField));
-        page.handle_key_event(press(KeyCode::Right));
-        assert!(matches!(vetting_action(&mut rx), V::Cycle(true)));
+        // The page's props are not re-derived here: put the focus where the
+        // loop would have. On the name, → moves the cursor (#578); on the
+        // claim row it chooses.
         if let VettingMode::NewFace(form) = &mut page.props.main_page.content_panel.vetting.mode {
             form.focus = NewFaceFocus::Asked(0);
         }
+        page.handle_key_event(press(KeyCode::Right));
+        assert!(matches!(vetting_action(&mut rx), V::Cycle(true)));
         page.handle_key_event(press(KeyCode::Char(' ')));
         assert!(matches!(vetting_action(&mut rx), V::Toggle));
     }
@@ -2565,10 +2400,6 @@ mod key_handler_tests {
             repos_key(press(KeyCode::Esc), &form),
             Some(R::Workspace(W::Cancel))
         );
-        assert_eq!(
-            repos_paste(&form, "c/x\n"),
-            Some(R::Workspace(W::SettingsInput("~/src/x".into())))
-        );
 
         let mut armed = repos_view();
         armed.workspace.confirm = Some(WorkspaceChange::RemoveIdentity);
@@ -2736,23 +2567,6 @@ mod key_handler_tests {
     }
 
     /// A pasted DID lands in the add form's person field.
-    #[test]
-    fn a_paste_fills_the_repos_form() {
-        use crate::state_handler::actions::ReposAction as R;
-        use crate::state_handler::main_page::repos::AddPersonForm;
-        let mut v = repos_view();
-        let mut form = AddPersonForm::new("github.com/acme/widgets".into());
-        form.external = true;
-        v.add = Some(form);
-        assert_eq!(
-            repos_paste(&v, "did:webvh:dan"),
-            Some(R::AddInput {
-                field: 0,
-                value: "did:webvh:dan".into()
-            })
-        );
-    }
-
     #[test]
     fn communities_leave_archive_delete_are_status_gated() {
         // Active row: `l` arms a leave; `d`/`x` do nothing (must leave first).
@@ -4446,10 +4260,13 @@ mod key_handler_tests {
                 f.question = 1;
             }
         });
+        // Drawn first: the ballot's footer lists Ctrl-a, which is what makes
+        // the chord the ballot's rather than the text field's.
+        let _ = drawn(&page);
         page.handle_key_event(press(KeyCode::Char('a')));
         assert!(matches!(
             elections_action(&mut rx),
-            Some(E::BallotChar('a'))
+            Some(E::BallotText(t)) if t == "a"
         ));
         page.handle_key_event(ctrl(KeyCode::Char('a')));
         assert!(matches!(elections_action(&mut rx), Some(E::BallotAbstain)));

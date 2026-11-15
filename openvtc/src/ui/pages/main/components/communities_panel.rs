@@ -575,13 +575,16 @@ fn render_context_delete(lines: &mut Vec<Line<'static>>, view: &ContextDeleteVie
                 ))
                 .fg(COLOR_ORANGE),
             );
-            lines.push(Line::from(vec![
-                Span::styled("   > ", dim),
-                Span::styled(
-                    format!("{}▎", view.typed),
-                    Style::new().fg(COLOR_SOFT_PURPLE).bold(),
-                ),
-            ]));
+            lines.push(Line::from(
+                [Span::styled("   > ", dim)]
+                    .into_iter()
+                    .chain(crate::ui::pages::main::text_input::cursor_spans(
+                        &view.typed,
+                        true,
+                        Style::new().fg(COLOR_SOFT_PURPLE).bold(),
+                    ))
+                    .collect::<Vec<_>>(),
+            ));
             lines.push(Line::from(""));
             keymap::footer(
                 lines,
@@ -678,10 +681,14 @@ fn render_device_access(
                     },
                 ),
                 Span::styled(format!("{name:<10}"), text),
-                Span::styled(value, Style::new().fg(COLOR_SOFT_PURPLE)),
             ];
-            if focused {
-                spans.push(Span::styled(if typed { "▎" } else { "  ←/→" }, dim));
+            spans.extend(crate::ui::pages::main::text_input::cursor_spans(
+                &value,
+                focused && typed,
+                Style::new().fg(COLOR_SOFT_PURPLE),
+            ));
+            if focused && !typed {
+                spans.push(Span::styled("  ←/→", dim));
             }
             Line::from(spans)
         };

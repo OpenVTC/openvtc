@@ -4,7 +4,7 @@
 use crate::state_handler::actions::Action;
 use crate::state_handler::main_page::MainPanel;
 use crate::state_handler::main_page::status::Status;
-use crate::ui::pages::main::{MainPage, edit_text};
+use crate::ui::pages::main::MainPage;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 impl MainPage {
@@ -94,7 +94,8 @@ impl MainPage {
                 KeyCode::Left => Some(V::Cycle(false)),
                 KeyCode::Right => Some(V::Cycle(true)),
                 code => match text {
-                    Some(current) => edit_text(code, &current).map(V::Input),
+                    // Typing is the field's (`text_input`).
+                    Some(_) => None,
                     None if chooses_face && code == KeyCode::Char('f') => Some(V::ChooseFace),
                     None if code == KeyCode::Char('y') && y_commits => Some(V::Submit),
                     None if code == KeyCode::Char('n') && confirming => Some(V::Back),

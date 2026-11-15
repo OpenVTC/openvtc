@@ -16,7 +16,7 @@ use crate::state_handler::{
 };
 use crate::ui::badges;
 use crate::ui::pages::main::keymap::{self, k};
-use crate::ui::pages::main::{MainPage, copy_to_clipboard, edit_text};
+use crate::ui::pages::main::{MainPage, copy_to_clipboard};
 use crossterm::event::{KeyCode, KeyEvent};
 use openvtc_core::display::display_identifier;
 use ratatui::{
@@ -382,11 +382,19 @@ fn render_new_request(
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  Reason: ", Style::new().fg(COLOR_TEXT_DEFAULT)),
-        Span::styled(reason_input.to_string(), Style::new().fg(COLOR_SOFT_PURPLE)),
-        Span::styled("▎", Style::new().fg(COLOR_SUCCESS)),
-    ]));
+    lines.push(Line::from(
+        vec![Span::styled(
+            "  Reason: ",
+            Style::new().fg(COLOR_TEXT_DEFAULT),
+        )]
+        .into_iter()
+        .chain(crate::ui::pages::main::text_input::cursor_spans(
+            reason_input,
+            true,
+            Style::new().fg(COLOR_SOFT_PURPLE),
+        ))
+        .collect::<Vec<_>>(),
+    ));
 
     lines.push(Line::from(""));
     let mut keys = Vec::new();
@@ -483,15 +491,8 @@ impl MainPage {
                         }
                         true
                     }
-                    code => match edit_text(code, reason_input) {
-                        Some(r) => {
-                            let _ = self
-                                .action_tx
-                                .send(Action::Credential(CredentialAction::ReasonUpdate(r)));
-                            true
-                        }
-                        None => false,
-                    },
+                    // Typing is the field's (`text_input`).
+                    _ => false,
                 }
             }
             CredentialsMode::Detail { index } => {

@@ -582,11 +582,17 @@ fn render_question(
             }
         }
         AnswerDraft::Text(t) => {
-            let caret = if focused.is_some() { "▏" } else { "" };
-            lines.push(Line::from(text(format!(
-                "        › {}{caret}",
-                crate::state_handler::main_page::sanitize_display(t, 4096)
-            ))));
+            let shown = crate::state_handler::main_page::sanitize_display(t, 4096);
+            lines.push(Line::from(
+                [Span::raw("        › ")]
+                    .into_iter()
+                    .chain(crate::ui::pages::main::text_input::cursor_spans(
+                        &shown,
+                        focused.is_some(),
+                        text(String::new()).style,
+                    ))
+                    .collect::<Vec<_>>(),
+            ));
         }
     }
 }
@@ -632,7 +638,6 @@ fn render_ballot(view: &ElectionsView, recent_ticket: bool, lines: &mut Vec<Line
         k_.push(k("↑/↓", "option"));
         k_.push(k(keymap::TYPE, "answer"));
         k_.push(k("Ctrl+A", "blank"));
-        k_.push(k("←/→", "score"));
     } else {
         k_.push(k("↑/↓ or j/k", "option"));
         k_.push(k("Space", "choose/rank"));

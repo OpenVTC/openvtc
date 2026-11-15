@@ -120,11 +120,17 @@ fn field(name: &str, shown: String, focused: bool, text: bool) -> Line<'static> 
             },
         ),
         Span::styled(format!("{name:<22}"), label()),
-        Span::styled(shown, value()),
     ];
     if focused && text {
-        spans.push(Span::styled("▎", Style::new().fg(COLOR_SUCCESS)));
-    } else if focused {
+        spans.extend(crate::ui::pages::main::text_input::cursor_spans(
+            &shown,
+            true,
+            value(),
+        ));
+    } else {
+        spans.push(Span::styled(shown, value()));
+    }
+    if focused && !text {
         spans.push(Span::styled("  ←/→", dim()));
     }
     Line::from(spans)
