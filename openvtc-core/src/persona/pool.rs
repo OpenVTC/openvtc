@@ -430,11 +430,14 @@ pub async fn reveal(
                 )
             })?,
         ))),
-        // `notFound` is the answer to "is it still there", not a failure: the
-        // pane asks about a row the holder is looking at, and the row can have
-        // gone since it was drawn.
+        // A Trust Task `notFound` rejection is the answer to "is it still
+        // there", not a failure: the pane asks about a row the holder is
+        // looking at, and the row can have gone since it was drawn. Only that
+        // code counts — a bare REST 404/410 (an older VTA without this task, a
+        // misrouted request) is a failure, and is reported as one.
         Err(e)
-            if crate::errors::RemoteKind::from_vta(&e) == crate::errors::RemoteKind::NotFound =>
+            if e.rejection_code()
+                .is_some_and(|code| code.rsplit(':').next() == Some("notFound")) =>
         {
             Ok(None)
         }
