@@ -257,9 +257,10 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     }
                     (None, _) => {
                         ctx.state.main_page.content_panel.communities.status_message =
-                            Some(Status::error(
-                                "Messaging unavailable — cannot leave right now.".to_string(),
-                            ));
+                            Some(Status::error(messaging_unavailable(
+                                &ctx.state.connection,
+                                "cannot leave",
+                            )));
                     }
                 }
             }
@@ -473,9 +474,10 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     }
                     (None, _) => {
                         ctx.state.main_page.content_panel.communities.status_message =
-                            Some(Status::error(
-                                "Messaging unavailable — cannot issue right now.".to_string(),
-                            ));
+                            Some(Status::error(messaging_unavailable(
+                                &ctx.state.connection,
+                                "cannot issue",
+                            )));
                         None
                     }
                 };
@@ -553,10 +555,10 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     }
                     (None, _) => {
                         ctx.state.main_page.content_panel.communities.status_message =
-                            Some(Status::error(
-                                "Messaging unavailable — cannot ask for a challenge right now."
-                                    .to_string(),
-                            ));
+                            Some(Status::error(messaging_unavailable(
+                                &ctx.state.connection,
+                                "cannot ask for a challenge",
+                            )));
                     }
                 }
             }
@@ -613,9 +615,10 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     }
                     (None, _) => {
                         ctx.state.main_page.content_panel.communities.status_message =
-                            Some(Status::error(
-                                "Messaging unavailable — cannot renew right now.".to_string(),
-                            ));
+                            Some(Status::error(messaging_unavailable(
+                                &ctx.state.connection,
+                                "cannot renew",
+                            )));
                     }
                 }
             }
@@ -1460,13 +1463,32 @@ async fn assert_personhood(ctx: &mut ActionCtx<'_>, witnessed: Option<Vec<String
         }
         (None, _) => {
             ctx.state.main_page.content_panel.communities.status_message = Some(Status::error(
-                "Messaging unavailable — cannot assert right now.".to_string(),
+                messaging_unavailable(&ctx.state.connection, "cannot assert"),
             ));
         }
     }
     Handled::Continue
 }
 
+/// Why a network action cannot run now: messaging is down. Says which class
+/// of failure it is and what to do — not only *what* could not be done
+/// (#585, R6.4).
+fn messaging_unavailable(
+    connection: &crate::state_handler::state::ConnectionState,
+    what: &str,
+) -> String {
+    match &connection.status {
+        crate::state_handler::state::MediatorStatus::Failed(failure) => format!(
+            "Messaging unavailable ({}) — {what} right now. {} Help / Status: r retries.",
+            failure.short(),
+            failure.class.remedy()
+        ),
+        _ => format!(
+            "Messaging unavailable — {what} right now: messaging is not running. Help / Status \
+             shows its state."
+        ),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

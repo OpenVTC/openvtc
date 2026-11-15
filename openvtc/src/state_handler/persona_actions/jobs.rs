@@ -1,6 +1,7 @@
 //! The background work the pane spawns: [`PersonaJob`] round-trips, the read of
 //! every agent-served tab, and the re-reads that follow a write.
 
+use crate::state_handler::main_page::content::AgentError;
 use openvtc_core::persona::{
     binding, claim_types, contacts, correlation, disclosure, lifecycle,
     pool::{self, AttributeDraft},
@@ -226,23 +227,19 @@ impl PersonaReadJob {
         // reveal (`s`) fetches that one value on its own via `pool::reveal`.
         let attributes = pool::list(&self.admin_vta, self.include_values, false)
             .await
-            .map_err(|e| format!("{e}"));
-        let profiles = profile::list(&self.admin_vta)
-            .await
-            .map_err(|e| format!("{e}"));
+            .map_err(AgentError::of);
+        let profiles = profile::list(&self.admin_vta).await.map_err(AgentError::of);
         let retired = lifecycle::list_retired(&self.admin_vta)
             .await
-            .map_err(|e| format!("{e}"));
-        let worlds = world::list(&self.admin_vta)
-            .await
-            .map_err(|e| format!("{e}"));
+            .map_err(AgentError::of);
+        let worlds = world::list(&self.admin_vta).await.map_err(AgentError::of);
         let links = correlation::analyze(&self.admin_vta)
             .await
-            .map_err(|e| format!("{e}"));
+            .map_err(AgentError::of);
         let disclosures = match std::num::NonZeroU64::new(DISCLOSURE_PAGE) {
             Some(limit) => disclosure::history(&self.admin_vta, limit)
                 .await
-                .map_err(|e| format!("{e}")),
+                .map_err(AgentError::of),
             None => Ok(Vec::new()),
         };
         let claim_types = match self.needs_claim_types {
@@ -250,7 +247,7 @@ impl PersonaReadJob {
                 claim_types::Registry::fetch(&self.admin_vta)
                     .await
                     .map(Box::new)
-                    .map_err(|e| format!("{e}")),
+                    .map_err(AgentError::of),
             ),
             false => None,
         };

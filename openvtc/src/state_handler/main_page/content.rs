@@ -1451,6 +1451,41 @@ impl ComposeForm {
     }
 }
 
+/// A failed read from the agent: what it said, and which class of failure
+/// it was (R6.4) — an unreachable agent and a refusing one need different
+/// answers on screen (#585).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentError {
+    pub text: String,
+    pub class: openvtc_core::errors::ErrorClass,
+}
+
+impl AgentError {
+    #[must_use]
+    pub fn new(text: impl Into<String>, class: openvtc_core::errors::ErrorClass) -> Self {
+        Self {
+            text: text.into(),
+            class,
+        }
+    }
+
+    /// An error, classified by its source chain.
+    #[must_use]
+    pub fn of(err: impl Into<anyhow::Error>) -> Self {
+        let err = err.into();
+        Self::new(
+            format!("{err}"),
+            openvtc_core::errors::class_of(err.as_ref()),
+        )
+    }
+}
+
+impl std::fmt::Display for AgentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
 /// The persona pane: every surface for the holder's own identity, in one place.
 ///
 /// Five of the six tabs are served by the agent and one by `Config`, and the
@@ -1617,7 +1652,7 @@ pub struct IdentityState {
     /// An empty pool and an unreachable agent look identical on screen unless
     /// something says otherwise, and of the two, "you have no attributes" is
     /// the confident wrong answer about the holder's own data (VTI R6.4).
-    pub load_error: Option<String>,
+    pub load_error: Option<AgentError>,
     /// Whether the agent-served tabs have ever been read in this session.
     pub loaded: bool,
     /// A refresh was asked for while one was in flight. Re-issued when the

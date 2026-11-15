@@ -285,13 +285,22 @@ fn render_status_help(
             Span::styled("  Connection:   ", label_style),
             Span::styled("Connecting...", label_style),
         ]),
-        MediatorStatus::Failed(reason) => Line::from(vec![
-            Span::styled("  Connection:   ", label_style),
-            Span::styled(
-                format!("Failed: {}", reason),
-                Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
-            ),
-        ]),
+        MediatorStatus::Failed(failure) => {
+            // Which class of failure, the error itself, and what to do about
+            // it (R6.4, #585) — then `r` retries from here.
+            lines.push(Line::from(vec![
+                Span::styled("  Connection:   ", label_style),
+                Span::styled(
+                    failure.short(),
+                    Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED).bold(),
+                ),
+            ]));
+            super::status::push_error(&mut lines, &failure.reason, "                ");
+            Line::from(Span::styled(
+                format!("                {}", failure.class.remedy()),
+                Style::new().fg(COLOR_DARK_GRAY),
+            ))
+        }
         MediatorStatus::Initializing(step) => Line::from(vec![
             Span::styled("  Connection:   ", label_style),
             Span::styled(format!("Initializing: {}", step), label_style),
@@ -378,7 +387,11 @@ fn render_status_help(
 fn help_bindings(
     settings: &crate::state_handler::main_page::content::SettingsState,
 ) -> Vec<keymap::Binding> {
-    let mut keys = vec![k("1", "copy persona DID"), k("2", "copy mediator DID")];
+    let mut keys = vec![
+        k("r", "reconnect messaging"),
+        k("1", "copy persona DID"),
+        k("2", "copy mediator DID"),
+    ];
     if settings.did_git_sign.is_some() {
         keys.push(k("3", "copy signing principal"));
         keys.push(k("4", "copy SSH key"));
@@ -390,6 +403,14 @@ fn help_bindings(
 impl MainPage {
     pub(in crate::ui::pages::main) fn handle_help_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
+            // Retry messaging: the reconnect the Settings mediator row also
+            // offers (#585).
+            KeyCode::Char('r') => {
+                let _ = self.action_tx.send(Action::Settings(
+                    crate::state_handler::actions::SettingsAction::ReconnectMediator,
+                ));
+                true
+            }
             KeyCode::Char('1') => {
                 // Copy persona DID to clipboard
                 let did = self

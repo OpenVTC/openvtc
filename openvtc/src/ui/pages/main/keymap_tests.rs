@@ -518,3 +518,64 @@ fn a_short_terminal_scrolls_the_menu_to_the_selection() {
     let all = screen(&page, 80, 16).join("\n");
     assert!(all.contains("Quit"), "{all}");
 }
+
+// ----- Connectivity (#585) -------------------------------------------------
+
+fn failed(class: openvtc_core::errors::ErrorClass) -> impl Fn(&mut State) + Copy {
+    move |s: &mut State| {
+        s.connection.status = crate::state_handler::state::MediatorStatus::Failed(
+            crate::state_handler::state::ConnectionFailure::new("tls handshake eof", class),
+        );
+    }
+}
+
+/// The header names the class of failure — unreachable, refused and
+/// incompatible read differently — and where the retry is.
+#[test]
+fn the_header_tells_unreachable_from_rejected_from_incompatible() {
+    use openvtc_core::errors::ErrorClass as C;
+    let mut seen = Vec::new();
+    for class in [C::Unreachable, C::AuthRejected, C::Contract] {
+        let (page, _rx) = page_for(MainMenu::Inbox, failed(class));
+        let rows = screen(&page, 140, 40);
+        let header = rows[0].clone();
+        assert!(header.contains("see Help"), "{header}");
+        seen.push(header);
+    }
+    assert!(seen[0].contains("mediator unreachable"), "{}", seen[0]);
+    assert!(seen[1].contains("mediator refused us"), "{}", seen[1]);
+    assert!(seen[2].contains("mediator incompatible"), "{}", seen[2]);
+}
+
+/// Help / Status shows the whole reason and the remedy, and `r` there
+/// reconnects.
+#[test]
+fn help_status_shows_the_cause_and_r_retries() {
+    use openvtc_core::errors::ErrorClass as C;
+    let (mut page, mut rx) = page_for(MainMenu::Help, failed(C::AuthRejected));
+    let all = screen(&page, 140, 60).join("\n");
+    assert!(all.contains("tls handshake eof"), "{all}");
+    assert!(all.contains("refused our credentials"), "{all}");
+    page.handle_key_event(press(KeyCode::Char('r')));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Action::Settings(
+            crate::state_handler::actions::SettingsAction::ReconnectMediator
+        ))
+    ));
+}
+
+/// Enter on the Settings mediator row reconnects.
+#[test]
+fn the_mediator_row_reconnects() {
+    let (mut page, mut rx) = page_for(MainMenu::Settings, |s| {
+        s.main_page.content_panel.settings.selected_index = 1;
+    });
+    page.handle_key_event(press(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Action::Settings(
+            crate::state_handler::actions::SettingsAction::ReconnectMediator
+        ))
+    ));
+}

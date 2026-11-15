@@ -341,9 +341,11 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
             Style::new().fg(COLOR_TEXT_DEFAULT)
         };
 
-        let edit_hint = if *editable && is_selected {
+        let edit_hint = if i == MEDIATOR_ROW && is_selected {
+            " [Enter to reconnect]"
+        } else if *editable && is_selected {
             " [Enter to edit]"
-        } else if !editable {
+        } else if !editable && i != MEDIATOR_ROW {
             " (read-only)"
         } else {
             ""
@@ -1185,6 +1187,12 @@ impl MainPage {
                             let _ = self
                                 .action_tx
                                 .send(Action::Settings(SettingsAction::StartEdit));
+                        } else if selected == MEDIATOR_ROW {
+                            // The mediator is fixed by the DID document; what
+                            // can be done from here is reconnect to it (#585).
+                            let _ = self
+                                .action_tx
+                                .send(Action::Settings(SettingsAction::ReconnectMediator));
                         } else if selected == rows::PROTECTION_ROW {
                             let _ = self
                                 .action_tx

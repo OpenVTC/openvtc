@@ -1078,7 +1078,12 @@ pub const DIDCOMM_EVENT_CHANNEL_CAPACITY: usize = 256;
 /// without this helper having to know about the outer state shape.
 pub enum ReconnectOutcome {
     Connected,
-    Failed(String),
+    /// The reconnect failed: why, and which class of failure (R6.4) — so the
+    /// caller can tell an unreachable mediator from a refused one.
+    Failed {
+        reason: String,
+        class: crate::errors::ErrorClass,
+    },
 }
 
 /// Replace the persona listener and wait for it to come up. Used by the
@@ -1113,14 +1118,22 @@ pub async fn reconnect_persona_listener_io(
     // failure this codebase has already been bitten by (#132).
     service.remove_listener(&listener_id).await;
     if let Err(e) = add_listener(service, &new_config).await {
-        return ReconnectOutcome::Failed(format!("{e:#}"));
+        return ReconnectOutcome::Failed {
+            reason: format!("{e:#}"),
+            class: crate::errors::class_of(&e),
+        };
     }
     match service
         .wait_connected(&listener_id, std::time::Duration::from_secs(30))
         .await
     {
         Ok(()) => ReconnectOutcome::Connected,
-        Err(e) => ReconnectOutcome::Failed(e),
+        // The listener never came up: from here that is a mediator that did
+        // not answer in time, whatever its last state.
+        Err(e) => ReconnectOutcome::Failed {
+            reason: e,
+            class: crate::errors::ErrorClass::Timeout,
+        },
     }
 }
 

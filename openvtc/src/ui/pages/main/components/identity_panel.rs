@@ -1442,14 +1442,22 @@ fn push_agent_state(state: &IdentityState, lines: &mut Vec<Line<'static>>, noun:
         // Every other failure is echoed verbatim. That text is *data*: it may
         // name a host, a port, a contract mismatch, and translating what we do
         // not recognise would be inventing a cause (VTI R6.4).
-        if crate::holder_grant::needs_holder_grant(error) {
+        // Only a refusal can be the missing holder grant: an unreachable
+        // agent is never told to run a grant (#585, R6.4).
+        let refused = matches!(
+            error.class,
+            openvtc_core::errors::ErrorClass::AuthRejected
+                | openvtc_core::errors::ErrorClass::Refused
+        );
+        if refused && crate::holder_grant::needs_holder_grant(&error.text) {
             for line in
                 crate::holder_grant::holder_grant_hint(state.agent_credential_did.as_deref())
             {
                 lines.push(Line::from(line).fg(COLOR_ORANGE));
             }
         } else {
-            super::status::push_error(lines, error, " ");
+            super::status::push_error(lines, &error.text, " ");
+            lines.push(Line::from(format!(" {}", error.class.remedy())).fg(COLOR_DARK_GRAY));
         }
         lines.push(Line::from(""));
         lines.push(Line::from(" r: try again").fg(COLOR_DARK_GRAY));
@@ -2618,6 +2626,7 @@ fn shorten_id(id: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state_handler::main_page::content::AgentError;
     use crate::state_handler::main_page::content::{ManagedDid, PersonaMembership};
     use openvtc_core::persona::binding::BindingSummary;
     use openvtc_core::persona::correlation::{Finding, Remedy};
@@ -2708,11 +2717,11 @@ mod tests {
             // agent's text rather than ours, so it is not this test's to police.
             let mut refused = populated(tab);
             loaded(&mut refused);
-            refused.load_error = Some(
+            refused.load_error = Some(AgentError::new(
                 "this task reads or writes the holder's attribute pool, which sits above \
-                 every trust context. It requires an unscoped holder credential"
-                    .to_string(),
-            );
+                 every trust context. It requires an unscoped holder credential",
+                openvtc_core::errors::ErrorClass::AuthRejected,
+            ));
             screens.push(text(&render(&refused)));
         }
         for mode in [
@@ -2893,7 +2902,10 @@ mod tests {
         let empty = text(&render(&state));
         assert!(empty.contains("No attributes yet"), "{empty}");
 
-        state.load_error = Some("connection refused".to_string());
+        state.load_error = Some(AgentError::new(
+            "connection refused",
+            openvtc_core::errors::ErrorClass::Unreachable,
+        ));
         let failed = text(&render(&state));
         assert!(
             failed.contains("Could not read your attributes"),
@@ -2919,11 +2931,11 @@ mod tests {
     fn the_holder_refusal_carries_the_grant_command() {
         let mut state = IdentityState {
             tab: PersonaTab::Attributes,
-            load_error: Some(
+            load_error: Some(AgentError::new(
                 "this task reads or writes the holder's attribute pool … it requires an unscoped \
-                 holder credential"
-                    .to_string(),
-            ),
+                 holder credential",
+                openvtc_core::errors::ErrorClass::AuthRejected,
+            )),
             agent_credential_did: Some("did:key:z6MkThisInstall".to_string()),
             ..IdentityState::default()
         };
@@ -2969,7 +2981,10 @@ mod tests {
     fn an_unrelated_failure_carries_no_grant_command() {
         let mut state = IdentityState {
             tab: PersonaTab::Attributes,
-            load_error: Some("connection refused".to_string()),
+            load_error: Some(AgentError::new(
+                "connection refused",
+                openvtc_core::errors::ErrorClass::Unreachable,
+            )),
             ..IdentityState::default()
         };
         loaded(&mut state);

@@ -315,6 +315,56 @@ pub struct ConnectionState {
     pub online_listeners: std::collections::BTreeSet<String>,
 }
 
+/// Why messaging is down, typed by the class of failure, so the header can
+/// tell an unreachable mediator from a refused or incompatible one (#585).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionFailure {
+    pub reason: String,
+    pub class: openvtc_core::errors::ErrorClass,
+}
+
+impl ConnectionFailure {
+    #[must_use]
+    pub fn new(reason: impl Into<String>, class: openvtc_core::errors::ErrorClass) -> Self {
+        Self {
+            reason: reason.into(),
+            class,
+        }
+    }
+
+    /// The failure of an error, classified by its source chain.
+    #[must_use]
+    pub fn of(err: &anyhow::Error) -> Self {
+        Self::new(
+            format!("{err:#}"),
+            openvtc_core::errors::class_of(err.as_ref()),
+        )
+    }
+
+    /// A few words for the header: which kind of failure, not its text.
+    #[must_use]
+    pub fn short(&self) -> &'static str {
+        use openvtc_core::errors::ErrorClass as C;
+        match self.class {
+            C::Unreachable => "mediator unreachable",
+            C::Timeout => "mediator not answering",
+            C::AuthRejected => "mediator refused us",
+            C::Contract => "mediator incompatible",
+            C::NotFound => "mediator does not know us",
+            C::Refused => "mediator declined",
+            C::RemoteFailed => "mediator failed",
+            C::Local => "local error",
+            _ => "messaging failed",
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub enum MediatorStatus {
     /// Status has not been determined yet.
@@ -326,8 +376,8 @@ pub enum MediatorStatus {
     Connecting,
     /// Successfully connected.
     Connected,
-    /// Connection failed with an error description.
-    Failed(String),
+    /// Connection failed: why, and which class of failure (R6.4).
+    Failed(ConnectionFailure),
     /// The account has no active community/persona yet (State A, R-A-5/R-C-7):
     /// there is no DID to open a DIDComm session for. The app runs without
     /// messaging until the user joins a community.

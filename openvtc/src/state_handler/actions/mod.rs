@@ -214,9 +214,8 @@ pub enum SettingsAction {
         passphrase: SecretString,
     },
     RemovePassphrase,
-    // Manual mediator-reconnect path: handler is live, but the Settings UI does
-    // not yet expose a control that emits it.
-    #[allow(dead_code)]
+    /// Reconnect messaging: Enter on the Settings mediator row, or `r` on
+    /// Help / Status.
     ReconnectMediator,
     /// Open the wipe-profile confirmation dialog from the Settings menu.
     WipeProfileStart,

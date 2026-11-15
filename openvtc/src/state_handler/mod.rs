@@ -711,8 +711,9 @@ impl StateHandler {
                                     progress.fail(&mut state.loading);
                                     state.startup_diagnosis =
                                         Some(std::sync::Arc::new(diagnose_startup(&e, &profile)));
-                                    state.connection.status =
-                                        state::MediatorStatus::Failed(format!("{e}"));
+                                    state.connection.status = state::MediatorStatus::Failed(
+                                        state::ConnectionFailure::of(&e),
+                                    );
                                     let _ = self.state_tx.send(state.clone());
                                     // No config loaded here — join is unavailable.
                                     return self
@@ -733,10 +734,12 @@ impl StateHandler {
                                             &profile,
                                         ),
                                     ));
-                                    state.connection.status =
-                                        state::MediatorStatus::Failed(
+                                    state.connection.status = state::MediatorStatus::Failed(
+                                        state::ConnectionFailure::new(
                                             format!("Internal error: {join_err}"),
-                                        );
+                                            openvtc_core::errors::ErrorClass::Local,
+                                        ),
+                                    );
                                     let _ = self.state_tx.send(state.clone());
                                     return self
                                         .run_degraded_loop_terminal(
@@ -4430,7 +4433,10 @@ fn spawn_persona_effect(
                 .to_string();
         let p = &mut state.main_page.content_panel.identity;
         p.loading = false;
-        p.load_error = Some(reason.clone());
+        p.load_error = Some(crate::state_handler::main_page::content::AgentError::new(
+            reason.clone(),
+            openvtc_core::errors::ErrorClass::Unreachable,
+        ));
         if matches!(effect, PersonaEffect::Job(_)) {
             persona_actions::release_form(state, reason);
         }

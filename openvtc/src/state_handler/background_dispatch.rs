@@ -538,9 +538,15 @@ pub(crate) fn apply_outcome(
                 state.connection.messaging_active = true;
                 state.main_page.log("Reconnected to mediator");
             }
-            ReconnectOutcome::Failed(reason) => {
-                state.connection.status = state::MediatorStatus::Failed(reason.clone());
-                state.main_page.log(format!("Reconnect failed: {reason}"));
+            ReconnectOutcome::Failed { reason, class } => {
+                let failure = state::ConnectionFailure::new(reason, class);
+                state.main_page.log_warning(format!(
+                    "Reconnect failed ({}): {} {}",
+                    failure.short(),
+                    failure.reason,
+                    class.remedy()
+                ));
+                state.connection.status = state::MediatorStatus::Failed(failure);
             }
         },
         DispatchOutcome::Relationship(outcome) => outcome.apply(state, config, save),
@@ -797,11 +803,17 @@ mod tests {
             &mut config,
             &mut save,
             &mut in_flight,
-            DispatchOutcome::MediatorReconnect(ReconnectOutcome::Failed("dead mediator".into())),
+            DispatchOutcome::MediatorReconnect(ReconnectOutcome::Failed {
+                reason: "dead mediator".into(),
+                class: openvtc_core::errors::ErrorClass::Unreachable,
+            }),
         );
 
         match &state.connection.status {
-            state::MediatorStatus::Failed(reason) => assert_eq!(reason, "dead mediator"),
+            state::MediatorStatus::Failed(f) => {
+                assert_eq!(f.reason, "dead mediator");
+                assert_eq!(f.short(), "mediator unreachable");
+            }
             other => panic!("expected Failed status, got {other:?}"),
         }
         assert!(!state.connection.messaging_active);
