@@ -13,6 +13,7 @@
 //! tells the member of (VTI-NTF-063); a notified one is shown only as notified — who holds it,
 //! its identifier, whom it is put to and its period — until it is opened.
 
+use crossterm::event::{KeyCode, KeyEvent};
 use std::time::Instant;
 
 use ratatui::style::Style;
@@ -783,4 +784,80 @@ fn render_result(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
     } else {
         keys(lines, &["Esc back"]);
     }
+}
+
+/// The Elections panel's keys, by screen. `None` when the key means nothing here.
+///
+/// On the ballot, a text question takes printable keys as its answer, so its blank toggle is
+/// `Ctrl-a`; elsewhere on the ballot `a` leaves the focused question blank. On the
+/// confirmation only `y` casts — anything else goes back to the ballot, so a key held a
+/// moment too long after `⏎` never casts.
+pub(super) fn elections_key(
+    key: KeyEvent,
+    view: &crate::state_handler::main_page::elections::ElectionsView,
+) -> Option<crate::state_handler::actions::ElectionsAction> {
+    use crate::state_handler::actions::ElectionsAction as E;
+    use crate::state_handler::main_page::elections::Screen;
+    let ctrl = key
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::CONTROL);
+    Some(match view.screen {
+        Screen::List => {
+            let last = view.rows().len().saturating_sub(1);
+            match key.code {
+                KeyCode::Esc => E::Back,
+                KeyCode::Char('r') => E::Refresh,
+                KeyCode::Up | KeyCode::Char('k') => E::Select(view.selected.saturating_sub(1)),
+                KeyCode::Down | KeyCode::Char('j') => E::Select((view.selected + 1).min(last)),
+                KeyCode::Enter => E::Show,
+                _ => return None,
+            }
+        }
+        // Only `y` presents; anything else goes back without presenting (VTI-VOT-016).
+        Screen::Disclose => match key.code {
+            KeyCode::Char('y') => E::Present,
+            _ => E::Back,
+        },
+        Screen::Detail => match key.code {
+            KeyCode::Esc => E::Back,
+            KeyCode::Char('r') => E::Refresh,
+            KeyCode::Char('t') => E::TakeTicket,
+            KeyCode::Char('v') => E::Vote,
+            _ => return None,
+        },
+        Screen::Ballot => {
+            let typing = view
+                .form
+                .as_ref()
+                .zip(view.shown.as_ref())
+                .is_some_and(|(f, s)| f.typing(s.manifest()));
+            match key.code {
+                KeyCode::Esc => E::Back,
+                KeyCode::Tab => E::BallotQuestion(1),
+                KeyCode::BackTab => E::BallotQuestion(-1),
+                KeyCode::Up => E::BallotOption(-1),
+                KeyCode::Down => E::BallotOption(1),
+                KeyCode::Enter => E::Review,
+                KeyCode::Char('a') if ctrl => E::BallotAbstain,
+                KeyCode::Backspace if typing => E::BallotBackspace,
+                KeyCode::Char(c) if typing && !ctrl => E::BallotChar(c),
+                KeyCode::Char(' ') => E::BallotToggle,
+                KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => E::BallotAdjust(1),
+                KeyCode::Char('-') | KeyCode::Left => E::BallotAdjust(-1),
+                KeyCode::Char('a') => E::BallotAbstain,
+                KeyCode::Char('k') => E::BallotOption(-1),
+                KeyCode::Char('j') => E::BallotOption(1),
+                _ => return None,
+            }
+        }
+        Screen::Confirm => match key.code {
+            KeyCode::Char('y') => E::Cast,
+            _ => E::Back,
+        },
+        Screen::Result => match key.code {
+            KeyCode::Esc => E::Back,
+            KeyCode::Char('r') => E::Resend,
+            _ => return None,
+        },
+    })
 }

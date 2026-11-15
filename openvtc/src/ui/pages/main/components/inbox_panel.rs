@@ -1,12 +1,18 @@
+//! Inbox panel — pending tasks and their detail, with the panel's key handling.
+
 use super::panel::Panel;
 use crate::colors::{
     COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,
     COLOR_WARNING_ACCESSIBLE_RED,
 };
+use crate::state_handler::actions::{Action, InboxAction};
+use crate::state_handler::main_page::MainPanel;
 use crate::state_handler::{
     main_page::content::{ActiveTaskView, ContentPanelState, InboxConfirm, InboxState, TaskKind},
     state::{ConnectionState, MediatorStatus},
 };
+use crate::ui::pages::main::MainPage;
+use crossterm::event::{KeyCode, KeyEvent};
 use openvtc_core::display::display_identifier;
 use ratatui::{
     style::{Style, Stylize},
@@ -400,4 +406,161 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+impl MainPage {
+    pub(in crate::ui::pages::main) fn handle_inbox_key(&mut self, key: KeyEvent) -> bool {
+        let inbox = &self.props.main_page.content_panel.inbox;
+
+        // A destructive-action confirmation is pending: only y/Enter commits;
+        // anything else cancels. Mirrors the Communities/VTA-DID pattern (R25).
+        if let Some(confirm) = inbox.confirm.clone() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    let commit = match confirm {
+                        InboxConfirm::Dismiss { task_id } => InboxAction::DismissTask { task_id },
+                        InboxConfirm::ClearAll => InboxAction::ClearAll,
+                    };
+                    let _ = self.action_tx.send(Action::Inbox(commit));
+                }
+                _ => {
+                    let _ = self
+                        .action_tx
+                        .send(Action::Inbox(InboxAction::CancelConfirm));
+                }
+            }
+            return true;
+        }
+
+        // If viewing a task detail, handle detail keys
+        if let Some(active_task) = &inbox.active_task {
+            // Extract what we need before borrowing self mutably
+            let task_id = match active_task {
+                ActiveTaskView::RelationshipRequestInbound { task_id, .. }
+                | ActiveTaskView::VRCRequestInbound { task_id, .. }
+                | ActiveTaskView::VRCIssued { task_id, .. }
+                | ActiveTaskView::RelationshipRequestOutbound { task_id, .. }
+                | ActiveTaskView::VRCRequestOutbound { task_id, .. }
+                | ActiveTaskView::Info { task_id, .. } => task_id.clone(),
+            };
+            let is_rel_inbound = matches!(
+                active_task,
+                ActiveTaskView::RelationshipRequestInbound { .. }
+            );
+            let is_vrc_issued = matches!(active_task, ActiveTaskView::VRCIssued { .. });
+            let is_vrc_request_inbound =
+                matches!(active_task, ActiveTaskView::VRCRequestInbound { .. });
+
+            return match key.code {
+                KeyCode::Esc => {
+                    let _ = self.action_tx.send(Action::Inbox(InboxAction::Back));
+                    true
+                }
+                // Accepting with a pairwise R-DID is the default path (#241);
+                // `A` stays wired to it so existing muscle memory keeps giving
+                // the private outcome it always gave.
+                KeyCode::Char('p') if is_rel_inbound => {
+                    let _ = self
+                        .action_tx
+                        .send(Action::Inbox(InboxAction::AcceptRelationship {
+                            task_id,
+                            generate_r_did: false,
+                        }));
+                    true
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') if is_rel_inbound => {
+                    let _ = self
+                        .action_tx
+                        .send(Action::Inbox(InboxAction::AcceptRelationship {
+                            task_id,
+                            generate_r_did: true,
+                        }));
+                    true
+                }
+                KeyCode::Char('a') => {
+                    if is_vrc_issued {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Inbox(InboxAction::AcceptVrc { task_id }));
+                    } else if is_vrc_request_inbound {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Inbox(InboxAction::AcceptVrcRequest { task_id }));
+                    }
+                    true
+                }
+                KeyCode::Char('r') => {
+                    if is_rel_inbound {
+                        let _ =
+                            self.action_tx
+                                .send(Action::Inbox(InboxAction::RejectRelationship {
+                                    task_id,
+                                    reason: None,
+                                }));
+                    } else if is_vrc_request_inbound {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Inbox(InboxAction::RejectVrcRequest {
+                                task_id,
+                                reason: None,
+                            }));
+                    }
+                    true
+                }
+                KeyCode::Char('d') => {
+                    let _ = self
+                        .action_tx
+                        .send(Action::Inbox(InboxAction::ConfirmDismiss { task_id }));
+                    true
+                }
+                _ => false,
+            };
+        }
+
+        // Task list navigation
+        let selected = inbox.selected_index;
+        let task_count = inbox.tasks.len();
+
+        match key.code {
+            KeyCode::Up if selected > 0 => {
+                let _ = self
+                    .action_tx
+                    .send(Action::Inbox(InboxAction::SelectTask(selected - 1)));
+                true
+            }
+            KeyCode::Down if selected + 1 < task_count => {
+                let _ = self
+                    .action_tx
+                    .send(Action::Inbox(InboxAction::SelectTask(selected + 1)));
+                true
+            }
+            KeyCode::Enter if selected < task_count => {
+                // All task types have detail views — let the state handler build it
+                let _ = self
+                    .action_tx
+                    .send(Action::Inbox(InboxAction::OpenDetail(selected)));
+                true
+            }
+            KeyCode::Char('d') if selected < task_count => {
+                let task_id = inbox.tasks[selected].id.clone();
+                let _ = self
+                    .action_tx
+                    .send(Action::Inbox(InboxAction::ConfirmDismiss { task_id }));
+                true
+            }
+            KeyCode::Char('c') if task_count > 0 => {
+                let _ = self
+                    .action_tx
+                    .send(Action::Inbox(InboxAction::ConfirmClearAll));
+                true
+            }
+            KeyCode::Esc => {
+                let _ = self
+                    .action_tx
+                    .send(Action::MainPanelSwitch(MainPanel::MainMenu));
+                true
+            }
+            _ => false,
+        }
+    }
 }

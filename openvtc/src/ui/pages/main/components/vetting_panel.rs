@@ -13,6 +13,8 @@
 //! Copy says "meets the published requirements", never "approved": only the
 //! community decides (D12).
 
+mod keys;
+
 use super::panel::Panel;
 use super::qr::{QrError, qr_lines};
 use crate::colors::{

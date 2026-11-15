@@ -44,6 +44,8 @@
 //! about a person's own data, so every agent-served tab draws the failure
 //! rather than an empty list.
 
+mod keys;
+
 use super::panel::Panel;
 use crate::colors::{
     COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,

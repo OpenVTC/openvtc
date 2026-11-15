@@ -1,12 +1,19 @@
+//! Relationships panel — relationships, their detail and new requests, with
+//! the panel's key handling.
+
 use super::panel::Panel;
 use crate::colors::{
     COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,
     COLOR_WARNING_ACCESSIBLE_RED,
 };
+use crate::state_handler::actions::{Action, RelationshipAction};
+use crate::state_handler::main_page::MainPanel;
 use crate::state_handler::{
     main_page::content::{ContentPanelState, RelationshipsMode, RelationshipsState},
     state::ConnectionState,
 };
+use crate::ui::pages::main::{MainPage, edit_text};
+use crossterm::event::{KeyCode, KeyEvent};
 use openvtc_core::config::account::RelationshipIdentifierDefault;
 use openvtc_core::display::display_identifier;
 use ratatui::{
@@ -680,6 +687,337 @@ fn render_form(
     );
 
     lines
+}
+
+impl MainPage {
+    pub(in crate::ui::pages::main) fn handle_relationships_key(&mut self, key: KeyEvent) -> bool {
+        use crate::state_handler::main_page::content::RelationshipsMode;
+
+        let rels = &self.props.main_page.content_panel.relationships;
+
+        match &rels.mode {
+            RelationshipsMode::NewRequest {
+                did_input,
+                alias_input,
+                reason_input,
+                generate_r_did,
+                active_field,
+                ..
+            } => {
+                // Form input handling
+                let active_field = *active_field;
+                let generate_r_did = *generate_r_did;
+                match key.code {
+                    KeyCode::Esc => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Relationship(RelationshipAction::CancelNewRequest));
+                        true
+                    }
+                    KeyCode::Tab => {
+                        // Cycle through fields 0->1->2->3->0
+                        let next = (active_field + 1) % 4;
+                        let _ = self
+                            .action_tx
+                            .send(Action::Relationship(RelationshipAction::FocusField(next)));
+                        true
+                    }
+                    KeyCode::Up if active_field > 0 => {
+                        let _ = self.action_tx.send(Action::Relationship(
+                            RelationshipAction::FocusField(active_field - 1),
+                        ));
+                        true
+                    }
+                    KeyCode::Down if active_field < 3 => {
+                        let _ = self.action_tx.send(Action::Relationship(
+                            RelationshipAction::FocusField(active_field + 1),
+                        ));
+                        true
+                    }
+                    KeyCode::Char(' ') if active_field == 3 => {
+                        // Toggle the generate_r_did boolean
+                        let _ = self
+                            .action_tx
+                            .send(Action::Relationship(RelationshipAction::ToggleRDid));
+                        true
+                    }
+                    KeyCode::Enter if active_field == 3 => {
+                        // Submit from the last field
+                        let did = did_input.clone();
+                        let alias = alias_input.clone();
+                        let reason = if reason_input.trim().is_empty() {
+                            None
+                        } else {
+                            Some(reason_input.clone())
+                        };
+                        let _ = self.action_tx.send(Action::Relationship(
+                            RelationshipAction::SubmitRequest {
+                                did,
+                                alias,
+                                reason,
+                                generate_r_did,
+                            },
+                        ));
+                        true
+                    }
+                    code if active_field < 3 => {
+                        let current = match active_field {
+                            0 => did_input,
+                            1 => alias_input,
+                            _ => reason_input,
+                        };
+                        match edit_text(code, current) {
+                            Some(value) => {
+                                let _ = self.action_tx.send(Action::Relationship(
+                                    RelationshipAction::InputUpdate {
+                                        field: active_field,
+                                        value,
+                                    },
+                                ));
+                                true
+                            }
+                            None => false,
+                        }
+                    }
+                    _ => false,
+                }
+            }
+            RelationshipsMode::Detail {
+                index,
+                selected_vrc,
+            } => {
+                let index = *index;
+                let current_vrc = *selected_vrc;
+
+                // A removal confirmation is pending: y/Enter commits, anything
+                // else cancels. Mirrors the Communities/VTA-DID pattern (R25).
+                if let Some(remote_p_did) = rels.confirm_delete.clone() {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => {
+                            let _ = self.action_tx.send(Action::Relationship(
+                                RelationshipAction::Remove { remote_p_did },
+                            ));
+                        }
+                        _ => {
+                            let _ = self
+                                .action_tx
+                                .send(Action::Relationship(RelationshipAction::CancelRemove));
+                        }
+                    }
+                    return true;
+                }
+
+                match key.code {
+                    KeyCode::Down => {
+                        if let Some(rel) = rels.relationships.get(index) {
+                            let total = rel.vrcs_issued.len() + rel.vrcs_received.len();
+                            if total > 0 {
+                                let next = match current_vrc {
+                                    None => Some(0),
+                                    Some(n) if n + 1 < total => Some(n + 1),
+                                    other => other,
+                                };
+                                if let RelationshipsMode::Detail {
+                                    selected_vrc: ref mut sv,
+                                    ..
+                                } = self.props.main_page.content_panel.relationships.mode
+                                {
+                                    *sv = next;
+                                }
+                            }
+                        }
+                        true
+                    }
+                    KeyCode::Up => {
+                        let next = match current_vrc {
+                            Some(0) => None,
+                            Some(n) => Some(n - 1),
+                            None => None,
+                        };
+                        if let RelationshipsMode::Detail {
+                            selected_vrc: ref mut sv,
+                            ..
+                        } = self.props.main_page.content_panel.relationships.mode
+                        {
+                            *sv = next;
+                        }
+                        true
+                    }
+                    KeyCode::Esc => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Relationship(RelationshipAction::Back));
+                        true
+                    }
+                    KeyCode::Char('e') => {
+                        if let Some(rel) = rels.relationships.get(index) {
+                            let current = rel.alias.clone().unwrap_or_default();
+                            let _ = self.action_tx.send(Action::Relationship(
+                                RelationshipAction::StartEditAlias {
+                                    index,
+                                    current_alias: current,
+                                },
+                            ));
+                        }
+                        true
+                    }
+                    KeyCode::Char('p') => {
+                        if let Some(rel) = rels.relationships.get(index) {
+                            let _ = self.action_tx.send(Action::Relationship(
+                                RelationshipAction::Ping {
+                                    remote_p_did: rel.remote_p_did.clone(),
+                                },
+                            ));
+                        }
+                        true
+                    }
+                    KeyCode::Char('d') => {
+                        if let Some(rel) = rels.relationships.get(index) {
+                            let _ = self.action_tx.send(Action::Relationship(
+                                RelationshipAction::ConfirmRemove {
+                                    remote_p_did: rel.remote_p_did.clone(),
+                                },
+                            ));
+                        }
+                        true
+                    }
+                    KeyCode::Char('v') => {
+                        if let Some(rel) = rels.relationships.get(index) {
+                            let _ = self.action_tx.send(Action::Relationship(
+                                RelationshipAction::RequestVrc {
+                                    remote_p_did: rel.remote_p_did.clone(),
+                                },
+                            ));
+                        }
+                        true
+                    }
+                    KeyCode::Char('w') => {
+                        let _ = self.action_tx.send(Action::Relationship(
+                            RelationshipAction::StartWitness { index },
+                        ));
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            RelationshipsMode::Witness {
+                index,
+                witness_input,
+                share_membership,
+            } => {
+                let index = *index;
+                match key.code {
+                    KeyCode::Esc => {
+                        let _ = self.action_tx.send(Action::Relationship(
+                            RelationshipAction::CancelWitness { index },
+                        ));
+                        true
+                    }
+                    KeyCode::Enter => {
+                        if let Some(rel) = rels.relationships.get(index) {
+                            let _ = self.action_tx.send(Action::Relationship(
+                                RelationshipAction::Witness {
+                                    remote_p_did: rel.remote_p_did.clone(),
+                                    witness: witness_input.clone(),
+                                    share_membership: *share_membership,
+                                },
+                            ));
+                        }
+                        true
+                    }
+                    // Tab, not a letter: the witness is typed into this prompt.
+                    KeyCode::Tab => {
+                        let _ = self.action_tx.send(Action::Relationship(
+                            RelationshipAction::ToggleWitnessMembership,
+                        ));
+                        true
+                    }
+                    code => match edit_text(code, witness_input) {
+                        Some(value) => {
+                            let _ = self.action_tx.send(Action::Relationship(
+                                RelationshipAction::WitnessInputUpdate(value),
+                            ));
+                            true
+                        }
+                        None => false,
+                    },
+                }
+            }
+            RelationshipsMode::EditAlias { index, alias_input } => {
+                let index = *index;
+                match key.code {
+                    KeyCode::Esc => {
+                        let _ = self.action_tx.send(Action::Relationship(
+                            RelationshipAction::CancelEditAlias { index },
+                        ));
+                        true
+                    }
+                    KeyCode::Enter => {
+                        if let Some(rel) = rels.relationships.get(index) {
+                            let _ = self.action_tx.send(Action::Relationship(
+                                RelationshipAction::EditAlias {
+                                    remote_p_did: rel.remote_p_did.clone(),
+                                    alias: alias_input.clone(),
+                                },
+                            ));
+                        }
+                        true
+                    }
+                    code => match edit_text(code, alias_input) {
+                        Some(value) => {
+                            let _ = self.action_tx.send(Action::Relationship(
+                                RelationshipAction::EditAliasUpdate(value),
+                            ));
+                            true
+                        }
+                        None => false,
+                    },
+                }
+            }
+            RelationshipsMode::List => {
+                let selected = rels.selected_index;
+                let count = rels.relationships.len();
+
+                match key.code {
+                    KeyCode::Up if selected > 0 => {
+                        let _ =
+                            self.action_tx
+                                .send(Action::Relationship(RelationshipAction::Select(
+                                    selected - 1,
+                                )));
+                        true
+                    }
+                    KeyCode::Down if selected + 1 < count => {
+                        let _ =
+                            self.action_tx
+                                .send(Action::Relationship(RelationshipAction::Select(
+                                    selected + 1,
+                                )));
+                        true
+                    }
+                    KeyCode::Enter if selected < count => {
+                        let _ = self.action_tx.send(Action::Relationship(
+                            RelationshipAction::OpenDetail(selected),
+                        ));
+                        true
+                    }
+                    KeyCode::Char('n') => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Relationship(RelationshipAction::StartNewRequest));
+                        true
+                    }
+                    KeyCode::Esc => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::MainPanelSwitch(MainPanel::MainMenu));
+                        true
+                    }
+                    _ => false,
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

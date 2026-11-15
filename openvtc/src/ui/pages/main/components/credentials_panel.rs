@@ -1,8 +1,13 @@
+//! Credentials panel — held credentials, their detail and new requests, with
+//! the panel's key handling.
+
 use super::panel::Panel;
 use crate::colors::{
     COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,
     COLOR_WARNING_ACCESSIBLE_RED,
 };
+use crate::state_handler::actions::{Action, CredentialAction};
+use crate::state_handler::main_page::MainPanel;
 use crate::state_handler::{
     main_page::content::{
         ContentPanelState, CredentialTab, CredentialsMode, CredentialsState, RelationshipsState,
@@ -10,6 +15,8 @@ use crate::state_handler::{
     state::ConnectionState,
 };
 use crate::ui::badges;
+use crate::ui::pages::main::{MainPage, copy_to_clipboard, edit_text};
+use crossterm::event::{KeyCode, KeyEvent};
 use openvtc_core::display::display_identifier;
 use ratatui::{
     style::{Style, Stylize},
@@ -381,6 +388,179 @@ fn truncate(text: &str, max: usize) -> String {
     } else {
         let kept: String = text.chars().take(max.saturating_sub(1)).collect();
         format!("{kept}…")
+    }
+}
+
+impl MainPage {
+    pub(in crate::ui::pages::main) fn handle_credentials_key(&mut self, key: KeyEvent) -> bool {
+        use crate::state_handler::main_page::content::CredentialsMode;
+
+        let creds = &self.props.main_page.content_panel.credentials;
+
+        match &creds.mode {
+            CredentialsMode::NewRequest {
+                relationship_index,
+                reason_input,
+            } => {
+                let rel_idx = *relationship_index;
+                match key.code {
+                    KeyCode::Esc => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Credential(CredentialAction::CancelNewRequest));
+                        true
+                    }
+                    KeyCode::Up if rel_idx > 0 => {
+                        let _ = self.action_tx.send(Action::Credential(
+                            CredentialAction::SelectRelationship(rel_idx - 1),
+                        ));
+                        true
+                    }
+                    KeyCode::Down => {
+                        // Bound check happens in state handler
+                        let _ = self.action_tx.send(Action::Credential(
+                            CredentialAction::SelectRelationship(rel_idx + 1),
+                        ));
+                        true
+                    }
+                    KeyCode::Enter => {
+                        // Get the established relationships from the relationships panel state
+                        let established: Vec<_> = self
+                            .props
+                            .main_page
+                            .content_panel
+                            .relationships
+                            .relationships
+                            .iter()
+                            .filter(|r| r.state == "Established")
+                            .collect();
+                        if let Some(rel) = established.get(rel_idx) {
+                            let _ = self.action_tx.send(Action::Credential(
+                                CredentialAction::SubmitRequest {
+                                    relationship_p_did: rel.remote_p_did.clone(),
+                                    reason: if reason_input.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(reason_input.clone())
+                                    },
+                                },
+                            ));
+                        }
+                        true
+                    }
+                    code => match edit_text(code, reason_input) {
+                        Some(r) => {
+                            let _ = self
+                                .action_tx
+                                .send(Action::Credential(CredentialAction::ReasonUpdate(r)));
+                            true
+                        }
+                        None => false,
+                    },
+                }
+            }
+            CredentialsMode::Detail { index } => {
+                let detail_index = *index;
+
+                // A removal confirmation is pending: y/Enter commits, anything
+                // else cancels. Mirrors the Communities/VTA-DID pattern (R25).
+                if let Some(vrc_id) = creds.confirm_delete.clone() {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => {
+                            let _ = self
+                                .action_tx
+                                .send(Action::Credential(CredentialAction::Remove { vrc_id }));
+                        }
+                        _ => {
+                            let _ = self
+                                .action_tx
+                                .send(Action::Credential(CredentialAction::CancelRemove));
+                        }
+                    }
+                    return true;
+                }
+
+                match key.code {
+                    KeyCode::Esc => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Credential(CredentialAction::Back));
+                        true
+                    }
+                    KeyCode::Char('d') => {
+                        // Membership, role and vetting credentials are bound to a
+                        // community or an application — there is no local-only
+                        // removal, so `d` is a no-op there (the Remove action
+                        // won't find a matching VRC).
+                        if creds.selected_tab.allows_local_removal()
+                            && let Some(vrc) = creds.active_list().get(detail_index)
+                        {
+                            let _ = self.action_tx.send(Action::Credential(
+                                CredentialAction::ConfirmRemove {
+                                    vrc_id: vrc.vrc_id.clone(),
+                                },
+                            ));
+                        }
+                        true
+                    }
+                    KeyCode::Char('c') => {
+                        if let Some(vrc) = creds.active_list().get(detail_index) {
+                            copy_to_clipboard(
+                                &vrc.raw_json.to_pretty_json(),
+                                "credential",
+                                &self.action_tx,
+                            );
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            CredentialsMode::List => {
+                let active_list_len = creds.active_list().len();
+                let selected = creds.selected_index;
+
+                match key.code {
+                    KeyCode::Tab => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Credential(CredentialAction::SwitchTab));
+                        true
+                    }
+                    KeyCode::Up if selected > 0 => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Credential(CredentialAction::Select(selected - 1)));
+                        true
+                    }
+                    KeyCode::Down if selected + 1 < active_list_len => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Credential(CredentialAction::Select(selected + 1)));
+                        true
+                    }
+                    KeyCode::Enter if selected < active_list_len => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Credential(CredentialAction::OpenDetail(selected)));
+                        true
+                    }
+                    KeyCode::Char('n') => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Credential(CredentialAction::StartNewRequest));
+                        true
+                    }
+                    KeyCode::Esc => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::MainPanelSwitch(MainPanel::MainMenu));
+                        true
+                    }
+                    _ => false,
+                }
+            }
+        }
     }
 }
 
