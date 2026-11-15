@@ -227,11 +227,11 @@ impl SaveScheduler {
     /// `spawn_blocking`, awaiting completion. This drains any pending dirty state:
     /// after a successful flush, `dirty` is cleared and the deadline disarmed.
     ///
-    /// It does not coordinate with an already in-flight background save (the
-    /// caller's mutation may post-date it); flushing unconditionally guarantees
-    /// the *current* live state hits disk, which is the durability guarantee we
-    /// want. The in-flight flag is left untouched so a concurrently completing
-    /// background save still calls `finish` correctly.
+    /// It does not wait for an already in-flight background save (the caller's
+    /// mutation may post-date it); flushing unconditionally puts the *current*
+    /// live state on disk now. Because that older save may land afterwards,
+    /// the config is left dirty while one is in flight, and its `finish`
+    /// writes the current state once more.
     ///
     /// # Errors
     ///
@@ -248,10 +248,18 @@ impl SaveScheduler {
             .await
             .map_err(|e| OpenVTCError::Config(format!("save task panicked: {e}")))?;
         if result.is_ok() {
-            self.dirty = false;
-            self.deadline = None;
+            self.settle_after_flush();
         }
         result
+    }
+
+    /// The bookkeeping after a successful [`flush`](Self::flush). A background
+    /// save still in flight holds an *older* snapshot and may land after the
+    /// flush, overwriting it; leaving the config dirty makes its
+    /// [`finish`](Self::finish) schedule one more save of the current state.
+    fn settle_after_flush(&mut self) {
+        self.dirty = self.in_flight;
+        self.deadline = None;
     }
 
     /// Build a [`PendingSave`] from the live config without touching the
@@ -328,6 +336,26 @@ mod tests {
     /// At most one save in flight: while a save is running, the deadline firing
     /// must NOT start a second one. A mark that lands during the in-flight save
     /// is remembered and scheduled by `finish`.
+    /// A flush that overlaps a background save must not let the older
+    /// snapshot have the last word: the config stays dirty, and the
+    /// background save's `finish` schedules a fresh one.
+    #[test]
+    fn a_flush_during_a_background_save_schedules_another() {
+        let mut s = SaveScheduler::new("test");
+        s.mark_dirty();
+        s.dirty = false;
+        s.in_flight = true; // a background save with an older snapshot
+        s.settle_after_flush();
+        assert!(s.dirty, "the overlapped flush must leave the config dirty");
+        s.finish(true);
+        assert!(s.deadline.is_some(), "finish must schedule another save");
+
+        let mut idle = SaveScheduler::new("test");
+        idle.mark_dirty();
+        idle.settle_after_flush();
+        assert!(!idle.dirty && idle.deadline.is_none());
+    }
+
     #[test]
     fn at_most_one_in_flight_and_reschedules() {
         let mut sched = SaveScheduler::new("test");

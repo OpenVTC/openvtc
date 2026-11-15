@@ -39,6 +39,9 @@ enum Fail {
     SubmitSigner,
     /// The invitation stage never finishes — for a cancel to land in.
     HangInInvite,
+    /// The submit waits for the test to release it — the request is on the
+    /// wire while it waits.
+    GatedSubmit,
 }
 
 struct Fake {
@@ -48,6 +51,8 @@ struct Fake {
     saves: AtomicUsize,
     /// A resolve that waits for the test to answer it.
     resolve_gate: Mutex<Option<oneshot::Receiver<Result<String, String>>>>,
+    /// Released by the test to let a `GatedSubmit` submit finish.
+    submit_gate: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 impl Fake {
@@ -57,6 +62,7 @@ impl Fake {
             removed: Mutex::new(Vec::new()),
             saves: AtomicUsize::new(0),
             resolve_gate: Mutex::new(None),
+            submit_gate: Mutex::new(None),
         })
     }
 
@@ -161,7 +167,13 @@ impl JoinIo for Fake {
 
     fn submit(&self, req: SubmitReq, _progress: Progress) -> IoFuture<'static, Submitted> {
         let fail = self.fail;
+        let gate = self.submit_gate.lock().unwrap().take();
         Box::pin(async move {
+            if fail == Fail::GatedSubmit
+                && let Some(gate) = gate
+            {
+                let _ = gate.await;
+            }
             let request = match req.prepared {
                 Err(e) => Err(e),
                 Ok(_) if fail == Fail::SubmitSend => Err(SubmitError::Send(OpenVTCError::Config(
@@ -766,4 +778,70 @@ async fn a_stale_outcome_is_ignored() {
     assert!(matches!(step, JoinStep::Continue));
     assert_eq!(h.state.join.page, JoinPage::EnterDid);
     assert!(!h.job_in_flight());
+}
+
+// ---- The submit: past the point of no return ----
+
+/// The job in flight is the submit.
+fn submitting(h: &Harness) -> bool {
+    h.driver.submitting_to().is_some()
+}
+
+/// F10 while the request is on the wire waits for it: the request is
+/// recorded and the persona kept, then the join exits.
+#[tokio::test]
+async fn an_exit_during_the_submit_waits_for_it_and_records_the_join() {
+    let mut h = Harness::new(Fail::GatedSubmit).await;
+    let (release, gate) = oneshot::channel();
+    *h.fake.submit_gate.lock().unwrap() = Some(gate);
+    h.launch(IdentityPick::Mint).await;
+    h.run_until(submitting).await;
+    assert!(submitting(&h), "parked in the submit");
+    assert_eq!(h.driver.submitting_to(), Some(COMMUNITY));
+
+    let step = h.act(Action::Exit).await;
+    assert!(matches!(step, JoinStep::Continue), "the exit waits");
+    assert!(h.said("stopping once it has been sent"));
+    assert!(h.persona(MINTED_DID), "nothing is undone while it sends");
+
+    release.send(()).unwrap();
+    h.run_jobs().await;
+    assert!(
+        h.config
+            .account
+            .memberships()
+            .any(|m| m.vtc_did == COMMUNITY),
+        "the sent request is recorded"
+    );
+    assert!(
+        h.persona(MINTED_DID),
+        "the persona the community holds is kept"
+    );
+    assert!(h.fake.removed().is_empty(), "its listener stays");
+    // The loop takes the queued exit next (`next_action`), as it does any key
+    // held back behind a job.
+    let queued = h.driver.leftover.pop_front();
+    assert!(matches!(queued, Some(Action::Exit)), "the exit was kept");
+    let step = h.act(Action::Exit).await;
+    assert!(
+        matches!(step, JoinStep::Exit(Interrupted::UserInt)),
+        "then the exit is taken"
+    );
+    assert!(h.persona(MINTED_DID), "and nothing is undone by it");
+}
+
+/// The loop stopping mid-submit cannot wait, so it keeps the persona rather
+/// than forget a DID the community may now hold.
+#[tokio::test]
+async fn an_interrupt_during_the_submit_keeps_the_persona() {
+    let mut h = Harness::new(Fail::GatedSubmit).await;
+    let (_release, gate) = oneshot::channel::<()>();
+    *h.fake.submit_gate.lock().unwrap() = Some(gate);
+    h.launch(IdentityPick::Mint).await;
+    h.run_until(submitting).await;
+    h.cancel().await;
+    assert!(!h.driver.is_active());
+    assert!(h.persona(MINTED_DID));
+    assert!(h.fake.removed().is_empty());
+    assert!(h.said("It may have been sent; the persona was kept."));
 }

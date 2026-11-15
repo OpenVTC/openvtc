@@ -171,6 +171,12 @@ pub(crate) struct Runtime {
     pub(super) join: join_flow::JoinDriver,
     /// The join flow to enter at the end of this iteration.
     pub(super) join_entry: Option<join_flow::JoinEntry>,
+    /// Messages from a community whose join request is being sent, held
+    /// until the request is recorded (see [`Runtime::on_inbound`]).
+    pub(super) held_inbound: Vec<(
+        didcomm::DIDCommEvent,
+        Option<openvtc_core::inbound::PreVerified>,
+    )>,
     /// A join waiting on a community's requirements (see `join_flow::AwaitingRequirements`).
     pub(super) awaiting_requirements: Option<join_flow::AwaitingRequirements>,
     /// A join parked on a hidden-vetting challenge (see
@@ -512,6 +518,7 @@ impl Runtime {
             hidden_vetting_pacer: hidden_vetting_poll::HiddenVettingPacer::default(),
             join: join_flow::JoinDriver::new(true),
             join_entry: None,
+            held_inbound: Vec::new(),
             awaiting_requirements: None,
             awaiting_challenge: None,
             awaiting_wallet: None,
@@ -614,11 +621,12 @@ impl Runtime {
                 }
                 // Every two seconds, and almost always with nothing to start.
                 _ = self.vta_sync_tick.tick() => {
-                    if self.on_vta_sync_tick().await {
-                        Flow::Continue
-                    } else {
-                        Flow::Quiet
-                    }
+                    // Always republished: the UI redraws only on keys or new
+                    // state, and this 2 s tick is what keeps "now"-based
+                    // displays (pending-join liveness, election and receive
+                    // countdowns) moving, as on the old loop.
+                    self.on_vta_sync_tick().await;
+                    Flow::Continue
                 }
                 Some(ex) = self.vta_sync_rx.recv() => {
                     self.on_vta_sync_exchange(ex).await;

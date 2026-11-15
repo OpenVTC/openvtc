@@ -4,7 +4,22 @@
 use super::*;
 use crate::state_handler::*;
 
+/// The most messages held for a join being submitted; past this they are
+/// processed as they arrive, as before.
+const MAX_HELD_INBOUND: usize = 64;
+
 impl Runtime {
+    /// Process messages held while a join request was being sent, once it
+    /// no longer is.
+    pub(super) async fn release_held_inbound(&mut self) {
+        if self.join.submitting_to().is_some() || self.held_inbound.is_empty() {
+            return;
+        }
+        for (event, pre) in std::mem::take(&mut self.held_inbound) {
+            Box::pin(self.on_inbound(event, pre)).await;
+        }
+    }
+
     /// DIDComm inbound message events — as they arrive, or handed
     /// back with the result of their off-loop check.
     pub(super) async fn on_inbound(
@@ -12,6 +27,19 @@ impl Runtime {
         event: didcomm::DIDCommEvent,
         pre: Option<openvtc_core::inbound::PreVerified>,
     ) {
+        // While a join request to a community is being sent, its messages
+        // wait: the pending record its submit-receipt or verdict is matched
+        // against is written only once the submit comes back, and a fast
+        // answer processed first would find nothing and be dropped. The old
+        // nested join loop got this for free by not reading inbound at all.
+        if let didcomm::DIDCommEvent::InboundMessage { authenticated, .. } = &event
+            && let Some(vtc) = self.join.submitting_to()
+            && authenticated.as_deref() == Some(vtc)
+            && self.held_inbound.len() < MAX_HELD_INBOUND
+        {
+            self.held_inbound.push((event, pre));
+            return;
+        }
         let Runtime {
             state,
             config,

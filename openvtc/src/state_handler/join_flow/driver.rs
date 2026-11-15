@@ -943,6 +943,9 @@ struct Job {
     generation: u64,
     abort: tokio::task::AbortHandle,
     then: Then,
+    /// The submit stage: the request may already be on the wire, so the job
+    /// is past the point where cancelling can undo it.
+    submitting: bool,
 }
 
 enum Then {
@@ -1144,6 +1147,22 @@ impl JoinDriver {
         let Some(session) = self.session.as_mut() else {
             return JoinStep::Continue;
         };
+        if session.job.as_ref().is_some_and(|job| job.submitting)
+            && matches!(
+                action,
+                Action::Exit | Action::UXError(_) | Action::JoinCancel
+            )
+        {
+            // The request may already be on the wire. Cancelling now would
+            // forget the persona the community is about to answer, with no
+            // record of the request: let the submit finish and be recorded,
+            // then take this way out.
+            session.queued.push_back(action);
+            ctx.state
+                .join
+                .info("Sending the join request — stopping once it has been sent.");
+            return JoinStep::Continue;
+        }
         if session.job.is_some() {
             // The ways out take effect now, whatever the job is waiting on;
             // everything else waits its turn, as it did in the old loop's
@@ -1217,7 +1236,7 @@ impl JoinDriver {
                 JoinStep::Continue
             }
             (Then::Stage, JobResult::Invited(invited)) => {
-                self.on_invited(ctx, invited);
+                self.on_invited(ctx, invited).await;
                 JoinStep::Continue
             }
             (Then::Stage, JobResult::Presented(presented)) => {
@@ -1340,9 +1359,26 @@ impl JoinDriver {
 
     /// Abort the job in flight, and undo a launch that was under way.
     async fn interrupt(&mut self, ctx: &mut JoinCtx<'_>) {
+        let mut submitting = false;
         if let Some(job) = self.session.as_mut().and_then(|s| s.job.take()) {
+            submitting = job.submitting;
             job.abort.abort();
             ctx.in_flight.finish(DispatchDomain::Join);
+        }
+        if submitting && self.session.as_ref().is_some_and(|s| s.launch.is_some()) {
+            // Interrupted mid-submit (the app is stopping): the request may
+            // have gone out, so the persona and its listener are kept rather
+            // than forgotten — deleting a DID the community may now hold is
+            // worse than leaving one unused.
+            self.end_launch(ctx);
+            ctx.state.join.completed = Completion::CompletedFail;
+            ctx.state.join.info(
+                "Stopped while sending the join request. It may have been sent; the persona was kept. Check the community's status from Communities.",
+            );
+            ctx.state
+                .main_page
+                .log("Join stopped while its request was being sent; persona kept.");
+            return;
         }
         if self.session.as_ref().is_some_and(|s| s.launch.is_some()) {
             self.compensate(ctx).await;
@@ -1399,6 +1435,7 @@ impl JoinDriver {
             generation,
             abort,
             then,
+            submitting: false,
         });
     }
 
@@ -2789,7 +2826,7 @@ impl JoinDriver {
     /// Stage 3 came back: the listener's fate and the invitation to present.
     /// Plan the presenting — the linkage proof's signer, the answers, the
     /// hidden-vetting proof — on the loop, and run it off.
-    fn on_invited(&mut self, ctx: &mut JoinCtx<'_>, invited: Invited) {
+    async fn on_invited(&mut self, ctx: &mut JoinCtx<'_>, invited: Invited) {
         let Some(launch) = self.launch_mut() else {
             return;
         };
@@ -2835,9 +2872,11 @@ impl JoinDriver {
             );
         }
         let Some((persona_id, _)) = launch.persona.clone() else {
+            self.fail_and_undo(ctx, "The join lost track of its persona part-way through and was undone. Please try again.").await;
             return;
         };
         let Some((applicant_did, _)) = launch.applicant.clone() else {
+            self.fail_and_undo(ctx, "The join lost track of its persona part-way through and was undone. Please try again.").await;
             return;
         };
         let linkage = plan_linkage(config, state, &applicant_did);
@@ -2896,6 +2935,7 @@ impl JoinDriver {
         let (Some((persona_id, _)), Some((applicant_did, mediator))) =
             (launch.persona.clone(), launch.applicant.clone())
         else {
+            self.fail_and_undo(ctx, "The join lost track of its persona part-way through and was undone. Please try again.").await;
             return;
         };
         let vtc_did = launch.vtc_did.clone();
@@ -2968,6 +3008,23 @@ impl JoinDriver {
             |io, progress| io.submit(req, progress),
             JobResult::Submitted,
         );
+        if let Some(job) = self.session.as_mut().and_then(|s| s.job.as_mut()) {
+            job.submitting = true;
+        }
+    }
+
+    /// The community a join request is being sent to right now, if one is.
+    /// The runtime holds that community's messages until the request has
+    /// been recorded, so a fast answer is not processed before the pending
+    /// record it answers exists.
+    pub(crate) fn submitting_to(&self) -> Option<&str> {
+        let session = self.session.as_ref()?;
+        session
+            .job
+            .as_ref()
+            .filter(|job| job.submitting)
+            .and(session.launch.as_ref())
+            .map(|launch| launch.vtc_did.as_str())
     }
 
     /// Stage 5 came back: the request went out, or why not. Record the
@@ -3006,6 +3063,7 @@ impl JoinDriver {
         let (Some((persona_id, persona_did)), Some((applicant_did, _))) =
             (launch.persona.clone(), launch.applicant.clone())
         else {
+            self.fail_and_undo(ctx, "The join lost track of its persona part-way through and was undone. Please try again.").await;
             return;
         };
         let vtc_did = launch.vtc_did.clone();

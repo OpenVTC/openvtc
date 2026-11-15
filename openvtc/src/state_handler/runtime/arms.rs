@@ -150,10 +150,12 @@ impl Runtime {
             background_dispatch::DispatchOutcome::Join(outcome) => {
                 let (join, mut ctx) = self.join_parts();
                 let step = join.on_outcome(&mut ctx, *outcome).await;
-                return match self.apply_join_step(step).await {
+                let flow = match self.apply_join_step(step).await {
                     Some(interrupted) => Flow::Exit(interrupted),
                     None => Flow::Continue,
                 };
+                self.release_held_inbound().await;
+                return flow;
             }
             background_dispatch::DispatchOutcome::Progress(
                 background_dispatch::ProgressUpdate::Join { generation, line },

@@ -43,7 +43,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ([#529](https://github.com/OpenVTC/openvtc/issues/529)). The join runs as a job on the
   main loop instead of a nested event loop, so saves, inbound messages, VTA supervision
   and timers carry on while it runs. Esc, F10 or an error cancels a resolve, discovery or
-  launch at once, and the steps already taken are undone in reverse. A join job that
+  launch at once, and the steps already taken are undone in reverse — except once the
+  join request is being sent: then the exit waits for it, so the request is recorded and
+  the persona the community now holds is kept. Messages from that community wait until
+  the request is recorded, so a fast answer is not dropped. A join job that
   panics reports "Joining a community failed (internal error)."
 - **The runtime loop is a `Runtime` struct with one method per event**
   ([#528](https://github.com/OpenVTC/openvtc/issues/528)), and its arms are tested on
