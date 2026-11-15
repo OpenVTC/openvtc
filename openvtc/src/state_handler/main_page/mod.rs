@@ -541,8 +541,9 @@ impl MainPageState {
 
         // Sync credentials (scoped to the working community's persona)
         let memo = &mut self.post_quantum;
+        let persona_labels = persona_labels_by_did(config);
         self.content_panel.credentials.received = finish_credential_rows(
-            config,
+            &persona_labels,
             memo,
             collect_vrcs(
                 &config.private.vrcs_received,
@@ -553,7 +554,7 @@ impl MainPageState {
         )
         .into();
         self.content_panel.credentials.issued = finish_credential_rows(
-            config,
+            &persona_labels,
             memo,
             collect_vrcs(
                 &config.private.vrcs_issued,
@@ -564,9 +565,10 @@ impl MainPageState {
         )
         .into();
         self.content_panel.credentials.membership =
-            finish_credential_rows(config, memo, collect_membership_creds(config)).into();
+            finish_credential_rows(&persona_labels, memo, collect_membership_creds(config)).into();
         self.content_panel.credentials.vetting =
-            finish_credential_rows(config, memo, collect_vetting_statements(config)).into();
+            finish_credential_rows(&persona_labels, memo, collect_vetting_statements(config))
+                .into();
         memo.finish_sync();
         self.content_panel.credentials.retired_vrcs = config.private.vrcs_received.retired()
             + config.private.vrcs_issued.retired()
@@ -700,6 +702,12 @@ impl MainPageState {
         // DID is the holder's identity, not a property of the agent that
         // happens to host its keys, and the pane that manages it is the pane
         // that should list it.
+        // Memberships per persona, counted in one pass over the memberships.
+        let mut bound_communities: std::collections::HashMap<PersonaId, usize> =
+            std::collections::HashMap::new();
+        for c in config.account.memberships() {
+            *bound_communities.entry(c.persona_ref).or_default() += 1;
+        }
         let mut personas: Vec<content::ManagedDid> = config
             .account
             .personas
@@ -711,11 +719,7 @@ impl MainPageState {
                 did: p.did.clone(),
                 did_locator: p.did_locator.clone(),
                 label: p.label.clone().unwrap_or_default(),
-                bound_communities: config
-                    .account
-                    .memberships()
-                    .filter(|c| c.persona_ref == p.persona_id)
-                    .count(),
+                bound_communities: bound_communities.get(&p.persona_id).copied().unwrap_or(0),
                 is_active: p.did.as_str() == persona_did,
             })
             .collect();
@@ -1133,23 +1137,35 @@ fn collect_vrcs(
 /// persona it was issued to, by name, and whether it is post-quantum signed.
 /// One pass here rather than in each collector, so no list can miss it.
 fn finish_credential_rows(
-    config: &Config,
+    persona_labels: &std::collections::HashMap<&str, Option<&str>>,
     post_quantum: &mut PostQuantumMemo,
     mut rows: Vec<VrcSummary>,
 ) -> Vec<VrcSummary> {
     for row in &mut rows {
         row.post_quantum = post_quantum.post_quantum(&row.vrc_id, &row.raw_json);
         if row.subject_is_self {
-            row.subject_label = config
-                .account
-                .personas
-                .values()
-                .find(|p| p.did == row.subject)
-                .and_then(|p| p.label.as_deref())
+            row.subject_label = persona_labels
+                .get(row.subject.as_str())
+                .copied()
+                .flatten()
                 .map(|l| sanitize_display(l, 64));
         }
     }
     rows
+}
+
+/// Each persona DID's own label (`None` when it has none), built once per sync
+/// so a credential row finds its subject's label by lookup rather than a scan
+/// of the personas. Where two personas share a DID the first in iteration order
+/// wins, as the scan's `find` did.
+fn persona_labels_by_did(config: &Config) -> std::collections::HashMap<&str, Option<&str>> {
+    let mut labels = std::collections::HashMap::with_capacity(config.account.personas.len());
+    for p in config.account.personas.values() {
+        labels
+            .entry(p.did.as_str())
+            .or_insert_with(|| p.label.as_deref());
+    }
+    labels
 }
 
 fn collect_membership_creds(config: &Config) -> Vec<VrcSummary> {
@@ -3289,6 +3305,56 @@ mod tests {
 
         let lazy = content::RawCredential::Vrc(Arc::new(vrc)).to_pretty_json();
         assert_eq!(lazy, eager, "lazy VRC JSON must match the old eager output");
+    }
+
+    /// The per-sync lookup answers what the per-row scan did: a persona's label
+    /// by its DID, `None` for a persona without one or a DID that is not ours.
+    #[test]
+    fn persona_labels_by_did_matches_the_scan() {
+        use openvtc_core::config::account::PersonaRecord;
+        let mut config = crate::state_handler::dispatch_util::test_config();
+        for (did, label) in [
+            ("did:webvh:scid:example.com:a", Some("Alice")),
+            ("did:webvh:scid:example.com:b", None),
+        ] {
+            let id = PersonaId::new();
+            config.account.personas.insert(
+                id,
+                PersonaRecord {
+                    extra: serde_json::Map::new(),
+                    persona_id: id,
+                    did: did.into(),
+                    did_document: None,
+                    did_locator: None,
+                    key_refs: vec![],
+                    mediator_did: None,
+                    origin_context_id: "ctx".into(),
+                    created_at: chrono::Utc::now(),
+                    label: label.map(Into::into),
+                },
+            );
+        }
+        let labels = persona_labels_by_did(&config);
+        for did in [
+            "did:webvh:scid:example.com:a",
+            "did:webvh:scid:example.com:b",
+            "did:webvh:scid:example.com:other",
+        ] {
+            let scan = config
+                .account
+                .personas
+                .values()
+                .find(|p| p.did == did)
+                .and_then(|p| p.label.as_deref());
+            assert_eq!(labels.get(did).copied().flatten(), scan, "{did}");
+        }
+        assert_eq!(
+            labels
+                .get("did:webvh:scid:example.com:a")
+                .copied()
+                .flatten(),
+            Some("Alice")
+        );
     }
 
     /// A VRC is checked for post-quantum proofs once, then answered from the
