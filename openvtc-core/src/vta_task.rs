@@ -38,10 +38,24 @@ pub fn acl_subject_absent(err: &VtaError) -> bool {
 /// Max attempts for a single VTA round-trip before giving up (1 try + 2 retries).
 pub const MAX_ATTEMPTS: usize = 3;
 
-/// Base back-off between retries; doubles each attempt (0.5s, then 1s). Short,
-/// because the dominant retryable fault is a stale DIDComm socket that ATM
-/// re-establishes almost immediately — we just need a beat before re-sending.
+/// Base back-off between retries; doubles each attempt (0.5s, then 1s, each
+/// jittered down by up to half — see [`backoff_delay`]). Short, because the
+/// dominant retryable fault is a stale DIDComm socket that ATM re-establishes
+/// almost immediately — we just need a beat before re-sending.
 const RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The back-off before retry number `attempt` (1-based): "equal jitter" over the
+/// exponential step `RETRY_BASE * 2^(attempt-1)` — half of the step is fixed, the
+/// other half is scaled by `unit`, a sample in `[0, 1]`. The fixed half keeps the
+/// beat a stale socket needs; the random half spreads clients that failed together
+/// (a VTA or mediator restart) so their retries do not land in lockstep (R1.4).
+/// `unit` is clamped, so the result is always within `[step/2, step]`.
+#[must_use]
+fn backoff_delay(attempt: usize, unit: f64) -> std::time::Duration {
+    let step = RETRY_BASE * (1u32 << (attempt.saturating_sub(1)).min(16));
+    let half = step / 2;
+    half + half.mul_f64(unit.clamp(0.0, 1.0))
+}
 
 /// True for errors a retry might clear: transport/timeout faults where the
 /// request most likely never reached the VTA (or its reply never came back).
@@ -77,7 +91,7 @@ where
         match op().await {
             Ok(v) => return Ok(v),
             Err(e) if attempt < MAX_ATTEMPTS && retryable(&e) => {
-                let backoff = RETRY_BASE * (1 << (attempt - 1));
+                let backoff = backoff_delay(attempt, rand::random::<f64>());
                 tracing::warn!(
                     "VTA '{label}' failed (attempt {attempt}/{MAX_ATTEMPTS}): {e} — \
                      retrying in {backoff:?}"
@@ -108,6 +122,24 @@ mod tests {
         assert!(!retryable(&VtaError::Conflict("dup".into())));
         assert!(!retryable(&VtaError::NotFound("gone".into())));
         assert!(!retryable(&VtaError::Auth("expired".into())));
+    }
+
+    #[test]
+    fn backoff_delay_stays_within_jitter_bounds() {
+        for attempt in 1..MAX_ATTEMPTS {
+            let step = RETRY_BASE * (1 << (attempt - 1));
+            // The extremes of the sample, and out-of-range samples, are clamped.
+            assert_eq!(backoff_delay(attempt, 0.0), step / 2);
+            assert_eq!(backoff_delay(attempt, 1.0), step);
+            assert_eq!(backoff_delay(attempt, -3.0), step / 2);
+            assert_eq!(backoff_delay(attempt, 7.0), step);
+            for _ in 0..200 {
+                let d = backoff_delay(attempt, rand::random::<f64>());
+                assert!(d >= step / 2 && d <= step, "attempt {attempt}: {d:?}");
+            }
+        }
+        // A runaway attempt count cannot overflow the shift.
+        assert!(backoff_delay(usize::MAX, 1.0) <= RETRY_BASE * (1 << 16));
     }
 
     #[tokio::test(start_paused = true)]
