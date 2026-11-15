@@ -96,6 +96,68 @@ pub struct MainPageState {
     /// trust-anchor override (see `crate::env_overrides`). Rendered at the front
     /// of the bottom bar, so the run cannot be mistaken for a normal one.
     pub dev_override: Option<String>,
+
+    /// Whether each VRC row is post-quantum signed, remembered across syncs so a
+    /// credential is serialised for the check once rather than on every sync.
+    post_quantum: PostQuantumMemo,
+}
+
+/// The post-quantum flag of every VRC row, by credential id, kept from one
+/// [`MainPageState::sync_from_config`] to the next.
+///
+/// Answering it for a VRC means serialising the credential, and the sync runs on
+/// every config mutation — once per inbound message in a redelivery burst. A VRC's
+/// id is its proof value, so the id fixes the proofs the flag is read from: an id
+/// seen before has the same answer. Bounded by the credentials on display: each
+/// sync keeps only the ids it showed ([`Self::finish_sync`]).
+///
+/// JSON-held credentials (membership, role, vetting) are not remembered: their
+/// check is a walk of a value already in memory, with nothing to serialise.
+#[derive(Debug, Default)]
+struct PostQuantumMemo {
+    /// What the previous sync answered.
+    previous: std::collections::HashMap<String, bool>,
+    /// What this sync has answered so far.
+    current: std::collections::HashMap<String, bool>,
+}
+
+/// A cache, so a clone starts empty: `MainPageState` is cloned to the UI on every
+/// change, and the UI's copy never syncs.
+impl Clone for PostQuantumMemo {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PostQuantumMemo {
+    /// Whether the credential `id` carries a post-quantum proof.
+    fn post_quantum(&mut self, id: &str, raw: &content::RawCredential) -> bool {
+        self.post_quantum_with(id, raw, content::RawCredential::signed_post_quantum)
+    }
+
+    /// [`Self::post_quantum`], answering a miss with `check`.
+    fn post_quantum_with(
+        &mut self,
+        id: &str,
+        raw: &content::RawCredential,
+        check: impl FnOnce(&content::RawCredential) -> bool,
+    ) -> bool {
+        if matches!(raw, content::RawCredential::Value(_)) {
+            return check(raw);
+        }
+        if let Some(&known) = self.current.get(id) {
+            return known;
+        }
+        let answer = self.previous.remove(id).unwrap_or_else(|| check(raw));
+        self.current.insert(id.to_string(), answer);
+        answer
+    }
+
+    /// End a sync: what it answered is what the next one may reuse, and ids it
+    /// did not show are forgotten.
+    fn finish_sync(&mut self) {
+        self.previous = std::mem::take(&mut self.current);
+    }
 }
 
 impl MainPageState {
@@ -478,8 +540,10 @@ impl MainPageState {
             .collect();
 
         // Sync credentials (scoped to the working community's persona)
+        let memo = &mut self.post_quantum;
         self.content_panel.credentials.received = finish_credential_rows(
             config,
+            memo,
             collect_vrcs(
                 &config.private.vrcs_received,
                 config,
@@ -490,6 +554,7 @@ impl MainPageState {
         .into();
         self.content_panel.credentials.issued = finish_credential_rows(
             config,
+            memo,
             collect_vrcs(
                 &config.private.vrcs_issued,
                 config,
@@ -499,9 +564,10 @@ impl MainPageState {
         )
         .into();
         self.content_panel.credentials.membership =
-            finish_credential_rows(config, collect_membership_creds(config)).into();
+            finish_credential_rows(config, memo, collect_membership_creds(config)).into();
         self.content_panel.credentials.vetting =
-            finish_credential_rows(config, collect_vetting_statements(config)).into();
+            finish_credential_rows(config, memo, collect_vetting_statements(config)).into();
+        memo.finish_sync();
         self.content_panel.credentials.retired_vrcs = config.private.vrcs_received.retired()
             + config.private.vrcs_issued.retired()
             + config
@@ -1066,9 +1132,13 @@ fn collect_vrcs(
 /// What every credential row needs that its collector does not compute: the
 /// persona it was issued to, by name, and whether it is post-quantum signed.
 /// One pass here rather than in each collector, so no list can miss it.
-fn finish_credential_rows(config: &Config, mut rows: Vec<VrcSummary>) -> Vec<VrcSummary> {
+fn finish_credential_rows(
+    config: &Config,
+    post_quantum: &mut PostQuantumMemo,
+    mut rows: Vec<VrcSummary>,
+) -> Vec<VrcSummary> {
     for row in &mut rows {
-        row.post_quantum = row.raw_json.signed_post_quantum();
+        row.post_quantum = post_quantum.post_quantum(&row.vrc_id, &row.raw_json);
         if row.subject_is_self {
             row.subject_label = config
                 .account
@@ -3219,6 +3289,58 @@ mod tests {
 
         let lazy = content::RawCredential::Vrc(Arc::new(vrc)).to_pretty_json();
         assert_eq!(lazy, eager, "lazy VRC JSON must match the old eager output");
+    }
+
+    /// A VRC is checked for post-quantum proofs once, then answered from the
+    /// memo on later syncs; an id a sync no longer shows is forgotten; JSON-held
+    /// credentials are always checked (there is nothing to serialise).
+    #[test]
+    fn post_quantum_memo_checks_a_vrc_once_across_syncs() {
+        use chrono::{TimeZone, Utc};
+        use dtg_credentials::DTGCredential;
+        use std::cell::Cell;
+
+        let vrc = content::RawCredential::Vrc(Arc::new(DTGCredential::new_vrc(
+            "did:test:issuer".to_string(),
+            dtg_credentials::IssuerScope::Pairwise,
+            "did:test:subject".to_string(),
+            Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap(),
+            None,
+        )));
+        let value = content::RawCredential::Value(Arc::new(serde_json::json!({})));
+        let checks = Cell::new(0u32);
+        let check = |answer: bool| {
+            let checks = &checks;
+            move |_: &content::RawCredential| {
+                checks.set(checks.get() + 1);
+                answer
+            }
+        };
+
+        let mut memo = PostQuantumMemo::default();
+        // First sync: the check runs once, even when the row appears twice.
+        assert!(memo.post_quantum_with("vrc-1", &vrc, check(true)));
+        assert!(memo.post_quantum_with("vrc-1", &vrc, check(false)));
+        memo.finish_sync();
+        assert_eq!(checks.get(), 1);
+
+        // Second sync: answered from the memo, not re-checked.
+        assert!(memo.post_quantum_with("vrc-1", &vrc, check(false)));
+        memo.finish_sync();
+        assert_eq!(checks.get(), 1);
+
+        // A sync without it forgets it, so the memo stays bounded by what is shown.
+        memo.finish_sync();
+        assert!(!memo.post_quantum_with("vrc-1", &vrc, check(false)));
+        assert_eq!(checks.get(), 2);
+
+        // JSON-held credentials are always asked.
+        memo.post_quantum_with("vc-1", &value, check(true));
+        memo.post_quantum_with("vc-1", &value, check(true));
+        assert_eq!(checks.get(), 4);
+
+        // The UI's clone of the state does not carry the cache.
+        assert!(memo.clone().previous.is_empty() && memo.clone().current.is_empty());
     }
 
     /// The lazy `RawCredential::Value` path (membership/role credentials) must

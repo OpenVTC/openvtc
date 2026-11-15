@@ -54,7 +54,8 @@ impl RawCredential {
 
     /// Whether the credential carries a post-quantum proof (ML-DSA or
     /// SLH-DSA, alone or in a proof set). Serializes a VRC, so call it when a
-    /// list is built, not per frame.
+    /// list is built, not per frame — and the sync asks through a memo keyed by
+    /// credential id, so a VRC is serialised for it once, not on every sync.
     #[must_use]
     pub fn signed_post_quantum(&self) -> bool {
         match self {
