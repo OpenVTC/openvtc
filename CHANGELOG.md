@@ -39,6 +39,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Inbound dispatch and the join protocol live in `openvtc-core`**
+  ([#530](https://github.com/OpenVTC/openvtc/issues/530)). `process_inbound_message` and
+  what it reports (`InboundEffects`, the off-loop `VerifyJob`s) moved from the CLI to
+  `openvtc_core::inbound`; relationship-DID key creation to
+  `openvtc_core::relationships::keys`; the join sequence's protocol steps (manifest over
+  HTTP, context choice, submit transport, signed submit, pending record, persona
+  rollback) to `openvtc_core::join::sequence`, and the join status poll to
+  `openvtc_core::join::status_poll`. The TUI and `openvtc community join` now send a join
+  through the same code. `openvtc community join` prints a line when the submit goes
+  over a different transport than the community prefers, as the TUI already did.
+- **One registry decides which inbound message types are accepted and who handles them**
+  ([#531](https://github.com/OpenVTC/openvtc/issues/531)). The transport's accept gate
+  and the dispatcher are both derived from `openvtc_core::inbound::registry`, so a
+  handler cannot exist for a type the gate drops. The gate no longer admits whole
+  namespaces no handler claims (any `spec/vtc/*`, the legacy `openvtc/vtc/*` authority,
+  any `linuxfoundation.org/openvtc/*`): those messages were already ignored by the
+  dispatcher as unknown, and are now dropped at the gate instead, still logged at `warn`.
+- **Remote failures carry a typed class** ([#536](https://github.com/OpenVTC/openvtc/issues/536)).
+  A VTA call that fails now reports whether the VTA was unreachable, timed out, refused
+  our credentials, answered in a shape this client cannot read, did not know the thing,
+  refused with a reason, or failed on its side — in the message (e.g. `VTA timed out:
+  …` where it used to say `VTA Error: …`) and as data. Startup's "couldn't reach the
+  VTA" guidance follows the class.
+- **Library API** (`openvtc-core`, additive unless noted): `inbound` (`process_inbound_message`,
+  `apply_inline`, `InboundEffects`, `ThreadedReply`, `VerifyJob`, `PreVerified`,
+  `Arrival`, `Deferred`, `registry::{ROUTES, Family, TypeMatcher, Route, classify}`);
+  `relationships::keys`; `join::sequence`; `join::status_poll`; `vta_task::{retry,
+  retryable, MAX_ATTEMPTS}`; `capabilities::CAPABILITY_TYPE_PREFIX`;
+  `OpenVTCError::Remote` with `RemoteService`, `RemoteKind`, `ErrorClass`,
+  `OpenVTCError::{vta, remote, class, remote_kind}` and `errors::class_of`;
+  `DiscoverError::kind` and `MessagingError::class`; a `test-support` feature (test-only
+  hooks). **Removed:** `didcomm::OPENVTC_CATCH_ALL_PATTERN` (the gate is the registry
+  now; `didcomm::routes_inbound_type` still answers whether a type is admitted). Errors
+  that were `OpenVTCError::Vta(String)` from VTA calls are now `OpenVTCError::Remote`.
+
 - **Faster startup, sends and `health`** ([#557](https://github.com/OpenVTC/openvtc/issues/557),
   [#559](https://github.com/OpenVTC/openvtc/issues/559),
   [#560](https://github.com/OpenVTC/openvtc/issues/560)). A persona's VTA-held keys are
