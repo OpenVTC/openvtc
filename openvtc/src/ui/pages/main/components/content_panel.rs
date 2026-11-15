@@ -1,7 +1,12 @@
+//! Content panel — the right-hand pane that draws the selected menu's panel,
+//! plus the Help view's key handling.
+
 use crate::colors::{
     COLOR_BORDER, COLOR_DARK_GRAY, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,
     COLOR_WARNING_ACCESSIBLE_RED,
 };
+use crate::state_handler::actions::Action;
+use crate::state_handler::main_page::MainPanel;
 use crate::state_handler::{
     main_page::{
         ActivityLogEntry,
@@ -10,6 +15,9 @@ use crate::state_handler::{
     },
     state::{ConnectionState, MediatorStatus},
 };
+use crate::ui::pages::main::MainPage;
+use crate::ui::pages::main::copy_to_clipboard;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
     layout::{Alignment, Margin, Rect},
@@ -351,4 +359,62 @@ fn render_status_help(
     lines.push(Line::from("  F10            Quit").fg(COLOR_TEXT_DEFAULT));
 
     lines
+}
+
+impl MainPage {
+    pub(in crate::ui::pages::main) fn handle_help_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('1') => {
+                // Copy persona DID to clipboard
+                let did = self
+                    .props
+                    .main_page
+                    .content_panel
+                    .settings
+                    .persona_did
+                    .clone();
+                copy_to_clipboard(&did, "Persona DID", &self.action_tx);
+                true
+            }
+            KeyCode::Char('2') => {
+                // Copy mediator DID to clipboard
+                let did = self
+                    .props
+                    .main_page
+                    .content_panel
+                    .settings
+                    .mediator_did
+                    .clone();
+                copy_to_clipboard(&did, "Mediator DID", &self.action_tx);
+                true
+            }
+            KeyCode::Char('3') => {
+                if let Some(info) = &self.props.main_page.content_panel.settings.did_git_sign {
+                    copy_to_clipboard(
+                        &info.did_key_id,
+                        "Signing principal (DID#kid)",
+                        &self.action_tx,
+                    );
+                }
+                true
+            }
+            KeyCode::Char('4') => {
+                if let Some(info) = &self.props.main_page.content_panel.settings.did_git_sign {
+                    copy_to_clipboard(
+                        &info.ssh_public_key,
+                        "SSH signing public key",
+                        &self.action_tx,
+                    );
+                }
+                true
+            }
+            KeyCode::Esc => {
+                let _ = self
+                    .action_tx
+                    .send(Action::MainPanelSwitch(MainPanel::MainMenu));
+                true
+            }
+            _ => false,
+        }
+    }
 }

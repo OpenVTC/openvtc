@@ -4,10 +4,14 @@ use crate::colors::{
     COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,
     COLOR_WARNING_ACCESSIBLE_RED,
 };
+use crate::state_handler::actions::Action;
+use crate::state_handler::main_page::MainPanel;
 use crate::state_handler::{
     main_page::content::{ContentPanelState, VicLifecycle, VtaState, VtaTransport},
     state::ConnectionState,
 };
+use crate::ui::pages::main::MainPage;
+use crossterm::event::{KeyCode, KeyEvent};
 use openvtc_core::display::{display_identifier, truncate_did_centered};
 use ratatui::{
     style::{Style, Stylize},
@@ -560,6 +564,110 @@ fn render_vics(state: &VtaState, panel_focused: bool, lines: &mut Vec<Line<'stat
             ))
             .fg(COLOR_DARK_GRAY),
         );
+    }
+}
+
+impl MainPage {
+    /// VTA Service keys. The panel's one manageable list is the invitation
+    /// credentials: ↑/↓ move the selection, `a` imports, `i` flips the archived
+    /// filter, `r`/`u`/`d`/`p` drive the lifecycle. Returns true if consumed.
+    ///
+    /// The persona DID list that used to share this panel — and the `n`, `g`
+    /// and `d` verbs that acted on it — moved to the identity pane, which is
+    /// where the rest of a persona's management already lives.
+    pub(in crate::ui::pages::main) fn handle_vta_key(&mut self, key: KeyEvent) -> bool {
+        use crate::state_handler::main_page::content::VicLifecycle;
+
+        let vta = &self.props.main_page.content_panel.vta;
+        let vic_count = vta.vics.len();
+        let vic_selected = vta.vic_selected_index;
+        let vic_lifecycle = vta.vics.get(vic_selected).map(|v| v.lifecycle);
+
+        // VIC purge / delete confirmation gates: only y/Enter confirms.
+        if let Some(idx) = vta.confirm_purge_vic {
+            let act = match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => Action::PurgeVic(idx),
+                _ => Action::VicCancelPurge,
+            };
+            let _ = self.action_tx.send(act);
+            return true;
+        }
+        if let Some(idx) = vta.confirm_delete_vic {
+            let act = match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => Action::DeleteVic(idx),
+                _ => Action::VicCancelDelete,
+            };
+            let _ = self.action_tx.send(act);
+            return true;
+        }
+
+        match key.code {
+            // The list is read on demand rather than polled, and this is the
+            // key that asks. It was Tab because Tab moved focus onto the list
+            // and the load rode along; with one list left, the load is the
+            // whole of what the key does.
+            KeyCode::Tab => {
+                let _ = self.action_tx.send(Action::VicRefresh);
+                true
+            }
+            KeyCode::Char('a') => {
+                let _ = self.action_tx.send(Action::StartAddVic);
+                true
+            }
+            KeyCode::Char('i') => {
+                let _ = self.action_tx.send(Action::VicToggleInactive);
+                true
+            }
+            KeyCode::Esc => {
+                let _ = self
+                    .action_tx
+                    .send(Action::MainPanelSwitch(MainPanel::MainMenu));
+                true
+            }
+            KeyCode::Up if vic_count > 0 => {
+                let _ = self
+                    .action_tx
+                    .send(Action::VicSelect(vic_selected.saturating_sub(1)));
+                true
+            }
+            KeyCode::Down if vic_count > 0 => {
+                let _ = self
+                    .action_tx
+                    .send(Action::VicSelect((vic_selected + 1).min(vic_count - 1)));
+                true
+            }
+            // r: archive an active VIC (reversible, so no confirm).
+            KeyCode::Char('r') if vic_lifecycle == Some(VicLifecycle::Active) => {
+                let _ = self.action_tx.send(Action::VicArchive(vic_selected));
+                true
+            }
+            // u: unarchive an archived VIC, or restore a soft-deleted one.
+            KeyCode::Char('u') => {
+                match vic_lifecycle {
+                    Some(VicLifecycle::Archived) => {
+                        let _ = self.action_tx.send(Action::VicUnarchive(vic_selected));
+                    }
+                    Some(VicLifecycle::Deleted) => {
+                        let _ = self.action_tx.send(Action::VicRestore(vic_selected));
+                    }
+                    _ => {}
+                }
+                true
+            }
+            // d: soft-delete (not already deleted).
+            KeyCode::Char('d') | KeyCode::Delete
+                if vic_selected < vic_count && vic_lifecycle != Some(VicLifecycle::Deleted) =>
+            {
+                let _ = self.action_tx.send(Action::VicConfirmDelete(vic_selected));
+                true
+            }
+            // p: irreversible purge.
+            KeyCode::Char('p') if vic_selected < vic_count => {
+                let _ = self.action_tx.send(Action::VicConfirmPurge(vic_selected));
+                true
+            }
+            _ => false,
+        }
     }
 }
 

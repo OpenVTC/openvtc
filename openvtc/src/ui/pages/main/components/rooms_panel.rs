@@ -5,6 +5,7 @@
 //! custody (`rooms/keys/list`), read the way the member portal and `pnm` read them, so
 //! all three show the same thing.
 
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
@@ -206,4 +207,21 @@ impl Panel for RoomsPanel {
         )));
         lines
     }
+}
+
+/// The Rooms panel's keys: navigate, accept, refresh, close.
+pub(super) fn rooms_key(
+    key: KeyEvent,
+    view: &crate::state_handler::main_page::rooms::RoomsView,
+) -> Option<crate::state_handler::actions::RoomsAction> {
+    use crate::state_handler::actions::RoomsAction as R;
+    let last = view.rooms.len().saturating_sub(1);
+    Some(match key.code {
+        KeyCode::Esc => R::Back,
+        KeyCode::Char('r') => R::Refresh,
+        KeyCode::Up | KeyCode::Char('k') => R::Select(view.selected.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') => R::Select((view.selected + 1).min(last)),
+        KeyCode::Enter | KeyCode::Char('a') => R::Accept,
+        _ => return None,
+    })
 }

@@ -1,3 +1,8 @@
+//! Communities panel — the persona's community memberships and the sub-views
+//! opened from them. Key handling lives in the `keys` submodule.
+
+mod keys;
+
 use super::panel::Panel;
 use crate::colors::{
     COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT,

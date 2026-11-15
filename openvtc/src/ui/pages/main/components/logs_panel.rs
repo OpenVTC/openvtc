@@ -2,7 +2,11 @@
 
 use super::status::wrap_text;
 use crate::colors::{COLOR_DARK_GRAY, COLOR_SUCCESS, COLOR_TEXT_DEFAULT};
+use crate::state_handler::actions::Action;
+use crate::state_handler::main_page::MainPanel;
 use crate::state_handler::main_page::{ActivityLogEntry, content::LogsState};
+use crate::ui::pages::main::{MainPage, copy_to_clipboard};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     style::{Style, Stylize},
     text::{Line, Span},
@@ -98,4 +102,72 @@ pub fn render(
     );
 
     lines
+}
+
+impl MainPage {
+    pub(in crate::ui::pages::main) fn handle_logs_key(&mut self, key: KeyEvent) -> bool {
+        let total = self.props.main_page.activity_log.len();
+
+        // Detail view mode — Esc or Enter to close
+        if self.logs_detail_view {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => {
+                    self.logs_detail_view = false;
+                    return true;
+                }
+                KeyCode::Char('c') if total > 0 => {
+                    let entries: Vec<_> = self.props.main_page.activity_log.iter().rev().collect();
+                    if let Some(entry) = entries.get(self.logs_selected) {
+                        copy_to_clipboard(&entry.summary, "Log entry", &self.action_tx);
+                    }
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+
+        match key.code {
+            KeyCode::Up if self.logs_selected > 0 => {
+                self.logs_selected -= 1;
+                true
+            }
+            KeyCode::Down if self.logs_selected + 1 < total => {
+                self.logs_selected += 1;
+                true
+            }
+            KeyCode::Enter if total > 0 => {
+                self.logs_detail_view = true;
+                true
+            }
+            KeyCode::Char('c') if total > 0 => {
+                // Copy selected log entry to clipboard
+                let entries: Vec<_> = self.props.main_page.activity_log.iter().rev().collect();
+                if let Some(entry) = entries.get(self.logs_selected) {
+                    copy_to_clipboard(&entry.summary, "Log entry", &self.action_tx);
+                }
+                true
+            }
+            KeyCode::Char('a') if total > 0 => {
+                // Copy all log entries to clipboard
+                let all_text: String = self
+                    .props
+                    .main_page
+                    .activity_log
+                    .iter()
+                    .rev()
+                    .map(|e| e.summary.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                copy_to_clipboard(&all_text, "All log entries", &self.action_tx);
+                true
+            }
+            KeyCode::Esc => {
+                let _ = self
+                    .action_tx
+                    .send(Action::MainPanelSwitch(MainPanel::MainMenu));
+                true
+            }
+            _ => false,
+        }
+    }
 }

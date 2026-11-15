@@ -1,13 +1,20 @@
+//! Settings panel — the persona's settings and the forms opened from them,
+//! with the panel's key handling.
+
 use super::panel::Panel;
 use super::status::push_status;
 use crate::colors::{
     COLOR_BORDER, COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS,
     COLOR_TEXT_DEFAULT, COLOR_WARNING_ACCESSIBLE_RED,
 };
+use crate::state_handler::actions::{Action, SettingsAction};
+use crate::state_handler::main_page::MainPanel;
 use crate::state_handler::{
     main_page::content::{ContentPanelState, SettingsMode, SettingsState, ThemeRow},
     state::ConnectionState,
 };
+use crate::ui::pages::main::{MainPage, edit_text};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     style::{Style, Stylize},
     text::{Line, Span},
@@ -828,6 +835,452 @@ fn textwrap_warning(warning: &str) -> Vec<String> {
         }
     }
     out
+}
+
+impl MainPage {
+    pub(in crate::ui::pages::main) fn handle_settings_key(&mut self, key: KeyEvent) -> bool {
+        use crate::state_handler::main_page::content::SettingsMode;
+
+        let settings = &self.props.main_page.content_panel.settings;
+
+        match &settings.mode {
+            SettingsMode::EditFriendlyName { input } => {
+                let current = input.clone();
+                match key.code {
+                    KeyCode::Esc => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::CancelEdit));
+                        true
+                    }
+                    KeyCode::Enter => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::SubmitEdit {
+                                value: current,
+                            }));
+                        true
+                    }
+                    code => match edit_text(code, &current) {
+                        Some(v) => {
+                            let _ = self
+                                .action_tx
+                                .send(Action::Settings(SettingsAction::FieldUpdate(v)));
+                            true
+                        }
+                        None => false,
+                    },
+                }
+            }
+            SettingsMode::ExportConfig {
+                path_input,
+                active_field,
+                ..
+            } => {
+                let active = *active_field;
+                let path = path_input.clone();
+                self.handle_config_form_key(key, active, path, true, |path, passphrase| {
+                    SettingsAction::ExportConfig { path, passphrase }
+                })
+            }
+            SettingsMode::ChangeProtection {
+                selected_option,
+                active_field,
+                ..
+            } => {
+                let active = *active_field;
+                let sel = *selected_option;
+                match key.code {
+                    KeyCode::Esc => {
+                        self.passphrase_buffer.clear();
+                        self.confirm_buffer.clear();
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::CancelEdit));
+                        true
+                    }
+                    KeyCode::Up if active == 0 && sel > 0 => {
+                        let _ = self.action_tx.send(Action::Settings(
+                            SettingsAction::ProtectionOptionSelect(sel - 1),
+                        ));
+                        true
+                    }
+                    KeyCode::Down if active == 0 && sel < 1 => {
+                        let _ = self.action_tx.send(Action::Settings(
+                            SettingsAction::ProtectionOptionSelect(sel + 1),
+                        ));
+                        true
+                    }
+                    KeyCode::Enter if active == 0 => {
+                        if sel == 0 {
+                            // Switch to passphrase input
+                            let _ = self
+                                .action_tx
+                                .send(Action::Settings(SettingsAction::ProtectionStartInput));
+                        } else {
+                            // Remove passphrase
+                            let _ = self
+                                .action_tx
+                                .send(Action::Settings(SettingsAction::RemovePassphrase));
+                        }
+                        true
+                    }
+                    KeyCode::Tab if active >= 1 => {
+                        let next = if active == 1 { 2 } else { 1 };
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::ProtectionTabSwitch(next)));
+                        true
+                    }
+                    KeyCode::Up if active == 2 => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::ProtectionTabSwitch(1)));
+                        true
+                    }
+                    KeyCode::Down if active == 1 => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::ProtectionTabSwitch(2)));
+                        true
+                    }
+                    KeyCode::Enter if active == 1 => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::ProtectionTabSwitch(2)));
+                        true
+                    }
+                    KeyCode::Enter if active == 2 => {
+                        // Submit passphrase — or say why not. An Enter that
+                        // silently does nothing reads as a frozen form.
+                        let action = match passphrase_problem(
+                            self.passphrase_buffer.as_str(),
+                            self.confirm_buffer.as_str(),
+                        ) {
+                            Some(why) => SettingsAction::FormProblem(why),
+                            None => {
+                                let passphrase = self.passphrase_buffer.take();
+                                self.confirm_buffer.clear();
+                                SettingsAction::SetPassphrase { passphrase }
+                            }
+                        };
+                        let _ = self.action_tx.send(Action::Settings(action));
+                        true
+                    }
+                    code if active >= 1 => {
+                        // Secure passphrase / confirm buffers: apply the keystroke
+                        // to the active buffer and report only its length.
+                        let buffer = if active == 1 {
+                            &mut self.passphrase_buffer
+                        } else {
+                            &mut self.confirm_buffer
+                        };
+                        match code {
+                            KeyCode::Backspace => {
+                                buffer.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                buffer.push(c);
+                            }
+                            _ => return false,
+                        }
+                        let len = buffer.len();
+                        let action = if active == 1 {
+                            SettingsAction::ProtectionPassphraseLen(len)
+                        } else {
+                            SettingsAction::ProtectionConfirmLen(len)
+                        };
+                        let _ = self.action_tx.send(Action::Settings(action));
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            #[cfg(feature = "openpgp-card")]
+            SettingsMode::TokenManagement { selected_index } => {
+                let sel = *selected_index;
+                match key.code {
+                    KeyCode::Esc => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::TokenBack));
+                        true
+                    }
+                    KeyCode::Up if sel > 0 => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::Select(sel - 1)));
+                        true
+                    }
+                    KeyCode::Down if sel < 1 => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::Select(sel + 1)));
+                        true
+                    }
+                    KeyCode::Enter => {
+                        match sel {
+                            0 => {
+                                let _ = self
+                                    .action_tx
+                                    .send(Action::Settings(SettingsAction::TokenDetect));
+                            }
+                            1 => {
+                                let _ = self
+                                    .action_tx
+                                    .send(Action::Settings(SettingsAction::TokenFactoryResetStart));
+                            }
+                            _ => {}
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            SettingsMode::ImportConfig {
+                path_input,
+                active_field,
+                ..
+            } => {
+                let active = *active_field;
+                let path = path_input.clone();
+                self.handle_config_form_key(key, active, path, false, |path, passphrase| {
+                    SettingsAction::ImportConfig { path, passphrase }
+                })
+            }
+            SettingsMode::View => {
+                use crate::ui::pages::main::components::settings_panel as rows;
+                let selected = settings.selected_index;
+                let max_index = rows::WIPE_ROW;
+
+                match key.code {
+                    KeyCode::Up if selected > 0 => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::Select(selected - 1)));
+                        true
+                    }
+                    KeyCode::Down if selected < max_index => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::Select(selected + 1)));
+                        true
+                    }
+                    KeyCode::Enter => {
+                        // Friendly name, export and import each open a form;
+                        // `settings_actions::handle_start_edit` picks which.
+                        if selected == rows::FRIENDLY_NAME_ROW
+                            || selected == rows::EXPORT_ROW
+                            || selected == rows::IMPORT_ROW
+                        {
+                            let _ = self
+                                .action_tx
+                                .send(Action::Settings(SettingsAction::StartEdit));
+                        } else if selected == rows::PROTECTION_ROW {
+                            let _ = self
+                                .action_tx
+                                .send(Action::Settings(SettingsAction::ChangeProtection));
+                        } else if selected == rows::THEME_ROW {
+                            let _ = self
+                                .action_tx
+                                .send(Action::Settings(SettingsAction::ThemeOpen));
+                        }
+                        #[cfg(feature = "openpgp-card")]
+                        if selected == rows::TOKEN_ROW {
+                            let _ = self
+                                .action_tx
+                                .send(Action::Settings(SettingsAction::TokenManagement));
+                        }
+                        if selected == rows::WIPE_ROW {
+                            let _ = self
+                                .action_tx
+                                .send(Action::Settings(SettingsAction::WipeProfileStart));
+                        }
+                        true
+                    }
+                    KeyCode::Esc => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::MainPanelSwitch(MainPanel::MainMenu));
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            SettingsMode::ThemePicker { rows, selected, .. } => {
+                let (selected, count) = (*selected, rows.len());
+                let action = match key.code {
+                    KeyCode::Up if selected > 0 => SettingsAction::ThemeSelect(selected - 1),
+                    KeyCode::Down if selected + 1 < count => {
+                        SettingsAction::ThemeSelect(selected + 1)
+                    }
+                    KeyCode::Enter => SettingsAction::ThemeApply,
+                    KeyCode::Esc => SettingsAction::ThemeCancel,
+                    KeyCode::Char('c') => SettingsAction::ThemeCopy,
+                    KeyCode::Char('r') => SettingsAction::ThemeReload,
+                    _ => return false,
+                };
+                let _ = self.action_tx.send(Action::Settings(action));
+                true
+            }
+            #[cfg(feature = "openpgp-card")]
+            SettingsMode::TokenResetConfirm { confirm_input, .. } => {
+                let current = confirm_input.clone();
+                let action = match key.code {
+                    // Back to the token screen — nothing is erased.
+                    KeyCode::Esc => SettingsAction::TokenManagement,
+                    KeyCode::Enter => SettingsAction::TokenFactoryReset,
+                    code => match edit_text(code, &current) {
+                        Some(next) => SettingsAction::TokenFactoryResetInput(next),
+                        None => return false,
+                    },
+                };
+                let _ = self.action_tx.send(Action::Settings(action));
+                true
+            }
+            SettingsMode::WipeConfirm { confirm_input } => {
+                let current = confirm_input.clone();
+                match key.code {
+                    KeyCode::Esc => {
+                        // Drop back to the Settings list — wipe is cancelled.
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::CancelEdit));
+                        true
+                    }
+                    KeyCode::Enter => {
+                        let _ = self
+                            .action_tx
+                            .send(Action::Settings(SettingsAction::WipeProfileConfirm));
+                        true
+                    }
+                    code => match edit_text(code, &current) {
+                        Some(next) => {
+                            let _ = self
+                                .action_tx
+                                .send(Action::Settings(SettingsAction::WipeProfileInput(next)));
+                            true
+                        }
+                        None => false,
+                    },
+                }
+            }
+        }
+    }
+
+    /// Shared key handling for the Export/Import config forms. The two forms are
+    /// identical except for the submit Action, supplied via `make_submit`
+    /// (called with the path and the taken passphrase buffer). `active` is the
+    /// focused field (0 = path, 1 = passphrase).
+    fn handle_config_form_key(
+        &mut self,
+        key: KeyEvent,
+        active: usize,
+        path: String,
+        confirm: bool,
+        make_submit: impl FnOnce(String, secrecy::SecretString) -> SettingsAction,
+    ) -> bool {
+        // The field Enter submits from: the confirmation on export, the
+        // passphrase on import.
+        let last = if confirm { 2 } else { 1 };
+        match key.code {
+            KeyCode::Esc => {
+                self.passphrase_buffer.clear();
+                self.confirm_buffer.clear();
+                let _ = self
+                    .action_tx
+                    .send(Action::Settings(SettingsAction::CancelEdit));
+                true
+            }
+            KeyCode::Tab | KeyCode::Up | KeyCode::Down => {
+                let _ = self
+                    .action_tx
+                    .send(Action::Settings(SettingsAction::FormTabSwitch));
+                true
+            }
+            KeyCode::Enter if active == 1 && confirm => {
+                let _ = self
+                    .action_tx
+                    .send(Action::Settings(SettingsAction::FormTabSwitch));
+                true
+            }
+            KeyCode::Enter if active == last => {
+                // A typo in an export passphrase makes a backup nobody can
+                // open, discovered only when it is needed.
+                let problem = if confirm {
+                    passphrase_problem(
+                        self.passphrase_buffer.as_str(),
+                        self.confirm_buffer.as_str(),
+                    )
+                } else {
+                    None
+                };
+                let action = match problem {
+                    Some(why) => SettingsAction::FormProblem(why),
+                    None => {
+                        let passphrase = self.passphrase_buffer.take();
+                        self.confirm_buffer.clear();
+                        make_submit(path, passphrase)
+                    }
+                };
+                let _ = self.action_tx.send(Action::Settings(action));
+                true
+            }
+            code => {
+                if active == 0 {
+                    match edit_text(code, &path) {
+                        Some(value) => {
+                            let _ = self.action_tx.send(Action::Settings(
+                                SettingsAction::FormFieldUpdate { field: 0, value },
+                            ));
+                            true
+                        }
+                        None => false,
+                    }
+                } else {
+                    let buffer = if active == 1 {
+                        &mut self.passphrase_buffer
+                    } else {
+                        &mut self.confirm_buffer
+                    };
+                    match code {
+                        KeyCode::Backspace => {
+                            buffer.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            buffer.push(c);
+                        }
+                        _ => return false,
+                    }
+                    let len = buffer.len();
+                    let action = if active == 1 {
+                        SettingsAction::PassphraseLen(len)
+                    } else {
+                        SettingsAction::ExportConfirmLen(len)
+                    };
+                    let _ = self.action_tx.send(Action::Settings(action));
+                    true
+                }
+            }
+        }
+    }
+}
+
+/// Why a new passphrase and its confirmation cannot be submitted, if they
+/// cannot. Checked before anything leaves the form.
+fn passphrase_problem(passphrase: &str, confirm: &str) -> Option<String> {
+    if passphrase.is_empty() {
+        Some("Enter a passphrase.".to_string())
+    } else if openvtc_core::config::validate_passphrase(passphrase).is_err() {
+        Some(format!(
+            "Passphrases must be at least {} characters.",
+            openvtc_core::config::MIN_PASSPHRASE_LENGTH
+        ))
+    } else if passphrase != confirm {
+        Some("The passphrases do not match.".to_string())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

@@ -9,6 +9,8 @@
 //! machine: whether it is checked out, where, and whether a commit made there
 //! would be signed as this persona — with the one key that fixes it.
 
+pub(in crate::ui::pages::main) mod keys;
+
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 

@@ -1,6 +1,9 @@
 //! Capabilities panel — the per-community `governance/capability/*` view,
 //! opened from the Communities panel with `c`.
 
+use crate::state_handler::actions::Action;
+use crate::ui::pages::main::MainPage;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use serde_json::Value;
@@ -236,5 +239,49 @@ fn render_manifest(
     }
     if let Some(at) = &item.enabled_at {
         kv(lines, "enabled at", at.clone());
+    }
+}
+
+impl MainPage {
+    /// Keys for the per-community capabilities view.
+    pub(super) fn handle_capabilities_key(
+        &mut self,
+        key: KeyEvent,
+        view: &crate::state_handler::main_page::content::CapabilitiesView,
+    ) -> bool {
+        // Toggle confirmation pending: y/⏎ commits, anything else cancels.
+        if view.confirm_toggle.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    let _ = self.action_tx.send(Action::CapabilitiesToggleCommit);
+                }
+                _ => {
+                    let _ = self.action_tx.send(Action::CapabilitiesToggleCancel);
+                }
+            }
+            return true;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                let _ = self.action_tx.send(Action::CapabilitiesClose);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let _ = self.action_tx.send(Action::CapabilitiesUp);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let _ = self.action_tx.send(Action::CapabilitiesDown);
+            }
+            KeyCode::Enter => {
+                let _ = self.action_tx.send(Action::CapabilitiesDetail);
+            }
+            KeyCode::Char('r') => {
+                let _ = self.action_tx.send(Action::CapabilitiesRefresh);
+            }
+            KeyCode::Char('e') => {
+                let _ = self.action_tx.send(Action::CapabilitiesToggleArm);
+            }
+            _ => return false,
+        }
+        true
     }
 }
