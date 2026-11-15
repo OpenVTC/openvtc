@@ -9,7 +9,7 @@ use crate::colors::{
 };
 use crate::state_handler::{
     main_page::content::{
-        CommunitiesState, ContentPanelState, ContextDeletePhase, ContextDeleteView,
+        CommunitiesState, CommunitySend, ContentPanelState, ContextDeletePhase, ContextDeleteView,
         DeviceAccessView, GrantListing,
     },
     state::ConnectionState,
@@ -385,31 +385,46 @@ pub fn render(
     };
     if let Some(idx) = state.confirm_delete {
         lines.push(
-            Line::from(format!(
-                "Delete “{}”?   y: confirm    n: cancel",
+            Line::from(crate::ui::pages::main::confirm::prompt(&format!(
+                "Delete “{}”?",
                 confirm_name(idx)
-            ))
+            )))
             .fg(COLOR_ORANGE)
             .bold(),
         );
     } else if let Some(idx) = state.confirm_leave {
         lines.push(
-            Line::from(format!(
-                "Leave “{}”? This sends a self-removal to the community.   y: confirm    n: cancel",
+            Line::from(crate::ui::pages::main::confirm::prompt(&format!(
+                "Leave “{}”? This sends a self-removal to the community.",
                 confirm_name(idx)
-            ))
+            )))
             .fg(COLOR_ORANGE)
             .bold(),
         );
     } else if let Some(idx) = state.confirm_withdraw {
         lines.push(
-            Line::from(format!(
-                "Cancel the pending join to “{}”? The request will be marked withdrawn.   \
-                 y: confirm    n: cancel",
+            Line::from(crate::ui::pages::main::confirm::prompt(&format!(
+                "Cancel the pending join to “{}”? The request will be marked withdrawn.",
                 confirm_name(idx)
-            ))
+            )))
             .fg(COLOR_ORANGE)
             .bold(),
+        );
+    } else if let Some(send) = state.confirm_send {
+        let question = match send {
+            CommunitySend::IssueVmc(idx) => format!(
+                "Issue your membership credential (VMC) to “{}”? It is signed and sent to the community.",
+                confirm_name(idx)
+            ),
+            CommunitySend::Renew(idx) => format!(
+                "Ask “{}” to renew your membership? It re-issues your credentials.",
+                confirm_name(idx)
+            ),
+        };
+        lines.push(
+            Line::from(crate::ui::pages::main::confirm::prompt(&question))
+                .fg(COLOR_ORANGE)
+                .bold(),
         );
     } else {
         lines.push(Line::from(key_hints(state)).fg(COLOR_DARK_GRAY));
@@ -676,10 +691,10 @@ fn render_device_access(
     {
         lines.push(Line::from(""));
         lines.push(
-            Line::from(format!(
-                " Revoke {}'s access to this community?   y: confirm    n: cancel",
+            Line::from(crate::ui::pages::main::confirm::prompt(&format!(
+                " Revoke {}'s access to this community?",
                 grant.did
-            ))
+            )))
             .fg(COLOR_ORANGE)
             .bold(),
         );

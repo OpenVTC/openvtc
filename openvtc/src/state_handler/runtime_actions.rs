@@ -1239,6 +1239,8 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::CommunityCancelLeave
         | Action::CommunityConfirmWithdraw(..)
         | Action::CommunityCancelWithdraw
+        | Action::CommunityConfirmSend(..)
+        | Action::CommunityCancelSend
         | Action::CommunitySwitcherMove(..)
         | Action::CloseCommunitySwitcher
         | Action::DidSelect(..)

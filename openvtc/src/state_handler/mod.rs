@@ -3464,7 +3464,8 @@ impl StateHandler {
                     Action::CommunitySelect(..) | Action::CommunityConfirmDelete(..) |
                     Action::CommunityCancelDelete | Action::CommunityConfirmLeave(..) |
                     Action::CommunityCancelLeave | Action::CommunityConfirmWithdraw(..) |
-                    Action::CommunityCancelWithdraw | Action::CommunitySwitcherMove(..) |
+                    Action::CommunityCancelWithdraw | Action::CommunityConfirmSend(..) |
+                    Action::CommunityCancelSend | Action::CommunitySwitcherMove(..) |
                     Action::CloseCommunitySwitcher | Action::DidSelect(..) |
                     Action::DidConfirmDelete(..) | Action::DidCancelDelete |
                     Action::StartCreatePersona | Action::CreatePersonaInput(..) |
@@ -4702,6 +4703,12 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
         }
         Action::CommunityCancelWithdraw => {
             state.main_page.content_panel.communities.confirm_withdraw = None;
+        }
+        Action::CommunityConfirmSend(send) => {
+            state.main_page.content_panel.communities.confirm_send = Some(*send);
+        }
+        Action::CommunityCancelSend => {
+            state.main_page.content_panel.communities.confirm_send = None;
         }
         Action::CommunitySwitcherMove(i) => {
             if let Some(switcher) = state.main_page.switcher.as_mut() {

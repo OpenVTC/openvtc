@@ -158,8 +158,9 @@ impl Panel for ReposPanel {
             )));
             let class = armed.request.consent_class();
             lines.push(Line::from(dim(format!(
-                "    {} change · signed by this persona · y confirm · any other key cancels",
-                class.label()
+                "    {} change · signed by this persona · {}",
+                class.label(),
+                crate::ui::pages::main::confirm::KEYS
             ))));
         }
 
@@ -1067,7 +1068,10 @@ fn render_workspace_overlay(lines: &mut Vec<Line<'static>>, view: &ReposView) {
              signing, and its credential is revoked at the VTA.",
             Style::default().fg(COLOR_ORANGE).bold(),
         )));
-        lines.push(Line::from(dim("    y confirm · any other key cancels")));
+        lines.push(Line::from(dim(format!(
+            "    {}",
+            crate::ui::pages::main::confirm::KEYS
+        ))));
     }
 }
 
@@ -2176,7 +2180,7 @@ mod tests {
         v.workspace.confirm = Some(WorkspaceChange::RemoveIdentity);
         let out = rendered(v);
         assert!(out.contains("revoked at the VTA"), "{out}");
-        assert!(out.contains("y confirm"), "{out}");
+        assert!(out.contains("y: confirm"), "{out}");
     }
 
     /// Everything the VTC supplies is cleaned before it is drawn: a reason

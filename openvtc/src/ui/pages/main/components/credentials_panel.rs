@@ -303,9 +303,11 @@ fn render_detail(state: &CredentialsState, index: usize) -> Vec<Line<'static>> {
     // A pending removal confirmation replaces the footer hint (R25).
     if state.confirm_delete.is_some() {
         lines.push(
-            Line::from("Remove this credential?   y: confirm    n: cancel")
-                .fg(COLOR_ORANGE)
-                .bold(),
+            Line::from(crate::ui::pages::main::confirm::prompt(
+                "Remove this credential?",
+            ))
+            .fg(COLOR_ORANGE)
+            .bold(),
         );
     } else if state.selected_tab.allows_local_removal() {
         lines.push(Line::from("d: remove  c: copy JSON  Esc: back").fg(COLOR_DARK_GRAY));
@@ -466,7 +468,7 @@ impl MainPage {
                 // else cancels. Mirrors the Communities/VTA-DID pattern (R25).
                 if let Some(vrc_id) = creds.confirm_delete.clone() {
                     match key.code {
-                        KeyCode::Char('y') | KeyCode::Enter => {
+                        KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
                             let _ = self
                                 .action_tx
                                 .send(Action::Credential(CredentialAction::Remove { vrc_id }));

@@ -202,7 +202,9 @@ impl MainPage {
             PersonaConfirm::None => {}
             PersonaConfirm::DeletePersona(i) => {
                 let act = match key.code {
-                    KeyCode::Char('y') | KeyCode::Enter => Action::DeleteDid(i),
+                    KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
+                        Action::DeleteDid(i)
+                    }
                     _ => Action::DidCancelDelete,
                 };
                 let _ = self.action_tx.send(act);
@@ -210,7 +212,9 @@ impl MainPage {
             }
             _ => {
                 return match key.code {
-                    KeyCode::Char('y') | KeyCode::Enter => send(PA::ConfirmYes),
+                    KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
+                        send(PA::ConfirmYes)
+                    }
                     _ => send(PA::ConfirmNo),
                 };
             }

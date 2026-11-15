@@ -1073,6 +1073,10 @@ pub(crate) async fn dispatch(
         InboxAction::ConfirmClearAll => {
             state.main_page.content_panel.inbox.confirm = Some(InboxConfirm::ClearAll);
         }
+        InboxAction::ConfirmReject { task_id, vrc } => {
+            state.main_page.content_panel.inbox.confirm =
+                Some(InboxConfirm::Reject { task_id, vrc });
+        }
         InboxAction::CancelConfirm => {
             state.main_page.content_panel.inbox.confirm = None;
         }

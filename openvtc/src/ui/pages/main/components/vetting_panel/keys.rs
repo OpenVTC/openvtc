@@ -22,6 +22,25 @@ impl MainPage {
         if !matches!(vetting.mode, VettingMode::List) {
             let text = vetting.mode.focused_text().map(str::to_string);
             let confirming = matches!(vetting.mode, VettingMode::ConfirmDecline { .. });
+            // Abandon, delete-ticket and withdraw are committed by `y` alone
+            // (#579): Enter opened this view, and a key held a moment too long
+            // must not also commit it. A plain prompt (abandon, delete) takes
+            // any other key as "keep it".
+            let plain_prompt = matches!(
+                vetting.mode,
+                VettingMode::ConfirmAbandon { .. } | VettingMode::ConfirmDeleteTicket { .. }
+            );
+            let y_commits =
+                confirming || plain_prompt || matches!(vetting.mode, VettingMode::Withdraw { .. });
+            if plain_prompt {
+                let action = if crate::ui::pages::main::confirm::is_yes(&key) {
+                    V::Submit
+                } else {
+                    V::Back
+                };
+                let _ = self.action_tx.send(Action::Vetting(action));
+                return true;
+            }
             // The holder-grant view's whole job is to send you to another
             // terminal and back, and it ends with "then press f again". That
             // key was not bound here, so the one thing the screen asks for did
@@ -64,6 +83,11 @@ impl MainPage {
             }
             let action = match key.code {
                 KeyCode::Esc => Some(V::Back),
+                // On the decline note, Enter finishes typing and moves on; `y`
+                // then declines. On the other y-committed views Enter does
+                // nothing.
+                KeyCode::Enter if confirming && text.is_some() => Some(V::NextField),
+                KeyCode::Enter if y_commits => None,
                 KeyCode::Enter => Some(V::Submit),
                 KeyCode::Tab | KeyCode::Down => Some(V::NextField),
                 KeyCode::BackTab | KeyCode::Up => Some(V::PrevField),
@@ -72,7 +96,7 @@ impl MainPage {
                 code => match text {
                     Some(current) => edit_text(code, &current).map(V::Input),
                     None if chooses_face && code == KeyCode::Char('f') => Some(V::ChooseFace),
-                    None if code == KeyCode::Char('y') && confirming => Some(V::Submit),
+                    None if code == KeyCode::Char('y') && y_commits => Some(V::Submit),
                     None if code == KeyCode::Char('n') && confirming => Some(V::Back),
                     None if on_result && code == KeyCode::Char('n') => Some(V::DirectoryPage(true)),
                     None if on_result && code == KeyCode::Char('p') => {

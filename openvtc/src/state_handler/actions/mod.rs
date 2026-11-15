@@ -48,6 +48,13 @@ pub enum InboxAction {
     },
     /// Arm the confirmation for clearing all tasks (R25).
     ConfirmClearAll,
+    /// Arm the confirmation for rejecting an inbound request (#579): a
+    /// rejection is sent to the peer, so it confirms like a removal does.
+    /// `vrc` is a VRC request; otherwise a relationship request.
+    ConfirmReject {
+        task_id: String,
+        vrc: bool,
+    },
     /// Cancel a pending dismiss/clear-all confirmation (R25).
     CancelConfirm,
     Back,
@@ -978,6 +985,12 @@ pub enum Action {
 
     /// Dismiss a pending cancel confirmation without withdrawing.
     CommunityCancelWithdraw,
+
+    /// Arm the confirmation for a message to a community (issue VMC, renew).
+    CommunityConfirmSend(crate::state_handler::main_page::content::CommunitySend),
+
+    /// Dismiss a pending send confirmation without sending.
+    CommunityCancelSend,
 
     /// Cancel the Pending join at this index: best-effort notify the VTC, then
     /// set it `Withdrawn` and deregister its session so it can be deleted or

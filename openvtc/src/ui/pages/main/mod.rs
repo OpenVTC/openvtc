@@ -28,6 +28,7 @@ use std::cell::Cell;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub mod components;
+pub(crate) mod confirm;
 mod secret_buffer;
 
 use secret_buffer::SecretBuffer;
@@ -527,7 +528,7 @@ impl MainPage {
         // the name, which anyone can then reclaim); anything else backs out.
         if overlay.confirm_remove.is_some() {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => {
+                KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
                     let _ = self.action_tx.send(Action::AgentNameManagerRemove);
                 }
                 _ => {
@@ -1214,9 +1215,9 @@ impl MainPage {
             .map(|row| row.name.as_str());
         if let Some(name) = armed {
             lines.push(
-                Line::from(format!(
-                    "Release @{name}? It becomes free for anyone to reclaim.   y: confirm    n: cancel"
-                ))
+                Line::from(crate::ui::pages::main::confirm::prompt(&format!(
+                    "Release @{name}? It becomes free for anyone to reclaim."
+                )))
                 .fg(COLOR_ORANGE)
                 .bold(),
             );
@@ -1444,9 +1445,9 @@ mod key_handler_tests {
     use super::*;
     use crate::state_handler::actions::{InboxAction, PersonaAction};
     use crate::state_handler::main_page::content::{
-        CommunitySummary, CommunitySwitcherState, CredentialTab, CredentialsMode, InboxConfirm,
-        ManagedDid, PersonaConfirm, PersonaMode, PersonaTab, RawCredential, RelationshipSummary,
-        RelationshipsMode, SwitcherItem, TaskKind, TaskSummary, VrcSummary,
+        CommunitySend, CommunitySummary, CommunitySwitcherState, CredentialTab, CredentialsMode,
+        InboxConfirm, ManagedDid, PersonaConfirm, PersonaMode, PersonaTab, RawCredential,
+        RelationshipSummary, RelationshipsMode, SwitcherItem, TaskKind, TaskSummary, VrcSummary,
     };
     use components::repos_panel::keys::{repos_copy_path, repos_key};
     use crossterm::event::KeyModifiers;
@@ -2579,19 +2580,20 @@ mod key_handler_tests {
             Ok(Action::CommunityConfirmLeave(0)) => {}
             _ => panic!("expected CommunityConfirmLeave(0)"),
         }
-        // Active row: `m` issues this membership's reciprocal VMC to the community.
+        // Active row: `m` arms issuing this membership's reciprocal VMC to the
+        // community — it is sent to someone else, so it confirms (#579).
         let (mut page, mut rx) = active();
         page.handle_key_event(press(KeyCode::Char('m')));
         match rx.try_recv() {
-            Ok(Action::IssueMemberVmc(0)) => {}
-            _ => panic!("expected IssueMemberVmc(0)"),
+            Ok(Action::CommunityConfirmSend(CommunitySend::IssueVmc(0))) => {}
+            _ => panic!("expected CommunityConfirmSend(IssueVmc(0))"),
         }
-        // Active row: `R` asks the community to renew this membership.
+        // Active row: `R` arms asking the community to renew this membership.
         let (mut page, mut rx) = active();
         page.handle_key_event(press(KeyCode::Char('R')));
         match rx.try_recv() {
-            Ok(Action::RenewMembership(0)) => {}
-            _ => panic!("expected RenewMembership(0)"),
+            Ok(Action::CommunityConfirmSend(CommunitySend::Renew(0))) => {}
+            _ => panic!("expected CommunityConfirmSend(Renew(0))"),
         }
         // Active row: `c` opens the community's capabilities view (the
         // cancel-pending-join meaning of `c` is Pending-only; the two are
@@ -2816,11 +2818,17 @@ mod key_handler_tests {
         let (mut page, mut rx) = page_for(MainMenu::Identity, |s| {
             s.main_page.content_panel.identity.confirm = PersonaConfirm::DeletePersona(1);
         });
-        page.handle_key_event(press(KeyCode::Enter));
+        page.handle_key_event(press(KeyCode::Char('y')));
         match rx.try_recv() {
             Ok(Action::DeleteDid(1)) => {}
             _ => panic!("expected DeleteDid(1)"),
         }
+        // Enter does not delete (#579).
+        let (mut page, mut rx) = page_for(MainMenu::Identity, |s| {
+            s.main_page.content_panel.identity.confirm = PersonaConfirm::DeletePersona(1);
+        });
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(!matches!(rx.try_recv(), Ok(Action::DeleteDid(_))));
 
         let (mut page, mut rx) = page_for(MainMenu::Identity, |s| {
             s.main_page.content_panel.identity.confirm = PersonaConfirm::DeletePersona(0);
@@ -3613,9 +3621,13 @@ mod key_handler_tests {
         page.handle_key_event(press(KeyCode::Char('y')));
         assert!(matches!(rx.try_recv(), Ok(Action::AgentNameManagerRemove)));
 
+        // Enter does not confirm a removal (#579): it cancels, like any other key.
         let (mut page, mut rx) = armed();
         page.handle_key_event(press(KeyCode::Enter));
-        assert!(matches!(rx.try_recv(), Ok(Action::AgentNameManagerRemove)));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Action::AgentNameManagerCancelRemove)
+        ));
 
         let (mut page, mut rx) = armed();
         page.handle_key_event(press(KeyCode::Esc));
@@ -3797,15 +3809,20 @@ mod key_handler_tests {
             _ => panic!("expected VicConfirmDelete(0)"),
         }
 
-        // Armed: Enter commits the soft-delete.
+        // Armed: `y` commits the soft-delete; Enter does not (#579).
         let (mut page, mut rx) = page_for(MainMenu::Vta, |s| {
             s.main_page.content_panel.vta.confirm_delete_vic = Some(0);
         });
-        page.handle_key_event(press(KeyCode::Enter));
+        page.handle_key_event(press(KeyCode::Char('y')));
         match rx.try_recv() {
             Ok(Action::DeleteVic(0)) => {}
             _ => panic!("expected DeleteVic(0)"),
         }
+        let (mut page, mut rx) = page_for(MainMenu::Vta, |s| {
+            s.main_page.content_panel.vta.confirm_delete_vic = Some(0);
+        });
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(!matches!(rx.try_recv(), Ok(Action::DeleteVic(_))));
 
         // Armed: any other key cancels.
         let (mut page, mut rx) = page_for(MainMenu::Vta, |s| {
@@ -3960,14 +3977,22 @@ mod key_handler_tests {
             _ => panic!("expected Inbox(DismissTask)"),
         }
 
-        // A pending clear-all commits on Enter.
+        // A pending clear-all commits on `y` only; Enter cancels (#579).
+        let (mut page, mut rx) = page_for(MainMenu::Inbox, |s| {
+            s.main_page.content_panel.inbox.confirm = Some(InboxConfirm::ClearAll);
+        });
+        page.handle_key_event(press(KeyCode::Char('y')));
+        match rx.try_recv() {
+            Ok(Action::Inbox(InboxAction::ClearAll)) => {}
+            _ => panic!("expected Inbox(ClearAll)"),
+        }
         let (mut page, mut rx) = page_for(MainMenu::Inbox, |s| {
             s.main_page.content_panel.inbox.confirm = Some(InboxConfirm::ClearAll);
         });
         page.handle_key_event(press(KeyCode::Enter));
         match rx.try_recv() {
-            Ok(Action::Inbox(InboxAction::ClearAll)) => {}
-            _ => panic!("expected Inbox(ClearAll)"),
+            Ok(Action::Inbox(InboxAction::CancelConfirm)) => {}
+            _ => panic!("expected Enter to cancel"),
         }
 
         // Any other key cancels.
@@ -4311,6 +4336,259 @@ mod key_handler_tests {
                 !text.contains("Written answers are released"),
                 "{screen:?}: {text}"
             );
+        }
+    }
+    // ----- One confirmation rule (#579) ------------------------------------
+
+    /// Every action sent for `code` on a page armed by `arm`.
+    fn sent_for(menu: MainMenu, arm: &dyn Fn(&mut State), code: KeyCode) -> Vec<Action> {
+        let (mut page, mut rx) = page_for(menu, arm);
+        page.handle_key_event(press(code));
+        let mut sent = Vec::new();
+        while let Ok(action) = rx.try_recv() {
+            sent.push(action);
+        }
+        sent
+    }
+
+    /// A held Enter — the key that opened the view a moment earlier — must
+    /// never commit a destructive or outward-facing action; `y` must.
+    #[test]
+    fn enter_never_commits_a_confirmation_and_y_does() {
+        use crate::state_handler::actions::VettingAction as V;
+        use crate::state_handler::main_page::content::{
+            AgentNameManagerPhase, AgentNameManagerState, AgentNameRow, PROTECTION_CONFIRM_REMOVE,
+            SettingsMode, VettingMode,
+        };
+        type Arm = Box<dyn Fn(&mut State)>;
+        type Commit = fn(&Action) -> bool;
+        fn one_community(s: &mut State) {
+            s.main_page.content_panel.communities.items =
+                Arc::from(vec![community_summary("Acme")]);
+        }
+        let cases: Vec<(&str, MainMenu, Arm, Commit)> = vec![
+            (
+                "community delete",
+                MainMenu::Communities,
+                Box::new(|s| {
+                    one_community(s);
+                    s.main_page.content_panel.communities.confirm_delete = Some(0);
+                }),
+                |a| matches!(a, Action::DeleteCommunity(0)),
+            ),
+            (
+                "community leave",
+                MainMenu::Communities,
+                Box::new(|s| {
+                    one_community(s);
+                    s.main_page.content_panel.communities.confirm_leave = Some(0);
+                }),
+                |a| matches!(a, Action::LeaveCommunity(0)),
+            ),
+            (
+                "community withdraw",
+                MainMenu::Communities,
+                Box::new(|s| {
+                    one_community(s);
+                    s.main_page.content_panel.communities.confirm_withdraw = Some(0);
+                }),
+                |a| matches!(a, Action::WithdrawJoin(0)),
+            ),
+            (
+                "issue VMC",
+                MainMenu::Communities,
+                Box::new(|s| {
+                    one_community(s);
+                    s.main_page.content_panel.communities.confirm_send =
+                        Some(CommunitySend::IssueVmc(0));
+                }),
+                |a| matches!(a, Action::IssueMemberVmc(0)),
+            ),
+            (
+                "renew membership",
+                MainMenu::Communities,
+                Box::new(|s| {
+                    one_community(s);
+                    s.main_page.content_panel.communities.confirm_send =
+                        Some(CommunitySend::Renew(0));
+                }),
+                |a| matches!(a, Action::RenewMembership(0)),
+            ),
+            (
+                "inbox dismiss",
+                MainMenu::Inbox,
+                Box::new(|s| {
+                    s.main_page.content_panel.inbox.confirm = Some(InboxConfirm::Dismiss {
+                        task_id: "t1".into(),
+                    });
+                }),
+                |a| matches!(a, Action::Inbox(InboxAction::DismissTask { .. })),
+            ),
+            (
+                "inbox clear all",
+                MainMenu::Inbox,
+                Box::new(|s| {
+                    s.main_page.content_panel.inbox.confirm = Some(InboxConfirm::ClearAll);
+                }),
+                |a| matches!(a, Action::Inbox(InboxAction::ClearAll)),
+            ),
+            (
+                "inbox reject (sent to the peer)",
+                MainMenu::Inbox,
+                Box::new(|s| {
+                    s.main_page.content_panel.inbox.confirm = Some(InboxConfirm::Reject {
+                        task_id: "t1".into(),
+                        vrc: false,
+                    });
+                }),
+                |a| matches!(a, Action::Inbox(InboxAction::RejectRelationship { .. })),
+            ),
+            (
+                "relationship remove",
+                MainMenu::Relationships,
+                Box::new(|s| {
+                    s.main_page.content_panel.relationships.mode = RelationshipsMode::Detail {
+                        index: 0,
+                        selected_vrc: None,
+                    };
+                    s.main_page.content_panel.relationships.confirm_delete =
+                        Some("did:example:partner".into());
+                }),
+                |a| matches!(a, Action::Relationship(RelationshipAction::Remove { .. })),
+            ),
+            (
+                "credential remove",
+                MainMenu::Credentials,
+                Box::new(|s| {
+                    s.main_page.content_panel.credentials.mode =
+                        CredentialsMode::Detail { index: 0 };
+                    s.main_page.content_panel.credentials.confirm_delete = Some("vrc1".into());
+                }),
+                |a| matches!(a, Action::Credential(CredentialAction::Remove { .. })),
+            ),
+            (
+                "invitation credential delete",
+                MainMenu::Vta,
+                Box::new(|s| {
+                    s.main_page.content_panel.vta.confirm_delete_vic = Some(0);
+                }),
+                |a| matches!(a, Action::DeleteVic(0)),
+            ),
+            (
+                "agent name remove",
+                MainMenu::Vta,
+                Box::new(|s| {
+                    s.main_page.agent_names = Some(AgentNameManagerState {
+                        phase: AgentNameManagerPhase::Ready,
+                        names: vec![AgentNameRow {
+                            name: "alice".into(),
+                            enabled: true,
+                        }],
+                        confirm_remove: Some(0),
+                        ..Default::default()
+                    });
+                }),
+                |a| matches!(a, Action::AgentNameManagerRemove),
+            ),
+            (
+                "persona delete",
+                MainMenu::Identity,
+                Box::new(|s| {
+                    s.main_page.content_panel.identity.confirm = PersonaConfirm::DeletePersona(0);
+                }),
+                |a| matches!(a, Action::DeleteDid(0)),
+            ),
+            (
+                "remove passphrase",
+                MainMenu::Settings,
+                Box::new(|s| {
+                    s.main_page.content_panel.settings.mode = SettingsMode::ChangeProtection {
+                        selected_option: 1,
+                        passphrase_len: 0,
+                        confirm_len: 0,
+                        active_field: PROTECTION_CONFIRM_REMOVE,
+                    };
+                }),
+                |a| matches!(a, Action::Settings(SettingsAction::RemovePassphrase)),
+            ),
+            (
+                "abandon an application",
+                MainMenu::Vetting,
+                Box::new(|s| {
+                    s.main_page.content_panel.vetting.mode = VettingMode::ConfirmAbandon {
+                        application_id: "a1".into(),
+                    };
+                }),
+                |a| matches!(a, Action::Vetting(V::Submit)),
+            ),
+            (
+                "delete a ticket",
+                MainMenu::Vetting,
+                Box::new(|s| {
+                    s.main_page.content_panel.vetting.mode = VettingMode::ConfirmDeleteTicket {
+                        ticket_id: "t1".into(),
+                    };
+                }),
+                |a| matches!(a, Action::Vetting(V::Submit)),
+            ),
+        ];
+        for (what, menu, arm, is_commit) in &cases {
+            let on_enter = sent_for(menu.clone(), arm.as_ref(), KeyCode::Enter);
+            assert!(
+                !on_enter.iter().any(is_commit),
+                "{what}: Enter must not commit"
+            );
+            let on_y = sent_for(menu.clone(), arm.as_ref(), KeyCode::Char('y'));
+            assert!(on_y.iter().any(is_commit), "{what}: y must commit");
+        }
+    }
+
+    /// Reject in the Inbox detail is sent to the peer, so `r` arms it rather
+    /// than sending it.
+    #[test]
+    fn inbox_reject_arms_a_confirmation() {
+        use crate::state_handler::main_page::content::ActiveTaskView;
+        let (mut page, mut rx) = page_for(MainMenu::Inbox, |s| {
+            s.main_page.content_panel.inbox.active_task =
+                Some(ActiveTaskView::RelationshipRequestInbound {
+                    task_id: "t1".into(),
+                    from_did: "did:example:them".into(),
+                    from_agent_name: None,
+                    their_did: "did:example:them".into(),
+                    reason: None,
+                    name: None,
+                });
+        });
+        page.handle_key_event(press(KeyCode::Char('r')));
+        match rx.try_recv() {
+            Ok(Action::Inbox(InboxAction::ConfirmReject {
+                task_id,
+                vrc: false,
+            })) => {
+                assert_eq!(task_id, "t1");
+            }
+            _ => panic!("expected ConfirmReject"),
+        }
+    }
+
+    /// Removing the passphrase from Settings arms a confirmation first.
+    #[test]
+    fn remove_passphrase_arms_a_confirmation() {
+        use crate::state_handler::main_page::content::{PROTECTION_CONFIRM_REMOVE, SettingsMode};
+        let (mut page, mut rx) = page_for(MainMenu::Settings, |s| {
+            s.main_page.content_panel.settings.mode = SettingsMode::ChangeProtection {
+                selected_option: 1,
+                passphrase_len: 0,
+                confirm_len: 0,
+                active_field: 0,
+            };
+        });
+        page.handle_key_event(press(KeyCode::Enter));
+        match rx.try_recv() {
+            Ok(Action::Settings(SettingsAction::ProtectionTabSwitch(f))) => {
+                assert_eq!(f, PROTECTION_CONFIRM_REMOVE);
+            }
+            _ => panic!("expected the removal to be armed"),
         }
     }
 }

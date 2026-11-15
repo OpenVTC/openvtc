@@ -132,13 +132,14 @@ impl Panel for CapabilitiesPanel {
         {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                    format!(
-                        "    {} {}? This is a signed governance write. y/⏎ confirm · any other key cancels",
-                        if item.enabled { "Disable" } else { "Enable" },
-                        item.slug,
-                    ),
-                    Style::default().fg(COLOR_ORANGE).bold(),
-                )));
+                format!(
+                    "    {} {}? This is a signed governance write.   {}",
+                    if item.enabled { "Disable" } else { "Enable" },
+                    item.slug,
+                    crate::ui::pages::main::confirm::KEYS,
+                ),
+                Style::default().fg(COLOR_ORANGE).bold(),
+            )));
         }
 
         if let Some(status) = &view.status_message {
@@ -249,10 +250,10 @@ impl MainPage {
         key: KeyEvent,
         view: &crate::state_handler::main_page::content::CapabilitiesView,
     ) -> bool {
-        // Toggle confirmation pending: y/⏎ commits, anything else cancels.
+        // Toggle confirmation pending: only y commits, anything else cancels (#579).
         if view.confirm_toggle.is_some() {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => {
+                KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
                     let _ = self.action_tx.send(Action::CapabilitiesToggleCommit);
                 }
                 _ => {

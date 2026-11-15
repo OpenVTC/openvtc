@@ -159,8 +159,16 @@ pub fn render(state: &InboxState, connection: &ConnectionState) -> Vec<Line<'sta
 /// Footer prompt shown while a destructive inbox action awaits `y`/`n` (R25).
 fn confirm_prompt_line(confirm: &InboxConfirm) -> Line<'static> {
     let text = match confirm {
-        InboxConfirm::Dismiss { .. } => "Dismiss this task?   y: confirm    n: cancel",
-        InboxConfirm::ClearAll => "Clear all tasks?   y: confirm    n: cancel",
+        InboxConfirm::Dismiss { .. } => {
+            crate::ui::pages::main::confirm::prompt("Dismiss this task?")
+        }
+        InboxConfirm::ClearAll => crate::ui::pages::main::confirm::prompt("Clear all tasks?"),
+        InboxConfirm::Reject { vrc: false, .. } => crate::ui::pages::main::confirm::prompt(
+            "Reject this relationship request? The rejection is sent to them.",
+        ),
+        InboxConfirm::Reject { vrc: true, .. } => crate::ui::pages::main::confirm::prompt(
+            "Reject this credential request? The rejection is sent to them.",
+        ),
     };
     Line::from(text).fg(COLOR_ORANGE).bold()
 }
@@ -412,14 +420,27 @@ impl MainPage {
     pub(in crate::ui::pages::main) fn handle_inbox_key(&mut self, key: KeyEvent) -> bool {
         let inbox = &self.props.main_page.content_panel.inbox;
 
-        // A destructive-action confirmation is pending: only y/Enter commits;
-        // anything else cancels. Mirrors the Communities/VTA-DID pattern (R25).
+        // A destructive or outward-facing confirmation is pending: only `y`
+        // commits; anything else — Enter included — cancels (#579).
         if let Some(confirm) = inbox.confirm.clone() {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => {
+                KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
                     let commit = match confirm {
                         InboxConfirm::Dismiss { task_id } => InboxAction::DismissTask { task_id },
                         InboxConfirm::ClearAll => InboxAction::ClearAll,
+                        InboxConfirm::Reject {
+                            task_id,
+                            vrc: false,
+                        } => InboxAction::RejectRelationship {
+                            task_id,
+                            reason: None,
+                        },
+                        InboxConfirm::Reject { task_id, vrc: true } => {
+                            InboxAction::RejectVrcRequest {
+                                task_id,
+                                reason: None,
+                            }
+                        }
                     };
                     let _ = self.action_tx.send(Action::Inbox(commit));
                 }
@@ -477,7 +498,7 @@ impl MainPage {
                         }));
                     true
                 }
-                KeyCode::Char('a') => {
+                KeyCode::Char('a') if is_vrc_issued || is_vrc_request_inbound => {
                     if is_vrc_issued {
                         let _ = self
                             .action_tx
@@ -489,22 +510,15 @@ impl MainPage {
                     }
                     true
                 }
-                KeyCode::Char('r') => {
-                    if is_rel_inbound {
-                        let _ =
-                            self.action_tx
-                                .send(Action::Inbox(InboxAction::RejectRelationship {
-                                    task_id,
-                                    reason: None,
-                                }));
-                    } else if is_vrc_request_inbound {
-                        let _ = self
-                            .action_tx
-                            .send(Action::Inbox(InboxAction::RejectVrcRequest {
-                                task_id,
-                                reason: None,
-                            }));
-                    }
+                // Rejecting is sent to the peer, so it is armed and confirmed
+                // with `y`, like the local-only dismiss beside it (#579).
+                KeyCode::Char('r') if is_rel_inbound || is_vrc_request_inbound => {
+                    let _ = self
+                        .action_tx
+                        .send(Action::Inbox(InboxAction::ConfirmReject {
+                            task_id,
+                            vrc: is_vrc_request_inbound,
+                        }));
                     true
                 }
                 KeyCode::Char('d') => {

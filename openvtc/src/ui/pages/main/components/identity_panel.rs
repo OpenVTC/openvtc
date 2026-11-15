@@ -179,19 +179,22 @@ fn confirm_prompt(state: &IdentityState) -> Option<String> {
                 Some(name) => format!("{name} ({did})"),
                 None => did.into_owned(),
             };
-            Some(format!("Remove {name}?   y: confirm    n: cancel"))
+            Some(crate::ui::pages::main::confirm::prompt(&format!(
+                "Remove {name}?"
+            )))
         }
         PersonaConfirm::DeleteAttribute { name, cascade, .. } => {
             if *cascade {
                 // The cascading question names the consequence the plain one
                 // does not have: profiles that show this value stop showing it.
-                Some(format!(
+                Some(crate::ui::pages::main::confirm::prompt(&format!(
                     "\"{name}\" is on one or more faces. Forget it AND remove it from those \
-                     faces too?   Nothing already shared is affected — that has left.   \
-                     y: confirm    n: cancel"
-                ))
+                     faces too?   Nothing already shared is affected — that has left."
+                )))
             } else {
-                Some(format!("Forget \"{name}\"?   y: confirm    n: cancel"))
+                Some(crate::ui::pages::main::confirm::prompt(&format!(
+                    "Forget \"{name}\"?"
+                )))
             }
         }
         PersonaConfirm::DeleteProfile {
@@ -207,15 +210,15 @@ fn confirm_prompt(state: &IdentityState) -> Option<String> {
                 .map(|w| format!("   {w}"))
                 .unwrap_or_default();
             if *unbind {
-                Some(format!(
+                Some(crate::ui::pages::main::confirm::prompt(&format!(
                     "A persona wears \"{name}\". Delete it and leave that persona showing \
                      nothing?{spoken}   To stop being it without losing it, press n and retire \
-                     it with x.   y: confirm    n: cancel"
-                ))
+                     it with x."
+                )))
             } else {
-                Some(format!(
-                    "Delete the face \"{name}\"?{spoken}   y: confirm    n: cancel"
-                ))
+                Some(crate::ui::pages::main::confirm::prompt(&format!(
+                    "Delete the face \"{name}\"?{spoken}"
+                )))
             }
         }
         PersonaConfirm::PurgeAttribute { name, used_by, .. } => {
@@ -232,42 +235,44 @@ fn confirm_prompt(state: &IdentityState) -> Option<String> {
                     "   {n} faces use it; any that pin an old version will show nothing for it."
                 ),
             };
-            Some(format!(
+            Some(crate::ui::pages::main::confirm::prompt(&format!(
                 "Forget every earlier version of \"{name}\", keeping only what it says now?\
-                 {faces}   This cannot be undone.   y: confirm    n: cancel"
-            ))
+                 {faces}   This cannot be undone."
+            )))
         }
         PersonaConfirm::DeleteWorld { name, faces, .. } => Some(match faces {
             // The sentence a holder needs is about what *survives*. "Delete
             // Work" reads to almost everyone as though the faces in it go too,
             // and a prompt that leaves that uncorrected is answered under a
             // belief nobody checked.
-            0 => format!("Delete the world \"{name}\"?   y: confirm    n: cancel"),
-            1 => format!(
+            0 => crate::ui::pages::main::confirm::prompt(&format!("Delete the world \"{name}\"?")),
+            1 => crate::ui::pages::main::confirm::prompt(&format!(
                 "Delete the world \"{name}\"? The face in it is kept and belongs to no world \
-                 afterwards.   y: confirm    n: cancel"
-            ),
-            n => format!(
+                 afterwards."
+            )),
+            n => crate::ui::pages::main::confirm::prompt(&format!(
                 "Delete the world \"{name}\"? The {n} faces in it are kept and belong to no \
-                 world afterwards.   y: confirm    n: cancel"
-            ),
+                 world afterwards."
+            )),
         }),
         PersonaConfirm::RetireFace { name, worn, .. } => Some(match worn {
-            0 => format!(
+            0 => crate::ui::pages::main::confirm::prompt(&format!(
                 "Retire \"{name}\"? It is worn nowhere now; it is kept with its history and left \
-                 out of every picker until you reinstate it.   y: confirm    n: cancel"
-            ),
-            n => format!(
+                 out of every picker until you reinstate it."
+            )),
+            n => crate::ui::pages::main::confirm::prompt(&format!(
                 "Retire \"{name}\"? It comes off the {n} communit{} wearing it, and is kept with \
                  its history — reinstate it later with z, then x. Nothing already shared is \
-                 affected.   y: confirm    n: cancel",
+                 affected.",
                 if *n == 1 { "y" } else { "ies" }
-            ),
+            )),
         }),
-        PersonaConfirm::Unbind { community, .. } => Some(format!(
-            "Take it off — show {community} nothing?   Nothing already shared is affected \
-             — that has left.   y: confirm    n: cancel"
-        )),
+        PersonaConfirm::Unbind { community, .. } => {
+            Some(crate::ui::pages::main::confirm::prompt(&format!(
+                "Take it off — show {community} nothing?   Nothing already shared is affected \
+             — that has left."
+            )))
+        }
     }
 }
 

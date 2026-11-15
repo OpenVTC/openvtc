@@ -536,9 +536,9 @@ fn render_vics(state: &VtaState, panel_focused: bool, lines: &mut Vec<Line<'stat
             .map(|v| v.id.as_str())
             .unwrap_or("this VIC");
         lines.push(
-            Line::from(format!(
-                "Purge {target} permanently?   y: confirm    n: cancel"
-            ))
+            Line::from(crate::ui::pages::main::confirm::prompt(&format!(
+                "Purge {target} permanently?"
+            )))
             .fg(COLOR_ORANGE)
             .bold(),
         );
@@ -549,9 +549,11 @@ fn render_vics(state: &VtaState, panel_focused: bool, lines: &mut Vec<Line<'stat
             .map(|v| v.id.as_str())
             .unwrap_or("this VIC");
         lines.push(
-            Line::from(format!("Delete {target}?   y: confirm    n: cancel"))
-                .fg(COLOR_ORANGE)
-                .bold(),
+            Line::from(crate::ui::pages::main::confirm::prompt(&format!(
+                "Delete {target}?"
+            )))
+            .fg(COLOR_ORANGE)
+            .bold(),
         );
     } else if focused {
         let sel = state.vics.get(state.vic_selected_index);
@@ -588,7 +590,9 @@ impl MainPage {
         // VIC purge / delete confirmation gates: only y/Enter confirms.
         if let Some(idx) = vta.confirm_purge_vic {
             let act = match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => Action::PurgeVic(idx),
+                KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
+                    Action::PurgeVic(idx)
+                }
                 _ => Action::VicCancelPurge,
             };
             let _ = self.action_tx.send(act);
@@ -596,7 +600,9 @@ impl MainPage {
         }
         if let Some(idx) = vta.confirm_delete_vic {
             let act = match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => Action::DeleteVic(idx),
+                KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
+                    Action::DeleteVic(idx)
+                }
                 _ => Action::VicCancelDelete,
             };
             let _ = self.action_tx.send(act);

@@ -10,7 +10,9 @@ use crate::colors::{
 use crate::state_handler::actions::{Action, SettingsAction};
 use crate::state_handler::main_page::MainPanel;
 use crate::state_handler::{
-    main_page::content::{ContentPanelState, SettingsMode, SettingsState, ThemeRow},
+    main_page::content::{
+        ContentPanelState, PROTECTION_CONFIRM_REMOVE, SettingsMode, SettingsState, ThemeRow,
+    },
     state::ConnectionState,
 };
 use crate::ui::pages::main::{MainPage, edit_text};
@@ -713,7 +715,19 @@ fn render_change_protection(
     );
     lines.push(Line::from(""));
 
-    if active_field == 0 {
+    if active_field == PROTECTION_CONFIRM_REMOVE {
+        lines.push(Line::from(
+            "Remove the passphrase? The configuration is then protected by the OS keyring only.",
+        ));
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(crate::ui::pages::main::confirm::prompt(
+                "Remove the passphrase?",
+            ))
+            .fg(COLOR_ORANGE)
+            .bold(),
+        );
+    } else if active_field == 0 {
         // Option selection mode
         let options = ["Set Passphrase", "Remove Passphrase (keyring only)"];
         for (i, label) in options.iter().enumerate() {
@@ -890,6 +904,17 @@ impl MainPage {
             } => {
                 let active = *active_field;
                 let sel = *selected_option;
+                // Removing the passphrase weakens what protects the keys: it
+                // is armed by Enter and committed only by `y` (#579).
+                if active == PROTECTION_CONFIRM_REMOVE {
+                    let action = if crate::ui::pages::main::confirm::is_yes(&key) {
+                        SettingsAction::RemovePassphrase
+                    } else {
+                        SettingsAction::ProtectionTabSwitch(0)
+                    };
+                    let _ = self.action_tx.send(Action::Settings(action));
+                    return true;
+                }
                 match key.code {
                     KeyCode::Esc => {
                         self.passphrase_buffer.clear();
@@ -918,10 +943,10 @@ impl MainPage {
                                 .action_tx
                                 .send(Action::Settings(SettingsAction::ProtectionStartInput));
                         } else {
-                            // Remove passphrase
-                            let _ = self
-                                .action_tx
-                                .send(Action::Settings(SettingsAction::RemovePassphrase));
+                            // Remove passphrase — arm the confirmation.
+                            let _ = self.action_tx.send(Action::Settings(
+                                SettingsAction::ProtectionTabSwitch(PROTECTION_CONFIRM_REMOVE),
+                            ));
                         }
                         true
                     }

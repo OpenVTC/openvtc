@@ -4,6 +4,7 @@
 
 use crate::state_handler::actions::Action;
 use crate::state_handler::main_page::MainPanel;
+use crate::state_handler::main_page::content::CommunitySend;
 use crate::ui::pages::main::MainPage;
 use crate::ui::pages::main::components::{
     self as components,
@@ -115,7 +116,7 @@ impl MainPage {
         // (n/Esc) apply; every other key is swallowed so nothing slips through.
         if let Some(idx) = comms.confirm_delete {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => {
+                KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
                     let _ = self.action_tx.send(Action::DeleteCommunity(idx));
                 }
                 _ => {
@@ -127,7 +128,7 @@ impl MainPage {
         // A leave confirmation is pending (R-L-1): same y/n gate.
         if let Some(idx) = comms.confirm_leave {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => {
+                KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
                     let _ = self.action_tx.send(Action::LeaveCommunity(idx));
                 }
                 _ => {
@@ -139,12 +140,24 @@ impl MainPage {
         // A cancel-pending-join confirmation is pending: same y/n gate.
         if let Some(idx) = comms.confirm_withdraw {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => {
+                KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
                     let _ = self.action_tx.send(Action::WithdrawJoin(idx));
                 }
                 _ => {
                     let _ = self.action_tx.send(Action::CommunityCancelWithdraw);
                 }
+            }
+            return true;
+        }
+
+        // A message to the community is pending: same `y` gate (#579).
+        if let Some(send) = comms.confirm_send {
+            let _ = self.action_tx.send(Action::CommunityCancelSend);
+            if crate::ui::pages::main::confirm::is_yes(&key) {
+                let _ = self.action_tx.send(match send {
+                    CommunitySend::IssueVmc(idx) => Action::IssueMemberVmc(idx),
+                    CommunitySend::Renew(idx) => Action::RenewMembership(idx),
+                });
             }
             return true;
         }
@@ -209,7 +222,11 @@ impl MainPage {
             KeyCode::Char('m') if sel_active => {
                 // Issue this membership's reciprocal VMC back to the community and
                 // send it to the VTC (members/vmc/1.0). Active-only.
-                let _ = self.action_tx.send(Action::IssueMemberVmc(selected));
+                let _ = self
+                    .action_tx
+                    .send(Action::CommunityConfirmSend(CommunitySend::IssueVmc(
+                        selected,
+                    )));
                 true
             }
             KeyCode::Char('R') if sel_renewable => {
@@ -219,7 +236,9 @@ impl MainPage {
                 // the manual rescue for an approved join whose credential never
                 // arrived: the community re-issues, and the renewal activates
                 // the membership as delivery would have.
-                let _ = self.action_tx.send(Action::RenewMembership(selected));
+                let _ = self
+                    .action_tx
+                    .send(Action::CommunityConfirmSend(CommunitySend::Renew(selected)));
                 true
             }
             KeyCode::Char('c') if sel_active => {
@@ -411,7 +430,9 @@ impl MainPage {
             }
         } else if view.confirm_revoke {
             Some(match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => C::RevokeConfirm,
+                KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
+                    C::RevokeConfirm
+                }
                 _ => C::RevokeCancel,
             })
         } else {

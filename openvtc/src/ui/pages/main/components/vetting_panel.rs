@@ -797,9 +797,9 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
             lines.push(Line::from(""));
             lines.push(
                 Line::from(if *focused == 1 {
-                    "Enter: decline    ↑/↓: field    Esc: keep it"
+                    "Enter: done typing    ↑/↓: field    Esc: keep it"
                 } else {
-                    "y or Enter: decline    n or Esc: keep it    ↑/↓: field"
+                    "y: decline    n or Esc: keep it    ↑/↓: field"
                 })
                 .fg(COLOR_ORANGE)
                 .bold(),
@@ -853,7 +853,7 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 lines.push(hint("answer."));
             }
             lines.push(Line::from(""));
-            lines.push(hint("Enter: abandon  Esc: keep it"));
+            lines.push(hint("y: abandon · any other key: keep it"));
         }
         VettingMode::ConfirmDeleteTicket { ticket_id } => {
             lines.push(heading("Delete this ticket"));
@@ -895,7 +895,7 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 "so hand out a new one if they still need to reach you.",
             ));
             lines.push(Line::from(""));
-            lines.push(hint("Enter: delete  Esc: keep it"));
+            lines.push(hint("y: delete · any other key: keep it"));
         }
         VettingMode::Withdraw {
             statement_id,
@@ -928,7 +928,7 @@ fn mode_lines(lines: &mut Vec<Line<'static>>, v: &VettingState) {
                 false,
             ));
             lines.push(Line::from(""));
-            lines.push(hint("Enter: withdraw  Esc: cancel"));
+            lines.push(hint("←/→: reason  y: withdraw  Esc: cancel"));
         }
     }
 }

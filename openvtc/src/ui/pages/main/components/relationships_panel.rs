@@ -416,9 +416,11 @@ fn render_detail(
     // A pending removal confirmation replaces the footer hint (R25).
     if state.confirm_delete.is_some() {
         lines.push(
-            Line::from("Remove this relationship?   y: confirm    n: cancel")
-                .fg(COLOR_ORANGE)
-                .bold(),
+            Line::from(crate::ui::pages::main::confirm::prompt(
+                "Remove this relationship?",
+            ))
+            .fg(COLOR_ORANGE)
+            .bold(),
         );
     } else {
         lines.push(
@@ -793,7 +795,7 @@ impl MainPage {
                 // else cancels. Mirrors the Communities/VTA-DID pattern (R25).
                 if let Some(remote_p_did) = rels.confirm_delete.clone() {
                     match key.code {
-                        KeyCode::Char('y') | KeyCode::Enter => {
+                        KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
                             let _ = self.action_tx.send(Action::Relationship(
                                 RelationshipAction::Remove { remote_p_did },
                             ));

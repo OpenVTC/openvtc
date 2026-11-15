@@ -215,6 +215,15 @@ pub struct CapabilitiesState {
 // Communities State (R-C-*)
 // ****************************************************************************
 
+/// A message to a community the Communities panel asks about before sending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommunitySend {
+    /// Issue this membership's reciprocal VMC to the community (`m`).
+    IssueVmc(usize),
+    /// Ask the community to renew this membership's credentials (`R`).
+    Renew(usize),
+}
+
 /// State for the Communities overview panel — the account's community
 /// memberships, in display order (favourites first).
 #[derive(Clone, Debug, Default)]
@@ -248,6 +257,9 @@ pub struct CommunitiesState {
     /// `y`/`n` confirmation. Transitions the record to `Withdrawn` so it can then
     /// be deleted or re-joined.
     pub confirm_withdraw: Option<usize>,
+    /// When `Some`, a message to the community (issue the VMC, ask to renew)
+    /// is awaiting `y` — it is sent to someone else, so it confirms (#579).
+    pub confirm_send: Option<CommunitySend>,
     /// Whether archived communities are included in the list (R-C-8). Off by
     /// default; toggled so archived records stay discoverable.
     pub show_archived: bool,
@@ -3563,6 +3575,9 @@ pub enum InboxConfirm {
     Dismiss { task_id: String },
     /// Clear every pending task.
     ClearAll,
+    /// Reject an inbound request — sent to the peer, so it confirms (#579).
+    /// `vrc` is a VRC request; otherwise a relationship request.
+    Reject { task_id: String, vrc: bool },
 }
 
 /// Lightweight display summary of a task (no Arc/Mutex).
@@ -4099,6 +4114,10 @@ pub struct TokenManagementState {
     pub reset_completed: bool,
 }
 
+/// `ChangeProtection::active_field` while removing the passphrase awaits `y`:
+/// it weakens what protects the key material, so it confirms (#579).
+pub const PROTECTION_CONFIRM_REMOVE: usize = 3;
+
 /// Display modes for the settings panel.
 #[derive(Clone, Debug, Default)]
 pub enum SettingsMode {
@@ -4133,7 +4152,8 @@ pub enum SettingsMode {
         passphrase_len: usize,
         /// Length of the confirm passphrase (actual value held only in UI component)
         confirm_len: usize,
-        /// Which field is active (0 = option list, 1 = passphrase, 2 = confirm)
+        /// Which field is active (0 = option list, 1 = passphrase, 2 = confirm,
+        /// [`PROTECTION_CONFIRM_REMOVE`] = removing the passphrase awaits `y`)
         active_field: usize,
     },
     /// Token management sub-screen
