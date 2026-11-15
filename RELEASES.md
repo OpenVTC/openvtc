@@ -62,6 +62,10 @@ uses as the GitHub Release notes.
 Up to `0.6.x` releases were made from `main` by hand. `0.7.0` is the first
 release from a release branch.
 
+`openvtc-vetting-pcs` was published from this workspace up to `0.6.0`. The
+hidden-vetting engine now runs in the VTA (VTI's `vti-vetting-pcs`), and the
+crate is no longer part of this workspace.
+
 ## Schedule
 
 | Release | Branch | First RC | GA | Latest | Status |

@@ -17,17 +17,19 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done
 ## Scoped work
 
 ### [ ] D4 — Verifiable Presentation construction + VP requirement discovery
-Join step 4 still submits a stub VP (`openvtc/src/state_handler/join_flow.rs`,
-single call site). Closes the last deferred item from the multi-community spec
+The stub VP is gone: join step 4 now builds its VP with `build_join_vp`
+(`openvtc-core/src/join.rs`), called from `join_flow.rs` and `join_cmd.rs`. D4
+needs re-scoping against that before it is closed or scheduled. Closes the last
+deferred item from the multi-community spec
 (`docs/design/multi-community-support.md` §8, §10 Q1).
-**See [`d4-scoping.md`](./d4-scoping.md) for the full scoping** — not scheduled.
+**See [`d4-scoping.md`](./d4-scoping.md) for the original scoping** — not scheduled.
 
 ### [ ] Persona key rotation (R-P-3)
 Deferred from the multi-community plan; never scoped. No config-model or UI
 support for rotating a persona's keys today.
 
 ### [ ] Identity pane — the four `persona/*` verbs it does not offer
-The pane (`ui/pages/main/components/personas_panel.rs` + `state_handler/persona_actions.rs`)
+The pane (`ui/pages/main/components/identity_panel.rs` + `state_handler/persona_actions.rs`)
 covers personas, the pool, profiles, bindings and the disclosure history. Four
 parts of the family are deliberately not on it, each for a reason worth keeping:
 
@@ -57,10 +59,9 @@ parts of the family are deliberately not on it, each for a reason worth keeping:
 
 Items whose OpenVTC side is understood and whose prerequisite is a crate being
 published elsewhere. Recorded together because they interlocked: the dependency
-unwind gated the rest, and it closed on 2026-09-10. The two that remain both
-wait on one thing — a `vtc-client` release carrying VTI #1399 — and the second
-falls out for free if the first lands, since the session transports verify reply
-proofs through the SDK.
+unwind gated the rest, and it closed on 2026-09-10. Reply-proof verification
+has since been done on OpenVTC's own inbound path; the `vtc-client` migration
+remains.
 
 ### [x] Drop every `[patch.crates-io]` entry and take the 0.35 line
 Both of these — the `vta-sdk` facet pin and the two VGI entries — closed
@@ -114,7 +115,14 @@ routes no longer exist. The current document endpoint resolves the proof's
 `verificationMethod` through a DID resolver and has accepted `did:webvh` since
 the vm-resolver work. Fix that comment when this is done.
 
-### [ ] Verify VTC trust-task reply proofs
+### [x] Verify VTC trust-task reply proofs
+Done: `verification_job` in `openvtc/src/state_handler/message_dispatch.rs`
+routes join verdicts, receipts and status replies, removal notices, profile,
+capability, git-ns, rooms and election replies through `VerifyJob::Operational`
+(`openvtc_core::operational::verify_operational`); handlers refuse an unchecked
+document. The headless `join` command uses the same dispatch.
+
+Original note:
 OpenVTC verifies VRC *credential* proofs (`verify_vrc_proof` in
 `message_dispatch.rs`) and nothing else on the VTC path, so a join accept or
 reject is acted on as unauthenticated bytes. VTI #1334 made VTCs sign their
@@ -135,7 +143,11 @@ change. That is conflict-free and does not wait on the migration.
 
 ## Small / unscheduled
 
-### [ ] Honour `include_sensitive` as a real second escalation
+### [x] Honour `include_sensitive` as a real second escalation
+Done: `pool::list` takes `include_sensitive` separately and the bulk listing
+passes `false`; the `s` reveal fetches one value through `pool::reveal`
+(`openvtc-core/src/persona/pool.rs`, `persona_actions.rs`).
+
 vta-sdk 0.34 gave `persona_attribute_list` an `include_sensitive` argument —
 the read-path control `openvtc-core/src/persona/claim_types.rs`'s module header
 had been recording as *missing*. `pool::list` now passes `include_values`
@@ -196,7 +208,10 @@ document is seeded to run the `alsoKnownAs` check, and the happy path + spoof
 live `did:webvh` resolve against a real agent-name-serving host is still only
 provable by running OpenVTC end to end.
 
-### [ ] Outbound size guard on join submit
+### [x] Outbound size guard on join submit
+Done: `MAX_JOIN_SUBMIT_BYTES` and `oversized_join_submit` in
+`openvtc-core/src/join.rs`.
+
 A bridge file-size limit silently dropped a join submit once (root cause behind
 PR #137). A guard that fails loudly on an oversized outbound payload was
 deferred at the time, not abandoned.
@@ -210,13 +225,15 @@ The MockVta harness covers bootstrap → persona mint → mediator join/lifecycl
 but not the VIC vault manager path.
 
 ### [ ] Shared persona-mint helper
-`mint_persona_into` exists twice in `openvtc/src/state_handler/setup_sequence/config.rs`
-(:64 and :231). The join flow also makes key calls the standalone mint path
-already covers. Worth one shared helper.
+`mint_persona_into` is now declared once on `ConfigExtension` and implemented
+once (`openvtc/src/state_handler/setup_sequence/config.rs`); the join flow and
+`create_persona.rs` both call it. **Unverified** whether the join flow still
+makes key calls the standalone mint path already covers — check before doing
+work.
 
 ### [ ] Mirror `needs_reestablishment` badge into the relationship *detail* view
-The badge renders in `relationships_panel.rs:109`. **Unverified** whether that
-is the list row only or the detail pane too — check before doing work.
+The badge renders in `render_list` in `relationships_panel.rs` only;
+`render_detail` does not show it.
 
 ---
 
@@ -242,6 +259,6 @@ dep), so **this belongs to the `did-git-sign` repo**, not here.
 ## Closed while archiving (verified in code, 2026-07-20)
 
 - **`rollback_minted_persona` friendly_name restore** — fixed. It now takes
-  `prior_friendly_name` and restores it (`join_flow.rs:1087`).
+  `prior_friendly_name` and restores it (`rollback_minted_persona` in `join_flow.rs`).
 - **Per-community capabilities beyond the main page** — shipped as the
   Capabilities panel in #157 (`29758a3`).

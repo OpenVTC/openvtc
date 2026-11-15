@@ -4,6 +4,11 @@ Status: **scoping** (not scheduled). Covers the two intertwined backlog items â€
 "Consume `vtc-client` for VTC interactions and delete the hand-built path" and
 "Verify VTC trust-task reply proofs" (see [`follow-ups.md`](./follow-ups.md)).
 
+> **Not re-checked.** These conclusions were verified against `vta-sdk 0.42.1` /
+> `vtc-client 0.6.7`. The workspace now requires `vta-sdk 0.80.0`; nothing here
+> has been re-checked against it. Reply-proof verification has since been done
+> on OpenVTC's own inbound path (see `follow-ups.md`).
+
 ## 1. What this is, and why it is NOT a drop-in
 
 The backlog framed this as an unblocked consumer change: VTI #1399 shipped

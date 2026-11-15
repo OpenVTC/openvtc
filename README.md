@@ -1,6 +1,6 @@
 # Open Verifiable Trust Community (OpenVTC) with First Person Protocol
 
-[![Rust](https://img.shields.io/badge/rust-1.94.0%2B-blue.svg?maxAge=3600)](https://github.com/OpenVTC/openvtc)
+[![Rust](https://img.shields.io/badge/rust-1.95.0%2B-blue.svg?maxAge=3600)](https://github.com/OpenVTC/openvtc)
 
 A CLI tool for establishing verifiable trust relationships within developer
 communities using Decentralised Identifiers (DIDs) and Verifiable Credentials
@@ -15,9 +15,14 @@ Personhood Credentials (PHCs) and Verifiable Relationship Credentials (VRCs).
 
 | Crate | Description |
 |-------|-------------|
-| `openvtc` | TUI-based CLI with ratatui interface |
-| `openvtc-core` | Shared library for configuration, DID management, and crypto |
-| `did-git-sign` | [Git commit signing proxy](./did-git-sign/) using DID Ed25519 keys via VTA |
+| [`openvtc`](./openvtc/) | The OpenVTC client: a terminal UI (TUI) plus headless subcommands |
+| [`openvtc-core`](./openvtc-core/) | Shared library for configuration, DID management, messaging and crypto |
+
+The verifiable trust infrastructure that OpenVTC talks to (the VTA, key
+management, credential protocols and DIDComm services) lives in
+[verifiable-trust-infrastructure](https://github.com/OpenVTC/verifiable-trust-infrastructure).
+The `did-git-sign` commit signer lives in
+[verifiable-git-infrastructure](https://github.com/OpenVTC/verifiable-git-infrastructure).
 
 ## Table of Contents
 
@@ -26,50 +31,38 @@ Personhood Credentials (PHCs) and Verifiable Relationship Credentials (VRCs).
 - [Decentralised Identity](#decentralised-identity)
 - [Decentralised Communication](#decentralised-communication)
 - [Profiles and Configurations](#profiles-and-configurations)
-  - [Public Configuration](#public-configuration)
-  - [Private Configuration](#private-configuration)
-  - [Secured Configuration](#secured-configuration)
 - [Prerequisites](#prerequisites)
 - [Feature Flags](#feature-flags)
 - [Getting Started](#getting-started)
-  - [Initial Setup](#initial-setup)
-  - [Host Your DID Document](#host-your-did-document)
-- [Check Setup Status](#check-setup-status)
 - [Usage](#usage)
-- [Planned Commands](#planned-commands)
 - [DID Git Signing](#did-git-signing)
+- [Contributing](#contributing)
 - [Additional Resources](#additional-resources)
 
 ## Quickstart
 
-Install from source.
+Install from crates.io.
 
 ```bash
-cargo install --path openvtc
+cargo install openvtc
 ```
 
-Run setup wizard.
+Run the setup wizard.
 
 ```bash
 openvtc setup
 ```
 
-Launch the TUI (review status, contacts, relationships, and credentials).
+Launch the TUI.
 
 ```bash
 openvtc
 ```
 
-View available commands.
+View the available commands.
 
 ```bash
 openvtc --help
-```
-
-Print the version.
-
-```bash
-openvtc --version
 ```
 
 ## Core Concepts
@@ -82,17 +75,22 @@ openvtc --version
 
 - **Verifiable Relationship Credentials (VRCs)** - A type of verifiable credential issued peer-to-peer between holders of personhood credentials to attest to verifiable first-person trust relationships. The verifiable relationship credential validates your personhood credential. [Read more](https://docs.google.com/document/d/1RtS86BqyVn3i3mXm48VhC-SRaYvW2W_MvR4w6x9KQWY/edit?tab=t.0#heading=h.siks62ntn9c5).
 
+- **Verifiable Trust Agent (VTA)** - The service that holds your keys and creates your DIDs. OpenVTC connects to a VTA during setup; you authorise it from your Personal Network Manager (PNM).
+
 - **DIDComm Messaging Protocol** - An open standard for decentralised communication. Built on the foundation of Decentralised Identifiers (DIDs), it enables parties to exchange verifiable data such as credentials and establishes secure communication channels between parties without relying on centralised servers.
 
 ## Decentralised Identity
 
-The OpenVTC tool uses the `did:webvh` to create your **persona DID**. It enhances the existing `did:web` method, providing:
+OpenVTC uses `did:webvh` for your **persona DID**. It enhances the existing `did:web` method, providing:
 
 - Portability with a self-certifying identifier (SCID), allowing you to move to a different domain.
 
 - Robust security by introducing a pre-rotation key and witness proof that approves changes to the DID.
 
-**Requirements:** A publicly accessible domain to host DID log entries (`did.jsonl`) for successful DID resolution and public key/service endpoint retrieval.
+You do not host the DID yourself. A persona DID is created through your VTA,
+which publishes it on its WebVH hosting service, when you join your first
+community (or create a persona in **My Identity**). One account can hold
+several personas.
 
 _Sample did:webvh identifier:_
 
@@ -100,7 +98,7 @@ _Sample did:webvh identifier:_
 
 ## Decentralised Communication
 
-OpenVTC seamlessly integrates with DIDComm-compatible mediators for secure, private communication using your **persona DID** or a per-relationship **relationship DID**.
+OpenVTC uses DIDComm-compatible mediators for secure, private communication using your **persona DID** or a per-relationship **relationship DID**. The mediator comes from your VTA's DID document; OpenVTC has no built-in default mediator.
 
 DIDComm mediators handle message routing and storage while preserving privacy through end-to-end encryption. Messages are structured in multiple "envelope" layers providing:
 
@@ -115,175 +113,69 @@ _Sample DIDComm message envelopes._
 
 ## Profiles and Configurations
 
-OpenVTC supports multiple profiles, allowing you to represent different identities across various contexts.
-
-To use a specific profile when running the tool, set the environment variable `OPENVTC_CONFIG_PROFILE` with the name of your profile. For example:
-
-**Linux/macOS (bash/zsh):**
+OpenVTC supports multiple profiles, allowing you to represent different identities across various contexts. Choose one with `-p/--profile <NAME>` or the `OPENVTC_CONFIG_PROFILE` environment variable:
 
 ```bash
-export OPENVTC_CONFIG_PROFILE=profile-1 
-```
-> Add to `~/.zshrc` or `~/.bashrc` to persist across sessions.
-
-**Windows (PowerShell):**
-
-```powershell
-$env:OPENVTC_CONFIG_PROFILE = "profile-1"
-```
-> On Windows, to keep this setting permanently, add it to your PowerShell profile or go to System Properties and set it under Environment Variables.
-
-Each profile manages two types of configurations:
-
-### Public Configuration
-
-Stored in JSON format, the public configuration contains environment-specific details such as:
-
-- Persona DID.
-- Mediator DID.
-- Security mode (e.g., Unlock Codes or Hardware Token).
-- Encrypted private data containing known contacts, relationships, and VRCs.
-
-Config file location:
-
-**Default location (all platforms unless `OPENVTC_CONFIG_PATH` is set):**
-
-- Default profile: `~/.config/openvtc/config.json`
-- Named profiles: `~/.config/openvtc/config-<PROFILE_NAME>.json`
-
-On Windows this resolves to:
-
-```
-C:\Users\<YourUser>\.config\openvtc\config.json
+openvtc -p profile-1
+export OPENVTC_CONFIG_PROFILE=profile-1   # bash/zsh
+$env:OPENVTC_CONFIG_PROFILE = "profile-1" # PowerShell
 ```
 
-> Path is built from `dirs::home_dir()` plus `.config/openvtc/`.
+Each profile has three layers of configuration. See
+[Config Data Structure](./docs/openvtc-config-data-structure.md) for detail.
 
+- **Public configuration** — a JSON file on disk with non-secret settings,
+  the protection mode, the activity log, and the encrypted protected
+  configuration.
+- **Protected configuration** — encrypted, stored inside the public file. It
+  holds your account (personas and community memberships), contacts,
+  relationships and credentials.
+- **Secured configuration** — key material in the OS credential store: macOS
+  Keychain, Linux Secret Service or Windows Credential Manager. On a headless
+  Linux machine you can choose an encrypted file store instead with
+  `OPENVTC_SECURE_STORE=file`. See the
+  [`openvtc` README](./openvtc/README.md#secure-storage) and
+  [Secured Configuration Management](./docs/secured-configuration-management.md).
 
+Config files live in:
 
-You can change the default location where the public configuration is saved by setting the environment variable `OPENVTC_CONFIG_PATH` with the new path. For example:
+- `~/.config/openvtc/` on Linux and macOS
+- `%APPDATA%\openvtc\` on Windows (from `dirs::config_dir()`)
 
-**Linux/macOS (bash/zsh):**
-
-```bash
-export OPENVTC_CONFIG_PATH=~/.config/openvtc-tool
-```
-**Windows (PowerShell):**
-
-```powershell
-$env:OPENVTC_CONFIG_PATH = "C:\custom\path\openvtc"
-```
-> Ensure the value is a directory path. OpenVTC will create it if it does not exist.
-
-
-### Private Configuration
-
-An encrypted configuration stored inside the public configuration file, containing sensitive information about:
-
-- List of known contacts with their Persona DIDs and Alias.
-- List of known relationships with their:
-  - Remote and local relationship DIDs
-  - Remote and local persona DIDs
-  - Relationship aliases
-- Verifiable Relationship Credentials (VRCs)
-
-The private configuration uses the same encryption method as the [secured configuration](#secured-configuration).
-
-### Secured Configuration
-
-Sensitive information is stored in the operating system's secure storage through the project's `keyring` integration:
-
-- **macOS** — Keychain
-- **Linux** — Secret Service keyring
-- **Windows** — Windows Credential Manager
-
-The secured configuration includes:
-
-- Private key materials.
-- Encrypted Session Key (ESK), if using a hardware token.
-
-For more details, refer to the [Secured Configuration Management](./docs/secured-configuration-management.md).
+The default profile uses `config.json`; a named profile uses
+`config-<PROFILE_NAME>.json`. Set `OPENVTC_CONFIG_PATH` to use another
+directory; OpenVTC creates it if it does not exist.
 
 ## Prerequisites
 
-1. Rust version 1.94.0 or higher (Install [Rust](https://rust-lang.org/learn/get-started/))
-2. Publicly accessible domain to host your DID document.
-3. **Optional:** DIDComm mediator to send messages. OpenVTC provides a default DIDComm mediator.
-4. **Optional:** Set environment variables.
-   - `OPENVTC_CONFIG_PATH`: Path to openvtc configuration files (default:
-     `~/.config/openvtc/config.json`).
-   - `OPENVTC_CONFIG_PROFILE`: Set a specific configuration profile (defaults to `default`).
+1. Rust 1.95.0 or later, to build from source ([install Rust](https://rust-lang.org/learn/get-started/)).
+2. Access to a Verifiable Trust Agent (VTA), and its DID.
+3. A Personal Network Manager (`pnm`) that can grant OpenVTC access to the VTA,
+   or a VTA administrator who will run the grant for you.
 
 ## Feature Flags
 
-OpenVTC currently supports `openpgp-card` as an option to perform cryptographic operations, such as signing and authentication.
+| Flag            | Description                                                         | Default  |
+| --------------- | ------------------------------------------------------------------- | -------- |
+| `openpgp-card`  | OpenPGP-compatible hardware token support                           | Enabled  |
+| `dev-overrides` | Honour VTA and mediator overrides from the environment (development builds only) | Disabled |
 
-| Flag           | Description                               | Default |
-| -------------- | ----------------------------------------- | ------- |
-| `openpgp-card` | OpenPGP-compatible hardware token support | Enabled |
-
-`--no-default-features` is a Cargo flag applied at build/install time (not a
-flag on the `openvtc` binary itself). To build or install without the
-OpenPGP-card feature:
+`--no-default-features` is a Cargo flag applied at build or install time, not a
+flag on the `openvtc` binary. To install without hardware token support:
 
 ```bash
-cargo install --path openvtc --no-default-features
+cargo install openvtc --no-default-features
 ```
 
 ## Getting Started
 
-### Workspace Layout
-
-This repository is a Cargo workspace. The root `Cargo.toml` defines the following crates:
-
-| Crate | Role |
-|---|---|
-| `openvtc-core` | Core library — config, storage, cryptography, DID logic |
-| `openvtc` | Terminal UI (TUI) interface |
-| `did-git-sign` | Git commit signing proxy using DID Ed25519 keys |
-
-### Building
-
-From the repo root:
-
-```bash
-cargo build
-```
-
-To build without the OpenPGP card feature:
-
-```bash
-cargo build --no-default-features
-```
-
-### Testing
-
-```bash
-cargo test
-```
-
-For a specific crate:
-
-```bash
-cargo test -p openvtc-core
-```
-
-### PR Guidelines
-
-- Use conventional commits where possible (e.g. `docs: expand CONTRIBUTING.md`)
-- Sign the CLA — GitHub will guide you through this when you open a PR
-- Reference the issue your PR addresses (e.g. `Closes #13`)
-- If platform-specific behaviour is uncertain, write `> **Note:** TBD — help wanted` rather than documenting incorrect information
-
-### Initial Setup
-
-1. Install locally from the source.
+1. Install OpenVTC.
 
    ```bash
-   cargo install --path openvtc
+   cargo install openvtc
    ```
 
-   > **Note:** This will change once the tool is published.
+   To install from a checkout instead, run `cargo install --path openvtc`.
 
 2. Run the setup wizard.
 
@@ -291,127 +183,99 @@ cargo test -p openvtc-core
    openvtc setup
    ```
 
-   To set up a named profile instead of **default**, set the `-p/--profile` option.
+   To set up a named profile instead of **default**, add `-p/--profile`:
 
    ```bash
    openvtc -p profile-1 setup
    ```
 
-Follow the prompts to:
+   The wizard walks you through:
 
-- Create the configuration.
-- Generate cryptographic keys.
-- Generate Persona DID.
-- Connect to DIDComm mediator server.
+   - Connecting to your VTA: enter the VTA's DID.
+   - Authorising OpenVTC from your PNM: the wizard shows the `pnm` command to
+     run. The grant lasts one hour.
+   - Optionally setting up a hardware token.
+   - Setting an unlock code to protect the profile.
 
-### Host Your DID Document
+   No DID is created during setup. The wizard can also restore a profile from
+   a backup; see [Backup and Restore](./docs/backup-restore.md).
 
-After setup, OpenVTC generates a `did.jsonl` file for your Persona DID. The file must be hosted at a specific URL matching your configured DID.
+   On a machine without a terminal UI, run setup headless:
 
-The `did:webvh` method resolves your DID by fetching the DID document from a well-known location on the web. If the document is not hosted at the correct URL, the DID cannot be resolved or used.
+   ```bash
+   openvtc setup --vta-did <VTA_DID> --unlock-code-file <PATH>
+   ```
 
-**For example:**
+   It prints the PNM command for the VTA administrator, waits for the grant,
+   then saves the account.
 
-- If your configured URL is `https://mydomain.com`, you must host the file at:
+3. Join a community. In the TUI, open **Communities**. Or, headless:
 
-  ```
-  https://mydomain.com/.well-known/did.jsonl
-  ```
+   ```bash
+   openvtc community join <COMMUNITY_DID>
+   ```
 
-- If your configured URL is `https://mydomain.com/profile1`, you must host the file at:
+   Your first join creates your persona DID through the VTA. Add
+   `--invitation <FILE>` to present an invitation credential.
 
-  ```text
-  https://mydomain.com/profile1/did.jsonl
-  ```
+4. Check the setup at any time:
 
-> **Important:** The URL must be publicly accessible for DID resolution.
+   ```bash
+   openvtc health
+   ```
 
-To set up multiple profiles for the same domain, see the [Multiple DIDs on Same Domain](./docs/multiple-didweb-same-domain.md).
-
-## Check Setup Status
-
-OpenVTC configures your environment to ensure your setup is safe, secure, and private when running the tool.
-
-Once setup is complete, launch the TUI to review the status and health of your current environment:
-
-```bash
-openvtc
-```
-
-To launch with a specific profile:
-
-```bash
-openvtc -p profile-1
-```
-
-The TUI surfaces, among other things:
-
-- Tool version.
-- Your Persona DIDs, and whether your Persona DID is resolvable.
-- Configured keys for authentication, encryption, and signing.
-- List of requested and established relationships.
-- DIDComm mediator connectivity.
+   It resolves your personas, the VTA, the mediators and each community, and
+   reports which transport each pair would use. It is read-only.
 
 ## Usage
 
-OpenVTC today is a terminal UI (TUI) plus a `setup` subcommand. Launch the
-TUI from the installed binary:
+Run `openvtc` with no subcommand to launch the TUI. Its main menu holds
+Communities, Inbox, My Relationships, My Credentials, Vetting, My Identity,
+Settings, VTA Service, TSP Relationships, Logs and Help / Status.
 
-```bash
-openvtc
-```
+The CLI also has these subcommands:
 
-Or from the source checkout:
+| Command | Description |
+| --- | --- |
+| `openvtc setup` | Set up a profile (wizard or headless). |
+| `openvtc health` | Report on the messaging chain. Read-only. |
+| `openvtc theme …` | List, choose, import, create and export themes. See [Themes](./docs/themes.md). |
+| `openvtc community join …` | Join a community without the TUI. |
+| `openvtc repo list\|clone\|sign` | Work with a community's repositories without the TUI. |
 
-```bash
-cargo run -p openvtc
-```
-
-The only non-TUI subcommand currently implemented is `setup`. Refer to the
-complete [command reference](./docs/openvtc-tool-commands.md) for the full
-list of flags and the roadmap of planned commands.
-
-## Planned Commands
-
-A number of standalone subcommands (`status`, `logs`, `contacts`,
-`relationships`, `tasks`, `vrcs`, and config `export`/`import`) are planned but
-not yet implemented as CLI commands — those capabilities are currently reached
-through the TUI. See the
-[command reference](./docs/openvtc-tool-commands.md#planned-commands-not-yet-implemented)
-for details.
+See the [command reference](./docs/openvtc-tool-commands.md) for every
+subcommand, flag and environment variable.
 
 ## DID Git Signing
 
-The workspace includes [`did-git-sign`](./did-git-sign/), a standalone tool that
-signs git commits using your DID's Ed25519 key managed by a VTA. It integrates
-with git's SSH signing mechanism as a signing proxy — no private key material
-ever touches disk.
+OpenVTC can make a repository checkout sign commits as your persona. Set it up
+from a community's Repos view in the TUI (`e`), or with `openvtc repo sign`.
+Both need the `did-git-sign` binary on your `PATH`:
 
 ```bash
-# Install
-cargo install --path did-git-sign
-
-# Configure for the current repo
-did-git-sign init \
-  --credential "eyJkaWQiOi..." \
-  --key-id "your-vta-key-id" \
-  --did-key-id "did:webvh:abc123:example.com#key-0" \
-  --name "Your Name"
-
-# Commits are now automatically signed with your DID
-git commit -m "signed with my DID"
+cargo install did-git-sign
 ```
 
-See the [did-git-sign README](./did-git-sign/README.md) for full documentation.
+`did-git-sign` is developed in
+[verifiable-git-infrastructure](https://github.com/OpenVTC/verifiable-git-infrastructure).
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for building, testing, commit
+sign-off (DCO) and the pull request process, and [RELEASES.md](./RELEASES.md)
+for how releases are made.
 
 ## Additional Resources
 
 Additional resources to learn more about the Open Verifiable Trust Community (OpenVTC) Tool.
 
 - [First Person Project White Paper](https://www.firstperson.network/white-paper)
+- [Command Reference](./docs/openvtc-tool-commands.md)
 - [Relationships and VRCs Guide](./docs/relationships-vrcs.md)
+- [Community Rooms](./docs/community-rooms.md)
+- [Forge Accounts](./docs/forge-accounts.md)
+- [Themes](./docs/themes.md)
 - [Secure Key Management](./docs/secure-key-management.md)
 - [Secured Configuration Management](./docs/secured-configuration-management.md)
 - [Backup and Restore](./docs/backup-restore.md)
-- [Multiple Profiles Setup](./docs/multiple-didweb-same-domain.md)
 - [Config Data Structure](./docs/openvtc-config-data-structure.md)

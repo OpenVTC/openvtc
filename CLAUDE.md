@@ -7,7 +7,10 @@ on top of the verifiable trust infrastructure. This repository hosts:
 
 - `openvtc` — the CLI (ratatui TUI). Primary user-facing tool.
 - `openvtc-core` — shared library code used by the CLI.
-- `did-git-sign` — standalone DID-based git commit signing proxy.
+
+`did-git-sign`, the DID-based git commit signing proxy, is not in this
+workspace. It lives in OpenVTC/verifiable-git-infrastructure and is consumed
+from crates.io (the `did-git-sign` and `vgi-core` dependencies).
 
 The heavy lifting of the verifiable trust infrastructure (VTA, key
 management, credential protocols, DIDComm services) lives in a separate
