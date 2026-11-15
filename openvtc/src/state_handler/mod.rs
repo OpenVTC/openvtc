@@ -1720,8 +1720,8 @@ impl StateHandler {
                                 after,
                                 state,
                                 &mut ctx.config,
+                                &mut save,
                                 &ctx.tdk,
-                                self.profile.as_str(),
                             )
                             .await;
                             // The first persona was just minted. This loop has no
@@ -2101,8 +2101,8 @@ async fn settle_after_apply(
     after: background_dispatch::AfterApply,
     state: &mut State,
     config: &mut Config,
+    save: &mut save_coalesce::SaveScheduler,
     tdk: &TDK,
-    profile: &str,
 ) -> AfterSettle {
     use main_page::content::CreatePersonaPhase;
 
@@ -2116,7 +2116,17 @@ async fn settle_after_apply(
             AfterSettle::HiddenVetting(outcome)
         }
         background_dispatch::AfterApply::PersistPersona(minted) => {
-            match minted.persist(config, tdk, profile).await {
+            // Durability-critical: the DID already exists at the VTA, so the
+            // persona is force-flushed, not left to the debounce.
+            let persisted = match minted.write_into(config, tdk).await {
+                Ok(persona_id) => save
+                    .flush(config)
+                    .await
+                    .map(|()| persona_id)
+                    .map_err(anyhow::Error::from),
+                Err(e) => Err(e),
+            };
+            match persisted {
                 Ok(persona_id) => {
                     let did = minted.shareable_did();
                     let copied = crate::clipboard::copy_to_clipboard(&did).is_ok();

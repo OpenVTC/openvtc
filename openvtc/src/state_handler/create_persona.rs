@@ -261,13 +261,12 @@ impl MintedPersona {
     /// Write the persona into the config, recording the context it was minted
     /// in as its origin. Runs on the loop thread, from whichever loop is live —
     /// a first persona is minted in State A.
-    pub(crate) async fn persist(
-        &self,
-        config: &mut Config,
-        tdk: &TDK,
-        profile: &str,
-    ) -> Result<PersonaId> {
-        let persona_id = Config::mint_persona_into(config, &self.setup, tdk, profile).await?;
+    ///
+    /// In memory only: the caller persists it, the TUI loops through
+    /// [`SaveScheduler::flush`](crate::state_handler::save_coalesce::SaveScheduler::flush)
+    /// (the one persistence path), the headless join with its own save.
+    pub(crate) async fn write_into(&self, config: &mut Config, tdk: &TDK) -> Result<PersonaId> {
+        let persona_id = Config::mint_persona_in_memory(config, &self.setup, tdk).await?;
         if let Some(record) = config.account.personas.get_mut(&persona_id) {
             record.origin_context_id = self.context_id.clone();
         }

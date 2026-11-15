@@ -11,16 +11,6 @@ use openvtc_core::{config::Config, logs::LogFamily};
 use secrecy::{ExposeSecret, SecretString};
 use tracing::info;
 
-/// Save the config to disk using the profile name.
-pub fn save_config(config: &Config, profile: &str) -> Result<()> {
-    config.save(
-        profile,
-        #[cfg(feature = "openpgp-card")]
-        &|| {},
-    )?;
-    Ok(())
-}
-
 /// Update the friendly name.
 ///
 /// R11: mutates + logs only; persistence is the caller's responsibility (the
@@ -56,11 +46,11 @@ pub fn update_friendly_name(config: &mut Config, name: &str) {
 /// `spawn_blocking` thread via `UnlockKey::derive_blocking` so it does not peg
 /// the async event-loop / render task. The key is derived under a fresh random
 /// salt (#566), which the save writes beside the ciphertext. The subsequent
-/// `save_config` does not run Argon2 (it AES-encrypts with the already-derived
+/// force-flush ([`SaveScheduler::flush`]) does not run Argon2 (it AES-encrypts with the already-derived
 /// key), so this is the only KDF on this path.
 pub async fn set_passphrase(
     config: &mut Config,
-    profile: &str,
+    save: &mut SaveScheduler,
     passphrase: &SecretString,
 ) -> Result<()> {
     use openvtc_core::config::{ConfigProtectionType, UnlockKey, validate_passphrase};
@@ -73,13 +63,16 @@ pub async fn set_passphrase(
         LogFamily::Config,
         "Profile protection changed to an unlock code".to_string(),
     );
-    save_config(config, profile)?;
+    save.flush(config).await?;
     info!("config protection set to passphrase encrypted");
     Ok(())
 }
 
 /// Remove passphrase protection, reverting to keyring-only.
-pub fn remove_passphrase(config: &mut Config, profile: &str) -> Result<()> {
+///
+/// Force-flushes through [`SaveScheduler::flush`]: the protection change must
+/// be on disk before success is reported.
+pub async fn remove_passphrase(config: &mut Config, save: &mut SaveScheduler) -> Result<()> {
     use openvtc_core::config::ConfigProtectionType;
 
     config.unlock_code = None;
@@ -88,7 +81,7 @@ pub fn remove_passphrase(config: &mut Config, profile: &str) -> Result<()> {
         LogFamily::Config,
         "Config protection changed to keyring only (no additional encryption)".to_string(),
     );
-    save_config(config, profile)?;
+    save.flush(config).await?;
     info!("config protection reverted to keyring only");
     Ok(())
 }
@@ -330,7 +323,6 @@ async fn handle_export_config_action(
     state: &mut State,
     state_tx: &watch::Sender<std::sync::Arc<State>>,
     save: &mut SaveScheduler,
-    profile: &str,
     path: &str,
     passphrase: SecretString,
 ) {
@@ -351,16 +343,13 @@ async fn handle_export_config_action(
                 .insert(LogFamily::Config, format!("Config exported to {}", path));
             // R11 force-flush: export is durability-critical (the exported file
             // must reflect persisted state and the export-log entry must hit
-            // disk now). Keep this save synchronous on the loop thread — it is a
-            // deliberate force-flush point, not the coalesced hot path. It also
-            // clears any pending coalesced dirty state, so we drop the scheduler's
-            // deadline below.
-            if let Err(e) = save_config(config, profile) {
+            // disk now). The flush is awaited before the handler returns — a
+            // deliberate force-flush point, not the coalesced hot path — and a
+            // successful one also clears any pending coalesced dirty state.
+            if let Err(e) = save.flush(config).await {
                 state
                     .main_page
                     .log_error("Failed to persist export-log entry", &e);
-            } else {
-                save.clear_after_external_save();
             }
             state.main_page.content_panel.settings.mode = SettingsMode::View;
             dispatch_util::save_and_sync(
@@ -381,11 +370,10 @@ async fn handle_export_config_action(
     }
 }
 
-fn handle_import_config_action(
+async fn handle_import_config_action(
     config: &mut Box<Config>,
     state: &mut State,
     save: &mut SaveScheduler,
-    profile: &str,
     path: &str,
     passphrase: &SecretString,
 ) {
@@ -396,12 +384,10 @@ fn handle_import_config_action(
                 .logs
                 .insert(LogFamily::Config, format!("Config imported from {}", path));
             // Force-flush the import-log entry (see export handler).
-            if let Err(e) = save_config(config, profile) {
+            if let Err(e) = save.flush(config).await {
                 state
                     .main_page
                     .log_error("Failed to persist import-log entry", &e);
-            } else {
-                save.clear_after_external_save();
             }
             state.main_page.content_panel.settings.mode = SettingsMode::View;
             dispatch_util::save_and_sync(
@@ -451,14 +437,11 @@ async fn handle_set_passphrase(
     // R11 force-flush: a protection change re-derives the unlock key and rewrites
     // the secured config; it MUST be persisted before reporting success (the
     // keyring entry now requires the new passphrase to decrypt). `set_passphrase`
-    // saves synchronously — a deliberate force-flush point. (R12 moves its Argon2
-    // derivation off the runtime.)
-    match set_passphrase(config, profile, passphrase).await {
+    // force-flushes and awaits it — a deliberate force-flush point, which also
+    // drops any pending coalesced dirty mark. (R12 moves its Argon2 derivation
+    // off the runtime.)
+    match set_passphrase(config, save, passphrase).await {
         Ok(()) => {
-            // The synchronous save above already persisted the latest state;
-            // drop any pending coalesced dirty mark so we don't redundantly
-            // re-save.
-            save.clear_after_external_save();
             state.main_page.content_panel.settings.mode = SettingsMode::View;
             dispatch_util::save_and_sync(
                 &mut state.main_page,
@@ -486,18 +469,17 @@ async fn handle_set_passphrase(
     }
 }
 
-fn handle_remove_passphrase(
+async fn handle_remove_passphrase(
     config: &mut Box<Config>,
     state: &mut State,
     save: &mut SaveScheduler,
     profile: &str,
 ) {
     // R11 force-flush: same rationale as `handle_set_passphrase` — a protection
-    // change must be on disk before reporting success. `remove_passphrase` saves
-    // synchronously.
-    match remove_passphrase(config, profile) {
+    // change must be on disk before reporting success. `remove_passphrase`
+    // force-flushes and awaits it.
+    match remove_passphrase(config, save).await {
         Ok(()) => {
-            save.clear_after_external_save();
             state.main_page.content_panel.settings.mode = SettingsMode::View;
             dispatch_util::save_and_sync(
                 &mut state.main_page,
@@ -1132,17 +1114,19 @@ pub(crate) async fn dispatch(
         // remaining (explicit, operator-driven) way to ask for one.
         SettingsAction::SubmitEdit { value } => handle_submit_edit(config, state, save, &value),
         SettingsAction::ExportConfig { path, passphrase } => {
-            handle_export_config_action(config, state, state_tx, save, profile, &path, passphrase)
+            handle_export_config_action(config, state, state_tx, save, &path, passphrase)
                 .await
         }
         SettingsAction::ImportConfig { path, passphrase } => {
-            handle_import_config_action(config, state, save, profile, &path, &passphrase)
+            handle_import_config_action(config, state, save, &path, &passphrase).await
         }
         SettingsAction::ChangeProtection => handle_change_protection(state),
         SettingsAction::SetPassphrase { passphrase } => {
             handle_set_passphrase(config, state, state_tx, save, profile, &passphrase).await
         }
-        SettingsAction::RemovePassphrase => handle_remove_passphrase(config, state, save, profile),
+        SettingsAction::RemovePassphrase => {
+            handle_remove_passphrase(config, state, save, profile).await
+        }
         #[cfg(feature = "openpgp-card")]
         SettingsAction::TokenManagement => handle_token_management(state),
         #[cfg(feature = "openpgp-card")]

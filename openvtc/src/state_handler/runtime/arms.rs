@@ -211,7 +211,7 @@ impl Runtime {
             pending_replies,
         })
         .await;
-        let settled = settle_after_apply(after, state, config, tdk, handler.profile.as_str()).await;
+        let settled = settle_after_apply(after, state, config, save, tdk).await;
         match settled {
             // A community we have just left still holds a messaging
             // session. The session manager lives here, not in the

@@ -5,7 +5,7 @@
 //! inline across the inbox, relationship, credential, and settings handlers:
 //!
 //! 1. set the panel's `status_message`,
-//! 2. persist the config (`save_config`, logging on failure),
+//! 2. persist the config (now `SaveScheduler::mark_dirty`),
 //! 3. rebuild UI state from config (`sync_from_config`),
 //! 4. push an activity-log entry (`log` or `log_detailed`).
 //!

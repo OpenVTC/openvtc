@@ -274,20 +274,6 @@ impl SaveScheduler {
     pub(crate) fn needs_flush(&self) -> bool {
         self.dirty || self.in_flight
     }
-
-    /// Drop any pending coalesced dirty state because the caller just persisted
-    /// the *current* config synchronously by another path (a force-flush save,
-    /// e.g. a passphrase/protection change or export). This avoids a redundant
-    /// debounced re-save of state that is already on disk.
-    ///
-    /// It does **not** touch the `in_flight` flag: a concurrently-running
-    /// background save must still call [`finish`](Self::finish). If that
-    /// background save raced ahead of this external save its data is a subset
-    /// (older) of what we just wrote, so clearing `dirty` is safe.
-    pub(crate) fn clear_after_external_save(&mut self) {
-        self.dirty = false;
-        self.deadline = None;
-    }
 }
 
 #[cfg(test)]

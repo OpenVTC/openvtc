@@ -384,10 +384,11 @@ impl Job<'_> {
         )
         .await?;
         let persona_id = minted
-            .persist(config, self.tdk, self.profile)
+            .write_into(config, self.tdk)
             .await
             .with_context(|| format!("persona {} minted but not saved", minted.did))?;
-        save(config, self.profile)?;
+        save(config, self.profile)
+            .with_context(|| format!("persona {} minted but not saved", minted.did))?;
         progress(format!("persona created: {}", minted.did));
         Ok((persona_id, minted.setup.did_keys.take()))
     }

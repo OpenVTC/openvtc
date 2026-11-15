@@ -74,6 +74,16 @@ pub trait ConfigExtension {
         tdk: &TDK,
         profile: &str,
     ) -> Result<PersonaId>;
+
+    /// [`mint_persona_into`](Self::mint_persona_into) without the save: write
+    /// the persona into `config` in memory and return its id. The caller owns
+    /// persisting it — the TUI loops force-flush through their
+    /// `SaveScheduler`, the headless join saves directly.
+    async fn mint_persona_in_memory(
+        config: &mut Config,
+        state: &SetupState,
+        tdk: &TDK,
+    ) -> Result<PersonaId>;
 }
 
 /// The operator-chosen name in `SetupState::username`, or `None` when there
@@ -298,6 +308,22 @@ impl ConfigExtension for Config {
         tdk: &TDK,
         profile: &str,
     ) -> Result<PersonaId> {
+        let persona_id = Self::mint_persona_in_memory(config, state, tdk).await?;
+        config.save(
+            profile,
+            #[cfg(feature = "openpgp-card")]
+            &|| {
+                eprintln!("Touch confirmation needed for decryption");
+            },
+        )?;
+        Ok(persona_id)
+    }
+
+    async fn mint_persona_in_memory(
+        config: &mut Config,
+        state: &SetupState,
+        tdk: &TDK,
+    ) -> Result<PersonaId> {
         // The callers have already refused a mint with no VTA mediator before
         // touching the VTA; this is the backstop for any path that forgets, so
         // a persona can never be persisted with a mediator nobody chose.
@@ -420,14 +446,6 @@ impl ConfigExtension for Config {
         if let Some(name) = operator_chosen_name(&state.username) {
             config.public.friendly_name = name.to_string();
         }
-
-        config.save(
-            profile,
-            #[cfg(feature = "openpgp-card")]
-            &|| {
-                eprintln!("Touch confirmation needed for decryption");
-            },
-        )?;
 
         Ok(persona_id)
     }
