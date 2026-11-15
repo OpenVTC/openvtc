@@ -1667,19 +1667,6 @@ pub fn bound_sender(
     }
 }
 
-/// The routing gate, compiled once and shared by the live dispatcher and the
-/// stored-message pickup so the two admit **exactly** the same set.
-///
-/// It used to be compiled inside `dispatch_inbound`, where a compile failure
-/// silently killed inbound dispatch for the process. The pattern is a `const`
-/// covered by `catch_all_tests`, so a failure is a build-time bug; treating it
-/// as one here is what lets both call sites share a single compiled regex
-/// without either carrying an unreachable error path.
-static CATCH_ALL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(&format!("^(?:{OPENVTC_CATCH_ALL_PATTERN})$"))
-        .expect("OPENVTC_CATCH_ALL_PATTERN is a constant, and `catch_all_tests` compiles it")
-});
-
 /// Classify one already-decoded inbound message into the events the state
 /// handler consumes. Returns **zero or more**: an unroutable type yields none, a
 /// trust-pong yields two (the log event and the message itself).
@@ -1722,7 +1709,7 @@ fn classify_inbound(
             },
         ];
     }
-    if CATCH_ALL.is_match(&message.typ) {
+    if crate::inbound::registry::classify(&message.typ).is_some() {
         tracing::info!(
             listener = %crate::display::truncate_did(&listener_id, 32),
             msg_type = %message.typ,
@@ -1742,7 +1729,10 @@ fn classify_inbound(
     // and stay at `debug!`; anything over TSP, or any Trust Task, is a message a
     // peer meant for us — dropping one of those silently is how an answer the
     // peer sent turns into a timeout here with nothing in the log (R6.4).
-    if transport == MessagingTransport::Tsp || is_trust_task_type(&message.typ) {
+    if transport == MessagingTransport::Tsp
+        || is_trust_task_type(&message.typ)
+        || is_openvtc_protocol_type(&message.typ)
+    {
         tracing::warn!(
             listener = %crate::display::truncate_did(&listener_id, 32),
             msg_type = %message.typ,
@@ -1761,6 +1751,14 @@ fn classify_inbound(
 /// addressed to this client, as opposed to mediator housekeeping.
 fn is_trust_task_type(typ: &str) -> bool {
     typ.starts_with("https://trusttasks.org/")
+}
+
+/// Whether `typ` is in one of OpenVTC's own protocol namespaces (relationship
+/// and VRC messages). One this client does not handle is a peer speaking a
+/// version or verb we lack — worth a line at `warn!`, as for a Trust Task.
+fn is_openvtc_protocol_type(typ: &str) -> bool {
+    typ.starts_with("https://linuxfoundation.org/openvtc/")
+        || typ.starts_with("https://firstperson.network/")
 }
 
 /// Normalise an inbound TSP frame into the [`Message`] shape the dispatcher and
@@ -1941,87 +1939,28 @@ pub fn open_didcomm_envelope(message: &Message) -> Option<Message> {
     Some(opened)
 }
 
-/// Catch-all pattern for OpenVTC protocol messages + VTC Trust-Task
-/// replies (e.g. `join-requests/submit-receipt`). The state handler
-/// dispatches by type and ignores any it doesn't handle.
-///
-/// **Both VTC prefixes are accepted.** The VTC's Trust Tasks are moving
-/// from the non-conformant `trusttasks.org/openvtc/vtc/…` authority to
-/// the canonical registry at `trusttasks.org/spec/vtc/…`. This pattern
-/// decides whether a message reaches the handler *at all*, so it must
-/// accept the new prefix **before** any VTC starts emitting it —
-/// otherwise migrated traffic is dropped here, silently, before dispatch
-/// ever sees it. Accepting both also lets a migrated and an unmigrated
-/// VTC be talked to during the rollout; the `openvtc/vtc/` arm can be
-/// retired once no supported VTC emits it.
 /// Would an inbound message of this `type` reach the handler?
 ///
-/// The gate itself, exposed so the dispatcher that routes these types can be
-/// checked against it. Before this, the only way to ask was to recompile
-/// [`OPENVTC_CATCH_ALL_PATTERN`] and ask a copy — which is the same shape of
-/// mistake the pattern keeps producing: two descriptions of one fact, agreeing
-/// until one of them changes.
-///
-/// # Why this matters more than it looks
-///
-/// A `type` this returns `false` for is dropped at `classify_inbound` with a
-/// `debug!` and no reply. There is no error, no problem-report, and nothing on
-/// the sender's side but a wait that never ends. Adding a handler and forgetting
-/// the prefix is therefore a *total, silent* failure of that verb — which has
-/// already happened here: `capabilities::send_capability_document` sent the
-/// binding envelope, `process_inbound_message` had a branch for it, and every
-/// reply was dropped in between.
+/// The gate itself, derived from the inbound registry
+/// ([`crate::inbound::registry::ROUTES`]): a type is admitted exactly when a
+/// handler claims it, and the dispatcher routes on the same classification.
+/// The two used to be separate lists — a hand-written regex here and a chain
+/// of branches in the dispatcher — and a branch added without its prefix here
+/// was a verb that failed totally and silently: a `type` refused here is
+/// dropped at `classify_inbound` with no reply, and the sender waits out its
+/// timeout. That happened (`capabilities::send_capability_document` sent the
+/// binding envelope, the dispatcher had a branch for the reply, and every
+/// reply was dropped in between).
 #[must_use]
 pub fn routes_inbound_type(type_uri: &str) -> bool {
     // Mirrors [`classify_inbound`]'s admission order exactly. The two
-    // trust-ping types return before the catch-all is consulted, so a predicate
-    // that asked only the pattern would report them as dropped — which is the
-    // wrong answer, and the kind of near-miss that makes a census worse than
-    // useless: it would send someone to widen a regex that was never the
-    // problem.
-    type_uri == TRUST_PING_TYPE || type_uri == TRUST_PONG_TYPE || CATCH_ALL.is_match(type_uri)
+    // trust-ping types are taken before the registry is consulted (a ping is
+    // answered by the state handler, not dispatched), and both are in the
+    // registry too, so this is the registry's answer.
+    type_uri == TRUST_PING_TYPE
+        || type_uri == TRUST_PONG_TYPE
+        || crate::inbound::registry::classify(type_uri).is_some()
 }
-
-pub const OPENVTC_CATCH_ALL_PATTERN: &str = concat!(
-    r"https://linuxfoundation\.org/openvtc/.*",
-    r"|https://firstperson\.network/.*",
-    r"|https://trusttasks\.org/openvtc/vtc/.*",
-    r"|https://trusttasks\.org/spec/vtc/.*",
-    r"|https://trusttasks\.org/spec/credential-exchange/.*",
-    r"|https://trusttasks\.org/spec/vetting/.*",
-    r"|https://trusttasks\.org/spec/trust-task-error/.*",
-    // Capability replies typed as the response document, which is how a VTC
-    // answers today (the envelope arm below is how it will once it follows the
-    // binding's §5 fully). `inbound` reads both.
-    r"|https://trusttasks\.org/spec/governance/capability/.*",
-    // Git namespace replies (`git-ns/*`) for the Repos panel. A DIDComm reply
-    // in the binding envelope passed the gate under the `binding/` arm below,
-    // which hid the gap: TSP opens the envelope *before* the gate
-    // (`tsp_document_to_message`), so a TSP-joined member's `git-ns/view`
-    // answer arrived typed as the task, matched nothing here, and was dropped
-    // at `debug!` — the view waited out its timeout on an answer the VTC sent.
-    r"|https://trusttasks\.org/spec/git-ns/.*",
-    // A witness's answers to the documents a witnessing carries (`witness/session/*#response`,
-    // `openvtc_core::witness`). Over DIDComm they pass in the binding envelope below; TSP opens
-    // the envelope before the gate, so without this arm a witness answering over TSP would be
-    // dropped here and the witnessing would wait out its timeout.
-    r"|https://trusttasks\.org/spec/witness/.*",
-    // Notifications addressed to a persona (`notifications/notify`, `notifications/relay`),
-    // which this client hands to the member's VTA (VTI-NTF-054). Over DIDComm they pass in the
-    // binding envelope; TSP opens the envelope before the gate, so without this arm a
-    // notification delivered over TSP would be dropped here and never reach the VTA.
-    r"|https://trusttasks\.org/spec/notifications/.*",
-    // The **binding envelopes**, whose type says "a Trust Task is inside" and
-    // names no task. A peer built on `trust-tasks-didcomm` types every message
-    // this way, and so does this crate's own `capabilities::
-    // send_capability_document` — which is how the hole showed up: we sent the
-    // envelope type, the VTC replied in kind, and the reply was dropped *here*,
-    // before `process_inbound_message` could reach the handler it already has
-    // for it. A gate keyed on task URIs cannot see a carriage that deliberately
-    // does not name one.
-    r"|https://trusttasks\.org/binding/.*",
-    r"|https://didcomm\.org/report-problem/.*",
-);
 
 /// Extract secrets for a DID from the TDK's secrets resolver.
 ///
@@ -3681,122 +3620,6 @@ mod tsp_inbound_tests {
         let doc = serde_json::json!({ "type": VERDICT_TYPE, "payload": {} });
         let message = tsp_frame_to_message(&tsp_frame(doc, Some("did:webvh:example:vtc"))).unwrap();
         assert_eq!(message.id, "frame-hash");
-    }
-}
-
-#[cfg(test)]
-mod catch_all_tests {
-    use super::OPENVTC_CATCH_ALL_PATTERN;
-    use regex::Regex;
-
-    fn matches(uri: &str) -> bool {
-        // `route_regex` anchors the whole type string, so mirror that
-        // here rather than testing a substring match that would pass
-        // for URIs the router would actually reject.
-        Regex::new(&format!("^(?:{OPENVTC_CATCH_ALL_PATTERN})$"))
-            .expect("catch-all pattern compiles")
-            .is_match(uri)
-    }
-
-    /// The migration target. Without this arm, a migrated VTC's replies
-    /// never reach the handler — dropped by the router, before dispatch.
-    #[test]
-    fn canonical_vtc_trust_tasks_are_routed() {
-        for uri in [
-            "https://trusttasks.org/spec/vtc/join-requests/submit/0.1",
-            "https://trusttasks.org/spec/vtc/join-requests/submit/0.1#response",
-            "https://trusttasks.org/spec/vtc/join-requests/status/0.1#response",
-            "https://trusttasks.org/spec/vtc/members/self-remove/0.1",
-        ] {
-            assert!(matches(uri), "{uri} must reach the OpenVTC handler");
-        }
-    }
-
-    /// Peer vetting tasks travel member to member, not through a community,
-    /// so they live under their own prefix; and a refusal of any Trust Task
-    /// arrives as a `trust-task-error`, which a vetter uses to refuse a request.
-    /// Without these arms both are dropped before dispatch.
-    #[test]
-    fn vetting_tasks_and_trust_task_errors_are_routed() {
-        for uri in [
-            "https://trusttasks.org/spec/vetting/request/0.1",
-            "https://trusttasks.org/spec/vetting/request/0.1#response",
-            "https://trusttasks.org/spec/vetting/session/0.1",
-            "https://trusttasks.org/spec/vetting/session/0.1#response",
-            "https://trusttasks.org/spec/vetting/decline/0.1",
-            "https://trusttasks.org/spec/vtc/vetting/revoke-statement/0.1#response",
-            "https://trusttasks.org/spec/vtc/join-requests/manifest/0.2#response",
-            "https://trusttasks.org/spec/trust-task-error/0.5",
-        ] {
-            assert!(matches(uri), "{uri} must reach the OpenVTC handler");
-        }
-    }
-
-    /// The pre-migration prefix keeps working, so an unmigrated VTC is
-    /// still reachable during the rollout.
-    #[test]
-    fn legacy_vtc_trust_tasks_still_route() {
-        for uri in [
-            "https://trusttasks.org/openvtc/vtc/spec/join-requests/submit/1.0",
-            "https://trusttasks.org/openvtc/vtc/members/self-remove/1.0",
-        ] {
-            assert!(matches(uri), "{uri} must still reach the handler");
-        }
-    }
-
-    #[test]
-    fn the_other_arms_are_intact() {
-        for uri in [
-            "https://linuxfoundation.org/openvtc/anything",
-            "https://firstperson.network/protocols/x",
-            "https://trusttasks.org/spec/credential-exchange/offer/0.1",
-            "https://didcomm.org/report-problem/2.0/problem-report",
-        ] {
-            assert!(matches(uri), "{uri} must reach the handler");
-        }
-    }
-
-    /// The binding envelopes reach the handler.
-    ///
-    /// This is the one the gate was missing, and missing it was silent in both
-    /// directions: `capabilities::send_capability_document` sends with
-    /// `TRUST_TASK_ENVELOPE_TYPE`, `inbound::process_inbound_message`
-    /// has a branch for it — and every such reply was dropped in between,
-    /// because a gate keyed on task URIs cannot see a carriage that names no
-    /// task. A handler that exists and is unreachable looks exactly like a peer
-    /// that never answered.
-    #[test]
-    fn the_binding_envelopes_are_routed() {
-        for uri in [
-            "https://trusttasks.org/binding/didcomm/0.1/envelope",
-            "https://trusttasks.org/binding/tsp/0.1/envelope",
-        ] {
-            assert!(matches(uri), "{uri} must reach the OpenVTC handler");
-        }
-    }
-
-    /// And specifically the constant this crate sends with, read from the crate
-    /// that defines it rather than retyped here — so the gate cannot drift from
-    /// what `send_capability_document` puts on the wire.
-    #[test]
-    fn the_envelope_type_this_crate_sends_is_routed() {
-        assert!(
-            matches(crate::capabilities::TRUST_TASK_ENVELOPE_TYPE),
-            "the type we send must be one we accept back"
-        );
-    }
-
-    /// The pattern is a routing gate, not a catch-everything: an
-    /// unrelated canonical task must not be swept in.
-    #[test]
-    fn unrelated_types_are_not_routed() {
-        for uri in [
-            "https://trusttasks.org/spec/acl/list/0.1",
-            "https://trusttasks.org/spec/policy/upsert/0.2",
-            "https://example.com/whatever",
-        ] {
-            assert!(!matches(uri), "{uri} must NOT be routed here");
-        }
     }
 }
 

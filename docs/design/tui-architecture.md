@@ -166,10 +166,15 @@ the verified `(did, name)` results into `Config::agent_names` on the loop thread
 2. Put the **pure** handling logic (validation, body parsing, state derivation)
    in [`openvtc-core/src/messaging.rs`](../../openvtc-core/src/messaging.rs) so it
    is unit-testable without the TUI.
-3. Add a `MessageType::…` arm to `process_inbound_message` in
-   [`openvtc-core/src/inbound/`](../../openvtc-core/src/inbound/mod.rs),
-   calling the core handler and returning `Ok(true)` if it mutated `Config` (the
-   loop then `mark_dirty`s and re-syncs the UI).
+3. Add a `Family` variant and its route to the inbound registry
+   ([`openvtc-core/src/inbound/registry.rs`](../../openvtc-core/src/inbound/registry.rs)).
+   The transport's accept gate and the dispatcher both read that one table, so
+   the type is admitted exactly when it is routed. The dispatcher's
+   `match family` is exhaustive: add the family's handler in
+   [`openvtc-core/src/inbound/mod.rs`](../../openvtc-core/src/inbound/mod.rs),
+   calling the core logic and returning `Ok(true)` if it mutated `Config` (the
+   loop then `mark_dirty`s and re-syncs the UI). Add the type to the census in
+   `openvtc-core/tests/inbound_gate_census.rs`.
 4. If sending the message is user-initiated, add the corresponding `Action` +
    key (recipes above) and build the outbound message with
    `openvtc_core::messaging::build_didcomm_message`.

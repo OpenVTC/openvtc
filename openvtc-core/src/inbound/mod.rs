@@ -35,6 +35,10 @@ use crate::{
 use affinidi_tdk::{TDK, didcomm::Message};
 use dtg_credentials::DTGCredential;
 use tracing::{debug, info, warn};
+
+pub mod registry;
+
+use registry::Family;
 use vta_sdk::protocols::PROBLEM_REPORT_TYPE;
 use vta_sdk::protocols::credential_exchange::ISSUE as CREDENTIAL_ISSUE_TYPE;
 use vta_sdk::protocols::join_requests::{
@@ -120,8 +124,7 @@ pub(crate) async fn issue_member_vmc_for(
 
 /// Whether a document of `typ` may be a reply to a capability request.
 fn is_capability_reply_type(typ: &str) -> bool {
-    typ.starts_with("https://trusttasks.org/spec/governance/capability/")
-        || is_trust_task_error_type(typ)
+    typ.starts_with(crate::capabilities::CAPABILITY_TYPE_PREFIX) || is_trust_task_error_type(typ)
 }
 
 /// A community's reply to a request of ours, as handed to the view waiting on
@@ -477,125 +480,84 @@ fn verification_job(
             .collect(),
         typ: typ.to_string(),
     };
-    if typ == CREDENTIAL_ISSUE_TYPE {
-        let credential = credential_in_issue(message)?;
-        // Issued by the community that sent it, to one of our personas, and
-        // that community is one we hold a record with. (Which membership,
-        // and whether it is live, the handler checks again once verified; a
-        // vetter's grant passes here too.) A vetter's statement is vetting's,
-        // checked by vetting.
-        let to_us = credential
-            .pointer("/credentialSubject/id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|subject| config.account.persona_id_for_did(subject).is_some());
-        let from_issuer = crate::issued_credential::issuer_of(&credential) == Some(from_did);
-        return (member && to_us && from_issuer).then(|| VerifyJob::Credential {
-            document: message.body.clone(),
-            sender: from_did.to_string(),
-        });
-    }
-    // A community's answer to a vetting question: only from a community we
-    // have business with — a question outstanding, an application, or a
-    // membership (the same test vetting applies before taking one).
-    if crate::vetting::inbound::is_community_answer_type(typ) {
-        let business = config.private.vetting.asked(from_did)
-            || config
-                .private
-                .vetting
-                .applications
-                .iter()
-                .any(|a| a.community == from_did)
-            || member;
-        return business.then(operational);
-    }
-    // Our renewal's answer: only one threading on a renewal we asked this
-    // community for. It carries credentials, so it is checked as both an
-    // operational document and two issued credentials.
-    if typ == crate::renewal::MEMBERS_RENEW_RESPONSE_TYPE {
-        let asked = message
-            .thid
-            .as_deref()
-            .is_some_and(|thid| crate::renewal::is_pending(from_did, thid));
-        return (member && asked).then(|| VerifyJob::Renewal {
-            document: message.body.clone(),
-            sender: from_did.to_string(),
-            our_dids: config
-                .account
-                .personas
-                .values()
-                .map(|p| p.did.clone())
-                .collect(),
-        });
-    }
-    // An election answer from the community holding an election a notification told us of
-    // (VTI-NTF-063), which may be one we hold no membership with: only on a thread we sent it.
-    if !member && crate::elections::is_reply_type(typ) {
-        return awaited_election_answer(message, from_did).then(operational);
-    }
-    if is_capability_reply_type(typ)
-        || crate::git_ns::is_reply_type(typ)
-        || crate::community_rooms::is_reply_type(typ)
-        || crate::elections::is_reply_type(typ)
-        || JoinProtocol::is_submit_response(typ)
-        || [
-            MEMBER_REMOVAL_NOTICE_TYPE,
-            MEMBER_REQUEST_VMC_TYPE,
-            JOIN_REQUEST_SUBMIT_RECEIPT_TYPE,
-            JOIN_REQUEST_STATUS_RESPONSE_TYPE,
-            COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE,
-        ]
-        .contains(&typ)
-    {
-        return member.then(operational);
-    }
-    match MessageType::try_from(message).ok()? {
-        MessageType::RelationshipRequest => {
-            let body: crate::relationships::RelationshipRequestBody =
-                serde_json::from_value(message.body.clone()).ok()?;
-            validate_did(&body.did).ok()?;
-            relationship_request_admissible(
-                config,
-                &Arc::new(message.id.clone()),
-                &Arc::new(from_did.to_string()),
-            )
-            .ok()?;
-            Some(VerifyJob::DidBinding {
-                did: body.did,
-                did_proof: body.did_proof,
-                persona: from_did.to_string(),
-                persona_proof: body.persona_proof,
-                peer: recipient_did.to_string(),
-                thid: message.id.clone(),
-                role: crate::relationships::BindingRole::Request,
+    let member_operational = || member.then(operational);
+    match registry::classify(typ)? {
+        Family::CredentialIssue => {
+            let credential = credential_in_issue(message)?;
+            // Issued by the community that sent it, to one of our personas, and
+            // that community is one we hold a record with. (Which membership,
+            // and whether it is live, the handler checks again once verified; a
+            // vetter's grant passes here too.) A vetter's statement is vetting's,
+            // checked by vetting.
+            let to_us = credential
+                .pointer("/credentialSubject/id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|subject| config.account.persona_id_for_did(subject).is_some());
+            let from_issuer = crate::issued_credential::issuer_of(&credential) == Some(from_did);
+            (member && to_us && from_issuer).then(|| VerifyJob::Credential {
+                document: message.body.clone(),
+                sender: from_did.to_string(),
             })
         }
-        MessageType::RelationshipRequestAccepted => {
-            let body: RelationshipAcceptBody = serde_json::from_value(message.body.clone()).ok()?;
-            validate_did(&body.did).ok()?;
-            let thid = message.thid.clone()?;
-            // It answers a request of ours still waiting, from the party it
-            // went to.
-            config
-                .private
-                .relationships
-                .awaiting(
-                    &Arc::new(thid.clone()),
-                    RelationshipState::RequestSent,
-                    from_did,
-                )
-                .is_some()
-                .then_some(())?;
-            Some(VerifyJob::DidBinding {
-                did: body.did,
-                did_proof: body.did_proof,
-                persona: from_did.to_string(),
-                persona_proof: body.persona_proof,
-                peer: recipient_did.to_string(),
-                thid,
-                role: crate::relationships::BindingRole::Accept,
+        // A community's answer to a vetting question: only from a community we
+        // have business with — a question outstanding, an application, or a
+        // membership (the same test vetting applies before taking one). The
+        // rest of vetting's traffic is checked by vetting.
+        Family::Vetting if crate::vetting::inbound::is_community_answer_type(typ) => {
+            let business = config.private.vetting.asked(from_did)
+                || config
+                    .private
+                    .vetting
+                    .applications
+                    .iter()
+                    .any(|a| a.community == from_did)
+                || member;
+            business.then(operational)
+        }
+        // Our renewal's answer: only one threading on a renewal we asked this
+        // community for. It carries credentials, so it is checked as both an
+        // operational document and two issued credentials.
+        Family::RenewalResponse => {
+            let asked = message
+                .thid
+                .as_deref()
+                .is_some_and(|thid| crate::renewal::is_pending(from_did, thid));
+            (member && asked).then(|| VerifyJob::Renewal {
+                document: message.body.clone(),
+                sender: from_did.to_string(),
+                our_dids: config
+                    .account
+                    .personas
+                    .values()
+                    .map(|p| p.did.clone())
+                    .collect(),
             })
         }
-        MessageType::VRCIssued => {
+        // An election answer — or a refusal, which may be one — from the
+        // community holding an election a notification told us of
+        // (VTI-NTF-063), which may be one we hold no membership with: only on
+        // a thread we sent it.
+        Family::ElectionsReply | Family::TrustTaskError if !member => {
+            awaited_election_answer(message, from_did).then(operational)
+        }
+        Family::CapabilityReply
+        | Family::GitNsReply
+        | Family::RoomsReply
+        | Family::ElectionsReply
+        | Family::TrustTaskError
+        | Family::JoinVerdict
+        | Family::MemberRemovalNotice
+        | Family::MemberRequestVmc
+        | Family::JoinSubmitReceipt
+        | Family::JoinStatusResponse
+        | Family::CommunityProfileResponse => member_operational(),
+        Family::RelationshipRequest => {
+            relationship_request_job(config, message, from_did, recipient_did)
+        }
+        Family::RelationshipRequestAccepted => {
+            relationship_accept_job(config, message, from_did, recipient_did)
+        }
+        Family::VrcIssued => {
             let vrc: DTGCredential = serde_json::from_value(message.body.clone()).ok()?;
             // An established relationship, and the issuer pinned to it.
             vet_vrc_issued(
@@ -608,8 +570,80 @@ fn verification_job(
             .ok()?;
             Some(VerifyJob::Vrc(Box::new(vrc)))
         }
-        _ => None,
+        Family::Notification
+        | Family::WitnessReply
+        | Family::Vetting
+        | Family::ProblemReport
+        | Family::PersonhoodChallengeResponse
+        | Family::PersonhoodAssertResponse
+        | Family::MemberVmcResponse
+        | Family::BindingEnvelope
+        | Family::RelationshipRequestRejected
+        | Family::RelationshipRequestFinalize
+        | Family::TrustPing
+        | Family::TrustPong
+        | Family::VrcRequest
+        | Family::VrcRequestRejected => None,
     }
+}
+
+/// A relationship request's binding check, if it could be queued at all.
+fn relationship_request_job(
+    config: &Config,
+    message: &Message,
+    from_did: &str,
+    recipient_did: &str,
+) -> Option<VerifyJob> {
+    let body: crate::relationships::RelationshipRequestBody =
+        serde_json::from_value(message.body.clone()).ok()?;
+    validate_did(&body.did).ok()?;
+    relationship_request_admissible(
+        config,
+        &Arc::new(message.id.clone()),
+        &Arc::new(from_did.to_string()),
+    )
+    .ok()?;
+    Some(VerifyJob::DidBinding {
+        did: body.did,
+        did_proof: body.did_proof,
+        persona: from_did.to_string(),
+        persona_proof: body.persona_proof,
+        peer: recipient_did.to_string(),
+        thid: message.id.clone(),
+        role: crate::relationships::BindingRole::Request,
+    })
+}
+
+/// A relationship accept's binding check, if it answers a request of ours
+/// still waiting, from the party it went to.
+fn relationship_accept_job(
+    config: &Config,
+    message: &Message,
+    from_did: &str,
+    recipient_did: &str,
+) -> Option<VerifyJob> {
+    let body: RelationshipAcceptBody = serde_json::from_value(message.body.clone()).ok()?;
+    validate_did(&body.did).ok()?;
+    let thid = message.thid.clone()?;
+    config
+        .private
+        .relationships
+        .awaiting(
+            &Arc::new(thid.clone()),
+            RelationshipState::RequestSent,
+            from_did,
+        )
+        .is_some()
+        .then_some(())?;
+    Some(VerifyJob::DidBinding {
+        did: body.did,
+        did_proof: body.did_proof,
+        persona: from_did.to_string(),
+        persona_proof: body.persona_proof,
+        peer: recipient_did.to_string(),
+        thid,
+        role: crate::relationships::BindingRole::Accept,
+    })
 }
 
 /// Whether an inbound relationship request from `from_did` (task id
@@ -825,20 +859,6 @@ async fn process_inbound(
     effects: &mut InboundEffects,
     arrival: Arrival<'_>,
 ) -> Result<bool, anyhow::Error> {
-    let InboundEffects {
-        inactivated,
-        capability_replies,
-        git_ns_replies,
-        rooms_replies,
-        elections_replies,
-        personhood_challenges,
-        vetting_answers,
-        vetting_grant_checks,
-        renewals,
-        witness_replies,
-        notifications,
-        deferred,
-    } = effects;
     // A message handed back with its check's result (or restored from before
     // a restart) already passed the age and replay gates on arrival; running
     // them again would drop it as a replay of itself.
@@ -966,7 +986,7 @@ async fn process_inbound(
             (None, _) => None,
         };
         if let Some(job) = job {
-            *deferred = Some(Deferred {
+            effects.deferred = Some(Deferred {
                 message: arrived.clone(),
                 job,
             });
@@ -978,9 +998,93 @@ async fn process_inbound(
         Arrival::New { .. } | Arrival::Restored => None,
     };
 
-    // Computed at most once per message (see `community_reply_proven`).
-    let mut reply_proven: Option<bool> = None;
+    let Some(family) = registry::classify(&message.typ) else {
+        warn!(typ = %message.typ, "unknown message type — ignoring");
+        return Ok(false);
+    };
+    let mut cx = Cx {
+        tdk,
+        service,
+        message,
+        from_did,
+        recipient_did,
+        recipient_persona,
+        pre,
+    };
+    let c = &mut cx;
+    match family {
+        Family::Notification => notification(config, c, effects),
+        Family::CapabilityReply => capability_reply(config, c, effects),
+        Family::GitNsReply => git_ns_reply(config, c, effects),
+        Family::RoomsReply => rooms_reply(config, c, effects),
+        Family::ElectionsReply => elections_reply(config, c, effects),
+        Family::WitnessReply => witness_reply(c, effects),
+        Family::Vetting => vetting(config, c, effects).await,
+        Family::JoinSubmitReceipt => join_submit_receipt(config, c),
+        Family::CredentialIssue => credential_issue(config, c, effects).await,
+        Family::JoinVerdict => join_verdict(config, c, effects),
+        Family::ProblemReport => problem_report(config, c, effects).await,
+        Family::RenewalResponse => renewal_response(config, c, effects).await,
+        Family::TrustTaskError => trust_task_error(config, c, effects).await,
+        Family::JoinStatusResponse => join_status_response(config, c, effects),
+        Family::CommunityProfileResponse => community_profile_response(config, c),
+        Family::PersonhoodChallengeResponse => personhood_challenge(c, effects),
+        Family::PersonhoodAssertResponse => personhood_assert(c),
+        Family::MemberVmcResponse => member_vmc_response(config, c),
+        Family::MemberRequestVmc => member_request_vmc(config, c).await,
+        Family::MemberRemovalNotice => member_removal_notice(config, c, effects),
+        // Reached only by an envelope `open_didcomm_envelope` could not open
+        // (one that could has been routed as the document it carries).
+        Family::BindingEnvelope => Ok(unclaimed(message)),
+        Family::RelationshipRequest => peer(config, c, MessageType::RelationshipRequest).await,
+        Family::RelationshipRequestRejected => {
+            peer(config, c, MessageType::RelationshipRequestRejected).await
+        }
+        Family::RelationshipRequestAccepted => {
+            peer(config, c, MessageType::RelationshipRequestAccepted).await
+        }
+        Family::RelationshipRequestFinalize => {
+            peer(config, c, MessageType::RelationshipRequestFinalize).await
+        }
+        Family::TrustPing => peer(config, c, MessageType::TrustPing).await,
+        Family::TrustPong => peer(config, c, MessageType::TrustPong).await,
+        Family::VrcRequest => peer(config, c, MessageType::VRCRequest).await,
+        Family::VrcRequestRejected => peer(config, c, MessageType::VRCRequestRejected).await,
+        Family::VrcIssued => peer(config, c, MessageType::VRCIssued).await,
+    }
+}
 
+/// What every family's handler reads about the message in hand.
+struct Cx<'a> {
+    tdk: &'a TDK,
+    service: &'a Messaging,
+    /// The message as routed (opened out of its binding envelope).
+    message: &'a Message,
+    /// The authenticated sender.
+    from_did: Arc<String>,
+    /// The persona it was addressed to — the DID any reply goes out as.
+    recipient_did: String,
+    recipient_persona: Option<crate::config::account::PersonaId>,
+    /// The result of its off-loop check, if it had one.
+    pre: Option<PreVerified>,
+}
+
+/// A message of a routed family that its handler did not take: logged, and
+/// nothing changes.
+fn unclaimed(message: &Message) -> bool {
+    warn!(typ = %message.typ, "inbound message not taken by its handler — ignoring");
+    false
+}
+
+/// [`Family::Notification`].
+fn notification(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let InboundEffects { notifications, .. } = effects;
     // A notification addressed to one of our personas (VTI-NTF-054): handed to the member's
     // VTA exactly as received, whoever sent it — no acceptance policy here, which would be
     // declining on the principal's behalf. The loop deposits it and answers the sender; nothing
@@ -1004,7 +1108,834 @@ async fn process_inbound(
         }
         return Ok(false);
     }
+    Ok(unclaimed(message))
+}
 
+/// [`Family::CapabilityReply`].
+fn capability_reply(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let recipient_did = cx.recipient_did.clone();
+    let pre = cx.pre.take();
+    // Computed at most once per message (see `community_reply_proven`).
+    let mut reply_proven: Option<bool> = None;
+    let InboundEffects {
+        capability_replies, ..
+    } = effects;
+    // Capability replies (governance/capability/*), in either carriage: hand
+    // them to the state loop keyed by the document's `threadId` (== our request
+    // id). This is a fan-in point waiting on nothing in particular, so the
+    // document is classified against its own `threadId`; the correlation that
+    // matters is `apply_capability_replies` matching it to the open view's
+    // `pending_thid`, and an uncorrelated reply is dropped there.
+    //
+    // A `trust-task-error` is ambiguous here — it may refuse a capability
+    // toggle or anything else we asked — so it is offered to the capability
+    // view *and* falls through to the handlers below; each side drops an error
+    // that threads on nothing of its own.
+    if is_capability_reply_type(&message.typ)
+        && let Some((thid, doc)) = crate::capabilities::parse_envelope_document(&message.body)
+        && let Some(reply) = crate::capabilities::parse_capability_reply(&doc, &thid)
+        && community_reply_proven(
+            config,
+            &pre,
+            message,
+            &from_did,
+            &recipient_did,
+            &mut reply_proven,
+        )
+    {
+        capability_replies.push((from_did.to_string(), thid, reply));
+        if !is_trust_task_error_type(&message.typ) {
+            return Ok(false);
+        }
+    }
+    Ok(unclaimed(message))
+}
+
+/// [`Family::GitNsReply`].
+fn git_ns_reply(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let recipient_did = cx.recipient_did.clone();
+    let pre = cx.pre.take();
+    // Computed at most once per message (see `community_reply_proven`).
+    let mut reply_proven: Option<bool> = None;
+    let InboundEffects { git_ns_replies, .. } = effects;
+    // Git namespace replies (git-ns/*), in either carriage, for the Repos
+    // panel — keyed by the document's `threadId` and correlated there against
+    // the one request the panel has outstanding; anything else is dropped.
+    // A `trust-task-error` is offered here as well and falls through, for the
+    // same reason as above.
+    if crate::git_ns::is_reply_type(&message.typ)
+        && let Some((_, doc)) = crate::capabilities::parse_envelope_document(&message.body)
+        && let Some((thid, reply)) = crate::git_ns::parse_reply(&doc)
+        && community_reply_proven(
+            config,
+            &pre,
+            message,
+            &from_did,
+            &recipient_did,
+            &mut reply_proven,
+        )
+    {
+        // The sender and the document's issuer travel with the answer: the
+        // Repos view takes one only from the community it asked.
+        git_ns_replies.push(ThreadedReply {
+            from: from_did.to_string(),
+            issuer: doc.issuer.clone(),
+            thid,
+            reply,
+        });
+        if !is_trust_task_error_type(&message.typ) {
+            return Ok(false);
+        }
+    }
+    Ok(unclaimed(message))
+}
+
+/// [`Family::RoomsReply`].
+fn rooms_reply(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let recipient_did = cx.recipient_did.clone();
+    let pre = cx.pre.take();
+    // Computed at most once per message (see `community_reply_proven`).
+    let mut reply_proven: Option<bool> = None;
+    let InboundEffects { rooms_replies, .. } = effects;
+    // Data-room replies (vtc/rooms/*), in either carriage, for the Rooms panel — keyed by
+    // `threadId` and correlated there against the one request the panel has outstanding.
+    // A `trust-task-error` is offered here as well and falls through.
+    if crate::community_rooms::is_reply_type(&message.typ)
+        && let Some((_, doc)) = crate::capabilities::parse_envelope_document(&message.body)
+        && let Some((thid, reply)) = crate::community_rooms::parse_reply(&doc)
+        && community_reply_proven(
+            config,
+            &pre,
+            message,
+            &from_did,
+            &recipient_did,
+            &mut reply_proven,
+        )
+    {
+        rooms_replies.push(ThreadedReply {
+            from: from_did.to_string(),
+            issuer: doc.issuer.clone(),
+            thid,
+            reply,
+        });
+        if !is_trust_task_error_type(&message.typ) {
+            return Ok(false);
+        }
+    }
+    Ok(unclaimed(message))
+}
+
+/// [`Family::ElectionsReply`].
+fn elections_reply(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let recipient_did = cx.recipient_did.clone();
+    let pre = cx.pre.take();
+    // Computed at most once per message (see `community_reply_proven`).
+    let mut reply_proven: Option<bool> = None;
+    let InboundEffects {
+        elections_replies, ..
+    } = effects;
+    // Election replies (vtc/elections/*), in either carriage, for the Elections panel — keyed by
+    // `threadId` and correlated there against the one request the panel has outstanding. A
+    // `trust-task-error` is offered here as well and falls through.
+    if crate::elections::is_reply_type(&message.typ)
+        && let Some((_, doc)) = crate::capabilities::parse_envelope_document(&message.body)
+        && let Some((thid, reply)) = crate::elections::parse_reply(&doc)
+        && community_reply_proven(
+            config,
+            &pre,
+            message,
+            &from_did,
+            &recipient_did,
+            &mut reply_proven,
+        )
+    {
+        elections_replies.push(ThreadedReply {
+            from: from_did.to_string(),
+            issuer: doc.issuer.clone(),
+            thid,
+            reply,
+        });
+        if !is_trust_task_error_type(&message.typ) {
+            return Ok(false);
+        }
+    }
+    Ok(unclaimed(message))
+}
+
+/// [`Family::WitnessReply`]. Without a `threadId` it answers nothing.
+fn witness_reply(cx: &mut Cx<'_>, effects: &mut InboundEffects) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let InboundEffects {
+        witness_replies, ..
+    } = effects;
+    // A witness's answers (`witness/session/0.2#response`, `witness/session/submit/0.2#response`),
+    // for a witnessing of one of our relationships. They arrive on the relationship DID's own
+    // listener, in either carriage, threaded on the session id. Nothing is read here: the
+    // witnessing waiting on that thread verifies each as the witness's first. A
+    // `trust-task-error` may be a witness's refusal as much as anything else's, so it is offered
+    // here too and falls through, as it does for the capability and git-ns views above.
+    if (crate::witness::is_reply_type(&message.typ) || is_trust_task_error_type(&message.typ))
+        && message.body.get("threadId").is_some()
+    {
+        witness_replies.push(crate::witness::InboundReply {
+            sender: from_did.to_string(),
+            document: message.body.clone(),
+        });
+        if !is_trust_task_error_type(&message.typ) {
+            return Ok(false);
+        }
+    }
+    Ok(unclaimed(message))
+}
+
+/// [`Family::Vetting`].
+async fn vetting(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let tdk = cx.tdk;
+    let service = cx.service;
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let recipient_did = cx.recipient_did.clone();
+    let recipient_persona = cx.recipient_persona;
+    let pre = cx.pre.take();
+    let InboundEffects {
+        vetting_answers,
+        vetting_grant_checks,
+        ..
+    } = effects;
+    // Peer identity vetting (docs/design/vetting-process.md): requests,
+    // sessions, cards, statements, declines and refusals between members, and a
+    // community's vetting requirements. Tried before the join and credential
+    // routes below because it shares two of their types; `handle` returns
+    // `None` for anything that is not vetting's, which falls through unchanged.
+    if crate::vetting::inbound::may_claim(&message.typ) {
+        let resolver =
+            vta_sdk::trust_task_proof::TrustTaskVmResolver::new(tdk.did_resolver().clone());
+        let ctx = crate::vetting::inbound::Context {
+            account: &config.account,
+            resolver: &resolver,
+            did_resolver: tdk.did_resolver(),
+            issued_credential: match &pre {
+                Some(PreVerified::Credential(r)) => Some(r),
+                _ => None,
+            },
+            // Always `Some`: an answer is taken only as checked off the loop,
+            // never resolved here.
+            community_answer: Some(match &pre {
+                Some(PreVerified::Operational(r)) => r,
+                _ => &NOT_CHECKED,
+            }),
+            recipient: recipient_persona.map(|p| (p, recipient_did.as_str())),
+            now: chrono::Utc::now(),
+        };
+        if let Some(handled) = crate::vetting::inbound::handle(
+            &mut config.private.vetting,
+            &ctx,
+            &mut config.private.seen_documents,
+            message,
+            &from_did,
+        )
+        .await
+        {
+            if let Some(reply) = handled.reply
+                && let Err(e) = crate::vetting::wire::send_reply(config, tdk, service, reply).await
+            {
+                warn!(to = %from_did, error = %e, "could not send vetting reply");
+            }
+            if let Some(answer) = handled.answer {
+                vetting_answers.push(answer);
+            }
+            if let Some(check) = handled.grant_check {
+                vetting_grant_checks.push(check);
+            }
+            let noticed = handled.notice.is_some();
+            if let Some(notice) = handled.notice {
+                config
+                    .private
+                    .logs
+                    .insert(LogFamily::Community, notice.describe());
+                if let Some((id, task)) = notice.task() {
+                    config
+                        .private
+                        .tasks
+                        .new_task_for(&Arc::new(id), task, recipient_persona);
+                }
+            }
+            return Ok(handled.changed || noticed);
+        }
+    }
+    Ok(unclaimed(message))
+}
+
+/// [`Family::JoinSubmitReceipt`].
+fn join_submit_receipt(config: &mut Config, cx: &mut Cx<'_>) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let pre = cx.pre.take();
+    // VTC join-requests submit-receipt: the VTC's asynchronous reply to our
+    // submit, threaded (`thid`) on our submit message id. It carries the
+    // authoritative VTC `requestId`; reconcile it onto the matching Pending
+    // community record (which holds our submit message id as a placeholder).
+    // It is a VTC Trust-Task type, not an openvtc relationship-protocol type,
+    // so handle it before the `MessageType` conversion below (which rejects it).
+    if message.typ == JOIN_REQUEST_SUBMIT_RECEIPT_TYPE {
+        // The request id it carries becomes the handle the join is asked about
+        // by, so it is taken only from the community's signed document.
+        let verified = match community_document(config, &pre, &from_did) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(reason = %e, "join submit-receipt refused");
+                return Ok(false);
+            }
+        };
+        let changed = handle_join_submit_receipt(&mut config.account, message, &from_did);
+        if changed {
+            commit_community_document(config, verified);
+        }
+        return Ok(changed);
+    }
+    Ok(unclaimed(message))
+}
+
+/// [`Family::CredentialIssue`]: vetting's first (a vetter's statement or grant
+/// arrives this way), then the community's credential.
+async fn credential_issue(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let tdk = cx.tdk;
+    let service = cx.service;
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let recipient_did = cx.recipient_did.clone();
+    let recipient_persona = cx.recipient_persona;
+    let pre = cx.pre.take();
+    let InboundEffects {
+        vetting_answers,
+        vetting_grant_checks,
+        ..
+    } = effects;
+    // Peer identity vetting (docs/design/vetting-process.md): requests,
+    // sessions, cards, statements, declines and refusals between members, and a
+    // community's vetting requirements. Tried before the join and credential
+    // routes below because it shares two of their types; `handle` returns
+    // `None` for anything that is not vetting's, which falls through unchanged.
+    if crate::vetting::inbound::may_claim(&message.typ) {
+        let resolver =
+            vta_sdk::trust_task_proof::TrustTaskVmResolver::new(tdk.did_resolver().clone());
+        let ctx = crate::vetting::inbound::Context {
+            account: &config.account,
+            resolver: &resolver,
+            did_resolver: tdk.did_resolver(),
+            issued_credential: match &pre {
+                Some(PreVerified::Credential(r)) => Some(r),
+                _ => None,
+            },
+            // Always `Some`: an answer is taken only as checked off the loop,
+            // never resolved here.
+            community_answer: Some(match &pre {
+                Some(PreVerified::Operational(r)) => r,
+                _ => &NOT_CHECKED,
+            }),
+            recipient: recipient_persona.map(|p| (p, recipient_did.as_str())),
+            now: chrono::Utc::now(),
+        };
+        if let Some(handled) = crate::vetting::inbound::handle(
+            &mut config.private.vetting,
+            &ctx,
+            &mut config.private.seen_documents,
+            message,
+            &from_did,
+        )
+        .await
+        {
+            if let Some(reply) = handled.reply
+                && let Err(e) = crate::vetting::wire::send_reply(config, tdk, service, reply).await
+            {
+                warn!(to = %from_did, error = %e, "could not send vetting reply");
+            }
+            if let Some(answer) = handled.answer {
+                vetting_answers.push(answer);
+            }
+            if let Some(check) = handled.grant_check {
+                vetting_grant_checks.push(check);
+            }
+            let noticed = handled.notice.is_some();
+            if let Some(notice) = handled.notice {
+                config
+                    .private
+                    .logs
+                    .insert(LogFamily::Community, notice.describe());
+                if let Some((id, task)) = notice.task() {
+                    config
+                        .private
+                        .tasks
+                        .new_task_for(&Arc::new(id), task, recipient_persona);
+                }
+            }
+            return Ok(handled.changed || noticed);
+        }
+    }
+
+    // VTC credential delivery: on approve, the VTC pushes the issued VMC + role
+    // VEC as separate `credential-exchange/issue` messages. Store each on the
+    // community and flip Pending -> Active when the membership credential lands.
+    if message.typ == CREDENTIAL_ISSUE_TYPE {
+        // Snapshot before, so the log can say what *changed* rather than that a
+        // message arrived. An issued membership credential is the moment a join
+        // completes — the single most consequential inbound message there is,
+        // and it used to be indistinguishable from any other in the log.
+        let was_active = config
+            .account
+            .memberships_for(&from_did)
+            .iter()
+            .any(|m| m.status.is_active());
+        // Nothing is stored until its proof verifies against the community's
+        // DID document: the envelope proves who sent the message, not who
+        // signed the credential inside it.
+        let Some(credential) = credential_in_issue(message) else {
+            warn!("credential-issue without credential_response.credential — ignoring");
+            return Ok(false);
+        };
+        // The local checks come first: a credential this client could not
+        // store anyway — from a party we hold no membership with, for someone
+        // else, of an unknown kind — never costs a resolve or a status fetch.
+        if let Err(reason) = credential_issue_admissible(&config.account, &credential, &from_did) {
+            warn!("credential-issue ignored before verification: {reason}");
+            return Ok(false);
+        }
+        // Checked off the loop, before this message was handled at all — and
+        // the result must be for exactly this credential.
+        let verified = match match pre {
+            Some(PreVerified::Credential(Ok(v))) if *v.value() == credential => Ok(v),
+            Some(PreVerified::Credential(Err(e))) => Err(e),
+            _ => Err(crate::issued_credential::IssuedCredentialError::NotChecked),
+        } {
+            Ok(verified) => verified,
+            Err(e) => {
+                // The reason only: never the credential, and the DID stays out
+                // of the log line (the activity feed names the community).
+                warn!(reason = %e, "refused an issued credential");
+                config
+                    .account
+                    .note_credential_refused(&from_did, Some(&e.to_string()));
+                config.private.logs.insert(
+                    LogFamily::Community,
+                    format!("Refused a credential from community ({from_did}): {e}."),
+                );
+                return Ok(true);
+            }
+        };
+        let outcome = handle_credential_issue(&mut config.account, verified, &from_did);
+        if outcome.changed {
+            config.account.note_credential_refused(&from_did, None);
+        }
+        // Admission is the moment the member owes the community its half of
+        // the membership pair. Sending it here — naming the join request it
+        // closes — is what `vtc/members/vmc/0.1`'s `requestId` is for; without
+        // it the community's request sits `Approved` indefinitely, waiting for
+        // a reciprocal that only ever arrived unlinked, if at all.
+        //
+        // Best-effort by nature: the credential we just received is already
+        // stored and the membership is already Active. A failure to send ours
+        // back is logged and leaves the join open — recoverable, either by the
+        // member issuing manually or by the community asking with
+        // `members/request-vmc`.
+        if let Some((persona_id, request_id)) = outcome.closed_join {
+            match issue_member_vmc_for(config, tdk, &from_did, persona_id, Some(request_id)).await {
+                Ok((_, vmc)) => {
+                    // Keep our half. The send is the only moment this document
+                    // exists on this side, and a member who cannot show what
+                    // they sent cannot answer whether they consented, nor
+                    // re-send it without minting a different credential.
+                    if let Some(record) = config.account.membership_mut(&from_did, persona_id) {
+                        record.member_vmc = Some(vmc);
+                        record.clear_retired(
+                            crate::config::account::RetiredCredential::MEMBER_ACKNOWLEDGEMENT,
+                        );
+                    }
+                    info!(
+                        vtc = %from_did,
+                        %request_id,
+                        "sent our reciprocal membership credential, closing the join request"
+                    )
+                }
+                Err(e) => warn!(
+                    vtc = %from_did,
+                    %request_id,
+                    error = %e,
+                    "could not send our reciprocal membership credential — the community's \
+                     join request stays open"
+                ),
+            }
+        }
+        let changed = outcome.changed;
+        if changed {
+            let now_active = config
+                .account
+                .memberships_for(&from_did)
+                .iter()
+                .any(|m| m.status.is_active());
+            config.private.logs.insert(
+                LogFamily::Community,
+                if now_active && !was_active {
+                    format!("Admitted to community ({from_did}) — membership is now Active.")
+                } else {
+                    format!("Credential received from community ({from_did}).")
+                },
+            );
+        }
+        return Ok(changed);
+    }
+    Ok(unclaimed(message))
+}
+
+/// [`Family::JoinVerdict`].
+fn join_verdict(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let pre = cx.pre.take();
+    let InboundEffects { inactivated, .. } = effects;
+    // VTC join-requests submit `#response`: the synchronous admission verdict in
+    // the trust-task join model (allow / deny / refer / request_more), threaded
+    // (`thid`) on our submit message id. `allow` → Active, `deny` → Rejected; a
+    // rejection inactivates the community so the loop deregisters the session.
+    if JoinProtocol::is_submit_response(&message.typ) {
+        let verified = match community_document(config, &pre, &from_did) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(reason = %e, "join verdict refused");
+                return Ok(false);
+            }
+        };
+        let outcome = handle_join_verdict(&mut config.account, message, &from_did);
+        // A `requestMore` is the one verdict that asks the member to act, so
+        // what it lacks is said where they will see it — not only in a trace.
+        if let Some(needs) = crate::messaging::join_verdict_needs(message) {
+            // Under a hidden-vetting criterion the join carried a proof, not statements, and
+            // the sentence is about the proof.
+            let hidden = config
+                .private
+                .vetting
+                .applications
+                .iter()
+                .any(|a| a.community == from_did.as_str() && a.hidden.is_some());
+            config.private.logs.insert(
+                LogFamily::Community,
+                format!(
+                    "Community ({from_did}) has not decided your join yet: {}.",
+                    crate::messaging::describe_join_needs(&needs, hidden)
+                ),
+            );
+        }
+        if outcome.changed {
+            commit_community_document(config, verified);
+        }
+        if let Some(persona) = outcome.inactivated {
+            inactivated.push((from_did.to_string(), persona));
+        }
+        return Ok(outcome.changed);
+    }
+    Ok(unclaimed(message))
+}
+
+/// [`Family::ProblemReport`]: vetting's first, then a community's report.
+async fn problem_report(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let tdk = cx.tdk;
+    let service = cx.service;
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let recipient_did = cx.recipient_did.clone();
+    let recipient_persona = cx.recipient_persona;
+    let pre = cx.pre.take();
+    let InboundEffects {
+        vetting_answers,
+        vetting_grant_checks,
+        ..
+    } = effects;
+    // Peer identity vetting (docs/design/vetting-process.md): requests,
+    // sessions, cards, statements, declines and refusals between members, and a
+    // community's vetting requirements. Tried before the join and credential
+    // routes below because it shares two of their types; `handle` returns
+    // `None` for anything that is not vetting's, which falls through unchanged.
+    if crate::vetting::inbound::may_claim(&message.typ) {
+        let resolver =
+            vta_sdk::trust_task_proof::TrustTaskVmResolver::new(tdk.did_resolver().clone());
+        let ctx = crate::vetting::inbound::Context {
+            account: &config.account,
+            resolver: &resolver,
+            did_resolver: tdk.did_resolver(),
+            issued_credential: match &pre {
+                Some(PreVerified::Credential(r)) => Some(r),
+                _ => None,
+            },
+            // Always `Some`: an answer is taken only as checked off the loop,
+            // never resolved here.
+            community_answer: Some(match &pre {
+                Some(PreVerified::Operational(r)) => r,
+                _ => &NOT_CHECKED,
+            }),
+            recipient: recipient_persona.map(|p| (p, recipient_did.as_str())),
+            now: chrono::Utc::now(),
+        };
+        if let Some(handled) = crate::vetting::inbound::handle(
+            &mut config.private.vetting,
+            &ctx,
+            &mut config.private.seen_documents,
+            message,
+            &from_did,
+        )
+        .await
+        {
+            if let Some(reply) = handled.reply
+                && let Err(e) = crate::vetting::wire::send_reply(config, tdk, service, reply).await
+            {
+                warn!(to = %from_did, error = %e, "could not send vetting reply");
+            }
+            if let Some(answer) = handled.answer {
+                vetting_answers.push(answer);
+            }
+            if let Some(check) = handled.grant_check {
+                vetting_grant_checks.push(check);
+            }
+            let noticed = handled.notice.is_some();
+            if let Some(notice) = handled.notice {
+                config
+                    .private
+                    .logs
+                    .insert(LogFamily::Community, notice.describe());
+                if let Some((id, task)) = notice.task() {
+                    config
+                        .private
+                        .tasks
+                        .new_task_for(&Arc::new(id), task, recipient_persona);
+                }
+            }
+            return Ok(handled.changed || noticed);
+        }
+    }
+
+    // DIDComm problem-report. It carries no proof, so it changes nothing — a
+    // join is rejected only by the community's signed `trust-task-error` or
+    // verdict. A report from a community we hold a record with is surfaced so a
+    // refusal is not invisible; one from anyone else is dropped without a trace.
+    if message.typ == PROBLEM_REPORT_TYPE {
+        let Some(note) = read_problem_report(&config.account, message, &from_did) else {
+            debug!("problem-report from a party we hold no membership with — ignored");
+            return Ok(false);
+        };
+        warn!(
+            code = %note.code,
+            on_pending_join = note.on_pending_join,
+            "community reported a problem (unsigned — not acted on)"
+        );
+        config.private.logs.insert(
+            LogFamily::Community,
+            format!(
+                "Community ({from_did}) reported a problem [{}]: {} — unsigned, so nothing \
+                 was changed",
+                note.code, note.comment
+            ),
+        );
+        return Ok(true);
+    }
+    Ok(unclaimed(message))
+}
+
+/// [`Family::RenewalResponse`].
+async fn renewal_response(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let tdk = cx.tdk;
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let pre = cx.pre.take();
+    let InboundEffects { renewals, .. } = effects;
+    // The community's answer to a renewal we asked for
+    // (`vtc/members/renew/0.1#response`): the re-issued VMC and role VAC,
+    // verified off the loop as the community's signed document and as two
+    // issued credentials. Stored on the membership, replacing what it held —
+    // which is what clears a pre-v1 notice — and then answered with a fresh
+    // acknowledgement, because the new grant has a new digest.
+    if message.typ == crate::renewal::MEMBERS_RENEW_RESPONSE_TYPE {
+        use crate::renewal::{RenewalError, RenewalOutcome};
+        let thid = message.thid.as_deref().unwrap_or_default();
+        let verified = match &pre {
+            Some(PreVerified::Renewal(Ok(v))) => v.clone(),
+            other => {
+                let e = match other {
+                    Some(PreVerified::Renewal(Err(e))) => e.clone(),
+                    _ => RenewalError::NotChecked,
+                };
+                warn!(vtc = %from_did, reason = %e, "renewal reply refused");
+                // Reported only when it threads on a renewal of ours: anything
+                // else answers nothing the member is waiting on. The request is
+                // not consumed — a forged reply must not be able to cancel the
+                // genuine one still on its way.
+                if crate::renewal::is_pending(&from_did, thid) {
+                    config
+                        .account
+                        .note_credential_refused(&from_did, Some(&e.to_string()));
+                    let outcome = RenewalOutcome::Failed(e.to_string());
+                    config.private.logs.insert(
+                        LogFamily::Community,
+                        format!("Community ({from_did}): {}", outcome.describe()),
+                    );
+                    renewals.push((from_did.to_string(), outcome));
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+        };
+        let now = chrono::Utc::now();
+        if let Err(e) = verified
+            .document()
+            .check(&config.private.seen_documents, now)
+        {
+            warn!(vtc = %from_did, reason = %e, "renewal reply refused");
+            return Ok(false);
+        }
+        match crate::renewal::take_pending(&from_did, thid) {
+            Some(member) if member == verified.member_did() => {}
+            _ => {
+                warn!(vtc = %from_did, "renewal reply answers no renewal of ours — ignored");
+                return Ok(false);
+            }
+        }
+        commit_community_document(config, verified.document().clone());
+        let outcome = match crate::renewal::apply_renewal(&mut config.account, &verified, &from_did)
+        {
+            Err(e) => RenewalOutcome::Failed(e.to_string()),
+            Ok(summary) => {
+                config.account.note_credential_refused(&from_did, None);
+                // The new grant has a new digest, so the community is owed a
+                // fresh acknowledgement — sent the way the join flow sends one
+                // on admission. Best-effort: the renewed credentials are
+                // already stored, and the member can send it with `m`.
+                //
+                // A renewal that rescued an approved join closes its
+                // request, as the delivered credential would have.
+                let acknowledged = match issue_member_vmc_for(
+                    config,
+                    tdk,
+                    &from_did,
+                    summary.persona,
+                    summary.closed_join,
+                )
+                .await
+                {
+                    Ok((_, vmc)) => {
+                        crate::renewal::store_acknowledgement(
+                            &mut config.account,
+                            &from_did,
+                            summary.persona,
+                            vmc,
+                        );
+                        Ok(())
+                    }
+                    Err(e) => {
+                        warn!(
+                            vtc = %from_did,
+                            error = %e,
+                            "membership renewed, but our acknowledgement could not be sent"
+                        );
+                        Err(e.to_string())
+                    }
+                };
+                info!(
+                    vtc = %from_did,
+                    personhood = summary.personhood,
+                    personhood_changed = summary.personhood_changed,
+                    cleared_retired = summary.cleared_retired,
+                    "membership renewed"
+                );
+                RenewalOutcome::Renewed {
+                    summary,
+                    acknowledged,
+                }
+            }
+        };
+        config.private.logs.insert(
+            LogFamily::Community,
+            format!("Community ({from_did}): {}", outcome.describe()),
+        );
+        renewals.push((from_did.to_string(), outcome));
+        return Ok(true);
+    }
+    Ok(unclaimed(message))
+}
+
+/// [`Family::TrustTaskError`]: a refusal may answer any request we sent, so it
+/// is offered to each view waiting on a thread (capability, `git-ns`, rooms,
+/// elections, a witnessing), then to vetting, then to a renewal of ours, and
+/// last to the join it may refuse. Each step drops a refusal that threads on
+/// nothing of its own. The order is the order these were checked in before the
+/// registry, and the join step always decides.
+async fn trust_task_error(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let tdk = cx.tdk;
+    let service = cx.service;
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let recipient_did = cx.recipient_did.clone();
+    let recipient_persona = cx.recipient_persona;
+    let pre = cx.pre.take();
+    // Computed at most once per message (see `community_reply_proven`).
+    let mut reply_proven: Option<bool> = None;
+    let InboundEffects {
+        inactivated,
+        capability_replies,
+        git_ns_replies,
+        rooms_replies,
+        elections_replies,
+        vetting_answers,
+        vetting_grant_checks,
+        renewals,
+        witness_replies,
+        ..
+    } = effects;
     // Capability replies (governance/capability/*), in either carriage: hand
     // them to the state loop keyed by the document's `threadId` (== our request
     // id). This is a fan-in point waiting on nothing in particular, so the
@@ -1196,318 +2127,6 @@ async fn process_inbound(
         }
     }
 
-    // VTC join-requests submit-receipt: the VTC's asynchronous reply to our
-    // submit, threaded (`thid`) on our submit message id. It carries the
-    // authoritative VTC `requestId`; reconcile it onto the matching Pending
-    // community record (which holds our submit message id as a placeholder).
-    // It is a VTC Trust-Task type, not an openvtc relationship-protocol type,
-    // so handle it before the `MessageType` conversion below (which rejects it).
-    if message.typ == JOIN_REQUEST_SUBMIT_RECEIPT_TYPE {
-        // The request id it carries becomes the handle the join is asked about
-        // by, so it is taken only from the community's signed document.
-        let verified = match community_document(config, &pre, &from_did) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(reason = %e, "join submit-receipt refused");
-                return Ok(false);
-            }
-        };
-        let changed = handle_join_submit_receipt(&mut config.account, message, &from_did);
-        if changed {
-            commit_community_document(config, verified);
-        }
-        return Ok(changed);
-    }
-
-    // VTC credential delivery: on approve, the VTC pushes the issued VMC + role
-    // VEC as separate `credential-exchange/issue` messages. Store each on the
-    // community and flip Pending -> Active when the membership credential lands.
-    if message.typ == CREDENTIAL_ISSUE_TYPE {
-        // Snapshot before, so the log can say what *changed* rather than that a
-        // message arrived. An issued membership credential is the moment a join
-        // completes — the single most consequential inbound message there is,
-        // and it used to be indistinguishable from any other in the log.
-        let was_active = config
-            .account
-            .memberships_for(&from_did)
-            .iter()
-            .any(|m| m.status.is_active());
-        // Nothing is stored until its proof verifies against the community's
-        // DID document: the envelope proves who sent the message, not who
-        // signed the credential inside it.
-        let Some(credential) = credential_in_issue(message) else {
-            warn!("credential-issue without credential_response.credential — ignoring");
-            return Ok(false);
-        };
-        // The local checks come first: a credential this client could not
-        // store anyway — from a party we hold no membership with, for someone
-        // else, of an unknown kind — never costs a resolve or a status fetch.
-        if let Err(reason) = credential_issue_admissible(&config.account, &credential, &from_did) {
-            warn!("credential-issue ignored before verification: {reason}");
-            return Ok(false);
-        }
-        // Checked off the loop, before this message was handled at all — and
-        // the result must be for exactly this credential.
-        let verified = match match pre {
-            Some(PreVerified::Credential(Ok(v))) if *v.value() == credential => Ok(v),
-            Some(PreVerified::Credential(Err(e))) => Err(e),
-            _ => Err(crate::issued_credential::IssuedCredentialError::NotChecked),
-        } {
-            Ok(verified) => verified,
-            Err(e) => {
-                // The reason only: never the credential, and the DID stays out
-                // of the log line (the activity feed names the community).
-                warn!(reason = %e, "refused an issued credential");
-                config
-                    .account
-                    .note_credential_refused(&from_did, Some(&e.to_string()));
-                config.private.logs.insert(
-                    LogFamily::Community,
-                    format!("Refused a credential from community ({from_did}): {e}."),
-                );
-                return Ok(true);
-            }
-        };
-        let outcome = handle_credential_issue(&mut config.account, verified, &from_did);
-        if outcome.changed {
-            config.account.note_credential_refused(&from_did, None);
-        }
-        // Admission is the moment the member owes the community its half of
-        // the membership pair. Sending it here — naming the join request it
-        // closes — is what `vtc/members/vmc/0.1`'s `requestId` is for; without
-        // it the community's request sits `Approved` indefinitely, waiting for
-        // a reciprocal that only ever arrived unlinked, if at all.
-        //
-        // Best-effort by nature: the credential we just received is already
-        // stored and the membership is already Active. A failure to send ours
-        // back is logged and leaves the join open — recoverable, either by the
-        // member issuing manually or by the community asking with
-        // `members/request-vmc`.
-        if let Some((persona_id, request_id)) = outcome.closed_join {
-            match issue_member_vmc_for(config, tdk, &from_did, persona_id, Some(request_id)).await {
-                Ok((_, vmc)) => {
-                    // Keep our half. The send is the only moment this document
-                    // exists on this side, and a member who cannot show what
-                    // they sent cannot answer whether they consented, nor
-                    // re-send it without minting a different credential.
-                    if let Some(record) = config.account.membership_mut(&from_did, persona_id) {
-                        record.member_vmc = Some(vmc);
-                        record.clear_retired(
-                            crate::config::account::RetiredCredential::MEMBER_ACKNOWLEDGEMENT,
-                        );
-                    }
-                    info!(
-                        vtc = %from_did,
-                        %request_id,
-                        "sent our reciprocal membership credential, closing the join request"
-                    )
-                }
-                Err(e) => warn!(
-                    vtc = %from_did,
-                    %request_id,
-                    error = %e,
-                    "could not send our reciprocal membership credential — the community's \
-                     join request stays open"
-                ),
-            }
-        }
-        let changed = outcome.changed;
-        if changed {
-            let now_active = config
-                .account
-                .memberships_for(&from_did)
-                .iter()
-                .any(|m| m.status.is_active());
-            config.private.logs.insert(
-                LogFamily::Community,
-                if now_active && !was_active {
-                    format!("Admitted to community ({from_did}) — membership is now Active.")
-                } else {
-                    format!("Credential received from community ({from_did}).")
-                },
-            );
-        }
-        return Ok(changed);
-    }
-
-    // VTC join-requests submit `#response`: the synchronous admission verdict in
-    // the trust-task join model (allow / deny / refer / request_more), threaded
-    // (`thid`) on our submit message id. `allow` → Active, `deny` → Rejected; a
-    // rejection inactivates the community so the loop deregisters the session.
-    if JoinProtocol::is_submit_response(&message.typ) {
-        let verified = match community_document(config, &pre, &from_did) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(reason = %e, "join verdict refused");
-                return Ok(false);
-            }
-        };
-        let outcome = handle_join_verdict(&mut config.account, message, &from_did);
-        // A `requestMore` is the one verdict that asks the member to act, so
-        // what it lacks is said where they will see it — not only in a trace.
-        if let Some(needs) = crate::messaging::join_verdict_needs(message) {
-            // Under a hidden-vetting criterion the join carried a proof, not statements, and
-            // the sentence is about the proof.
-            let hidden = config
-                .private
-                .vetting
-                .applications
-                .iter()
-                .any(|a| a.community == from_did.as_str() && a.hidden.is_some());
-            config.private.logs.insert(
-                LogFamily::Community,
-                format!(
-                    "Community ({from_did}) has not decided your join yet: {}.",
-                    crate::messaging::describe_join_needs(&needs, hidden)
-                ),
-            );
-        }
-        if outcome.changed {
-            commit_community_document(config, verified);
-        }
-        if let Some(persona) = outcome.inactivated {
-            inactivated.push((from_did.to_string(), persona));
-        }
-        return Ok(outcome.changed);
-    }
-
-    // DIDComm problem-report. It carries no proof, so it changes nothing — a
-    // join is rejected only by the community's signed `trust-task-error` or
-    // verdict. A report from a community we hold a record with is surfaced so a
-    // refusal is not invisible; one from anyone else is dropped without a trace.
-    if message.typ == PROBLEM_REPORT_TYPE {
-        let Some(note) = read_problem_report(&config.account, message, &from_did) else {
-            debug!("problem-report from a party we hold no membership with — ignored");
-            return Ok(false);
-        };
-        warn!(
-            code = %note.code,
-            on_pending_join = note.on_pending_join,
-            "community reported a problem (unsigned — not acted on)"
-        );
-        config.private.logs.insert(
-            LogFamily::Community,
-            format!(
-                "Community ({from_did}) reported a problem [{}]: {} — unsigned, so nothing \
-                 was changed",
-                note.code, note.comment
-            ),
-        );
-        return Ok(true);
-    }
-
-    // The community's answer to a renewal we asked for
-    // (`vtc/members/renew/0.1#response`): the re-issued VMC and role VAC,
-    // verified off the loop as the community's signed document and as two
-    // issued credentials. Stored on the membership, replacing what it held —
-    // which is what clears a pre-v1 notice — and then answered with a fresh
-    // acknowledgement, because the new grant has a new digest.
-    if message.typ == crate::renewal::MEMBERS_RENEW_RESPONSE_TYPE {
-        use crate::renewal::{RenewalError, RenewalOutcome};
-        let thid = message.thid.as_deref().unwrap_or_default();
-        let verified = match &pre {
-            Some(PreVerified::Renewal(Ok(v))) => v.clone(),
-            other => {
-                let e = match other {
-                    Some(PreVerified::Renewal(Err(e))) => e.clone(),
-                    _ => RenewalError::NotChecked,
-                };
-                warn!(vtc = %from_did, reason = %e, "renewal reply refused");
-                // Reported only when it threads on a renewal of ours: anything
-                // else answers nothing the member is waiting on. The request is
-                // not consumed — a forged reply must not be able to cancel the
-                // genuine one still on its way.
-                if crate::renewal::is_pending(&from_did, thid) {
-                    config
-                        .account
-                        .note_credential_refused(&from_did, Some(&e.to_string()));
-                    let outcome = RenewalOutcome::Failed(e.to_string());
-                    config.private.logs.insert(
-                        LogFamily::Community,
-                        format!("Community ({from_did}): {}", outcome.describe()),
-                    );
-                    renewals.push((from_did.to_string(), outcome));
-                    return Ok(true);
-                }
-                return Ok(false);
-            }
-        };
-        let now = chrono::Utc::now();
-        if let Err(e) = verified
-            .document()
-            .check(&config.private.seen_documents, now)
-        {
-            warn!(vtc = %from_did, reason = %e, "renewal reply refused");
-            return Ok(false);
-        }
-        match crate::renewal::take_pending(&from_did, thid) {
-            Some(member) if member == verified.member_did() => {}
-            _ => {
-                warn!(vtc = %from_did, "renewal reply answers no renewal of ours — ignored");
-                return Ok(false);
-            }
-        }
-        commit_community_document(config, verified.document().clone());
-        let outcome = match crate::renewal::apply_renewal(&mut config.account, &verified, &from_did)
-        {
-            Err(e) => RenewalOutcome::Failed(e.to_string()),
-            Ok(summary) => {
-                config.account.note_credential_refused(&from_did, None);
-                // The new grant has a new digest, so the community is owed a
-                // fresh acknowledgement — sent the way the join flow sends one
-                // on admission. Best-effort: the renewed credentials are
-                // already stored, and the member can send it with `m`.
-                //
-                // A renewal that rescued an approved join closes its
-                // request, as the delivered credential would have.
-                let acknowledged = match issue_member_vmc_for(
-                    config,
-                    tdk,
-                    &from_did,
-                    summary.persona,
-                    summary.closed_join,
-                )
-                .await
-                {
-                    Ok((_, vmc)) => {
-                        crate::renewal::store_acknowledgement(
-                            &mut config.account,
-                            &from_did,
-                            summary.persona,
-                            vmc,
-                        );
-                        Ok(())
-                    }
-                    Err(e) => {
-                        warn!(
-                            vtc = %from_did,
-                            error = %e,
-                            "membership renewed, but our acknowledgement could not be sent"
-                        );
-                        Err(e.to_string())
-                    }
-                };
-                info!(
-                    vtc = %from_did,
-                    personhood = summary.personhood,
-                    personhood_changed = summary.personhood_changed,
-                    cleared_retired = summary.cleared_retired,
-                    "membership renewed"
-                );
-                RenewalOutcome::Renewed {
-                    summary,
-                    acknowledged,
-                }
-            }
-        };
-        config.private.logs.insert(
-            LogFamily::Community,
-            format!("Community ({from_did}): {}", outcome.describe()),
-        );
-        renewals.push((from_did.to_string(), outcome));
-        return Ok(true);
-    }
-
     // A refusal of a renewal we asked for — `vtc/members/renew:notMember`, or
     // anything else the community answers it with. Matched on the thread
     // before the join handler below, which would otherwise take it for a
@@ -1594,7 +2213,19 @@ async fn process_inbound(
         }
         return Ok(outcome.changed);
     }
+    Ok(unclaimed(message))
+}
 
+/// [`Family::JoinStatusResponse`].
+fn join_status_response(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let pre = cx.pre.take();
+    let InboundEffects { inactivated, .. } = effects;
     // VTC join-requests status-response: the authoritative lifecycle resolution
     // (approved / rejected / deferred) for a Pending join, correlated by
     // `requestId` (R-B-8). A rejection inactivates the community, so report its
@@ -1616,7 +2247,14 @@ async fn process_inbound(
         }
         return Ok(outcome.changed);
     }
+    Ok(unclaimed(message))
+}
 
+/// [`Family::CommunityProfileResponse`].
+fn community_profile_response(config: &mut Config, cx: &mut Cx<'_>) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let pre = cx.pre.take();
     // VTC community-profile response: carries the community's declared
     // `relationshipIdentifierDefault`, which seeds the pairwise-vs-attributed
     // default of the new-relationship form (issue #241). Informational — it
@@ -1643,7 +2281,20 @@ async fn process_inbound(
             handle_community_profile_show_response(&mut config.account, message, &from_did);
         return Ok(changed);
     }
+    Ok(unclaimed(message))
+}
 
+/// [`Family::PersonhoodChallengeResponse`].
+fn personhood_challenge(
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let InboundEffects {
+        personhood_challenges,
+        ..
+    } = effects;
     // VTC personhood challenge reply: carries the nonce an assertion must be
     // signed over, and the match code to read aloud. Reported up rather than
     // applied here — the challenge is display state with a ten-minute life,
@@ -1667,7 +2318,13 @@ async fn process_inbound(
         }
         return Ok(false);
     }
+    Ok(unclaimed(message))
+}
 
+/// [`Family::PersonhoodAssertResponse`].
+fn personhood_assert(cx: &mut Cx<'_>) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
     // VTC personhood assertion result. The re-issued VMC carrying
     // `PersonhoodCredential` arrives separately as a credential-issue message,
     // which is what actually updates the wallet — this is the decision.
@@ -1683,7 +2340,13 @@ async fn process_inbound(
         }
         return Ok(false);
     }
+    Ok(unclaimed(message))
+}
 
+/// [`Family::MemberVmcResponse`].
+fn member_vmc_response(config: &mut Config, cx: &mut Cx<'_>) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
     // VTC member-VMC receipt (`members/vmc/1.0#response`): the VTC acknowledging
     // the reciprocal VMC we sent. Informational — log and move on.
     if message.typ == MEMBER_VMC_RESPONSE_TYPE {
@@ -1697,7 +2360,16 @@ async fn process_inbound(
         );
         return Ok(true);
     }
+    Ok(unclaimed(message))
+}
 
+/// [`Family::MemberRequestVmc`].
+async fn member_request_vmc(config: &mut Config, cx: &mut Cx<'_>) -> Result<bool, anyhow::Error> {
+    let tdk = cx.tdk;
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let recipient_persona = cx.recipient_persona;
+    let pre = cx.pre.take();
     // VTC → member: "please issue + send your VMC" (`members/request-vmc/0.1`).
     // Auto-answer: the sender is the community VTC and the recipient is one of our
     // personas; if we hold an Active membership there, issue + send our reciprocal
@@ -1760,7 +2432,19 @@ async fn process_inbound(
         }
         return Ok(false);
     }
+    Ok(unclaimed(message))
+}
 
+/// [`Family::MemberRemovalNotice`].
+fn member_removal_notice(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    effects: &mut InboundEffects,
+) -> Result<bool, anyhow::Error> {
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let pre = cx.pre.take();
+    let InboundEffects { inactivated, .. } = effects;
     // VTC → member removal notice (`vtc/members/removal-notice/0.1`): the
     // community telling a member it removed them (issue #240). Unsolicited — not
     // threaded on anything we sent — and the first thing that can move a
@@ -1792,14 +2476,22 @@ async fn process_inbound(
         }
         return Ok(outcome.changed);
     }
+    Ok(unclaimed(message))
+}
 
-    let msg_type = match MessageType::try_from(message) {
-        Ok(t) => t,
-        Err(_) => {
-            warn!(typ = %message.typ, "unknown message type — ignoring");
-            return Ok(false);
-        }
-    };
+/// The OpenVTC relationship / VRC / trust-ping families, by their
+/// [`MessageType`].
+async fn peer(
+    config: &mut Config,
+    cx: &mut Cx<'_>,
+    msg_type: MessageType,
+) -> Result<bool, anyhow::Error> {
+    let service = cx.service;
+    let message = cx.message;
+    let from_did = Arc::clone(&cx.from_did);
+    let recipient_did = cx.recipient_did.clone();
+    let recipient_persona = cx.recipient_persona;
+    let pre = cx.pre.take();
 
     let thid_display = message.thid.as_deref().unwrap_or("none");
     debug!(

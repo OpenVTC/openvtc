@@ -6442,7 +6442,6 @@ dependencies = [
  "openssl-sys",
  "pgp",
  "rand 0.8.8",
- "regex",
  "reqwest",
  "secrecy",
  "serde",

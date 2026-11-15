@@ -67,9 +67,6 @@ affinidi-messaging-delivery = { workspace = true }
 affinidi-messaging-core = { workspace = true }
 affinidi-messaging-sdk = { workspace = true }
 futures-util = { workspace = true }
-# The inbound dispatcher compiles `OPENVTC_CATCH_ALL_PATTERN` to decide which
-# message types reach the state handler; the delivery layer has no type routing.
-regex = { workspace = true }
 agent-names.workspace = true
 base64.workspace = true
 bip39.workspace = true

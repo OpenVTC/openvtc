@@ -59,7 +59,7 @@ pub use offers::OfferV2 as Offer;
 pub use offers::Renewal;
 
 /// Every type this module sends or reads starts with this.
-const TYPE_PREFIX: &str = "https://trusttasks.org/spec/vtc/rooms/";
+pub(crate) const TYPE_PREFIX: &str = "https://trusttasks.org/spec/vtc/rooms/";
 
 /// Longest text from the community kept for display.
 const MAX_PEER_TEXT: usize = 512;

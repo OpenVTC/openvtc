@@ -23,6 +23,10 @@ pub use trust_tasks_capability_client::{
     correlation_thread, parse_capability_reply, parse_envelope_document, parse_envelope_reply,
 };
 
+/// The type-URI prefix every `governance/capability/*` document shares: the
+/// answers this client routes to the capability view, in every version.
+pub const CAPABILITY_TYPE_PREFIX: &str = "https://trusttasks.org/spec/governance/capability/";
+
 /// A request document as the builders here (and [`crate::git_ns::build`])
 /// return it — named so a caller can hold one between building and sending
 /// without depending on `trust-tasks-rs` itself.

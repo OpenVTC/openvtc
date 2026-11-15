@@ -39,8 +39,10 @@ use openvtc_core::didcomm::{
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-/// An OpenVTC protocol type the production catch-all pattern must route.
-const OPENVTC_TYPE: &str = "https://linuxfoundation.org/openvtc/test/1.0/ping";
+/// An OpenVTC protocol type the inbound gate routes. A real one: the gate
+/// admits exactly the types a handler claims (the inbound registry), so a
+/// made-up type under the OpenVTC namespace is dropped before it is delivered.
+const OPENVTC_TYPE: &str = openvtc_core::protocol_urls::RELATIONSHIP_REQUEST_REJECT;
 
 /// Stand up one profile's production `Messaging` runtime and install its listener.
 async fn start_production_service(
