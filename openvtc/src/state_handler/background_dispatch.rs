@@ -468,7 +468,9 @@ impl ProgressUpdate {
 /// forever (every subsequent action on that domain rejected as "in progress").
 /// This wrapper joins the inner task and, on a `JoinError`, synthesises a
 /// [`DispatchOutcome::Panicked`] so `apply_outcome` always clears the flag.
-pub(crate) fn spawn_dispatch<F>(
+///
+/// Private: every job reaches it through [`dispatch`] or [`spawn_unclaimed`].
+fn spawn_dispatch<F>(
     tx: tokio::sync::mpsc::UnboundedSender<DispatchOutcome>,
     domain: DispatchDomain,
     fut: F,
@@ -530,6 +532,21 @@ pub(crate) fn dispatch<J: Job>(
     }
     spawn_dispatch(dispatch_tx.clone(), domain, job.execute());
     true
+}
+
+/// Spawn `job` without claiming its domain.
+///
+/// For work the client starts on its own rather than for a person — a check
+/// an inbound message asked for, a step a background exchange owes — which
+/// must never be refused because a person's job holds the same domain, and
+/// must never stop that person starting one. Everything else goes through
+/// [`dispatch`]. The outcome is applied by [`apply_outcome`] like any other.
+pub(crate) fn spawn_unclaimed<J: Job>(
+    job: J,
+    dispatch_tx: &tokio::sync::mpsc::UnboundedSender<DispatchOutcome>,
+) {
+    let domain = job.domain();
+    spawn_dispatch(dispatch_tx.clone(), domain, job.execute());
 }
 
 /// Apply a completed [`DispatchOutcome`] to `state` and clear the domain's
@@ -1061,6 +1078,31 @@ mod tests {
         assert!(release.send(()).is_err(), "a refused job is dropped unrun");
         drop(tx);
         assert!(rx.recv().await.is_none());
+    }
+
+    /// An unclaimed job runs even while its domain is held, and leaves the
+    /// holder's claim alone: it is never refused and never blocks anyone.
+    #[tokio::test]
+    async fn spawn_unclaimed_runs_beside_a_held_domain_without_claiming() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DispatchOutcome>();
+        let mut in_flight = InFlight::default();
+        assert!(in_flight.try_begin(DispatchDomain::Vetting));
+
+        let (release, gate) = tokio::sync::oneshot::channel();
+        spawn_unclaimed(
+            TestJob {
+                domain: DispatchDomain::Vetting,
+                release: gate,
+            },
+            &tx,
+        );
+        release.send(()).expect("the unclaimed job was spawned");
+        let outcome = rx.recv().await.expect("the unclaimed job reports back");
+        assert_eq!(outcome.domain(), DispatchDomain::Vetting);
+        assert!(
+            in_flight.is_busy(DispatchDomain::Vetting),
+            "spawning does not touch the held claim"
+        );
     }
 
     /// The busy message names the domain so the UI tells the user *what* is

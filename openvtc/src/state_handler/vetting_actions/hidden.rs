@@ -15,7 +15,7 @@ use super::desk::session_id_of;
 use super::dispatch::{page, persist, status};
 use super::jobs::Sent;
 use super::pcs::start_pcs_work;
-use super::send::{abandon, persona_did, sign_and_send};
+use super::send::{Claim, abandon, persona_did, sign_and_send};
 use super::words::{community_display, outlook_words};
 use crate::state_handler::background_dispatch::{DispatchDomain, InFlight};
 use crate::state_handler::hidden_vetting_vta::PcsWork;
@@ -69,7 +69,7 @@ pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &
         community: app.community.clone(),
         kind: QueryKind::PcsChallenge,
     };
-    if let Err(e) = sign_and_send(ctx, app.persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, app.persona, document, sent, Claim::Unheld).await {
         abandon(ctx, "Could not ask for a submission challenge", e);
     }
 }

@@ -19,7 +19,7 @@ use super::dispatch::{page, persist, status};
 use super::hidden::{attest_hidden, hidden_vetting_tick};
 use super::jobs::Sent;
 use super::pcs::start_pcs_work;
-use super::send::{abandon, begin, persona_did, resolver, sign_and_send, spawn_send};
+use super::send::{Claim, abandon, begin, persona_did, resolver, sign_and_send, spawn_send};
 use super::words::{community_display, hidden_without_id_words, hides_vetters};
 use crate::state_handler::main_page::content::{
     AttestForm, VETTING_METHODS, VETTING_RELATIONSHIPS, VETTING_WITHDRAWAL_REASONS, VettingMode,
@@ -71,7 +71,7 @@ pub(super) async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, meth
         let sent = Sent::Manifest {
             community: entry.community.clone(),
         };
-        if let Err(e) = sign_and_send(ctx, entry.persona, document, sent).await {
+        if let Err(e) = sign_and_send(ctx, entry.persona, document, sent, Claim::Held).await {
             abandon(ctx, "Could not ask the community", e);
         }
         return;
@@ -158,7 +158,7 @@ pub(super) async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, meth
     };
     let from = document.issuer.clone().unwrap_or_default();
     let to = document.recipient.clone().unwrap_or_default();
-    spawn_send(ctx, message, &from, &to, sent);
+    spawn_send(ctx, message, &from, &to, sent, Claim::Held);
 }
 
 /// Keep this account's vetter side current with the communities it vets for: read each one's
@@ -271,7 +271,7 @@ async fn ask_bindings(ctx: &mut ActionCtx<'_>) {
             community: community.clone(),
             kind: QueryKind::PcsBinding,
         };
-        if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
+        if let Err(e) = sign_and_send(ctx, persona, document, sent, Claim::Unheld).await {
             status(
                 ctx,
                 Status::error(format!(
@@ -350,7 +350,7 @@ async fn refresh_vetter_communities(ctx: &mut ActionCtx<'_>, only_stale: bool) {
         };
         let now = Utc::now();
         ctx.config.private.vetting.mode_asked(&community, now);
-        match sign_and_send(ctx, persona, document, sent).await {
+        match sign_and_send(ctx, persona, document, sent, Claim::Unheld).await {
             Ok(()) => ctx.config.private.vetting.vetter_refresh_failures = 0,
             Err(e) => {
                 tracing::warn!(community = %community, error = %e, "could not ask a community what it requires");
@@ -546,7 +546,14 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
         statement_id: issued.id,
         previous: entry.state.clone(),
     };
-    spawn_send(ctx, message, &vetter_did, &entry.applicant, sent);
+    spawn_send(
+        ctx,
+        message,
+        &vetter_did,
+        &entry.applicant,
+        sent,
+        Claim::Held,
+    );
 }
 
 /// Decline a desk request, with the reason and note the vetter chose — both
@@ -594,7 +601,7 @@ pub(super) async fn decline(
         request_id: request_id.to_string(),
         previous: entry.state.clone(),
     };
-    if let Err(e) = sign_and_send(ctx, entry.persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, entry.persona, document, sent, Claim::Held).await {
         if let Some(desk) = ctx.config.private.vetting.desk_entry_mut(request_id) {
             desk.state = entry.state;
         }
@@ -649,7 +656,7 @@ pub(super) async fn withdraw(ctx: &mut ActionCtx<'_>, statement_id: &str, reason
     let sent = Sent::Withdrawal {
         statement_id: statement_id.to_string(),
     };
-    if let Err(e) = sign_and_send(ctx, issued.persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, issued.persona, document, sent, Claim::Held).await {
         if let Some(s) = ctx
             .config
             .private

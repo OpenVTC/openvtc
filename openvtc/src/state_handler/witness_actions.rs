@@ -221,6 +221,16 @@ pub(crate) fn prepare(
     })
 }
 
+impl crate::state_handler::background_dispatch::Job for WitnessJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Witness
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Witness(self.run().await)
+    }
+}
+
 impl WitnessJob {
     /// The round. I/O only.
     pub(crate) async fn run(self) -> WitnessOutcome {

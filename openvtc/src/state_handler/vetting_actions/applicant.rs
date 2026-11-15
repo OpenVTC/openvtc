@@ -14,7 +14,7 @@ use vta_sdk::protocols::vetting::{VETTING_REQUEST_TYPE, request};
 
 use super::dispatch::{back, page, persist, status};
 use super::jobs::Sent;
-use super::send::{abandon, begin, persona_did, sign_and_send};
+use super::send::{Claim, abandon, begin, persona_did, sign_and_send};
 use super::words::community_display;
 use crate::state_handler::main_page::content::{
     DIRECTORY_LABELS, DIRECTORY_METHODS, DirectoryView, VettingMode, VettingTab, row_of,
@@ -148,7 +148,7 @@ pub(super) async fn refresh_requirements(ctx: &mut ActionCtx<'_>, application_id
     let sent = Sent::Manifest {
         community: app.community.clone(),
     };
-    if let Err(e) = sign_and_send(ctx, app.persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, app.persona, document, sent, Claim::Held).await {
         abandon(ctx, "Could not ask the community", e);
     }
 }
@@ -364,7 +364,7 @@ pub(super) async fn request_vetter(
         document_id: document_id.clone(),
         vetter: vetter.to_string(),
     };
-    if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, persona, document, sent, Claim::Held).await {
         if let Some(app) = ctx
             .config
             .private
@@ -524,7 +524,7 @@ pub(super) async fn search_directory(ctx: &mut ActionCtx<'_>, cursors: Vec<Optio
         community: target.community.clone(),
         kind: QueryKind::VetterList,
     };
-    if let Err(e) = sign_and_send(ctx, target.persona, document, sent).await {
+    if let Err(e) = sign_and_send(ctx, target.persona, document, sent, Claim::Held).await {
         ctx.config.private.vetting.forget_query(&document_id);
         if let VettingMode::Directory(view) = &mut page(ctx).mode {
             view.pending = None;

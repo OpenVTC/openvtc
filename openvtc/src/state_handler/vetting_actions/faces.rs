@@ -2,7 +2,6 @@
 //! VTA, saving attributes for them, and sending the vetting card.
 
 use crate::state_handler::main_page::status::Status;
-use std::future::Future;
 
 use chrono::Utc;
 use openvtc_core::config::Config;
@@ -15,9 +14,7 @@ use vta_sdk::client::VtaClient;
 
 use super::dispatch::{card_mode, page, status};
 use super::jobs::{CardJob, CardStep, FaceJob, Presenting};
-use super::outcome::VettingOutcome;
-use super::send::{abandon, begin, resolver};
-use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome};
+use super::send::{Claim, abandon, begin, resolver, spawn};
 use crate::state_handler::main_page::content::{
     CardPreview, FaceChoice, NewFaceForm, NewFaceStep, PoolRow, VettingMode,
 };
@@ -95,7 +92,7 @@ pub(super) fn open_new_face(ctx: &mut ActionCtx<'_>, application_id: &str, requi
             .claim_types
             .clone(),
     };
-    spawn_job(ctx, job.run());
+    spawn(ctx, job, Claim::Held);
 }
 
 /// Enter on the make-a-face form: save a value typed in place, or create the
@@ -139,7 +136,7 @@ pub(super) fn create_face(ctx: &mut ActionCtx<'_>, mut form: NewFaceForm) {
         name,
         live_refs,
     };
-    spawn_job(ctx, job.run());
+    spawn(ctx, job, Claim::Held);
 }
 
 /// Save a value typed on the make-a-face form as an attribute of its own.
@@ -177,7 +174,7 @@ fn save_attribute(
             .claim_types
             .clone(),
     };
-    spawn_job(ctx, job.run());
+    spawn(ctx, job, Claim::Held);
 }
 
 /// The claim types any open session names as optional, for the make-a-face
@@ -316,14 +313,6 @@ pub(super) fn application_context(
     Ok((id, join_did))
 }
 
-fn spawn_job(ctx: &mut ActionCtx<'_>, job: impl Future<Output = VettingOutcome> + Send + 'static) {
-    background_dispatch::spawn_dispatch(
-        ctx.dispatch_tx.clone(),
-        DispatchDomain::Vetting,
-        async move { DispatchOutcome::Vetting(job.await) },
-    );
-}
-
 /// Read the holder's faces, and which one the application wears.
 pub(super) fn list_faces(ctx: &mut ActionCtx<'_>, application_id: &str) {
     let Some(client) = admin_client(ctx) else {
@@ -343,7 +332,7 @@ pub(super) fn list_faces(ctx: &mut ActionCtx<'_>, application_id: &str) {
         persona_did,
         application_id: application_id.to_string(),
     };
-    spawn_job(ctx, job.run());
+    spawn(ctx, job, Claim::Held);
 }
 
 /// Wear `face` in the application's context.
@@ -385,7 +374,7 @@ pub(super) fn wear_face(ctx: &mut ActionCtx<'_>, application_id: &str, face: Opt
         application_id: application_id.to_string(),
         face,
     };
-    spawn_job(ctx, job.run());
+    spawn(ctx, job, Claim::Held);
 }
 
 /// The card for `session_id`, in two steps: preview what the face would show
@@ -477,11 +466,12 @@ pub(super) async fn send_card(
         session_id: session_id.to_string(),
         step,
     };
-    spawn_job(ctx, job.run());
+    spawn(ctx, job, Claim::Held);
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::outcome::VettingOutcome;
     use super::*;
     use crate::state_handler::dispatch_util::test_config;
     use crate::state_handler::main_page::content::NewFaceFocus;

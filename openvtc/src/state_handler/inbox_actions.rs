@@ -312,6 +312,16 @@ pub(crate) enum InboxJob {
     Send(InboxSend),
 }
 
+impl crate::state_handler::background_dispatch::Job for InboxJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Inbox
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Inbox(self.run().await)
+    }
+}
+
 impl InboxJob {
     pub(crate) async fn run(self) -> InboxOutcome {
         match self {
@@ -991,8 +1001,8 @@ pub(crate) enum InboxDispatch {
 }
 
 /// Whether an `InboxAction` is a network-bound action the loop should run
-/// off-thread (claiming the `Inbox` busy-domain first). Checked *before*
-/// `dispatch` does any pre-send config mutation.
+/// off-thread on the `Inbox` busy-domain. The loop checks that domain is free
+/// *before* `dispatch` does any pre-send config mutation.
 pub(crate) fn is_network(action: &InboxAction) -> bool {
     matches!(
         action,
@@ -1009,7 +1019,7 @@ pub(crate) fn is_network(action: &InboxAction) -> bool {
 /// network actions do their loop-thread pre-send work and return
 /// [`InboxDispatch::Spawn`] for the loop to run off-thread (post-send mutation in
 /// [`InboxOutcome::apply`]). A pre-send failure is recorded as a status and
-/// returns `Handled` (no job spawned → the loop releases the busy-domain).
+/// returns `Handled` (no job, so nothing claims the busy-domain).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch(
     action: InboxAction,

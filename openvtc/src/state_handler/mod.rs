@@ -1422,11 +1422,12 @@ impl StateHandler {
                         let domain = background_dispatch::DispatchDomain::Did;
                         match (join_ctx.as_mut(), messaging) {
                             (Some(ctx), Some(service)) => {
-                                if !in_flight.try_begin(domain) {
+                                if in_flight.is_busy(domain) {
                                     let msg = background_dispatch::InFlight::busy_message(domain);
                                     state.main_page.log(msg);
                                 } else {
                                     let av = ctx.admin_vta.clone();
+                                    // `None`: a guard rejected it (logged inline).
                                     if let Some(job) = prepare_delete_context_did(
                                         state,
                                         &mut ctx.config,
@@ -1434,18 +1435,12 @@ impl StateHandler {
                                         service,
                                         i,
                                     ) {
-                                        background_dispatch::spawn_dispatch(
-                                            dispatch_tx.clone(),
-                                            domain,
-                                            async move {
-                                                background_dispatch::DispatchOutcome::Did(
-                                                    job.run().await,
-                                                )
-                                            },
+                                        background_dispatch::dispatch(
+                                            job,
+                                            &mut in_flight,
+                                            &dispatch_tx,
+                                            |msg| state.main_page.log(msg),
                                         );
-                                    } else {
-                                        // A guard rejected it (logged inline).
-                                        in_flight.finish(domain);
                                     }
                                 }
                             }

@@ -112,7 +112,15 @@ inbox accept/reject, context-DID delete):
    `on_busy` gets the busy message, to show or to remember as a deferred
    retry — a second action is rejected or deferred, never run alongside. Work
    due only once the claim succeeded (locking an overlay, arming a view on a
-   thread id) is done by the caller when `dispatch` returns `true`.
+   thread id) is done by the caller when `dispatch` returns `true`. Where
+   building the job itself changes state (inbox and relationship sends,
+   identity removal, a VRC request, a witnessing, a mediator reconnect, the
+   vetting sends), the caller first checks `InFlight::is_busy` and prepares
+   only when the domain is free; the loop runs one arm at a time, so the
+   claim `dispatch` then makes cannot be lost in between.
+   `background_dispatch::spawn_unclaimed` runs a job without claiming: for
+   work the client starts on its own (a revocation check, a step of hidden
+   vetting) that must never be refused or block a person's job.
 3. The job returns a `DispatchOutcome` over an mpsc the loop owns. The dedicated
    `Some(outcome) = dispatch_rx.recv()` arm calls `apply_outcome`, which mutates
    `State`/`Config` **on the loop thread** and clears the busy-flag. Mutation

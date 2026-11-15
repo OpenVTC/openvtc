@@ -70,6 +70,24 @@ pub(crate) struct ActionCtx<'a> {
     pub(crate) pending_replies: &'a mut openvtc_core::pending_replies::PendingReplies,
 }
 
+/// Say an Inbox network action was refused because one is in flight.
+fn inbox_busy(state: &mut State, msg: String) {
+    state.main_page.content_panel.inbox.status_message = Some(Status::warning(msg.clone()));
+    state.main_page.log(msg);
+}
+
+/// Say a relationship network action was refused because one is in flight.
+fn relationship_busy(state: &mut State, msg: String) {
+    state.main_page.content_panel.relationships.status_message = Some(Status::warning(msg.clone()));
+    state.main_page.log(msg);
+}
+
+/// Say a mediator reconnect was refused because one is still connecting.
+fn mediator_busy(state: &mut State, msg: String) {
+    state.connection.status = state::MediatorStatus::Connecting;
+    state.main_page.log(msg);
+}
+
 /// What the loop must do after an action was handled.
 pub(crate) enum Handled {
     /// Carry on.
@@ -818,13 +836,13 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         }
         Action::DeleteDid(i) => {
             // Identity deletion does a VTA `delete_did_webvh` + listener
-            // teardown (R14): claim the Did domain, run the guards +
-            // extraction on-thread, then spawn the I/O; local ctx.config
-            // cleanup + ctx.save apply on the outcome. Guard failures (DID
-            // bound to a community, not found) are surfaced inline and
-            // spawn nothing.
+            // teardown (R14). The Did domain must be free before the guards
+            // and extraction run on-thread (they change state); the job then
+            // claims it and does the I/O, and local config cleanup + save
+            // apply on the outcome. Guard failures (DID bound to a community,
+            // not found) are surfaced inline and spawn nothing.
             let domain = background_dispatch::DispatchDomain::Did;
-            if !ctx.in_flight.try_begin(domain) {
+            if ctx.in_flight.is_busy(domain) {
                 let msg = background_dispatch::InFlight::busy_message(domain);
                 ctx.state.main_page.log(msg);
             } else if let Some(job) = prepare_delete_context_did(
@@ -834,12 +852,9 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 ctx.didcomm_service,
                 i,
             ) {
-                background_dispatch::spawn_dispatch(ctx.dispatch_tx.clone(), domain, async move {
-                    background_dispatch::DispatchOutcome::Did(job.run().await)
+                background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |msg| {
+                    ctx.state.main_page.log(msg)
                 });
-            } else {
-                // Guard rejected the delete (logged inline); release.
-                ctx.in_flight.finish(domain);
             }
         }
         Action::CreatePersonaSubmit => {
@@ -975,45 +990,33 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         }
         Action::Inbox(ia) => {
             // Network inbox actions (accept/reject relationship or VRC
-            // request) run off the loop (R14): claim the Inbox domain,
-            // do the loop-thread pre-send work, then spawn the send;
-            // the outcome arm applies the post-send mutation. A second
-            // inbox network action while one is in flight is rejected
-            // with a status. Local actions run inline as before.
+            // request) run off the loop (R14): the Inbox domain must be
+            // free before the loop-thread pre-send work runs; the job then
+            // claims it for the send, and the outcome arm applies the
+            // post-send mutation. A second inbox network action while one
+            // is in flight is rejected with a status. Local actions run
+            // inline.
             if inbox_actions::is_network(&ia) {
                 let domain = background_dispatch::DispatchDomain::Inbox;
-                if !ctx.in_flight.try_begin(domain) {
+                if ctx.in_flight.is_busy(domain) {
                     let msg = background_dispatch::InFlight::busy_message(domain);
-                    ctx.state.main_page.content_panel.inbox.status_message =
-                        Some(Status::warning(msg.clone()));
-                    ctx.state.main_page.log(msg);
-                } else {
-                    match inbox_actions::dispatch(
-                        ia,
-                        ctx.config,
-                        ctx.tdk,
-                        ctx.didcomm_service,
-                        ctx.state,
-                        ctx.save,
-                        ctx.admin_vta,
-                    )
-                    .await
-                    {
-                        inbox_actions::InboxDispatch::Spawn(job) => {
-                            background_dispatch::spawn_dispatch(
-                                ctx.dispatch_tx.clone(),
-                                domain,
-                                async move {
-                                    background_dispatch::DispatchOutcome::Inbox(job.run().await)
-                                },
-                            );
-                        }
-                        // Pre-send failure recorded a status; nothing
-                        // was spawned, so release the domain now.
-                        inbox_actions::InboxDispatch::Handled => {
-                            ctx.in_flight.finish(domain);
-                        }
-                    }
+                    inbox_busy(ctx.state, msg);
+                } else if let inbox_actions::InboxDispatch::Spawn(job) = inbox_actions::dispatch(
+                    ia,
+                    ctx.config,
+                    ctx.tdk,
+                    ctx.didcomm_service,
+                    ctx.state,
+                    ctx.save,
+                    ctx.admin_vta,
+                )
+                .await
+                {
+                    // A pre-send failure (`Handled`) recorded a status and
+                    // spawned nothing.
+                    background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |msg| {
+                        inbox_busy(ctx.state, msg)
+                    });
                 }
             } else {
                 let _ = inbox_actions::dispatch(
@@ -1036,7 +1039,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
             share_membership,
         }) => {
             let domain = background_dispatch::DispatchDomain::Witness;
-            if !ctx.in_flight.try_begin(domain) {
+            if ctx.in_flight.is_busy(domain) {
                 let msg = background_dispatch::InFlight::busy_message(domain);
                 ctx.state
                     .main_page
@@ -1063,14 +1066,15 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         .relationships
                         .status_message =
                         Some(Status::progress("Starting the witnessing…".to_string()));
-                    background_dispatch::spawn_dispatch(
-                        ctx.dispatch_tx.clone(),
-                        domain,
-                        async move { DispatchOutcome::Witness(job.run().await) },
-                    );
+                    background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |msg| {
+                        ctx.state
+                            .main_page
+                            .content_panel
+                            .relationships
+                            .status_message = Some(Status::warning(msg));
+                    });
                 }
                 Err(reason) => {
-                    ctx.in_flight.finish(domain);
                     ctx.state
                         .main_page
                         .content_panel
@@ -1081,22 +1085,17 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         }
         Action::Relationship(ra) => {
             // Network relationship actions (create/ping/remove/request
-            // VRC) run off the loop (R14). Same pattern as Inbox: claim
-            // the Relationship domain, prepare on-thread, spawn the I/O,
-            // apply the outcome later. `is_ping` stamps `ping_sent_at`
-            // for pong-latency display.
+            // VRC) run off the loop (R14). Same pattern as Inbox: the
+            // Relationship domain must be free, then prepare on-thread,
+            // dispatch the I/O, apply the outcome later. `is_ping` stamps
+            // `ping_sent_at` for pong-latency display.
             if relationship_actions::is_network(&ra) {
                 let domain = background_dispatch::DispatchDomain::Relationship;
-                if !ctx.in_flight.try_begin(domain) {
+                if ctx.in_flight.is_busy(domain) {
                     let msg = background_dispatch::InFlight::busy_message(domain);
-                    ctx.state
-                        .main_page
-                        .content_panel
-                        .relationships
-                        .status_message = Some(Status::warning(msg.clone()));
-                    ctx.state.main_page.log(msg);
-                } else {
-                    match relationship_actions::dispatch(
+                    relationship_busy(ctx.state, msg);
+                } else if let relationship_actions::RelationshipDispatch::Spawn { job, is_ping } =
+                    relationship_actions::dispatch(
                         ra,
                         ctx.config,
                         ctx.tdk,
@@ -1106,25 +1105,13 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         ctx.admin_vta,
                     )
                     .await
-                    {
-                        relationship_actions::RelationshipDispatch::Spawn { job, is_ping } => {
-                            if is_ping {
-                                *ctx.ping_sent_at = Some(std::time::Instant::now());
-                            }
-                            background_dispatch::spawn_dispatch(
-                                ctx.dispatch_tx.clone(),
-                                domain,
-                                async move {
-                                    background_dispatch::DispatchOutcome::Relationship(
-                                        job.run().await,
-                                    )
-                                },
-                            );
-                        }
-                        relationship_actions::RelationshipDispatch::Handled => {
-                            ctx.in_flight.finish(domain);
-                        }
+                {
+                    if is_ping {
+                        *ctx.ping_sent_at = Some(std::time::Instant::now());
                     }
+                    background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |msg| {
+                        relationship_busy(ctx.state, msg)
+                    });
                 }
             } else {
                 let _ = relationship_actions::dispatch(
@@ -1151,7 +1138,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
             } = &ca
             {
                 let domain = background_dispatch::DispatchDomain::Credential;
-                if !ctx.in_flight.try_begin(domain) {
+                if ctx.in_flight.is_busy(domain) {
                     ctx.state.main_page.content_panel.credentials.status_message = Some(
                         Status::warning(background_dispatch::InFlight::busy_message(domain)),
                     );
@@ -1161,13 +1148,11 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     relationship_p_did,
                     reason.as_deref(),
                 ) {
-                    background_dispatch::spawn_dispatch(
-                        ctx.dispatch_tx.clone(),
-                        domain,
-                        async move { background_dispatch::DispatchOutcome::Credential(job.run().await) },
-                    );
+                    background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |msg| {
+                        ctx.state.main_page.content_panel.credentials.status_message =
+                            Some(Status::warning(msg));
+                    });
                 } else {
-                    ctx.in_flight.finish(domain);
                     ctx.state.main_page.content_panel.credentials.status_message = Some(
                         Status::warning("That relationship is no longer available.".to_string()),
                     );
@@ -1206,37 +1191,23 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     // The busy-guard rejects a second reconnect while
                     // one is in flight (matching the old effectively
                     // serialised behaviour) with a visible status.
-                    if !ctx
-                        .in_flight
-                        .try_begin(background_dispatch::DispatchDomain::Mediator)
-                    {
-                        let msg = background_dispatch::InFlight::busy_message(
-                            background_dispatch::DispatchDomain::Mediator,
-                        );
-                        ctx.state.connection.status = state::MediatorStatus::Connecting;
-                        ctx.state.main_page.log(msg);
+                    let domain = background_dispatch::DispatchDomain::Mediator;
+                    if ctx.in_flight.is_busy(domain) {
+                        let msg = background_dispatch::InFlight::busy_message(domain);
+                        mediator_busy(ctx.state, msg);
                     } else {
-                        // Build the new listener ctx.config on the loop
+                        // Build the new listener config on the loop
                         // thread (cheap, local: reads secrets from the
                         // TDK resolver, no network), then hand only the
-                        // slow connect I/O to a background task.
-                        let listener_id = didcomm::persona_listener_id(ctx.config.persona_did());
-                        let new_listener_config =
-                            didcomm::persona_listener_config(ctx.config, ctx.tdk).await;
-                        let service = ctx.didcomm_service.clone();
-                        background_dispatch::spawn_dispatch(
-                            ctx.dispatch_tx.clone(),
-                            background_dispatch::DispatchDomain::Mediator,
-                            async move {
-                                let outcome = didcomm::reconnect_persona_listener_io(
-                                    &service,
-                                    listener_id,
-                                    new_listener_config,
-                                )
-                                .await;
-                                background_dispatch::DispatchOutcome::MediatorReconnect(outcome)
-                            },
-                        );
+                        // slow connect I/O to a background job.
+                        let job = settings_actions::MediatorReconnectJob {
+                            service: ctx.didcomm_service.clone(),
+                            listener_id: didcomm::persona_listener_id(ctx.config.persona_did()),
+                            listener: didcomm::persona_listener_config(ctx.config, ctx.tdk).await,
+                        };
+                        background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |msg| {
+                            mediator_busy(ctx.state, msg)
+                        });
                     }
                 }
             }
@@ -2218,5 +2189,165 @@ mod tests {
             "{:?}",
             comms.status_message
         );
+    }
+
+    // ---- Claim first, prepare second ----
+    //
+    // A network action whose preparation changes state checks its domain is
+    // free before preparing, and its job claims the domain only when it is
+    // dispatched. A refused preparation therefore leaves the domain free, and a
+    // busy domain is refused before anything is prepared.
+
+    use background_dispatch::DispatchDomain;
+
+    /// A busy Inbox is refused out loud, and the running job keeps its claim.
+    #[tokio::test]
+    async fn a_busy_inbox_refuses_before_preparing() {
+        let mut h = Harness::new(false).await;
+        assert!(h.in_flight.try_begin(DispatchDomain::Inbox));
+
+        h.handle(Action::Inbox(actions::InboxAction::RejectRelationship {
+            task_id: "missing".into(),
+            reason: None,
+        }))
+        .await;
+
+        assert!(h.in_flight.is_busy(DispatchDomain::Inbox));
+        let status = h
+            .state
+            .main_page
+            .content_panel
+            .inbox
+            .status_message
+            .as_ref();
+        assert_eq!(
+            status.map(|s| s.text.as_str()),
+            Some(InFlight::busy_message(DispatchDomain::Inbox).as_str())
+        );
+        assert!(h.dispatch_rx.try_recv().is_err(), "nothing was spawned");
+    }
+
+    /// An Inbox action whose preparation fails spawns nothing and leaves the
+    /// domain free for the next one.
+    #[tokio::test]
+    async fn a_refused_inbox_preparation_claims_nothing() {
+        let mut h = Harness::new(false).await;
+
+        h.handle(Action::Inbox(actions::InboxAction::RejectRelationship {
+            task_id: "missing".into(),
+            reason: None,
+        }))
+        .await;
+
+        assert!(!h.in_flight.is_busy(DispatchDomain::Inbox));
+        assert!(h.dispatch_rx.try_recv().is_err(), "nothing was spawned");
+    }
+
+    /// A VRC request to a relationship that is gone claims nothing and says so;
+    /// with the domain busy it is refused with the busy message instead.
+    #[tokio::test]
+    async fn a_vrc_request_claims_only_when_it_is_sent() {
+        let request = || {
+            Action::Credential(actions::CredentialAction::SubmitRequest {
+                relationship_p_did: "did:example:gone".into(),
+                reason: None,
+            })
+        };
+        let mut h = Harness::new(false).await;
+        h.handle(request()).await;
+        assert!(!h.in_flight.is_busy(DispatchDomain::Credential));
+        assert!(
+            h.state
+                .main_page
+                .content_panel
+                .credentials
+                .status_message
+                .as_ref()
+                .is_some_and(|s| s.text.contains("no longer available"))
+        );
+
+        let mut h = Harness::new(false).await;
+        assert!(h.in_flight.try_begin(DispatchDomain::Credential));
+        h.handle(request()).await;
+        assert_eq!(
+            h.state
+                .main_page
+                .content_panel
+                .credentials
+                .status_message
+                .as_ref()
+                .map(|s| s.text.as_str()),
+            Some(InFlight::busy_message(DispatchDomain::Credential).as_str())
+        );
+    }
+
+    /// Removing an identity the guards refuse claims nothing.
+    #[tokio::test]
+    async fn a_refused_identity_removal_claims_nothing() {
+        let mut h = Harness::new(true).await;
+
+        h.handle(Action::DeleteDid(7)).await;
+
+        assert!(!h.in_flight.is_busy(DispatchDomain::Did));
+        assert!(h.dispatch_rx.try_recv().is_err(), "nothing was spawned");
+    }
+
+    /// A reconnect claims the mediator domain through its job; a second one
+    /// while it runs is refused and leaves the header connecting.
+    #[tokio::test]
+    async fn a_mediator_reconnect_is_a_claimed_job() {
+        let mut h = Harness::new(false).await;
+        h.handle(Action::Settings(actions::SettingsAction::ReconnectMediator))
+            .await;
+        assert!(h.in_flight.is_busy(DispatchDomain::Mediator));
+
+        h.handle(Action::Settings(actions::SettingsAction::ReconnectMediator))
+            .await;
+        assert!(matches!(
+            h.state.connection.status,
+            state::MediatorStatus::Connecting
+        ));
+        let busy = InFlight::busy_message(DispatchDomain::Mediator);
+        assert!(
+            h.state
+                .main_page
+                .activity_log
+                .iter()
+                .any(|e| e.summary.contains(&busy)),
+            "the refusal is logged"
+        );
+    }
+
+    /// A vetting job a person starts claims the vetting domain when it is
+    /// dispatched; with the domain busy it is refused before anything changes.
+    #[tokio::test]
+    async fn a_vetting_job_claims_its_domain_when_dispatched() {
+        use crate::state_handler::main_page::content::VettingMode;
+        let choose_new_face = |h: &mut Harness| {
+            h.state.main_page.content_panel.vetting.mode = VettingMode::ChooseFace {
+                application_id: "app-1".into(),
+                faces: Vec::new(),
+                index: 0,
+                required: Vec::new(),
+            };
+        };
+
+        let mut h = Harness::new(true).await;
+        choose_new_face(&mut h);
+        h.handle(Action::Vetting(actions::VettingAction::Submit))
+            .await;
+        assert!(h.in_flight.is_busy(DispatchDomain::Vetting));
+
+        let mut h = Harness::new(true).await;
+        choose_new_face(&mut h);
+        assert!(h.in_flight.try_begin(DispatchDomain::Vetting));
+        h.handle(Action::Vetting(actions::VettingAction::Submit))
+            .await;
+        let v = &h.state.main_page.content_panel.vetting;
+        assert_eq!(
+            v.status_message.as_ref().map(|s| s.text.as_str()),
+            Some(InFlight::busy_message(DispatchDomain::Vetting).as_str())
+        );
+        assert!(h.dispatch_rx.try_recv().is_err(), "nothing was spawned");
     }
 }

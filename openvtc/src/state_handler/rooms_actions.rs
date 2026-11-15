@@ -193,17 +193,35 @@ fn ask_vta(lp: &mut Loop<'_>, ask: VtaAsk) -> bool {
     else {
         return false;
     };
-    if !lp.in_flight.try_begin(KEYS) {
-        return false;
+    let job = VtaJob {
+        vta,
+        vtc_did,
+        persona,
+        ask,
+    };
+    background_dispatch::dispatch(job, lp.in_flight, lp.dispatch_tx, |_| {})
+}
+
+/// One question for the VTA about the open community's room keys.
+struct VtaJob {
+    vta: VtaClient,
+    vtc_did: String,
+    persona: PersonaId,
+    ask: VtaAsk,
+}
+
+impl background_dispatch::Job for VtaJob {
+    fn domain(&self) -> DispatchDomain {
+        KEYS
     }
-    background_dispatch::spawn_dispatch(lp.dispatch_tx.clone(), KEYS, async move {
+
+    async fn execute(self) -> DispatchOutcome {
         DispatchOutcome::RoomsVta(RoomsVtaOutcome {
-            vtc_did,
-            persona,
-            answer: ask.run(&vta).await,
+            vtc_did: self.vtc_did,
+            persona: self.persona,
+            answer: self.ask.run(&self.vta).await,
         })
-    });
-    true
+    }
 }
 
 /// Read the community's record and the VTA's custody again.

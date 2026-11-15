@@ -314,6 +314,16 @@ impl CreateJob {
     }
 }
 
+impl crate::state_handler::background_dispatch::Job for RelationshipJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Relationship
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Relationship(self.run().await)
+    }
+}
+
 impl RelationshipJob {
     /// Run the network I/O (send, or listener teardown) and package the result
     /// for the loop. Called inside the spawned task; never touches `Config`/`TDK`.
@@ -735,6 +745,16 @@ pub(crate) struct DidDeleteJob {
     pub(crate) did: String,
     pub(crate) persona_id: openvtc_core::config::account::PersonaId,
     pub(crate) key_ids: Vec<String>,
+}
+
+impl crate::state_handler::background_dispatch::Job for DidDeleteJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Did
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Did(self.run().await)
+    }
 }
 
 impl DidDeleteJob {
@@ -1251,8 +1271,8 @@ pub(crate) enum RelationshipDispatch {
 }
 
 /// Whether a `RelationshipAction` is a network-bound action that the loop should
-/// run off-thread (claiming the `Relationship` busy-domain first). Lets the loop
-/// reject a busy domain *before* `dispatch` does any pre-send config mutation.
+/// run off-thread on the `Relationship` busy-domain. Lets the loop reject a
+/// busy domain *before* `dispatch` does any pre-send config mutation.
 /// Open the witness prompt. Membership off every time it opens: a member's identity goes to a
 /// witness only when chosen for that one witnessing, and the choice is never carried over.
 fn handle_start_witness(state: &mut State, index: usize) {
@@ -1293,8 +1313,8 @@ pub(crate) fn is_network(action: &RelationshipAction) -> bool {
 /// add, R-DID path reservation, message build) and return
 /// [`RelationshipDispatch::Spawn`] for the loop to run off-thread; the post-send
 /// config mutation is applied later by [`RelationshipOutcome::apply`]. A pre-send
-/// failure is recorded as a status here and returns `Handled` (no job spawned, so
-/// the loop releases the busy-domain immediately).
+/// failure is recorded as a status here and returns `Handled` (no job, so
+/// nothing claims the busy-domain).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch(
     action: RelationshipAction,

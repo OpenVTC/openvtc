@@ -420,11 +420,21 @@ pub(crate) fn probe_if_due(
         identity,
         forge_hosts,
     };
-    if !in_flight.try_begin(PROBE) {
-        return;
+    if background_dispatch::dispatch(ProbeJob(input), in_flight, dispatch_tx, |_| {}) {
+        view.workspace.probe_wanted = None;
     }
-    view.workspace.probe_wanted = None;
-    background_dispatch::spawn_dispatch(dispatch_tx.clone(), PROBE, async move {
+}
+
+/// One probe of the workspace, run on a blocking thread.
+struct ProbeJob(ProbeInput);
+
+impl background_dispatch::Job for ProbeJob {
+    fn domain(&self) -> DispatchDomain {
+        PROBE
+    }
+
+    async fn execute(self) -> DispatchOutcome {
+        let input = self.0;
         let vtc_did = input.vtc_did.clone();
         let persona = input.persona;
         let outcome = tokio::task::spawn_blocking(move || run_probe(input))
@@ -437,7 +447,7 @@ pub(crate) fn probe_if_due(
                 forges: HashMap::new(),
             });
         DispatchOutcome::WorkspaceProbe(outcome)
-    });
+    }
 }
 
 // ****************************************************************************

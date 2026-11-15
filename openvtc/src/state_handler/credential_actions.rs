@@ -25,6 +25,16 @@ pub(crate) struct VrcRequestJob {
     pub(crate) msg_id: Arc<String>,
 }
 
+impl crate::state_handler::background_dispatch::Job for VrcRequestJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Credential
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Credential(self.run().await)
+    }
+}
+
 impl VrcRequestJob {
     /// Send it. I/O only.
     pub(crate) async fn run(self) -> VrcRequestOutcome {

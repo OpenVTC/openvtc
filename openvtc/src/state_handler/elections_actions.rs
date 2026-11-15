@@ -341,24 +341,46 @@ fn ask_vta(lp: &mut Loop<'_>, ask: VtaAsk) -> bool {
         );
         return true;
     };
-    if !lp.in_flight.try_begin(VTA) {
-        return false;
+    let job = VtaJob {
+        vta,
+        context_id,
+        target,
+        vtc_did,
+        persona,
+        ask,
+    };
+    background_dispatch::dispatch(job, lp.in_flight, lp.dispatch_tx, |_| {})
+}
+
+/// One question for the VTA, about the open election's community.
+struct VtaJob {
+    vta: vta_sdk::client::VtaClient,
+    context_id: String,
+    /// The registrar: the community holding the election.
+    target: String,
+    vtc_did: String,
+    persona: PersonaId,
+    ask: VtaAsk,
+}
+
+impl background_dispatch::Job for VtaJob {
+    fn domain(&self) -> DispatchDomain {
+        VTA
     }
-    background_dispatch::spawn_dispatch(lp.dispatch_tx.clone(), VTA, async move {
-        // The registrar is the community holding the election.
+
+    async fn execute(self) -> DispatchOutcome {
         let voter = Voter {
-            vta: &vta,
-            context_id: &context_id,
-            community: &target,
+            vta: &self.vta,
+            context_id: &self.context_id,
+            community: &self.target,
         };
-        let answer = ask.run(&voter).await;
+        let answer = self.ask.run(&voter).await;
         DispatchOutcome::ElectionsVta(ElectionsVtaOutcome {
-            vtc_did,
-            persona,
+            vtc_did: self.vtc_did,
+            persona: self.persona,
             answer,
         })
-    });
-    true
+    }
 }
 
 /// Send the cast to the ballot box, after a random pause.
@@ -378,21 +400,45 @@ fn deliver(lp: &mut Loop<'_>, cast: Cast) -> bool {
     else {
         return true;
     };
-    if !lp.in_flight.try_begin(CAST) {
-        return false;
+    let job = CastJob {
+        resolver: lp.tdk.did_resolver().clone(),
+        ballot_box,
+        vtc_did,
+        persona,
+        cast,
+    };
+    background_dispatch::dispatch(job, lp.in_flight, lp.dispatch_tx, |_| {})
+}
+
+/// One cast on its way to the ballot box.
+struct CastJob {
+    resolver: affinidi_tdk::did_resolver::DIDCacheClient,
+    ballot_box: String,
+    vtc_did: String,
+    persona: PersonaId,
+    cast: Cast,
+}
+
+impl background_dispatch::Job for CastJob {
+    fn domain(&self) -> DispatchDomain {
+        CAST
     }
-    let resolver = lp.tdk.did_resolver().clone();
-    background_dispatch::spawn_dispatch(lp.dispatch_tx.clone(), CAST, async move {
-        let result =
-            elections::deliver_cast(&resolver, &ballot_box, &cast, elections::cast_delay()).await;
+
+    async fn execute(self) -> DispatchOutcome {
+        let result = elections::deliver_cast(
+            &self.resolver,
+            &self.ballot_box,
+            &self.cast,
+            elections::cast_delay(),
+        )
+        .await;
         DispatchOutcome::ElectionsCast(Box::new(ElectionsCastOutcome {
-            vtc_did,
-            persona,
-            cast,
+            vtc_did: self.vtc_did,
+            persona: self.persona,
+            cast: self.cast,
             result,
         }))
-    });
-    true
+    }
 }
 
 /// Read the list again, and the VTA's held election notifications beside it.

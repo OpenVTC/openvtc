@@ -630,6 +630,32 @@ impl background_dispatch::Job for DidGitSignJob {
     }
 }
 
+/// A mediator change or manual reconnect: replace the persona listener with
+/// `listener` and wait for it to connect. The listener is built on the loop
+/// (it reads secrets from the TDK, no network); only the connect runs here.
+pub(crate) struct MediatorReconnectJob {
+    pub(crate) service: openvtc_core::didcomm::Messaging,
+    pub(crate) listener_id: String,
+    pub(crate) listener: openvtc_core::didcomm::ListenerSpec,
+}
+
+impl background_dispatch::Job for MediatorReconnectJob {
+    fn domain(&self) -> DispatchDomain {
+        DispatchDomain::Mediator
+    }
+
+    async fn execute(self) -> DispatchOutcome {
+        DispatchOutcome::MediatorReconnect(
+            openvtc_core::didcomm::reconnect_persona_listener_io(
+                &self.service,
+                self.listener_id,
+                self.listener,
+            )
+            .await,
+        )
+    }
+}
+
 /// [`detect_did_git_sign_info`](crate::state_handler::main_page::detect_did_git_sign_info)
 /// on a blocking thread. A detection that panics reads as "not set up".
 pub(crate) async fn detect_did_git_sign_off_loop(
