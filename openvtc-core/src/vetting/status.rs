@@ -58,7 +58,7 @@ impl GrantCheck {
     /// kept the borrowed `&str` across its `.await` is not provably `Send` for
     /// every lifetime the SDK's `AsyncFn(&str)` may be called with.
     pub async fn run(&self, resolver: &DIDCacheClient) -> StatusCheck {
-        let client = match status_client(true, STATUS_FETCH_TIMEOUT) {
+        let client = match shared_status_client() {
             Ok(client) => client,
             Err(e) => return StatusCheck::Unknown(e),
         };
@@ -121,6 +121,22 @@ pub fn status_client(https_only: bool, timeout: Duration) -> Result<Client, Stri
     builder
         .build()
         .map_err(|e| format!("could not start an HTTP client to check the grant: {e}"))
+}
+
+/// The public-internet status client with [`STATUS_FETCH_TIMEOUT`], built once
+/// and reused, so repeated grant and credential checks share connections, TLS
+/// setup and the guarded DNS resolver rather than rebuilding them (R1.2).
+///
+/// # Errors
+///
+/// Only if the TLS backend cannot start.
+pub fn shared_status_client() -> Result<Client, String> {
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let client = status_client(true, STATUS_FETCH_TIMEOUT)?;
+    Ok(CLIENT.get_or_init(|| client).clone())
 }
 
 /// A status list URL this client will fetch: `https`, with a host that is not

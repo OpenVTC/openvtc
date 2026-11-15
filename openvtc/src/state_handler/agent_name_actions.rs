@@ -56,8 +56,6 @@ impl Verb {
 pub(crate) struct AgentNameJob {
     pub(crate) vta: VtaClient,
     pub(crate) persona_did: String,
-    /// Host the persona's DID is served from, for the display-cache entry.
-    pub(crate) host: String,
     pub(crate) verb: Verb,
 }
 
@@ -67,7 +65,6 @@ impl AgentNameJob {
     pub(crate) async fn run(self) -> AgentNameOutcome {
         let mut out = AgentNameOutcome {
             persona_did: self.persona_did.clone(),
-            host: self.host,
             message: None,
             log: None,
             names: None,
@@ -166,7 +163,6 @@ impl AgentNameJob {
 /// What the job learned. Data only; applied on the loop thread.
 pub(crate) struct AgentNameOutcome {
     persona_did: String,
-    host: String,
     /// Status line for the overlay.
     message: Option<String>,
     /// Activity-log line, for a mutation that actually landed.
@@ -193,18 +189,18 @@ impl AgentNameOutcome {
             .as_ref()
             .is_some_and(|o| o.persona_did == self.persona_did);
 
+        // A mutation landed: the persona's served names changed.
+        let changed = self.log.is_some();
         if let Some(line) = self.log {
             state.main_page.log(line);
         }
 
-        // Persisted display name: the first *served* name, host-qualified.
-        if let Some(Ok(names)) = self.names.as_ref() {
-            let cached = names
-                .iter()
-                .find(|n| n.enabled)
-                .filter(|_| !self.host.is_empty())
-                .map(|n| format!("{}/@{}", self.host, n.name));
-            config.set_cached_agent_name(&self.persona_did, cached, chrono::Utc::now());
+        // The displayed name is never taken from the registry: the registry
+        // says what the VTA will serve, not that the name resolves back to this
+        // DID. A change only forgets the cached name, so the background sweep
+        // re-verifies it with the full round-trip (`resolve_verified_name`)
+        // before it is shown again.
+        if changed && config.forget_cached_agent_name(&self.persona_did) {
             save.mark_dirty();
             state.main_page.sync_from_config(config);
         }
@@ -270,7 +266,6 @@ mod tests {
     fn outcome(names: Option<Result<Vec<AgentNameEntry>, String>>) -> AgentNameOutcome {
         AgentNameOutcome {
             persona_did: DID.to_string(),
-            host: "example.com".to_string(),
             message: None,
             log: None,
             names,
@@ -278,10 +273,10 @@ mod tests {
         }
     }
 
-    /// The happy path: rows land, the phase unlocks, and the first *served*
-    /// name becomes the persona's persisted display name.
+    /// The happy path: rows land and the phase unlocks. The registry is not
+    /// proof a name resolves, so no display name is taken from it (#571).
     #[test]
-    fn a_listing_populates_the_overlay_and_caches_the_served_name() {
+    fn a_listing_populates_the_overlay_and_caches_nothing() {
         let mut state = State::default();
         let mut config = test_config();
         let mut save = SaveScheduler::new("test");
@@ -297,8 +292,10 @@ mod tests {
         assert_eq!(o.phase, AgentNameManagerPhase::Ready);
         assert_eq!(o.names.len(), 2);
         assert!(!o.list_stale);
-        assert_eq!(config.agent_name_for(DID), Some("example.com/@alice"));
-        assert!(save.is_pending());
+        // Listing the registry is not verification: nothing is cached, and
+        // there is nothing to save.
+        assert_eq!(config.agent_name_for(DID), None);
+        assert!(!save.is_pending());
     }
 
     /// A failed read-back marks the registry unknown rather than rendering an
@@ -342,17 +339,37 @@ mod tests {
         assert_eq!(o.phase, AgentNameManagerPhase::Working);
     }
 
-    /// …but the persisted name still applies, because it is a fact about the
-    /// DID and not about what happens to be on screen.
+    /// …but forgetting the cached name still applies, because it is a fact
+    /// about the DID and not about what happens to be on screen.
     #[test]
-    fn the_cached_name_applies_even_with_the_overlay_closed() {
+    fn a_change_forgets_the_cached_name_even_with_the_overlay_closed() {
         let mut state = State::default();
         let mut config = test_config();
         let mut save = SaveScheduler::new("test");
+        config.set_cached_agent_name(DID, Some("example.com/@old".into()), chrono::Utc::now());
+
+        let mut changed = outcome(Some(Ok(vec![entry("alice", true)])));
+        changed.log = Some("Claimed agent name @alice".to_string());
+        changed.apply(&mut state, &mut config, &mut save);
+
+        assert!(state.main_page.agent_names.is_none());
+        assert_eq!(config.agent_name_for(DID), None);
+        assert!(
+            !config.private.agent_names.contains_key(DID),
+            "the sweep must see the DID as uncached"
+        );
+    }
+
+    /// Opening the overlay (no change) leaves a verified name alone.
+    #[test]
+    fn a_plain_listing_keeps_a_verified_name() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+        config.set_cached_agent_name(DID, Some("example.com/@alice".into()), chrono::Utc::now());
 
         outcome(Some(Ok(vec![entry("alice", true)]))).apply(&mut state, &mut config, &mut save);
 
-        assert!(state.main_page.agent_names.is_none());
         assert_eq!(config.agent_name_for(DID), Some("example.com/@alice"));
     }
 

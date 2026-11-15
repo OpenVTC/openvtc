@@ -1685,7 +1685,11 @@ pub fn cast_url(base: &str) -> String {
 /// cast), or the answer is a refusal or not a document.
 pub async fn post_cast(base: &str, cast: &Cast) -> Result<Value, CastError> {
     let url = cast_url(base);
-    let policy = vta_sdk::http::EndpointPolicy::process_default();
+    // Public hosts (and loopback) only, whatever the environment says:
+    // `process_default` would let `VTA_ALLOW_PRIVATE_ENDPOINTS` open the
+    // private-network guard in a release build, where OpenVTC's own overrides
+    // are confined to the `dev-overrides` feature.
+    let policy = vta_sdk::http::EndpointPolicy::public_only();
     vta_sdk::http::guard_foreign_url(&url, policy)
         .map_err(|e| CastError::Blocked(e.to_string()))?;
     let body =
@@ -1698,10 +1702,17 @@ pub async fn post_cast(base: &str, cast: &Cast) -> Result<Value, CastError> {
         .await
         .map_err(|e| CastError::Unreachable(e.to_string()))?;
     let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|e| CastError::Unreachable(e.to_string()))?;
+    // The cast has been delivered by now, so an oversize answer is unreadable,
+    // not unreachable: resending would not change it.
+    let text =
+        crate::foreign_http::read_text_capped(response, crate::foreign_http::MAX_FOREIGN_ANSWER)
+            .await
+            .map_err(|e| match e {
+                crate::foreign_http::CappedRead::TooLarge { .. } => {
+                    CastError::Unreadable(e.to_string())
+                }
+                crate::foreign_http::CappedRead::Read(_) => CastError::Unreachable(e.to_string()),
+            })?;
     read_cast_answer(status.as_u16(), &text)
 }
 

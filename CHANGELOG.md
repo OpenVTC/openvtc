@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Faster startup, sends and `health`** ([#557](https://github.com/OpenVTC/openvtc/issues/557),
+  [#559](https://github.com/OpenVTC/openvtc/issues/559),
+  [#560](https://github.com/OpenVTC/openvtc/issues/560)). A persona's VTA-held keys are
+  fetched concurrently, and relationship keys at most 8 at a time. TSP discovery shares
+  one DID resolver, so its cache is used, and the status-list and manifest HTTP clients
+  are built once. `openvtc health` resolves and probes up to 4 parties at once, and still
+  prints them one at a time.
+
 - **`OpenVTCError` is now `#[non_exhaustive]`** (breaking for code that uses
   `openvtc-core` as a library). A `match` on it outside `openvtc-core` needs a
   wildcard arm. From now on a new error variant is not a breaking change, so a
@@ -49,6 +57,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   now also turns bracketed paste off and shows the cursor again. F10 is heard on the
   join screen while a DID resolves. A quit you asked for no longer prints "exited per user
   request"; other exits explain themselves on stderr.
+- **An agent name is shown only after this device has verified it**
+  ([#571](https://github.com/OpenVTC/openvtc/issues/571)). Claiming, parking, resuming or
+  removing a name no longer caches a hand-formatted `host/@name` as verified; it forgets
+  the cached name so the background sweep re-verifies it. A name that arrives through VTA
+  state sync is kept but not displayed until the sweep has verified it here.
+- **Community and ballot-box answers are read up to 2 MiB**
+  ([#558](https://github.com/OpenVTC/openvtc/issues/558)). The join-manifest and
+  ballot-box fetches no longer buffer whatever a peer-advertised endpoint sends.
+- **The ballot box is reached under the public-hosts policy in every build**
+  ([#573](https://github.com/OpenVTC/openvtc/issues/573)); `VTA_ALLOW_PRIVATE_ENDPOINTS`
+  no longer relaxes it. DID labels in `openvtc health` and rebuilt communities'
+  sub-context ids are now derived with `didwebvh-rs`; a community whose DID has no path
+  is named by its SCID instead of `host%3Aport`.
+- **Typing an agent name waits at most 15 s** ([#562](https://github.com/OpenVTC/openvtc/issues/562)),
+  and the join screen says it is resolving.
+- **Sending a message no longer holds the messaging identity lock while the recipient
+  resolves** ([#561](https://github.com/OpenVTC/openvtc/issues/561)).
 - **Peer messages are handled only as the sender the transport authenticated.** The
   inbound dispatcher used to fall back to a message's `from` header when the transport
   bound no sender to it (anoncrypt DIDComm, or an authcrypt whose `from` its sealing key

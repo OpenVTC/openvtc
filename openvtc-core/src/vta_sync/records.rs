@@ -153,7 +153,7 @@ fn membership_key(c: &CommunityRecord) -> String {
     )
 }
 
-fn simple_key(kind: RecordKind, id: &str) -> String {
+pub(crate) fn simple_key(kind: RecordKind, id: &str) -> String {
     format!("{}{}", kind.prefix(), h(id))
 }
 
@@ -425,6 +425,12 @@ pub fn apply(parts: &mut SyncParts<'_>, key: &str, value: Option<&Value>) -> Res
                     return Err("agent name does not match its key".to_string());
                 }
                 let entry: CachedAgentName = decode(v.get("entry").unwrap_or(&Value::Null))?;
+                // Another device's verification is not this one's: the name is
+                // kept (so nothing is pushed back) but not shown until the sweep
+                // has verified it here.
+                if entry.name.is_some() {
+                    parts.private.agent_names_unverified.insert(did.to_string());
+                }
                 parts.private.agent_names.insert(did.to_string(), entry);
             }
             None => parts

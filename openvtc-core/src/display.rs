@@ -127,6 +127,29 @@ pub fn truncate_did_centered(did: &str, max_len: usize) -> Cow<'_, str> {
 /// did:webvh:QmUF…aFtL3:webvh.storm.ws:kid-long
 /// ```
 ///
+/// The last path segment of a `did:webvh` — the part people recognise
+/// (`did:webvh:{SCID}:dids.example.dev:legend-swear` → `legend-swear`).
+///
+/// A `did:scid:vh:1` with a `?src=` locator is read through the `did:webvh` that
+/// locator names. Parsed with `didwebvh-rs`, never by splitting on colons: a
+/// port is `%3A`-encoded inside the host segment, and a DID with no path has
+/// no segment to give.
+///
+/// `None` for a DID with no path, a bare `did:scid`, or anything that is not a
+/// parseable `did:webvh`.
+#[must_use]
+pub fn webvh_path_tail(did: &str) -> Option<String> {
+    let webvh = if vta_sdk::did_scid::is_scid(did) {
+        vta_sdk::did_scid::webvh_did(did)?
+    } else {
+        did.to_string()
+    };
+    let url = didwebvh_rs::url::WebVHURL::parse_did_url(&webvh).ok()?;
+    let tail = url.path.trim_matches('/').rsplit('/').next()?;
+    // A path-less DID resolves under `/.well-known/`, which names nothing.
+    (!tail.is_empty() && tail != ".well-known").then(|| tail.to_string())
+}
+
 /// Parsed with `didwebvh-rs` rather than split on colons, per the repository
 /// rule: a port is `%3A`-encoded inside the host segment, so counting colons
 /// finds the wrong boundary for exactly the DIDs a developer runs locally.
@@ -281,6 +304,27 @@ pub fn task_label(type_uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webvh_path_tail_reads_the_last_segment() {
+        assert_eq!(
+            webvh_path_tail("did:webvh:QmScid:dids.example.dev:legend-swear").as_deref(),
+            Some("legend-swear")
+        );
+        assert_eq!(
+            webvh_path_tail("did:webvh:QmScid:example.com%3A8443:a:b").as_deref(),
+            Some("b")
+        );
+    }
+
+    /// No path, no tail — never the host, and never `host%3Aport`.
+    #[test]
+    fn webvh_path_tail_is_none_without_a_path() {
+        assert_eq!(webvh_path_tail("did:webvh:QmScid:example.com"), None);
+        assert_eq!(webvh_path_tail("did:webvh:QmScid:example.com%3A8443"), None);
+        assert_eq!(webvh_path_tail("did:scid:vh:1:QmScid"), None);
+        assert_eq!(webvh_path_tail("did:key:z6Mkabc"), None);
+    }
 
     /// A did:scid gives up its SCID and keeps its locator, the part a reader
     /// tells it apart by; a bare one keeps just its prefix.

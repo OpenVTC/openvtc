@@ -392,16 +392,14 @@ pub async fn build_report_with_progress(
 
     let http = probe_client(policy);
 
-    let mut parties: Vec<Party> = Vec::new();
+    let mut unique: Vec<Subject> = Vec::new();
     for subject in subjects {
-        if subject.did.is_empty() {
+        if subject.did.is_empty() || unique.iter().any(|s| s.did == subject.did) {
             continue;
         }
-        if parties.iter().any(|p| p.did == subject.did) {
-            continue;
-        }
-        parties.push(resolve_party(&resolver, http.as_ref(), policy, subject, progress).await);
+        unique.push(subject.clone());
     }
+    let mut parties = resolve_parties(&resolver, http.as_ref(), policy, unique, progress).await;
 
     // Second pass: every mediator any resolved party routes through, resolved
     // once and labelled with *every* party that named it and for which
@@ -415,10 +413,11 @@ pub async fn build_report_with_progress(
         .filter(|(did, _)| !parties.iter().any(|p| p.did == *did))
         .collect();
     progress(Step::FollowingMediators { count: fresh.len() });
-    for (did, users) in fresh {
-        let subject = Subject::new(Role::Mediator, format!("mediator of {users}"), did);
-        parties.push(resolve_party(&resolver, http.as_ref(), policy, &subject, progress).await);
-    }
+    let mediators = fresh
+        .into_iter()
+        .map(|(did, users)| Subject::new(Role::Mediator, format!("mediator of {users}"), did))
+        .collect();
+    parties.extend(resolve_parties(&resolver, http.as_ref(), policy, mediators, progress).await);
 
     let links = negotiate_links(&parties);
     progress(Step::Negotiating { pairs: links.len() });
@@ -481,6 +480,52 @@ fn mediator_references(parties: &[Party]) -> std::collections::BTreeMap<String, 
 }
 
 /// Resolve one DID and read everything the report needs off its document.
+/// How many parties are resolved and probed at once. `health` is run when
+/// something is down, exactly when each step waits out its full timeout, so
+/// doing them one at a time made the worst case P × (resolve + probes).
+const PARTY_CONCURRENCY: usize = 4;
+
+/// [`resolve_party`] for each of `subjects`, at most [`PARTY_CONCURRENCY`] at
+/// once. Each party's progress is held back and replayed when its turn comes,
+/// in `subjects` order, so the human-readable output reads one party at a time
+/// rather than interleaved.
+async fn resolve_parties(
+    resolver: &DIDCacheClient,
+    http: Option<&reqwest::Client>,
+    policy: ProbePolicy,
+    subjects: Vec<Subject>,
+    progress: ProgressFn<'_>,
+) -> Vec<Party> {
+    use futures_util::stream::{self, StreamExt};
+
+    let mut results = stream::iter(subjects.into_iter().map(|subject| async move {
+        let events = std::sync::Mutex::new(Vec::new());
+        let party = {
+            let record = |step: Step| {
+                events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(step);
+            };
+            resolve_party(resolver, http, policy, &subject, &record).await
+        };
+        let events = events
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (party, events)
+    }))
+    .buffered(PARTY_CONCURRENCY);
+
+    let mut parties = Vec::new();
+    while let Some((party, events)) = results.next().await {
+        for step in events {
+            progress(step);
+        }
+        parties.push(party);
+    }
+    parties
+}
+
 async fn resolve_party(
     resolver: &DIDCacheClient,
     http: Option<&reqwest::Client>,
@@ -548,15 +593,21 @@ async fn resolve_party(
             .map(|s| s.endpoint.as_str())
             .filter(|e| e.starts_with("http://") || e.starts_with("https://"))
             .collect();
-        for url in urls {
+        // A party's endpoints are probed together; their progress is reported
+        // afterwards, in URL order.
+        let results = futures_util::future::join_all(urls.into_iter().map(|url| async move {
+            let probe_started = std::time::Instant::now();
+            let result = probe(client, url, policy).await;
+            (url, result, probe_started.elapsed())
+        }))
+        .await;
+        for (url, result, elapsed) in results {
             progress(Step::Probing {
                 url: url.to_string(),
             });
-            let probe_started = std::time::Instant::now();
-            let result = probe(client, url, policy).await;
             progress(Step::Probed {
                 probe: result.clone(),
-                elapsed: probe_started.elapsed(),
+                elapsed,
             });
             probes.push(result);
         }
