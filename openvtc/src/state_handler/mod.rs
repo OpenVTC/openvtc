@@ -3490,7 +3490,7 @@ impl StateHandler {
                     Action::JoinVettingJoin |
                     Action::JoinVettingAskAgain | Action::JoinVettingRow(..) |
                     Action::JoinCancel | Action::JoinPasteVic(..) | Action::JoinClipboardFailed(..) |
-                    Action::JoinClearVic | Action::ImportConfig(..) | Action::SetProtection(..) |
+                    Action::JoinClearVic | Action::ImportConfig(..) | Action::SetUnlockCode(..) |
                     Action::VtaSubmitDid(..) | Action::VtaStartProvision { .. } |
                     Action::RecoverPlanContext |
                     Action::SetupCompleted(..) => {}

@@ -4,7 +4,7 @@
 //! multi-cause error chains) must be word-wrapped manually before being
 //! pushed as `Line`s or they get clipped at the panel width.
 
-use crate::colors::{COLOR_SUCCESS, COLOR_WARNING_ACCESSIBLE_RED};
+use crate::colors::{COLOR_TEXT_DEFAULT, COLOR_WARNING_ACCESSIBLE_RED};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -74,8 +74,8 @@ pub fn content_height() -> usize {
 
 /// Push a status message as one or more wrapped lines (no trailing blank).
 ///
-/// Messages that look like errors are rendered in the warning (red) color;
-/// everything else uses the success (green) color, matching prior behavior.
+/// Messages worded as failures are rendered in the warning (red) colour;
+/// everything else in the plain text colour (see [`status_style`]).
 /// Each wrapped line is prefixed with `indent` so callers can indent inside
 /// a panel.
 pub fn push_status(lines: &mut Vec<Line<'static>>, msg: &str, indent: &'static str) {
@@ -94,19 +94,38 @@ pub fn push_wrapped(lines: &mut Vec<Line<'static>>, msg: &str, indent: &'static 
     }
 }
 
+/// Phrases that mark a message as a failure. Matched case-insensitively
+/// anywhere in the message, because failures are worded many ways ("Couldn't
+/// archive: …", "Messaging unavailable — …"), not only with an `Error` prefix.
+const FAILURE_MARKERS: &[&str] = &[
+    "error",
+    "failed",
+    "couldn't",
+    "could not",
+    "can't",
+    "cannot",
+    "unavailable",
+    "not available",
+    "timed out",
+    "refused",
+    "denied",
+    "invalid",
+];
+
+/// Red for a message worded as a failure; otherwise the plain text colour.
+///
+/// A message that is not recognisably a failure is not thereby a success, so
+/// it is no longer drawn in the success green — that made failures worded
+/// without "Error"/"Failed" look like confirmations. Panels with a typed
+/// severity use [`push_wrapped`] instead.
 fn status_style(msg: &str) -> Style {
-    let trimmed = msg.trim_start();
-    let is_error = trimmed.starts_with("Error")
-        || trimmed.starts_with("Failed")
-        || trimmed.starts_with("failed")
-        || trimmed.contains("failed:")
-        || trimmed.contains("Failed:");
-    if is_error {
+    let lower = msg.to_lowercase();
+    if FAILURE_MARKERS.iter().any(|m| lower.contains(m)) {
         Style::new()
             .fg(COLOR_WARNING_ACCESSIBLE_RED)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(COLOR_SUCCESS)
+        Style::new().fg(COLOR_TEXT_DEFAULT)
     }
 }
 
@@ -180,6 +199,27 @@ mod tests {
             status_style("Ping failed: timeout").fg,
             Some(COLOR_WARNING_ACCESSIBLE_RED)
         );
-        assert_eq!(status_style("Relationship removed").fg, Some(COLOR_SUCCESS));
+        assert_eq!(
+            status_style("Relationship removed").fg,
+            Some(COLOR_TEXT_DEFAULT)
+        );
+    }
+
+    /// Failures from #577 that were drawn in success green.
+    #[test]
+    fn failures_without_an_error_prefix_are_red() {
+        for msg in [
+            "Messaging unavailable — cannot leave right now.",
+            "Couldn't sign the departure: bad key",
+            "Couldn't archive: timeout",
+            "Could not use that theme: parse error",
+            "Witnessing is not available until messaging and the VTA are connected.",
+        ] {
+            assert_eq!(
+                status_style(msg).fg,
+                Some(COLOR_WARNING_ACCESSIBLE_RED),
+                "{msg}"
+            );
+        }
     }
 }

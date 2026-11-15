@@ -177,6 +177,21 @@ impl UnlockCode {
     /// Returns an error if the passphrase is shorter than [`MIN_PASSPHRASE_LENGTH`].
     pub fn from_string(s: &str) -> Result<Self, OpenVTCError> {
         validate_passphrase(s)?;
+        Self::for_existing(s)
+    }
+
+    /// Derives the key for a code that was set earlier, without the length
+    /// check [`UnlockCode::from_string`] applies to a new one.
+    ///
+    /// The minimum length governs *setting* a code. Releases before 0.8 let the
+    /// setup wizard and config import set a shorter one, and refusing it at
+    /// unlock locks that profile out for good. Use this only to try a code
+    /// against stored data; a code being set goes through `from_string`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Argon2 key derivation fails.
+    pub fn for_existing(s: &str) -> Result<Self, OpenVTCError> {
         let key = derive_passphrase_key(s.as_bytes(), b"openvtc-unlock-code-v1")?;
         Ok(UnlockCode(SecretBox::new(Box::new(key.to_vec()))))
     }

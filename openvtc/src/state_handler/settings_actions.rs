@@ -1,6 +1,8 @@
 //! Settings action handlers for the TUI.
 
 use anyhow::Result;
+#[cfg(feature = "openpgp-card")]
+use openvtc_core::config::ConfigProtectionType;
 use openvtc_core::{config::Config, logs::LogFamily};
 use secrecy::{SecretBox, SecretString};
 use tracing::info;
@@ -162,6 +164,7 @@ fn handle_select(state: &mut State, index: usize) {
 }
 
 fn handle_start_edit(state: &mut State) {
+    state.main_page.content_panel.settings.form_problem = None;
     let idx = state.main_page.content_panel.settings.selected_index;
     let s = &state.main_page.content_panel.settings;
     state.main_page.content_panel.settings.mode = match idx {
@@ -173,6 +176,7 @@ fn handle_start_edit(state: &mut State) {
         rows::EXPORT_ROW => SettingsMode::ExportConfig {
             path_input: "openvtc-export.enc".to_string(),
             passphrase_len: 0,
+            confirm_len: 0,
             active_field: 0,
         },
         rows::IMPORT_ROW => SettingsMode::ImportConfig {
@@ -205,6 +209,7 @@ fn handle_form_field_update(state: &mut State, field: usize, value: String) {
 }
 
 fn handle_passphrase_len(state: &mut State, len: usize) {
+    state.main_page.content_panel.settings.form_problem = None;
     match &mut state.main_page.content_panel.settings.mode {
         SettingsMode::ExportConfig { passphrase_len, .. }
         | SettingsMode::ImportConfig { passphrase_len, .. } => {
@@ -214,10 +219,23 @@ fn handle_passphrase_len(state: &mut State, len: usize) {
     }
 }
 
+fn handle_export_confirm_len(state: &mut State, len: usize) {
+    state.main_page.content_panel.settings.form_problem = None;
+    if let SettingsMode::ExportConfig { confirm_len, .. } =
+        &mut state.main_page.content_panel.settings.mode
+    {
+        *confirm_len = len;
+    }
+}
+
+/// Export cycles path → passphrase → confirm; import has no confirm field.
 fn handle_form_tab_switch(state: &mut State) {
+    state.main_page.content_panel.settings.form_problem = None;
     match &mut state.main_page.content_panel.settings.mode {
-        SettingsMode::ExportConfig { active_field, .. }
-        | SettingsMode::ImportConfig { active_field, .. } => {
+        SettingsMode::ExportConfig { active_field, .. } => {
+            *active_field = (*active_field + 1) % 3;
+        }
+        SettingsMode::ImportConfig { active_field, .. } => {
             *active_field = if *active_field == 0 { 1 } else { 0 };
         }
         _ => {}
@@ -242,6 +260,7 @@ fn handle_protection_start_input(state: &mut State) {
 }
 
 fn handle_protection_passphrase_len(state: &mut State, len: usize) {
+    state.main_page.content_panel.settings.form_problem = None;
     if let SettingsMode::ChangeProtection { passphrase_len, .. } =
         &mut state.main_page.content_panel.settings.mode
     {
@@ -250,6 +269,7 @@ fn handle_protection_passphrase_len(state: &mut State, len: usize) {
 }
 
 fn handle_protection_confirm_len(state: &mut State, len: usize) {
+    state.main_page.content_panel.settings.form_problem = None;
     if let SettingsMode::ChangeProtection { confirm_len, .. } =
         &mut state.main_page.content_panel.settings.mode
     {
@@ -403,6 +423,7 @@ fn handle_import_config_action(
 }
 
 fn handle_change_protection(state: &mut State) {
+    state.main_page.content_panel.settings.form_problem = None;
     state.main_page.content_panel.settings.mode = SettingsMode::ChangeProtection {
         selected_option: 0,
         passphrase_len: 0,
@@ -671,27 +692,94 @@ fn handle_token_detect(state: &mut State) {
 }
 
 #[cfg(feature = "openpgp-card")]
-fn handle_token_factory_reset(state: &mut State) {
-    match openvtc_core::openpgp_card::get_cards() {
-        Ok(cards) if !cards.is_empty() => {
-            match openvtc_core::openpgp_card::factory_reset(cards[0].clone()) {
-                Ok(()) => {
-                    state.main_page.content_panel.settings.token.messages =
-                        vec!["Factory reset completed successfully.".to_string()];
-                    state.main_page.content_panel.settings.token.reset_completed = true;
-                }
-                Err(e) => {
-                    state.main_page.content_panel.settings.token.messages =
-                        vec![format!("Factory reset failed: {e}")];
-                }
-            }
+use crate::ui::pages::main::components::settings_panel::TOKEN_RESET_CONFIRM_TOKEN;
+
+/// A connected card, as `openvtc_core::openpgp_card::get_cards` hands it out.
+#[cfg(feature = "openpgp-card")]
+type SharedCard = std::sync::Arc<tokio::sync::Mutex<openpgp_card::Card<openpgp_card::state::Open>>>;
+
+/// The one connected card, by identity. A reset is offered only when exactly
+/// one card is present, so the card erased is never a guess between several.
+#[cfg(feature = "openpgp-card")]
+fn single_card() -> Result<(SharedCard, String, String), String> {
+    let cards = openvtc_core::openpgp_card::get_cards().map_err(|e| format!("Error: {e}"))?;
+    match cards.as_slice() {
+        [] => Err("No tokens detected. Insert a token first.".to_string()),
+        [card] => {
+            let (ident, manufacturer) = openvtc_core::openpgp_card::card_identity(card)
+                .map_err(|e| format!("Error: {e}"))?;
+            Ok((card.clone(), ident, manufacturer))
         }
+        _ => Err(format!(
+            "{} tokens are connected. Remove all but the one to reset, then try again.",
+            cards.len()
+        )),
+    }
+}
+
+#[cfg(feature = "openpgp-card")]
+fn handle_token_reset_start(state: &mut State, config: &Config) {
+    let settings = &mut state.main_page.content_panel.settings;
+    settings.token.reset_completed = false;
+    match single_card() {
+        Ok((_, ident, manufacturer)) => {
+            let protects_profile = matches!(
+                &config.public.protection,
+                ConfigProtectionType::Token(id) if *id == ident
+            );
+            settings.token.messages.clear();
+            settings.mode = SettingsMode::TokenResetConfirm {
+                ident,
+                manufacturer,
+                protects_profile,
+                confirm_input: String::new(),
+            };
+        }
+        Err(why) => settings.token.messages = vec![why],
+    }
+}
+
+#[cfg(feature = "openpgp-card")]
+fn handle_token_factory_reset(state: &mut State) {
+    let settings = &mut state.main_page.content_panel.settings;
+    let SettingsMode::TokenResetConfirm {
+        ident,
+        confirm_input,
+        ..
+    } = &settings.mode
+    else {
+        return;
+    };
+    let confirmed = confirm_input.trim() == TOKEN_RESET_CONFIRM_TOKEN;
+    let ident = ident.clone();
+    settings.mode = SettingsMode::TokenManagement { selected_index: 1 };
+    if !confirmed {
+        settings.token.messages = vec![format!(
+            "Type {TOKEN_RESET_CONFIRM_TOKEN} (exactly) to confirm — reset cancelled."
+        )];
+        return;
+    }
+    // The card is looked up again: the one confirmed must still be the only
+    // one connected, or nothing is erased.
+    let card = match single_card() {
+        Ok((card, now, _)) if now == ident => card,
         Ok(_) => {
-            state.main_page.content_panel.settings.token.messages =
-                vec!["No tokens detected. Insert a token first.".to_string()];
+            settings.token.messages =
+                vec!["The connected token changed — nothing was reset.".to_string()];
+            return;
+        }
+        Err(why) => {
+            settings.token.messages = vec![why];
+            return;
+        }
+    };
+    match openvtc_core::openpgp_card::factory_reset(card) {
+        Ok(()) => {
+            settings.token.messages = vec![format!("Token {ident} was factory reset.")];
+            settings.token.reset_completed = true;
         }
         Err(e) => {
-            state.main_page.content_panel.settings.token.messages = vec![format!("Error: {e}")];
+            settings.token.messages = vec![format!("Factory reset failed: {e}")];
         }
     }
 }
@@ -929,6 +1017,10 @@ pub(crate) async fn dispatch(
             handle_protection_tab_switch(state, next_field)
         }
         SettingsAction::PassphraseLen(len) => handle_passphrase_len(state, len),
+        SettingsAction::ExportConfirmLen(len) => handle_export_confirm_len(state, len),
+        SettingsAction::FormProblem(why) => {
+            state.main_page.content_panel.settings.form_problem = Some(why);
+        }
         // No editable setting changes the mediator any more, so committing one
         // never implies a reconnect. `SettingsAction::ReconnectMediator` is the
         // remaining (explicit, operator-driven) way to ask for one.
@@ -949,6 +1041,16 @@ pub(crate) async fn dispatch(
         SettingsAction::TokenManagement => handle_token_management(state),
         #[cfg(feature = "openpgp-card")]
         SettingsAction::TokenDetect => handle_token_detect(state),
+        #[cfg(feature = "openpgp-card")]
+        SettingsAction::TokenFactoryResetStart => handle_token_reset_start(state, config),
+        #[cfg(feature = "openpgp-card")]
+        SettingsAction::TokenFactoryResetInput(value) => {
+            if let SettingsMode::TokenResetConfirm { confirm_input, .. } =
+                &mut state.main_page.content_panel.settings.mode
+            {
+                *confirm_input = value;
+            }
+        }
         #[cfg(feature = "openpgp-card")]
         SettingsAction::TokenFactoryReset => handle_token_factory_reset(state),
         #[cfg(feature = "openpgp-card")]
@@ -1209,6 +1311,7 @@ mod tests {
             (rows::EXPORT_ROW, || SettingsMode::ExportConfig {
                 path_input: String::new(),
                 passphrase_len: 0,
+                confirm_len: 0,
                 active_field: 0,
             }),
             (rows::IMPORT_ROW, || SettingsMode::ImportConfig {
@@ -1315,6 +1418,7 @@ mod tests {
             (|| SettingsMode::ExportConfig {
                 path_input: String::new(),
                 passphrase_len: 0,
+                confirm_len: 0,
                 active_field: 0,
             }) as ModeFn,
             || SettingsMode::ImportConfig {
@@ -1333,6 +1437,7 @@ mod tests {
                     path_input,
                     passphrase_len,
                     active_field,
+                    ..
                 }
                 | SettingsMode::ImportConfig {
                     path_input,
@@ -1344,7 +1449,17 @@ mod tests {
             assert_eq!(path, "backup.enc");
             assert_eq!(plen, 4);
             assert_eq!(field, 1, "tab switch toggled 0 -> 1");
-            handle_form_tab_switch(&mut state); // 1 -> 0
+            if matches!(settings(&state), SettingsMode::ExportConfig { .. }) {
+                handle_form_tab_switch(&mut state); // 1 -> 2 (confirm)
+                assert!(matches!(
+                    settings(&state),
+                    SettingsMode::ExportConfig {
+                        active_field: 2,
+                        ..
+                    }
+                ));
+            }
+            handle_form_tab_switch(&mut state); // back to 0
             let field = match settings(&state) {
                 SettingsMode::ExportConfig { active_field, .. }
                 | SettingsMode::ImportConfig { active_field, .. } => *active_field,

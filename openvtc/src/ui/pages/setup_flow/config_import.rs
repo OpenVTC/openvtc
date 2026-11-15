@@ -10,6 +10,7 @@ use crate::{
     ui::pages::setup_flow::{SetupFlow, render_setup_header},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent};
+use openvtc_core::config::{MIN_PASSPHRASE_LENGTH, validate_passphrase};
 use ratatui::{
     Frame,
     layout::{
@@ -36,6 +37,8 @@ pub struct ConfigImport {
     pub config_unlock_passphrase: Input,
     pub new_unlock_passphrase: Input,
     pub processing: bool,
+    /// Input problem found before anything was sent to the handler.
+    pub error_msg: Option<String>,
 }
 
 impl Default for ConfigImport {
@@ -46,6 +49,7 @@ impl Default for ConfigImport {
             config_unlock_passphrase: Input::default(),
             new_unlock_passphrase: Input::default(),
             processing: false,
+            error_msg: None,
         }
     }
 }
@@ -94,6 +98,17 @@ impl ConfigImport {
                 if let Completion::CompletedOK = state.props.state.config_import.completed {
                     let _ = state.action_tx.send(Action::Exit);
                 } else {
+                    // Blank is allowed (the backup may carry no unlock code);
+                    // a short code is not, as it could never be used to unlock.
+                    let new_code = state.config_import.new_unlock_passphrase.value();
+                    if !new_code.is_empty() && validate_passphrase(new_code).is_err() {
+                        state.config_import.error_msg = Some(format!(
+                            "The new unlock code must be at least {MIN_PASSPHRASE_LENGTH} characters."
+                        ));
+                        state.config_import.active_input = 2;
+                        return;
+                    }
+                    state.config_import.error_msg = None;
                     state.config_import.processing = true;
                     let _ = state.action_tx.send(Action::ImportConfig(
                         state.config_import.filename.value().to_string(),
@@ -122,6 +137,7 @@ impl ConfigImport {
                 _ => {}
             },
             _ if !completed_ok && !locked => {
+                state.config_import.error_msg = None;
                 // Handle text input
                 match state.config_import.active_input {
                     0 => state.config_import.filename.handle_event(&Event::Key(key)),
@@ -248,6 +264,12 @@ impl ConfigImport {
 
         // Show any error messages
         let mut lines = Vec::new();
+        if let Some(err) = &self.error_msg {
+            lines.push(Line::styled(
+                format!("ERROR: {err}"),
+                Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+            ));
+        }
         for msg in state.config_import.messages.iter() {
             match msg {
                 MessageType::Info(info) => {

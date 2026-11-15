@@ -231,8 +231,8 @@ pub fn diagnose(err: &OpenVTCError, ctx: &DiagnosisContext) -> Diagnosis {
                                profile name. Nothing on the network is involved."
                         .to_string();
                     d.remedies = vec![
-                        "If you have an encrypted export, restore it: run OpenVTC, then \
-                         Settings -> Import / Restore Backup."
+                        "If you have an encrypted export, restore it: run `openvtc setup` \
+                         and choose Restore Backup."
                             .to_string(),
                         "If the config was copied from another machine or user account, the \
                          credential did not come with it — export it from the original \
@@ -247,7 +247,7 @@ pub fn diagnose(err: &OpenVTCError, ctx: &DiagnosisContext) -> Diagnosis {
                         "Check you are on the intended profile — OPENVTC_CONFIG_PROFILE and \
                          --profile select which credential is looked up."
                             .to_string(),
-                        "Only if none of the above apply: `openvtc --setup` starts over. \
+                        "Only if none of the above apply: `openvtc setup` starts over. \
                          This mints new keys and DIDs, and every community must be \
                          re-joined. The old keys cannot be recovered afterwards."
                             .to_string(),
@@ -301,13 +301,13 @@ pub fn diagnose(err: &OpenVTCError, ctx: &DiagnosisContext) -> Diagnosis {
                                name."
                         .to_string();
                     d.remedies = vec![
-                        "Restore an encrypted export if you have one (Settings -> Import / \
-                         Restore Backup)."
+                        "Restore an encrypted export if you have one: run `openvtc setup` \
+                         and choose Restore Backup."
                             .to_string(),
                         "Check whether another tool writes to the `openvtc` service in your \
                          credential store."
                             .to_string(),
-                        "If no backup exists, `openvtc --setup` starts over — new keys, and \
+                        "If no backup exists, `openvtc setup` starts over — new keys, and \
                          every community re-joined."
                             .to_string(),
                     ];
@@ -319,7 +319,7 @@ pub fn diagnose(err: &OpenVTCError, ctx: &DiagnosisContext) -> Diagnosis {
                                the clear."
                         .to_string();
                     d.remedies = vec![
-                        "Set a passphrase under Settings -> Config Protection; the profile \
+                        "Set a passphrase under Settings -> Protection; the profile \
                          then stores durably."
                             .to_string(),
                     ];
@@ -355,7 +355,7 @@ pub fn diagnose(err: &OpenVTCError, ctx: &DiagnosisContext) -> Diagnosis {
             context,
             checks: Vec::new(),
             remedies: vec![
-                "Run `openvtc --setup` to create the profile.".to_string(),
+                "Run `openvtc setup` to create the profile.".to_string(),
                 "If you expected an existing profile, check OPENVTC_CONFIG_PATH and \
                  --profile / OPENVTC_CONFIG_PROFILE point where you think they do."
                     .to_string(),
@@ -483,7 +483,7 @@ mod tests {
         let reset = d
             .remedies
             .iter()
-            .position(|r| r.contains("--setup"))
+            .position(|r| r.contains("`openvtc setup` starts over"))
             .expect("reset remedy present");
         let restore = d
             .remedies

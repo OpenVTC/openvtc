@@ -5506,10 +5506,11 @@ mod tests {
     #[tokio::test]
     async fn surfaces_os_sigint_variant() {
         let (tx, mut rx) = broadcast::channel::<Interrupted>(4);
-        tx.send(Interrupted::OsSigInt).expect("send interrupt");
+        tx.send(Interrupted::OsSignal("SIGINT"))
+            .expect("send interrupt");
         let outcome = race_against_interrupt(std::future::pending::<()>(), &mut rx).await;
         assert!(
-            matches!(outcome, Some(Interrupted::OsSigInt)),
+            matches!(outcome, Some(Interrupted::OsSignal("SIGINT"))),
             "the specific interrupt variant propagates: {outcome:?}"
         );
     }

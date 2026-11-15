@@ -39,6 +39,21 @@ pub fn open_card(token_id: &str) -> Result<Card<Open>, OpenVTCError> {
     Ok(card)
 }
 
+/// The card's application identifier (`ident`) and manufacturer name — what a
+/// person needs to tell one connected card from another.
+pub fn card_identity(card: &Arc<Mutex<Card<Open>>>) -> Result<(String, String), OpenVTCError> {
+    let mut lock = card
+        .try_lock()
+        .map_err(|e| OpenVTCError::Token(format!("Couldn't lock card: {e}")))?;
+    let tx = lock
+        .transaction()
+        .map_err(|e| OpenVTCError::Token(format!("Couldn't get card transaction: {e}")))?;
+    let id = tx
+        .application_identifier()
+        .map_err(|e| OpenVTCError::Token(format!("Couldn't read card identifier: {e}")))?;
+    Ok((id.ident(), id.manufacturer_name().to_string()))
+}
+
 /// Performs a factory reset on the card, erasing all keys and data
 pub fn factory_reset(card: Arc<Mutex<Card<Open>>>) -> Result<(), OpenVTCError> {
     let mut lock = card
