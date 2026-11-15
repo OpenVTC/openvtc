@@ -1,21 +1,20 @@
-//! Inbound DIDComm message dispatch for the TUI.
+//! Inbound message dispatch: what this client does with a message a peer or
+//! community sent it.
 //!
-//! Messages that don't need human input are auto-processed.
-//! Messages requiring user decisions are queued as tasks in the inbox.
+//! Messages that need no human input are applied to [`Config`] here; messages
+//! that need a decision are queued as inbox tasks. Anything this cannot do
+//! itself — tear down a session, show a challenge, hand a reply to a waiting
+//! view — is reported up in [`InboundEffects`] for the caller (the TUI's
+//! runtime loop, or a headless command via [`apply_inline`]) to act on.
 //!
-//! The pure protocol logic (validators, the join-receipt / credential-issue
-//! handlers, the VRC vetting + proof verification, and the replay guard) lives
-//! in [`openvtc_core::messaging`] so it is testable without the TUI crate. This
-//! module keeps only the async I/O orchestrator [`process_inbound_message`],
-//! which imports and calls into core.
+//! Moved here from the CLI crate (issue #530) so it has no TUI dependency and
+//! core's end-to-end harness can drive it.
 
 use std::sync::Arc;
 
-use affinidi_tdk::{TDK, didcomm::Message};
-use dtg_credentials::DTGCredential;
-use openvtc_core::didcomm::Messaging;
-use openvtc_core::join::COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE;
-use openvtc_core::messaging::{
+use crate::didcomm::Messaging;
+use crate::join::COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE;
+use crate::messaging::{
     SeenMessages, check_message_age, check_task_capacity, create_finalize_message,
     credential_in_issue, credential_issue_admissible, handle_community_profile_show_response,
     handle_credential_issue, handle_join_status_response, handle_join_submit_receipt,
@@ -23,11 +22,9 @@ use openvtc_core::messaging::{
     is_trust_task_error_type, read_problem_report, require_thid, validate_did, verify_inbound_vrc,
     vet_vrc_issued,
 };
-use openvtc_core::personhood::{
-    PERSONHOOD_ASSERT_RESPONSE_TYPE, PERSONHOOD_CHALLENGE_RESPONSE_TYPE,
-};
-use openvtc_core::vetting::protocol::JoinProtocol;
-use openvtc_core::{
+use crate::personhood::{PERSONHOOD_ASSERT_RESPONSE_TYPE, PERSONHOOD_CHALLENGE_RESPONSE_TYPE};
+use crate::vetting::protocol::JoinProtocol;
+use crate::{
     MessageType,
     config::{Config, account::VtcDid},
     logs::LogFamily,
@@ -35,6 +32,8 @@ use openvtc_core::{
     tasks::TaskType,
     vrc::VRCRequestReject,
 };
+use affinidi_tdk::{TDK, didcomm::Message};
+use dtg_credentials::DTGCredential;
 use tracing::{debug, info, warn};
 use vta_sdk::protocols::PROBLEM_REPORT_TYPE;
 use vta_sdk::protocols::credential_exchange::ISSUE as CREDENTIAL_ISSUE_TYPE;
@@ -59,10 +58,10 @@ pub(crate) async fn issue_member_vmc_for(
     config: &Config,
     tdk: &TDK,
     vtc_did: &str,
-    persona_id: openvtc_core::config::account::PersonaId,
+    persona_id: crate::config::account::PersonaId,
     closes_request: Option<uuid::Uuid>,
-) -> Result<(uuid::Uuid, serde_json::Value), openvtc_core::errors::OpenVTCError> {
-    use openvtc_core::errors::OpenVTCError;
+) -> Result<(uuid::Uuid, serde_json::Value), crate::errors::OpenVTCError> {
+    use crate::errors::OpenVTCError;
     // The grant we are acknowledging, as the community sent it. Without one
     // there is nothing to acknowledge: an acknowledgement names a specific
     // grant by digest, and a community that has issued us none has no
@@ -72,7 +71,7 @@ pub(crate) async fn issue_member_vmc_for(
     let grant = membership
         .and_then(|c| {
             c.credentials
-                .get(&openvtc_core::CredentialKind::Membership)
+                .get(&crate::CredentialKind::Membership)
                 .cloned()
         })
         .ok_or_else(|| {
@@ -98,12 +97,12 @@ pub(crate) async fn issue_member_vmc_for(
     // join poll does: it is the hop the routing layer seals to, and the
     // community's document may have changed since the submit.
     let tsp_mediator = if over_tsp {
-        openvtc_core::config::peer_tsp_mediator(vtc_did).await
+        crate::config::peer_tsp_mediator(vtc_did).await
     } else {
         None
     };
-    openvtc_core::members::issue_and_send_member_vmc(
-        &openvtc_core::members::Delivery {
+    crate::members::issue_and_send_member_vmc(
+        &crate::members::Delivery {
             atm,
             profile: &profile,
             member_did: &member_did,
@@ -125,6 +124,21 @@ fn is_capability_reply_type(typ: &str) -> bool {
         || is_trust_task_error_type(typ)
 }
 
+/// A community's reply to a request of ours, as handed to the view waiting on
+/// it: who sent it, who signed it, and the thread it answers. The view takes a
+/// reply only from the community it asked.
+#[derive(Debug, Clone)]
+pub struct ThreadedReply<R> {
+    /// The transport-authenticated sender.
+    pub from: String,
+    /// The document's `issuer`.
+    pub issuer: Option<String>,
+    /// The request id the reply threads on.
+    pub thid: String,
+    /// The classified reply.
+    pub reply: R,
+}
+
 /// What an inbound message asks the loop to do, beyond mutating `Config`.
 ///
 /// These are things this function cannot do itself: tearing down a session
@@ -137,40 +151,40 @@ fn is_capability_reply_type(typ: &str) -> bool {
 pub struct InboundEffects {
     /// Communities that resolved to an inactive status; the loop deregisters
     /// their sessions (R-S-3).
-    pub inactivated: Vec<(VtcDid, openvtc_core::config::account::PersonaId)>,
+    pub inactivated: Vec<(VtcDid, crate::config::account::PersonaId)>,
     /// Capability replies, keyed by the request id they thread on.
     /// `(sender, thread id, reply)` — the view takes a reply only from the
     /// community it asked.
-    pub capability_replies: Vec<(String, String, openvtc_core::capabilities::CapabilityReply)>,
+    pub capability_replies: Vec<(String, String, crate::capabilities::CapabilityReply)>,
     /// `git-ns/*` replies for the Repos panel, keyed by the request id they
     /// thread on.
-    pub git_ns_replies: Vec<crate::state_handler::repos_actions::InboundReply>,
+    pub git_ns_replies: Vec<ThreadedReply<crate::git_ns::Reply>>,
     /// `vtc/rooms/*` replies for the Rooms panel, keyed by the request id they thread on.
-    pub rooms_replies: Vec<crate::state_handler::rooms_actions::InboundReply>,
+    pub rooms_replies: Vec<ThreadedReply<crate::community_rooms::Reply>>,
     /// `vtc/elections/*` replies for the Elections panel, keyed by the request id they thread
     /// on.
-    pub elections_replies: Vec<crate::state_handler::elections_actions::InboundReply>,
+    pub elections_replies: Vec<ThreadedReply<crate::elections::Reply>>,
     /// Personhood challenges the community answered with. Display state with a
     /// ten-minute life — never persisted.
-    pub personhood_challenges: Vec<openvtc_core::personhood::ChallengeReply>,
+    pub personhood_challenges: Vec<crate::personhood::ChallengeReply>,
     /// Communities' answers to questions we put to them — a directory page, a
     /// stored profile, a resent grant, a manifest — for whoever is waiting.
-    pub vetting_answers: Vec<openvtc_core::vetting::queries::CommunityAnswer>,
+    pub vetting_answers: Vec<crate::vetting::queries::CommunityAnswer>,
     /// Vetters' grants to check for revocation. The check fetches over HTTPS,
     /// so the loop runs it as a background job.
-    pub vetting_grant_checks: Vec<openvtc_core::vetting::status::GrantCheck>,
+    pub vetting_grant_checks: Vec<crate::vetting::status::GrantCheck>,
     /// How renewals we asked for ended (`vtc/members/renew/0.1`), keyed by the
     /// community — the panel's status line says what happened.
-    pub renewals: Vec<(String, openvtc_core::renewal::RenewalOutcome)>,
+    pub renewals: Vec<(String, crate::renewal::RenewalOutcome)>,
     /// Documents that may be a witness's answer to a witnessing in progress: its session or
     /// submission `#response`, or a `trust-task-error`. The loop hands each to the witnessing
     /// waiting on its thread, which verifies it as the witness's before reading it; one on a
     /// thread nobody waits on is dropped there.
-    pub witness_replies: Vec<openvtc_core::witness::InboundReply>,
+    pub witness_replies: Vec<crate::witness::InboundReply>,
     /// Notifications (`notifications/notify`, `notifications/relay`) addressed to one of our
     /// personas, exactly as received. The loop hands each to the member's VTA and answers the
     /// sender (VTI-NTF-054); nothing here reads, filters or acts on them.
-    pub notifications: Vec<openvtc_core::notifications::Received>,
+    pub notifications: Vec<crate::notifications::Received>,
     /// A message whose handling waits on a network-bound check (a DID resolve,
     /// a status-list fetch). The loop runs [`VerifyJob::run`] off the loop and
     /// hands the message back with the result; nothing about it is applied
@@ -207,7 +221,7 @@ pub enum VerifyJob {
         persona_proof: Option<serde_json::Value>,
         peer: String,
         thid: String,
-        role: openvtc_core::relationships::BindingRole,
+        role: crate::relationships::BindingRole,
     },
     /// A VRC's proof against its issuer's key.
     Vrc(Box<DTGCredential>),
@@ -225,10 +239,10 @@ pub enum VerifyJob {
     /// membership it asks about Active, say.
     Barrier,
     /// A check that never finishes (tests of the queue's timeout).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Hang,
     /// A check that panics (tests of the queue's supervision).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Panic,
 }
 
@@ -237,19 +251,16 @@ pub enum VerifyJob {
 pub enum PreVerified {
     Credential(
         Result<
-            openvtc_core::issued_credential::VerifiedIssuedCredential,
-            openvtc_core::issued_credential::IssuedCredentialError,
+            crate::issued_credential::VerifiedIssuedCredential,
+            crate::issued_credential::IssuedCredentialError,
         >,
     ),
     Operational(
-        Result<
-            openvtc_core::operational::VerifiedOperational,
-            openvtc_core::operational::OperationalError,
-        >,
+        Result<crate::operational::VerifiedOperational, crate::operational::OperationalError>,
     ),
-    DidBinding(Result<(), openvtc_core::relationships::DidBindingError>),
+    DidBinding(Result<(), crate::relationships::DidBindingError>),
     Vrc(Result<(), String>),
-    Renewal(Result<openvtc_core::renewal::VerifiedRenewal, openvtc_core::renewal::RenewalError>),
+    Renewal(Result<crate::renewal::VerifiedRenewal, crate::renewal::RenewalError>),
     /// Nothing was checked ([`VerifyJob::Barrier`]).
     Barrier,
 }
@@ -260,7 +271,7 @@ pub enum Arrival<'a> {
     /// queued for a check ahead of this one, which it must not overtake.
     New { waiting: &'a dyn Fn(&str) -> bool },
     /// Queued for its check before a restart
-    /// ([`openvtc_core::config::protected_config::ProtectedConfig::deferred_inbound`]).
+    /// ([`crate::config::protected_config::ProtectedConfig::deferred_inbound`]).
     /// It passed the age and replay gates when it arrived; it is set aside
     /// again — for its check if it still passes the local checks, else to wait
     /// its turn and be refused by its handler then. It is never handled
@@ -270,12 +281,12 @@ pub enum Arrival<'a> {
     Returning(PreVerified),
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn nobody_waiting(_: &str) -> bool {
     false
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Arrival<'static> {
     /// Just arrived, with nothing queued ahead of it.
     pub const FRESH: Arrival<'static> = Arrival::New {
@@ -297,7 +308,7 @@ impl VerifyJob {
         let now = chrono::Utc::now();
         match self {
             VerifyJob::Credential { document, sender } => PreVerified::Credential(
-                openvtc_core::issued_credential::verify_issued_delivery(
+                crate::issued_credential::verify_issued_delivery(
                     &document,
                     &sender,
                     tdk.did_resolver(),
@@ -315,13 +326,13 @@ impl VerifyJob {
                 // The replay check is the loop's, at apply time, against the
                 // live set; an empty set here only skips it.
                 PreVerified::Operational(
-                    openvtc_core::operational::verify_operational(
+                    crate::operational::verify_operational(
                         &document,
                         &sender,
                         &ours,
                         &typ,
                         tdk.did_resolver(),
-                        &openvtc_core::operational::SeenDocuments::default(),
+                        &crate::operational::SeenDocuments::default(),
                         now,
                     )
                     .await,
@@ -336,7 +347,7 @@ impl VerifyJob {
                 thid,
                 role,
             } => PreVerified::DidBinding(
-                openvtc_core::relationships::verify_did_binding(
+                crate::relationships::verify_did_binding(
                     &did,
                     did_proof.as_ref(),
                     &persona,
@@ -358,7 +369,7 @@ impl VerifyJob {
             } => {
                 let ours: Vec<&str> = our_dids.iter().map(String::as_str).collect();
                 PreVerified::Renewal(
-                    openvtc_core::renewal::verify_renewal_response(
+                    crate::renewal::verify_renewal_response(
                         &document,
                         &sender,
                         &ours,
@@ -369,9 +380,9 @@ impl VerifyJob {
                 )
             }
             VerifyJob::Barrier => PreVerified::Barrier,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             VerifyJob::Hang => std::future::pending().await,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             VerifyJob::Panic => panic!("a check that panics"),
         }
     }
@@ -382,25 +393,25 @@ impl VerifyJob {
     pub fn unfinished(&self) -> PreVerified {
         match self {
             VerifyJob::Credential { .. } => PreVerified::Credential(Err(
-                openvtc_core::issued_credential::IssuedCredentialError::CheckUnfinished,
+                crate::issued_credential::IssuedCredentialError::CheckUnfinished,
             )),
-            VerifyJob::DidBinding { .. } => PreVerified::DidBinding(Err(
-                openvtc_core::relationships::DidBindingError::CheckUnfinished,
-            )),
+            VerifyJob::DidBinding { .. } => {
+                PreVerified::DidBinding(Err(crate::relationships::DidBindingError::CheckUnfinished))
+            }
             VerifyJob::Vrc(_) => PreVerified::Vrc(Err(
                 "its proof's check did not finish (timed out or failed)".to_string(),
             )),
             VerifyJob::Renewal { .. } => {
-                PreVerified::Renewal(Err(openvtc_core::renewal::RenewalError::CheckUnfinished))
+                PreVerified::Renewal(Err(crate::renewal::RenewalError::CheckUnfinished))
             }
             VerifyJob::Barrier => PreVerified::Barrier,
-            #[cfg(test)]
-            VerifyJob::Hang | VerifyJob::Panic => PreVerified::Operational(Err(
-                openvtc_core::operational::OperationalError::CheckUnfinished,
-            )),
-            VerifyJob::Operational { .. } => PreVerified::Operational(Err(
-                openvtc_core::operational::OperationalError::CheckUnfinished,
-            )),
+            #[cfg(any(test, feature = "test-support"))]
+            VerifyJob::Hang | VerifyJob::Panic => {
+                PreVerified::Operational(Err(crate::operational::OperationalError::CheckUnfinished))
+            }
+            VerifyJob::Operational { .. } => {
+                PreVerified::Operational(Err(crate::operational::OperationalError::CheckUnfinished))
+            }
         }
     }
 
@@ -411,14 +422,14 @@ impl VerifyJob {
         matches!(
             self,
             VerifyJob::DidBinding {
-                role: openvtc_core::relationships::BindingRole::Request,
+                role: crate::relationships::BindingRole::Request,
                 ..
             }
         )
     }
 
     /// Whether this is a [`VerifyJob::Barrier`] (nothing to check).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn is_barrier(&self) -> bool {
         matches!(self, VerifyJob::Barrier)
@@ -477,7 +488,7 @@ fn verification_job(
             .pointer("/credentialSubject/id")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|subject| config.account.persona_id_for_did(subject).is_some());
-        let from_issuer = openvtc_core::issued_credential::issuer_of(&credential) == Some(from_did);
+        let from_issuer = crate::issued_credential::issuer_of(&credential) == Some(from_did);
         return (member && to_us && from_issuer).then(|| VerifyJob::Credential {
             document: message.body.clone(),
             sender: from_did.to_string(),
@@ -486,7 +497,7 @@ fn verification_job(
     // A community's answer to a vetting question: only from a community we
     // have business with — a question outstanding, an application, or a
     // membership (the same test vetting applies before taking one).
-    if openvtc_core::vetting::inbound::is_community_answer_type(typ) {
+    if crate::vetting::inbound::is_community_answer_type(typ) {
         let business = config.private.vetting.asked(from_did)
             || config
                 .private
@@ -500,11 +511,11 @@ fn verification_job(
     // Our renewal's answer: only one threading on a renewal we asked this
     // community for. It carries credentials, so it is checked as both an
     // operational document and two issued credentials.
-    if typ == openvtc_core::renewal::MEMBERS_RENEW_RESPONSE_TYPE {
+    if typ == crate::renewal::MEMBERS_RENEW_RESPONSE_TYPE {
         let asked = message
             .thid
             .as_deref()
-            .is_some_and(|thid| openvtc_core::renewal::is_pending(from_did, thid));
+            .is_some_and(|thid| crate::renewal::is_pending(from_did, thid));
         return (member && asked).then(|| VerifyJob::Renewal {
             document: message.body.clone(),
             sender: from_did.to_string(),
@@ -518,13 +529,13 @@ fn verification_job(
     }
     // An election answer from the community holding an election a notification told us of
     // (VTI-NTF-063), which may be one we hold no membership with: only on a thread we sent it.
-    if !member && openvtc_core::elections::is_reply_type(typ) {
+    if !member && crate::elections::is_reply_type(typ) {
         return awaited_election_answer(message, from_did).then(operational);
     }
     if is_capability_reply_type(typ)
-        || openvtc_core::git_ns::is_reply_type(typ)
-        || openvtc_core::community_rooms::is_reply_type(typ)
-        || openvtc_core::elections::is_reply_type(typ)
+        || crate::git_ns::is_reply_type(typ)
+        || crate::community_rooms::is_reply_type(typ)
+        || crate::elections::is_reply_type(typ)
         || JoinProtocol::is_submit_response(typ)
         || [
             MEMBER_REMOVAL_NOTICE_TYPE,
@@ -539,7 +550,7 @@ fn verification_job(
     }
     match MessageType::try_from(message).ok()? {
         MessageType::RelationshipRequest => {
-            let body: openvtc_core::relationships::RelationshipRequestBody =
+            let body: crate::relationships::RelationshipRequestBody =
                 serde_json::from_value(message.body.clone()).ok()?;
             validate_did(&body.did).ok()?;
             relationship_request_admissible(
@@ -555,7 +566,7 @@ fn verification_job(
                 persona_proof: body.persona_proof,
                 peer: recipient_did.to_string(),
                 thid: message.id.clone(),
-                role: openvtc_core::relationships::BindingRole::Request,
+                role: crate::relationships::BindingRole::Request,
             })
         }
         MessageType::RelationshipRequestAccepted => {
@@ -581,7 +592,7 @@ fn verification_job(
                 persona_proof: body.persona_proof,
                 peer: recipient_did.to_string(),
                 thid,
-                role: openvtc_core::relationships::BindingRole::Accept,
+                role: crate::relationships::BindingRole::Accept,
             })
         }
         MessageType::VRCIssued => {
@@ -644,32 +655,29 @@ fn awaited_election_answer(message: &Message, from_did: &str) -> bool {
             .get("threadId")
             .and_then(serde_json::Value::as_str)
     });
-    thread.is_some_and(|t| openvtc_core::elections::is_awaited(from_did, t))
+    thread.is_some_and(|t| crate::elections::is_awaited(from_did, t))
 }
 
 /// An operational document that was not checked.
 static NOT_CHECKED: Result<
-    openvtc_core::operational::VerifiedOperational,
-    openvtc_core::operational::OperationalError,
-> = Err(openvtc_core::operational::OperationalError::NotChecked);
+    crate::operational::VerifiedOperational,
+    crate::operational::OperationalError,
+> = Err(crate::operational::OperationalError::NotChecked);
 
 /// The operational result the off-loop check produced, or "not checked".
 fn pre_operational(
     pre: &Option<PreVerified>,
-) -> Result<
-    openvtc_core::operational::VerifiedOperational,
-    openvtc_core::operational::OperationalError,
-> {
+) -> Result<crate::operational::VerifiedOperational, crate::operational::OperationalError> {
     match pre {
         Some(PreVerified::Operational(r)) => r.clone(),
-        _ => Err(openvtc_core::operational::OperationalError::NotChecked),
+        _ => Err(crate::operational::OperationalError::NotChecked),
     }
 }
 
 /// Whether a community's reply to a question of ours (capability, git-ns) may
 /// be taken: it must be the community's signed operational document —
 /// `authentication` key, addressed to the persona it arrived for, fresh, not
-/// seen before ([`openvtc_core::operational`]). That holds for a refusal
+/// seen before ([`crate::operational`]). That holds for a refusal
 /// (`trust-task-error`) as much as for a success: an unsigned refusal is
 /// ignored, with a log line. The view then also checks the sender is the
 /// community it asked.
@@ -702,7 +710,7 @@ fn community_reply_proven(
         // election a notification told us of (VTI-NTF-063).
         Ok(_)
             if config.account.memberships_for(from_did).is_empty()
-                && !(openvtc_core::elections::is_reply_type(&message.typ)
+                && !(crate::elections::is_reply_type(&message.typ)
                     && awaited_election_answer(message, from_did)) =>
         {
             warn!(typ = %message.typ, "reply from a community we hold no membership with — ignored");
@@ -738,14 +746,11 @@ fn community_document(
     config: &Config,
     pre: &Option<PreVerified>,
     from_did: &str,
-) -> Result<
-    openvtc_core::operational::VerifiedOperational,
-    openvtc_core::operational::OperationalError,
-> {
+) -> Result<crate::operational::VerifiedOperational, crate::operational::OperationalError> {
     // A community we hold no membership with (Pending included) has asked
     // nothing of ours to answer.
     if config.account.memberships_for(from_did).is_empty() {
-        return Err(openvtc_core::operational::OperationalError::NoStanding);
+        return Err(crate::operational::OperationalError::NoStanding);
     }
     let verified = pre_operational(pre)?;
     verified.check(&config.private.seen_documents, chrono::Utc::now())?;
@@ -755,7 +760,7 @@ fn community_document(
 /// Commit a verified community reply that matched something of ours.
 fn commit_community_document(
     config: &mut Config,
-    verified: openvtc_core::operational::VerifiedOperational,
+    verified: crate::operational::VerifiedOperational,
 ) {
     if let Err(e) = verified.commit(&mut config.private.seen_documents, chrono::Utc::now()) {
         warn!(reason = %e, "community reply acted on but not recorded");
@@ -776,10 +781,10 @@ fn commit_community_document(
 /// nothing is ever acted on before its check has passed.
 ///
 /// `authenticated` is the sender the transport bound to the frame
-/// ([`openvtc_core::didcomm::DIDCommEvent::InboundMessage`]). The message is
+/// ([`crate::didcomm::DIDCommEvent::InboundMessage`]). The message is
 /// handled as that sender only: one with no authenticated sender, or whose
 /// `from` names someone else, is dropped before any handler sees it
-/// ([`openvtc_core::didcomm::bound_sender`]).
+/// ([`crate::didcomm::bound_sender`]).
 #[allow(clippy::too_many_arguments)]
 pub async fn process_inbound_message(
     config: &mut Config,
@@ -862,12 +867,11 @@ async fn process_inbound(
     // inbox task, no reply, no receipt, no task removed. It selects the record
     // a message is about; decisions with lasting effect (a credential stored,
     // a membership ended, a relationship bound) are further gated on a proof
-    // by that party (`openvtc_core::proof_check`).
+    // by that party (`crate::proof_check`).
     //
     // Before the replay cache: a message handled as nobody must not take up
     // the id of one that is, or the real one would be dropped as its replay.
-    let from_did = match openvtc_core::didcomm::bound_sender(message.from.as_deref(), authenticated)
-    {
+    let from_did = match crate::didcomm::bound_sender(message.from.as_deref(), authenticated) {
         Ok(did) => Arc::new(did),
         Err(reason) => {
             warn!(
@@ -931,8 +935,8 @@ async fn process_inbound(
     // community replies in the document's own type today and in the envelope
     // once it follows the binding (§5) fully — this reads both, the same way
     // (VTI #1687, Keyring VTI-42).
-    let opened = openvtc_core::didcomm::open_didcomm_envelope(message);
-    if opened.is_none() && message.typ == openvtc_core::capabilities::TRUST_TASK_ENVELOPE_TYPE {
+    let opened = crate::didcomm::open_didcomm_envelope(message);
+    if opened.is_none() && message.typ == crate::capabilities::TRUST_TASK_ENVELOPE_TYPE {
         warn!(id = %message.id, from = %from_did, "binding envelope carries no typed document — dropped");
         return Ok(false);
     }
@@ -981,11 +985,11 @@ async fn process_inbound(
     // VTA exactly as received, whoever sent it — no acceptance policy here, which would be
     // declining on the principal's behalf. The loop deposits it and answers the sender; nothing
     // else is done because of it (VTI-NTF-053).
-    if openvtc_core::notifications::is_notification_type(&message.typ) {
-        match openvtc_core::notifications::addressee_of(&message.body)
+    if crate::notifications::is_notification_type(&message.typ) {
+        match crate::notifications::addressee_of(&message.body)
             .filter(|addressee| config.account.persona_id_for_did(addressee).is_some())
         {
-            Some(addressee) => notifications.push(openvtc_core::notifications::Received {
+            Some(addressee) => notifications.push(crate::notifications::Received {
                 document: message.body.clone(),
                 sender: from_did.to_string(),
                 addressee: addressee.to_string(),
@@ -1013,9 +1017,8 @@ async fn process_inbound(
     // view *and* falls through to the handlers below; each side drops an error
     // that threads on nothing of its own.
     if is_capability_reply_type(&message.typ)
-        && let Some((thid, doc)) =
-            openvtc_core::capabilities::parse_envelope_document(&message.body)
-        && let Some(reply) = openvtc_core::capabilities::parse_capability_reply(&doc, &thid)
+        && let Some((thid, doc)) = crate::capabilities::parse_envelope_document(&message.body)
+        && let Some(reply) = crate::capabilities::parse_capability_reply(&doc, &thid)
         && community_reply_proven(
             config,
             &pre,
@@ -1036,9 +1039,9 @@ async fn process_inbound(
     // the one request the panel has outstanding; anything else is dropped.
     // A `trust-task-error` is offered here as well and falls through, for the
     // same reason as above.
-    if openvtc_core::git_ns::is_reply_type(&message.typ)
-        && let Some((_, doc)) = openvtc_core::capabilities::parse_envelope_document(&message.body)
-        && let Some((thid, reply)) = openvtc_core::git_ns::parse_reply(&doc)
+    if crate::git_ns::is_reply_type(&message.typ)
+        && let Some((_, doc)) = crate::capabilities::parse_envelope_document(&message.body)
+        && let Some((thid, reply)) = crate::git_ns::parse_reply(&doc)
         && community_reply_proven(
             config,
             &pre,
@@ -1050,7 +1053,7 @@ async fn process_inbound(
     {
         // The sender and the document's issuer travel with the answer: the
         // Repos view takes one only from the community it asked.
-        git_ns_replies.push(crate::state_handler::repos_actions::InboundReply {
+        git_ns_replies.push(ThreadedReply {
             from: from_did.to_string(),
             issuer: doc.issuer.clone(),
             thid,
@@ -1064,9 +1067,9 @@ async fn process_inbound(
     // Data-room replies (vtc/rooms/*), in either carriage, for the Rooms panel — keyed by
     // `threadId` and correlated there against the one request the panel has outstanding.
     // A `trust-task-error` is offered here as well and falls through.
-    if openvtc_core::community_rooms::is_reply_type(&message.typ)
-        && let Some((_, doc)) = openvtc_core::capabilities::parse_envelope_document(&message.body)
-        && let Some((thid, reply)) = openvtc_core::community_rooms::parse_reply(&doc)
+    if crate::community_rooms::is_reply_type(&message.typ)
+        && let Some((_, doc)) = crate::capabilities::parse_envelope_document(&message.body)
+        && let Some((thid, reply)) = crate::community_rooms::parse_reply(&doc)
         && community_reply_proven(
             config,
             &pre,
@@ -1076,7 +1079,7 @@ async fn process_inbound(
             &mut reply_proven,
         )
     {
-        rooms_replies.push(crate::state_handler::rooms_actions::InboundReply {
+        rooms_replies.push(ThreadedReply {
             from: from_did.to_string(),
             issuer: doc.issuer.clone(),
             thid,
@@ -1090,9 +1093,9 @@ async fn process_inbound(
     // Election replies (vtc/elections/*), in either carriage, for the Elections panel — keyed by
     // `threadId` and correlated there against the one request the panel has outstanding. A
     // `trust-task-error` is offered here as well and falls through.
-    if openvtc_core::elections::is_reply_type(&message.typ)
-        && let Some((_, doc)) = openvtc_core::capabilities::parse_envelope_document(&message.body)
-        && let Some((thid, reply)) = openvtc_core::elections::parse_reply(&doc)
+    if crate::elections::is_reply_type(&message.typ)
+        && let Some((_, doc)) = crate::capabilities::parse_envelope_document(&message.body)
+        && let Some((thid, reply)) = crate::elections::parse_reply(&doc)
         && community_reply_proven(
             config,
             &pre,
@@ -1102,7 +1105,7 @@ async fn process_inbound(
             &mut reply_proven,
         )
     {
-        elections_replies.push(crate::state_handler::elections_actions::InboundReply {
+        elections_replies.push(ThreadedReply {
             from: from_did.to_string(),
             issuer: doc.issuer.clone(),
             thid,
@@ -1119,11 +1122,10 @@ async fn process_inbound(
     // witnessing waiting on that thread verifies each as the witness's first. A
     // `trust-task-error` may be a witness's refusal as much as anything else's, so it is offered
     // here too and falls through, as it does for the capability and git-ns views above.
-    if (openvtc_core::witness::is_reply_type(&message.typ)
-        || is_trust_task_error_type(&message.typ))
+    if (crate::witness::is_reply_type(&message.typ) || is_trust_task_error_type(&message.typ))
         && message.body.get("threadId").is_some()
     {
-        witness_replies.push(openvtc_core::witness::InboundReply {
+        witness_replies.push(crate::witness::InboundReply {
             sender: from_did.to_string(),
             document: message.body.clone(),
         });
@@ -1137,10 +1139,10 @@ async fn process_inbound(
     // community's vetting requirements. Tried before the join and credential
     // routes below because it shares two of their types; `handle` returns
     // `None` for anything that is not vetting's, which falls through unchanged.
-    if openvtc_core::vetting::inbound::may_claim(&message.typ) {
+    if crate::vetting::inbound::may_claim(&message.typ) {
         let resolver =
             vta_sdk::trust_task_proof::TrustTaskVmResolver::new(tdk.did_resolver().clone());
-        let ctx = openvtc_core::vetting::inbound::Context {
+        let ctx = crate::vetting::inbound::Context {
             account: &config.account,
             resolver: &resolver,
             did_resolver: tdk.did_resolver(),
@@ -1157,7 +1159,7 @@ async fn process_inbound(
             recipient: recipient_persona.map(|p| (p, recipient_did.as_str())),
             now: chrono::Utc::now(),
         };
-        if let Some(handled) = openvtc_core::vetting::inbound::handle(
+        if let Some(handled) = crate::vetting::inbound::handle(
             &mut config.private.vetting,
             &ctx,
             &mut config.private.seen_documents,
@@ -1167,8 +1169,7 @@ async fn process_inbound(
         .await
         {
             if let Some(reply) = handled.reply
-                && let Err(e) =
-                    openvtc_core::vetting::wire::send_reply(config, tdk, service, reply).await
+                && let Err(e) = crate::vetting::wire::send_reply(config, tdk, service, reply).await
             {
                 warn!(to = %from_did, error = %e, "could not send vetting reply");
             }
@@ -1250,7 +1251,7 @@ async fn process_inbound(
         let verified = match match pre {
             Some(PreVerified::Credential(Ok(v))) if *v.value() == credential => Ok(v),
             Some(PreVerified::Credential(Err(e))) => Err(e),
-            _ => Err(openvtc_core::issued_credential::IssuedCredentialError::NotChecked),
+            _ => Err(crate::issued_credential::IssuedCredentialError::NotChecked),
         } {
             Ok(verified) => verified,
             Err(e) => {
@@ -1291,7 +1292,9 @@ async fn process_inbound(
                     // re-send it without minting a different credential.
                     if let Some(record) = config.account.membership_mut(&from_did, persona_id) {
                         record.member_vmc = Some(vmc);
-                        record.clear_retired(openvtc_core::config::account::RetiredCredential::MEMBER_ACKNOWLEDGEMENT);
+                        record.clear_retired(
+                            crate::config::account::RetiredCredential::MEMBER_ACKNOWLEDGEMENT,
+                        );
                     }
                     info!(
                         vtc = %from_did,
@@ -1342,7 +1345,7 @@ async fn process_inbound(
         let outcome = handle_join_verdict(&mut config.account, message, &from_did);
         // A `requestMore` is the one verdict that asks the member to act, so
         // what it lacks is said where they will see it — not only in a trace.
-        if let Some(needs) = openvtc_core::messaging::join_verdict_needs(message) {
+        if let Some(needs) = crate::messaging::join_verdict_needs(message) {
             // Under a hidden-vetting criterion the join carried a proof, not statements, and
             // the sentence is about the proof.
             let hidden = config
@@ -1355,7 +1358,7 @@ async fn process_inbound(
                 LogFamily::Community,
                 format!(
                     "Community ({from_did}) has not decided your join yet: {}.",
-                    openvtc_core::messaging::describe_join_needs(&needs, hidden)
+                    crate::messaging::describe_join_needs(&needs, hidden)
                 ),
             );
         }
@@ -1399,8 +1402,8 @@ async fn process_inbound(
     // issued credentials. Stored on the membership, replacing what it held —
     // which is what clears a pre-v1 notice — and then answered with a fresh
     // acknowledgement, because the new grant has a new digest.
-    if message.typ == openvtc_core::renewal::MEMBERS_RENEW_RESPONSE_TYPE {
-        use openvtc_core::renewal::{RenewalError, RenewalOutcome};
+    if message.typ == crate::renewal::MEMBERS_RENEW_RESPONSE_TYPE {
+        use crate::renewal::{RenewalError, RenewalOutcome};
         let thid = message.thid.as_deref().unwrap_or_default();
         let verified = match &pre {
             Some(PreVerified::Renewal(Ok(v))) => v.clone(),
@@ -1414,7 +1417,7 @@ async fn process_inbound(
                 // else answers nothing the member is waiting on. The request is
                 // not consumed — a forged reply must not be able to cancel the
                 // genuine one still on its way.
-                if openvtc_core::renewal::is_pending(&from_did, thid) {
+                if crate::renewal::is_pending(&from_did, thid) {
                     config
                         .account
                         .note_credential_refused(&from_did, Some(&e.to_string()));
@@ -1437,7 +1440,7 @@ async fn process_inbound(
             warn!(vtc = %from_did, reason = %e, "renewal reply refused");
             return Ok(false);
         }
-        match openvtc_core::renewal::take_pending(&from_did, thid) {
+        match crate::renewal::take_pending(&from_did, thid) {
             Some(member) if member == verified.member_did() => {}
             _ => {
                 warn!(vtc = %from_did, "renewal reply answers no renewal of ours — ignored");
@@ -1445,58 +1448,58 @@ async fn process_inbound(
             }
         }
         commit_community_document(config, verified.document().clone());
-        let outcome =
-            match openvtc_core::renewal::apply_renewal(&mut config.account, &verified, &from_did) {
-                Err(e) => RenewalOutcome::Failed(e.to_string()),
-                Ok(summary) => {
-                    config.account.note_credential_refused(&from_did, None);
-                    // The new grant has a new digest, so the community is owed a
-                    // fresh acknowledgement — sent the way the join flow sends one
-                    // on admission. Best-effort: the renewed credentials are
-                    // already stored, and the member can send it with `m`.
-                    //
-                    // A renewal that rescued an approved join closes its
-                    // request, as the delivered credential would have.
-                    let acknowledged = match issue_member_vmc_for(
-                        config,
-                        tdk,
-                        &from_did,
-                        summary.persona,
-                        summary.closed_join,
-                    )
-                    .await
-                    {
-                        Ok((_, vmc)) => {
-                            openvtc_core::renewal::store_acknowledgement(
-                                &mut config.account,
-                                &from_did,
-                                summary.persona,
-                                vmc,
-                            );
-                            Ok(())
-                        }
-                        Err(e) => {
-                            warn!(
-                                vtc = %from_did,
-                                error = %e,
-                                "membership renewed, but our acknowledgement could not be sent"
-                            );
-                            Err(e.to_string())
-                        }
-                    };
-                    info!(
-                        vtc = %from_did,
-                        personhood = summary.personhood,
-                        personhood_changed = summary.personhood_changed,
-                        cleared_retired = summary.cleared_retired,
-                        "membership renewed"
-                    );
-                    RenewalOutcome::Renewed {
-                        summary,
-                        acknowledged,
+        let outcome = match crate::renewal::apply_renewal(&mut config.account, &verified, &from_did)
+        {
+            Err(e) => RenewalOutcome::Failed(e.to_string()),
+            Ok(summary) => {
+                config.account.note_credential_refused(&from_did, None);
+                // The new grant has a new digest, so the community is owed a
+                // fresh acknowledgement — sent the way the join flow sends one
+                // on admission. Best-effort: the renewed credentials are
+                // already stored, and the member can send it with `m`.
+                //
+                // A renewal that rescued an approved join closes its
+                // request, as the delivered credential would have.
+                let acknowledged = match issue_member_vmc_for(
+                    config,
+                    tdk,
+                    &from_did,
+                    summary.persona,
+                    summary.closed_join,
+                )
+                .await
+                {
+                    Ok((_, vmc)) => {
+                        crate::renewal::store_acknowledgement(
+                            &mut config.account,
+                            &from_did,
+                            summary.persona,
+                            vmc,
+                        );
+                        Ok(())
                     }
+                    Err(e) => {
+                        warn!(
+                            vtc = %from_did,
+                            error = %e,
+                            "membership renewed, but our acknowledgement could not be sent"
+                        );
+                        Err(e.to_string())
+                    }
+                };
+                info!(
+                    vtc = %from_did,
+                    personhood = summary.personhood,
+                    personhood_changed = summary.personhood_changed,
+                    cleared_retired = summary.cleared_retired,
+                    "membership renewed"
+                );
+                RenewalOutcome::Renewed {
+                    summary,
+                    acknowledged,
                 }
-            };
+            }
+        };
         config.private.logs.insert(
             LogFamily::Community,
             format!("Community ({from_did}): {}", outcome.describe()),
@@ -1511,7 +1514,7 @@ async fn process_inbound(
     // refusal of a join and drop it for matching no pending request.
     if is_trust_task_error_type(&message.typ)
         && let Some(thid) = message.thid.as_deref()
-        && openvtc_core::renewal::is_pending(&from_did, thid)
+        && crate::renewal::is_pending(&from_did, thid)
     {
         if !community_reply_proven(
             config,
@@ -1523,9 +1526,9 @@ async fn process_inbound(
         ) {
             return Ok(false);
         }
-        let _ = openvtc_core::renewal::take_pending(&from_did, thid);
-        let outcome = openvtc_core::renewal::RenewalOutcome::Refused(
-            openvtc_core::renewal::RenewalRefusal::read(&message.body),
+        let _ = crate::renewal::take_pending(&from_did, thid);
+        let outcome = crate::renewal::RenewalOutcome::Refused(
+            crate::renewal::RenewalRefusal::read(&message.body),
         );
         warn!(vtc = %from_did, "renewal refused by the community");
         config.private.logs.insert(
@@ -1630,7 +1633,7 @@ async fn process_inbound(
         let asked = message
             .thid
             .as_deref()
-            .is_some_and(|thid| openvtc_core::join::take_profile_query(&from_did, thid));
+            .is_some_and(|thid| crate::join::take_profile_query(&from_did, thid));
         if !asked {
             warn!("community profile response we did not ask for — ignored");
             return Ok(false);
@@ -1647,7 +1650,7 @@ async fn process_inbound(
     // and this function owns `Config`, which is the thing that gets persisted.
     // A single-use nonce has no business surviving a restart.
     if message.typ == PERSONHOOD_CHALLENGE_RESPONSE_TYPE {
-        match openvtc_core::personhood::parse_challenge_reply(&message.body) {
+        match crate::personhood::parse_challenge_reply(&message.body) {
             Ok(reply) => {
                 debug!(
                     vtc = %from_did,
@@ -1669,7 +1672,7 @@ async fn process_inbound(
     // `PersonhoodCredential` arrives separately as a credential-issue message,
     // which is what actually updates the wallet — this is the decision.
     if message.typ == PERSONHOOD_ASSERT_RESPONSE_TYPE {
-        match openvtc_core::personhood::parse_assert_reply(&message.body) {
+        match crate::personhood::parse_assert_reply(&message.body) {
             Ok(reply) => info!(
                 vtc = %from_did,
                 did = %reply.did,
@@ -1734,7 +1737,9 @@ async fn process_inbound(
                     Ok((_, vmc)) => {
                         if let Some(record) = config.account.membership_mut(&from_did, persona_id) {
                             record.member_vmc = Some(vmc);
-                            record.clear_retired(openvtc_core::config::account::RetiredCredential::MEMBER_ACKNOWLEDGEMENT);
+                            record.clear_retired(
+                                crate::config::account::RetiredCredential::MEMBER_ACKNOWLEDGEMENT,
+                            );
                         }
                         info!(
                             vtc = %from_did,
@@ -1763,7 +1768,7 @@ async fn process_inbound(
     // its VTC DID up for the loop to deregister the session (R-S-3).
     if message.typ == MEMBER_REMOVAL_NOTICE_TYPE {
         // Only the community's signature ends a membership.
-        let notice = match openvtc_core::messaging::bind_removal_notice(
+        let notice = match crate::messaging::bind_removal_notice(
             message,
             &from_did,
             &config.account,
@@ -1836,7 +1841,7 @@ async fn process_inbound(
                 .map(|rel| Arc::clone(&rel.our_did))
                 .filter(|our_did| !config.is_persona_did(our_did.as_str()));
             let listener_to_remove =
-                our_did.map(|our_did| super::didcomm::listener_id_for_did(&our_did, config));
+                our_did.map(|our_did| crate::didcomm::listener_id_for_did(&our_did, config));
             if let Some(lid) = listener_to_remove {
                 // Infallible now: dropping a transport closes its socket and
                 // forgets its wire, with nothing left that can fail.
@@ -1893,7 +1898,7 @@ async fn process_inbound(
             // Checked off the loop, before this message was handled at all.
             if let Err(e) = match &pre {
                 Some(PreVerified::DidBinding(r)) => r.clone(),
-                _ => Err(openvtc_core::relationships::DidBindingError::NotChecked),
+                _ => Err(crate::relationships::DidBindingError::NotChecked),
             } {
                 warn!(reason = %e, "relationship accept refused");
                 config.private.logs.insert(
@@ -1917,7 +1922,7 @@ async fn process_inbound(
             // If the send fails, still persist the Established state.
             let finalize_msg = create_finalize_message(&recipient_did, &from_did, &task_id)?;
 
-            if let Err(e) = super::didcomm::send_message(
+            if let Err(e) = crate::didcomm::send_message(
                 service,
                 config,
                 &finalize_msg,
@@ -1987,7 +1992,7 @@ async fn process_inbound(
             // A rejection closes only our own VRC request, on its thread, to the
             // party it was sent to — the thread id alone names no counterparty,
             // and anyone who learned it could otherwise delete the task.
-            if !openvtc_core::tasks::is_our_vrc_request_to(
+            if !crate::tasks::is_our_vrc_request_to(
                 &config.private.tasks,
                 &config.private.relationships,
                 &task_id,
@@ -2015,7 +2020,7 @@ async fn process_inbound(
         // =====================================================================
         MessageType::RelationshipRequest => {
             let task_id = Arc::new(message.id.clone());
-            let body: openvtc_core::relationships::RelationshipRequestBody =
+            let body: crate::relationships::RelationshipRequestBody =
                 serde_json::from_value(message.body.clone())?;
 
             if let Err(e) = validate_did(&body.did) {
@@ -2034,7 +2039,7 @@ async fn process_inbound(
             // Checked off the loop, before this message was handled at all.
             if let Err(e) = match &pre {
                 Some(PreVerified::DidBinding(r)) => r.clone(),
-                _ => Err(openvtc_core::relationships::DidBindingError::NotChecked),
+                _ => Err(crate::relationships::DidBindingError::NotChecked),
             } {
                 warn!(reason = %e, "relationship request refused");
                 return Ok(false);
@@ -2205,12 +2210,57 @@ async fn process_inbound(
             debug!(from = %from_did, "trust-ping task created");
             Ok(true)
         }
-
-        _ => {
-            warn!(msg_type = %message.typ, "unhandled message type");
-            Ok(false)
-        }
     }
+}
+
+/// The runtime loop's inbound handling without the loop: dispatch, run any
+/// deferred check inline, dispatch again with its result. `true` when the
+/// config changed.
+///
+/// For headless commands that listen as a persona, so a message they were not
+/// waiting for is applied rather than lost. Effects that need a live UI or a
+/// session manager (a view's reply, a session to tear down) are dropped; the
+/// account state they stand beside is applied.
+///
+/// `authenticated` is the sender the transport bound to the frame; the
+/// message is handled as that sender only (see [`process_inbound_message`]).
+pub async fn apply_inline(
+    config: &mut Config,
+    tdk: &TDK,
+    messaging: &Messaging,
+    seen: &mut SeenMessages,
+    message: &Message,
+    authenticated: Option<&str>,
+) -> bool {
+    let nobody = |_: &str| false;
+    let mut arrival = Arrival::New { waiting: &nobody };
+    let mut message = message.clone();
+    let mut changed = false;
+    // Bounded: a returning message is handled, not set aside again.
+    for _ in 0..3 {
+        let mut effects = InboundEffects::default();
+        match process_inbound_message(
+            config,
+            tdk,
+            messaging,
+            seen,
+            &message,
+            authenticated,
+            &mut effects,
+            arrival,
+        )
+        .await
+        {
+            Ok(c) => changed |= c,
+            Err(e) => warn!(error = %e, "inbound message not handled"),
+        }
+        let Some(deferred) = effects.deferred else {
+            break;
+        };
+        arrival = Arrival::Returning(deferred.job.run(tdk.clone()).await);
+        message = deferred.message;
+    }
+    changed
 }
 
 /// Whether `task_id` is a ping we sent to `from` — directly, or to the
@@ -2241,1646 +2291,4 @@ fn is_our_ping_to(config: &Config, task_id: &Arc<String>, from: &Arc<String>) ->
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state_handler::dispatch_util::{test_config, test_tdk};
-    use affinidi_tdk::secrets_resolver::secrets::Secret;
-    use openvtc_core::config::account::{
-        CommunityRecord, CommunityStatus, PersonaId, PersonaRecord,
-    };
-
-    const PERSONA: &str = "did:webvh:QmP:example.com:alice";
-
-    fn community_key() -> (String, Secret) {
-        let mut s = Secret::generate_ed25519(None, Some(&[0x71; 32]));
-        let mb = s.get_public_keymultibase().unwrap();
-        let did = format!("did:key:{mb}");
-        s.id = format!("{did}#{mb}");
-        (did, s)
-    }
-
-    /// A config holding one persona with a Pending join to `vtc`.
-    fn pending_config(vtc: &str) -> Config {
-        let mut config = test_config();
-        let pid = PersonaId::new();
-        config.account.personas.insert(
-            pid,
-            PersonaRecord {
-                extra: serde_json::Map::new(),
-                persona_id: pid,
-                did: PERSONA.into(),
-                did_document: None,
-                did_locator: None,
-                key_refs: vec![],
-                mediator_did: None,
-                origin_context_id: "openvtc".into(),
-                created_at: chrono::Utc::now(),
-                label: None,
-            },
-        );
-        config.account.add_membership(CommunityRecord::new_pending(
-            vtc.into(),
-            None,
-            "openvtc/x".into(),
-            pid,
-            uuid::Uuid::new_v4(),
-            chrono::Utc::now(),
-        ));
-        config
-    }
-
-    /// An `issue` as a VTC pushes it: a Trust Task document signed by the
-    /// community's key, opened out of the binding envelope.
-    async fn issue(vtc: &str, key: &Secret, credential: serde_json::Value) -> Message {
-        let mut document = serde_json::from_value(serde_json::json!({
-            "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-            "type": CREDENTIAL_ISSUE_TYPE,
-            "issuer": vtc,
-            "recipient": PERSONA,
-            "issuedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "payload": { "credential_response": { "credential": credential } },
-        }))
-        .expect("an issue document");
-        openvtc_core::capabilities::sign_document(&mut document, key)
-            .await
-            .expect("sign the delivery");
-        Message::build(
-            uuid::Uuid::new_v4().to_string(),
-            CREDENTIAL_ISSUE_TYPE.to_string(),
-            serde_json::to_value(&document).expect("document json"),
-        )
-        .from(vtc.to_string())
-        .to(PERSONA.to_string())
-        .created_time(chrono::Utc::now().timestamp() as u64)
-        .finalize()
-    }
-
-    async fn membership_vmc(vtc: &str, key: &Secret) -> serde_json::Value {
-        let mut vc = serde_json::json!({
-            "@context": [
-                dtg_credentials::W3C_VC_V2_CONTEXT,
-                dtg_credentials::DTG_CONTEXT_V1
-            ],
-            "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-            "type": ["VerifiableCredential", "DTGCredential", "MembershipCredential"],
-            "issuer": vtc,
-            "issuerScope": "public",
-            "validFrom": "2026-01-01T00:00:00Z",
-            "validUntil": "2099-01-01T00:00:00Z",
-            "credentialSubject": { "id": PERSONA },
-        });
-        let proof = affinidi_data_integrity::DataIntegrityProof::sign(
-            &vc,
-            key,
-            affinidi_data_integrity::SignOptions::new(),
-        )
-        .await
-        .unwrap();
-        vc["proof"] = serde_json::to_value(proof).unwrap();
-        vc
-    }
-
-    fn status(config: &Config, vtc: &str) -> CommunityStatus {
-        config.account.memberships_for(vtc)[0].status.clone()
-    }
-
-    /// A credential delivery is not handled on arrival: it is set aside for
-    /// its check, and nothing — no credential, no activation — is applied
-    /// until the check's result comes back. Then a verified credential
-    /// activates the join, and a refused one leaves it Pending.
-    #[tokio::test]
-    async fn a_credential_is_verified_off_the_loop_before_anything_is_applied() {
-        let (vtc, key) = community_key();
-        let tdk = test_tdk().await;
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let service = openvtc_core::didcomm::start_empty_service(
-            tx,
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let mut seen = SeenMessages::new();
-
-        // A forged (unsigned) credential: deferred, then refused.
-        let mut config = pending_config(&vtc);
-        let mut forged = membership_vmc(&vtc, &key).await;
-        forged.as_object_mut().unwrap().remove("proof");
-        let m = issue(&vtc, &key, forged).await;
-        let mut effects = InboundEffects::default();
-        let changed = process_inbound_message(
-            &mut config,
-            &tdk,
-            &service,
-            &mut seen,
-            &m,
-            m.from.as_deref(),
-            &mut effects,
-            Arrival::FRESH,
-        )
-        .await
-        .unwrap();
-        assert!(!changed, "nothing applied on arrival");
-        let deferred = effects.deferred.take().expect("set aside for its check");
-        assert_eq!(deferred.job.verifying_community(), Some(vtc.as_str()));
-        assert!(matches!(
-            status(&config, &vtc),
-            CommunityStatus::Pending { .. }
-        ));
-        let pre = deferred.job.run(tdk.clone()).await;
-        let mut effects = InboundEffects::default();
-        process_inbound_message(
-            &mut config,
-            &tdk,
-            &service,
-            &mut seen,
-            &deferred.message,
-            deferred.message.from.as_deref(),
-            &mut effects,
-            Arrival::Returning(pre),
-        )
-        .await
-        .unwrap();
-        assert!(
-            effects.deferred.is_none(),
-            "handled on its return, not set aside again"
-        );
-        assert!(
-            matches!(status(&config, &vtc), CommunityStatus::Pending { .. }),
-            "refused: still Pending"
-        );
-        assert!(
-            config.account.memberships_for(&vtc)[0]
-                .credentials
-                .is_empty()
-        );
-
-        // A genuine credential: deferred, then it activates.
-        let mut config = pending_config(&vtc);
-        let genuine = membership_vmc(&vtc, &key).await;
-        let m = issue(&vtc, &key, genuine).await;
-        let mut effects = InboundEffects::default();
-        process_inbound_message(
-            &mut config,
-            &tdk,
-            &service,
-            &mut seen,
-            &m,
-            m.from.as_deref(),
-            &mut effects,
-            Arrival::FRESH,
-        )
-        .await
-        .unwrap();
-        let deferred = effects.deferred.take().expect("set aside");
-        assert!(
-            matches!(status(&config, &vtc), CommunityStatus::Pending { .. }),
-            "not before its check"
-        );
-        let pre = deferred.job.run(tdk.clone()).await;
-        assert!(matches!(&pre, PreVerified::Credential(Ok(_))));
-        let mut effects = InboundEffects::default();
-        process_inbound_message(
-            &mut config,
-            &tdk,
-            &service,
-            &mut seen,
-            &deferred.message,
-            deferred.message.from.as_deref(),
-            &mut effects,
-            Arrival::Returning(pre),
-        )
-        .await
-        .unwrap();
-        assert!(status(&config, &vtc).is_active(), "activated once verified");
-    }
-
-    /// A community's answer to a hidden-vetting question — here a vetter's enrolment, in the
-    /// binding envelope the VTC replies in — reaches the vetting router and takes the question
-    /// it threads on. It used to be dropped before the router saw it, so the question waited
-    /// out its 30 seconds as "no answer" and the vetter never held a token to attest with.
-    #[tokio::test]
-    async fn a_hidden_vetting_answer_reaches_the_question_it_answers() {
-        use openvtc_core::vetting::queries::{CommunityQuery, QueryKind};
-        use openvtc_core::vetting::wire::pcs;
-
-        let (vtc, _key) = community_key();
-        let tdk = test_tdk().await;
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let service = openvtc_core::didcomm::start_empty_service(
-            tx,
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let mut seen = SeenMessages::new();
-        let mut config = pending_config(&vtc);
-        let persona = *config.account.personas.keys().next().unwrap();
-
-        for (kind, task, payload) in [
-            (
-                QueryKind::PcsRoot,
-                pcs::ROOT_TYPE,
-                serde_json::json!({ "label": "vetter/2026-10", "preCredential": "z1" }),
-            ),
-            (
-                QueryKind::PcsTokens,
-                pcs::TOKENS_TYPE,
-                serde_json::json!({ "label": "token/2026-10", "tick": 0, "preCredentials": [] }),
-            ),
-        ] {
-            let asked = format!("urn:uuid:{}", uuid::Uuid::new_v4());
-            config.private.vetting.ask(CommunityQuery {
-                document_id: asked.clone(),
-                community: vtc.clone(),
-                persona,
-                kind,
-                sent_at: chrono::Utc::now(),
-            });
-            let answer = Message::build(
-                uuid::Uuid::new_v4().to_string(),
-                openvtc_core::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
-                serde_json::json!({
-                    "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-                    "type": pcs::response_of(task),
-                    "threadId": asked,
-                    "issuer": vtc,
-                    "recipient": PERSONA,
-                    "payload": payload,
-                }),
-            )
-            .from(vtc.clone())
-            .to(PERSONA.to_string())
-            .created_time(chrono::Utc::now().timestamp() as u64)
-            .finalize();
-            let mut effects = InboundEffects::default();
-            process_inbound_message(
-                &mut config,
-                &tdk,
-                &service,
-                &mut seen,
-                &answer,
-                answer.from.as_deref(),
-                &mut effects,
-                Arrival::FRESH,
-            )
-            .await
-            .unwrap();
-            assert!(
-                !config
-                    .private
-                    .vetting
-                    .queries
-                    .iter()
-                    .any(|q| q.document_id == asked),
-                "the {kind:?} answer was heard, so its question no longer waits to time out"
-            );
-        }
-    }
-
-    /// A result is taken only for the credential it was produced for.
-    #[tokio::test]
-    async fn a_check_result_for_another_credential_is_not_taken() {
-        let (vtc, key) = community_key();
-        let tdk = test_tdk().await;
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let service = openvtc_core::didcomm::start_empty_service(
-            tx,
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let mut seen = SeenMessages::new();
-        let mut config = pending_config(&vtc);
-
-        let other = issue(&vtc, &key, membership_vmc(&vtc, &key).await).await;
-        let mut effects = InboundEffects::default();
-        process_inbound_message(
-            &mut config,
-            &tdk,
-            &service,
-            &mut seen,
-            &other,
-            other.from.as_deref(),
-            &mut effects,
-            Arrival::FRESH,
-        )
-        .await
-        .unwrap();
-        let pre = effects.deferred.take().unwrap().job.run(tdk.clone()).await;
-
-        // A different credential, handed back with the first one's result.
-        let mut different = membership_vmc(&vtc, &key).await;
-        different["id"] = serde_json::json!("urn:uuid:different");
-        let m = issue(&vtc, &key, different).await;
-        let mut effects = InboundEffects::default();
-        process_inbound_message(
-            &mut config,
-            &tdk,
-            &service,
-            &mut seen,
-            &m,
-            m.from.as_deref(),
-            &mut effects,
-            Arrival::Returning(pre),
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            status(&config, &vtc),
-            CommunityStatus::Pending { .. }
-        ));
-    }
-
-    /// Operational documents (here a removal notice) are set aside too, and
-    /// applied only with their check's result.
-    #[tokio::test]
-    async fn a_removal_notice_waits_for_its_check() {
-        let (vtc, _) = community_key();
-        let tdk = test_tdk().await;
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let service = openvtc_core::didcomm::start_empty_service(
-            tx,
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let mut seen = SeenMessages::new();
-        let mut config = pending_config(&vtc);
-        let m = Message::build(
-            uuid::Uuid::new_v4().to_string(),
-            MEMBER_REMOVAL_NOTICE_TYPE.to_string(),
-            serde_json::json!({ "payload": { "did": PERSONA } }),
-        )
-        .from(vtc.clone())
-        .created_time(chrono::Utc::now().timestamp() as u64)
-        .finalize();
-        let mut effects = InboundEffects::default();
-        process_inbound_message(
-            &mut config,
-            &tdk,
-            &service,
-            &mut seen,
-            &m,
-            m.from.as_deref(),
-            &mut effects,
-            Arrival::FRESH,
-        )
-        .await
-        .unwrap();
-        let deferred = effects.deferred.expect("set aside for its check");
-        assert!(matches!(deferred.job, VerifyJob::Operational { .. }));
-        assert_eq!(deferred.job.verifying_community(), None);
-    }
-
-    /// A config holding one persona with an Active membership of `vtc` whose
-    /// pre-v1 credentials were set aside on load — what the v1 migration leaves.
-    ///
-    /// The persona also has a runtime identity, so a reply addressed to it is
-    /// recognised as ours (`Config::is_persona_did`), as it is at run time.
-    fn retired_config(vtc: &str) -> Config {
-        let mut config = with_identity(pending_config(vtc));
-        let record = &mut config.account.communities.get_mut(vtc).unwrap()[0];
-        record.activate(chrono::Utc::now());
-        for kind in ["Membership", "Role"] {
-            record
-                .retired_credentials
-                .push(openvtc_core::config::account::RetiredCredential {
-                    kind: kind.into(),
-                    credential_id: None,
-                    reason: "pre-v1".into(),
-                    retired_at: chrono::Utc::now(),
-                });
-        }
-        config
-    }
-
-    /// `config` with a runtime identity for `PERSONA`, so a reply addressed
-    /// to it is recognised as ours (`Config::is_persona_did`), as it is at run
-    /// time.
-    fn with_identity(mut config: Config) -> Config {
-        use affinidi_tdk::messaging::profiles::{ATMProfile, ATMProfileInner};
-        let pid = config.account.persona_id_for_did(PERSONA).unwrap();
-        config.identities.insert(
-            pid,
-            openvtc_core::identity::IdentityContext {
-                persona_id: pid,
-                did: PERSONA.to_string(),
-                document: serde_json::from_value(serde_json::json!({ "id": PERSONA }))
-                    .expect("minimal DID document"),
-                profile: Arc::new(ATMProfile {
-                    inner: Arc::new(ATMProfileInner {
-                        did: PERSONA.to_string(),
-                        alias: PERSONA.to_string(),
-                        mediator: Arc::new(None),
-                    }),
-                }),
-                mediator_did: None,
-            },
-        );
-        config
-    }
-
-    /// A Trust Task document from the community to `PERSONA`, threaded on
-    /// `thid`, signed under `authentication` and carried in the binding
-    /// envelope — the shape a VTC answers a member verb with.
-    async fn community_reply(
-        vtc: &str,
-        key: &Secret,
-        typ: &str,
-        thid: &str,
-        payload: serde_json::Value,
-    ) -> Message {
-        let mut document = serde_json::from_value(serde_json::json!({
-            "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-            "type": typ,
-            "issuer": vtc,
-            "recipient": PERSONA,
-            "issuedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "threadId": thid,
-            "payload": payload,
-        }))
-        .expect("a reply document");
-        openvtc_core::capabilities::sign_document(&mut document, key)
-            .await
-            .expect("sign the reply");
-        Message::build(
-            uuid::Uuid::new_v4().to_string(),
-            openvtc_core::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string(),
-            serde_json::to_value(&document).expect("document json"),
-        )
-        .from(vtc.to_string())
-        .to(PERSONA.to_string())
-        .thid(thid.to_string())
-        .created_time(chrono::Utc::now().timestamp() as u64)
-        .finalize()
-    }
-
-    /// A community role VAC conferring `role:member`, signed by `key`.
-    async fn role_vac(vtc: &str, key: &Secret) -> serde_json::Value {
-        let vac = DTGCredential::new_community_role_vac(
-            vtc.to_string(),
-            PERSONA.to_string(),
-            "member",
-            chrono::Utc::now() - chrono::Duration::minutes(1),
-            chrono::Utc::now() + chrono::Duration::days(365),
-        )
-        .unwrap()
-        .with_max_attenuation(0)
-        .unwrap();
-        let mut vc = serde_json::to_value(vac).unwrap();
-        let proof = affinidi_data_integrity::DataIntegrityProof::sign(
-            &vc,
-            key,
-            affinidi_data_integrity::SignOptions::new(),
-        )
-        .await
-        .unwrap();
-        vc["proof"] = serde_json::to_value(proof).unwrap();
-        vc
-    }
-
-    /// **Renewal, end to end through the dispatcher.** The community's answer
-    /// to a renewal we asked for is set aside for its check, and only then
-    /// stored: the re-issued VMC and role VAC replace the set-aside pre-v1
-    /// credentials, and the notices go with them.
-    #[tokio::test]
-    async fn a_renewal_reply_is_checked_then_stored_clearing_the_retired_notices() {
-        let (vtc, key) = community_key();
-        let tdk = test_tdk().await;
-        let mut config = retired_config(&vtc);
-        let request = uuid::Uuid::new_v4();
-        openvtc_core::renewal::record_request(request, &vtc, PERSONA);
-
-        let vmc = membership_vmc(&vtc, &key).await;
-        let vac = role_vac(&vtc, &key).await;
-        let m = community_reply(
-            &vtc,
-            &key,
-            openvtc_core::renewal::MEMBERS_RENEW_RESPONSE_TYPE,
-            &format!("urn:uuid:{request}"),
-            serde_json::json!({
-                "did": PERSONA,
-                "vmc": vmc,
-                "roleVac": vac,
-                "personhood": false,
-                "personhoodChanged": false,
-            }),
-        )
-        .await;
-
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
-        let deferred = effects.deferred.expect("set aside for its check");
-        assert!(matches!(deferred.job, VerifyJob::Renewal { .. }));
-        assert!(
-            config.account.memberships_for(&vtc)[0]
-                .credentials
-                .is_empty(),
-            "nothing stored before the check"
-        );
-
-        let pre = deferred.job.run(tdk.clone()).await;
-        assert!(matches!(&pre, PreVerified::Renewal(Ok(_))));
-        let effects = dispatch(
-            &mut config,
-            &tdk,
-            &deferred.message,
-            Arrival::Returning(pre),
-        )
-        .await;
-
-        let record = &config.account.memberships_for(&vtc)[0];
-        assert_eq!(
-            record
-                .credentials
-                .get(&openvtc_core::CredentialKind::Membership),
-            Some(&vmc)
-        );
-        assert_eq!(
-            record.credentials.get(&openvtc_core::CredentialKind::Role),
-            Some(&vac)
-        );
-        assert!(record.retired_credentials.is_empty(), "the notices clear");
-        let [(from, outcome)] = effects.renewals.as_slice() else {
-            panic!("one renewal outcome");
-        };
-        assert_eq!(from, &vtc);
-        let openvtc_core::renewal::RenewalOutcome::Renewed {
-            summary,
-            acknowledged,
-        } = outcome
-        else {
-            panic!("renewed, got {outcome:?}");
-        };
-        assert_eq!(summary.roles, vec!["member".to_string()]);
-        // The test config has no messaging identity, so the acknowledgement
-        // cannot go out — and the member is told how to send it.
-        assert!(acknowledged.is_err());
-        assert!(outcome.describe().contains("press m"));
-
-        // Answered once: the same reply again is not taken.
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
-        assert!(effects.deferred.is_none());
-        assert!(effects.renewals.is_empty());
-    }
-
-    /// A reply threading on no renewal of ours is never checked or stored.
-    #[tokio::test]
-    async fn a_renewal_reply_we_did_not_ask_for_is_ignored() {
-        let (vtc, key) = community_key();
-        let tdk = test_tdk().await;
-        let mut config = retired_config(&vtc);
-        let m = community_reply(
-            &vtc,
-            &key,
-            openvtc_core::renewal::MEMBERS_RENEW_RESPONSE_TYPE,
-            &format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-            serde_json::json!({
-                "did": PERSONA,
-                "vmc": membership_vmc(&vtc, &key).await,
-                "roleVac": role_vac(&vtc, &key).await,
-                "personhood": false,
-                "personhoodChanged": false,
-            }),
-        )
-        .await;
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
-        assert!(effects.deferred.is_none());
-        assert!(effects.renewals.is_empty());
-        assert!(
-            config.account.memberships_for(&vtc)[0]
-                .credentials
-                .is_empty()
-        );
-    }
-
-    /// **notMember.** The community's signed refusal of our renewal reaches
-    /// the member as such — not as a join refusal, and with nothing changed.
-    #[tokio::test]
-    async fn a_renewal_refused_as_not_a_member_is_reported() {
-        let (vtc, key) = community_key();
-        let tdk = test_tdk().await;
-        let mut config = retired_config(&vtc);
-        let request = uuid::Uuid::new_v4();
-        openvtc_core::renewal::record_request(request, &vtc, PERSONA);
-        let m = community_reply(
-            &vtc,
-            &key,
-            "https://trusttasks.org/spec/trust-task-error/0.1",
-            &format!("urn:uuid:{request}"),
-            serde_json::json!({
-                "code": openvtc_core::renewal::RENEW_NOT_MEMBER,
-                "message": "no ACL row — not a member",
-                "retryable": false,
-            }),
-        )
-        .await;
-
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
-        let deferred = effects.deferred.expect("set aside for its check");
-        let pre = deferred.job.run(tdk.clone()).await;
-        let effects = dispatch(
-            &mut config,
-            &tdk,
-            &deferred.message,
-            Arrival::Returning(pre),
-        )
-        .await;
-
-        let [(_, outcome)] = effects.renewals.as_slice() else {
-            panic!("one renewal outcome");
-        };
-        assert_eq!(
-            outcome,
-            &openvtc_core::renewal::RenewalOutcome::Refused(
-                openvtc_core::renewal::RenewalRefusal::NotMember
-            )
-        );
-        let record = &config.account.memberships_for(&vtc)[0];
-        assert!(record.status.is_active(), "a refused renewal ends nothing");
-        assert_eq!(record.retired_credentials.len(), 2);
-        assert!(!openvtc_core::renewal::is_pending(
-            &vtc,
-            &request.to_string()
-        ));
-    }
-
-    /// Collects what is logged at `WARN` and above while it is the default
-    /// subscriber on this thread.
-    #[derive(Clone, Default)]
-    struct Warnings(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Warnings {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl Warnings {
-        fn capture(&self) -> tracing::subscriber::DefaultGuard {
-            let sink = self.clone();
-            tracing::subscriber::set_default(
-                tracing_subscriber::fmt()
-                    .with_max_level(tracing::Level::WARN)
-                    .with_ansi(false)
-                    .with_writer(move || sink.clone())
-                    .finish(),
-            )
-        }
-        fn text(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-        }
-    }
-
-    /// Dispatch `m` once it has been through its off-loop check, as the loop
-    /// does: on arrival it is set aside, then handled with the check's result.
-    async fn dispatch_checked(config: &mut Config, tdk: &TDK, m: &Message) -> InboundEffects {
-        let effects = dispatch(config, tdk, m, Arrival::FRESH).await;
-        let deferred = effects.deferred.expect("set aside for its check");
-        let pre = deferred.job.run(tdk.clone()).await;
-        dispatch(config, tdk, &deferred.message, Arrival::Returning(pre)).await
-    }
-
-    /// A witness's answer reaches the witnessing waiting on it whoever sent it — a witness is
-    /// no contact and no community — in either carriage, and is not read here: the witnessing
-    /// verifies it as the witness's. A refusal (`trust-task-error`) is offered too.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_witness_answer_is_handed_to_the_witnessing() {
-        let tdk = test_tdk().await;
-        let mut config = test_config();
-        let witness = "did:key:z6MkWitness";
-        let session = "urn:uuid:9e8d7c6b-0000-4000-8000-0000000000aa";
-        for (typ, enveloped) in [
-            (
-                "https://trusttasks.org/spec/witness/session/0.2#response",
-                true,
-            ),
-            (
-                "https://trusttasks.org/spec/witness/session/submit/0.2#response",
-                false,
-            ),
-            ("https://trusttasks.org/spec/trust-task-error/0.5", true),
-        ] {
-            let document = serde_json::json!({
-                "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-                "type": typ,
-                "threadId": session,
-                "issuer": witness,
-                "recipient": "did:peer:2.Vz6MkOurs",
-                "payload": {},
-            });
-            let message = Message::build(
-                format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-                if enveloped {
-                    openvtc_core::capabilities::TRUST_TASK_ENVELOPE_TYPE.to_string()
-                } else {
-                    typ.to_string()
-                },
-                document.clone(),
-            )
-            .from(witness.to_string())
-            .to("did:peer:2.Vz6MkOurs".to_string())
-            .finalize();
-            let effects = dispatch(&mut config, &tdk, &message, Arrival::FRESH).await;
-            assert!(
-                effects.deferred.is_none(),
-                "{typ}: nothing to check off the loop"
-            );
-            let [reply] = effects.witness_replies.as_slice() else {
-                panic!(
-                    "{typ}: one answer for the witnessing, got {:?}",
-                    effects.witness_replies
-                );
-            };
-            assert_eq!(reply.sender, witness);
-            assert_eq!(reply.document, document);
-        }
-    }
-
-    /// A community that offers no capability management refuses the query
-    /// with a signed `trust-task-error`. It is proven and recorded once, for
-    /// the capability view, and then falls through the other refusal handlers
-    /// — which must not re-check it, find it already recorded, and warn that a
-    /// community refusal was ignored as a replay.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_capability_refusal_is_not_reported_as_its_own_replay() {
-        let (vtc, key) = community_key();
-        let tdk = test_tdk().await;
-        let mut config = retired_config(&vtc);
-        let thid = format!("urn:uuid:{}", uuid::Uuid::new_v4());
-        let m = community_reply(
-            &vtc,
-            &key,
-            "https://trusttasks.org/spec/trust-task-error/0.1",
-            &thid,
-            serde_json::json!({
-                "code": "unsupportedType",
-                "message": "governance/capability/list is not served here",
-                "retryable": false,
-            }),
-        )
-        .await;
-
-        let warnings = Warnings::default();
-        let effects = {
-            let _guard = warnings.capture();
-            dispatch_checked(&mut config, &tdk, &m).await
-        };
-
-        let [(from, reply_thid, reply)] = effects.capability_replies.as_slice() else {
-            panic!("one capability reply, got {:?}", effects.capability_replies);
-        };
-        assert_eq!(from, &vtc);
-        assert_eq!(reply_thid, &thid);
-        assert!(matches!(
-            reply,
-            openvtc_core::capabilities::CapabilityReply::Rejected { code, .. }
-                if code == "unsupportedType"
-        ));
-        let logged = warnings.text();
-        assert!(!logged.contains("replay"), "{logged}");
-        assert!(!logged.contains("refusal ignored"), "{logged}");
-        assert!(
-            !logged.contains("did not match a pending request"),
-            "{logged}"
-        );
-        assert!(
-            config.account.memberships_for(&vtc)[0].status.is_active(),
-            "a capability refusal ends nothing"
-        );
-
-        // Replay protection across messages is untouched: the same refusal
-        // again is not handed to the view a second time.
-        let effects = dispatch_checked(&mut config, &tdk, &m).await;
-        assert!(effects.capability_replies.is_empty());
-    }
-
-    /// A genuine join refusal still reaches the join handler, though it too is
-    /// proven first by the capability arm: a `permissionDenied` threaded on
-    /// our submit rejects the pending join.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_join_refusal_still_rejects_the_pending_join() {
-        let (vtc, key) = community_key();
-        let tdk = test_tdk().await;
-        let mut config = with_identity(pending_config(&vtc));
-        let CommunityStatus::Pending { request_id } = status(&config, &vtc) else {
-            panic!("pending");
-        };
-        let m = community_reply(
-            &vtc,
-            &key,
-            "https://trusttasks.org/spec/trust-task-error/0.1",
-            &request_id.to_string(),
-            serde_json::json!({
-                "code": "permissionDenied",
-                "message": "not admitted",
-                "retryable": false,
-            }),
-        )
-        .await;
-
-        let warnings = Warnings::default();
-        let effects = {
-            let _guard = warnings.capture();
-            dispatch_checked(&mut config, &tdk, &m).await
-        };
-
-        assert!(
-            status(&config, &vtc) == CommunityStatus::Rejected,
-            "{:?}",
-            status(&config, &vtc)
-        );
-        assert_eq!(effects.inactivated.len(), 1);
-        let logged = warnings.text();
-        assert!(!logged.contains("replay"), "{logged}");
-    }
-
-    /// A TSP-joined member's Repos view loads from the community's
-    /// `git-ns/view/0.6` answer, taken the whole way a live one is: sealed in
-    /// the TSP binding envelope, mapped and passed through the inbound gate
-    /// (`deliver_tsp_document`), checked off the loop and dispatched
-    /// (`process_inbound_message`), then correlated by the Repos view
-    /// (`repos_actions::apply_replies`). The gate used to drop this exact type
-    /// at debug, and the view timed out on an answer the VTC had sent.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_tsp_git_ns_view_answer_loads_the_repos_view() {
-        use crate::state_handler::main_page::repos::{Pending, Purpose, ReposPhase, ReposView};
-        let (vtc, key) = community_key();
-        let tdk = test_tdk().await;
-        let mut config = retired_config(&vtc);
-        let thid = format!("urn:uuid:{}", uuid::Uuid::new_v4());
-
-        // The signed document, as the VTC sends it over TSP.
-        let mut document = serde_json::from_value(serde_json::json!({
-            "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-            "type": "https://trusttasks.org/spec/git-ns/view/0.6#response",
-            "issuer": vtc,
-            "recipient": PERSONA,
-            "issuedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "threadId": thid,
-            "payload": {
-                "accounts": [],
-                "namespaces": [{"id": "ns_1", "forge": "github.com", "owner": "acme",
-                                "kind": "organization", "mode": "bridge", "state": "bound"}],
-                "repos": [{"resource": "github.com/acme/gadgets", "forgeId": "1",
-                           "visibility": "public", "state": "active", "owners": [PERSONA],
-                           "bootstrap": {"workflow": true, "keyring": true,
-                                         "variables": true, "requiredCheck": true},
-                           "sync": {"state": "inSync", "drift": []}}],
-                "rights": [{"subject": PERSONA, "right": "git.repo.own",
-                            "resource": "github.com/acme/gadgets", "grantedBy": PERSONA,
-                            "grantedAt": "2026-09-02T00:00:00Z"}]
-            },
-        }))
-        .expect("a reply document");
-        openvtc_core::capabilities::sign_document(&mut document, &key)
-            .await
-            .expect("sign the reply");
-        let wrapped = vta_sdk::tsp_binding::wrap_envelope(
-            &serde_json::to_vec(&document).expect("document bytes"),
-        );
-        let m = openvtc_core::didcomm::deliver_tsp_document(&wrapped, &vtc, PERSONA)
-            .expect("the answer passes the inbound gate");
-
-        let effects = dispatch_checked(&mut config, &tdk, &m).await;
-        assert_eq!(effects.git_ns_replies.len(), 1, "handed to the Repos view");
-
-        // The Repos view, waiting on the request this answers.
-        let pid = config.account.persona_id_for_did(PERSONA).unwrap();
-        let mut state = crate::state_handler::state::State::default();
-        let mut view = ReposView::new(vtc.clone(), pid, PERSONA.into(), "Acme".into());
-        view.pending = Some(Pending {
-            thid: thid.clone(),
-            sent_at: std::time::Instant::now(),
-            purpose: Purpose::View,
-        });
-        state.main_page.content_panel.repos.view = Some(view);
-
-        crate::state_handler::repos_actions::apply_replies(
-            &mut state,
-            &config,
-            effects.git_ns_replies,
-        );
-        let view = state.main_page.content_panel.repos.view.as_ref().unwrap();
-        assert_eq!(view.phase, ReposPhase::Loaded);
-        assert!(view.pending.is_none(), "the wait is over");
-        assert_eq!(view.my_repos().len(), 1);
-    }
-
-    /// VTI-NTF-054: a notification addressed to one of our personas is handed over exactly as
-    /// received, whoever sent it — this client applies no acceptance policy — and one addressed
-    /// to a DID this account holds no persona for is not.
-    #[tokio::test]
-    async fn vti_ntf_054_a_notification_for_a_persona_is_handed_over_as_received() {
-        let tdk = test_tdk().await;
-        let mut config = with_identity(pending_config("did:key:z6MkSomeCommunity"));
-        let stranger = "did:key:z6MkNotACommunityWeKnow";
-        let document = serde_json::json!({
-            "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-            "type": openvtc_core::notifications::NOTIFY_TYPE,
-            "issuer": stranger,
-            "recipient": PERSONA,
-            "issuedAt": "2026-11-03T00:00:00.000000Z",
-            "payload": { "notification": { "notificationId": "n-1" } },
-            "proof": { "type": "DataIntegrityProof", "proofValue": "z5opaque" }
-        });
-        let wrapped = vta_sdk::tsp_binding::wrap_envelope(&serde_json::to_vec(&document).unwrap());
-        let m = openvtc_core::didcomm::deliver_tsp_document(&wrapped, stranger, PERSONA)
-            .expect("a notification passes the inbound gate");
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
-        assert!(
-            effects.deferred.is_none(),
-            "nothing is checked before the hand-over"
-        );
-        assert_eq!(effects.notifications.len(), 1);
-        let received = &effects.notifications[0];
-        assert_eq!(received.document, document, "exactly as received");
-        assert_eq!(received.sender, stranger);
-        assert_eq!(received.addressee, PERSONA);
-
-        let mut elsewhere = document.clone();
-        elsewhere["recipient"] = serde_json::json!("did:key:z6MkNotOurs");
-        elsewhere["id"] = serde_json::json!(format!("urn:uuid:{}", uuid::Uuid::new_v4()));
-        let wrapped = vta_sdk::tsp_binding::wrap_envelope(&serde_json::to_vec(&elsewhere).unwrap());
-        let m = openvtc_core::didcomm::deliver_tsp_document(&wrapped, stranger, PERSONA).unwrap();
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
-        assert!(effects.notifications.is_empty());
-    }
-
-    /// An election answer from a community we hold no membership with — one holding an
-    /// election a notification told us of — is checked and handed over only on a thread we sent
-    /// it (VTI-NTF-063); on any other it has no standing and is never set aside for a check.
-    #[tokio::test]
-    async fn an_election_answer_from_a_non_member_community_needs_a_thread_we_sent() {
-        let (holder, key) = community_key();
-        let tdk = test_tdk().await;
-        let mut config = with_identity(pending_config("did:key:z6MkTheCommunityWeBelongTo"));
-        let answer = |thid: String| {
-            let holder = holder.clone();
-            let key = key.clone();
-            async move {
-                let mut document = serde_json::from_value(serde_json::json!({
-                    "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-                    "type": "https://trusttasks.org/spec/trust-task-error/0.1",
-                    "issuer": holder,
-                    "recipient": PERSONA,
-                    "issuedAt": chrono::Utc::now()
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    "threadId": thid,
-                    "payload": { "code": "vtc/elections/show:electionUnknown" },
-                }))
-                .unwrap();
-                openvtc_core::capabilities::sign_document(&mut document, &key)
-                    .await
-                    .unwrap();
-                let wrapped =
-                    vta_sdk::tsp_binding::wrap_envelope(&serde_json::to_vec(&document).unwrap());
-                openvtc_core::didcomm::deliver_tsp_document(&wrapped, &holder, PERSONA).unwrap()
-            }
-        };
-
-        // Not on a thread we sent it: not even set aside for a check.
-        let m = answer(format!("urn:uuid:{}", uuid::Uuid::new_v4())).await;
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
-        assert!(effects.deferred.is_none() && effects.elections_replies.is_empty());
-
-        // On a thread we sent it: checked, then handed to the Elections panel.
-        let thid = format!("urn:uuid:{}", uuid::Uuid::new_v4());
-        openvtc_core::elections::expect_answer(&holder, &thid);
-        let m = answer(thid.clone()).await;
-        let effects = dispatch_checked(&mut config, &tdk, &m).await;
-        assert_eq!(effects.elections_replies.len(), 1);
-        assert_eq!(effects.elections_replies[0].thid, thid);
-        openvtc_core::elections::answered(&thid);
-    }
-
-    /// Dispatch `m` as `arrival`, returning the effects.
-    async fn dispatch(
-        config: &mut Config,
-        tdk: &TDK,
-        m: &Message,
-        arrival: Arrival<'_>,
-    ) -> InboundEffects {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let service = openvtc_core::didcomm::start_empty_service(
-            tx,
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let mut seen = SeenMessages::new();
-        let mut effects = InboundEffects::default();
-        process_inbound_message(
-            config,
-            tdk,
-            &service,
-            &mut seen,
-            m,
-            m.from.as_deref(),
-            &mut effects,
-            arrival,
-        )
-        .await
-        .unwrap();
-        effects
-    }
-
-    /// The local checks run before anything is queued for a network-bound
-    /// check: a credential or operational document from a party we hold no
-    /// membership with, an accept that answers nothing of ours, or a
-    /// community answer to no question of ours is never set aside (so never
-    /// resolved or fetched for) — it is handled at once, and refused.
-    #[tokio::test]
-    async fn only_what_passes_the_local_checks_is_queued_for_a_check() {
-        let (vtc, key) = community_key();
-        let tdk = test_tdk().await;
-        let mut config = pending_config(&vtc);
-        let stranger = "did:key:z6MkStranger";
-
-        // A credential "issued" by a stranger, about itself.
-        let mut vc = membership_vmc(&vtc, &key).await;
-        vc["issuer"] = serde_json::json!(stranger);
-        let effects = dispatch(
-            &mut config,
-            &tdk,
-            &issue(stranger, &key, vc).await,
-            Arrival::FRESH,
-        )
-        .await;
-        assert!(effects.deferred.is_none());
-        // A credential for someone else, from the community.
-        let mut vc = membership_vmc(&vtc, &key).await;
-        vc["credentialSubject"]["id"] = serde_json::json!("did:key:z6MkSomeoneElse");
-        let effects = dispatch(
-            &mut config,
-            &tdk,
-            &issue(&vtc, &key, vc).await,
-            Arrival::FRESH,
-        )
-        .await;
-        assert!(effects.deferred.is_none());
-        assert!(matches!(
-            status(&config, &vtc),
-            CommunityStatus::Pending { .. }
-        ));
-
-        // Operational documents from a stranger.
-        for typ in [
-            MEMBER_REMOVAL_NOTICE_TYPE,
-            JOIN_REQUEST_STATUS_RESPONSE_TYPE,
-            vta_sdk::protocols::vetting::VETTING_VETTER_LIST_RESPONSE_TYPE,
-        ] {
-            let m = Message::build(
-                uuid::Uuid::new_v4().to_string(),
-                typ.to_string(),
-                serde_json::json!({ "payload": { "did": PERSONA } }),
-            )
-            .from(stranger.to_string())
-            .created_time(chrono::Utc::now().timestamp() as u64)
-            .finalize();
-            let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
-            assert!(effects.deferred.is_none(), "{typ}");
-        }
-
-        // A relationship accept answering no request of ours.
-        let m = Message::build(
-            uuid::Uuid::new_v4().to_string(),
-            openvtc_core::protocol_urls::RELATIONSHIP_REQUEST_ACCEPT.to_string(),
-            serde_json::json!({ "did": stranger }),
-        )
-        .from(stranger.to_string())
-        .thid(uuid::Uuid::new_v4().to_string())
-        .created_time(chrono::Utc::now().timestamp() as u64)
-        .finalize();
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
-        assert!(effects.deferred.is_none());
-    }
-
-    /// A message whose sender has messages queued for a check waits behind
-    /// them rather than overtaking them, and is handled when its turn comes.
-    ///
-    /// The message here has no check of its own, which is what makes it wait
-    /// as a barrier. (This used `members/request-vmc`, until that became the
-    /// community's signed document with a check of its own; its ordering is
-    /// the same, and `a_request_for_our_vmc_waits_for_the_communitys_signature`
-    /// covers it.)
-    #[tokio::test]
-    async fn a_message_behind_a_check_from_its_sender_waits_its_turn() {
-        let (vtc, _) = community_key();
-        let tdk = test_tdk().await;
-        let mut config = pending_config(&vtc);
-        let m = Message::build(
-            uuid::Uuid::new_v4().to_string(),
-            "https://didcomm.org/trust-ping/2.0/ping".to_string(),
-            serde_json::json!({ "response_requested": false }),
-        )
-        .from(vtc.clone())
-        .to(PERSONA.to_string())
-        .created_time(chrono::Utc::now().timestamp() as u64)
-        .finalize();
-
-        let busy = |sender: &str| sender == vtc;
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::New { waiting: &busy }).await;
-        let deferred = effects.deferred.expect("waits behind its sender's check");
-        assert!(deferred.job.is_barrier());
-
-        // Nobody else is held up.
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
-        assert!(effects.deferred.is_none());
-
-        // Back in its turn, it is handled, not set aside again.
-        let effects = dispatch(
-            &mut config,
-            &tdk,
-            &deferred.message,
-            Arrival::Returning(PreVerified::Barrier),
-        )
-        .await;
-        assert!(effects.deferred.is_none());
-    }
-
-    /// `members/request-vmc` makes this client sign and send a credential, so
-    /// it is the community's signed operational document or nothing: it is set
-    /// aside for that check, never acted on for the transport sender alone, and
-    /// a check that did not pass issues no VMC.
-    #[tokio::test]
-    async fn a_request_for_our_vmc_waits_for_the_communitys_signature() {
-        let (vtc, _) = community_key();
-        let tdk = test_tdk().await;
-        let mut config = pending_config(&vtc);
-        let m = Message::build(
-            uuid::Uuid::new_v4().to_string(),
-            MEMBER_REQUEST_VMC_TYPE.to_string(),
-            serde_json::json!({}),
-        )
-        .from(vtc.clone())
-        .to(PERSONA.to_string())
-        .created_time(chrono::Utc::now().timestamp() as u64)
-        .finalize();
-
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
-        let deferred = effects
-            .deferred
-            .expect("a request for our VMC is checked before it is answered");
-        assert!(
-            matches!(deferred.job, VerifyJob::Operational { .. }),
-            "checked as the community's operational document"
-        );
-
-        let effects = dispatch(
-            &mut config,
-            &tdk,
-            &deferred.message,
-            Arrival::Returning(deferred.job.unfinished()),
-        )
-        .await;
-        assert!(effects.deferred.is_none());
-        assert!(
-            config
-                .account
-                .memberships_for(&vtc)
-                .iter()
-                .all(|m| m.member_vmc.is_none()),
-            "an unverified request issues nothing"
-        );
-    }
-
-    /// A message kept across a restart is queued for its check again — past
-    /// the age gate it already passed. One that no longer passes the local
-    /// checks is not dropped on restore: it waits its turn, and its handler
-    /// refuses it then.
-    #[tokio::test]
-    async fn a_restored_message_is_queued_again() {
-        let (vtc, key) = community_key();
-        let tdk = test_tdk().await;
-        let mut config = pending_config(&vtc);
-        let mut m = issue(&vtc, &key, membership_vmc(&vtc, &key).await).await;
-        // Older than the replay window allows a fresh message.
-        m.created_time = Some(1);
-        assert!(
-            dispatch(&mut config, &tdk, &m, Arrival::FRESH)
-                .await
-                .deferred
-                .is_none(),
-            "a fresh arrival that old is dropped"
-        );
-        let effects = dispatch(&mut config, &tdk, &m, Arrival::Restored).await;
-        assert!(matches!(
-            effects.deferred.map(|d| d.job),
-            Some(VerifyJob::Credential { .. })
-        ));
-
-        // The membership went meanwhile: it waits as a barrier, and on its
-        // turn it is refused — nothing is applied.
-        config.account = Default::default();
-        let deferred = dispatch(&mut config, &tdk, &m, Arrival::Restored)
-            .await
-            .deferred
-            .expect("set aside to wait its turn");
-        assert!(deferred.job.is_barrier());
-        let effects = dispatch(
-            &mut config,
-            &tdk,
-            &deferred.message,
-            Arrival::Returning(PreVerified::Barrier),
-        )
-        .await;
-        assert!(effects.deferred.is_none());
-        assert!(config.account.memberships_for(&vtc).is_empty());
-    }
-
-    /// A message that waited as a barrier is triaged again on its turn: if it
-    /// now needs a check (its sender became a community we hold a record
-    /// with meanwhile), it is set aside for that check rather than refused as
-    /// unchecked.
-    #[tokio::test]
-    async fn a_barrier_is_triaged_again_on_its_turn() {
-        let (vtc, key) = community_key();
-        let tdk = test_tdk().await;
-        let m = issue(&vtc, &key, membership_vmc(&vtc, &key).await).await;
-        // No record with the community yet: no check, and it waits behind
-        // its sender's queued work.
-        let mut config = pending_config(&vtc);
-        let persona_only = {
-            let mut c = pending_config(&vtc);
-            c.account.communities.clear();
-            c
-        };
-        let mut early = persona_only;
-        let busy = |sender: &str| sender == vtc;
-        let deferred = dispatch(&mut early, &tdk, &m, Arrival::New { waiting: &busy })
-            .await
-            .deferred
-            .expect("waits its turn");
-        assert!(deferred.job.is_barrier());
-        // By its turn the join is Pending: it now needs its check.
-        let again = dispatch(
-            &mut config,
-            &tdk,
-            &deferred.message,
-            Arrival::Returning(PreVerified::Barrier),
-        )
-        .await
-        .deferred
-        .expect("set aside for the check it now needs");
-        assert!(matches!(again.job, VerifyJob::Credential { .. }));
-    }
-
-    /// A check that did not finish is a refusal: the credential is not stored.
-    #[tokio::test]
-    async fn an_unfinished_check_refuses() {
-        let (vtc, key) = community_key();
-        let tdk = test_tdk().await;
-        let mut config = pending_config(&vtc);
-        let m = issue(&vtc, &key, membership_vmc(&vtc, &key).await).await;
-        let deferred = dispatch(&mut config, &tdk, &m, Arrival::FRESH)
-            .await
-            .deferred
-            .unwrap();
-        let pre = deferred.job.unfinished();
-        dispatch(
-            &mut config,
-            &tdk,
-            &deferred.message,
-            Arrival::Returning(pre),
-        )
-        .await;
-        assert!(matches!(
-            status(&config, &vtc),
-            CommunityStatus::Pending { .. }
-        ));
-    }
-
-    /// Every peer-message handler acts only as the sender the transport
-    /// authenticated. A message whose `from` is not backed by its sealing key
-    /// — none bound, or another DID — creates no task, removes none, changes no
-    /// relationship and hands nothing over.
-    mod sender_binding {
-        use super::*;
-        use openvtc_core::protocol_urls;
-        use openvtc_core::relationships::Relationship;
-
-        const ALICE: &str = "did:key:z6MkAlicePeerInAnEstablishedRelationship";
-        const CAROL: &str = "did:key:z6MkCarolSomeoneElse";
-
-        fn config_with(state: RelationshipState, task_id: &str) -> Config {
-            let mut config = with_identity(pending_config("did:key:z6MkSomeCommunity"));
-            let alice = Arc::new(ALICE.to_string());
-            config.private.relationships.relationships.insert(
-                Arc::clone(&alice),
-                Relationship {
-                    task_id: Arc::new(task_id.to_string()),
-                    our_did: Arc::new(PERSONA.to_string()),
-                    remote_did: Arc::clone(&alice),
-                    remote_p_did: alice,
-                    created: chrono::Utc::now(),
-                    state,
-                    our_persona: None,
-                    needs_reestablishment: false,
-                },
-            );
-            config
-        }
-
-        fn message(
-            typ: &str,
-            from: Option<&str>,
-            thid: Option<&str>,
-            body: serde_json::Value,
-        ) -> Message {
-            let mut b = Message::build(uuid::Uuid::new_v4().to_string(), typ.to_string(), body)
-                .to(PERSONA.to_string())
-                .created_time(chrono::Utc::now().timestamp() as u64);
-            if let Some(from) = from {
-                b = b.from(from.to_string());
-            }
-            if let Some(thid) = thid {
-                b = b.thid(thid.to_string());
-            }
-            b.finalize()
-        }
-
-        async fn dispatch_as(
-            config: &mut Config,
-            m: &Message,
-            authenticated: Option<&str>,
-        ) -> InboundEffects {
-            let tdk = test_tdk().await;
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-            let service = openvtc_core::didcomm::start_empty_service(
-                tx,
-                tokio_util::sync::CancellationToken::new(),
-            );
-            let mut seen = SeenMessages::new();
-            let mut effects = InboundEffects::default();
-            process_inbound_message(
-                config,
-                &tdk,
-                &service,
-                &mut seen,
-                m,
-                authenticated,
-                &mut effects,
-                Arrival::FRESH,
-            )
-            .await
-            .unwrap();
-            effects
-        }
-
-        /// The two ways a claimed `from` is not the sender: nothing bound, or
-        /// someone else bound.
-        const UNBOUND: [Option<&str>; 2] = [None, Some(CAROL)];
-
-        #[tokio::test]
-        async fn a_vrc_request_needs_its_sender_authenticated() {
-            for authenticated in UNBOUND {
-                let mut config = config_with(RelationshipState::Established, "rel");
-                let m = message(
-                    protocol_urls::VRC_REQUEST,
-                    Some(ALICE),
-                    None,
-                    serde_json::json!({ "reason": "please" }),
-                );
-                dispatch_as(&mut config, &m, authenticated).await;
-                assert!(
-                    config.private.tasks.tasks.is_empty(),
-                    "no inbox task for {authenticated:?}"
-                );
-            }
-            let mut config = config_with(RelationshipState::Established, "rel");
-            let m = message(
-                protocol_urls::VRC_REQUEST,
-                Some(ALICE),
-                None,
-                serde_json::json!({ "reason": "please" }),
-            );
-            dispatch_as(&mut config, &m, Some(ALICE)).await;
-            assert_eq!(config.private.tasks.tasks.len(), 1, "authenticated: queued");
-        }
-
-        #[tokio::test]
-        async fn a_vrc_request_rejection_needs_its_sender_authenticated() {
-            let task = Arc::new(uuid::Uuid::new_v4().to_string());
-            let setup = || {
-                let mut config = config_with(RelationshipState::Established, "rel");
-                config.private.tasks.new_task(
-                    &task,
-                    TaskType::VRCRequestOutbound {
-                        remote_p_did: Arc::new(ALICE.to_string()),
-                    },
-                );
-                config
-            };
-            let reject = || {
-                message(
-                    protocol_urls::VRC_REJECTED,
-                    Some(ALICE),
-                    Some(&task),
-                    serde_json::json!({ "reason": "no" }),
-                )
-            };
-            for authenticated in UNBOUND {
-                let mut config = setup();
-                dispatch_as(&mut config, &reject(), authenticated).await;
-                assert!(config.private.tasks.get_by_id(&task).is_some());
-            }
-            let mut config = setup();
-            dispatch_as(&mut config, &reject(), Some(ALICE)).await;
-            assert!(config.private.tasks.get_by_id(&task).is_none());
-        }
-
-        /// A pong closes only our ping, answered by the party pinged — never a
-        /// task named by thread id alone, and never for a pong with no
-        /// authenticated sender.
-        #[tokio::test]
-        async fn a_pong_closes_only_our_ping_to_its_authenticated_sender() {
-            let ping = Arc::new(uuid::Uuid::new_v4().to_string());
-            let other = Arc::new(uuid::Uuid::new_v4().to_string());
-            let setup = || {
-                let mut config = config_with(RelationshipState::Established, "rel");
-                config.private.tasks.new_task(
-                    &ping,
-                    TaskType::TrustPing {
-                        from: Arc::new(PERSONA.to_string()),
-                        to: Arc::new(ALICE.to_string()),
-                        remote_p_did: Arc::new(ALICE.to_string()),
-                    },
-                );
-                config.private.tasks.new_task(
-                    &other,
-                    TaskType::VRCRequestOutbound {
-                        remote_p_did: Arc::new(ALICE.to_string()),
-                    },
-                );
-                config
-            };
-            let pong = |from: Option<&str>, thid: &str| {
-                message(
-                    protocol_urls::TRUST_PONG,
-                    from,
-                    Some(thid),
-                    serde_json::json!({}),
-                )
-            };
-
-            // No `from`, nothing authenticated: the old shortcut is gone.
-            let mut config = setup();
-            dispatch_as(&mut config, &pong(None, &ping), None).await;
-            assert!(config.private.tasks.get_by_id(&ping).is_some());
-
-            for authenticated in UNBOUND {
-                let mut config = setup();
-                dispatch_as(&mut config, &pong(Some(ALICE), &ping), authenticated).await;
-                assert!(config.private.tasks.get_by_id(&ping).is_some());
-            }
-
-            // Authenticated, but the thread names a task that is not a ping.
-            let mut config = setup();
-            dispatch_as(&mut config, &pong(Some(ALICE), &other), Some(ALICE)).await;
-            assert!(config.private.tasks.get_by_id(&other).is_some());
-
-            // Authenticated as someone we did not ping.
-            let mut config = setup();
-            dispatch_as(&mut config, &pong(Some(CAROL), &ping), Some(CAROL)).await;
-            assert!(config.private.tasks.get_by_id(&ping).is_some());
-
-            let mut config = setup();
-            dispatch_as(&mut config, &pong(Some(ALICE), &ping), Some(ALICE)).await;
-            assert!(config.private.tasks.get_by_id(&ping).is_none());
-            assert!(config.private.tasks.get_by_id(&other).is_some());
-        }
-
-        #[tokio::test]
-        async fn a_relationship_rejection_needs_its_sender_authenticated() {
-            let thid = uuid::Uuid::new_v4().to_string();
-            let reject = || {
-                message(
-                    protocol_urls::RELATIONSHIP_REQUEST_REJECT,
-                    Some(ALICE),
-                    Some(&thid),
-                    serde_json::json!({ "reason": "no" }),
-                )
-            };
-            for authenticated in UNBOUND {
-                let mut config = config_with(RelationshipState::RequestSent, &thid);
-                dispatch_as(&mut config, &reject(), authenticated).await;
-                assert_eq!(config.private.relationships.relationships.len(), 1);
-            }
-            let mut config = config_with(RelationshipState::RequestSent, &thid);
-            dispatch_as(&mut config, &reject(), Some(ALICE)).await;
-            assert!(config.private.relationships.relationships.is_empty());
-        }
-
-        #[tokio::test]
-        async fn a_relationship_finalize_needs_its_sender_authenticated() {
-            let thid = uuid::Uuid::new_v4().to_string();
-            let finalize = || {
-                message(
-                    protocol_urls::RELATIONSHIP_REQUEST_FINALIZE,
-                    Some(ALICE),
-                    Some(&thid),
-                    serde_json::json!({}),
-                )
-            };
-            let state = |config: &Config| {
-                config
-                    .private
-                    .relationships
-                    .relationships
-                    .values()
-                    .next()
-                    .map(|r| r.state.clone())
-            };
-            for authenticated in UNBOUND {
-                let mut config = config_with(RelationshipState::RequestAccepted, &thid);
-                dispatch_as(&mut config, &finalize(), authenticated).await;
-                assert_eq!(state(&config), Some(RelationshipState::RequestAccepted));
-            }
-            let mut config = config_with(RelationshipState::RequestAccepted, &thid);
-            dispatch_as(&mut config, &finalize(), Some(ALICE)).await;
-            assert_eq!(state(&config), Some(RelationshipState::Established));
-        }
-
-        /// A message dropped for its sender does not enter the replay cache,
-        /// so the authenticated message with the same id is still handled.
-        #[tokio::test]
-        async fn an_unbound_message_does_not_use_up_its_id() {
-            let tdk = test_tdk().await;
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-            let service = openvtc_core::didcomm::start_empty_service(
-                tx,
-                tokio_util::sync::CancellationToken::new(),
-            );
-            let mut seen = SeenMessages::new();
-            let mut config = config_with(RelationshipState::Established, "rel");
-            let m = message(
-                protocol_urls::VRC_REQUEST,
-                Some(ALICE),
-                None,
-                serde_json::json!({ "reason": "please" }),
-            );
-            for authenticated in [None, Some(ALICE)] {
-                let mut effects = InboundEffects::default();
-                process_inbound_message(
-                    &mut config,
-                    &tdk,
-                    &service,
-                    &mut seen,
-                    &m,
-                    authenticated,
-                    &mut effects,
-                    Arrival::FRESH,
-                )
-                .await
-                .unwrap();
-            }
-            assert_eq!(config.private.tasks.tasks.len(), 1);
-        }
-
-        #[tokio::test]
-        async fn a_trust_ping_task_needs_its_sender_authenticated() {
-            for authenticated in UNBOUND {
-                let mut config = config_with(RelationshipState::Established, "rel");
-                let m = message(
-                    protocol_urls::TRUST_PING,
-                    Some(ALICE),
-                    None,
-                    serde_json::json!({}),
-                );
-                dispatch_as(&mut config, &m, authenticated).await;
-                assert!(config.private.tasks.tasks.is_empty());
-            }
-        }
-
-        /// A notification is handed over and answered with a receipt to its
-        /// sender; with no authenticated sender there is nobody to answer.
-        #[tokio::test]
-        async fn a_notification_needs_its_sender_authenticated() {
-            let document = || {
-                serde_json::json!({
-                    "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-                    "type": openvtc_core::notifications::NOTIFY_TYPE,
-                    "issuer": ALICE,
-                    "recipient": PERSONA,
-                    "issuedAt": "2026-11-03T00:00:00.000000Z",
-                    "payload": { "notification": { "notificationId": "n-1" } },
-                })
-            };
-            for authenticated in UNBOUND {
-                let mut config = config_with(RelationshipState::Established, "rel");
-                let m = message(
-                    openvtc_core::notifications::NOTIFY_TYPE,
-                    Some(ALICE),
-                    None,
-                    document(),
-                );
-                let effects = dispatch_as(&mut config, &m, authenticated).await;
-                assert!(effects.notifications.is_empty(), "{authenticated:?}");
-            }
-            let mut config = config_with(RelationshipState::Established, "rel");
-            let m = message(
-                openvtc_core::notifications::NOTIFY_TYPE,
-                Some(ALICE),
-                None,
-                document(),
-            );
-            let effects = dispatch_as(&mut config, &m, Some(ALICE)).await;
-            assert_eq!(effects.notifications.len(), 1);
-            assert_eq!(effects.notifications[0].sender, ALICE);
-        }
-    }
-}
+mod tests;

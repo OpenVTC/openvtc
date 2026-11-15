@@ -1992,7 +1992,7 @@ pub const OPENVTC_CATCH_ALL_PATTERN: &str = concat!(
     r"|https://trusttasks\.org/spec/trust-task-error/.*",
     // Capability replies typed as the response document, which is how a VTC
     // answers today (the envelope arm below is how it will once it follows the
-    // binding's §5 fully). `message_dispatch` reads both.
+    // binding's §5 fully). `inbound` reads both.
     r"|https://trusttasks\.org/spec/governance/capability/.*",
     // Git namespace replies (`git-ns/*`) for the Repos panel. A DIDComm reply
     // in the binding envelope passed the gate under the `binding/` arm below,
@@ -3760,7 +3760,7 @@ mod catch_all_tests {
     ///
     /// This is the one the gate was missing, and missing it was silent in both
     /// directions: `capabilities::send_capability_document` sends with
-    /// `TRUST_TASK_ENVELOPE_TYPE`, `message_dispatch::process_inbound_message`
+    /// `TRUST_TASK_ENVELOPE_TYPE`, `inbound::process_inbound_message`
     /// has a branch for it — and every such reply was dropped in between,
     /// because a gate keyed on task URIs cannot see a carriage that names no
     /// task. A handler that exists and is unreachable looks exactly like a peer

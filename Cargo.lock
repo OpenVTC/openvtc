@@ -6357,7 +6357,6 @@ dependencies = [
 name = "openvtc"
 version = "0.8.0"
 dependencies = [
- "affinidi-data-integrity",
  "affinidi-tdk",
  "anyhow",
  "arboard",

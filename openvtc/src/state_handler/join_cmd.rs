@@ -2,8 +2,8 @@
 //!
 //! Covers the two ways in that need no questions answered: presenting an
 //! invitation, or sending an open request. The submit mirrors
-//! `join_flow::run_join_sequence` for an existing persona; the wait reuses the
-//! TUI's inbound dispatch and join status poll, so a verdict is applied exactly
+//! `join_flow::run_join_sequence` for an existing persona; the wait reuses
+//! core's inbound dispatch and join status poll, so a verdict is applied exactly
 //! as the runtime loop would apply it.
 
 use std::time::Duration;
@@ -32,7 +32,6 @@ use vta_sdk::protocols::did_management::create::WebvhPathMode;
 use crate::headless::{self, Admin, progress, save, step};
 
 use super::main_page::{sanitize_display, shorten_did};
-use super::message_dispatch::{Arrival, InboundEffects, process_inbound_message};
 use super::{DeferredLoad, create_persona, join_flow, join_status_poll};
 
 /// Bound on resolving the community's DID (same as the TUI's).
@@ -745,7 +744,7 @@ impl Job<'_> {
         message: &Message,
         authenticated: Option<&str>,
     ) -> bool {
-        apply_inbound(
+        openvtc_core::inbound::apply_inline(
             config,
             self.tdk,
             self.messaging,
@@ -755,52 +754,6 @@ impl Job<'_> {
         )
         .await
     }
-}
-
-/// The runtime loop's inbound handling: dispatch, run any deferred check
-/// inline, dispatch again with its result. `true` when the config changed.
-/// Shared by every headless command that listens as a persona, so a message
-/// it was not waiting for is applied rather than lost.
-///
-/// `authenticated` is the sender the transport bound to the frame; the
-/// message is handled as that sender only (see `process_inbound_message`).
-pub(crate) async fn apply_inbound(
-    config: &mut Config,
-    tdk: &TDK,
-    messaging: &Messaging,
-    seen: &mut SeenMessages,
-    message: &Message,
-    authenticated: Option<&str>,
-) -> bool {
-    let nobody = |_: &str| false;
-    let mut arrival = Arrival::New { waiting: &nobody };
-    let mut message = message.clone();
-    let mut changed = false;
-    // Bounded: a returning message is handled, not set aside again.
-    for _ in 0..3 {
-        let mut effects = InboundEffects::default();
-        match process_inbound_message(
-            config,
-            tdk,
-            messaging,
-            seen,
-            &message,
-            authenticated,
-            &mut effects,
-            arrival,
-        )
-        .await
-        {
-            Ok(c) => changed |= c,
-            Err(e) => warn!(error = %e, "inbound message not handled"),
-        }
-        let Some(deferred) = effects.deferred else {
-            break;
-        };
-        arrival = Arrival::Returning(deferred.job.run(tdk.clone()).await);
-        message = deferred.message;
-    }
-    changed
 }
 
 /// The persona a join goes out as.

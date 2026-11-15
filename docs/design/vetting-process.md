@@ -497,7 +497,7 @@ Throttling:
 
 **Where the gate lives.**
 - **V0:** tickets are stored in `ProtectedConfig` (per community, like
-  `tasks`). The gate runs in `openvtc/src/state_handler/message_dispatch.rs` before a
+  `tasks`). The gate runs in `openvtc-core/src/inbound/mod.rs` before a
   `TaskType` is created.
 - **V1:** tickets move to the vetter's VTA (`vetting/tickets/*`). The gate
   runs as `vta-policy` Rego on the inbound task URI, so rejected requests

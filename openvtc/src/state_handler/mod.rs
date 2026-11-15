@@ -292,13 +292,14 @@ mod device_presence;
 mod dispatch_util;
 mod hidden_vetting_poll;
 mod hidden_vetting_vta;
+#[cfg(test)]
+mod inbound_glue_tests;
 mod inbox_actions;
 pub mod join;
 pub(crate) mod join_cmd;
 mod join_flow;
 mod join_status_poll;
 pub mod main_page;
-mod message_dispatch;
 mod notification_actions;
 mod relationship_actions;
 mod runtime_actions;
@@ -1498,10 +1499,10 @@ impl StateHandler {
                             // shows its membership as verifying.
                             let returning_credential = matches!(
                                 pre,
-                                Some(message_dispatch::PreVerified::Credential(_))
+                                Some(openvtc_core::inbound::PreVerified::Credential(_))
                             );
                             let returning = pre.is_some();
-                            let mut effects = message_dispatch::InboundEffects::default();
+                            let mut effects = openvtc_core::inbound::InboundEffects::default();
                             // Only the sender the transport authenticated can be
                             // waited on: a claimed `from` alone neither holds a
                             // community's messages back nor jumps its queue.
@@ -1510,10 +1511,10 @@ impl StateHandler {
                                     && verifier.is_waiting_on(claimed)
                             };
                             let arrival = match pre {
-                                Some(pre) => message_dispatch::Arrival::Returning(pre),
-                                None => message_dispatch::Arrival::New { waiting: &waiting },
+                                Some(pre) => openvtc_core::inbound::Arrival::Returning(pre),
+                                None => openvtc_core::inbound::Arrival::New { waiting: &waiting },
                             };
-                            let dispatched = message_dispatch::process_inbound_message(
+                            let dispatched = openvtc_core::inbound::process_inbound_message(
                                 &mut config,
                                 &tdk,
                                 &didcomm_service,
@@ -1535,7 +1536,7 @@ impl StateHandler {
                                     save.mark_dirty();
                                 }
                             }
-                            let message_dispatch::InboundEffects {
+                            let openvtc_core::inbound::InboundEffects {
                                 inactivated,
                                 capability_replies,
                                 git_ns_replies,
@@ -5222,7 +5223,10 @@ fn build_trust_pong(
 async fn next_inbound(
     arriving: &mut mpsc::UnboundedReceiver<didcomm::DIDCommEvent>,
     verifier: &mut verify_queue::Verifier,
-) -> Option<(didcomm::DIDCommEvent, Option<message_dispatch::PreVerified>)> {
+) -> Option<(
+    didcomm::DIDCommEvent,
+    Option<openvtc_core::inbound::PreVerified>,
+)> {
     tokio::select! {
         biased;
         finished = verifier.finished() => Some((
@@ -5287,7 +5291,7 @@ fn queue_for_check(
     verifier: &mut verify_queue::Verifier,
     config: &mut openvtc_core::config::Config,
     state: &mut State,
-    deferred: message_dispatch::Deferred,
+    deferred: openvtc_core::inbound::Deferred,
     transport: didcomm::MessagingTransport,
     authenticated: Option<&str>,
 ) -> Result<(), verify_queue::Refused> {
@@ -5369,8 +5373,8 @@ async fn restore_kept(
             backlog.push_front(kept);
             break;
         }
-        let mut effects = message_dispatch::InboundEffects::default();
-        let _ = message_dispatch::process_inbound_message(
+        let mut effects = openvtc_core::inbound::InboundEffects::default();
+        let _ = openvtc_core::inbound::process_inbound_message(
             config,
             tdk,
             service,
@@ -5378,7 +5382,7 @@ async fn restore_kept(
             &kept.message,
             Some(&kept.sender),
             &mut effects,
-            message_dispatch::Arrival::Restored,
+            openvtc_core::inbound::Arrival::Restored,
         )
         .await;
         let queued = match effects.deferred {
@@ -5452,12 +5456,12 @@ mod tests {
         config
     }
 
-    fn waiting_message(id: &str, from: &str) -> message_dispatch::Deferred {
-        message_dispatch::Deferred {
+    fn waiting_message(id: &str, from: &str) -> openvtc_core::inbound::Deferred {
+        openvtc_core::inbound::Deferred {
             message: affinidi_tdk::didcomm::Message::build(id, "t", serde_json::json!({}))
                 .from(from.to_string())
                 .finalize(),
-            job: message_dispatch::VerifyJob::Barrier,
+            job: openvtc_core::inbound::VerifyJob::Barrier,
         }
     }
 

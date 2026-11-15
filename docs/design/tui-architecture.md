@@ -72,7 +72,6 @@ the real work is decomposed into focused modules (declared at `mod.rs:50`):
 |--------|------|
 | `actions/` | The `Action` enum + domain sub-enums (`InboxAction`, `RelationshipAction`, `CredentialAction`, `SettingsAction`). |
 | `state.rs` | The `State` struct + sub-states (`MainPageState`, `ConnectionState`, `MediatorStatus`, `ActivePage`, `LoadingProgress`). |
-| `message_dispatch.rs` | Inbound DIDComm orchestration: `process_inbound_message` (async I/O only). |
 | `background_dispatch.rs` | Off-loop network dispatch plumbing (see §4). |
 | `save_coalesce.rs` | Coalesced, off-runtime `Config` persistence (see §4). |
 | `agent_name_refresh.rs` | Off-loop batch resolution of agent names (DID→name), applied via background-dispatch (see §4). |
@@ -87,7 +86,10 @@ the real work is decomposed into focused modules (declared at `mod.rs:50`):
 credential-issue), VRC vetting/proof verification, and the replay guard
 (`SeenMessages`) were moved to
 [`openvtc-core/src/messaging.rs`](../../openvtc-core/src/messaging.rs) so they are
-testable without the TUI crate; `message_dispatch.rs` imports and calls into them.
+testable without the TUI crate. Inbound dispatch itself (`process_inbound_message`,
+`InboundEffects`, the off-loop `VerifyJob`s) lives in
+[`openvtc-core/src/inbound/`](../../openvtc-core/src/inbound/mod.rs); the runtime
+loop calls it and applies the returned `InboundEffects` to `State`.
 The `MessageType` protocol enum lives in
 [`openvtc-core/src/lib.rs:171`](../../openvtc-core/src/lib.rs).
 
@@ -165,7 +167,7 @@ the verified `(did, name)` results into `Config::agent_names` on the loop thread
    in [`openvtc-core/src/messaging.rs`](../../openvtc-core/src/messaging.rs) so it
    is unit-testable without the TUI.
 3. Add a `MessageType::…` arm to `process_inbound_message` in
-   [`state_handler/message_dispatch.rs`](../../openvtc/src/state_handler/message_dispatch.rs),
+   [`openvtc-core/src/inbound/`](../../openvtc-core/src/inbound/mod.rs),
    calling the core handler and returning `Ok(true)` if it mutated `Config` (the
    loop then `mark_dirty`s and re-syncs the UI).
 4. If sending the message is user-initiated, add the corresponding `Action` +

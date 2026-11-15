@@ -2,7 +2,7 @@
 //!
 //! A message whose handling needs a network-bound check (a DID resolve, a
 //! status-list fetch) is set aside by dispatch
-//! ([`super::message_dispatch::InboundEffects::deferred`]) and queued here. One
+//! ([`openvtc_core::inbound::InboundEffects::deferred`]) and queued here. One
 //! check runs at a time, spawned as its own task, and the message comes back
 //! with the result ([`Verifier::finished`]) to be dispatched from the top.
 //!
@@ -37,7 +37,7 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use super::didcomm::MessagingTransport;
-use super::message_dispatch::{Deferred, PreVerified};
+use openvtc_core::inbound::{Deferred, PreVerified};
 
 /// The longest one check may take: a DID resolve and a status-list fetch are
 /// each bounded at ten seconds (R1.2), so this is their sum with room to spare.
@@ -278,9 +278,9 @@ impl Verifier {
 
 #[cfg(test)]
 mod tests {
-    use super::super::message_dispatch::VerifyJob;
     use super::*;
     use crate::state_handler::dispatch_util::test_tdk;
+    use openvtc_core::inbound::VerifyJob;
 
     fn barrier(id: &str) -> Deferred {
         Deferred {

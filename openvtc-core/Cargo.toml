@@ -27,6 +27,10 @@ openpgp-card = [
 # (issue #124). Off by default; nightly fuzz builds opt in. Pulls chrono's
 # own `arbitrary` feature for the `LogMessage` timestamp.
 arbitrary = ["dep:arbitrary", "chrono/arbitrary"]
+# Test-only hooks other crates' tests need (e.g. inbound `VerifyJob`s that
+# hang or panic, for the CLI's verify-queue tests). Never enabled by a
+# release build; the CLI turns it on from `[dev-dependencies]` only.
+test-support = []
 
 [dependencies]
 # The commit signer the Repos panel sets up for a persona (`git_signing`): its
