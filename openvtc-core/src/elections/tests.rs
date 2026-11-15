@@ -876,17 +876,3 @@ fn vti_vot_018_an_indeterminate_answer_says_to_try_again() {
         );
     }
 }
-
-/// An answer from a community this persona is not a member of is admitted only on a thread
-/// sent to it, and only from it.
-#[test]
-fn an_answer_from_a_community_we_do_not_belong_to_is_admitted_only_on_its_thread() {
-    let thid = "urn:uuid:00000000-0000-4000-8000-0000000000bb";
-    assert!(!is_awaited(VTC, thid));
-    expect_answer(VTC, thid);
-    assert!(is_awaited(VTC, thid));
-    assert!(is_awaited(VTC, "00000000-0000-4000-8000-0000000000bb"));
-    assert!(!is_awaited("did:key:z6MkSomeoneElse", thid));
-    answered(thid);
-    assert!(!is_awaited(VTC, thid));
-}

@@ -249,44 +249,23 @@ async fn send_to_community(
     .await
 }
 
-/// Profile questions we have outstanding: document id → (community, when).
-/// In memory: a question is this process's, and its answer after a restart is
-/// simply not taken (the next launch asks again).
-static PROFILE_QUERIES: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
-> = std::sync::LazyLock::new(Default::default);
-
-/// How long a profile question waits for its answer.
-const PROFILE_QUERY_TTL: std::time::Duration = std::time::Duration::from_secs(600);
-/// Most profile questions outstanding at once.
-const MAX_PROFILE_QUERIES: usize = 256;
-
-fn remember_profile_query(document_id: &str, vtc_did: &str) {
-    if let Ok(mut q) = PROFILE_QUERIES.lock() {
-        q.retain(|_, (_, at)| at.elapsed() < PROFILE_QUERY_TTL);
-        if q.len() < MAX_PROFILE_QUERIES {
-            q.insert(
-                document_id.to_string(),
-                (vtc_did.to_string(), std::time::Instant::now()),
-            );
-        }
-    }
-}
-
-/// Whether `thid` answers a profile question we put to `vtc_did` (and is not
-/// yet answered). Consumes it: a question is answered once.
-#[must_use]
-pub fn take_profile_query(vtc_did: &str, thid: &str) -> bool {
-    let Ok(mut q) = PROFILE_QUERIES.lock() else {
-        return false;
-    };
-    match q.get(thid) {
-        Some((vtc, at)) if vtc == vtc_did && at.elapsed() < PROFILE_QUERY_TTL => {
-            q.remove(thid);
-            true
-        }
-        _ => false,
-    }
+/// Open a profile question to `vtc_did`: a fresh document id, recorded in
+/// `pending` (kind `CommunityProfile`) so the answer threading on it is taken.
+/// Done on the thread that owns `pending`, before the send
+/// ([`send_community_profile_show`]) is spawned, so an answer racing the send
+/// is still recognised. In memory: a question is this process's, and its answer
+/// after a restart is simply not taken (the next launch asks again).
+pub fn open_profile_query(
+    pending: &mut crate::pending_replies::PendingReplies,
+    vtc_did: &str,
+) -> String {
+    let document_id = format!("urn:uuid:{}", Uuid::new_v4());
+    pending.record(
+        &document_id,
+        vtc_did,
+        crate::pending_replies::Purpose::CommunityProfile,
+    );
+    document_id
 }
 
 /// Ask a community for its profile (`vtc/community/profile/show/0.1`) so we can
@@ -300,6 +279,9 @@ pub fn take_profile_query(vtc_did: &str, thid: &str) -> bool {
 /// awaited here. Background, best-effort — a send failure is the caller's to log,
 /// not surface (the value only seeds a form default, and its absence is a valid,
 /// pairwise-defaulting state).
+///
+/// `document_id` is the question's id, from [`open_profile_query`].
+#[allow(clippy::too_many_arguments)]
 pub async fn send_community_profile_show(
     atm: &ATM,
     profile: &Arc<ATMProfile>,
@@ -308,10 +290,8 @@ pub async fn send_community_profile_show(
     vtc_did: &str,
     mediator_did: &str,
     tsp_mediator_did: Option<&str>,
+    document_id: String,
 ) -> Result<(), OpenVTCError> {
-    let document_id = format!("urn:uuid:{}", Uuid::new_v4());
-    // Remembered before the send, so an answer racing it is still recognised.
-    remember_profile_query(&document_id, vtc_did);
     // The show payload carries only an optional extension bag; an empty object is
     // the request. The VTC reads the body as a Trust Task document, so it must be
     // wrapped (a bare payload is rejected `malformedRequest`).
@@ -1365,18 +1345,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("revocation status"), "{err}");
-    }
-
-    #[test]
-    fn a_profile_answer_is_taken_once_and_only_from_the_community_asked() {
-        remember_profile_query("urn:uuid:q1", "did:webvh:vtc");
-        assert!(!take_profile_query("did:webvh:mallory", "urn:uuid:q1"));
-        assert!(!take_profile_query("did:webvh:vtc", "urn:uuid:other"));
-        assert!(take_profile_query("did:webvh:vtc", "urn:uuid:q1"));
-        assert!(
-            !take_profile_query("did:webvh:vtc", "urn:uuid:q1"),
-            "answered once"
-        );
     }
 
     #[test]

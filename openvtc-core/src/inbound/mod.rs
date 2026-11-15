@@ -22,6 +22,7 @@ use crate::messaging::{
     is_trust_task_error_type, read_problem_report, require_thid, validate_did, verify_inbound_vrc,
     vet_vrc_issued,
 };
+use crate::pending_replies::{PendingReplies, ReplyKind};
 use crate::personhood::{PERSONHOOD_ASSERT_RESPONSE_TYPE, PERSONHOOD_CHALLENGE_RESPONSE_TYPE};
 use crate::vetting::protocol::JoinProtocol;
 use crate::{
@@ -461,6 +462,7 @@ impl VerifyJob {
 /// closed without a check result).
 fn verification_job(
     config: &Config,
+    pending: &PendingReplies,
     message: &Message,
     from_did: &str,
     recipient_did: &str,
@@ -521,7 +523,7 @@ fn verification_job(
             let asked = message
                 .thid
                 .as_deref()
-                .is_some_and(|thid| crate::renewal::is_pending(from_did, thid));
+                .is_some_and(|thid| pending.is_awaited(ReplyKind::Renewal, from_did, thid));
             (member && asked).then(|| VerifyJob::Renewal {
                 document: message.body.clone(),
                 sender: from_did.to_string(),
@@ -538,7 +540,7 @@ fn verification_job(
         // (VTI-NTF-063), which may be one we hold no membership with: only on
         // a thread we sent it.
         Family::ElectionsReply | Family::TrustTaskError if !member => {
-            awaited_election_answer(message, from_did).then(operational)
+            awaited_election_answer(pending, message, from_did).then(operational)
         }
         Family::CapabilityReply
         | Family::GitNsReply
@@ -682,14 +684,14 @@ fn relationship_request_admissible(
 
 /// Whether `message` answers an elections request we sent `from_did` and still wait for — the
 /// only standing a community we hold no membership with has here.
-fn awaited_election_answer(message: &Message, from_did: &str) -> bool {
+fn awaited_election_answer(pending: &PendingReplies, message: &Message, from_did: &str) -> bool {
     let thread = message.thid.as_deref().or_else(|| {
         message
             .body
             .get("threadId")
             .and_then(serde_json::Value::as_str)
     });
-    thread.is_some_and(|t| crate::elections::is_awaited(from_did, t))
+    thread.is_some_and(|t| pending.is_awaited(ReplyKind::ElectionAnswer, from_did, t))
 }
 
 /// An operational document that was not checked.
@@ -726,6 +728,7 @@ fn community_reply_proven(
     from_did: &str,
     recipient_did: &str,
     cached: &mut Option<bool>,
+    pending: &PendingReplies,
 ) -> bool {
     if let Some(answer) = *cached {
         return answer;
@@ -745,7 +748,7 @@ fn community_reply_proven(
         Ok(_)
             if config.account.memberships_for(from_did).is_empty()
                 && !(crate::elections::is_reply_type(&message.typ)
-                    && awaited_election_answer(message, from_did)) =>
+                    && awaited_election_answer(pending, message, from_did)) =>
         {
             warn!(typ = %message.typ, "reply from a community we hold no membership with — ignored");
             false
@@ -825,6 +828,7 @@ pub async fn process_inbound_message(
     tdk: &TDK,
     service: &Messaging,
     seen: &mut SeenMessages,
+    pending: &mut PendingReplies,
     message: &Message,
     authenticated: Option<&str>,
     effects: &mut InboundEffects,
@@ -839,6 +843,7 @@ pub async fn process_inbound_message(
         tdk,
         service,
         seen,
+        pending,
         message,
         authenticated,
         effects,
@@ -854,6 +859,7 @@ async fn process_inbound(
     tdk: &TDK,
     service: &Messaging,
     seen: &mut SeenMessages,
+    pending: &mut PendingReplies,
     message: &Message,
     authenticated: Option<&str>,
     effects: &mut InboundEffects,
@@ -971,7 +977,7 @@ async fn process_inbound(
     let recheck = matches!(arrival, Arrival::Returning(PreVerified::Barrier));
     if !returning || recheck {
         let job = match (
-            verification_job(config, message, &from_did, &recipient_did),
+            verification_job(config, pending, message, &from_did, &recipient_did),
             &arrival,
         ) {
             (Some(job), _) => Some(job),
@@ -1005,6 +1011,7 @@ async fn process_inbound(
     let mut cx = Cx {
         tdk,
         service,
+        pending,
         message,
         from_did,
         recipient_did,
@@ -1058,6 +1065,9 @@ async fn process_inbound(
 struct Cx<'a> {
     tdk: &'a TDK,
     service: &'a Messaging,
+    /// The requests we wait on an answer for: the gate for answers admitted
+    /// only because we asked (a renewal, a profile, an election).
+    pending: &'a mut PendingReplies,
     /// The message as routed (opened out of its binding envelope).
     message: &'a Message,
     /// The authenticated sender.
@@ -1147,6 +1157,7 @@ fn capability_reply(
             &from_did,
             &recipient_did,
             &mut reply_proven,
+            cx.pending,
         )
     {
         capability_replies.push((from_did.to_string(), thid, reply));
@@ -1185,6 +1196,7 @@ fn git_ns_reply(
             &from_did,
             &recipient_did,
             &mut reply_proven,
+            cx.pending,
         )
     {
         // The sender and the document's issuer travel with the answer: the
@@ -1228,6 +1240,7 @@ fn rooms_reply(
             &from_did,
             &recipient_did,
             &mut reply_proven,
+            cx.pending,
         )
     {
         rooms_replies.push(ThreadedReply {
@@ -1271,6 +1284,7 @@ fn elections_reply(
             &from_did,
             &recipient_did,
             &mut reply_proven,
+            cx.pending,
         )
     {
         elections_replies.push(ThreadedReply {
@@ -1811,7 +1825,7 @@ async fn renewal_response(
                 // else answers nothing the member is waiting on. The request is
                 // not consumed — a forged reply must not be able to cancel the
                 // genuine one still on its way.
-                if crate::renewal::is_pending(&from_did, thid) {
+                if cx.pending.is_awaited(ReplyKind::Renewal, &from_did, thid) {
                     config
                         .account
                         .note_credential_refused(&from_did, Some(&e.to_string()));
@@ -1834,8 +1848,9 @@ async fn renewal_response(
             warn!(vtc = %from_did, reason = %e, "renewal reply refused");
             return Ok(false);
         }
-        match crate::renewal::take_pending(&from_did, thid) {
-            Some(member) if member == verified.member_did() => {}
+        match cx.pending.take(ReplyKind::Renewal, &from_did, thid) {
+            Some(crate::pending_replies::Purpose::Renewal { member_did })
+                if member_did == verified.member_did() => {}
             _ => {
                 warn!(vtc = %from_did, "renewal reply answers no renewal of ours — ignored");
                 return Ok(false);
@@ -1957,6 +1972,7 @@ async fn trust_task_error(
             &from_did,
             &recipient_did,
             &mut reply_proven,
+            cx.pending,
         )
     {
         capability_replies.push((from_did.to_string(), thid, reply));
@@ -1980,6 +1996,7 @@ async fn trust_task_error(
             &from_did,
             &recipient_did,
             &mut reply_proven,
+            cx.pending,
         )
     {
         // The sender and the document's issuer travel with the answer: the
@@ -2008,6 +2025,7 @@ async fn trust_task_error(
             &from_did,
             &recipient_did,
             &mut reply_proven,
+            cx.pending,
         )
     {
         rooms_replies.push(ThreadedReply {
@@ -2034,6 +2052,7 @@ async fn trust_task_error(
             &from_did,
             &recipient_did,
             &mut reply_proven,
+            cx.pending,
         )
     {
         elections_replies.push(ThreadedReply {
@@ -2133,7 +2152,7 @@ async fn trust_task_error(
     // refusal of a join and drop it for matching no pending request.
     if is_trust_task_error_type(&message.typ)
         && let Some(thid) = message.thid.as_deref()
-        && crate::renewal::is_pending(&from_did, thid)
+        && cx.pending.is_awaited(ReplyKind::Renewal, &from_did, thid)
     {
         if !community_reply_proven(
             config,
@@ -2142,10 +2161,11 @@ async fn trust_task_error(
             &from_did,
             &recipient_did,
             &mut reply_proven,
+            cx.pending,
         ) {
             return Ok(false);
         }
-        let _ = crate::renewal::take_pending(&from_did, thid);
+        let _ = cx.pending.take(ReplyKind::Renewal, &from_did, thid);
         let outcome = crate::renewal::RenewalOutcome::Refused(
             crate::renewal::RenewalRefusal::read(&message.body),
         );
@@ -2268,10 +2288,11 @@ fn community_profile_response(config: &mut Config, cx: &mut Cx<'_>) -> Result<bo
                 return Ok(false);
             }
         };
-        let asked = message
-            .thid
-            .as_deref()
-            .is_some_and(|thid| crate::join::take_profile_query(&from_did, thid));
+        let asked = message.thid.as_deref().is_some_and(|thid| {
+            cx.pending
+                .take(ReplyKind::CommunityProfile, &from_did, thid)
+                .is_some()
+        });
         if !asked {
             warn!("community profile response we did not ask for — ignored");
             return Ok(false);
@@ -2910,7 +2931,9 @@ async fn peer(
 /// config changed.
 ///
 /// For headless commands that listen as a persona, so a message they were not
-/// waiting for is applied rather than lost. Effects that need a live UI or a
+/// waiting for is applied rather than lost. Each command holds its own
+/// `pending` table for the life of its listening, as the runtime loop holds
+/// its own. Effects that need a live UI or a
 /// session manager (a view's reply, a session to tear down) are dropped; the
 /// account state they stand beside is applied.
 ///
@@ -2921,6 +2944,7 @@ pub async fn apply_inline(
     tdk: &TDK,
     messaging: &Messaging,
     seen: &mut SeenMessages,
+    pending: &mut PendingReplies,
     message: &Message,
     authenticated: Option<&str>,
 ) -> bool {
@@ -2936,6 +2960,7 @@ pub async fn apply_inline(
             tdk,
             messaging,
             seen,
+            pending,
             &message,
             authenticated,
             &mut effects,

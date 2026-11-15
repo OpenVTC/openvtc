@@ -104,6 +104,7 @@ fn the_list_is_read_a_page_at_a_time_and_ordered_by_what_can_be_done() {
     arm(&mut state, Purpose::List);
     assert!(apply_replies(
         &mut state,
+        &mut PendingReplies::default(),
         vec![inbound(list_page(
             json!([item("old", "tallied")]),
             Some("c1")
@@ -118,6 +119,7 @@ fn the_list_is_read_a_page_at_a_time_and_ordered_by_what_can_be_done() {
     arm(&mut state, Purpose::List);
     apply_replies(
         &mut state,
+        &mut PendingReplies::default(),
         vec![inbound(list_page(json!([item("now", "voting")]), None))],
     );
     let v = view(&mut state);
@@ -132,10 +134,18 @@ fn an_answer_from_anyone_else_is_dropped() {
     arm(&mut state, Purpose::List);
     let mut forged = inbound(list_page(json!([]), None));
     forged.from = "did:key:zMallory".into();
-    assert!(!apply_replies(&mut state, vec![forged]));
+    assert!(!apply_replies(
+        &mut state,
+        &mut PendingReplies::default(),
+        vec![forged]
+    ));
     let mut forged = inbound(list_page(json!([]), None));
     forged.issuer = Some("did:key:zMallory".into());
-    assert!(!apply_replies(&mut state, vec![forged]));
+    assert!(!apply_replies(
+        &mut state,
+        &mut PendingReplies::default(),
+        vec![forged]
+    ));
     assert!(view(&mut state).pending.is_some());
 }
 
@@ -156,7 +166,11 @@ fn a_vote_reads_the_election_again_then_registers() {
             intent: Intent::Vote,
         },
     );
-    apply_replies(&mut state, vec![inbound(Reply::Show(shown("voting")))]);
+    apply_replies(
+        &mut state,
+        &mut PendingReplies::default(),
+        vec![inbound(Reply::Show(shown("voting")))],
+    );
     let v = view(&mut state);
     assert!(matches!(v.next, Some(Next::Register)));
     assert_eq!(v.flow.as_ref().unwrap().step, Step::Registering);
@@ -177,7 +191,11 @@ fn a_closed_election_takes_no_ticket() {
             intent: Intent::Ticket,
         },
     );
-    apply_replies(&mut state, vec![inbound(Reply::Show(shown("closed")))]);
+    apply_replies(
+        &mut state,
+        &mut PendingReplies::default(),
+        vec![inbound(Reply::Show(shown("closed")))],
+    );
     let v = view(&mut state);
     assert!(v.flow.is_none() && v.next.is_none());
     assert!(v.status.as_ref().unwrap().text.contains("closed"));
@@ -215,6 +233,7 @@ fn voting_without_a_ticket_takes_it_and_stops() {
     let issued = json!({ "electionId": "agm", "label": "voter/agm", "preCredential": "zPre" });
     apply_replies(
         &mut state,
+        &mut PendingReplies::default(),
         vec![inbound(Reply::TicketIssued {
             typed: Box::new(serde_json::from_value(issued.clone()).unwrap()),
             raw: issued.clone(),
@@ -352,6 +371,7 @@ fn a_community_refusal_ends_the_flow_in_words() {
     );
     apply_replies(
         &mut state,
+        &mut PendingReplies::default(),
         vec![inbound(Reply::Refused(Refusal {
             code: "vtc/elections/tickets/issue:notEligible".into(),
             message: None,
@@ -401,6 +421,7 @@ fn vti_ntf_063_the_list_carries_notified_elections_once() {
     arm(&mut state, Purpose::List);
     apply_replies(
         &mut state,
+        &mut PendingReplies::default(),
         vec![inbound(list_page(json!([item("agm", "voting")]), None))],
     );
     vta(
@@ -447,7 +468,11 @@ fn vti_vot_016_a_membership_is_presented_only_once_the_member_chooses() {
     // From the community the read went to — not the panel's own.
     refusal.from = HOLDER.into();
     refusal.issuer = Some(HOLDER.into());
-    assert!(apply_replies(&mut state, vec![refusal]));
+    assert!(apply_replies(
+        &mut state,
+        &mut PendingReplies::default(),
+        vec![refusal]
+    ));
     let v = view(&mut state);
     assert_eq!(v.screen, Screen::Disclose);
     assert!(v.presenting.is_none(), "nothing presented yet");
@@ -527,11 +552,49 @@ fn an_answer_is_taken_from_the_community_the_request_went_to() {
     // The panel's own community is not the one asked.
     assert!(!apply_replies(
         &mut state,
+        &mut PendingReplies::default(),
         vec![inbound(Reply::Show(shown("voting")))]
     ));
     let mut from_holder = inbound(Reply::Show(shown("voting")));
     from_holder.from = HOLDER.into();
     from_holder.issuer = Some(HOLDER.into());
-    assert!(apply_replies(&mut state, vec![from_holder]));
+    assert!(apply_replies(
+        &mut state,
+        &mut PendingReplies::default(),
+        vec![from_holder]
+    ));
     assert!(view(&mut state).shown.is_some());
+}
+
+/// Once the view has taken its answer, or its send failed, the inbound gate no longer admits an
+/// answer on that thread from a community this persona does not belong to.
+#[test]
+fn an_answer_taken_or_failed_is_no_longer_awaited_at_the_gate() {
+    let election = openvtc_core::pending_replies::Purpose::ElectionAnswer;
+    // Taken.
+    let mut state = state_with_view();
+    arm(&mut state, Purpose::List);
+    let mut pending = PendingReplies::default();
+    pending.record("t1", VTC, election.clone());
+    assert!(apply_replies(
+        &mut state,
+        &mut pending,
+        vec![inbound(list_page(json!([]), None))]
+    ));
+    assert!(!pending.is_awaited(ReplyKind::ElectionAnswer, VTC, "t1"));
+
+    // Its send failed.
+    let mut state = state_with_view();
+    arm(&mut state, Purpose::List);
+    pending.record("t1", VTC, election);
+    let persona = view(&mut state).persona;
+    ElectionsOutcome {
+        vtc_did: VTC.into(),
+        persona,
+        thid: "t1".into(),
+        result: Err("unreachable".into()),
+    }
+    .apply(&mut state, &mut pending);
+    assert!(!pending.is_awaited(ReplyKind::ElectionAnswer, VTC, "t1"));
+    assert!(view(&mut state).pending.is_none());
 }

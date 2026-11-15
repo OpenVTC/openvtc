@@ -1307,6 +1307,7 @@ mod tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             outcome,
         );
         assert!(!in_flight.is_busy(DispatchDomain::DidGitSign));

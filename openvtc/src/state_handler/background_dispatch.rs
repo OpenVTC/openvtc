@@ -542,6 +542,7 @@ pub(crate) fn apply_outcome(
     config: &mut Config,
     save: &mut SaveScheduler,
     in_flight: &mut InFlight,
+    pending_replies: &mut openvtc_core::pending_replies::PendingReplies,
     outcome: DispatchOutcome,
 ) -> AfterApply {
     let domain = outcome.domain();
@@ -629,7 +630,7 @@ pub(crate) fn apply_outcome(
         }
         DispatchOutcome::AgentNameManage(outcome) => outcome.apply(state, config, save),
         DispatchOutcome::Community(outcome) => {
-            let pending = outcome.apply(state, config, save);
+            let pending = outcome.apply(state, config, save, pending_replies);
             in_flight.finish(domain);
             return match pending {
                 Some((vtc, persona)) => AfterApply::Deregister(vtc, persona),
@@ -663,7 +664,7 @@ pub(crate) fn apply_outcome(
         }
         DispatchOutcome::Rooms(outcome) => outcome.apply(state),
         DispatchOutcome::RoomsVta(outcome) => outcome.apply(state),
-        DispatchOutcome::Elections(outcome) => outcome.apply(state),
+        DispatchOutcome::Elections(outcome) => outcome.apply(state, pending_replies),
         DispatchOutcome::ElectionsVta(outcome) => outcome.apply(state),
         DispatchOutcome::ElectionsCast(outcome) => outcome.apply(state),
         // Merged, not replaced. A sweep only carries the targets it was given,
@@ -821,6 +822,7 @@ mod tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::MediatorReconnect(ReconnectOutcome::Connected),
         );
 
@@ -850,6 +852,7 @@ mod tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::MediatorReconnect(ReconnectOutcome::Failed {
                 reason: "dead mediator".into(),
                 class: openvtc_core::errors::ErrorClass::Unreachable,
@@ -884,6 +887,7 @@ mod tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::Panicked(DispatchDomain::Relationship),
         );
 
@@ -985,7 +989,14 @@ mod tests {
                     }
                 }
                 Some(outcome) = dispatch_rx.recv() => {
-                    apply_outcome(&mut state, &mut config, &mut save, &mut in_flight, outcome);
+                    apply_outcome(
+                        &mut state,
+                        &mut config,
+                        &mut save,
+                        &mut in_flight,
+                        &mut openvtc_core::pending_replies::PendingReplies::default(),
+                        outcome,
+                    );
                 }
             }
         };
@@ -1023,6 +1034,7 @@ mod tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::AgentName(vec![
                 (
                     "did:webvh:example.com:alice".to_string(),
@@ -1058,6 +1070,7 @@ mod tests {
             &mut config,
             &mut save2,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::AgentName(vec![
                 (
                     "did:webvh:example.com:alice".to_string(),
@@ -1099,6 +1112,7 @@ mod progress_tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::Progress(ProgressUpdate::PersonaMint("Minting the DID…".into())),
         );
 
@@ -1132,6 +1146,7 @@ mod progress_tests {
             &mut config,
             &mut save,
             &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
             DispatchOutcome::Progress(ProgressUpdate::PersonaMint("Minting…".into())),
         );
 

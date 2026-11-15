@@ -177,9 +177,17 @@ impl Runtime {
             witness_router,
             ping_sent_at,
             handler,
+            pending_replies,
             ..
         } = self;
-        let after = background_dispatch::apply_outcome(state, config, save, in_flight, outcome);
+        let after = background_dispatch::apply_outcome(
+            state,
+            config,
+            save,
+            in_flight,
+            pending_replies,
+            outcome,
+        );
         // A VTA answer or a failed send may call for the Rooms panel's next
         // step, and frees the lane it waits on.
         rooms_actions::advance(&mut rooms_actions::Loop {
@@ -199,6 +207,7 @@ impl Runtime {
             vta: admin_vta.as_ref(),
             dispatch_tx,
             in_flight,
+            pending_replies,
         })
         .await;
         let settled = settle_after_apply(after, state, config, tdk, handler.profile.as_str()).await;
@@ -242,6 +251,7 @@ impl Runtime {
                     state_tx: &handler.state_tx,
                     profile: handler.profile.as_str(),
                     witness_router,
+                    pending_replies,
                 };
                 vetting_actions::apply_pcs_outcome(&mut ctx, *outcome).await;
             }

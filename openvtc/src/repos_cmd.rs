@@ -22,6 +22,7 @@ use openvtc_core::didcomm::{self, DIDCommEvent, Messaging};
 use openvtc_core::git_ns::{self, GitRight, Reply, Request};
 use openvtc_core::git_workspace::{self, CLONE_TIMEOUT, RepoCoords, WorkspaceSettings};
 use openvtc_core::messaging::SeenMessages;
+use openvtc_core::pending_replies::PendingReplies;
 use tokio::sync::mpsc;
 
 use crate::colors::{CLI_ERROR, CLI_INFO, Themed};
@@ -387,6 +388,10 @@ async fn ask(
 #[derive(Default)]
 struct Others {
     seen: SeenMessages,
+    /// Replies this command waits on by thread. It asks nothing the inbound
+    /// gate admits only on a recorded thread, so this stays empty; it is the
+    /// command's own, as the runtime loop's is its own.
+    pending: PendingReplies,
     handled: usize,
 }
 
@@ -452,6 +457,7 @@ async fn await_reply(
                     tdk,
                     messaging,
                     &mut others.seen,
+                    &mut others.pending,
                     &message,
                     authenticated.as_deref(),
                 )

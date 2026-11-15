@@ -25,6 +25,7 @@ impl Runtime {
             verifier,
             restore_backlog,
             seen_messages,
+            pending_replies,
             witness_router,
             ping_sent_at,
             join_entry,
@@ -72,6 +73,7 @@ impl Runtime {
                     tdk,
                     didcomm_service,
                     seen_messages,
+                    pending_replies,
                     &message,
                     authenticated.as_deref(),
                     &mut effects,
@@ -156,6 +158,7 @@ impl Runtime {
                         tdk,
                         didcomm_service,
                         seen_messages,
+                        pending_replies,
                     )
                     .await
                 {
@@ -317,7 +320,7 @@ impl Runtime {
                 // Election answers for the Elections panel; each may call for
                 // the next step of a ticket or a vote.
                 if !elections_replies.is_empty()
-                    && elections_actions::apply_replies(state, elections_replies)
+                    && elections_actions::apply_replies(state, pending_replies, elections_replies)
                 {
                     elections_actions::advance(&mut elections_actions::Loop {
                         state,
@@ -326,6 +329,7 @@ impl Runtime {
                         vta: admin_vta.as_ref(),
                         dispatch_tx,
                         in_flight,
+                        pending_replies,
                     })
                     .await;
                 }

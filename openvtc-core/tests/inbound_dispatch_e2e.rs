@@ -36,6 +36,7 @@ use openvtc_core::config::{
 use openvtc_core::didcomm::{Messaging, routes_inbound_type};
 use openvtc_core::inbound::{Arrival, InboundEffects, process_inbound_message};
 use openvtc_core::messaging::SeenMessages;
+use openvtc_core::pending_replies::PendingReplies;
 use openvtc_core::protocol_urls;
 use openvtc_core::relationships::{
     BindingRole, Relationship, RelationshipRequestBody, RelationshipState, did_binding_proofs,
@@ -234,6 +235,7 @@ async fn dispatch(config: &mut Config, tdk: &TDK, received: &Received) -> (bool,
     let service: Messaging =
         openvtc_core::didcomm::start_empty_service(tx, tokio_util::sync::CancellationToken::new());
     let mut seen = SeenMessages::new();
+    let mut pending = PendingReplies::default();
     let nobody = |_: &str| false;
     let mut arrival = Arrival::New { waiting: &nobody };
     let mut message = received.message.clone();
@@ -245,6 +247,7 @@ async fn dispatch(config: &mut Config, tdk: &TDK, received: &Received) -> (bool,
             tdk,
             &service,
             &mut seen,
+            &mut pending,
             &message,
             received.authenticated.as_deref(),
             &mut effects,
@@ -463,6 +466,7 @@ async fn a_type_no_handler_claims_is_refused_by_the_gate() {
         &tdk,
         &service,
         &mut SeenMessages::new(),
+        &mut PendingReplies::default(),
         &received.message,
         received.authenticated.as_deref(),
         &mut effects,

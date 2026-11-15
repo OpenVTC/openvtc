@@ -90,6 +90,7 @@ async fn dispatch(
         tdk,
         &service,
         &mut seen,
+        &mut openvtc_core::pending_replies::PendingReplies::default(),
         m,
         m.from.as_deref(),
         &mut effects,

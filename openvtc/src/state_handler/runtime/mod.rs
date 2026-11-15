@@ -123,6 +123,12 @@ pub(crate) struct Runtime {
 
     // ── Inbound ──
     pub(super) seen_messages: openvtc_core::messaging::SeenMessages,
+    /// Replies awaited by thread — a renewal's, a community profile's, an
+    /// election answer from a community we hold no membership with. The
+    /// inbound gate admits those only on a thread recorded here. Owned by
+    /// this loop alone: send paths record into it on this thread before
+    /// spawning, and inbound dispatch consumes from it.
+    pub(super) pending_replies: openvtc_core::pending_replies::PendingReplies,
     pub(super) verifier: verify_queue::Verifier,
     pub(super) restore_backlog: VecDeque<openvtc_core::config::protected_config::DeferredInbound>,
     pub(super) witness_router: openvtc_core::witness::ReplyRouter,
@@ -255,6 +261,8 @@ impl Runtime {
         // Process-lifetime LRU of inbound message IDs. Backstop for replay
         // and mediator-pickup duplicates beyond what the TDK already filters.
         let mut seen_messages = openvtc_core::messaging::SeenMessages::new();
+        // Replies awaited by thread (see the `pending_replies` field).
+        let mut pending_replies = openvtc_core::pending_replies::PendingReplies::default();
 
         // Forward lifecycle events (connect/disconnect/restart) to the activity log
         let (lifecycle_log_tx, lifecycle_log_rx) =
@@ -398,6 +406,7 @@ impl Runtime {
             &tdk,
             &didcomm_service,
             &mut seen_messages,
+            &mut pending_replies,
         )
         .await
         {
@@ -428,6 +437,7 @@ impl Runtime {
             _listener_install: listener_install,
             _lifecycle_handle: lifecycle_handle,
             seen_messages,
+            pending_replies,
             verifier,
             restore_backlog,
             // Hands a witness's answers from the inbound arm to the witnessing
@@ -793,6 +803,7 @@ impl Runtime {
             state_tx: &self.handler.state_tx,
             profile: self.handler.profile.as_str(),
             witness_router: &self.witness_router,
+            pending_replies: &mut self.pending_replies,
         }
     }
 

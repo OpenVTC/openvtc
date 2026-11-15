@@ -110,6 +110,7 @@ async fn a_credential_is_verified_off_the_loop_before_anything_is_applied() {
     let service =
         crate::didcomm::start_empty_service(tx, tokio_util::sync::CancellationToken::new());
     let mut seen = SeenMessages::new();
+    let mut pending = PendingReplies::default();
 
     // A forged (unsigned) credential: deferred, then refused.
     let mut config = pending_config(&vtc);
@@ -122,6 +123,7 @@ async fn a_credential_is_verified_off_the_loop_before_anything_is_applied() {
         &tdk,
         &service,
         &mut seen,
+        &mut pending,
         &m,
         m.from.as_deref(),
         &mut effects,
@@ -143,6 +145,7 @@ async fn a_credential_is_verified_off_the_loop_before_anything_is_applied() {
         &tdk,
         &service,
         &mut seen,
+        &mut pending,
         &deferred.message,
         deferred.message.from.as_deref(),
         &mut effects,
@@ -174,6 +177,7 @@ async fn a_credential_is_verified_off_the_loop_before_anything_is_applied() {
         &tdk,
         &service,
         &mut seen,
+        &mut pending,
         &m,
         m.from.as_deref(),
         &mut effects,
@@ -194,6 +198,7 @@ async fn a_credential_is_verified_off_the_loop_before_anything_is_applied() {
         &tdk,
         &service,
         &mut seen,
+        &mut pending,
         &deferred.message,
         deferred.message.from.as_deref(),
         &mut effects,
@@ -219,6 +224,7 @@ async fn a_hidden_vetting_answer_reaches_the_question_it_answers() {
     let service =
         crate::didcomm::start_empty_service(tx, tokio_util::sync::CancellationToken::new());
     let mut seen = SeenMessages::new();
+    let mut pending = PendingReplies::default();
     let mut config = pending_config(&vtc);
     let persona = *config.account.personas.keys().next().unwrap();
 
@@ -264,6 +270,7 @@ async fn a_hidden_vetting_answer_reaches_the_question_it_answers() {
             &tdk,
             &service,
             &mut seen,
+            &mut pending,
             &answer,
             answer.from.as_deref(),
             &mut effects,
@@ -292,6 +299,7 @@ async fn a_check_result_for_another_credential_is_not_taken() {
     let service =
         crate::didcomm::start_empty_service(tx, tokio_util::sync::CancellationToken::new());
     let mut seen = SeenMessages::new();
+    let mut pending = PendingReplies::default();
     let mut config = pending_config(&vtc);
 
     let other = issue(&vtc, &key, membership_vmc(&vtc, &key).await).await;
@@ -301,6 +309,7 @@ async fn a_check_result_for_another_credential_is_not_taken() {
         &tdk,
         &service,
         &mut seen,
+        &mut pending,
         &other,
         other.from.as_deref(),
         &mut effects,
@@ -320,6 +329,7 @@ async fn a_check_result_for_another_credential_is_not_taken() {
         &tdk,
         &service,
         &mut seen,
+        &mut pending,
         &m,
         m.from.as_deref(),
         &mut effects,
@@ -343,6 +353,7 @@ async fn a_removal_notice_waits_for_its_check() {
     let service =
         crate::didcomm::start_empty_service(tx, tokio_util::sync::CancellationToken::new());
     let mut seen = SeenMessages::new();
+    let mut pending = PendingReplies::default();
     let mut config = pending_config(&vtc);
     let m = Message::build(
         uuid::Uuid::new_v4().to_string(),
@@ -358,6 +369,7 @@ async fn a_removal_notice_waits_for_its_check() {
         &tdk,
         &service,
         &mut seen,
+        &mut pending,
         &m,
         m.from.as_deref(),
         &mut effects,
@@ -487,7 +499,13 @@ async fn a_renewal_reply_is_checked_then_stored_clearing_the_retired_notices() {
     let tdk = test_tdk().await;
     let mut config = retired_config(&vtc);
     let request = uuid::Uuid::new_v4();
-    crate::renewal::record_request(request, &vtc, PERSONA);
+    let mut pending = PendingReplies::default();
+    assert!(crate::renewal::record_request(
+        &mut pending,
+        request,
+        &vtc,
+        PERSONA
+    ));
 
     let vmc = membership_vmc(&vtc, &key).await;
     let vac = role_vac(&vtc, &key).await;
@@ -506,7 +524,7 @@ async fn a_renewal_reply_is_checked_then_stored_clearing_the_retired_notices() {
     )
     .await;
 
-    let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+    let effects = dispatch_waiting(&mut config, &mut pending, &tdk, &m, Arrival::FRESH).await;
     let deferred = effects.deferred.expect("set aside for its check");
     assert!(matches!(deferred.job, VerifyJob::Renewal { .. }));
     assert!(
@@ -518,8 +536,9 @@ async fn a_renewal_reply_is_checked_then_stored_clearing_the_retired_notices() {
 
     let pre = deferred.job.run(tdk.clone()).await;
     assert!(matches!(&pre, PreVerified::Renewal(Ok(_))));
-    let effects = dispatch(
+    let effects = dispatch_waiting(
         &mut config,
+        &mut pending,
         &tdk,
         &deferred.message,
         Arrival::Returning(pre),
@@ -554,7 +573,8 @@ async fn a_renewal_reply_is_checked_then_stored_clearing_the_retired_notices() {
     assert!(outcome.describe().contains("press m"));
 
     // Answered once: the same reply again is not taken.
-    let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
+    let effects = dispatch_waiting(&mut config, &mut pending, &tdk, &m, Arrival::FRESH).await;
+    assert!(pending.is_empty(), "the reply took its request");
     assert!(effects.deferred.is_none());
     assert!(effects.renewals.is_empty());
 }
@@ -597,7 +617,13 @@ async fn a_renewal_refused_as_not_a_member_is_reported() {
     let tdk = test_tdk().await;
     let mut config = retired_config(&vtc);
     let request = uuid::Uuid::new_v4();
-    crate::renewal::record_request(request, &vtc, PERSONA);
+    let mut pending = PendingReplies::default();
+    assert!(crate::renewal::record_request(
+        &mut pending,
+        request,
+        &vtc,
+        PERSONA
+    ));
     let m = community_reply(
         &vtc,
         &key,
@@ -611,16 +637,7 @@ async fn a_renewal_refused_as_not_a_member_is_reported() {
     )
     .await;
 
-    let effects = dispatch(&mut config, &tdk, &m, Arrival::FRESH).await;
-    let deferred = effects.deferred.expect("set aside for its check");
-    let pre = deferred.job.run(tdk.clone()).await;
-    let effects = dispatch(
-        &mut config,
-        &tdk,
-        &deferred.message,
-        Arrival::Returning(pre),
-    )
-    .await;
+    let effects = dispatch_checked_waiting(&mut config, &mut pending, &tdk, &m).await;
 
     let [(_, outcome)] = effects.renewals.as_slice() else {
         panic!("one renewal outcome");
@@ -632,7 +649,10 @@ async fn a_renewal_refused_as_not_a_member_is_reported() {
     let record = &config.account.memberships_for(&vtc)[0];
     assert!(record.status.is_active(), "a refused renewal ends nothing");
     assert_eq!(record.retired_credentials.len(), 2);
-    assert!(!crate::renewal::is_pending(&vtc, &request.to_string()));
+    assert!(
+        !pending.is_awaited(ReplyKind::Renewal, &vtc, &request.to_string()),
+        "the refusal took the request"
+    );
 }
 
 /// Collects what is logged at `WARN` and above while it is the default
@@ -669,10 +689,27 @@ impl Warnings {
 /// Dispatch `m` once it has been through its off-loop check, as the loop
 /// does: on arrival it is set aside, then handled with the check's result.
 async fn dispatch_checked(config: &mut Config, tdk: &TDK, m: &Message) -> InboundEffects {
-    let effects = dispatch(config, tdk, m, Arrival::FRESH).await;
+    dispatch_checked_waiting(config, &mut PendingReplies::default(), tdk, m).await
+}
+
+/// [`dispatch_checked`], with the requests in `pending` waited on.
+async fn dispatch_checked_waiting(
+    config: &mut Config,
+    pending: &mut PendingReplies,
+    tdk: &TDK,
+    m: &Message,
+) -> InboundEffects {
+    let effects = dispatch_waiting(config, pending, tdk, m, Arrival::FRESH).await;
     let deferred = effects.deferred.expect("set aside for its check");
     let pre = deferred.job.run(tdk.clone()).await;
-    dispatch(config, tdk, &deferred.message, Arrival::Returning(pre)).await
+    dispatch_waiting(
+        config,
+        pending,
+        tdk,
+        &deferred.message,
+        Arrival::Returning(pre),
+    )
+    .await
 }
 
 /// A witness's answer reaches the witnessing waiting on it whoever sent it — a witness is
@@ -908,17 +945,32 @@ async fn an_election_answer_from_a_non_member_community_needs_a_thread_we_sent()
 
     // On a thread we sent it: checked, then handed to the Elections panel.
     let thid = format!("urn:uuid:{}", uuid::Uuid::new_v4());
-    crate::elections::expect_answer(&holder, &thid);
+    let mut pending = PendingReplies::default();
+    pending.record(
+        &thid,
+        &holder,
+        crate::pending_replies::Purpose::ElectionAnswer,
+    );
     let m = answer(thid.clone()).await;
-    let effects = dispatch_checked(&mut config, &tdk, &m).await;
+    let effects = dispatch_checked_waiting(&mut config, &mut pending, &tdk, &m).await;
     assert_eq!(effects.elections_replies.len(), 1);
     assert_eq!(effects.elections_replies[0].thid, thid);
-    crate::elections::answered(&thid);
 }
 
-/// Dispatch `m` as `arrival`, returning the effects.
+/// Dispatch `m` as `arrival`, returning the effects. Nothing is waited on.
 async fn dispatch(
     config: &mut Config,
+    tdk: &TDK,
+    m: &Message,
+    arrival: Arrival<'_>,
+) -> InboundEffects {
+    dispatch_waiting(config, &mut PendingReplies::default(), tdk, m, arrival).await
+}
+
+/// [`dispatch`], with the requests in `pending` waited on.
+async fn dispatch_waiting(
+    config: &mut Config,
+    pending: &mut PendingReplies,
     tdk: &TDK,
     m: &Message,
     arrival: Arrival<'_>,
@@ -933,6 +985,7 @@ async fn dispatch(
         tdk,
         &service,
         &mut seen,
+        pending,
         m,
         m.from.as_deref(),
         &mut effects,
@@ -1268,12 +1321,14 @@ mod sender_binding {
         let service =
             crate::didcomm::start_empty_service(tx, tokio_util::sync::CancellationToken::new());
         let mut seen = SeenMessages::new();
+        let mut pending = PendingReplies::default();
         let mut effects = InboundEffects::default();
         process_inbound_message(
             config,
             &tdk,
             &service,
             &mut seen,
+            &mut pending,
             m,
             authenticated,
             &mut effects,
@@ -1467,6 +1522,7 @@ mod sender_binding {
         let service =
             crate::didcomm::start_empty_service(tx, tokio_util::sync::CancellationToken::new());
         let mut seen = SeenMessages::new();
+        let mut pending = PendingReplies::default();
         let mut config = config_with(RelationshipState::Established, "rel");
         let m = message(
             protocol_urls::VRC_REQUEST,
@@ -1481,6 +1537,7 @@ mod sender_binding {
                 &tdk,
                 &service,
                 &mut seen,
+                &mut pending,
                 &m,
                 authenticated,
                 &mut effects,

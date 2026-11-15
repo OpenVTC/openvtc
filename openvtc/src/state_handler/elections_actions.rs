@@ -37,6 +37,7 @@ use openvtc_core::elections::{
     Voter,
 };
 use openvtc_core::notifications::NotifiedElection;
+use openvtc_core::pending_replies::{PendingReplies, ReplyKind};
 use tokio::sync::mpsc::UnboundedSender;
 use vta_sdk::client::VtaClient;
 
@@ -196,6 +197,9 @@ pub(crate) struct Loop<'a> {
     pub(crate) vta: Option<&'a VtaClient>,
     pub(crate) dispatch_tx: &'a UnboundedSender<DispatchOutcome>,
     pub(crate) in_flight: &'a mut InFlight,
+    /// Where a request to a community this persona may not belong to is
+    /// recorded, so the inbound gate admits its answer.
+    pub(crate) pending_replies: &'a mut PendingReplies,
 }
 
 impl Loop<'_> {
@@ -292,7 +296,11 @@ impl Loop<'_> {
             return false;
         }
         // Its answer is admitted from this community on this thread, member or not.
-        elections::expect_answer(&to, &thid);
+        self.pending_replies.record(
+            &thid,
+            &to,
+            openvtc_core::pending_replies::Purpose::ElectionAnswer,
+        );
         if let Some(view) = view_mut(self.state) {
             view.pending = Some(Pending {
                 thid,
@@ -490,6 +498,7 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: Act) {
         vta: ctx.admin_vta,
         dispatch_tx: ctx.dispatch_tx,
         in_flight: &mut *ctx.in_flight,
+        pending_replies: &mut *ctx.pending_replies,
     };
     match action {
         Act::Open(_) => {
@@ -880,7 +889,8 @@ pub(crate) async fn tick(lp: &mut Loop<'_>) {
             .is_some_and(|p| now.duration_since(p.sent_at) > REPLY_WINDOW)
         && let Some(p) = view.pending.take()
     {
-        elections::answered(&p.thid);
+        lp.pending_replies
+            .forget(ReplyKind::ElectionAnswer, &p.thid);
         let secs = REPLY_WINDOW.as_secs();
         match p.purpose {
             Purpose::List if view.elections.is_empty() => {
@@ -1017,11 +1027,11 @@ pub(crate) struct ElectionsOutcome {
 
 impl ElectionsOutcome {
     /// Say the send never left — while the view still waits on this request.
-    pub(crate) fn apply(self, state: &mut State) {
+    pub(crate) fn apply(self, state: &mut State, pending_replies: &mut PendingReplies) {
         let Err(e) = self.result else {
             return;
         };
-        elections::answered(&self.thid);
+        pending_replies.forget(ReplyKind::ElectionAnswer, &self.thid);
         let Some(view) = view_mut(state) else {
             return;
         };
@@ -1043,7 +1053,11 @@ impl ElectionsOutcome {
 }
 
 /// Apply the community's answers. Returns whether any was taken, so the loop [`advance`]s.
-pub(crate) fn apply_replies(state: &mut State, replies: Vec<InboundReply>) -> bool {
+pub(crate) fn apply_replies(
+    state: &mut State,
+    pending_replies: &mut PendingReplies,
+    replies: Vec<InboundReply>,
+) -> bool {
     let mut taken = false;
     for inbound in replies {
         // The community the outstanding request went to: the panel's own, or the one holding a
@@ -1067,12 +1081,17 @@ pub(crate) fn apply_replies(state: &mut State, replies: Vec<InboundReply>) -> bo
             tracing::warn!(from = %inbound.from, thid = %inbound.thid, "elections reply not from the community the view is asking — dropped");
             continue;
         }
-        taken |= apply_reply(state, &inbound.thid, inbound.reply);
+        taken |= apply_reply(state, pending_replies, &inbound.thid, inbound.reply);
     }
     taken
 }
 
-fn apply_reply(state: &mut State, thid: &str, reply: Reply) -> bool {
+fn apply_reply(
+    state: &mut State,
+    pending_replies: &mut PendingReplies,
+    thid: &str,
+    reply: Reply,
+) -> bool {
     let Some(view) = view_mut(state) else {
         return false;
     };
@@ -1085,7 +1104,7 @@ fn apply_reply(state: &mut State, thid: &str, reply: Reply) -> bool {
     let Some(pending) = view.pending.take() else {
         return false;
     };
-    elections::answered(&pending.thid);
+    pending_replies.forget(ReplyKind::ElectionAnswer, &pending.thid);
     match (reply, pending.purpose) {
         (Reply::List(page), Purpose::List) => {
             let next = page.next_cursor.as_ref().map(|c| c.as_str().to_string());

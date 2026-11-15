@@ -25,6 +25,7 @@ impl Runtime {
             dispatch_tx,
             session_manager,
             witness_router,
+            pending_replies,
             ping_sent_at,
             join_entry,
             awaiting_requirements,
@@ -61,6 +62,7 @@ impl Runtime {
             vta: admin_vta.as_ref(),
             dispatch_tx,
             in_flight,
+            pending_replies,
         })
         .await;
         // Questions to communities have a reply window too (R1.2).
@@ -86,6 +88,7 @@ impl Runtime {
                 state_tx: &handler.state_tx,
                 profile: handler.profile.as_str(),
                 witness_router,
+                pending_replies,
             };
             vetting_actions::start_pcs_work(&mut ctx, Vec::new());
         }
@@ -106,6 +109,7 @@ impl Runtime {
                 state_tx: &handler.state_tx,
                 profile: handler.profile.as_str(),
                 witness_router,
+                pending_replies,
             };
             vetting_actions::dispatch(&mut ctx, actions::VettingAction::RefreshVetterSide).await;
         } else if vetting_actions::desk_open(state) {
@@ -125,6 +129,7 @@ impl Runtime {
                 state_tx: &handler.state_tx,
                 profile: handler.profile.as_str(),
                 witness_router,
+                pending_replies,
             };
             vetting_actions::refresh_stale_modes(&mut ctx).await;
         }
@@ -386,6 +391,7 @@ impl Runtime {
             verifier,
             restore_backlog,
             seen_messages,
+            pending_replies,
             join_status_pacer,
             ..
         } = self;
@@ -400,6 +406,7 @@ impl Runtime {
                 tdk,
                 didcomm_service,
                 seen_messages,
+                pending_replies,
             )
             .await
         {
@@ -438,6 +445,7 @@ impl Runtime {
             dispatch_tx,
             session_manager,
             witness_router,
+            pending_replies,
             ping_sent_at,
             hidden_vetting_pacer,
             handler,
@@ -462,6 +470,7 @@ impl Runtime {
                 state_tx: &handler.state_tx,
                 profile: handler.profile.as_str(),
                 witness_router,
+                pending_replies,
             };
             vetting_actions::dispatch(&mut ctx, actions::VettingAction::RefreshVetterSide).await;
             let next = hidden_vetting_pacer.schedule(
@@ -478,6 +487,7 @@ impl Runtime {
             config,
             tdk,
             community_profile_pacer,
+            pending_replies,
             ..
         } = self;
         // Ask each Active community, once, for its profile so the
@@ -497,7 +507,7 @@ impl Runtime {
                 }
             }
             if !asks.is_empty() {
-                tokio::spawn(community_profile_poll::send_all(atm, asks));
+                tokio::spawn(community_profile_poll::send_all(atm, asks, pending_replies));
             }
         }
     }

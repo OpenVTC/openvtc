@@ -21,6 +21,7 @@ use openvtc_core::config::{
 use openvtc_core::didcomm::{DIDCommEvent, Messaging, MessagingTransport};
 use openvtc_core::logs::LogFamily;
 use openvtc_core::messaging::SeenMessages;
+use openvtc_core::pending_replies::PendingReplies;
 use openvtc_core::vetting::disclosure::{Describe, DirectoryStatement};
 use openvtc_core::vetting::protocol::JoinProtocol;
 use serde_json::Value;
@@ -624,6 +625,9 @@ impl Job<'_> {
         let vtc_did = self.vtc_did;
         let deadline = tokio::time::Instant::now() + wait;
         let mut seen = SeenMessages::new();
+        // This command's own table of replies awaited by thread — it asks
+        // nothing the gate admits only on a recorded thread, so it stays empty.
+        let mut pending = PendingReplies::default();
         let mut pacer = openvtc_core::join::status_poll::PollPacer::default();
         let mut poll =
             tokio::time::interval_at(tokio::time::Instant::now() + POLL_FIRST, POLL_EVERY);
@@ -675,7 +679,13 @@ impl Job<'_> {
                             note_verdict(&message);
                         }
                         if self
-                            .dispatch(config, &mut seen, &message, authenticated.as_deref())
+                            .dispatch(
+                                config,
+                                &mut seen,
+                                &mut pending,
+                                &message,
+                                authenticated.as_deref(),
+                            )
                             .await
                         {
                             save(config, self.profile)?;
@@ -724,6 +734,7 @@ impl Job<'_> {
         &self,
         config: &mut Config,
         seen: &mut SeenMessages,
+        pending: &mut PendingReplies,
         message: &Message,
         authenticated: Option<&str>,
     ) -> bool {
@@ -732,6 +743,7 @@ impl Job<'_> {
             self.tdk,
             self.messaging,
             seen,
+            pending,
             message,
             authenticated,
         )

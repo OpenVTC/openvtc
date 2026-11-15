@@ -26,6 +26,7 @@ use crate::state_handler::save_coalesce::SaveScheduler;
 use crate::state_handler::state::State;
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
+use openvtc_core::pending_replies::{PendingReplies, ReplyKind};
 
 /// Which document a job sends to the community.
 pub(crate) enum Verb {
@@ -77,8 +78,13 @@ pub(crate) enum Verb {
     /// [`openvtc_core::inbound`].
     ///
     /// `document_signer` is the persona's authentication key: the task
-    /// declares `proof` REQUIRED.
-    Renew { document_signer: Box<Secret> },
+    /// declares `proof` REQUIRED. `request_id` is the id the reply threads on,
+    /// recorded in the runtime's [`PendingReplies`] on the loop thread before
+    /// this job is spawned ([`openvtc_core::renewal::record_request`]).
+    Renew {
+        document_signer: Box<Secret>,
+        request_id: uuid::Uuid,
+    },
 }
 
 /// What a job did, for the apply path to report.
@@ -205,19 +211,28 @@ impl CommunityJob {
             )
             .await
             .map(|_| ()),
-            Verb::Renew { document_signer } => openvtc_core::renewal::request_renewal(
-                &openvtc_core::members::Delivery {
-                    atm: &self.atm,
-                    profile: &self.profile,
-                    member_did: &self.member_did,
-                    vtc_did: &self.vtc_did,
-                    mediator_did: &self.mediator,
-                    tsp_mediator_did: tsp_mediator.as_deref(),
-                },
+            Verb::Renew {
                 document_signer,
-            )
-            .await
-            .map(|_| ()),
+                request_id,
+            } => {
+                openvtc_core::renewal::request_renewal(
+                    &openvtc_core::members::Delivery {
+                        atm: &self.atm,
+                        profile: &self.profile,
+                        member_did: &self.member_did,
+                        vtc_did: &self.vtc_did,
+                        mediator_did: &self.mediator,
+                        tsp_mediator_did: tsp_mediator.as_deref(),
+                    },
+                    document_signer,
+                    *request_id,
+                )
+                .await
+            }
+        };
+        let renewal_request = match &self.verb {
+            Verb::Renew { request_id, .. } => Some(*request_id),
+            _ => None,
         };
         CommunityOutcome {
             vtc_did: self.vtc_did,
@@ -225,6 +240,7 @@ impl CommunityJob {
             performed,
             error: result.err().map(|e| format!("{e}")),
             issued,
+            renewal_request,
         }
     }
 }
@@ -240,6 +256,9 @@ pub(crate) struct CommunityOutcome {
     /// own acknowledgement. Carried back rather than written by the job, because
     /// the job holds no `Config`: every record change happens on the apply path.
     issued: Option<serde_json::Value>,
+    /// The renewal's request id, waited on in the runtime's [`PendingReplies`]
+    /// from before the send: a send that failed is no longer waited on.
+    renewal_request: Option<uuid::Uuid>,
 }
 
 impl CommunityOutcome {
@@ -254,7 +273,14 @@ impl CommunityOutcome {
         state: &mut State,
         config: &mut Config,
         save: &mut SaveScheduler,
+        pending_replies: &mut PendingReplies,
     ) -> Option<(String, PersonaId)> {
+        // A renewal that never left answers nothing.
+        if self.error.is_some()
+            && let Some(id) = self.renewal_request
+        {
+            pending_replies.forget(ReplyKind::Renewal, &id.to_string());
+        }
         // Set through a local rather than a long-lived `&mut` into `state`:
         // two of the arms also want to log, which needs `main_page` again.
         fn status(state: &mut State, msg: Status) {
@@ -393,6 +419,7 @@ mod tests {
             performed,
             error: error.map(ToString::to_string),
             issued: None,
+            renewal_request: None,
         }
     }
 
@@ -415,7 +442,12 @@ mod tests {
         let mut config = test_config();
         let mut save = SaveScheduler::new("test");
 
-        let deregister = outcome(Performed::Leave, None).apply(&mut state, &mut config, &mut save);
+        let deregister = outcome(Performed::Leave, None).apply(
+            &mut state,
+            &mut config,
+            &mut save,
+            &mut PendingReplies::default(),
+        );
 
         assert_eq!(deregister.map(|(v, _)| v).as_deref(), Some(VTC));
         assert!(save.is_pending(), "the record change must be persisted");
@@ -433,6 +465,7 @@ mod tests {
             &mut state,
             &mut config,
             &mut save,
+            &mut PendingReplies::default(),
         );
 
         assert!(deregister.is_none());
@@ -456,8 +489,12 @@ mod tests {
         let mut config = test_config();
         let mut save = SaveScheduler::new("test");
 
-        let deregister =
-            outcome(Performed::IssueVmc, None).apply(&mut state, &mut config, &mut save);
+        let deregister = outcome(Performed::IssueVmc, None).apply(
+            &mut state,
+            &mut config,
+            &mut save,
+            &mut PendingReplies::default(),
+        );
 
         assert!(deregister.is_none());
         assert!(!save.is_pending(), "nothing to persist");
@@ -487,6 +524,7 @@ mod tests {
             &mut state,
             &mut config,
             &mut save,
+            &mut PendingReplies::default(),
         );
 
         assert!(deregister.is_none());
@@ -513,6 +551,7 @@ mod tests {
             &mut state,
             &mut config,
             &mut save,
+            &mut PendingReplies::default(),
         );
 
         let msg = status_of(&state).expect("a status line");
@@ -534,7 +573,12 @@ mod tests {
         let mut config = test_config();
         let mut save = SaveScheduler::new("test");
 
-        outcome(Performed::AssertPersonhood, None).apply(&mut state, &mut config, &mut save);
+        outcome(Performed::AssertPersonhood, None).apply(
+            &mut state,
+            &mut config,
+            &mut save,
+            &mut PendingReplies::default(),
+        );
 
         let msg = status_of(&state).expect("a status line");
         assert!(
@@ -551,7 +595,12 @@ mod tests {
         let mut config = test_config();
         let mut save = SaveScheduler::new("test");
 
-        let deregister = outcome(Performed::Renew, None).apply(&mut state, &mut config, &mut save);
+        let deregister = outcome(Performed::Renew, None).apply(
+            &mut state,
+            &mut config,
+            &mut save,
+            &mut PendingReplies::default(),
+        );
 
         assert!(deregister.is_none());
         assert!(!save.is_pending());
@@ -560,6 +609,36 @@ mod tests {
             msg.contains("Renewal requested") && msg.contains("waiting"),
             "a sent renewal is not a renewed membership; got: {msg}"
         );
+    }
+
+    /// A renewal whose send failed is no longer waited on: an answer threading
+    /// on it later is not taken. One that was sent still is.
+    #[test]
+    fn a_renewal_that_never_left_is_no_longer_awaited() {
+        let vtc = VTC.to_string();
+        for (error, awaited) in [(Some("peer unreachable"), false), (None, true)] {
+            let mut pending = PendingReplies::default();
+            let id = uuid::Uuid::new_v4();
+            assert!(openvtc_core::renewal::record_request(
+                &mut pending,
+                id,
+                &vtc,
+                "did:example:member"
+            ));
+            let mut sent = outcome(Performed::Renew, error);
+            sent.renewal_request = Some(id);
+            sent.apply(
+                &mut State::default(),
+                &mut test_config(),
+                &mut SaveScheduler::new("test"),
+                &mut pending,
+            );
+            assert_eq!(
+                pending.is_awaited(ReplyKind::Renewal, &vtc, &id.to_string()),
+                awaited,
+                "error: {error:?}"
+            );
+        }
     }
 
     /// Each verb reports its own failure. With the previous `leaving: bool`
@@ -581,7 +660,12 @@ mod tests {
             let mut config = test_config();
             let mut save = SaveScheduler::new("test");
 
-            outcome(performed, Some("peer unreachable")).apply(&mut state, &mut config, &mut save);
+            outcome(performed, Some("peer unreachable")).apply(
+                &mut state,
+                &mut config,
+                &mut save,
+                &mut PendingReplies::default(),
+            );
 
             let msg = status_of(&state).expect("a status line");
             assert!(

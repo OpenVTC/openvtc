@@ -1707,6 +1707,8 @@ impl StateHandler {
                                 &mut ctx.config,
                                 &mut save,
                                 &mut in_flight,
+                                // Nothing here waits on a reply by thread.
+                                &mut openvtc_core::pending_replies::PendingReplies::default(),
                                 outcome,
                             );
                             // State A holds no messaging sessions, so a pending
@@ -3655,6 +3657,7 @@ async fn restore_kept(
     tdk: &affinidi_tdk::TDK,
     service: &didcomm::Messaging,
     seen: &mut openvtc_core::messaging::SeenMessages,
+    pending_replies: &mut openvtc_core::pending_replies::PendingReplies,
 ) -> bool {
     let mut changed = false;
     while let Some(kept) = backlog.pop_front() {
@@ -3668,6 +3671,7 @@ async fn restore_kept(
             tdk,
             service,
             seen,
+            pending_replies,
             &kept.message,
             Some(&kept.sender),
             &mut effects,
@@ -3893,6 +3897,7 @@ mod tests {
             &tdk,
             &service,
             &mut seen,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
         )
         .await;
         assert_eq!(backlog.len(), 1, "waits for room");
@@ -3915,6 +3920,7 @@ mod tests {
             &tdk,
             &service,
             &mut seen,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
         )
         .await;
         assert!(backlog.is_empty());
