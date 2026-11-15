@@ -12,6 +12,7 @@ use crate::state_handler::{
     state::{ConnectionState, MediatorStatus},
 };
 use crate::ui::pages::main::MainPage;
+use crate::ui::pages::main::keymap::{self, k};
 use crossterm::event::{KeyCode, KeyEvent};
 use openvtc_core::display::display_identifier;
 use ratatui::{
@@ -56,15 +57,13 @@ pub fn render(state: &InboxState, connection: &ConnectionState) -> Vec<Line<'sta
     let status_line = match &connection.status {
         MediatorStatus::Connected => Line::from("Connected").fg(COLOR_SUCCESS),
         MediatorStatus::Connecting => Line::from("Connecting...").fg(COLOR_TEXT_DEFAULT),
-        MediatorStatus::Failed(reason) => {
-            let display = format!(
-                "Failed: {}",
-                openvtc_core::display::truncate_did(reason, 40)
-            );
-            Line::from(display).fg(COLOR_WARNING_ACCESSIBLE_RED)
-        }
+        MediatorStatus::Failed(failure) => Line::from(format!(
+            "Messaging down — {}. Help / Status has the cause; r there retries.",
+            failure.short()
+        ))
+        .fg(COLOR_WARNING_ACCESSIBLE_RED),
         MediatorStatus::Initializing(step) => {
-            Line::from(format!("Initializing: {}", step)).fg(COLOR_ORANGE)
+            Line::from(format!("Initialising: {}", step)).fg(COLOR_ORANGE)
         }
         MediatorStatus::Unknown => Line::from("Not connected").fg(COLOR_ORANGE),
         MediatorStatus::NoActiveCommunity => Line::from("No active community").fg(COLOR_DARK_GRAY),
@@ -83,6 +82,8 @@ pub fn render(state: &InboxState, connection: &ConnectionState) -> Vec<Line<'sta
 
     if state.tasks.is_empty() {
         lines.push(Line::from("No pending tasks").fg(COLOR_DARK_GRAY));
+        keymap::advertise(&[k("Esc", "back")]);
+        keymap::advertise(&[k("Esc", "back")]);
         lines.push(Line::from(""));
         lines.push(
             Line::from("Inbound messages will appear here automatically.").fg(COLOR_DARK_GRAY),
@@ -146,10 +147,17 @@ pub fn render(state: &InboxState, connection: &ConnectionState) -> Vec<Line<'sta
         if let Some(confirm) = &state.confirm {
             lines.push(confirm_prompt_line(confirm));
         } else {
-            lines.push(
-                Line::from("↑/↓ navigate  Enter: view  d: dismiss  c: clear all")
-                    .fg(COLOR_DARK_GRAY),
-            );
+            let mut keys = Vec::new();
+            if state.tasks.len() > 1 {
+                keys.push(k("↑/↓", "move"));
+            }
+            keys.extend([
+                k("Enter", "view"),
+                k("d", "dismiss"),
+                k("c", "clear all"),
+                k("Esc", "back"),
+            ]);
+            keymap::footer(&mut lines, "", &keys);
         }
     }
 
@@ -159,8 +167,16 @@ pub fn render(state: &InboxState, connection: &ConnectionState) -> Vec<Line<'sta
 /// Footer prompt shown while a destructive inbox action awaits `y`/`n` (R25).
 fn confirm_prompt_line(confirm: &InboxConfirm) -> Line<'static> {
     let text = match confirm {
-        InboxConfirm::Dismiss { .. } => "Dismiss this task?   y: confirm    n: cancel",
-        InboxConfirm::ClearAll => "Clear all tasks?   y: confirm    n: cancel",
+        InboxConfirm::Dismiss { .. } => {
+            crate::ui::pages::main::confirm::prompt("Dismiss this task?")
+        }
+        InboxConfirm::ClearAll => crate::ui::pages::main::confirm::prompt("Clear all tasks?"),
+        InboxConfirm::Reject { vrc: false, .. } => crate::ui::pages::main::confirm::prompt(
+            "Reject this relationship request? The rejection is sent to them.",
+        ),
+        InboxConfirm::Reject { vrc: true, .. } => crate::ui::pages::main::confirm::prompt(
+            "Reject this credential request? The rejection is sent to them.",
+        ),
     };
     Line::from(text).fg(COLOR_ORANGE).bold()
 }
@@ -248,11 +264,16 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
                 Line::from("     can resolve and compare with other contacts.").fg(COLOR_ORANGE),
             );
             lines.push(Line::from(""));
-            lines.push(
-                Line::from(
-                    "a: accept (R-DID)  p: accept (persona DID)  r: reject  d: dismiss  Esc: back",
-                )
-                .fg(COLOR_DARK_GRAY),
+            keymap::footer(
+                &mut lines,
+                "",
+                &[
+                    k("a/A", "accept (R-DID)"),
+                    k("p", "accept (persona DID)"),
+                    k("r", "reject"),
+                    k("d", "dismiss"),
+                    k("Esc", "back"),
+                ],
             );
         }
         ActiveTaskView::VRCRequestInbound {
@@ -281,9 +302,15 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
                 Span::styled(task_id.clone(), Style::new().fg(COLOR_DARK_GRAY)),
             ]));
             lines.push(Line::from(""));
-            lines.push(
-                Line::from("a: accept (issue VRC)  r: reject  d: dismiss  Esc: back")
-                    .fg(COLOR_DARK_GRAY),
+            keymap::footer(
+                &mut lines,
+                "",
+                &[
+                    k("a", "accept (issue VRC)"),
+                    k("r", "reject"),
+                    k("d", "dismiss"),
+                    k("Esc", "back"),
+                ],
             );
         }
         ActiveTaskView::VRCIssued {
@@ -305,7 +332,15 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
                 Span::styled(task_id.clone(), Style::new().fg(COLOR_DARK_GRAY)),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from("a: accept (store)  d: dismiss  Esc: back").fg(COLOR_DARK_GRAY));
+            keymap::footer(
+                &mut lines,
+                "",
+                &[
+                    k("a", "accept (store)"),
+                    k("d", "dismiss"),
+                    k("Esc", "back"),
+                ],
+            );
         }
         ActiveTaskView::RelationshipRequestOutbound {
             task_id,
@@ -348,7 +383,7 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
                 Span::styled(task_id.clone(), dim),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from("d: dismiss  Esc: back").fg(COLOR_DARK_GRAY));
+            keymap::footer(&mut lines, "", &[k("d", "dismiss"), k("Esc", "back")]);
         }
         ActiveTaskView::VRCRequestOutbound {
             task_id,
@@ -373,7 +408,7 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
                 Span::styled(task_id.clone(), dim),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from("d: dismiss  Esc: back").fg(COLOR_DARK_GRAY));
+            keymap::footer(&mut lines, "", &[k("d", "dismiss"), k("Esc", "back")]);
         }
         ActiveTaskView::Info {
             task_id,
@@ -401,7 +436,7 @@ pub fn render_task_detail(task: &ActiveTaskView) -> Vec<Line<'static>> {
                 Span::styled(task_id.clone(), dim),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from("d: dismiss  Esc: back").fg(COLOR_DARK_GRAY));
+            keymap::footer(&mut lines, "", &[k("d", "dismiss"), k("Esc", "back")]);
         }
     }
 
@@ -412,14 +447,27 @@ impl MainPage {
     pub(in crate::ui::pages::main) fn handle_inbox_key(&mut self, key: KeyEvent) -> bool {
         let inbox = &self.props.main_page.content_panel.inbox;
 
-        // A destructive-action confirmation is pending: only y/Enter commits;
-        // anything else cancels. Mirrors the Communities/VTA-DID pattern (R25).
+        // A destructive or outward-facing confirmation is pending: only `y`
+        // commits; anything else — Enter included — cancels (#579).
         if let Some(confirm) = inbox.confirm.clone() {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => {
+                KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
                     let commit = match confirm {
                         InboxConfirm::Dismiss { task_id } => InboxAction::DismissTask { task_id },
                         InboxConfirm::ClearAll => InboxAction::ClearAll,
+                        InboxConfirm::Reject {
+                            task_id,
+                            vrc: false,
+                        } => InboxAction::RejectRelationship {
+                            task_id,
+                            reason: None,
+                        },
+                        InboxConfirm::Reject { task_id, vrc: true } => {
+                            InboxAction::RejectVrcRequest {
+                                task_id,
+                                reason: None,
+                            }
+                        }
                     };
                     let _ = self.action_tx.send(Action::Inbox(commit));
                 }
@@ -477,7 +525,7 @@ impl MainPage {
                         }));
                     true
                 }
-                KeyCode::Char('a') => {
+                KeyCode::Char('a') if is_vrc_issued || is_vrc_request_inbound => {
                     if is_vrc_issued {
                         let _ = self
                             .action_tx
@@ -489,22 +537,15 @@ impl MainPage {
                     }
                     true
                 }
-                KeyCode::Char('r') => {
-                    if is_rel_inbound {
-                        let _ =
-                            self.action_tx
-                                .send(Action::Inbox(InboxAction::RejectRelationship {
-                                    task_id,
-                                    reason: None,
-                                }));
-                    } else if is_vrc_request_inbound {
-                        let _ = self
-                            .action_tx
-                            .send(Action::Inbox(InboxAction::RejectVrcRequest {
-                                task_id,
-                                reason: None,
-                            }));
-                    }
+                // Rejecting is sent to the peer, so it is armed and confirmed
+                // with `y`, like the local-only dismiss beside it (#579).
+                KeyCode::Char('r') if is_rel_inbound || is_vrc_request_inbound => {
+                    let _ = self
+                        .action_tx
+                        .send(Action::Inbox(InboxAction::ConfirmReject {
+                            task_id,
+                            vrc: is_vrc_request_inbound,
+                        }));
                     true
                 }
                 KeyCode::Char('d') => {

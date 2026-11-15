@@ -351,7 +351,7 @@ impl ConfigExtension for Config {
         let atm = tdk
             .atm
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("TDK ATM not initialized"))?;
+            .ok_or_else(|| anyhow::anyhow!("TDK ATM not initialised"))?;
         let persona_profile = ATMProfile::new(
             atm,
             Some("Persona DID".to_string()),

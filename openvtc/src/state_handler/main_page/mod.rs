@@ -35,6 +35,7 @@ pub mod elections;
 pub mod menu;
 pub mod repos;
 pub mod rooms;
+pub mod status;
 
 /// Maximum number of activity log entries to keep in the UI.
 const MAX_ACTIVITY_LOG_ENTRIES: usize = 100;
@@ -44,6 +45,9 @@ const MAX_ACTIVITY_LOG_ENTRIES: usize = 100;
 pub struct ActivityLogEntry {
     /// Short summary shown in the list view (includes timestamp).
     pub summary: String,
+    /// How the entry reads: an error is drawn as one, in colour and with a
+    /// glyph, so it does not look like the routine lines around it (#584).
+    pub severity: status::Severity,
     /// Detailed information shown when the entry is expanded.
     /// Includes DIDComm message details, DID addresses, etc.
     pub detail: Option<String>,
@@ -120,21 +124,33 @@ impl MainPageState {
 
     /// Push a timestamped entry to the activity log (O(1) bounded insertion).
     pub fn log(&mut self, message: impl Into<String>) {
-        self.log_detailed_inner(message.into(), None);
+        self.log_detailed_inner(message.into(), None, status::Severity::Info);
+    }
+
+    /// Push a timestamped entry that something did not happen and why — not
+    /// an error, but not routine either.
+    pub fn log_warning(&mut self, message: impl Into<String>) {
+        self.log_detailed_inner(message.into(), None, status::Severity::Warning);
     }
 
     /// Push a timestamped entry with detailed diagnostic info.
     pub fn log_detailed(&mut self, message: impl Into<String>, detail: impl Into<String>) {
-        self.log_detailed_inner(message.into(), Some(detail.into()));
+        self.log_detailed_inner(message.into(), Some(detail.into()), status::Severity::Info);
     }
 
-    fn log_detailed_inner(&mut self, message: String, detail: Option<String>) {
+    fn log_detailed_inner(
+        &mut self,
+        message: String,
+        detail: Option<String>,
+        severity: status::Severity,
+    ) {
         if self.activity_log.len() >= MAX_ACTIVITY_LOG_ENTRIES {
             self.activity_log.pop_front();
         }
         let timestamp = chrono::Local::now().format("%H:%M:%S");
         self.activity_log.push_back(Arc::new(ActivityLogEntry {
             summary: format!("[{}] {}", timestamp, message),
+            severity,
             detail,
         }));
     }
@@ -150,7 +166,47 @@ impl MainPageState {
         let context = context.into();
         let summary = format!("{context}: {err}");
         let detail = format_error_detail(&context, err);
-        self.log_detailed_inner(summary, Some(detail));
+        self.log_detailed_inner(summary, Some(detail), status::Severity::Error);
+    }
+}
+
+/// What each menu item has waiting for the user, for its badge (#584).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MenuBadges {
+    /// Inbound inbox items: requests and credentials sent to us. Our own
+    /// outbound requests and pings are not counted — they wait on someone
+    /// else.
+    pub inbox: usize,
+    /// Communities with something to acknowledge or act on.
+    pub communities: usize,
+    /// Vetting requests on our desk.
+    pub vetting: usize,
+}
+
+impl MainPageState {
+    /// The menu's badges, from the panels' own state.
+    #[must_use]
+    pub fn menu_badges(&self) -> MenuBadges {
+        use content::TaskKind;
+        let inbox = self
+            .content_panel
+            .inbox
+            .tasks
+            .iter()
+            .filter(|t| {
+                !matches!(
+                    t.kind,
+                    TaskKind::RelationshipRequestOutbound { .. }
+                        | TaskKind::VRCRequestOutbound
+                        | TaskKind::TrustPing
+                )
+            })
+            .count();
+        MenuBadges {
+            inbox,
+            communities: self.content_panel.communities.actions_required,
+            vetting: self.content_panel.vetting.desk.len(),
+        }
     }
 }
 
@@ -229,7 +285,7 @@ impl MainPageState {
                         TaskKind::Informational("Rejected".to_string())
                     }
                     TaskType::RelationshipRequestFinalized => {
-                        TaskKind::Informational("Finalized".to_string())
+                        TaskKind::Informational("Finalised".to_string())
                     }
                     TaskType::TrustPong => TaskKind::Informational("Pong received".to_string()),
                     TaskType::VRCRequestRejected => {
@@ -3228,6 +3284,47 @@ mod tests {
                 clone.activity_log.front().unwrap()
             ),
             "activity log entries must be shared by pointer after clone"
+        );
+    }
+    /// The Inbox badge counts what was sent to us, not our own pings and
+    /// requests waiting on someone else (#584).
+    #[test]
+    fn the_inbox_badge_counts_inbound_items_only() {
+        use crate::state_handler::main_page::content::{TaskKind, TaskSummary};
+        let task = |kind: TaskKind| TaskSummary {
+            id: "t".into(),
+            type_display: String::new(),
+            kind,
+            remote_did: String::new(),
+            remote_agent_name: None,
+            created: String::new(),
+        };
+        let mut page = MainPageState::default();
+        page.content_panel.inbox.tasks = std::sync::Arc::from(vec![
+            task(TaskKind::TrustPing),
+            task(TaskKind::VRCRequestOutbound),
+            task(TaskKind::VRCIssued),
+        ]);
+        assert_eq!(page.menu_badges().inbox, 1);
+        page.content_panel.communities.actions_required = 2;
+        assert_eq!(page.menu_badges().communities, 2);
+    }
+
+    /// An error in the activity log is recorded as one.
+    #[test]
+    fn the_activity_log_keeps_each_entrys_severity() {
+        let mut page = MainPageState::default();
+        page.log("routine");
+        page.log_warning("nothing happened");
+        page.log_error("Ping failed", "timed out");
+        let severities: Vec<_> = page.activity_log.iter().map(|e| e.severity).collect();
+        assert_eq!(
+            severities,
+            vec![
+                status::Severity::Info,
+                status::Severity::Warning,
+                status::Severity::Error
+            ]
         );
     }
 }

@@ -1,6 +1,7 @@
 //! Answers from communities, revocation checks, and the join flow's hand-off
 //! into the Vetting page.
 
+use crate::state_handler::main_page::status::Status;
 use chrono::Utc;
 use openvtc_core::config::Config;
 use openvtc_core::vetting::applicant::GrantStatus;
@@ -110,7 +111,8 @@ pub(crate) fn apply_answers(state: &mut State, config: &Config, answers: Vec<Com
             }
         };
         if let Some(message) = message {
-            state.main_page.content_panel.vetting.status_message = Some(message.clone());
+            state.main_page.content_panel.vetting.status_message =
+                Some(Status::error(message.clone()));
             state.main_page.log(message);
         }
     }
@@ -247,7 +249,7 @@ pub(crate) fn expire_queries(state: &mut State, config: &mut Config, now: chrono
         };
         let v = &mut state.main_page.content_panel.vetting;
         directory_failed(v, &query.document_id, &words);
-        v.status_message = Some(words.clone());
+        v.status_message = Some(Status::error(words.clone()));
         state.main_page.log(words);
     }
 }
@@ -382,7 +384,9 @@ pub(crate) fn focus_vetting_target(
                     sync_journey(v, config, Utc::now());
                 }
                 None => {
-                    v.status_message = Some("That request is no longer on your desk.".to_string());
+                    v.status_message = Some(Status::warning(
+                        "That request is no longer on your desk.".to_string(),
+                    ));
                 }
             }
         }
@@ -405,7 +409,7 @@ pub(crate) fn focus_application(
     if let Some(i) = v.applications.iter().position(|a| a.id == application_id) {
         v.selected = i;
     }
-    v.status_message = Some(message);
+    v.status_message = Some(Status::info(message));
     // Every way here — starting from the join page, an Inbox entry — lands on
     // the application's journey, so the holder always arrives at the same
     // picture of where they are.
@@ -553,7 +557,8 @@ mod tests {
                 .content_panel
                 .vetting
                 .status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("has not named you a vetter"))
         );
     }
@@ -633,7 +638,8 @@ mod tests {
         let v = &state.main_page.content_panel.vetting;
         assert!(
             v.status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("has revoked"))
         );
         assert_eq!(
@@ -680,7 +686,8 @@ mod tests {
         assert_eq!(v.tab, VettingTab::Desk);
         assert!(
             v.status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("no longer on your desk"))
         );
     }

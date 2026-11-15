@@ -48,6 +48,13 @@ pub enum InboxAction {
     },
     /// Arm the confirmation for clearing all tasks (R25).
     ConfirmClearAll,
+    /// Arm the confirmation for rejecting an inbound request (#579): a
+    /// rejection is sent to the peer, so it confirms like a removal does.
+    /// `vrc` is a VRC request; otherwise a relationship request.
+    ConfirmReject {
+        task_id: String,
+        vrc: bool,
+    },
     /// Cancel a pending dismiss/clear-all confirmation (R25).
     CancelConfirm,
     Back,
@@ -207,9 +214,8 @@ pub enum SettingsAction {
         passphrase: SecretString,
     },
     RemovePassphrase,
-    // Manual mediator-reconnect path: handler is live, but the Settings UI does
-    // not yet expose a control that emits it.
-    #[allow(dead_code)]
+    /// Reconnect messaging: Enter on the Settings mediator row, or `r` on
+    /// Help / Status.
     ReconnectMediator,
     /// Open the wipe-profile confirmation dialog from the Settings menu.
     WipeProfileStart,
@@ -233,7 +239,7 @@ pub enum SettingsAction {
     #[cfg(feature = "openpgp-card")]
     TokenBack,
     /// Clipboard copy result message for display on the status panel.
-    ClipboardCopied(String),
+    ClipboardCopied(crate::state_handler::main_page::status::Status),
     /// Open the theme picker.
     ThemeOpen,
     /// Highlight — and preview — the theme at this row.
@@ -410,7 +416,7 @@ pub enum VettingAction {
     /// Commit the open form.
     Submit,
     /// Show a status line (e.g. a clipboard result).
-    Status(String),
+    Status(crate::state_handler::main_page::status::Status),
     /// Pasted text that is a `vetting-ticket:` link, for the request form.
     PasteTicket(String),
     // ── Applicant ────────────────────────────────────────────────────────
@@ -559,6 +565,8 @@ pub enum ElectionsAction {
     BallotAdjust(i64),
     /// Ballot: a character typed into a text answer.
     BallotChar(char),
+    /// Ballot: the focused text answer, as edited (cursor editing, paste).
+    BallotText(String),
     /// Ballot: delete the last character of a text answer.
     BallotBackspace,
     /// Ballot: leave the focused (optional) question blank, or answer it again.
@@ -935,6 +943,9 @@ pub enum Action {
     /// Move the Communities-list selection to this index.
     CommunitySelect(usize),
 
+    /// Move the TSP Relationships cursor to this row.
+    TspSelect(usize),
+
     /// Make the Active community at this index the working context (D10 / R-C-6):
     /// the community-scoped main page (relationships/inbox/VRCs/identity) switches
     /// to its persona. No-op for a non-Active (read-only) community.
@@ -978,6 +989,12 @@ pub enum Action {
 
     /// Dismiss a pending cancel confirmation without withdrawing.
     CommunityCancelWithdraw,
+
+    /// Arm the confirmation for a message to a community (issue VMC, renew).
+    CommunityConfirmSend(crate::state_handler::main_page::content::CommunitySend),
+
+    /// Dismiss a pending send confirmation without sending.
+    CommunityCancelSend,
 
     /// Cancel the Pending join at this index: best-effort notify the VTC, then
     /// set it `Withdrawn` and deregister its session so it can be deleted or

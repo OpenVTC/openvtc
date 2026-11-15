@@ -39,17 +39,14 @@ impl UnlockCodeAsk {
 
     fn spec() -> ChoiceSpec {
         ChoiceSpec {
-            title: [
-                " Step 1/2: Set up unlock code ",
-                " Step 1/2: Set up unlock code ",
-            ],
+            title: [" Set up unlock code ", " Set up unlock code "],
             intro: vec![
                 Line::styled(
                     "An unlock code encrypts your cryptographic keys, configuration, and private data stored by OpenVTC.",
                     Style::new().fg(COLOR_DARK_GRAY),
                 ),
                 Line::styled(
-                    "This prevents unauthorized access even if someone gains access to your device.",
+                    "This prevents unauthorised access even if someone gains access to your device.",
                     Style::new().fg(COLOR_DARK_GRAY),
                 ),
                 Line::default(),
@@ -63,7 +60,7 @@ impl UnlockCodeAsk {
                 ChoiceOption {
                     label: "Yes, require unlock code (recommended)",
                     description: vec![Line::styled(
-                        "    Encrypts your keys, configuration, and private data for protection against unauthorized access.",
+                        "    Encrypts your keys, configuration, and private data for protection against unauthorised access.",
                         Style::new().fg(COLOR_DARK_GRAY),
                     )],
                     event: SetupEvent::WantUnlockCode,

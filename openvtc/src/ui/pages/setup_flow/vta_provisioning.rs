@@ -133,7 +133,7 @@ impl VtaProvisioning {
             Block::bordered()
                 .fg(COLOR_BORDER)
                 .padding(Padding::proportional(1))
-                .title(" Step 2 of 2 — Connect to the VTA "),
+                .title(" Connect to the VTA "),
             middle,
         );
 

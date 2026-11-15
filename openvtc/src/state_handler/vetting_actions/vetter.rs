@@ -1,6 +1,7 @@
 //! The vetter's own standing with its communities: the directory profile,
 //! event-mode requests, and credential resends.
 
+use crate::state_handler::main_page::status::Status;
 use chrono::Utc;
 use openvtc_core::vetting::VettingBook;
 use openvtc_core::vetting::queries::{CommunityQuery, QueryKind};
@@ -86,9 +87,9 @@ pub(super) fn open_profile(ctx: &mut ActionCtx<'_>) {
         };
         return status(
             ctx,
-            format!(
+            Status::warning(format!(
                 "A profile is published to a community that named you a vetter, and none has.{hint}"
-            ),
+            )),
         );
     }
     let form = profile_form(v, &ctx.config.private.vetting, 0, 0);
@@ -178,7 +179,7 @@ async fn publish_profile(ctx: &mut ActionCtx<'_>, form: &VetterProfileForm) {
     let Some(vetter_did) = persona_did(ctx.config, membership.persona) else {
         return status(
             ctx,
-            "The persona this community named a vetter is not available.",
+            Status::error("The persona this community named a vetter is not available."),
         );
     };
     if !begin(ctx) {
@@ -236,7 +237,7 @@ pub(super) async fn ask_event_mode(ctx: &mut ActionCtx<'_>, index: usize) {
     let Some(did) = persona_did(ctx.config, offer.persona) else {
         return status(
             ctx,
-            "The persona that belongs to this community is not available.",
+            Status::error("The persona that belongs to this community is not available."),
         );
     };
     if !begin(ctx) {
@@ -265,10 +266,10 @@ pub(super) async fn ask_event_mode(ctx: &mut ActionCtx<'_>, index: usize) {
     page(ctx).mode = VettingMode::List;
     status(
         ctx,
-        format!(
+        Status::progress(format!(
             "Asking {} to vet at {} ({})…",
             offer.community_name, offer.event_id, offer.tier
-        ),
+        )),
     );
     let sent = Sent::Query {
         document_id: document_id.clone(),
@@ -288,7 +289,7 @@ pub(super) async fn ask_resend(ctx: &mut ActionCtx<'_>, index: usize) {
     let Some(did) = persona_did(ctx.config, target.persona) else {
         return status(
             ctx,
-            "The persona that belongs to this community is not available.",
+            Status::error("The persona that belongs to this community is not available."),
         );
     };
     if !begin(ctx) {
@@ -309,10 +310,10 @@ pub(super) async fn ask_resend(ctx: &mut ActionCtx<'_>, index: usize) {
     page(ctx).mode = VettingMode::List;
     status(
         ctx,
-        format!(
+        Status::progress(format!(
             "Asking {} to send your vetter credential again…",
             target.name
-        ),
+        )),
     );
     let sent = Sent::Query {
         document_id: document_id.clone(),

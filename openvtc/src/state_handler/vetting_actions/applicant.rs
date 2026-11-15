@@ -1,6 +1,7 @@
 //! The applicant side: starting and abandoning applications, switching
 //! vetting path, requesting a vetter, and searching the vetter directory.
 
+use crate::state_handler::main_page::status::Status;
 use chrono::Utc;
 use openvtc_core::config::Config;
 use openvtc_core::config::community_context::{self, ContextKind, ContextOption};
@@ -116,7 +117,7 @@ pub(super) fn switch_vetting_path(ctx: &mut ActionCtx<'_>) {
                 ),
             );
         }
-        Err(why) => status(ctx, why),
+        Err(why) => status(ctx, Status::error(why)),
     }
 }
 
@@ -140,7 +141,10 @@ pub(super) async fn refresh_requirements(ctx: &mut ActionCtx<'_>, application_id
         Ok(d) => d,
         Err(e) => return abandon(ctx, "Could not ask the community", e),
     };
-    status(ctx, "Asking the community what it requires…");
+    status(
+        ctx,
+        Status::progress("Asking the community what it requires…"),
+    );
     let sent = Sent::Manifest {
         community: app.community.clone(),
     };
@@ -204,10 +208,16 @@ pub(super) async fn start_application(
     context: Option<String>,
 ) {
     if !community.starts_with("did:") {
-        return status(ctx, "Enter the community's DID (it starts with did:).");
+        return status(
+            ctx,
+            Status::warning("Enter the community's DID (it starts with did:)."),
+        );
     }
     let Some(persona) = page(ctx).personas.get(persona_index).cloned() else {
-        return status(ctx, "Choose the persona you will join with.");
+        return status(
+            ctx,
+            Status::warning("Choose the persona you will join with."),
+        );
     };
     let application_id = match ctx.config.private.vetting.start_application(
         community,
@@ -221,7 +231,12 @@ pub(super) async fn start_application(
             }
             app.id.clone()
         }
-        Err(e) => return status(ctx, format!("Could not start the application: {e}")),
+        Err(e) => {
+            return status(
+                ctx,
+                Status::error(format!("Could not start the application: {e}")),
+            );
+        }
     };
     // Said, not dropped (R6.4): a criterion this build cannot honour is the one thing that
     // makes this application gather evidence the community will not count.
@@ -282,11 +297,13 @@ pub(super) async fn request_vetter(
                 Err(_) if entry.is_empty() => {
                     return status(
                         ctx,
-                        "Paste the link from the vetter's QR code — it carries their ticket, \
+                        Status::warning(
+                            "Paste the link from the vetter's QR code — it carries their ticket, \
                          and a request without one is never answered.",
+                        ),
                     );
                 }
-                Err(e) => return status(ctx, sanitize_display(&e.to_string(), 400)),
+                Err(e) => return status(ctx, Status::error(sanitize_display(&e.to_string(), 400))),
             }
         }
     };
@@ -304,7 +321,7 @@ pub(super) async fn request_vetter(
         ctx.config.private.vetting.pcs_due = true;
         return status(
             ctx,
-            openvtc_core::vetting::hidden::HiddenError::NotReady.to_string(),
+            Status::error(openvtc_core::vetting::hidden::HiddenError::NotReady.to_string()),
         );
     }
     if !begin(ctx) {
@@ -394,10 +411,12 @@ pub(super) fn paste_ticket(ctx: &mut ActionCtx<'_>, text: &str) {
             }
             status(
                 ctx,
-                format!("Read the ticket link. It goes to {shown} — Enter sends the request."),
+                Status::info(format!(
+                    "Read the ticket link. It goes to {shown} — Enter sends the request."
+                )),
             );
         }
-        Err(e) => status(ctx, sanitize_display(&e.to_string(), 400)),
+        Err(e) => status(ctx, Status::error(sanitize_display(&e.to_string(), 400))),
     }
 }
 
@@ -406,8 +425,10 @@ pub(super) fn open_directory(ctx: &mut ActionCtx<'_>) {
     if v.directory_communities.is_empty() {
         return status(
             ctx,
-            "The vetter directory is searched per community: start an application (n) or join a \
+            Status::warning(
+                "The vetter directory is searched per community: start an application (n) or join a \
              community first.",
+            ),
         );
     }
     // Opened from an application — the list, or its journey — the search
@@ -471,7 +492,7 @@ pub(super) async fn search_directory(ctx: &mut ActionCtx<'_>, cursors: Vec<Optio
     let Some(asker) = persona_did(ctx.config, target.persona) else {
         return status(
             ctx,
-            "The persona the directory would be searched as is not available.",
+            Status::error("The persona the directory would be searched as is not available."),
         );
     };
     if !begin(ctx) {
@@ -496,7 +517,7 @@ pub(super) async fn search_directory(ctx: &mut ActionCtx<'_>, cursors: Vec<Optio
     }
     status(
         ctx,
-        format!("Asking {} for its vetter directory…", target.name),
+        Status::progress(format!("Asking {} for its vetter directory…", target.name)),
     );
     let sent = Sent::Query {
         document_id: document_id.clone(),
@@ -522,12 +543,12 @@ pub(super) async fn directory_page(ctx: &mut ActionCtx<'_>, forward: bool) {
     };
     if forward {
         let Some(next) = next else {
-            return status(ctx, "That is the last page.");
+            return status(ctx, Status::warning("That is the last page."));
         };
         cursors.push(Some(next));
     } else {
         if cursors.len() <= 1 {
-            return status(ctx, "This is the first page.");
+            return status(ctx, Status::warning("This is the first page."));
         }
         cursors.pop();
     }
@@ -555,11 +576,11 @@ pub(super) fn ask_listed_vetter(ctx: &mut ActionCtx<'_>) {
     let Some(application_id) = target.application_id.clone() else {
         return status(
             ctx,
-            format!(
+            Status::warning(format!(
                 "To ask {} you need an application to {} — start one on the Applications tab (n), \
                  then find them here again.",
                 row.name, target.name
-            ),
+            )),
         );
     };
     let how = match &row.contact_hint {
@@ -599,7 +620,7 @@ pub(super) fn abandon_application(ctx: &mut ActionCtx<'_>) {
         .abandon_application(&application_id)
     else {
         back(page(ctx));
-        return status(ctx, "That application is already gone.");
+        return status(ctx, Status::warning("That application is already gone."));
     };
     let community = community_display(ctx.config, &app.community);
     let asked = app.requests.len();
@@ -609,7 +630,7 @@ pub(super) fn abandon_application(ctx: &mut ActionCtx<'_>) {
     ctx.save.mark_dirty();
     status(
         ctx,
-        if asked == 0 {
+        Status::success(if asked == 0 {
             format!("Abandoned your application to {community}.")
         } else {
             format!(
@@ -619,7 +640,7 @@ pub(super) fn abandon_application(ctx: &mut ActionCtx<'_>) {
                 if asked == 1 { "" } else { "s" },
                 if asked == 1 { "s" } else { "" }
             )
-        },
+        }),
     );
 }
 

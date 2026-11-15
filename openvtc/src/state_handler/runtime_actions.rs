@@ -16,6 +16,7 @@
 //! outcome type, and `StartJoin` drives the join flow's own action loop with the
 //! receiver this one is selecting on.
 
+use crate::state_handler::main_page::status::Status;
 use tokio::sync::{mpsc::UnboundedSender, watch};
 
 use crate::state_handler::actions::Action;
@@ -252,11 +253,14 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     }
                     (_, Err(e)) => {
                         ctx.state.main_page.content_panel.communities.status_message =
-                            Some(format!("Couldn't sign the departure: {e}"));
+                            Some(Status::error(format!("Couldn't sign the departure: {e}")));
                     }
                     (None, _) => {
                         ctx.state.main_page.content_panel.communities.status_message =
-                            Some("Messaging unavailable — cannot leave right now.".to_string());
+                            Some(Status::error(messaging_unavailable(
+                                &ctx.state.connection,
+                                "cannot leave",
+                            )));
                     }
                 }
             }
@@ -385,7 +389,8 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         if let Some(view) =
                             ctx.state.main_page.content_panel.capabilities.view.as_mut()
                         {
-                            view.status_message = Some(format!("couldn't sign the change: {e}"));
+                            view.status_message =
+                                Some(Status::error(format!("couldn't sign the change: {e}")));
                         }
                         None
                     }
@@ -443,11 +448,12 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     .and_then(|c| c.credentials.get(&openvtc_core::CredentialKind::Membership))
                     .cloned()
                 else {
-                    ctx.state.main_page.content_panel.communities.status_message = Some(
-                        "This community hasn't issued you a membership credential yet — \
+                    ctx.state.main_page.content_panel.communities.status_message =
+                        Some(Status::warning(
+                            "This community hasn't issued you a membership credential yet — \
                          there is nothing to acknowledge."
-                            .to_string(),
-                    );
+                                .to_string(),
+                        ));
                     return Handled::Continue;
                 };
                 // The signing key is read here for the same reason as
@@ -461,13 +467,17 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 ) {
                     (Some(sender), Ok(keys)) => Some((sender, keys)),
                     (_, Err(e)) => {
-                        ctx.state.main_page.content_panel.communities.status_message =
-                            Some(format!("Couldn't sign the membership credential: {e}"));
+                        ctx.state.main_page.content_panel.communities.status_message = Some(
+                            Status::error(format!("Couldn't sign the membership credential: {e}")),
+                        );
                         None
                     }
                     (None, _) => {
                         ctx.state.main_page.content_panel.communities.status_message =
-                            Some("Messaging unavailable — cannot issue right now.".to_string());
+                            Some(Status::error(messaging_unavailable(
+                                &ctx.state.connection,
+                                "cannot issue",
+                            )));
                         None
                     }
                 };
@@ -538,15 +548,17 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         },
                     ),
                     (_, Err(e)) => {
-                        ctx.state.main_page.content_panel.communities.status_message = Some(
-                            format!("Could not load the persona's key to sign the request: {e}"),
-                        );
+                        ctx.state.main_page.content_panel.communities.status_message =
+                            Some(Status::error(format!(
+                                "Could not load the persona's key to sign the request: {e}"
+                            )));
                     }
                     (None, _) => {
-                        ctx.state.main_page.content_panel.communities.status_message = Some(
-                            "Messaging unavailable — cannot ask for a challenge right now."
-                                .to_string(),
-                        );
+                        ctx.state.main_page.content_panel.communities.status_message =
+                            Some(Status::error(messaging_unavailable(
+                                &ctx.state.connection,
+                                "cannot ask for a challenge",
+                            )));
                     }
                 }
             }
@@ -570,7 +582,9 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         // Progress until the send lands; a busy dispatcher
                         // replaces it with its own line.
                         ctx.state.main_page.content_panel.communities.status_message =
-                            Some("Asking the community to renew your membership…".to_string());
+                            Some(Status::progress(
+                                "Asking the community to renew your membership…".to_string(),
+                            ));
                         spawn_community_job(
                             ctx.dispatch_tx,
                             ctx.in_flight,
@@ -594,13 +608,17 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         )
                     }
                     (_, Err(e)) => {
-                        ctx.state.main_page.content_panel.communities.status_message = Some(
-                            format!("Could not load the persona's key to sign the renewal: {e}"),
-                        );
+                        ctx.state.main_page.content_panel.communities.status_message =
+                            Some(Status::error(format!(
+                                "Could not load the persona's key to sign the renewal: {e}"
+                            )));
                     }
                     (None, _) => {
                         ctx.state.main_page.content_panel.communities.status_message =
-                            Some("Messaging unavailable — cannot renew right now.".to_string());
+                            Some(Status::error(messaging_unavailable(
+                                &ctx.state.connection,
+                                "cannot renew",
+                            )));
                     }
                 }
             }
@@ -671,8 +689,9 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     )
                     .await;
                     ctx.state.main_page.sync_from_config(ctx.config);
-                    ctx.state.main_page.content_panel.communities.status_message =
-                        Some("Join cancelled — request withdrawn.".to_string());
+                    ctx.state.main_page.content_panel.communities.status_message = Some(
+                        Status::success("Join cancelled — request withdrawn.".to_string()),
+                    );
                 }
             }
         }
@@ -693,11 +712,11 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         ctx.save.mark_dirty();
                         ctx.state.main_page.sync_from_config(ctx.config);
                         ctx.state.main_page.content_panel.communities.status_message =
-                            Some("Community archived.".to_string());
+                            Some(Status::success("Community archived.".to_string()));
                     }
                     Err(e) => {
                         ctx.state.main_page.content_panel.communities.status_message =
-                            Some(format!("Couldn't archive: {e}"));
+                            Some(Status::error(format!("Couldn't archive: {e}")));
                     }
                 }
             }
@@ -942,7 +961,8 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                 let domain = background_dispatch::DispatchDomain::Inbox;
                 if !ctx.in_flight.try_begin(domain) {
                     let msg = background_dispatch::InFlight::busy_message(domain);
-                    ctx.state.main_page.content_panel.inbox.status_message = Some(msg.clone());
+                    ctx.state.main_page.content_panel.inbox.status_message =
+                        Some(Status::warning(msg.clone()));
                     ctx.state.main_page.log(msg);
                 } else {
                     match inbox_actions::dispatch(
@@ -999,7 +1019,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     .main_page
                     .content_panel
                     .relationships
-                    .status_message = Some(msg);
+                    .status_message = Some(Status::warning(msg));
                 return Handled::Continue;
             }
             match witness_actions::prepare(
@@ -1018,7 +1038,8 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         .main_page
                         .content_panel
                         .relationships
-                        .status_message = Some("Starting the witnessing…".to_string());
+                        .status_message =
+                        Some(Status::progress("Starting the witnessing…".to_string()));
                     background_dispatch::spawn_dispatch(
                         ctx.dispatch_tx.clone(),
                         domain,
@@ -1031,7 +1052,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         .main_page
                         .content_panel
                         .relationships
-                        .status_message = Some(reason);
+                        .status_message = Some(Status::error(reason));
                 }
             }
         }
@@ -1049,7 +1070,7 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                         .main_page
                         .content_panel
                         .relationships
-                        .status_message = Some(msg.clone());
+                        .status_message = Some(Status::warning(msg.clone()));
                     ctx.state.main_page.log(msg);
                 } else {
                     match relationship_actions::dispatch(
@@ -1108,8 +1129,9 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
             {
                 let domain = background_dispatch::DispatchDomain::Credential;
                 if !ctx.in_flight.try_begin(domain) {
-                    ctx.state.main_page.content_panel.credentials.status_message =
-                        Some(background_dispatch::InFlight::busy_message(domain));
+                    ctx.state.main_page.content_panel.credentials.status_message = Some(
+                        Status::warning(background_dispatch::InFlight::busy_message(domain)),
+                    );
                 } else if let Some(job) = credential_actions::prepare_vrc_request(
                     ctx.config,
                     ctx.didcomm_service,
@@ -1123,8 +1145,9 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
                     );
                 } else {
                     ctx.in_flight.finish(domain);
-                    ctx.state.main_page.content_panel.credentials.status_message =
-                        Some("That relationship is no longer available.".to_string());
+                    ctx.state.main_page.content_panel.credentials.status_message = Some(
+                        Status::warning("That relationship is no longer available.".to_string()),
+                    );
                 }
             } else {
                 credential_actions::dispatch(ca, ctx.config, ctx.state, ctx.save);
@@ -1213,12 +1236,15 @@ pub(crate) async fn handle_action(ctx: &mut ActionCtx<'_>, action: Action) -> Ha
         | Action::CapabilitiesToggleArm
         | Action::CapabilitiesToggleCancel
         | Action::CommunitySelect(..)
+        | Action::TspSelect(..)
         | Action::CommunityConfirmDelete(..)
         | Action::CommunityCancelDelete
         | Action::CommunityConfirmLeave(..)
         | Action::CommunityCancelLeave
         | Action::CommunityConfirmWithdraw(..)
         | Action::CommunityCancelWithdraw
+        | Action::CommunityConfirmSend(..)
+        | Action::CommunityCancelSend
         | Action::CommunitySwitcherMove(..)
         | Action::CloseCommunitySwitcher
         | Action::DidSelect(..)
@@ -1323,8 +1349,9 @@ async fn assert_personhood(ctx: &mut ActionCtx<'_>, witnessed: Option<Vec<String
             .content_panel
             .communities
             .personhood_evidence = None;
-        ctx.state.main_page.content_panel.communities.status_message =
-            Some("No personhood challenge in hand — ask for one first.".to_string());
+        ctx.state.main_page.content_panel.communities.status_message = Some(Status::warning(
+            "No personhood challenge in hand — ask for one first.".to_string(),
+        ));
         return Handled::Continue;
     };
     if !challenge.is_live(chrono::Utc::now()) {
@@ -1334,8 +1361,9 @@ async fn assert_personhood(ctx: &mut ActionCtx<'_>, witnessed: Option<Vec<String
         let comms = &mut ctx.state.main_page.content_panel.communities;
         comms.personhood_challenge = None;
         comms.personhood_evidence = None;
-        comms.status_message =
-            Some("That personhood challenge expired — ask for a fresh one.".to_string());
+        comms.status_message = Some(Status::warning(
+            "That personhood challenge expired — ask for a fresh one.".to_string(),
+        ));
         return Handled::Continue;
     }
 
@@ -1429,17 +1457,38 @@ async fn assert_personhood(ctx: &mut ActionCtx<'_>, witnessed: Option<Vec<String
             },
         ),
         (_, Err(e)) => {
-            ctx.state.main_page.content_panel.communities.status_message =
-                Some(format!("Couldn't sign the personhood presentation: {e}"));
+            ctx.state.main_page.content_panel.communities.status_message = Some(Status::error(
+                format!("Couldn't sign the personhood presentation: {e}"),
+            ));
         }
         (None, _) => {
-            ctx.state.main_page.content_panel.communities.status_message =
-                Some("Messaging unavailable — cannot assert right now.".to_string());
+            ctx.state.main_page.content_panel.communities.status_message = Some(Status::error(
+                messaging_unavailable(&ctx.state.connection, "cannot assert"),
+            ));
         }
     }
     Handled::Continue
 }
 
+/// Why a network action cannot run now: messaging is down. Says which class
+/// of failure it is and what to do — not only *what* could not be done
+/// (#585, R6.4).
+fn messaging_unavailable(
+    connection: &crate::state_handler::state::ConnectionState,
+    what: &str,
+) -> String {
+    match &connection.status {
+        crate::state_handler::state::MediatorStatus::Failed(failure) => format!(
+            "Messaging unavailable ({}) — {what} right now. {} Help / Status: r retries.",
+            failure.short(),
+            failure.class.remedy()
+        ),
+        _ => format!(
+            "Messaging unavailable — {what} right now: messaging is not running. Help / Status \
+             shows its state."
+        ),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1736,6 +1785,7 @@ mod tests {
             .communities
             .status_message
             .clone()
+            .map(|s| s.text)
             .unwrap_or_default()
     }
 
@@ -2007,7 +2057,12 @@ mod tests {
             .device_access
             .clone()
             .unwrap();
-        assert!(view.message.unwrap_or_default().contains("did:key"));
+        assert!(
+            view.message
+                .map(|s| s.text)
+                .unwrap_or_default()
+                .contains("did:key")
+        );
         assert!(view.form.is_some(), "the form stays open to fix the DID");
     }
 
@@ -2115,7 +2170,7 @@ mod tests {
         let comms = &h.state.main_page.content_panel.communities;
         assert!(comms.personhood_evidence.is_none(), "answered");
         assert!(
-            went_on_to_send(comms.status_message.as_deref()),
+            went_on_to_send(comms.status_message.as_ref().map(|s| s.text.as_str())),
             "and it went on to send: {:?}",
             comms.status_message
         );
@@ -2133,7 +2188,7 @@ mod tests {
         let comms = &h.state.main_page.content_panel.communities;
         assert!(comms.personhood_evidence.is_none());
         assert!(
-            went_on_to_send(comms.status_message.as_deref()),
+            went_on_to_send(comms.status_message.as_ref().map(|s| s.text.as_str())),
             "{:?}",
             comms.status_message
         );

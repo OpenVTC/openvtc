@@ -60,6 +60,7 @@ use crate::state_handler::{
     },
     state::ConnectionState,
 };
+use crate::ui::pages::main::keymap::{self, k};
 use openvtc_core::display::display_identifier;
 use openvtc_core::persona::correlation;
 use openvtc_core::persona::family::Family;
@@ -152,9 +153,24 @@ fn render_tabs(state: &IdentityState) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
     match confirm_prompt(state) {
         Some(prompt) => lines.push(Line::from(prompt).fg(COLOR_ORANGE).bold()),
-        None => lines.push(Line::from(hints(state)).fg(COLOR_DARK_GRAY)),
+        None => keymap::footer(&mut lines, "", &tab_bindings(state)),
     }
     lines
+}
+
+/// Draw a form's keys, or what it is doing while a write is in flight (when
+/// it takes no keys at all).
+fn working_footer(
+    lines: &mut Vec<Line<'static>>,
+    working: bool,
+    busy: &'static str,
+    keys: &[keymap::Binding],
+) {
+    if working {
+        lines.push(Line::from(busy).fg(COLOR_DARK_GRAY));
+    } else {
+        keymap::footer(lines, " ", keys);
+    }
 }
 
 /// The question to put, worded so a `y` cannot be given to the wrong one.
@@ -179,19 +195,22 @@ fn confirm_prompt(state: &IdentityState) -> Option<String> {
                 Some(name) => format!("{name} ({did})"),
                 None => did.into_owned(),
             };
-            Some(format!("Remove {name}?   y: confirm    n: cancel"))
+            Some(crate::ui::pages::main::confirm::prompt(&format!(
+                "Remove {name}?"
+            )))
         }
         PersonaConfirm::DeleteAttribute { name, cascade, .. } => {
             if *cascade {
                 // The cascading question names the consequence the plain one
                 // does not have: profiles that show this value stop showing it.
-                Some(format!(
+                Some(crate::ui::pages::main::confirm::prompt(&format!(
                     "\"{name}\" is on one or more faces. Forget it AND remove it from those \
-                     faces too?   Nothing already shared is affected — that has left.   \
-                     y: confirm    n: cancel"
-                ))
+                     faces too?   Nothing already shared is affected — that has left."
+                )))
             } else {
-                Some(format!("Forget \"{name}\"?   y: confirm    n: cancel"))
+                Some(crate::ui::pages::main::confirm::prompt(&format!(
+                    "Forget \"{name}\"?"
+                )))
             }
         }
         PersonaConfirm::DeleteProfile {
@@ -207,15 +226,15 @@ fn confirm_prompt(state: &IdentityState) -> Option<String> {
                 .map(|w| format!("   {w}"))
                 .unwrap_or_default();
             if *unbind {
-                Some(format!(
+                Some(crate::ui::pages::main::confirm::prompt(&format!(
                     "A persona wears \"{name}\". Delete it and leave that persona showing \
                      nothing?{spoken}   To stop being it without losing it, press n and retire \
-                     it with x.   y: confirm    n: cancel"
-                ))
+                     it with x."
+                )))
             } else {
-                Some(format!(
-                    "Delete the face \"{name}\"?{spoken}   y: confirm    n: cancel"
-                ))
+                Some(crate::ui::pages::main::confirm::prompt(&format!(
+                    "Delete the face \"{name}\"?{spoken}"
+                )))
             }
         }
         PersonaConfirm::PurgeAttribute { name, used_by, .. } => {
@@ -232,70 +251,161 @@ fn confirm_prompt(state: &IdentityState) -> Option<String> {
                     "   {n} faces use it; any that pin an old version will show nothing for it."
                 ),
             };
-            Some(format!(
+            Some(crate::ui::pages::main::confirm::prompt(&format!(
                 "Forget every earlier version of \"{name}\", keeping only what it says now?\
-                 {faces}   This cannot be undone.   y: confirm    n: cancel"
-            ))
+                 {faces}   This cannot be undone."
+            )))
         }
         PersonaConfirm::DeleteWorld { name, faces, .. } => Some(match faces {
             // The sentence a holder needs is about what *survives*. "Delete
             // Work" reads to almost everyone as though the faces in it go too,
             // and a prompt that leaves that uncorrected is answered under a
             // belief nobody checked.
-            0 => format!("Delete the world \"{name}\"?   y: confirm    n: cancel"),
-            1 => format!(
+            0 => crate::ui::pages::main::confirm::prompt(&format!("Delete the world \"{name}\"?")),
+            1 => crate::ui::pages::main::confirm::prompt(&format!(
                 "Delete the world \"{name}\"? The face in it is kept and belongs to no world \
-                 afterwards.   y: confirm    n: cancel"
-            ),
-            n => format!(
+                 afterwards."
+            )),
+            n => crate::ui::pages::main::confirm::prompt(&format!(
                 "Delete the world \"{name}\"? The {n} faces in it are kept and belong to no \
-                 world afterwards.   y: confirm    n: cancel"
-            ),
+                 world afterwards."
+            )),
         }),
         PersonaConfirm::RetireFace { name, worn, .. } => Some(match worn {
-            0 => format!(
+            0 => crate::ui::pages::main::confirm::prompt(&format!(
                 "Retire \"{name}\"? It is worn nowhere now; it is kept with its history and left \
-                 out of every picker until you reinstate it.   y: confirm    n: cancel"
-            ),
-            n => format!(
+                 out of every picker until you reinstate it."
+            )),
+            n => crate::ui::pages::main::confirm::prompt(&format!(
                 "Retire \"{name}\"? It comes off the {n} communit{} wearing it, and is kept with \
                  its history — reinstate it later with z, then x. Nothing already shared is \
-                 affected.   y: confirm    n: cancel",
+                 affected.",
                 if *n == 1 { "y" } else { "ies" }
-            ),
+            )),
         }),
-        PersonaConfirm::Unbind { community, .. } => Some(format!(
-            "Take it off — show {community} nothing?   Nothing already shared is affected \
-             — that has left.   y: confirm    n: cancel"
-        )),
+        PersonaConfirm::Unbind { community, .. } => {
+            Some(crate::ui::pages::main::confirm::prompt(&format!(
+                "Take it off — show {community} nothing?   Nothing already shared is affected \
+             — that has left."
+            )))
+        }
     }
 }
 
-fn hints(state: &IdentityState) -> &'static str {
+/// The tabbed view's keys: the tab's own, gated as the handler gates them,
+/// then the pane's.
+fn tab_bindings(state: &IdentityState) -> Vec<keymap::Binding> {
+    let mut keys = Vec::new();
+    let mv = |keys: &mut Vec<keymap::Binding>, count: usize| {
+        if count > 0 {
+            keys.push(k("↑/↓", "select"));
+        }
+    };
     match state.tab {
         PersonaTab::Personas => {
-            "↑/↓ select   n: new persona   g: agent names   d: remove unused   ⇥/⇧⇥: tab"
+            let count = state.personas.len();
+            mv(&mut keys, count);
+            keys.push(k("n", "new persona"));
+            keys.push(k("g", "agent names"));
+            if state
+                .personas
+                .get(state.persona_selected)
+                .is_some_and(|p| p.bound_communities == 0)
+            {
+                keys.push(k("d/Del", "remove unused"));
+            }
         }
         PersonaTab::Attributes => {
-            "↑/↓ select   n: add an attribute   e: edit   d: delete   p: forget earlier   \
-             v: values   s: show one   r: refresh   ⇥/⇧⇥: tab"
+            let count = state.attributes.len();
+            let on = state.attribute_selected < count;
+            mv(&mut keys, count);
+            keys.push(k("n", "add an attribute"));
+            if on {
+                keys.push(k("e", "edit"));
+                keys.push(k("d/Del", "delete"));
+                keys.push(k("p", "forget earlier"));
+                keys.push(k("s", "show one"));
+            }
+            keys.push(k("v", "values"));
+        }
+        PersonaTab::Profiles if state.open_profile.is_some() => {
+            let claims = state.open_profile.as_ref().map_or(0, |d| d.resolved.len());
+            if claims > 0 {
+                keys.push(k("↑/↓", "select"));
+            }
+            if state.face_claim_selected < claims {
+                keys.push(k("s", "show one"));
+            }
+            keys.push(k("Enter", "back"));
+            keys.push(k("e", "edit"));
+            keys.push(k("h", "where and when"));
         }
         PersonaTab::Profiles if state.show_retired => {
-            "↑/↓ select   x: reinstate   z: back to your faces   r: refresh   ⇥/⇧⇥: tab"
+            let retired = state.retired_faces.len();
+            mv(&mut keys, retired);
+            if state.profile_selected < retired {
+                keys.push(k("x", "reinstate"));
+            }
+            keys.push(k("z", "back to your faces"));
         }
         PersonaTab::Profiles => {
-            "↑/↓ select   ⏎: what it shows   n: make a face   e: edit   m: move to a world   \
-             x: retire   d: delete   z: retired   r: refresh   ⇥/⇧⇥: tab"
+            let count = state.profiles.len();
+            let on = state.profile_selected < count;
+            mv(&mut keys, count);
+            if on {
+                keys.push(k("Enter", "what it shows"));
+            }
+            keys.push(k("n", "make a face"));
+            if on {
+                keys.push(k("e", "edit"));
+                keys.push(k("m", "move to a world"));
+                keys.push(k("x", "retire"));
+                keys.push(k("d/Del", "delete"));
+            }
+            keys.push(k("z", "retired"));
         }
         PersonaTab::Worlds => {
-            "↑/↓ select   n: new world   e: edit   d: delete   r: refresh   ⇥/⇧⇥: tab"
+            let count = state.worlds.len();
+            mv(&mut keys, count);
+            keys.push(k("n", "new world"));
+            if state.world_selected < count {
+                keys.push(k("e", "edit"));
+                keys.push(k("d/Del", "delete"));
+            }
         }
         PersonaTab::Communities => {
-            "↑/↓ select   b: change face   c: make a face for it   f: faces made here   \
-             k: who it knows you as   p: people   u: take it off   r: refresh   ⇥/⇧⇥: tab"
+            let count = state.memberships.len();
+            mv(&mut keys, count);
+            if state.membership_selected < count {
+                keys.extend([
+                    k("b", "change face"),
+                    k("c", "make a face for it"),
+                    k("f", "faces made here"),
+                    k("k", "who it knows you as"),
+                    k("p", "people"),
+                    k("u", "take it off"),
+                ]);
+            }
         }
-        PersonaTab::Disclosures => "↑/↓ select   f: formats   r: refresh   ⇥/⇧⇥: tab",
+        PersonaTab::Disclosures => {
+            mv(&mut keys, state.disclosures.len());
+            keys.push(k("f", "formats"));
+        }
     }
+    if state.tab.needs_agent() {
+        keys.push(k("r", "refresh"));
+    }
+    keys.push(k("Tab/→", "next tab"));
+    keys.push(k("Shift+Tab/←", "previous tab"));
+    keys.push(k(
+        "Esc",
+        if state.open_profile.is_some() {
+            "close the face"
+        } else {
+            "back"
+        },
+    ));
+    keys
 }
 
 // ---------------------------------------------------------------------------
@@ -842,7 +952,7 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
         lines.push(Line::from(""));
         render_face_history(state, lines);
         if !detail.is_editable_here() {
-            super::status::push_status(lines, &detail.refusal(), " ");
+            super::status::push_error(lines, &detail.refusal(), " ");
             lines.push(Line::from(""));
         }
         if detail.resolved.is_empty() {
@@ -933,14 +1043,6 @@ fn render_profiles(state: &IdentityState, lines: &mut Vec<Line<'static>>) {
             );
             lines.push(Line::from(""));
         }
-        lines.push(
-            Line::from(if detail.resolved.is_empty() {
-                " ⏎/Esc: back   e: edit   h: where and when".to_string()
-            } else {
-                " ↑/↓ select   s: show one   ⏎/Esc: back   e: edit   h: where and when".to_string()
-            })
-            .fg(COLOR_DARK_GRAY),
-        );
         return;
     }
 
@@ -1340,14 +1442,22 @@ fn push_agent_state(state: &IdentityState, lines: &mut Vec<Line<'static>>, noun:
         // Every other failure is echoed verbatim. That text is *data*: it may
         // name a host, a port, a contract mismatch, and translating what we do
         // not recognise would be inventing a cause (VTI R6.4).
-        if crate::holder_grant::needs_holder_grant(error) {
+        // Only a refusal can be the missing holder grant: an unreachable
+        // agent is never told to run a grant (#585, R6.4).
+        let refused = matches!(
+            error.class,
+            openvtc_core::errors::ErrorClass::AuthRejected
+                | openvtc_core::errors::ErrorClass::Refused
+        );
+        if refused && crate::holder_grant::needs_holder_grant(&error.text) {
             for line in
                 crate::holder_grant::holder_grant_hint(state.agent_credential_did.as_deref())
             {
                 lines.push(Line::from(line).fg(COLOR_ORANGE));
             }
         } else {
-            super::status::push_status(lines, error, " ");
+            super::status::push_error(lines, &error.text, " ");
+            lines.push(Line::from(format!(" {}", error.class.remedy())).fg(COLOR_DARK_GRAY));
         }
         lines.push(Line::from(""));
         lines.push(Line::from(" r: try again").fg(COLOR_DARK_GRAY));
@@ -1360,7 +1470,7 @@ fn push_agent_state(state: &IdentityState, lines: &mut Vec<Line<'static>>, noun:
     if !state.loaded {
         lines.push(
             Line::from(format!(
-                " Your {noun} have not been read yet.   r: read them"
+                " Your {noun} have not been read yet — r reads them."
             ))
             .fg(COLOR_DARK_GRAY),
         );
@@ -1425,16 +1535,21 @@ fn render_attribute_form(form: &AttributeForm) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
     if let Some(error) = &form.error {
-        super::status::push_status(&mut lines, error, " ");
+        super::status::push_error(&mut lines, error, " ");
         lines.push(Line::from(""));
     }
-    lines.push(
-        Line::from(if form.working {
-            " Saving…"
-        } else {
-            " ⇥: next field   ←/→: value type   ⏎: save   Esc: cancel"
-        })
-        .fg(COLOR_DARK_GRAY),
+    working_footer(
+        &mut lines,
+        form.working,
+        " Saving…",
+        &[
+            k(keymap::TYPE, "this field"),
+            k("Tab/↓", "next field"),
+            k("Shift+Tab/↑", "previous field"),
+            k("←/→", "value type"),
+            k("Enter", "save"),
+            k("Esc", "cancel"),
+        ],
     );
     lines
 }
@@ -1543,16 +1658,29 @@ fn render_profile_form(state: &IdentityState, form: &ProfileForm) -> Vec<Line<'s
 
     lines.push(Line::from(""));
     if let Some(error) = &form.error {
-        super::status::push_status(&mut lines, error, " ");
+        super::status::push_error(&mut lines, error, " ");
         lines.push(Line::from(""));
     }
-    lines.push(
-        Line::from(if form.working {
-            " Saving…"
+    working_footer(
+        &mut lines,
+        form.working,
+        " Saving…",
+        &if form.focus == ProfileFormFocus::Entries {
+            vec![
+                k("Tab/Shift+Tab", "name/list"),
+                k("↑/↓", "move"),
+                k("Space", "tick"),
+                k("Enter", "save"),
+                k("Esc", "cancel"),
+            ]
         } else {
-            " ⇥: name/list   ↑/↓: move   Space: tick   ⏎: save   Esc: cancel"
-        })
-        .fg(COLOR_DARK_GRAY),
+            vec![
+                k(keymap::TYPE, "the name"),
+                k("Tab/Shift+Tab", "name/list"),
+                k("Enter", "save"),
+                k("Esc", "cancel"),
+            ]
+        },
     );
     lines
 }
@@ -1624,14 +1752,18 @@ fn render_compose_form(form: &ComposeForm) -> Vec<Line<'static>> {
         lines.push(Line::from(format!(" {e}")).fg(COLOR_ORANGE));
         lines.push(Line::from(""));
     }
-    lines.push(
-        Line::from(if form.working {
-            " Making it…"
-        } else {
-            " ⇥/⇧⇥ field   ↓ on the last: add a value   Ctrl-T: use in other faces   ⏎: make it   \
-             Esc: cancel"
-        })
-        .fg(COLOR_DARK_GRAY),
+    working_footer(
+        &mut lines,
+        form.working,
+        " Making it…",
+        &[
+            k(keymap::TYPE, "this field"),
+            k("Tab/Shift+Tab", "field"),
+            k("↑/↓", "move (↓ on the last adds a value)"),
+            k("Ctrl+T", "use in other faces"),
+            k("Enter", "make it"),
+            k("Esc", "cancel"),
+        ],
     );
     lines
 }
@@ -1667,7 +1799,7 @@ fn render_local_faces(view: &LocalFacesView) -> Vec<Line<'static>> {
         Some(Err(e)) => {
             lines.push(Line::from(format!(" Could not read them: {e}")).fg(COLOR_ORANGE));
             lines.push(Line::from(""));
-            lines.push(Line::from(" Esc: back").fg(COLOR_DARK_GRAY));
+            keymap::footer(&mut lines, " ", &[k("Esc", "back")]);
             return lines;
         }
         Some(Ok(faces)) => faces,
@@ -1675,9 +1807,8 @@ fn render_local_faces(view: &LocalFacesView) -> Vec<Line<'static>> {
     if faces.is_empty() {
         lines.push(Line::from(" No face has been made for this community.").fg(COLOR_DARK_GRAY));
         lines.push(Line::from(""));
-        lines.push(
-            Line::from(" `c` on the Communities tab makes one. Esc: back").fg(COLOR_DARK_GRAY),
-        );
+        lines.push(Line::from(" `c` on the Communities tab makes one.").fg(COLOR_DARK_GRAY));
+        keymap::footer(&mut lines, " ", &[k("Esc", "back")]);
         return lines;
     }
 
@@ -1712,10 +1843,10 @@ fn render_local_faces(view: &LocalFacesView) -> Vec<Line<'static>> {
 
     if let Some((_, name)) = &view.deleting {
         lines.push(
-            Line::from(format!(
+            Line::from(crate::ui::pages::main::confirm::prompt(&format!(
                 " Delete \"{name}\"? It is taken off as it goes, so this community sees nothing \
-                 from it.   ⏎: confirm    Esc: cancel"
-            ))
+                 from it."
+            )))
             .fg(COLOR_ORANGE),
         );
         lines.push(Line::from(""));
@@ -1728,21 +1859,26 @@ fn render_local_faces(view: &LocalFacesView) -> Vec<Line<'static>> {
         lines.push(
             Line::from(
                 " This cannot be undone. Once reusable, a value stays in your attributes; a \
-                 community that has seen it keeps what it saw. ⏎ again to make it reusable, Esc to \
-                 leave it as it is.",
+                 community that has seen it keeps what it saw.   y: make it reusable · any \
+                 other key: leave it as it is",
             )
             .fg(COLOR_ORANGE),
         );
         lines.push(Line::from(""));
     }
-    lines.push(
-        Line::from(if view.working {
-            " Making it reusable…"
-        } else {
-            " ↑/↓ value   space: choose   ⏎: make reusable   n: make a face here   w: wear it   \
-             d: delete   Esc: back"
-        })
-        .fg(COLOR_DARK_GRAY),
+    working_footer(
+        &mut lines,
+        view.working,
+        " Making it reusable…",
+        &[
+            k("↑/↓", "value"),
+            k("Space", "choose"),
+            k("Enter", "make reusable"),
+            k("n", "make a face here"),
+            k("w", "wear it"),
+            k("d/Del", "delete"),
+            k("Esc", "back"),
+        ],
     );
     lines
 }
@@ -1794,13 +1930,17 @@ fn render_local_face_form(
         lines.push(Line::from(format!(" {e}")).fg(COLOR_ORANGE));
         lines.push(Line::from(""));
     }
-    lines.push(
-        Line::from(if view.working {
-            " Making it…"
-        } else {
-            " ⇥/⇧⇥ field   ↓ on the last: add a value   ⏎: make it   Esc: cancel"
-        })
-        .fg(COLOR_DARK_GRAY),
+    working_footer(
+        &mut lines,
+        view.working,
+        " Making it…",
+        &[
+            k(keymap::TYPE, "this field"),
+            k("Tab/Shift+Tab", "field"),
+            k("↑/↓", "move (↓ on the last adds a value)"),
+            k("Enter", "make it"),
+            k("Esc", "cancel"),
+        ],
     );
     lines
 }
@@ -1876,10 +2016,9 @@ fn render_people(view: &PeopleView) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
     if let Some((_, label)) = &view.deleting {
         lines.push(
-            Line::from(format!(
-                " Forget {label}, and every revision of what they told you?   ⏎: confirm    \
-                 Esc: cancel"
-            ))
+            Line::from(crate::ui::pages::main::confirm::prompt(&format!(
+                " Forget {label}, and every revision of what they told you?"
+            )))
             .fg(COLOR_ORANGE),
         );
         lines.push(Line::from(""));
@@ -1888,13 +2027,17 @@ fn render_people(view: &PeopleView) -> Vec<Line<'static>> {
         lines.push(Line::from(format!(" {e}")).fg(COLOR_ORANGE));
         lines.push(Line::from(""));
     }
-    lines.push(
-        Line::from(if view.working {
-            " Working…"
-        } else {
-            " ↑/↓ select   ⏎: what they said   n: record someone   d: forget   Esc: back"
-        })
-        .fg(COLOR_DARK_GRAY),
+    working_footer(
+        &mut lines,
+        view.working,
+        " Working…",
+        &[
+            k("↑/↓", "select"),
+            k("Enter", "what they said"),
+            k("n", "record someone"),
+            k("d/Del", "forget"),
+            k("Esc", "back"),
+        ],
     );
     lines
 }
@@ -1959,13 +2102,11 @@ fn render_contact_detail(
         }
     }
     lines.push(Line::from(""));
-    lines.push(
-        Line::from(if view.working {
-            " Reading…"
-        } else {
-            " ↑/↓ another   Esc: back"
-        })
-        .fg(COLOR_DARK_GRAY),
+    working_footer(
+        &mut lines,
+        view.working,
+        " Reading…",
+        &[k("↑/↓", "another"), k("Esc", "back")],
     );
     lines
 }
@@ -2024,13 +2165,17 @@ fn render_contact_form(
         lines.push(Line::from(format!(" {e}")).fg(COLOR_ORANGE));
         lines.push(Line::from(""));
     }
-    lines.push(
-        Line::from(if view.working {
-            " Recording…"
-        } else {
-            " ⇥/⇧⇥ field   ↓ on the last: add a fact   ⏎: record   Esc: cancel"
-        })
-        .fg(COLOR_DARK_GRAY),
+    working_footer(
+        &mut lines,
+        view.working,
+        " Recording…",
+        &[
+            k(keymap::TYPE, "this field"),
+            k("Tab/Shift+Tab", "field"),
+            k("↑/↓", "move (↓ on the last adds a fact)"),
+            k("Enter", "record"),
+            k("Esc", "cancel"),
+        ],
     );
     lines
 }
@@ -2109,7 +2254,7 @@ fn render_renderers(view: &RenderersView) -> Vec<Line<'static>> {
             }
         }
     }
-    lines.push(Line::from(" Esc: back").fg(COLOR_DARK_GRAY));
+    keymap::footer(&mut lines, " ", &[k("Esc", "back")]);
     lines
 }
 
@@ -2178,7 +2323,7 @@ fn render_known_here(view: &KnownHereView) -> Vec<Line<'static>> {
             }
         }
     }
-    lines.push(Line::from(" Esc: back").fg(COLOR_DARK_GRAY));
+    keymap::footer(&mut lines, " ", &[k("Esc", "back")]);
     lines
 }
 
@@ -2271,16 +2416,29 @@ fn render_world_form(form: &WorldForm) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
 
     if let Some(error) = &form.error {
-        super::status::push_status(&mut lines, error, " ");
+        super::status::push_error(&mut lines, error, " ");
         lines.push(Line::from(""));
     }
-    lines.push(
-        Line::from(if form.working {
-            " Saving…"
+    working_footer(
+        &mut lines,
+        form.working,
+        " Saving…",
+        &if form.focus == WorldFormFocus::Colour {
+            vec![
+                k("Tab/Shift+Tab", "field"),
+                k("←/→/↑/↓", "colour"),
+                k("Enter", "save"),
+                k("Esc", "cancel"),
+            ]
         } else {
-            " ⇥/⇧⇥: field   ←/→: colour   ⏎: save   Esc: cancel"
-        })
-        .fg(COLOR_DARK_GRAY),
+            vec![
+                k(keymap::TYPE, "this field"),
+                k("Tab/Shift+Tab", "field"),
+                k("←/→", "colour"),
+                k("Enter", "save"),
+                k("Esc", "cancel"),
+            ]
+        },
     );
     lines
 }
@@ -2322,16 +2480,14 @@ fn render_face_placer(state: &IdentityState, picker: &FacePlacer) -> Vec<Line<'s
 
     lines.push(Line::from(""));
     if let Some(error) = &picker.error {
-        super::status::push_status(&mut lines, error, " ");
+        super::status::push_error(&mut lines, error, " ");
         lines.push(Line::from(""));
     }
-    lines.push(
-        Line::from(if picker.working {
-            " Moving…"
-        } else {
-            " ↑/↓: move   ⏎: apply   Esc: cancel"
-        })
-        .fg(COLOR_DARK_GRAY),
+    working_footer(
+        &mut lines,
+        picker.working,
+        " Moving…",
+        &[k("↑/↓", "move"), k("Enter", "apply"), k("Esc", "cancel")],
     );
     lines
 }
@@ -2394,16 +2550,14 @@ fn render_bind_picker(state: &IdentityState, picker: &BindPicker) -> Vec<Line<'s
 
     lines.push(Line::from(""));
     if let Some(error) = &picker.error {
-        super::status::push_status(&mut lines, error, " ");
+        super::status::push_error(&mut lines, error, " ");
         lines.push(Line::from(""));
     }
-    lines.push(
-        Line::from(if picker.working {
-            " Applying…"
-        } else {
-            " ↑/↓: move   ⏎: apply   Esc: cancel"
-        })
-        .fg(COLOR_DARK_GRAY),
+    working_footer(
+        &mut lines,
+        picker.working,
+        " Applying…",
+        &[k("↑/↓", "move"), k("Enter", "apply"), k("Esc", "cancel")],
     );
     lines
 }
@@ -2472,6 +2626,7 @@ fn shorten_id(id: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state_handler::main_page::content::AgentError;
     use crate::state_handler::main_page::content::{ManagedDid, PersonaMembership};
     use openvtc_core::persona::binding::BindingSummary;
     use openvtc_core::persona::correlation::{Finding, Remedy};
@@ -2562,11 +2717,11 @@ mod tests {
             // agent's text rather than ours, so it is not this test's to police.
             let mut refused = populated(tab);
             loaded(&mut refused);
-            refused.load_error = Some(
+            refused.load_error = Some(AgentError::new(
                 "this task reads or writes the holder's attribute pool, which sits above \
-                 every trust context. It requires an unscoped holder credential"
-                    .to_string(),
-            );
+                 every trust context. It requires an unscoped holder credential",
+                openvtc_core::errors::ErrorClass::AuthRejected,
+            ));
             screens.push(text(&render(&refused)));
         }
         for mode in [
@@ -2747,7 +2902,10 @@ mod tests {
         let empty = text(&render(&state));
         assert!(empty.contains("No attributes yet"), "{empty}");
 
-        state.load_error = Some("connection refused".to_string());
+        state.load_error = Some(AgentError::new(
+            "connection refused",
+            openvtc_core::errors::ErrorClass::Unreachable,
+        ));
         let failed = text(&render(&state));
         assert!(
             failed.contains("Could not read your attributes"),
@@ -2773,11 +2931,11 @@ mod tests {
     fn the_holder_refusal_carries_the_grant_command() {
         let mut state = IdentityState {
             tab: PersonaTab::Attributes,
-            load_error: Some(
+            load_error: Some(AgentError::new(
                 "this task reads or writes the holder's attribute pool … it requires an unscoped \
-                 holder credential"
-                    .to_string(),
-            ),
+                 holder credential",
+                openvtc_core::errors::ErrorClass::AuthRejected,
+            )),
             agent_credential_did: Some("did:key:z6MkThisInstall".to_string()),
             ..IdentityState::default()
         };
@@ -2823,7 +2981,10 @@ mod tests {
     fn an_unrelated_failure_carries_no_grant_command() {
         let mut state = IdentityState {
             tab: PersonaTab::Attributes,
-            load_error: Some("connection refused".to_string()),
+            load_error: Some(AgentError::new(
+                "connection refused",
+                openvtc_core::errors::ErrorClass::Unreachable,
+            )),
             ..IdentityState::default()
         };
         loaded(&mut state);

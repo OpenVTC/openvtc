@@ -4,7 +4,10 @@
 //! multi-cause error chains) must be word-wrapped manually before being
 //! pushed as `Line`s or they get clipped at the panel width.
 
-use crate::colors::{COLOR_TEXT_DEFAULT, COLOR_WARNING_ACCESSIBLE_RED};
+use crate::colors::{
+    COLOR_ORANGE, COLOR_SUCCESS, COLOR_TEXT_DEFAULT, COLOR_WARNING_ACCESSIBLE_RED,
+};
+pub use crate::state_handler::main_page::status::{Severity, Status};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -72,14 +75,20 @@ pub fn content_height() -> usize {
     CONTENT_HEIGHT.get()
 }
 
-/// Push a status message as one or more wrapped lines (no trailing blank).
+/// Push a status line as one or more wrapped lines (no trailing blank).
 ///
-/// Messages worded as failures are rendered in the warning (red) colour;
-/// everything else in the plain text colour (see [`status_style`]).
-/// Each wrapped line is prefixed with `indent` so callers can indent inside
-/// a panel.
-pub fn push_status(lines: &mut Vec<Line<'static>>, msg: &str, indent: &'static str) {
-    push_wrapped(lines, msg, indent, status_style(msg));
+/// Its colour comes from the [`Severity`] the producer set (see
+/// [`severity_style`]), never from the wording of the text (#577). Each
+/// wrapped line is prefixed with `indent` so callers can indent inside a
+/// panel.
+pub fn push_status(lines: &mut Vec<Line<'static>>, status: &Status, indent: &'static str) {
+    push_wrapped(lines, &status.text, indent, severity_style(status.severity));
+}
+
+/// Push a failure the producer stored as an error (a form's `error` field):
+/// [`push_status`] at [`Severity::Error`] without building a [`Status`].
+pub fn push_error(lines: &mut Vec<Line<'static>>, msg: &str, indent: &'static str) {
+    push_wrapped(lines, msg, indent, severity_style(Severity::Error));
 }
 
 /// [`push_status`] in a style the caller chooses, for a message whose severity
@@ -94,38 +103,19 @@ pub fn push_wrapped(lines: &mut Vec<Line<'static>>, msg: &str, indent: &'static 
     }
 }
 
-/// Phrases that mark a message as a failure. Matched case-insensitively
-/// anywhere in the message, because failures are worded many ways ("Couldn't
-/// archive: …", "Messaging unavailable — …"), not only with an `Error` prefix.
-const FAILURE_MARKERS: &[&str] = &[
-    "error",
-    "failed",
-    "couldn't",
-    "could not",
-    "can't",
-    "cannot",
-    "unavailable",
-    "not available",
-    "timed out",
-    "refused",
-    "denied",
-    "invalid",
-];
-
-/// Red for a message worded as a failure; otherwise the plain text colour.
+/// The one style a status line of each severity is drawn in, on every panel.
 ///
-/// A message that is not recognisably a failure is not thereby a success, so
-/// it is no longer drawn in the success green — that made failures worded
-/// without "Error"/"Failed" look like confirmations. Panels with a typed
-/// severity use [`push_wrapped`] instead.
-fn status_style(msg: &str) -> Style {
-    let lower = msg.to_lowercase();
-    if FAILURE_MARKERS.iter().any(|m| lower.contains(m)) {
-        Style::new()
+/// Errors are bold as well as red, so they stay distinguishable where colour
+/// is not (a colour-blind theme, a monochrome terminal).
+#[must_use]
+pub fn severity_style(severity: Severity) -> Style {
+    match severity {
+        Severity::Info | Severity::Progress => Style::new().fg(COLOR_TEXT_DEFAULT),
+        Severity::Success => Style::new().fg(COLOR_SUCCESS),
+        Severity::Warning => Style::new().fg(COLOR_ORANGE),
+        Severity::Error => Style::new()
             .fg(COLOR_WARNING_ACCESSIBLE_RED)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().fg(COLOR_TEXT_DEFAULT)
+            .add_modifier(Modifier::BOLD),
     }
 }
 
@@ -189,37 +179,45 @@ mod tests {
         assert_eq!(wrap_text("", 80), vec![String::new()]);
     }
 
+    /// The colour follows the severity the producer set, not the wording:
+    /// the failures from #577 that were drawn green are red because they are
+    /// errors, and a success worded with "failed" in it is still a success.
     #[test]
-    fn status_style_flags_errors() {
-        assert_eq!(
-            status_style("Error: something broke").fg,
-            Some(COLOR_WARNING_ACCESSIBLE_RED)
-        );
-        assert_eq!(
-            status_style("Ping failed: timeout").fg,
-            Some(COLOR_WARNING_ACCESSIBLE_RED)
-        );
-        assert_eq!(
-            status_style("Relationship removed").fg,
-            Some(COLOR_TEXT_DEFAULT)
-        );
-    }
-
-    /// Failures from #577 that were drawn in success green.
-    #[test]
-    fn failures_without_an_error_prefix_are_red() {
+    fn colour_follows_severity_not_wording() {
         for msg in [
             "Messaging unavailable — cannot leave right now.",
-            "Couldn't sign the departure: bad key",
             "Couldn't archive: timeout",
-            "Could not use that theme: parse error",
             "Witnessing is not available until messaging and the VTA are connected.",
         ] {
+            let mut lines = Vec::new();
+            push_status(&mut lines, &Status::error(msg), "");
             assert_eq!(
-                status_style(msg).fg,
+                lines[0].spans[0].style.fg,
                 Some(COLOR_WARNING_ACCESSIBLE_RED),
                 "{msg}"
             );
+        }
+        let mut lines = Vec::new();
+        push_status(&mut lines, &Status::success("Retried the failed send"), "");
+        assert_eq!(lines[0].spans[0].style.fg, Some(COLOR_SUCCESS));
+        let mut lines = Vec::new();
+        push_status(&mut lines, &Status::warning("Nothing to dismiss"), "");
+        assert_eq!(lines[0].spans[0].style.fg, Some(COLOR_ORANGE));
+    }
+
+    #[test]
+    fn every_severity_has_a_distinct_style() {
+        let styles = [
+            Severity::Info,
+            Severity::Success,
+            Severity::Warning,
+            Severity::Error,
+        ]
+        .map(severity_style);
+        for (i, a) in styles.iter().enumerate() {
+            for b in &styles[i + 1..] {
+                assert_ne!(a, b);
+            }
         }
     }
 }

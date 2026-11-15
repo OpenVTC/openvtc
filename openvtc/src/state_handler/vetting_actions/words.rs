@@ -941,6 +941,7 @@ mod tests {
                 .vetting
                 .status_message
                 .clone()
+                .map(|s| s.text)
                 .unwrap_or_default(),
             config.private.vetting.vetter_refresh_due,
         )

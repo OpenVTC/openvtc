@@ -5,6 +5,7 @@ use crate::colors::{COLOR_DARK_GRAY, COLOR_SUCCESS, COLOR_TEXT_DEFAULT};
 use crate::state_handler::actions::Action;
 use crate::state_handler::main_page::MainPanel;
 use crate::state_handler::main_page::{ActivityLogEntry, content::LogsState};
+use crate::ui::pages::main::keymap::{self, k};
 use crate::ui::pages::main::{MainPage, copy_to_clipboard};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -38,6 +39,8 @@ pub fn render(
         lines.push(
             Line::from("  Activity will appear here as you use the app.").fg(COLOR_DARK_GRAY),
         );
+        lines.push(Line::from(""));
+        keymap::footer(&mut lines, "  ", &[k("Esc", "back")]);
         return lines;
     }
 
@@ -68,8 +71,10 @@ pub fn render(
             }
 
             lines.push(Line::from(""));
-            lines.push(
-                Line::from("  Enter/Esc: back to list  c: copy to clipboard").fg(COLOR_DARK_GRAY),
+            keymap::footer(
+                &mut lines,
+                "  ",
+                &[k("Enter/Esc", "back to the list"), k("c", "copy")],
             );
         }
         return lines;
@@ -96,10 +101,17 @@ pub fn render(
     }
 
     lines.push(Line::from(""));
-    lines.push(
-        Line::from("  ↑/↓ navigate  Enter: view detail  c: copy selected  a: copy all  Esc: back")
-            .fg(COLOR_DARK_GRAY),
-    );
+    let mut keys = Vec::new();
+    if total > 1 {
+        keys.push(k("↑/↓", "move"));
+    }
+    keys.extend([
+        k("Enter", "view detail"),
+        k("c", "copy selected"),
+        k("a", "copy all"),
+        k("Esc", "back"),
+    ]);
+    keymap::footer(&mut lines, "  ", &keys);
 
     lines
 }

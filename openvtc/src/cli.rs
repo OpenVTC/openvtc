@@ -154,18 +154,18 @@ pub fn read_unlock_code_file(path: &str) -> anyhow::Result<zeroize::Zeroizing<St
         std::io::stdin()
             .lock()
             .read_line(&mut first_line)
-            .context("failed to read the unlock passphrase from standard input")?;
+            .context("failed to read the unlock code from standard input")?;
     } else {
         let file = std::fs::File::open(path)
-            .with_context(|| format!("failed to open unlock passphrase file `{path}`"))?;
+            .with_context(|| format!("failed to open unlock code file `{path}`"))?;
         std::io::BufReader::new(file)
             .read_line(&mut first_line)
-            .with_context(|| format!("failed to read unlock passphrase file `{path}`"))?;
+            .with_context(|| format!("failed to read unlock code file `{path}`"))?;
     }
 
     let passphrase = zeroize::Zeroizing::new(first_line.trim().to_string());
     if passphrase.is_empty() {
-        anyhow::bail!("no unlock passphrase on the first line of `{path}`");
+        anyhow::bail!("no unlock code on the first line of `{path}`");
     }
     Ok(passphrase)
 }

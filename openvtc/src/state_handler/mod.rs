@@ -1,3 +1,4 @@
+use crate::state_handler::main_page::status::Status;
 use crate::{
     Interrupted, Terminator,
     state_handler::{
@@ -710,8 +711,9 @@ impl StateHandler {
                                     progress.fail(&mut state.loading);
                                     state.startup_diagnosis =
                                         Some(std::sync::Arc::new(diagnose_startup(&e, &profile)));
-                                    state.connection.status =
-                                        state::MediatorStatus::Failed(format!("{e}"));
+                                    state.connection.status = state::MediatorStatus::Failed(
+                                        state::ConnectionFailure::of(&e),
+                                    );
                                     let _ = self.state_tx.send(state.clone());
                                     // No config loaded here — join is unavailable.
                                     return self
@@ -732,10 +734,12 @@ impl StateHandler {
                                             &profile,
                                         ),
                                     ));
-                                    state.connection.status =
-                                        state::MediatorStatus::Failed(
+                                    state.connection.status = state::MediatorStatus::Failed(
+                                        state::ConnectionFailure::new(
                                             format!("Internal error: {join_err}"),
-                                        );
+                                            openvtc_core::errors::ErrorClass::Local,
+                                        ),
+                                    );
                                     let _ = self.state_tx.send(state.clone());
                                     return self
                                         .run_degraded_loop_terminal(
@@ -1643,13 +1647,13 @@ impl StateHandler {
                                         match_code: reply.match_code.clone(),
                                         expires_at: reply.expires_at,
                                     });
-                                state.main_page.content_panel.communities.status_message = Some(
+                                state.main_page.content_panel.communities.status_message = Some(Status::info(
                                     format!(
                                         "Personhood challenge received — confirm the code {} with \
                                          whoever is vetting you, then assert.",
                                         reply.match_code
                                     ),
-                                );
+                                ));
                             }
 
                             // How a renewal the member asked for ended: on the
@@ -1666,8 +1670,14 @@ impl StateHandler {
                                         &format!("{vtc}: {line}"),
                                     ),
                                 }
+                                let severity = match &outcome {
+                                    openvtc_core::renewal::RenewalOutcome::Renewed { .. } => {
+                                        crate::state_handler::main_page::status::Severity::Success
+                                    }
+                                    _ => crate::state_handler::main_page::status::Severity::Error,
+                                };
                                 state.main_page.content_panel.communities.status_message =
-                                    Some(line);
+                                    Some(Status::new(severity, line));
                             }
 
                             match dispatched
@@ -1907,6 +1917,14 @@ impl StateHandler {
                             let latency_str = ms
                                 .map(|v| format!(" ({v}ms)"))
                                 .unwrap_or_default();
+                            // The answer belongs where the ping was sent, not only
+                            // in the log (#584).
+                            if !sender_did.is_empty() {
+                                state.main_page.content_panel.relationships.status_message =
+                                    Some(Status::success(format!(
+                                        "Pong from {sender_display}{latency_str} — they are reachable."
+                                    )));
+                            }
                             state.main_page.log_detailed(
                                 format!("Pong from {sender_display}{latency_str}"),
                                 format!(
@@ -2325,6 +2343,31 @@ impl StateHandler {
                         awaiting_wallet = None;
                         join_entry = Some(entry);
                     }
+                    // A ping has a reply window too (#584): past it, say so in
+                    // the panel that sent it and expire the outbound task, so
+                    // the Inbox does not keep a ping nobody will answer.
+                    if ping_sent_at.is_some_and(|t| t.elapsed() > PING_REPLY_WINDOW) {
+                        ping_sent_at = None;
+                        let cutoff = chrono::Utc::now()
+                            - chrono::Duration::from_std(PING_REPLY_WINDOW).unwrap_or_default();
+                        let before = config.private.tasks.tasks.len();
+                        config.private.tasks.tasks.retain(|_, t| {
+                            !(matches!(t.type_, openvtc_core::tasks::TaskType::TrustPing { .. })
+                                && t.created < cutoff)
+                        });
+                        if config.private.tasks.tasks.len() != before {
+                            save.mark_dirty();
+                            state.main_page.sync_from_config(&config);
+                        }
+                        let line = format!(
+                            "No reply to the ping after {} s — they may be offline, or not \
+                             listening on that DID.",
+                            PING_REPLY_WINDOW.as_secs()
+                        );
+                        state.main_page.content_panel.relationships.status_message =
+                            Some(Status::warning(line.clone()));
+                        state.main_page.log_warning(line);
+                    }
                     // R4.3: a capability query has a defined reply window. The
                     // send was fire-and-forget; if no correlated reply arrived,
                     // fail the view closed with a distinct, actionable message.
@@ -2339,9 +2382,9 @@ impl StateHandler {
                                 "no reply within 30s — the community's governance host may be offline".to_string(),
                             );
                         } else {
-                            view.status_message = Some(
+                            view.status_message = Some(Status::error(
                                 "no reply to the change within 30s — refresh (r) to re-check".to_string(),
-                            );
+                            ));
                         }
                     }
                 }
@@ -3454,10 +3497,12 @@ impl StateHandler {
                     Action::DismissLoading | Action::CapabilitiesClose | Action::CapabilitiesUp |
                     Action::CapabilitiesDown | Action::CapabilitiesDetail |
                     Action::CapabilitiesToggleArm | Action::CapabilitiesToggleCancel |
-                    Action::CommunitySelect(..) | Action::CommunityConfirmDelete(..) |
+                    Action::CommunitySelect(..) | Action::TspSelect(..) |
+                    Action::CommunityConfirmDelete(..) |
                     Action::CommunityCancelDelete | Action::CommunityConfirmLeave(..) |
                     Action::CommunityCancelLeave | Action::CommunityConfirmWithdraw(..) |
-                    Action::CommunityCancelWithdraw | Action::CommunitySwitcherMove(..) |
+                    Action::CommunityCancelWithdraw | Action::CommunityConfirmSend(..) |
+                    Action::CommunityCancelSend | Action::CommunitySwitcherMove(..) |
                     Action::CloseCommunitySwitcher | Action::DidSelect(..) |
                     Action::DidConfirmDelete(..) | Action::DidCancelDelete |
                     Action::StartCreatePersona | Action::CreatePersonaInput(..) |
@@ -3502,11 +3547,11 @@ impl StateHandler {
                     // and no restart is needed any more: creating a persona brings
                     // messaging up on its own.
                     Action::Vetting(..) => {
-                        state.main_page.content_panel.vetting.status_message = Some(
+                        state.main_page.content_panel.vetting.status_message = Some(Status::warning(
                             "Vetting needs a persona. Create one under My Identity — it is the \
                              DID you apply and vet as — and vetting comes online automatically."
                                 .to_string(),
-                        );
+                        ));
                     }
 
                     // Genuinely unavailable: these need a live community and the
@@ -3773,10 +3818,10 @@ fn apply_capability_replies(
                 if let Some(item) = view.items.iter_mut().find(|i| i.slug == capability) {
                     item.enabled = enabled;
                 }
-                view.status_message = Some(format!(
+                view.status_message = Some(Status::success(format!(
                     "{capability} is now {}",
                     if enabled { "enabled" } else { "disabled" }
-                ));
+                )));
                 view.phase = CapabilitiesPhase::Loaded;
             }
             CapabilityReply::Rejected { code, message } => {
@@ -3784,8 +3829,9 @@ fn apply_capability_replies(
                 match view.phase {
                     CapabilitiesPhase::Loaded => {
                         // A rejected toggle: keep the listing, surface why.
-                        view.status_message =
-                            Some(capability_actions::toggle_refusal(&code, &detail));
+                        view.status_message = Some(Status::error(
+                            capability_actions::toggle_refusal(&code, &detail),
+                        ));
                     }
                     _ => {
                         view.phase = CapabilitiesPhase::Failed(match code.as_str() {
@@ -4046,8 +4092,9 @@ fn spawn_community_job(
 ) {
     let domain = background_dispatch::DispatchDomain::Community;
     if !in_flight.try_begin(domain) {
-        state.main_page.content_panel.communities.status_message =
-            Some(background_dispatch::InFlight::busy_message(domain));
+        state.main_page.content_panel.communities.status_message = Some(Status::warning(
+            background_dispatch::InFlight::busy_message(domain),
+        ));
         return;
     }
     background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {
@@ -4111,7 +4158,9 @@ fn spawn_capability_job(
     let domain = background_dispatch::DispatchDomain::Capabilities;
     if !in_flight.try_begin(domain) {
         if let Some(view) = state.main_page.content_panel.capabilities.view.as_mut() {
-            view.status_message = Some(background_dispatch::InFlight::busy_message(domain));
+            view.status_message = Some(Status::warning(
+                background_dispatch::InFlight::busy_message(domain),
+            ));
         }
         return;
     }
@@ -4384,7 +4433,10 @@ fn spawn_persona_effect(
                 .to_string();
         let p = &mut state.main_page.content_panel.identity;
         p.loading = false;
-        p.load_error = Some(reason.clone());
+        p.load_error = Some(crate::state_handler::main_page::content::AgentError::new(
+            reason.clone(),
+            openvtc_core::errors::ErrorClass::Unreachable,
+        ));
         if matches!(effect, PersonaEffect::Job(_)) {
             persona_actions::release_form(state, reason);
         }
@@ -4579,11 +4631,11 @@ fn remove_community(
             save.mark_dirty();
             state.main_page.sync_from_config(config);
             state.main_page.content_panel.communities.status_message =
-                Some("Community removed.".to_string());
+                Some(Status::success("Community removed.".to_string()));
         }
         Err(e) => {
             state.main_page.content_panel.communities.status_message =
-                Some(format!("Could not remove community: {e}"));
+                Some(Status::error(format!("Could not remove community: {e}")));
         }
     }
 }
@@ -4671,6 +4723,10 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
                 view.confirm_toggle = None;
             }
         }
+        Action::TspSelect(i) => {
+            let tsp = &mut state.main_page.content_panel.tsp_relationships;
+            tsp.selected_index = (*i).min(tsp.rows.len().saturating_sub(1));
+        }
         Action::CommunitySelect(i) => {
             state.main_page.content_panel.communities.selected_index = *i;
         }
@@ -4691,6 +4747,12 @@ fn handle_nav_action(state: &mut State, action: &Action) -> bool {
         }
         Action::CommunityCancelWithdraw => {
             state.main_page.content_panel.communities.confirm_withdraw = None;
+        }
+        Action::CommunityConfirmSend(send) => {
+            state.main_page.content_panel.communities.confirm_send = Some(*send);
+        }
+        Action::CommunityCancelSend => {
+            state.main_page.content_panel.communities.confirm_send = None;
         }
         Action::CommunitySwitcherMove(i) => {
             if let Some(switcher) = state.main_page.switcher.as_mut() {
@@ -5189,6 +5251,10 @@ async fn install_persona_listener(
 //   relationship_actions::dispatch
 //   credential_actions::dispatch
 //   settings_actions::dispatch
+
+/// How long a trust-ping waits for its pong before the panel says there was
+/// none and the outbound task is expired (#584).
+const PING_REPLY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Build a DIDComm trust-pong message in response to a verified ping.
 /// Used inline by the trust-ping handler in the main loop.

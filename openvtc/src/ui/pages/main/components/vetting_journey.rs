@@ -26,7 +26,10 @@ fn dim() -> Style {
     Style::new().fg(COLOR_DARK_GRAY)
 }
 
-fn key(k: &str, what: &str) -> Vec<Span<'static>> {
+fn key(k: &'static str, what: &str) -> Vec<Span<'static>> {
+    // A step's key is drawn on its own line; it is one of the journey's keys
+    // for `?` all the same.
+    crate::ui::pages::main::keymap::advertise(&[crate::ui::pages::main::keymap::k(k, what)]);
     vec![
         Span::styled(format!("  {k}"), Style::new().fg(COLOR_SUCCESS).bold()),
         Span::styled(format!("  {what}"), Style::new().fg(COLOR_TEXT_DEFAULT)),
@@ -204,10 +207,15 @@ fn applicant_part(
         }
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Esc: back to your applications (nothing is lost)   x: abandon this application",
-        dim(),
-    )));
+    crate::ui::pages::main::keymap::footer(
+        lines,
+        "",
+        &[
+            crate::ui::pages::main::keymap::k("Esc", "back to your applications (nothing is lost)"),
+            crate::ui::pages::main::keymap::k("x/Del", "abandon this application"),
+            crate::ui::pages::main::keymap::k("m", "refresh requirements"),
+        ],
+    );
 }
 
 /// The vetter's part now.
@@ -286,14 +294,17 @@ fn vetter_part(
         }
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        if ending.is_some() {
-            "Esc: back to your desk"
-        } else {
-            "Esc: back to your desk (nothing is lost)   x: decline (a reason is optional)"
-        },
-        dim(),
-    )));
+    let mut out = vec![crate::ui::pages::main::keymap::k(
+        "Esc",
+        "back to your desk (nothing is lost)",
+    )];
+    if ending.is_none() {
+        out.push(crate::ui::pages::main::keymap::k(
+            "x",
+            "decline (a reason is optional)",
+        ));
+    }
+    crate::ui::pages::main::keymap::footer(lines, "", &out);
 }
 
 #[cfg(test)]

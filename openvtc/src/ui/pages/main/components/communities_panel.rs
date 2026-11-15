@@ -9,11 +9,12 @@ use crate::colors::{
 };
 use crate::state_handler::{
     main_page::content::{
-        CommunitiesState, ContentPanelState, ContextDeletePhase, ContextDeleteView,
+        CommunitiesState, CommunitySend, ContentPanelState, ContextDeletePhase, ContextDeleteView,
         DeviceAccessView, GrantListing,
     },
     state::ConnectionState,
 };
+use crate::ui::pages::main::keymap::{self, k};
 use openvtc_core::community_access::{DEVICE_ROLE, EXPIRY_CHOICES};
 use openvtc_core::config::community_context::DELETE_CONFIRMATION;
 use ratatui::{
@@ -76,7 +77,10 @@ pub fn render(
     push_personhood_challenge(&mut lines, state);
 
     if state.items.is_empty() && state.joining.is_empty() {
-        return render_empty(lines);
+        let mut lines = render_empty(lines);
+        lines.push(Line::from(""));
+        keymap::footer(&mut lines, "", &self::bindings(state));
+        return lines;
     }
 
     // Header with actions-required count (R-C-3). With no membership yet but a
@@ -385,34 +389,49 @@ pub fn render(
     };
     if let Some(idx) = state.confirm_delete {
         lines.push(
-            Line::from(format!(
-                "Delete “{}”?   y: confirm    n: cancel",
+            Line::from(crate::ui::pages::main::confirm::prompt(&format!(
+                "Delete “{}”?",
                 confirm_name(idx)
-            ))
+            )))
             .fg(COLOR_ORANGE)
             .bold(),
         );
     } else if let Some(idx) = state.confirm_leave {
         lines.push(
-            Line::from(format!(
-                "Leave “{}”? This sends a self-removal to the community.   y: confirm    n: cancel",
+            Line::from(crate::ui::pages::main::confirm::prompt(&format!(
+                "Leave “{}”? This sends a self-removal to the community.",
                 confirm_name(idx)
-            ))
+            )))
             .fg(COLOR_ORANGE)
             .bold(),
         );
     } else if let Some(idx) = state.confirm_withdraw {
         lines.push(
-            Line::from(format!(
-                "Cancel the pending join to “{}”? The request will be marked withdrawn.   \
-                 y: confirm    n: cancel",
+            Line::from(crate::ui::pages::main::confirm::prompt(&format!(
+                "Cancel the pending join to “{}”? The request will be marked withdrawn.",
                 confirm_name(idx)
-            ))
+            )))
             .fg(COLOR_ORANGE)
             .bold(),
         );
+    } else if let Some(send) = state.confirm_send {
+        let question = match send {
+            CommunitySend::IssueVmc(idx) => format!(
+                "Issue your membership credential (VMC) to “{}”? It is signed and sent to the community.",
+                confirm_name(idx)
+            ),
+            CommunitySend::Renew(idx) => format!(
+                "Ask “{}” to renew your membership? It re-issues your credentials.",
+                confirm_name(idx)
+            ),
+        };
+        lines.push(
+            Line::from(crate::ui::pages::main::confirm::prompt(&question))
+                .fg(COLOR_ORANGE)
+                .bold(),
+        );
     } else {
-        lines.push(Line::from(key_hints(state)).fg(COLOR_DARK_GRAY));
+        keymap::footer(&mut lines, "", &self::bindings(state));
     }
 
     lines
@@ -524,7 +543,7 @@ fn render_context_delete(lines: &mut Vec<Line<'static>>, view: &ContextDeleteVie
         ContextDeletePhase::Previewing => {
             lines.push(Line::from("   Asking your VTA what this would remove…").style(dim));
             lines.push(Line::from(""));
-            lines.push(Line::from("esc: cancel").style(dim));
+            keymap::footer(lines, "", &[k("Esc", "cancel")]);
         }
         ContextDeletePhase::Ready(preview) => {
             lines.push(Line::from(" Your VTA will permanently remove:").fg(COLOR_TEXT_DEFAULT));
@@ -552,19 +571,30 @@ fn render_context_delete(lines: &mut Vec<Line<'static>>, view: &ContextDeleteVie
             lines.push(Line::from(""));
             lines.push(
                 Line::from(format!(
-                    " This cannot be undone. Type {DELETE_CONFIRMATION} and press ⏎ to delete."
+                    " This cannot be undone. Type {DELETE_CONFIRMATION} and press Enter to delete."
                 ))
                 .fg(COLOR_ORANGE),
             );
-            lines.push(Line::from(vec![
-                Span::styled("   > ", dim),
-                Span::styled(
-                    format!("{}▎", view.typed),
-                    Style::new().fg(COLOR_SOFT_PURPLE).bold(),
-                ),
-            ]));
+            lines.push(Line::from(
+                [Span::styled("   > ", dim)]
+                    .into_iter()
+                    .chain(crate::ui::pages::main::text_input::cursor_spans(
+                        &view.typed,
+                        true,
+                        Style::new().fg(COLOR_SOFT_PURPLE).bold(),
+                    ))
+                    .collect::<Vec<_>>(),
+            ));
             lines.push(Line::from(""));
-            lines.push(Line::from("⏎ delete   esc: cancel").style(dim));
+            keymap::footer(
+                lines,
+                "",
+                &[
+                    k(keymap::TYPE, "the confirmation word"),
+                    k("Enter", "delete"),
+                    k("Esc", "cancel"),
+                ],
+            );
         }
         ContextDeletePhase::Deleting => {
             lines.push(Line::from("   Deleting…").style(dim));
@@ -651,10 +681,14 @@ fn render_device_access(
                     },
                 ),
                 Span::styled(format!("{name:<10}"), text),
-                Span::styled(value, Style::new().fg(COLOR_SOFT_PURPLE)),
             ];
-            if focused {
-                spans.push(Span::styled(if typed { "▎" } else { "  ←/→" }, dim));
+            spans.extend(crate::ui::pages::main::text_input::cursor_spans(
+                &value,
+                focused && typed,
+                Style::new().fg(COLOR_SOFT_PURPLE),
+            ));
+            if focused && !typed {
+                spans.push(Span::styled("  ←/→", dim));
             }
             Line::from(spans)
         };
@@ -676,10 +710,10 @@ fn render_device_access(
     {
         lines.push(Line::from(""));
         lines.push(
-            Line::from(format!(
-                " Revoke {}'s access to this community?   y: confirm    n: cancel",
+            Line::from(crate::ui::pages::main::confirm::prompt(&format!(
+                " Revoke {}'s access to this community?",
                 grant.did
-            ))
+            )))
             .fg(COLOR_ORANGE)
             .bold(),
         );
@@ -691,21 +725,37 @@ fn render_device_access(
 
     lines.push(Line::from(""));
     let hints = if view.busy {
-        "working…   esc: close".to_string()
-    } else if view.form.is_some() {
-        "Tab: next field   ←/→: expiry   ⏎ grant   esc: cancel".to_string()
+        lines.push(Line::from("working…").style(dim));
+        vec![k("Esc", "close")]
+    } else if let Some(form) = &view.form {
+        let mut hints = Vec::new();
+        if form.field < 2 {
+            hints.push(k(keymap::TYPE, "this field"));
+        } else {
+            hints.push(k("←/→", "expiry"));
+        }
+        hints.extend([
+            k("Tab/↓", "next field"),
+            k("Shift+Tab/↑", "previous field"),
+            k("Enter", "grant"),
+            k("Esc", "cancel"),
+        ]);
+        hints
     } else {
-        let mut hints = vec!["↑/↓ select"];
+        let mut hints = Vec::new();
+        if !grants.is_empty() {
+            hints.push(k("↑/↓", "select"));
+        }
         if view.can_grant {
-            hints.push("n: add a device");
+            hints.push(k("n", "add a device"));
         }
         if !grants.is_empty() {
-            hints.push("x: revoke");
+            hints.push(k("x/Del", "revoke"));
         }
-        hints.extend(["r: refresh", "esc: close"]);
-        hints.join("   ")
+        hints.extend([k("r", "refresh"), k("Esc", "close")]);
+        hints
     };
-    lines.push(Line::from(hints).style(dim));
+    keymap::footer(lines, "", &hints);
     if !view.can_grant {
         lines.push(
             Line::from(
@@ -767,6 +817,7 @@ fn render_personhood_evidence(
         lines.push(Line::from(""));
     }
     if view.confirm_all {
+        keymap::confirming();
         lines.push(
             Line::from(format!(
                 "Include all {} for this assertion only? The community learns each relationship.   y: include all    any other key: back",
@@ -778,11 +829,16 @@ fn render_personhood_evidence(
     } else {
         let n = view.chosen.iter().filter(|c| **c).count();
         lines.push(Line::from(format!("{n} chosen")).style(dim));
-        lines.push(
-            Line::from(
-                "↑/↓ move  Space: include/exclude  A: include all…  Enter: assert  Esc: cancel",
-            )
-            .style(dim),
+        keymap::footer(
+            lines,
+            "",
+            &[
+                k("↑/↓", "move"),
+                k("Space", "include/exclude"),
+                k("A", "include all…"),
+                k("Enter", "assert"),
+                k("Esc", "cancel"),
+            ],
         );
     }
 }
@@ -840,45 +896,61 @@ fn push_personhood_challenge(lines: &mut Vec<Line<'static>>, state: &Communities
 /// The two ungated keys (`j: join`, `v: show/hide archived`) are always listed:
 /// they act on the panel, not the selection, and stay available when nothing is
 /// selected at all.
+/// The footer as text, each binding preceded by a space so a test can look
+/// for one key (`" c: "`) without matching the tail of another (`"Esc: "`).
+#[cfg(test)]
 fn key_hints(state: &CommunitiesState) -> String {
+    bindings(state)
+        .iter()
+        .map(|b| format!(" {}: {}", b.key, b.does))
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+/// The list's keys, gated exactly as the key handler gates them.
+pub(crate) fn bindings(state: &CommunitiesState) -> Vec<keymap::Binding> {
     let selected = state.items.get(state.selected_index);
-    let mut hints = vec!["↑/↓ navigate".to_string()];
+    let rows = state.items.len() + state.joining.len();
+    let mut hints = Vec::new();
+    if rows > 0 {
+        hints.push(k("↑/↓ or j/k", "move"));
+    }
 
     if let Some(community) = selected {
-        hints.push("⏎ open".to_string());
-        hints.push("f: ★".to_string());
-        hints.push("a: acknowledge".to_string());
+        hints.push(k("Enter", "make it the working community"));
+        hints.push(k("f", "★ favourite"));
+        hints.push(k("a", "acknowledge"));
         if community.is_active {
-            hints.push("m: issue VMC".to_string());
-            hints.push("R: renew".to_string());
-            hints.push("c: capabilities".to_string());
-            hints.push("r: repos".to_string());
-            hints.push("o: rooms".to_string());
-            hints.push("e: elections".to_string());
-            hints.push("p: personhood".to_string());
-            hints.push("l: leave".to_string());
+            hints.push(k("m", "issue VMC"));
+            hints.push(k("R", "renew"));
+            hints.push(k("c", "capabilities"));
+            hints.push(k("r", "repos"));
+            hints.push(k("o", "rooms"));
+            hints.push(k("e", "elections"));
+            hints.push(k("p", "personhood"));
+            hints.push(k("l", "leave"));
         }
-        if community.approved_awaiting_credential {
+        if community.approved_awaiting_credential && !community.is_active {
             // The rescue for a lost delivery; matches the key handler's gate.
-            hints.push("R: renew".to_string());
+            hints.push(k("R", "renew"));
         }
         if community.is_pending {
-            hints.push("c: cancel".to_string());
+            hints.push(k("c", "cancel the join"));
         }
         if community.is_inactive {
-            hints.push("x: archive".to_string());
-            hints.push("d: delete".to_string());
+            hints.push(k("x", "archive"));
+            hints.push(k("d/Del", "delete"));
         }
         if community.has_own_context {
-            hints.push("g: devices".to_string());
+            hints.push(k("g", "devices"));
             if community.is_inactive {
-                hints.push("D: delete context".to_string());
+                hints.push(k("D", "delete context"));
             }
         }
     } else if joining_selected(state).is_some() {
         // A join in progress has no membership for any of the keys above to act
         // on; its one action is the journey, where its own keys are.
-        hints.push("⏎ open application".to_string());
+        hints.push(k("Enter", "open application"));
     }
 
     // Gated on the challenge, not on the row — matching the key handler,
@@ -890,19 +962,20 @@ fn key_hints(state: &CommunitiesState) -> String {
         .as_ref()
         .is_some_and(|c| c.is_live(chrono::Utc::now()))
     {
-        hints.push("P: assert personhood".to_string());
+        hints.push(k("P", "assert personhood"));
     }
 
-    hints.push("j: join".to_string());
-    hints.push(
+    hints.push(k("n", "join a community"));
+    hints.push(k(
+        "v",
         if state.show_archived {
-            "v: hide archived"
+            "hide archived"
         } else {
-            "v: show archived"
-        }
-        .to_string(),
-    );
-    hints.join("   ")
+            "show archived"
+        },
+    ));
+    hints.push(k("Esc", "back"));
+    hints
 }
 
 /// The "Joining" row under the cursor, if the cursor is past the memberships —
@@ -938,7 +1011,7 @@ fn render_empty(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
             .fg(COLOR_TEXT_DEFAULT),
     );
     lines.push(Line::from(""));
-    lines.push(Line::from("Press  j  to join your first community.").fg(COLOR_ORANGE));
+    lines.push(Line::from("Press  n  to join your first community.").fg(COLOR_ORANGE));
     lines
 }
 
@@ -1004,7 +1077,7 @@ mod key_hint_tests {
         ] {
             let hints = hints_for(row(active, inactive, pending));
             assert_eq!(
-                hints.matches("c: ").count(),
+                hints.matches(" c: ").count(),
                 usize::from(active || pending),
                 "`c` must appear at most once, and only where it does something: {hints}"
             );
@@ -1046,22 +1119,22 @@ mod key_hint_tests {
     fn an_inactive_row_offers_archive_and_delete() {
         let hints = hints_for(row(false, true, false));
         assert!(
-            hints.contains("x: archive") && hints.contains("d: delete"),
+            hints.contains("x: archive") && hints.contains("d/Del: delete"),
             "{hints}"
         );
-        assert!(!hints.contains("c: "), "{hints}");
+        assert!(!hints.contains(" c: "), "{hints}");
         assert!(!hints.contains("l: leave"), "{hints}");
     }
 
-    /// `j` and `v` act on the panel rather than the selection, so they survive
+    /// `n` and `v` act on the panel rather than the selection, so they survive
     /// an empty list — where every selection-gated key must be absent.
     #[test]
     fn panel_level_keys_survive_an_empty_selection() {
         let hints = key_hints(&CommunitiesState::default());
-        assert!(hints.contains("j: join"), "{hints}");
+        assert!(hints.contains("n: join"), "{hints}");
         assert!(hints.contains("v: show archived"), "{hints}");
-        assert!(!hints.contains("⏎ open"), "nothing is selected: {hints}");
-        assert!(!hints.contains("c: "), "nothing is selected: {hints}");
+        assert!(!hints.contains("Enter: "), "nothing is selected: {hints}");
+        assert!(!hints.contains(" c: "), "nothing is selected: {hints}");
     }
 
     /// The archived toggle reflects the current state, as it did before.
@@ -1465,7 +1538,7 @@ mod key_hint_tests {
         assert!(live.contains("application role"), "{live}");
         assert!(live.contains("did:key:zLaptop"), "{live}");
         assert!(
-            live.contains("n: add a device") && live.contains("x: revoke"),
+            live.contains("n: add a device") && live.contains("x/Del: revoke"),
             "{live}"
         );
 
@@ -1522,7 +1595,7 @@ mod key_hint_tests {
             shown.contains("1 of 1 statement — ready to join"),
             "{shown}"
         );
-        assert!(shown.contains("⏎ open application"), "{shown}");
+        assert!(shown.contains("Enter: open application"), "{shown}");
     }
 
     /// Several joins under way are counted in the header, not named one by one.
@@ -1572,10 +1645,10 @@ mod key_hint_tests {
         assert!(shown.contains("▸ Globex  as Work"), "{shown}");
 
         let hints = key_hints(&state);
-        assert!(hints.contains("⏎ open application"), "{hints}");
+        assert!(hints.contains("Enter: open application"), "{hints}");
         assert!(!hints.contains("f: ★"), "{hints}");
         assert!(!hints.contains("l: leave"), "{hints}");
-        assert!(hints.contains("j: join"), "{hints}");
+        assert!(hints.contains("n: join"), "{hints}");
     }
 }
 

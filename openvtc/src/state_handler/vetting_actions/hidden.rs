@@ -1,6 +1,7 @@
 //! Hidden vetting from the vetter's side: the token schedule tick, minting the
 //! engine, and attesting without a statement; plus the applicant's challenge request.
 
+use crate::state_handler::main_page::status::Status;
 use chrono::{DateTime, Utc};
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
@@ -59,7 +60,10 @@ pub(crate) async fn ask_for_challenge(ctx: &mut ActionCtx<'_>, application_id: &
         kind: QueryKind::PcsChallenge,
         sent_at: Utc::now(),
     });
-    status(ctx, "Asking the community for a submission challenge…");
+    status(
+        ctx,
+        Status::progress("Asking the community for a submission challenge…"),
+    );
     let sent = Sent::Query {
         document_id,
         community: app.community.clone(),
@@ -290,10 +294,10 @@ pub(super) fn ensure_hidden_vetter(ctx: &mut ActionCtx<'_>, community: &str) {
     ctx.save.mark_dirty();
     status(
         ctx,
-        format!(
+        Status::progress(format!(
             "{} hides its vetters. Enrolling you — your attestations there will name nobody.",
             community_display(ctx.config, community)
-        ),
+        )),
     );
 }
 
@@ -315,12 +319,15 @@ pub(super) async fn attest_hidden(
         Err(e) => return cannot_attest_hidden(ctx, entry, &e.to_string(), is_wait(&e), now),
     };
     let Some(session_id) = session_id_of(entry) else {
-        return status(ctx, "This request has no open session to attest on.");
+        return status(
+            ctx,
+            Status::warning("This request has no open session to attest on."),
+        );
     };
     let Some(context_id) = vetter_context(ctx.config, entry.persona) else {
         return status(
             ctx,
-            "The persona this request was made to is not available.",
+            Status::error("The persona this request was made to is not available."),
         );
     };
     let work = PcsWork::Attest {
@@ -331,14 +338,17 @@ pub(super) async fn attest_hidden(
     };
     if start_pcs_work(ctx, vec![work]) {
         page(ctx).mode = VettingMode::List;
-        status(ctx, "Your VTA is making the attestation — it names nobody…");
+        status(
+            ctx,
+            Status::progress("Your VTA is making the attestation — it names nobody…"),
+        );
     } else {
         status(
             ctx,
-            format!(
+            Status::warning(format!(
                 "{} — attest again in a moment. Nothing was sent; the request stays open.",
                 InFlight::busy_message(DispatchDomain::HiddenVetting)
-            ),
+            )),
         );
     }
 }
@@ -369,7 +379,7 @@ pub(super) fn cannot_attest_hidden(
         .filter(|_| waiting);
     status(
         ctx,
-        match outlook {
+        Status::error(match outlook {
             Some(o) => format!(
                 "Cannot attest yet: {why}. Nothing was sent; the request stays open. {}: {}.{}",
                 community_display(ctx.config, &entry.community),
@@ -381,7 +391,7 @@ pub(super) fn cannot_attest_hidden(
                 }
             ),
             None => format!("Cannot attest: {why}"),
-        },
+        }),
     );
 }
 

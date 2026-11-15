@@ -51,8 +51,10 @@ impl SecretBuffer {
     }
 
     /// Length in bytes.
+    /// Characters typed, for the masked display — not bytes, so a
+    /// non-ASCII passphrase shows one `*` per character (#578).
     pub(crate) fn len(&self) -> usize {
-        self.0.len()
+        self.0.chars().count()
     }
 
     /// The text typed so far.

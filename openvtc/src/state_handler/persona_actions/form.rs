@@ -1,6 +1,7 @@
 //! The pane's forms: validating and submitting whichever is open, releasing one
 //! whose request never left, and filling editors from existing records.
 
+use crate::state_handler::main_page::status::Status;
 use openvtc_core::persona::{
     contacts, lifecycle,
     pool::{self, AttributeDraft, PoolAttribute},
@@ -345,7 +346,7 @@ pub(crate) fn release_form(state: &mut State, reason: String) {
         // A read-only overlay has no in-flight write to release; the pane's own
         // status line is where the reason belongs.
         PersonaMode::View | PersonaMode::Renderers(_) | PersonaMode::KnownHere(_) => {
-            p.status_message = Some(reason);
+            p.status_message = Some(Status::error(reason));
         }
     }
 }

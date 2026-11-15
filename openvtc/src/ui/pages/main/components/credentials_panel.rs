@@ -15,7 +15,8 @@ use crate::state_handler::{
     state::ConnectionState,
 };
 use crate::ui::badges;
-use crate::ui::pages::main::{MainPage, copy_to_clipboard, edit_text};
+use crate::ui::pages::main::keymap::{self, k};
+use crate::ui::pages::main::{MainPage, copy_to_clipboard};
 use crossterm::event::{KeyCode, KeyEvent};
 use openvtc_core::display::display_identifier;
 use ratatui::{
@@ -183,10 +184,17 @@ fn render_list(state: &CredentialsState) -> Vec<Line<'static>> {
             ),
         ]));
     }
-    lines.push(
-        Line::from("Tab: switch tab  ↑/↓ navigate  Enter: details  n: request VRC")
-            .fg(COLOR_DARK_GRAY),
-    );
+    let count = state.active_list().len();
+    let mut keys = vec![k("Tab", "next tab")];
+    if count > 1 {
+        keys.push(k("↑/↓", "move"));
+    }
+    if count > 0 {
+        keys.push(k("Enter", "details"));
+    }
+    keys.push(k("n", "request a credential"));
+    keys.push(k("Esc", "back"));
+    keymap::footer(&mut lines, "", &keys);
 
     lines
 }
@@ -303,14 +311,20 @@ fn render_detail(state: &CredentialsState, index: usize) -> Vec<Line<'static>> {
     // A pending removal confirmation replaces the footer hint (R25).
     if state.confirm_delete.is_some() {
         lines.push(
-            Line::from("Remove this credential?   y: confirm    n: cancel")
-                .fg(COLOR_ORANGE)
-                .bold(),
+            Line::from(crate::ui::pages::main::confirm::prompt(
+                "Remove this credential?",
+            ))
+            .fg(COLOR_ORANGE)
+            .bold(),
         );
     } else if state.selected_tab.allows_local_removal() {
-        lines.push(Line::from("d: remove  c: copy JSON  Esc: back").fg(COLOR_DARK_GRAY));
+        keymap::footer(
+            &mut lines,
+            "",
+            &[k("d", "remove"), k("c", "copy JSON"), k("Esc", "back")],
+        );
     } else {
-        lines.push(Line::from("c: copy JSON  Esc: back").fg(COLOR_DARK_GRAY));
+        keymap::footer(&mut lines, "", &[k("c", "copy JSON"), k("Esc", "back")]);
     }
 
     lines
@@ -340,7 +354,7 @@ fn render_new_request(
             Line::from("No established relationships available.").fg(COLOR_WARNING_ACCESSIBLE_RED),
         );
         lines.push(Line::from(""));
-        lines.push(Line::from("Esc: back").fg(COLOR_DARK_GRAY));
+        keymap::footer(&mut lines, "", &[k("Esc", "back")]);
         return lines;
     }
 
@@ -368,14 +382,31 @@ fn render_new_request(
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  Reason: ", Style::new().fg(COLOR_TEXT_DEFAULT)),
-        Span::styled(reason_input.to_string(), Style::new().fg(COLOR_SOFT_PURPLE)),
-        Span::styled("▎", Style::new().fg(COLOR_SUCCESS)),
-    ]));
+    lines.push(Line::from(
+        vec![Span::styled(
+            "  Reason: ",
+            Style::new().fg(COLOR_TEXT_DEFAULT),
+        )]
+        .into_iter()
+        .chain(crate::ui::pages::main::text_input::cursor_spans(
+            reason_input,
+            true,
+            Style::new().fg(COLOR_SOFT_PURPLE),
+        ))
+        .collect::<Vec<_>>(),
+    ));
 
     lines.push(Line::from(""));
-    lines.push(Line::from("↑/↓ select  Enter: send request  Esc: cancel").fg(COLOR_DARK_GRAY));
+    let mut keys = Vec::new();
+    if established.len() > 1 {
+        keys.push(k("↑/↓", "choose"));
+    }
+    keys.extend([
+        k(keymap::TYPE, "reason"),
+        k("Enter", "send request"),
+        k("Esc", "cancel"),
+    ]);
+    keymap::footer(&mut lines, "", &keys);
 
     lines
 }
@@ -403,6 +434,19 @@ impl MainPage {
                 reason_input,
             } => {
                 let rel_idx = *relationship_index;
+                let established = self
+                    .props
+                    .main_page
+                    .content_panel
+                    .relationships
+                    .relationships
+                    .iter()
+                    .filter(|r| r.state == "Established")
+                    .count();
+                // With nothing to request from, the form is only a way back.
+                if established == 0 && key.code != KeyCode::Esc {
+                    return false;
+                }
                 match key.code {
                     KeyCode::Esc => {
                         let _ = self
@@ -416,8 +460,7 @@ impl MainPage {
                         ));
                         true
                     }
-                    KeyCode::Down => {
-                        // Bound check happens in state handler
+                    KeyCode::Down if rel_idx + 1 < established => {
                         let _ = self.action_tx.send(Action::Credential(
                             CredentialAction::SelectRelationship(rel_idx + 1),
                         ));
@@ -448,15 +491,8 @@ impl MainPage {
                         }
                         true
                     }
-                    code => match edit_text(code, reason_input) {
-                        Some(r) => {
-                            let _ = self
-                                .action_tx
-                                .send(Action::Credential(CredentialAction::ReasonUpdate(r)));
-                            true
-                        }
-                        None => false,
-                    },
+                    // Typing is the field's (`text_input`).
+                    _ => false,
                 }
             }
             CredentialsMode::Detail { index } => {
@@ -466,7 +502,7 @@ impl MainPage {
                 // else cancels. Mirrors the Communities/VTA-DID pattern (R25).
                 if let Some(vrc_id) = creds.confirm_delete.clone() {
                     match key.code {
-                        KeyCode::Char('y') | KeyCode::Enter => {
+                        KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
                             let _ = self
                                 .action_tx
                                 .send(Action::Credential(CredentialAction::Remove { vrc_id }));
@@ -487,14 +523,11 @@ impl MainPage {
                             .send(Action::Credential(CredentialAction::Back));
                         true
                     }
-                    KeyCode::Char('d') => {
-                        // Membership, role and vetting credentials are bound to a
-                        // community or an application — there is no local-only
-                        // removal, so `d` is a no-op there (the Remove action
-                        // won't find a matching VRC).
-                        if creds.selected_tab.allows_local_removal()
-                            && let Some(vrc) = creds.active_list().get(detail_index)
-                        {
+                    // Membership, role and vetting credentials are bound to a
+                    // community or an application — there is no local-only
+                    // removal, so `d` is not taken there (and says so).
+                    KeyCode::Char('d') if creds.selected_tab.allows_local_removal() => {
+                        if let Some(vrc) = creds.active_list().get(detail_index) {
                             let _ = self.action_tx.send(Action::Credential(
                                 CredentialAction::ConfirmRemove {
                                     vrc_id: vrc.vrc_id.clone(),

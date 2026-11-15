@@ -636,7 +636,8 @@ mod tests {
         assert!(matches!(&v.mode, VettingMode::SendCard { preview: Some(p), .. } if *p == preview));
         assert!(
             v.status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("approve"))
         );
 
@@ -824,7 +825,8 @@ mod tests {
                 .content_panel
                 .vetting
                 .status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("unreachable"))
         );
     }

@@ -128,10 +128,18 @@ pub fn render(spec: &ChoiceSpec, selected: usize, state: &SetupState, frame: &mu
         middle,
     );
 
-    let bottom_line = Line::from(vec![
+    let mut hints = vec![
         Span::styled("[F10]", Style::new().fg(COLOR_BORDER).bold()),
         Span::styled(" to quit", Style::new().fg(COLOR_TEXT_DEFAULT)),
-    ]);
+    ];
+    if super::navigation::previous_page(state.active_page).is_some() {
+        hints.extend([
+            Span::styled("  |  ", Style::new().fg(COLOR_TEXT_DEFAULT)),
+            Span::styled("[ESC]", Style::new().fg(COLOR_BORDER).bold()),
+            Span::styled(" to go back", Style::new().fg(COLOR_TEXT_DEFAULT)),
+        ]);
+    }
+    let bottom_line = Line::from(hints);
     frame.render_widget(
         Paragraph::new(bottom_line).block(Block::new().padding(Padding::new(2, 0, 1, 0))),
         bottom,

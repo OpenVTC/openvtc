@@ -1,6 +1,7 @@
 //! Shared sending helpers: claiming the vetting domain, signing a message
 //! on the loop and handing its send to a background job.
 
+use crate::state_handler::main_page::status::Status;
 use affinidi_tdk::didcomm::Message;
 use openvtc_core::config::Config;
 use openvtc_core::config::account::PersonaId;
@@ -22,7 +23,10 @@ pub(super) fn begin(ctx: &mut ActionCtx<'_>) -> bool {
     if ctx.in_flight.try_begin(DispatchDomain::Vetting) {
         return true;
     }
-    status(ctx, InFlight::busy_message(DispatchDomain::Vetting));
+    status(
+        ctx,
+        Status::warning(InFlight::busy_message(DispatchDomain::Vetting)),
+    );
     false
 }
 
@@ -33,7 +37,7 @@ pub(super) fn abandon(ctx: &mut ActionCtx<'_>, what: &str, error: impl std::fmt:
     let message = format!("{what}: {error}");
     ctx.state.main_page.log(message.clone());
     ctx.state.main_page.sync_from_config(ctx.config);
-    status(ctx, message);
+    status(ctx, Status::error(message));
 }
 
 pub(super) fn persona_did(config: &Config, persona: PersonaId) -> Option<String> {

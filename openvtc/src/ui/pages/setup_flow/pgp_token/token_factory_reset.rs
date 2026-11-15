@@ -127,7 +127,7 @@ impl TokenFactoryReset {
         let block = Block::bordered()
             .fg(COLOR_BORDER)
             .padding(Padding::proportional(1))
-            .title(" Step 4/6: Factory reset token ");
+            .title(" Factory reset token ");
 
         let mut lines = vec![
             Line::styled(

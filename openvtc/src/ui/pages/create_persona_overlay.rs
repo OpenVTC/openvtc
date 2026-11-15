@@ -23,6 +23,7 @@ use crate::colors::{
 
 use crate::state_handler::actions::Action;
 use crate::state_handler::main_page::content::CreatePersonaState;
+use crate::ui::pages::main::keymap::{self, k};
 
 pub fn handle_key(
     overlay: &CreatePersonaState,
@@ -180,10 +181,11 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
                     Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
                 )));
             }
-            lines.push(Line::from(Span::styled(
-                "⏎ next   esc cancel",
-                Style::new().fg(COLOR_BORDER),
-            )));
+            lines.push(keymap::overlay_line(&[
+                k(keymap::TYPE, "the label"),
+                k("Enter", "next"),
+                k("Esc", "cancel"),
+            ]));
         }
         CreatePersonaPhase::Path => {
             let custom = overlay.path_choice == PersonaPathChoice::Custom;
@@ -290,14 +292,20 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
                 )));
             }
             lines.push(Line::default());
-            lines.push(Line::from(Span::styled(
-                if custom {
-                    "⏎ create   esc: let the server pick"
-                } else {
-                    "⏎ create   p: choose the path yourself   m: DID method   esc back"
-                },
-                Style::new().fg(COLOR_BORDER),
-            )));
+            lines.push(keymap::overlay_line(&if custom {
+                vec![
+                    k(keymap::TYPE, "the path"),
+                    k("Enter", "create"),
+                    k("Esc", "let the server pick"),
+                ]
+            } else {
+                vec![
+                    k("Enter", "create"),
+                    k("p", "choose the path yourself"),
+                    k("m", "DID method"),
+                    k("Esc", "back"),
+                ]
+            }));
         }
         CreatePersonaPhase::Working => {
             for msg in &overlay.messages {
@@ -324,10 +332,10 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
                     Style::new().fg(COLOR_SUCCESS),
                 )));
             }
-            lines.push(Line::from(Span::styled(
-                "c: copy again   ⏎/esc close",
-                Style::new().fg(COLOR_BORDER),
-            )));
+            lines.push(keymap::overlay_line(&[
+                k("c", "copy again"),
+                k("Enter/Esc", "close (so does any other key)"),
+            ]));
         }
         CreatePersonaPhase::Failed => {
             for msg in &overlay.messages {
@@ -337,10 +345,10 @@ pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {
                 )));
             }
             lines.push(Line::default());
-            lines.push(Line::from(Span::styled(
-                "⏎/esc close",
-                Style::new().fg(COLOR_BORDER),
-            )));
+            lines.push(keymap::overlay_line(&[k(
+                "Enter/Esc",
+                "close (so does any key)",
+            )]));
         }
     }
 

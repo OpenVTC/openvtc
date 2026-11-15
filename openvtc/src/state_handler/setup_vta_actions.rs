@@ -213,11 +213,14 @@ pub(crate) async fn handle_vta_submit_did(
         }
     }
 
-    // Mint the ephemeral admin did:key. Held in memory only — a fresh key is
-    // generated if the wizard restarts, and the operator must re-run the PNM
-    // ACL step for the new DID.
-    let setup_key = match EphemeralSetupKey::generate() {
-        Ok(k) => Arc::new(k),
+    // Mint the ephemeral admin did:key — once per run. Held in memory only: a
+    // fresh key is generated if the wizard restarts, and the operator must
+    // re-run the PNM ACL step for the new DID. Going back to this page and on
+    // again within a run keeps the key, so a grant already made for it still
+    // applies (#588).
+    let existing = state.setup.vta.setup_key.clone();
+    let setup_key = match existing.map_or_else(|| EphemeralSetupKey::generate().map(Arc::new), Ok) {
+        Ok(k) => k,
         Err(e) => {
             state.setup.vta.messages.push(MessageType::Error(format!(
                 "Could not generate setup did:key: {e}"

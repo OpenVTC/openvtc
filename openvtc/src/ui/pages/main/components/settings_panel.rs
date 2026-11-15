@@ -10,11 +10,14 @@ use crate::colors::{
 use crate::state_handler::actions::{Action, SettingsAction};
 use crate::state_handler::main_page::MainPanel;
 use crate::state_handler::{
-    main_page::content::{ContentPanelState, SettingsMode, SettingsState, ThemeRow},
+    main_page::content::{
+        ContentPanelState, PROTECTION_CONFIRM_REMOVE, SettingsMode, SettingsState, ThemeRow,
+    },
     state::ConnectionState,
 };
-use crate::ui::pages::main::{MainPage, edit_text};
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::ui::pages::main::MainPage;
+use crate::ui::pages::main::keymap::{self, k};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     style::{Style, Stylize},
     text::{Line, Span},
@@ -184,9 +187,16 @@ fn render_theme_picker(
             .push(Line::from(format!("Your themes live in {}", dir.display())).fg(COLOR_DARK_GRAY));
     }
     lines.push(Line::from(""));
-    lines.push(
-        Line::from("↑/↓ preview  Enter: use  c: copy to edit  r: reload  Esc: cancel")
-            .fg(COLOR_DARK_GRAY),
+    keymap::footer(
+        &mut lines,
+        "",
+        &[
+            k("↑/↓", "preview"),
+            k("Enter", "use"),
+            k("c", "copy to edit"),
+            k("r", "reload"),
+            k("Esc", "cancel"),
+        ],
     );
     lines
 }
@@ -267,7 +277,15 @@ fn render_wipe_confirm(state: &SettingsState, confirm_input: &str) -> Vec<Line<'
         ),
     ]));
     lines.push(Line::from(""));
-    lines.push(Line::from("  Esc: cancel  |  Enter: confirm").fg(COLOR_DARK_GRAY));
+    keymap::footer(
+        &mut lines,
+        "  ",
+        &[
+            k(keymap::TYPE, "the word"),
+            k("Enter", "confirm"),
+            k("Esc", "cancel"),
+        ],
+    );
     lines
 }
 
@@ -323,9 +341,11 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
             Style::new().fg(COLOR_TEXT_DEFAULT)
         };
 
-        let edit_hint = if *editable && is_selected {
+        let edit_hint = if i == MEDIATOR_ROW && is_selected {
+            " [Enter to reconnect]"
+        } else if *editable && is_selected {
             " [Enter to edit]"
-        } else if !editable {
+        } else if !editable && i != MEDIATOR_ROW {
             " (read-only)"
         } else {
             ""
@@ -463,7 +483,11 @@ fn render_view(state: &SettingsState) -> Vec<Line<'static>> {
     ]));
 
     lines.push(Line::from(""));
-    lines.push(Line::from("↑/↓ navigate  Enter: edit/open").fg(COLOR_DARK_GRAY));
+    keymap::footer(
+        &mut lines,
+        "",
+        &[k("↑/↓", "move"), k("Enter", "edit/open"), k("Esc", "back")],
+    );
 
     lines
 }
@@ -518,7 +542,11 @@ fn render_token_management(state: &SettingsState, selected_index: usize) -> Vec<
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from("↑/↓ navigate  Enter: execute  Esc: back").fg(COLOR_DARK_GRAY));
+    keymap::footer(
+        &mut lines,
+        "",
+        &[k("↑/↓", "move"), k("Enter", "run"), k("Esc", "back")],
+    );
 
     lines
 }
@@ -582,26 +610,48 @@ fn render_token_reset_confirm(
         ),
     ]));
     lines.push(Line::from(""));
-    lines.push(Line::from("  Esc: cancel  |  Enter: confirm").fg(COLOR_DARK_GRAY));
+    keymap::footer(
+        &mut lines,
+        "  ",
+        &[
+            k(keymap::TYPE, "the word"),
+            k("Enter", "confirm"),
+            k("Esc", "cancel"),
+        ],
+    );
     lines
 }
 
 /// Render inline edit for a settings field.
 fn render_edit(label: &str, input: &str) -> Vec<Line<'static>> {
-    vec![
+    let mut lines = vec![
         Line::from(""),
         Line::from(format!("Editing: {}", label))
             .fg(COLOR_SUCCESS)
             .bold(),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(input.to_string(), Style::new().fg(COLOR_SOFT_PURPLE)),
-            Span::styled("▎", Style::new().fg(COLOR_SUCCESS)),
-        ]),
+        Line::from(
+            vec![Span::styled("  ", Style::default())]
+                .into_iter()
+                .chain(crate::ui::pages::main::text_input::cursor_spans(
+                    input,
+                    true,
+                    Style::new().fg(COLOR_SOFT_PURPLE),
+                ))
+                .collect::<Vec<_>>(),
+        ),
         Line::from(""),
-        Line::from("Enter: save  Esc: cancel").fg(COLOR_DARK_GRAY),
-    ]
+    ];
+    keymap::footer(
+        &mut lines,
+        "",
+        &[
+            k(keymap::TYPE, "edit"),
+            k("Enter", "save"),
+            k("Esc", "cancel"),
+        ],
+    );
+    lines
 }
 
 /// Render a config form (export or import) with path and passphrase fields.
@@ -628,15 +678,19 @@ fn render_export_form(
     } else {
         Style::new().fg(COLOR_TEXT_DEFAULT)
     };
-    lines.push(Line::from(vec![
-        Span::styled(if path_active { "▸ " } else { "  " }, path_style),
-        Span::styled("File path:  ", path_style),
-        Span::styled(path_input.to_string(), Style::new().fg(COLOR_SOFT_PURPLE)),
-        Span::styled(
-            if path_active { "▎" } else { "" },
-            Style::new().fg(COLOR_SUCCESS),
-        ),
-    ]));
+    lines.push(Line::from(
+        vec![
+            Span::styled(if path_active { "▸ " } else { "  " }, path_style),
+            Span::styled("File path:  ", path_style),
+        ]
+        .into_iter()
+        .chain(crate::ui::pages::main::text_input::cursor_spans(
+            path_input,
+            path_active,
+            Style::new().fg(COLOR_SOFT_PURPLE),
+        ))
+        .collect::<Vec<_>>(),
+    ));
 
     // Passphrase field (index 1) — display masked length only
     let pass_active = active_field == 1;
@@ -678,13 +732,28 @@ fn render_export_form(
 
     push_form_problem(&mut lines, problem);
     lines.push(Line::from(""));
-    lines.push(
-        Line::from(if confirm_len.is_some() {
-            "Tab: switch field  Enter (on confirm): export  Esc: cancel"
-        } else {
-            "Tab: switch field  Enter (on passphrase): import  Esc: cancel"
-        })
-        .fg(COLOR_DARK_GRAY),
+    let last = if confirm_len.is_some() { 2 } else { 1 };
+    let submit = if confirm_len.is_some() {
+        "export"
+    } else {
+        "import"
+    };
+    keymap::footer(
+        &mut lines,
+        "",
+        &[
+            k(keymap::TYPE, "this field"),
+            k("Tab/↑/↓", "switch field"),
+            k(
+                "Enter",
+                if active_field == last {
+                    submit
+                } else {
+                    "next field"
+                },
+            ),
+            k("Esc", "cancel"),
+        ],
     );
 
     lines
@@ -713,9 +782,24 @@ fn render_change_protection(
     );
     lines.push(Line::from(""));
 
-    if active_field == 0 {
+    if active_field == PROTECTION_CONFIRM_REMOVE {
+        lines.push(Line::from(
+            "Remove the unlock code? The profile is then protected by the OS keyring only.",
+        ));
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(crate::ui::pages::main::confirm::prompt(
+                "Remove the unlock code?",
+            ))
+            .fg(COLOR_ORANGE)
+            .bold(),
+        );
+    } else if active_field == 0 {
         // Option selection mode
-        let options = ["Set Passphrase", "Remove Passphrase (keyring only)"];
+        let options = [
+            "Set an unlock code",
+            "Remove the unlock code (keyring only)",
+        ];
         for (i, label) in options.iter().enumerate() {
             let is_selected = i == selected_option;
             let style = if is_selected {
@@ -729,7 +813,15 @@ fn render_change_protection(
             )]));
         }
         lines.push(Line::from(""));
-        lines.push(Line::from("↑/↓ select  Enter: choose  Esc: cancel").fg(COLOR_DARK_GRAY));
+        keymap::footer(
+            &mut lines,
+            "",
+            &[
+                k(if selected_option == 0 { "↓" } else { "↑" }, "select"),
+                k("Enter", "choose"),
+                k("Esc", "cancel"),
+            ],
+        );
     } else {
         // Passphrase input mode — display masked lengths only
         lines.push(Line::from(vec![
@@ -742,7 +834,7 @@ fn render_change_protection(
                 }),
             ),
             Span::styled(
-                "Passphrase: ",
+                "Unlock code: ",
                 Style::new().fg(if active_field == 1 {
                     COLOR_SUCCESS
                 } else {
@@ -769,7 +861,7 @@ fn render_change_protection(
                 }),
             ),
             Span::styled(
-                "Confirm:    ",
+                "Confirm:     ",
                 Style::new().fg(if active_field == 2 {
                     COLOR_SUCCESS
                 } else {
@@ -786,9 +878,23 @@ fn render_change_protection(
         push_form_problem(&mut lines, problem);
 
         lines.push(Line::from(""));
-        lines.push(
-            Line::from("Tab: next field  Enter (on confirm): save  Esc: cancel")
-                .fg(COLOR_DARK_GRAY),
+        keymap::footer(
+            &mut lines,
+            "",
+            &[
+                k(keymap::TYPE, "unlock code"),
+                k("Tab", "switch field"),
+                k(if active_field == 1 { "↓" } else { "↑" }, "switch field"),
+                k(
+                    "Enter",
+                    if active_field == 2 {
+                        "save"
+                    } else {
+                        "next field"
+                    },
+                ),
+                k("Esc", "cancel"),
+            ],
         );
     }
 
@@ -861,15 +967,8 @@ impl MainPage {
                             }));
                         true
                     }
-                    code => match edit_text(code, &current) {
-                        Some(v) => {
-                            let _ = self
-                                .action_tx
-                                .send(Action::Settings(SettingsAction::FieldUpdate(v)));
-                            true
-                        }
-                        None => false,
-                    },
+                    // Typing is the field's (`text_input`).
+                    _ => false,
                 }
             }
             SettingsMode::ExportConfig {
@@ -890,6 +989,17 @@ impl MainPage {
             } => {
                 let active = *active_field;
                 let sel = *selected_option;
+                // Removing the passphrase weakens what protects the keys: it
+                // is armed by Enter and committed only by `y` (#579).
+                if active == PROTECTION_CONFIRM_REMOVE {
+                    let action = if crate::ui::pages::main::confirm::is_yes(&key) {
+                        SettingsAction::RemovePassphrase
+                    } else {
+                        SettingsAction::ProtectionTabSwitch(0)
+                    };
+                    let _ = self.action_tx.send(Action::Settings(action));
+                    return true;
+                }
                 match key.code {
                     KeyCode::Esc => {
                         self.passphrase_buffer.clear();
@@ -918,10 +1028,10 @@ impl MainPage {
                                 .action_tx
                                 .send(Action::Settings(SettingsAction::ProtectionStartInput));
                         } else {
-                            // Remove passphrase
-                            let _ = self
-                                .action_tx
-                                .send(Action::Settings(SettingsAction::RemovePassphrase));
+                            // Remove passphrase — arm the confirmation.
+                            let _ = self.action_tx.send(Action::Settings(
+                                SettingsAction::ProtectionTabSwitch(PROTECTION_CONFIRM_REMOVE),
+                            ));
                         }
                         true
                     }
@@ -979,7 +1089,11 @@ impl MainPage {
                             KeyCode::Backspace => {
                                 buffer.pop();
                             }
-                            KeyCode::Char(c) => {
+                            KeyCode::Char(c)
+                                if !key
+                                    .modifiers
+                                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                            {
                                 buffer.push(c);
                             }
                             _ => return false,
@@ -1076,6 +1190,12 @@ impl MainPage {
                             let _ = self
                                 .action_tx
                                 .send(Action::Settings(SettingsAction::StartEdit));
+                        } else if selected == MEDIATOR_ROW {
+                            // The mediator is fixed by the DID document; what
+                            // can be done from here is reconnect to it (#585).
+                            let _ = self
+                                .action_tx
+                                .send(Action::Settings(SettingsAction::ReconnectMediator));
                         } else if selected == rows::PROTECTION_ROW {
                             let _ = self
                                 .action_tx
@@ -1124,22 +1244,18 @@ impl MainPage {
                 true
             }
             #[cfg(feature = "openpgp-card")]
-            SettingsMode::TokenResetConfirm { confirm_input, .. } => {
-                let current = confirm_input.clone();
+            SettingsMode::TokenResetConfirm { .. } => {
                 let action = match key.code {
                     // Back to the token screen — nothing is erased.
                     KeyCode::Esc => SettingsAction::TokenManagement,
                     KeyCode::Enter => SettingsAction::TokenFactoryReset,
-                    code => match edit_text(code, &current) {
-                        Some(next) => SettingsAction::TokenFactoryResetInput(next),
-                        None => return false,
-                    },
+                    // Typing is the field's (`text_input`).
+                    _ => return false,
                 };
                 let _ = self.action_tx.send(Action::Settings(action));
                 true
             }
-            SettingsMode::WipeConfirm { confirm_input } => {
-                let current = confirm_input.clone();
+            SettingsMode::WipeConfirm { .. } => {
                 match key.code {
                     KeyCode::Esc => {
                         // Drop back to the Settings list — wipe is cancelled.
@@ -1154,15 +1270,8 @@ impl MainPage {
                             .send(Action::Settings(SettingsAction::WipeProfileConfirm));
                         true
                     }
-                    code => match edit_text(code, &current) {
-                        Some(next) => {
-                            let _ = self
-                                .action_tx
-                                .send(Action::Settings(SettingsAction::WipeProfileInput(next)));
-                            true
-                        }
-                        None => false,
-                    },
+                    // Typing is the field's (`text_input`).
+                    _ => false,
                 }
             }
         }
@@ -1198,7 +1307,7 @@ impl MainPage {
                     .send(Action::Settings(SettingsAction::FormTabSwitch));
                 true
             }
-            KeyCode::Enter if active == 1 && confirm => {
+            KeyCode::Enter if active == 0 || (active == 1 && confirm) => {
                 let _ = self
                     .action_tx
                     .send(Action::Settings(SettingsAction::FormTabSwitch));
@@ -1228,15 +1337,8 @@ impl MainPage {
             }
             code => {
                 if active == 0 {
-                    match edit_text(code, &path) {
-                        Some(value) => {
-                            let _ = self.action_tx.send(Action::Settings(
-                                SettingsAction::FormFieldUpdate { field: 0, value },
-                            ));
-                            true
-                        }
-                        None => false,
-                    }
+                    // Typing is the field's (`text_input`).
+                    false
                 } else {
                     let buffer = if active == 1 {
                         &mut self.passphrase_buffer
@@ -1247,7 +1349,11 @@ impl MainPage {
                         KeyCode::Backspace => {
                             buffer.pop();
                         }
-                        KeyCode::Char(c) => {
+                        KeyCode::Char(c)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
                             buffer.push(c);
                         }
                         _ => return false,

@@ -15,6 +15,7 @@ use crate::state_handler::main_page::content::{CapabilitiesPhase, ContentPanelSt
 use crate::state_handler::state::ConnectionState;
 
 use super::panel::Panel;
+use crate::ui::pages::main::keymap::{self, k};
 
 pub struct CapabilitiesPanel;
 
@@ -59,10 +60,7 @@ impl Panel for CapabilitiesPanel {
                     Style::default().fg(COLOR_ORANGE),
                 )));
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "    r retry   Esc back",
-                    Style::default().fg(COLOR_DARK_GRAY),
-                )));
+                keymap::footer(&mut lines, "    ", &bindings(view));
                 return lines;
             }
             CapabilitiesPhase::Loaded if view.items.is_empty() => {
@@ -132,13 +130,14 @@ impl Panel for CapabilitiesPanel {
         {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                    format!(
-                        "    {} {}? This is a signed governance write. y/⏎ confirm · any other key cancels",
-                        if item.enabled { "Disable" } else { "Enable" },
-                        item.slug,
-                    ),
-                    Style::default().fg(COLOR_ORANGE).bold(),
-                )));
+                format!(
+                    "    {} {}? This is a signed governance write.   {}",
+                    if item.enabled { "Disable" } else { "Enable" },
+                    item.slug,
+                    crate::ui::pages::main::confirm::KEYS,
+                ),
+                Style::default().fg(COLOR_ORANGE).bold(),
+            )));
         }
 
         if let Some(status) = &view.status_message {
@@ -147,11 +146,28 @@ impl Panel for CapabilitiesPanel {
         }
 
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "    ↑/↓ navigate   ⏎ details   e enable/disable (administrators)   r refresh   Esc back",
-            Style::default().fg(COLOR_DARK_GRAY),
-        )));
+        keymap::footer(&mut lines, "    ", &bindings(view));
         lines
+    }
+}
+
+/// The view's keys in each phase, gated as the handler gates them.
+fn bindings(
+    view: &crate::state_handler::main_page::content::CapabilitiesView,
+) -> Vec<keymap::Binding> {
+    match view.phase {
+        CapabilitiesPhase::Loading => vec![k("Esc", "back")],
+        CapabilitiesPhase::Failed(_) => vec![k("r", "retry"), k("Esc", "back")],
+        CapabilitiesPhase::Loaded if view.items.is_empty() => {
+            vec![k("r", "refresh"), k("Esc", "back")]
+        }
+        CapabilitiesPhase::Loaded => vec![
+            k("↑/↓ or j/k", "move"),
+            k("Enter", "details"),
+            k("e", "enable/disable (administrators)"),
+            k("r", "refresh"),
+            k("Esc", "back"),
+        ],
     }
 }
 
@@ -249,10 +265,10 @@ impl MainPage {
         key: KeyEvent,
         view: &crate::state_handler::main_page::content::CapabilitiesView,
     ) -> bool {
-        // Toggle confirmation pending: y/⏎ commits, anything else cancels.
+        // Toggle confirmation pending: only y commits, anything else cancels (#579).
         if view.confirm_toggle.is_some() {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => {
+                KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
                     let _ = self.action_tx.send(Action::CapabilitiesToggleCommit);
                 }
                 _ => {
@@ -261,10 +277,17 @@ impl MainPage {
             }
             return true;
         }
+        let listed = matches!(view.phase, CapabilitiesPhase::Loaded) && !view.items.is_empty();
+        let loading = matches!(view.phase, CapabilitiesPhase::Loading);
         match key.code {
             KeyCode::Esc => {
                 let _ = self.action_tx.send(Action::CapabilitiesClose);
             }
+            _ if loading => return false,
+            KeyCode::Char('r') => {
+                let _ = self.action_tx.send(Action::CapabilitiesRefresh);
+            }
+            _ if !listed => return false,
             KeyCode::Up | KeyCode::Char('k') => {
                 let _ = self.action_tx.send(Action::CapabilitiesUp);
             }
@@ -273,9 +296,6 @@ impl MainPage {
             }
             KeyCode::Enter => {
                 let _ = self.action_tx.send(Action::CapabilitiesDetail);
-            }
-            KeyCode::Char('r') => {
-                let _ = self.action_tx.send(Action::CapabilitiesRefresh);
             }
             KeyCode::Char('e') => {
                 let _ = self.action_tx.send(Action::CapabilitiesToggleArm);

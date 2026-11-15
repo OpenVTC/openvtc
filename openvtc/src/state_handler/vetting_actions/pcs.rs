@@ -1,6 +1,7 @@
 //! PCS work at the VTA: deciding when it is due, starting it, and applying
 //! what comes back (results, recoveries, and inbound PCS messages).
 
+use crate::state_handler::main_page::status::Status;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -263,10 +264,10 @@ async fn apply_pcs_result(
             if !matches!(e, PcsError::Unreachable(_)) {
                 status(
                     ctx,
-                    format!(
+                    Status::error(format!(
                         "Could not {what} for {}: {e}",
                         community_display(ctx.config, &community)
-                    ),
+                    )),
                 );
             }
         }
@@ -291,10 +292,10 @@ async fn apply_pcs_result(
             if !matches!(e, PcsError::Unreachable(_)) {
                 status(
                     ctx,
-                    format!(
+                    Status::error(format!(
                         "Could not set up PCS ZKP vetting for {} at your VTA: {e}",
                         community_display(ctx.config, &community)
-                    ),
+                    )),
                 );
             }
         }
@@ -416,7 +417,7 @@ async fn send_enrolment(
 ) {
     let document = match wire::pcs_root_request(did, community, request) {
         Ok(d) => d,
-        Err(e) => return status(ctx, format!("Could not ask to enrol: {e}")),
+        Err(e) => return status(ctx, Status::error(format!("Could not ask to enrol: {e}"))),
     };
     let document_id = document.id.clone();
     if let Some(held) = ctx
@@ -436,7 +437,10 @@ async fn send_enrolment(
     });
     status(
         ctx,
-        format!("Asking to enrol as a vetter under {}…", request.label),
+        Status::progress(format!(
+            "Asking to enrol as a vetter under {}…",
+            request.label
+        )),
     );
     let sent = Sent::Query {
         document_id,
@@ -444,7 +448,7 @@ async fn send_enrolment(
         kind: QueryKind::PcsRoot,
     };
     if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
-        status(ctx, format!("Could not ask to enrol: {e}"));
+        status(ctx, Status::error(format!("Could not ask to enrol: {e}")));
     }
 }
 
@@ -459,7 +463,7 @@ async fn send_draw(
 ) {
     let document = match wire::pcs_tokens_request(did, community, request) {
         Ok(d) => d,
-        Err(e) => return status(ctx, format!("Could not draw tokens: {e}")),
+        Err(e) => return status(ctx, Status::error(format!("Could not draw tokens: {e}"))),
     };
     let document_id = document.id.clone();
     ctx.config.private.vetting.ask(CommunityQuery {
@@ -480,7 +484,7 @@ async fn send_draw(
         kind: QueryKind::PcsTokens,
     };
     if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
-        status(ctx, format!("Could not draw tokens: {e}"));
+        status(ctx, Status::error(format!("Could not draw tokens: {e}")));
     }
 }
 
@@ -507,7 +511,12 @@ fn send_attestation(
             Ok(message) => message,
             // The token is spent either way, but the request is not closed on a delivery that never
             // left.
-            Err(e) => return status(ctx, format!("Could not send the attestation: {e}")),
+            Err(e) => {
+                return status(
+                    ctx,
+                    Status::error(format!("Could not send the attestation: {e}")),
+                );
+            }
         };
     if let Err(e) = ctx
         .config
@@ -515,7 +524,10 @@ fn send_attestation(
         .vetting
         .hidden_attested(&job.request_id, now)
     {
-        return status(ctx, format!("Could not record the attestation: {e}"));
+        return status(
+            ctx,
+            Status::error(format!("Could not record the attestation: {e}")),
+        );
     }
     persist(ctx, "Sending your attestation — it names nobody.");
     let sent = Sent::Attestation {
@@ -686,7 +698,9 @@ fn apply_pcs_inbound(
                 tracing::warn!(error = %e, "hidden attestation refused");
                 status(
                     ctx,
-                    format!("A vetter's attestation was refused by your VTA: {e}"),
+                    Status::error(format!(
+                        "A vetter's attestation was refused by your VTA: {e}"
+                    )),
                 );
             }
             Ok(other) => tracing::warn!(?other, "unexpected answer to verify-attestation"),

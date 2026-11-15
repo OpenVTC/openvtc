@@ -1,6 +1,8 @@
 //! [`PersonaOutcome`]: what a persona job produced, folded back into the pane on
 //! the loop thread.
 
+use crate::state_handler::main_page::content::AgentError;
+use crate::state_handler::main_page::status::Status;
 use std::collections::HashMap;
 
 use openvtc_core::persona::{
@@ -24,14 +26,14 @@ use crate::state_handler::state::State;
 /// What a persona job produced. Data only; applied on the loop thread.
 pub(crate) enum PersonaOutcome {
     Read {
-        attributes: Result<Vec<PoolAttribute>, String>,
-        profiles: Result<Vec<ProfileSummary>, String>,
+        attributes: Result<Vec<PoolAttribute>, AgentError>,
+        profiles: Result<Vec<ProfileSummary>, AgentError>,
         /// The retired faces. Its own result: it feeds an optional view, and a
         /// failure there must not blank the faces the holder wears.
-        retired: Result<Vec<ProfileSummary>, String>,
-        worlds: Result<Vec<world::World>, String>,
-        links: Result<Vec<correlation::Finding>, String>,
-        disclosures: Result<Vec<disclosure::DisclosureRow>, String>,
+        retired: Result<Vec<ProfileSummary>, AgentError>,
+        worlds: Result<Vec<world::World>, AgentError>,
+        links: Result<Vec<correlation::Finding>, AgentError>,
+        disclosures: Result<Vec<disclosure::DisclosureRow>, AgentError>,
         bindings: HashMap<BindingTarget, openvtc_core::persona::binding::BindingSummary>,
         /// The claim-type registry, when this read asked for it. `None` means
         /// it was not asked for — a refresh over a table already held — which
@@ -42,7 +44,7 @@ pub(crate) enum PersonaOutcome {
         /// `clippy::large_enum_variant` will accept: every outcome, including
         /// the three one-word ones, would then be moved at the width of the
         /// table.
-        claim_types: Option<Result<Box<claim_types::Registry>, String>>,
+        claim_types: Option<Result<Box<claim_types::Registry>, AgentError>>,
         include_values: bool,
     },
     Written {
@@ -221,7 +223,7 @@ impl PersonaOutcome {
                         p.retired_faces = list.into();
                         p.retired_error = None;
                     }
-                    Err(e) => p.retired_error = Some(e),
+                    Err(e) => p.retired_error = Some(e.text),
                 }
                 if let Ok(list) = disclosures {
                     p.disclosure_selected = p.disclosure_selected.min(list.len().saturating_sub(1));
@@ -245,7 +247,7 @@ impl PersonaOutcome {
                 match error {
                     None => {
                         p.mode = PersonaMode::View;
-                        p.status_message = Some(format!("{verb}."));
+                        p.status_message = Some(Status::success(format!("{verb}.")));
                         state.main_page.log(format!("{verb}."));
                     }
                     Some(e) => {
@@ -280,7 +282,7 @@ impl PersonaOutcome {
                                 view.working = false;
                                 view.error = Some(e.clone());
                             }
-                            _ => p.status_message = Some(e.clone()),
+                            _ => p.status_message = Some(Status::error(e.clone())),
                         }
                         state
                             .main_page
@@ -375,7 +377,7 @@ impl PersonaOutcome {
                     if worn == 1 { "" } else { "s" },
                     if worn == 1 { "that persona" } else { "them" },
                 );
-                p.status_message = Some(message.clone());
+                p.status_message = Some(Status::warning(message.clone()));
                 p.confirm = PersonaConfirm::DeleteProfile {
                     profile_id,
                     name,
@@ -411,7 +413,7 @@ impl PersonaOutcome {
             PersonaOutcome::Deleted { message } => {
                 p.refresh_queued = true;
                 p.mode = PersonaMode::View;
-                p.status_message = Some(message.clone());
+                p.status_message = Some(Status::success(message.clone()));
                 state.main_page.log(message);
             }
 
@@ -448,7 +450,7 @@ impl PersonaOutcome {
                             // Refused rather than opened: saving could not
                             // round-trip an entry this build cannot read, and a
                             // save that silently drops one is invisible.
-                            p.status_message = Some(detail.refusal());
+                            p.status_message = Some(Status::warning(detail.refusal()));
                         }
                     } else {
                         p.open_profile = Some(detail);
@@ -461,7 +463,7 @@ impl PersonaOutcome {
                     }
                 }
                 Err(e) => {
-                    p.status_message = Some(e.clone());
+                    p.status_message = Some(Status::error(e.clone()));
                     state
                         .main_page
                         .log_error("Reading the profile failed", e.as_str());
@@ -497,12 +499,12 @@ impl PersonaOutcome {
                     p.revealed_attribute = Some(attribute_id);
                 }
                 Ok(_) => {
-                    p.status_message = Some(
+                    p.status_message = Some(Status::error(
                         "That value can't be shown — it has no single stored value.".to_string(),
-                    );
+                    ));
                 }
                 Err(e) => {
-                    p.status_message = Some(e.clone());
+                    p.status_message = Some(Status::error(e.clone()));
                     state
                         .main_page
                         .log_error("Revealing the value failed", e.as_str());
@@ -523,7 +525,7 @@ impl PersonaOutcome {
                         } else {
                             format!("Changed the face {community} sees.")
                         };
-                        p.status_message = Some(msg.clone());
+                        p.status_message = Some(Status::success(msg.clone()));
                         state.main_page.log(msg);
                     }
                     Some(e) => {
@@ -531,7 +533,7 @@ impl PersonaOutcome {
                             picker.working = false;
                             picker.error = Some(e.clone());
                         } else {
-                            p.status_message = Some(e.clone());
+                            p.status_message = Some(Status::error(e.clone()));
                         }
                         state
                             .main_page
@@ -618,7 +620,10 @@ mod tests {
         });
 
         PersonaOutcome::Read {
-            attributes: Err("connection refused".to_string()),
+            attributes: Err(AgentError::new(
+                "connection refused",
+                openvtc_core::errors::ErrorClass::Unreachable,
+            )),
             profiles: Ok(Vec::new()),
             retired: Ok(vec![]),
             disclosures: Ok(Vec::new()),
@@ -632,7 +637,10 @@ mod tests {
 
         assert_eq!(personas(&state).attributes.len(), 1);
         assert_eq!(
-            personas(&state).load_error.as_deref(),
+            personas(&state)
+                .load_error
+                .as_ref()
+                .map(|e| e.text.as_str()),
             Some("connection refused")
         );
     }
@@ -701,7 +709,8 @@ mod tests {
         assert!(
             personas(&state)
                 .status_message
-                .as_deref()
+                .as_ref()
+                .map(|s| s.text.as_str())
                 .is_some_and(|m| m.contains("cannot read"))
         );
     }
@@ -713,7 +722,7 @@ mod tests {
     /// untick the holder could not fix it from here.
     #[test]
     fn the_editor_drops_references_to_attributes_the_pool_no_longer_holds() {
-        let open = |loaded: bool, load_error: Option<String>| {
+        let open = |loaded: bool, load_error: Option<AgentError>| {
             let mut state = state_with(IdentityState {
                 attributes: vec![attribute("01A")].into(),
                 loaded,
@@ -737,7 +746,13 @@ mod tests {
         assert_eq!(open(true, None), (vec!["01A".to_string()], 1));
         // A pool that did not read cleanly is no evidence anything is gone.
         assert_eq!(
-            open(true, Some("unreachable".into())),
+            open(
+                true,
+                Some(AgentError::new(
+                    "unreachable",
+                    openvtc_core::errors::ErrorClass::Unreachable,
+                )),
+            ),
             (vec!["01A".to_string(), "01GONE".to_string()], 0)
         );
         assert_eq!(

@@ -1,5 +1,6 @@
 //! Relationship action handlers for the TUI.
 
+use crate::state_handler::main_page::status::Status;
 use std::sync::Arc;
 
 use crate::state_handler::setup_sequence::vta;
@@ -421,7 +422,7 @@ impl RelationshipOutcome {
         // Accessor for the relationships-panel status slot, used by the
         // `dispatch_util` save/error helpers below (a free fn so its HRTB is
         // inferred correctly).
-        fn status(mp: &mut crate::state_handler::main_page::MainPageState) -> &mut Option<String> {
+        fn status(mp: &mut crate::state_handler::main_page::MainPageState) -> &mut Option<Status> {
             &mut mp.content_panel.relationships.status_message
         }
         match self.effect {
@@ -624,7 +625,7 @@ impl RelationshipOutcome {
                 }
                 Err(e) => {
                     state.main_page.content_panel.relationships.status_message =
-                        Some(format!("Ping failed: {e:#}"));
+                        Some(Status::error(format!("Ping failed: {e:#}")));
                     state.main_page.log_detailed(
                         format!("Ping to {display_name} failed: {e}"),
                         format!(
@@ -678,7 +679,7 @@ impl RelationshipOutcome {
                 Err(e) => {
                     let err = anyhow::anyhow!("{e}");
                     state.main_page.content_panel.relationships.status_message =
-                        Some(format!("VRC request failed: {err:#}"));
+                        Some(Status::error(format!("VRC request failed: {err:#}")));
                     state
                         .main_page
                         .log_error(format!("VRC request to {display_name} failed"), &err);
@@ -1028,13 +1029,13 @@ async fn prepare_submit(
     // In-progress status (shown by the loop's post-arm state send).
     if generate_r_did {
         state.main_page.content_panel.relationships.status_message =
-            Some("Creating relationship DID...".to_string());
+            Some(Status::progress("Creating relationship DID...".to_string()));
         state
             .main_page
             .log("Creating relationship DID via key backend...");
     } else {
         state.main_page.content_panel.relationships.status_message =
-            Some("Sending request...".to_string());
+            Some(Status::progress("Sending request...".to_string()));
     }
 
     Ok(RelationshipJob::Create(Box::new(CreateJob {
@@ -1083,7 +1084,7 @@ fn prepare_ping(
     let display_name = resolve_did_to_display(config, remote_p_did);
 
     state.main_page.content_panel.relationships.status_message =
-        Some("Sending ping...".to_string());
+        Some(Status::progress("Sending ping...".to_string()));
 
     Ok(RelationshipJob::Send(Box::new(RelationshipSend {
         service: service.clone(),
@@ -1120,7 +1121,7 @@ fn prepare_remove(
     // The confirmation is now resolved.
     state.main_page.content_panel.relationships.confirm_delete = None;
     state.main_page.content_panel.relationships.status_message =
-        Some("Removing relationship...".to_string());
+        Some(Status::progress("Removing relationship...".to_string()));
     RelationshipJob::Remove {
         service: service.clone(),
         listener_id,
@@ -1157,7 +1158,7 @@ fn prepare_request_vrc(
     let display_name = resolve_did_to_display(config, remote_p_did);
 
     state.main_page.content_panel.relationships.status_message =
-        Some("Requesting VRC...".to_string());
+        Some(Status::progress("Requesting VRC...".to_string()));
 
     Ok(RelationshipJob::Send(Box::new(RelationshipSend {
         service: service.clone(),
@@ -1368,7 +1369,7 @@ pub(crate) async fn dispatch(
                 Ok(job) => return RelationshipDispatch::Spawn { job, is_ping: true },
                 Err(e) => {
                     state.main_page.content_panel.relationships.status_message =
-                        Some(format!("Ping failed: {e:#}"));
+                        Some(Status::error(format!("Ping failed: {e:#}")));
                     state.main_page.log_error("Failed to send trust-ping", &e);
                 }
             }
@@ -1430,9 +1431,9 @@ pub(crate) async fn dispatch(
         // its own domain (`witness_actions`). Reaching here means a loop with no runtime
         // services — say so rather than drop it.
         RelationshipAction::Witness { .. } => {
-            state.main_page.content_panel.relationships.status_message = Some(
-                "Witnessing is not available until messaging and the VTA are connected.".into(),
-            );
+            state.main_page.content_panel.relationships.status_message = Some(Status::error(
+                "Witnessing is not available until messaging and the VTA are connected.",
+            ));
         }
         RelationshipAction::RequestVrc { remote_p_did } => {
             match prepare_request_vrc(config, service, state, &remote_p_did) {
@@ -1444,7 +1445,7 @@ pub(crate) async fn dispatch(
                 }
                 Err(e) => {
                     state.main_page.content_panel.relationships.status_message =
-                        Some(format!("VRC request failed: {e:#}"));
+                        Some(Status::error(format!("VRC request failed: {e:#}")));
                     let display_name = resolve_did_to_display(config, &remote_p_did);
                     state
                         .main_page
@@ -1675,7 +1676,8 @@ mod tests {
                 .content_panel
                 .relationships
                 .status_message
-                .as_deref(),
+                .as_ref()
+                .map(|s| s.text.as_str()),
             Some("Ping sent")
         );
         assert!(
@@ -1717,6 +1719,7 @@ mod tests {
             .relationships
             .status_message
             .clone()
+            .map(|s| s.text)
             .unwrap_or_default();
         assert!(status.starts_with("Ping failed"), "got: {status}");
         assert!(
@@ -1823,7 +1826,8 @@ mod tests {
                 .content_panel
                 .relationships
                 .status_message
-                .as_deref(),
+                .as_ref()
+                .map(|s| s.text.as_str()),
             // Names the party rather than echoing its DID: the fixture has a
             // contact alias for this peer, and the status line honours the same
             // alias → verified agent name → DID precedence as everywhere else.
@@ -1944,6 +1948,7 @@ mod tests {
             .relationships
             .status_message
             .clone()
+            .map(|s| s.text)
             .unwrap_or_default();
         assert!(status.starts_with("Error:"), "got: {status}");
     }
@@ -1980,7 +1985,8 @@ mod tests {
                 .content_panel
                 .relationships
                 .status_message
-                .as_deref(),
+                .as_ref()
+                .map(|s| s.text.as_str()),
             Some("Relationship removed")
         );
     }
@@ -2062,7 +2068,8 @@ mod tests {
         ] {
             let mut state = State::default();
             state.main_page.content_panel.relationships.mode = start;
-            state.main_page.content_panel.relationships.status_message = Some("stale".to_string());
+            state.main_page.content_panel.relationships.status_message =
+                Some(Status::info("stale".to_string()));
             handle_cancel_or_back(&mut state);
             assert!(matches!(rel_mode(&state), RelationshipsMode::List));
             assert!(

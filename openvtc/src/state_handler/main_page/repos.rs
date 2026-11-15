@@ -30,45 +30,7 @@ use openvtc_core::git_workspace::{
 /// Longest name or DID kept for display.
 pub const MAX_NAME: usize = 256;
 
-/// How a status line reads: its colour comes from this, never from its text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Severity {
-    /// Neutral information.
-    Info,
-    /// A request is on its way; cleared when its answer lands.
-    Progress,
-    /// A change the community confirmed.
-    Success,
-    /// Nothing was done, and why (a key that does not apply here).
-    Warning,
-    /// A refusal, a failed send, a timeout, a contract mismatch.
-    Error,
-}
-
-/// One status line.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Status {
-    pub text: String,
-    pub severity: Severity,
-}
-
-impl Status {
-    #[must_use]
-    pub fn error(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            severity: Severity::Error,
-        }
-    }
-
-    #[must_use]
-    pub fn warning(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            severity: Severity::Warning,
-        }
-    }
-}
+pub use super::status::{Severity, Status};
 
 /// Load phase of the view read.
 #[derive(Clone, Debug, PartialEq)]

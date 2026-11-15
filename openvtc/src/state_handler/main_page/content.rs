@@ -180,7 +180,7 @@ pub struct CapabilitiesView {
     /// When the in-flight request was sent (reply-timeout sweep).
     pub sent_at: Option<std::time::Instant>,
     /// Transient status message.
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
 }
 
 impl CapabilitiesView {
@@ -215,6 +215,15 @@ pub struct CapabilitiesState {
 // Communities State (R-C-*)
 // ****************************************************************************
 
+/// A message to a community the Communities panel asks about before sending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommunitySend {
+    /// Issue this membership's reciprocal VMC to the community (`m`).
+    IssueVmc(usize),
+    /// Ask the community to renew this membership's credentials (`R`).
+    Renew(usize),
+}
+
 /// State for the Communities overview panel — the account's community
 /// memberships, in display order (favourites first).
 #[derive(Clone, Debug, Default)]
@@ -237,7 +246,7 @@ pub struct CommunitiesState {
     /// Number of communities raising the actions-required indicator (R-C-3).
     pub actions_required: usize,
     /// Transient status message.
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
     /// When `Some(index)`, a removal of that community is awaiting `y`/`n`
     /// confirmation (the panel shows a prompt and other keys are suppressed).
     pub confirm_delete: Option<usize>,
@@ -248,6 +257,9 @@ pub struct CommunitiesState {
     /// `y`/`n` confirmation. Transitions the record to `Withdrawn` so it can then
     /// be deleted or re-joined.
     pub confirm_withdraw: Option<usize>,
+    /// When `Some`, a message to the community (issue the VMC, ask to renew)
+    /// is awaiting `y` — it is sent to someone else, so it confirms (#579).
+    pub confirm_send: Option<CommunitySend>,
     /// Whether archived communities are included in the list (R-C-8). Off by
     /// default; toggled so archived records stay discoverable.
     pub show_archived: bool,
@@ -366,7 +378,7 @@ pub struct DeviceAccessView {
     /// A read, grant or revoke is running.
     pub busy: bool,
     /// The last result or problem.
-    pub message: Option<String>,
+    pub message: Option<crate::state_handler::main_page::status::Status>,
 }
 
 /// The new-grant form.
@@ -1439,6 +1451,41 @@ impl ComposeForm {
     }
 }
 
+/// A failed read from the agent: what it said, and which class of failure
+/// it was (R6.4) — an unreachable agent and a refusing one need different
+/// answers on screen (#585).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentError {
+    pub text: String,
+    pub class: openvtc_core::errors::ErrorClass,
+}
+
+impl AgentError {
+    #[must_use]
+    pub fn new(text: impl Into<String>, class: openvtc_core::errors::ErrorClass) -> Self {
+        Self {
+            text: text.into(),
+            class,
+        }
+    }
+
+    /// An error, classified by its source chain.
+    #[must_use]
+    pub fn of(err: impl Into<anyhow::Error>) -> Self {
+        let err = err.into();
+        Self::new(
+            format!("{err}"),
+            openvtc_core::errors::class_of(err.as_ref()),
+        )
+    }
+}
+
+impl std::fmt::Display for AgentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
 /// The persona pane: every surface for the holder's own identity, in one place.
 ///
 /// Five of the six tabs are served by the agent and one by `Config`, and the
@@ -1605,7 +1652,7 @@ pub struct IdentityState {
     /// An empty pool and an unreachable agent look identical on screen unless
     /// something says otherwise, and of the two, "you have no attributes" is
     /// the confident wrong answer about the holder's own data (VTI R6.4).
-    pub load_error: Option<String>,
+    pub load_error: Option<AgentError>,
     /// Whether the agent-served tabs have ever been read in this session.
     pub loaded: bool,
     /// A refresh was asked for while one was in flight. Re-issued when the
@@ -1615,7 +1662,7 @@ pub struct IdentityState {
     pub confirm: PersonaConfirm,
     pub mode: PersonaMode,
     /// Transient status line.
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
 }
 
 impl IdentityState {
@@ -2244,7 +2291,7 @@ pub struct VettingState {
     pub desk_view: DeskView,
     pub selected: usize,
     pub mode: VettingMode,
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
     pub applications: Arc<[ApplicationRow]>,
     pub desk: Arc<[DeskRow]>,
     pub tickets: Arc<[TicketRow]>,
@@ -3549,7 +3596,7 @@ pub struct InboxState {
     /// When viewing a specific task's details
     pub active_task: Option<ActiveTaskView>,
     /// Transient status message (e.g., "Task accepted", "Error: ...")
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
     /// When `Some`, a destructive inbox action (dismiss one task, or clear all)
     /// is awaiting `y`/`n` confirmation; the panel shows a prompt and other keys
     /// are suppressed. Mirrors the Communities/VTA-DID confirm pattern (R25).
@@ -3563,6 +3610,9 @@ pub enum InboxConfirm {
     Dismiss { task_id: String },
     /// Clear every pending task.
     ClearAll,
+    /// Reject an inbound request — sent to the peer, so it confirms (#579).
+    /// `vrc` is a VRC request; otherwise a relationship request.
+    Reject { task_id: String, vrc: bool },
 }
 
 /// Lightweight display summary of a task (no Arc/Mutex).
@@ -3739,7 +3789,7 @@ pub struct RelationshipsState {
     /// Current panel mode (list, detail, new request form)
     pub mode: RelationshipsMode,
     /// Transient status message
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
     /// When `Some(remote_p_did)`, removal of that relationship is awaiting
     /// `y`/`n` confirmation (armed from the detail view). Mirrors the
     /// Communities/VTA-DID confirm pattern (R25).
@@ -3888,7 +3938,7 @@ pub struct CredentialsState {
     /// Current panel mode
     pub mode: CredentialsMode,
     /// Transient status message
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
     /// Stored VRCs set aside on load because they pre-date DTG Credentials v1
     /// ([`openvtc_core::vrc::Vrcs::retired`]), across every store. Shown as a
     /// warning so the member knows to ask those peers for fresh ones.
@@ -4065,7 +4115,7 @@ pub struct SettingsState {
     /// Current panel mode
     pub mode: SettingsMode,
     /// Transient status message
-    pub status_message: Option<String>,
+    pub status_message: Option<crate::state_handler::main_page::status::Status>,
     /// Hardware token management state
     #[cfg(feature = "openpgp-card")]
     pub token: TokenManagementState,
@@ -4098,6 +4148,10 @@ pub struct TokenManagementState {
     /// Whether a factory reset was completed
     pub reset_completed: bool,
 }
+
+/// `ChangeProtection::active_field` while removing the passphrase awaits `y`:
+/// it weakens what protects the key material, so it confirms (#579).
+pub const PROTECTION_CONFIRM_REMOVE: usize = 3;
 
 /// Display modes for the settings panel.
 #[derive(Clone, Debug, Default)]
@@ -4133,7 +4187,8 @@ pub enum SettingsMode {
         passphrase_len: usize,
         /// Length of the confirm passphrase (actual value held only in UI component)
         confirm_len: usize,
-        /// Which field is active (0 = option list, 1 = passphrase, 2 = confirm)
+        /// Which field is active (0 = option list, 1 = passphrase, 2 = confirm,
+        /// [`PROTECTION_CONFIRM_REMOVE`] = removing the passphrase awaits `y`)
         active_field: usize,
     },
     /// Token management sub-screen

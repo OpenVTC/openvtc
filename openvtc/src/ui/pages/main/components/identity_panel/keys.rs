@@ -91,7 +91,7 @@ impl MainPage {
                     KeyCode::Enter => send(PA::FormSubmit),
                     KeyCode::Down => send(PA::FormCycle(true)),
                     KeyCode::Up => send(PA::FormCycle(false)),
-                    _ => true,
+                    _ => false,
                 };
             }
             PersonaMode::Bind(picker) => {
@@ -103,7 +103,7 @@ impl MainPage {
                     KeyCode::Enter => send(PA::FormSubmit),
                     KeyCode::Down => send(PA::FormCycle(true)),
                     KeyCode::Up => send(PA::FormCycle(false)),
-                    _ => true,
+                    _ => false,
                 };
             }
             PersonaMode::Compose(form) => {
@@ -141,6 +141,15 @@ impl MainPage {
                         _ => send(PA::FormKey(key)),
                     };
                 }
+                // A deletion, or making a value reusable — both one-way — is
+                // committed by `y` alone (#579).
+                if view.deleting.is_some() || view.confirming {
+                    return if crate::ui::pages::main::confirm::is_yes(&key) {
+                        send(PA::FormSubmit)
+                    } else {
+                        send(PA::FormCancel)
+                    };
+                }
                 return match key.code {
                     KeyCode::Esc => send(PA::FormCancel),
                     KeyCode::Enter => send(PA::FormSubmit),
@@ -150,7 +159,7 @@ impl MainPage {
                     KeyCode::Char('n') => send(PA::LocalFaceNew),
                     KeyCode::Char('w') => send(PA::LocalFaceWear),
                     KeyCode::Char('d') | KeyCode::Delete => send(PA::LocalFaceDeleteArm),
-                    _ => true,
+                    _ => false,
                 };
             }
             // Read-only overlays: any key but Esc is ignored rather than
@@ -158,7 +167,7 @@ impl MainPage {
             PersonaMode::Renderers(_) | PersonaMode::KnownHere(_) => {
                 return match key.code {
                     KeyCode::Esc => send(PA::FormCancel),
-                    _ => true,
+                    _ => false,
                 };
             }
             PersonaMode::People(view) => {
@@ -178,15 +187,22 @@ impl MainPage {
                         _ => send(PA::FormKey(key)),
                     };
                 }
+                // Forgetting someone is committed by `y` alone (#579).
+                if view.deleting.is_some() {
+                    return if crate::ui::pages::main::confirm::is_yes(&key) {
+                        send(PA::FormSubmit)
+                    } else {
+                        send(PA::FormCancel)
+                    };
+                }
                 return match key.code {
                     KeyCode::Esc => send(PA::FormCancel),
-                    KeyCode::Enter if view.deleting.is_some() => send(PA::FormSubmit),
                     KeyCode::Enter => send(PA::ContactOpen),
                     KeyCode::Down => send(PA::FormCycle(true)),
                     KeyCode::Up => send(PA::FormCycle(false)),
                     KeyCode::Char('n') => send(PA::ContactNew),
                     KeyCode::Char('d') | KeyCode::Delete => send(PA::ContactDeleteArm),
-                    _ => true,
+                    _ => false,
                 };
             }
             PersonaMode::View => {}
@@ -202,7 +218,9 @@ impl MainPage {
             PersonaConfirm::None => {}
             PersonaConfirm::DeletePersona(i) => {
                 let act = match key.code {
-                    KeyCode::Char('y') | KeyCode::Enter => Action::DeleteDid(i),
+                    KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
+                        Action::DeleteDid(i)
+                    }
                     _ => Action::DidCancelDelete,
                 };
                 let _ = self.action_tx.send(act);
@@ -210,7 +228,9 @@ impl MainPage {
             }
             _ => {
                 return match key.code {
-                    KeyCode::Char('y') | KeyCode::Enter => send(PA::ConfirmYes),
+                    KeyCode::Char('y') if crate::ui::pages::main::confirm::is_yes(&key) => {
+                        send(PA::ConfirmYes)
+                    }
                     _ => send(PA::ConfirmNo),
                 };
             }
@@ -265,14 +285,13 @@ impl MainPage {
                     // first, and the deletion path refuses it anyway. Refusing
                     // to *arm* it keeps the prompt from appearing over a
                     // question that has already been answered no.
-                    KeyCode::Char('d') | KeyCode::Delete if selected < count => {
+                    KeyCode::Char('d') | KeyCode::Delete
                         if personas
                             .personas
                             .get(selected)
-                            .is_some_and(|f| f.bound_communities == 0)
-                        {
-                            let _ = self.action_tx.send(Action::DidConfirmDelete(selected));
-                        }
+                            .is_some_and(|f| f.bound_communities == 0) =>
+                    {
+                        let _ = self.action_tx.send(Action::DidConfirmDelete(selected));
                         true
                     }
                     _ => false,

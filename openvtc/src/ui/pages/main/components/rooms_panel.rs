@@ -19,6 +19,7 @@ use crate::state_handler::state::ConnectionState;
 use openvtc_core::community_rooms::{self, Standing};
 
 use super::panel::Panel;
+use crate::ui::pages::main::keymap::{self, k};
 
 pub struct RoomsPanel;
 
@@ -31,12 +32,7 @@ fn text(text: impl Into<String>) -> Span<'static> {
 }
 
 fn push_status(lines: &mut Vec<Line<'static>>, status: &Status) {
-    let style = match status.severity {
-        Severity::Info | Severity::Progress => Style::default().fg(COLOR_TEXT_DEFAULT),
-        Severity::Success => Style::default().fg(COLOR_SUCCESS),
-        Severity::Warning => Style::default().fg(COLOR_ORANGE),
-        Severity::Error => Style::default().fg(COLOR_WARNING_ACCESSIBLE_RED).bold(),
-    };
+    let style = super::status::severity_style(status.severity);
     for part in super::status::wrap_text(
         &status.text,
         super::status::content_width().saturating_sub(6).max(20),
@@ -78,7 +74,7 @@ impl Panel for RoomsPanel {
                     "    asking the community which rooms it has offered you…",
                 )));
                 lines.push(Line::from(""));
-                lines.push(Line::from(dim("    r retry   Esc back")));
+                keymap::footer(&mut lines, "    ", &bindings(view));
                 return lines;
             }
             RoomsPhase::Failed(detail) => {
@@ -91,7 +87,7 @@ impl Panel for RoomsPanel {
                     },
                 );
                 lines.push(Line::from(""));
-                lines.push(Line::from(dim("    r retry   Esc back")));
+                keymap::footer(&mut lines, "    ", &bindings(view));
                 return lines;
             }
             RoomsPhase::Loaded => {}
@@ -192,16 +188,8 @@ impl Panel for RoomsPanel {
             push_status(&mut lines, status);
         }
 
-        let mut keys = vec!["↑/↓ navigate"];
-        if view.selected_row().is_some_and(|r| {
-            r.standing.acceptable() && community_rooms::RoomCondition::of(&r.room).admits()
-        }) && view.accept.is_none()
-        {
-            keys.push("⏎ accept");
-        }
-        keys.extend(["r refresh", "Esc back"]);
         lines.push(Line::from(""));
-        lines.push(Line::from(dim(format!("    {}", keys.join("   ")))));
+        keymap::footer(&mut lines, "    ", &bindings(view));
         lines.push(Line::from(dim(
             "    The same rooms, in the same state, as your member portal and pnm show.",
         )));
@@ -210,18 +198,44 @@ impl Panel for RoomsPanel {
 }
 
 /// The Rooms panel's keys: navigate, accept, refresh, close.
+/// Whether the highlighted room can be accepted now.
+fn acceptable(view: &crate::state_handler::main_page::rooms::RoomsView) -> bool {
+    view.selected_row().is_some_and(|r| {
+        r.standing.acceptable() && community_rooms::RoomCondition::of(&r.room).admits()
+    }) && view.accept.is_none()
+}
+
+/// The view's keys, gated as [`rooms_key`] gates them.
+fn bindings(view: &crate::state_handler::main_page::rooms::RoomsView) -> Vec<keymap::Binding> {
+    let mut keys = Vec::new();
+    if matches!(view.phase, RoomsPhase::Loaded) {
+        if !view.rooms.is_empty() {
+            keys.push(k("↑/↓ or j/k", "move"));
+        }
+        if acceptable(view) {
+            keys.push(k("Enter/a", "accept"));
+        }
+        keys.push(k("r", "refresh"));
+    } else {
+        keys.push(k("r", "retry"));
+    }
+    keys.push(k("Esc", "back"));
+    keys
+}
+
 pub(super) fn rooms_key(
     key: KeyEvent,
     view: &crate::state_handler::main_page::rooms::RoomsView,
 ) -> Option<crate::state_handler::actions::RoomsAction> {
     use crate::state_handler::actions::RoomsAction as R;
     let last = view.rooms.len().saturating_sub(1);
+    let listed = matches!(view.phase, RoomsPhase::Loaded) && !view.rooms.is_empty();
     Some(match key.code {
         KeyCode::Esc => R::Back,
         KeyCode::Char('r') => R::Refresh,
-        KeyCode::Up | KeyCode::Char('k') => R::Select(view.selected.saturating_sub(1)),
-        KeyCode::Down | KeyCode::Char('j') => R::Select((view.selected + 1).min(last)),
-        KeyCode::Enter | KeyCode::Char('a') => R::Accept,
+        KeyCode::Up | KeyCode::Char('k') if listed => R::Select(view.selected.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') if listed => R::Select((view.selected + 1).min(last)),
+        KeyCode::Enter | KeyCode::Char('a') if acceptable(view) => R::Accept,
         _ => return None,
     })
 }

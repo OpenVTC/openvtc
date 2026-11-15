@@ -1,5 +1,6 @@
 //! Settings action handlers for the TUI.
 
+use crate::state_handler::main_page::status::Status;
 use anyhow::Result;
 #[cfg(feature = "openpgp-card")]
 use openvtc_core::config::ConfigProtectionType;
@@ -67,7 +68,7 @@ pub async fn set_passphrase(
     config.public.protection = ConfigProtectionType::Encrypted;
     config.private.logs.insert(
         LogFamily::Config,
-        "Config protection changed to passphrase encrypted".to_string(),
+        "Profile protection changed to an unlock code".to_string(),
     );
     save_config(config, profile)?;
     info!("config protection set to passphrase encrypted");
@@ -336,7 +337,7 @@ async fn handle_export_config_action(
     // derive, during which the loop is parked here but the render task keeps
     // drawing this status (the runtime is no longer pegged by the KDF).
     state.main_page.content_panel.settings.status_message =
-        Some("Deriving encryption key…".to_string());
+        Some(Status::progress("Deriving encryption key…".to_string()));
     let _ = state_tx.send(state.clone());
 
     match export_config(config, path, passphrase).await {
@@ -371,7 +372,7 @@ async fn handle_export_config_action(
         }
         Err(e) => {
             state.main_page.content_panel.settings.status_message =
-                Some(format!("Export failed: {e:#}"));
+                Some(Status::error(format!("Export failed: {e:#}")));
             state.main_page.log_error("Config export failed", &e);
         }
     }
@@ -412,7 +413,7 @@ fn handle_import_config_action(
         }
         Err(e) => {
             state.main_page.content_panel.settings.status_message =
-                Some(format!("Import failed: {e:#}"));
+                Some(Status::error(format!("Import failed: {e:#}")));
             state.main_page.log_error("Config import failed", &e);
         }
     }
@@ -441,7 +442,7 @@ async fn handle_set_passphrase(
     // Push it to the render task now; `set_passphrase` then awaits a
     // `spawn_blocking` derive, during which the render task keeps drawing.
     state.main_page.content_panel.settings.status_message =
-        Some("Deriving encryption key…".to_string());
+        Some(Status::progress("Deriving encryption key…".to_string()));
     let _ = state_tx.send(state.clone());
 
     // R11 force-flush: a protection change re-derives the unlock key and rewrites
@@ -462,8 +463,8 @@ async fn handle_set_passphrase(
                 save,
                 dispatch_util::Persist::SyncOnly,
                 |mp| &mut mp.content_panel.settings.status_message,
-                "Passphrase protection enabled",
-                dispatch_util::SyncLog::Plain("Passphrase protection enabled".to_string()),
+                "Unlock code protection enabled",
+                dispatch_util::SyncLog::Plain("Unlock code protection enabled".to_string()),
             );
             // Setting a passphrase can move the secret to durable storage (the
             // file store only accepts an encrypted blob), so the volatile
@@ -475,7 +476,7 @@ async fn handle_set_passphrase(
             dispatch_util::record_error(
                 &mut state.main_page,
                 |mp| &mut mp.content_panel.settings.status_message,
-                "Failed to set passphrase",
+                "Failed to set the unlock code",
                 &e,
             );
         }
@@ -522,7 +523,7 @@ fn handle_remove_passphrase(
             dispatch_util::record_error(
                 &mut state.main_page,
                 |mp| &mut mp.content_panel.settings.status_message,
-                "Failed to remove passphrase",
+                "Failed to remove the unlock code",
                 &e,
             );
         }
@@ -551,9 +552,9 @@ fn handle_wipe_confirm(state: &mut State, config: &Config, profile: &str) -> boo
         _ => return false,
     };
     if !typed.eq_ignore_ascii_case(WIPE_CONFIRM_TOKEN) {
-        state.main_page.content_panel.settings.status_message = Some(format!(
+        state.main_page.content_panel.settings.status_message = Some(Status::warning(format!(
             "Type {WIPE_CONFIRM_TOKEN} (exactly) to confirm — wipe cancelled."
-        ));
+        )));
         state.main_page.content_panel.settings.mode = SettingsMode::View;
         return false;
     }
@@ -579,7 +580,7 @@ fn handle_wipe_confirm(state: &mut State, config: &Config, profile: &str) -> boo
                 .main_page
                 .log_error("Failed to wipe openvtc profile", &e);
             state.main_page.content_panel.settings.status_message =
-                Some(format!("Wipe failed: {e:#}"));
+                Some(Status::error(format!("Wipe failed: {e:#}")));
             return false;
         }
     }
@@ -856,7 +857,7 @@ fn handle_theme_select(state: &mut State, roots: &Roots, index: usize) {
             theme::set_active(&theme);
             None
         }
-        Err(e) => Some(format!("Could not load {}: {e}", row.name)),
+        Err(e) => Some(Status::error(format!("Could not load {}: {e}", row.name))),
     };
 }
 
@@ -888,10 +889,12 @@ fn handle_theme_apply(state: &mut State, roots: &Roots) {
                     mode.as_str()
                 ));
             }
-            settings.status_message = Some(message);
+            settings.status_message = Some(Status::success(message));
             state.main_page.log(format!("Theme set to {shown}"));
         }
-        Err(e) => settings.status_message = Some(format!("Could not use that theme: {e}")),
+        Err(e) => {
+            settings.status_message = Some(Status::error(format!("Could not use that theme: {e}")))
+        }
     }
 }
 
@@ -921,12 +924,14 @@ fn handle_theme_copy(state: &mut State, roots: &Roots) {
     match copied {
         Ok((copy_id, path)) => {
             reload_rows(state, roots, &copy_id);
-            state.main_page.content_panel.settings.status_message = Some(format!(
+            state.main_page.content_panel.settings.status_message = Some(Status::success(format!(
                 "Copied to {} — edit it, then press r here to see your changes.",
                 path.display()
-            ));
+            )));
         }
-        Err(e) => settings.status_message = Some(format!("Could not copy that theme: {e}")),
+        Err(e) => {
+            settings.status_message = Some(Status::error(format!("Could not copy that theme: {e}")))
+        }
     }
 }
 
@@ -960,7 +965,7 @@ fn handle_theme_reload(state: &mut State, roots: &Roots) {
     reload_rows(state, roots, &keep);
     let settings = &mut state.main_page.content_panel.settings;
     if settings.status_message.is_none() {
-        settings.status_message = Some("Themes reloaded.".to_string());
+        settings.status_message = Some(Status::success("Themes reloaded.".to_string()));
     }
 }
 
@@ -1053,7 +1058,7 @@ pub(crate) async fn dispatch(
         SettingsAction::TokenBack => handle_token_back(state),
         SettingsAction::ClipboardCopied(msg) => {
             state.main_page.content_panel.settings.status_message = Some(msg.clone());
-            state.main_page.log(msg);
+            state.main_page.log(msg.text);
         }
         SettingsAction::WipeProfileStart => handle_wipe_start(state),
         SettingsAction::WipeProfileInput(value) => handle_wipe_input(state, value),
@@ -1165,7 +1170,7 @@ mod tests {
             .settings
             .status_message
             .clone();
-        assert!(message.is_some_and(|m| m.starts_with("Theme set to Auto — ")));
+        assert!(message.is_some_and(|m| m.text.starts_with("Theme set to Auto — ")));
 
         theme::set_active(&Theme::default_theme());
         let _ = std::fs::remove_dir_all(base);
@@ -1270,7 +1275,8 @@ mod tests {
                 .content_panel
                 .settings
                 .status_message
-                .as_deref(),
+                .as_ref()
+                .map(|s| s.text.as_str()),
             Some("Setting saved")
         );
         assert_eq!(config.public.friendly_name, "Alice");

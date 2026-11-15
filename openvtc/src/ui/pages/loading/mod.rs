@@ -649,8 +649,12 @@ impl ComponentRender<()> for LoadingScreen {
             // Failed with no diagnosis attached: a phase-2 (post-load)
             // connection failure. Show it plainly rather than inventing advice.
             lines.push(Line::styled(
-                reason.clone(),
+                format!("{} — {}", reason.short(), reason.reason),
                 Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+            ));
+            lines.push(Line::styled(
+                reason.class.remedy(),
+                Style::new().fg(COLOR_DARK_GRAY),
             ));
             lines.push(Line::default());
         }
@@ -760,7 +764,11 @@ mod tests {
             detail: "No matching credential found".to_string(),
         };
         let mut state = State::default();
-        state.connection.status = MediatorStatus::Failed(err.to_string());
+        state.connection.status =
+            MediatorStatus::Failed(crate::state_handler::state::ConnectionFailure::new(
+                err.to_string(),
+                openvtc_core::errors::ErrorClass::Local,
+            ));
         state.startup_diagnosis = Some(std::sync::Arc::new(diagnose(
             &err,
             &DiagnosisContext::new("default"),

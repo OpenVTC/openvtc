@@ -1,6 +1,7 @@
 //! The vetter desk: opening sessions, attesting, declining and withdrawing,
 //! and keeping the vetter side current with its communities.
 
+use crate::state_handler::main_page::status::Status;
 use chrono::Utc;
 use openvtc_core::config::account::PersonaId;
 use openvtc_core::vetting::book::RequestVetting;
@@ -35,7 +36,7 @@ pub(super) async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, meth
     let Some(vetter_did) = persona_did(ctx.config, entry.persona) else {
         return status(
             ctx,
-            "The persona this request was made to is not available.",
+            Status::error("The persona this request was made to is not available."),
         );
     };
     let (required, known) = ctx.config.private.vetting.required_claims_for(
@@ -63,7 +64,9 @@ pub(super) async fn open_session(ctx: &mut ActionCtx<'_>, request_id: &str, meth
         };
         status(
             ctx,
-            "Asking the community which claims it requires — open the session again in a moment.",
+            Status::progress(
+                "Asking the community which claims it requires — open the session again in a moment.",
+            ),
         );
         let sent = Sent::Manifest {
             community: entry.community.clone(),
@@ -271,10 +274,10 @@ async fn ask_bindings(ctx: &mut ActionCtx<'_>) {
         if let Err(e) = sign_and_send(ctx, persona, document, sent).await {
             status(
                 ctx,
-                format!(
+                Status::error(format!(
                     "Could not ask {} which hidden-vetting key it holds for you: {e}",
                     community_display(ctx.config, &community)
-                ),
+                )),
             );
         }
     }
@@ -384,7 +387,9 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
     if !form.attested {
         return status(
             ctx,
-            "Tick the attestation (the last line) — signing is attributable to you in this community.",
+            Status::warning(
+                "Tick the attestation (the last line) — signing is attributable to you in this community.",
+            ),
         );
     }
     let now = Utc::now();
@@ -392,12 +397,15 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
         return;
     };
     let DeskState::CardReceived { session, .. } = &entry.state else {
-        return status(ctx, "You can attest once their card has arrived.");
+        return status(
+            ctx,
+            Status::warning("You can attest once their card has arrived."),
+        );
     };
     let Some(vetter_did) = persona_did(ctx.config, entry.persona) else {
         return status(
             ctx,
-            "The persona this request was made to is not available.",
+            Status::error("The persona this request was made to is not available."),
         );
     };
     let method = VETTING_METHODS[form.method_index.min(VETTING_METHODS.len() - 1)];
@@ -439,9 +447,11 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
         RequestVetting::Hidden => hides_vetters(book, &entry.community),
         RequestVetting::Named { .. } => false,
         RequestVetting::HiddenWithoutId { criterion } => {
-            return status(ctx, hidden_without_id_words(&criterion));
+            return status(ctx, Status::warning(hidden_without_id_words(&criterion)));
         }
-        RequestVetting::Unreadable(e) => return status(ctx, format!("Cannot attest: {e}")),
+        RequestVetting::Unreadable(e) => {
+            return status(ctx, Status::error(format!("Cannot attest: {e}")));
+        }
     };
     if hidden_request
         && book
@@ -458,9 +468,11 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
         page(ctx).mode = VettingMode::List;
         status(
             ctx,
-            "This community proves vetting with a PCS zero-knowledge proof, and you are not \
+            Status::warning(
+                "This community proves vetting with a PCS zero-knowledge proof, and you are not \
              enrolled for it yet, so nothing was signed. Enrolling now — attest again in a \
              moment.",
+            ),
         );
         refresh_vetter_side(ctx).await;
         return;
@@ -474,7 +486,7 @@ pub(super) async fn attest(ctx: &mut ActionCtx<'_>, request_id: &str, form: &Att
             .statement_draft(request_id, &vetter_did, attestation, now)
         {
             Ok(draft) => draft,
-            Err(e) => return status(ctx, format!("Cannot attest yet: {e}")),
+            Err(e) => return status(ctx, Status::error(format!("Cannot attest yet: {e}"))),
         };
     if !begin(ctx) {
         return;
@@ -551,7 +563,7 @@ pub(super) async fn decline(
     let Some(vetter_did) = persona_did(ctx.config, entry.persona) else {
         return status(
             ctx,
-            "The persona this request was made to is not available.",
+            Status::error("The persona this request was made to is not available."),
         );
     };
     if !begin(ctx) {
@@ -605,7 +617,7 @@ pub(super) async fn withdraw(ctx: &mut ActionCtx<'_>, statement_id: &str, reason
     let Some(vetter_did) = persona_did(ctx.config, issued.persona) else {
         return status(
             ctx,
-            "The persona that signed this statement is not available.",
+            Status::error("The persona that signed this statement is not available."),
         );
     };
     if !begin(ctx) {

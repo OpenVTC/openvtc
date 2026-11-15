@@ -52,6 +52,19 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+### Wording in the UI
+
+- **British spelling** in user-visible strings (`colour`, `recognised`,
+  `authorise`, `initialising`), as the newer code already uses. Protocol,
+  SDK and wire text keeps its own spelling (`"kind": "organization"`, a VTA
+  error matched verbatim).
+- **One name per concept**, as in the README's glossary: *persona*,
+  *community*, *unlock code*, *Inbox*, *Help / Status*.
+- **Keys** are named with one vocabulary — `Enter`, `Esc`, `Tab`,
+  `Shift+Tab`, `↑/↓`, `←/→`, `Space`, `Del`, `Ctrl+X` — and a view's keys
+  are declared as a `keymap::Binding` list, never typed into a footer
+  string (`openvtc/src/ui/pages/main/keymap.rs`).
+
 ### Commit Messages
 
 - Use [Conventional Commits](https://www.conventionalcommits.org/) style: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`

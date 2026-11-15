@@ -34,6 +34,7 @@ use openvtc_core::elections::{
 };
 
 use super::panel::Panel;
+use crate::ui::pages::main::keymap::{self, k};
 
 pub struct ElectionsPanel;
 
@@ -62,12 +63,7 @@ fn wrap(lines: &mut Vec<Line<'static>>, body: &str, indent: usize, style: Style)
 }
 
 fn push_status(lines: &mut Vec<Line<'static>>, status: &Status) {
-    let style = match status.severity {
-        Severity::Info | Severity::Progress => Style::default().fg(COLOR_TEXT_DEFAULT),
-        Severity::Success => Style::default().fg(COLOR_SUCCESS),
-        Severity::Warning => Style::default().fg(COLOR_ORANGE),
-        Severity::Error => Style::default().fg(COLOR_WARNING_ACCESSIBLE_RED).bold(),
-    };
+    let style = super::status::severity_style(status.severity);
     wrap(lines, &status.text, 4, style);
 }
 
@@ -80,9 +76,18 @@ fn standing_style(s: Standing) -> Style {
     })
 }
 
-fn keys(lines: &mut Vec<Line<'static>>, keys: &[&str]) {
+fn keys(lines: &mut Vec<Line<'static>>, keys: &[keymap::Binding]) {
     lines.push(Line::from(""));
-    lines.push(Line::from(dim(format!("    {}", keys.join("   ")))));
+    keymap::footer(lines, "    ", keys);
+}
+
+/// A `y`-only question: its own words, and only `y` goes ahead.
+fn ask(lines: &mut Vec<Line<'static>>, what: &str, otherwise: &str) {
+    keymap::confirming();
+    lines.push(Line::from(""));
+    lines.push(Line::from(dim(format!(
+        "    y: {what} · any other key: {otherwise}"
+    ))));
 }
 
 impl Panel for ElectionsPanel {
@@ -129,7 +134,7 @@ fn render_list(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
             lines.push(Line::from(dim(
                 "    asking the community which elections you may take part in…",
             )));
-            keys(lines, &["r retry", "Esc back"]);
+            keys(lines, &[k("r", "retry"), k("Esc", "back")]);
             return;
         }
         ElectionsPhase::Failed(detail) => {
@@ -141,7 +146,7 @@ fn render_list(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
                     severity: Severity::Error,
                 },
             );
-            keys(lines, &["r retry", "Esc back"]);
+            keys(lines, &[k("r", "retry"), k("Esc", "back")]);
             return;
         }
         ElectionsPhase::Loaded => {}
@@ -194,7 +199,13 @@ fn render_list(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
         lines.push(Line::from(""));
         push_status(lines, status);
     }
-    keys(lines, &["↑/↓ navigate", "⏎ open", "r refresh", "Esc back"]);
+    let mut k_ = Vec::new();
+    if !view.rows().is_empty() {
+        k_.push(k("↑/↓ or j/k", "move"));
+        k_.push(k("Enter", "open"));
+    }
+    k_.extend([k("r", "refresh"), k("Esc", "back")]);
+    keys(lines, &k_);
 }
 
 /// The elections held notifications tell the member of, shown only as notified (VTI-NTF-063):
@@ -270,7 +281,7 @@ fn day(t: &str) -> String {
 fn render_disclose(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
     lines.push(Line::from(""));
     let Some(d) = &view.disclose else {
-        keys(lines, &["Esc back"]);
+        keys(lines, &[k("Esc", "back")]);
         return;
     };
     lines.push(Line::from(Span::styled(
@@ -300,7 +311,7 @@ fn render_disclose(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
         lines.push(Line::from(""));
         push_status(lines, status);
     }
-    keys(lines, &["y present and open", "any other key: back"]);
+    ask(lines, "present and open", "back");
 }
 
 /// The warning an election whose written answers are released after fewer than 10 ballots
@@ -463,7 +474,7 @@ fn render_detail(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
         if let Some(status) = &view.status {
             push_status(lines, status);
         }
-        keys(lines, &["r retry", "Esc back"]);
+        keys(lines, &[k("r", "retry"), k("Esc", "back")]);
         return;
     };
     if !vta_sdk::did_scid::same_reference(&view.target, &view.vtc_did) {
@@ -487,15 +498,15 @@ fn render_detail(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
         lines.push(Line::from(""));
         push_status(lines, status);
     }
-    let mut k = Vec::new();
+    let mut k_ = Vec::new();
     if view.flow.is_none() && shown.tickets_open() {
-        k.push("t take ticket");
+        k_.push(k("t", "take ticket"));
     }
     if view.flow.is_none() && shown.voting_open() {
-        k.push("v vote");
+        k_.push(k("v", "vote"));
     }
-    k.extend(["r refresh", "Esc back"]);
-    keys(lines, &k);
+    k_.extend([k("r", "refresh"), k("Esc", "back")]);
+    keys(lines, &k_);
 }
 
 /// One question's rows on the ballot.
@@ -571,11 +582,17 @@ fn render_question(
             }
         }
         AnswerDraft::Text(t) => {
-            let caret = if focused.is_some() { "▏" } else { "" };
-            lines.push(Line::from(text(format!(
-                "        › {}{caret}",
-                crate::state_handler::main_page::sanitize_display(t, 4096)
-            ))));
+            let shown = crate::state_handler::main_page::sanitize_display(t, 4096);
+            lines.push(Line::from(
+                [Span::raw("        › ")]
+                    .into_iter()
+                    .chain(crate::ui::pages::main::text_input::cursor_spans(
+                        &shown,
+                        focused.is_some(),
+                        text(String::new()).style,
+                    ))
+                    .collect::<Vec<_>>(),
+            ));
         }
     }
 }
@@ -616,17 +633,19 @@ fn render_ballot(view: &ElectionsView, recent_ticket: bool, lines: &mut Vec<Line
         push_status(lines, status);
     }
     let typing = form.typing(shown.manifest());
-    let mut k = vec!["Tab/Shift-Tab question", "↑/↓ option"];
+    let mut k_ = vec![k("Tab/Shift+Tab", "question")];
     if typing {
-        k.push("type to answer");
-        k.push("Ctrl-a blank");
+        k_.push(k("↑/↓", "option"));
+        k_.push(k(keymap::TYPE, "answer"));
+        k_.push(k("Ctrl+A", "blank"));
     } else {
-        k.push("space choose/rank");
-        k.push("+/- score");
-        k.push("a blank");
+        k_.push(k("↑/↓ or j/k", "option"));
+        k_.push(k("Space", "choose/rank"));
+        k_.push(k("+/=/-/←/→", "score"));
+        k_.push(k("a/Ctrl+A", "blank"));
     }
-    k.extend(["⏎ review", "Esc back"]);
-    keys(lines, &k);
+    k_.extend([k("Enter", "review"), k("Esc", "back")]);
+    keys(lines, &k_);
 }
 
 fn render_form(form: &BallotForm, shown: &ShownElection, lines: &mut Vec<Line<'static>>) {
@@ -707,7 +726,7 @@ fn render_confirm(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
         lines.push(Line::from(""));
         push_status(lines, status);
     }
-    keys(lines, &["y cast", "any other key: back to the ballot"]);
+    ask(lines, "cast", "back to the ballot");
 }
 
 fn render_result(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
@@ -780,9 +799,9 @@ fn render_result(view: &ElectionsView, lines: &mut Vec<Line<'static>>) {
     }
     let resendable = matches!(view.result, Some(VoteResult::Failed { resend: true, .. }));
     if resendable && view.flow.is_none() {
-        keys(lines, &["r resend", "Esc back"]);
+        keys(lines, &[k("r", "resend"), k("Esc", "back")]);
     } else {
-        keys(lines, &["Esc back"]);
+        keys(lines, &[k("Esc", "back")]);
     }
 }
 
@@ -804,12 +823,17 @@ pub(super) fn elections_key(
     Some(match view.screen {
         Screen::List => {
             let last = view.rows().len().saturating_sub(1);
+            let listed = matches!(view.phase, ElectionsPhase::Loaded) && !view.rows().is_empty();
             match key.code {
                 KeyCode::Esc => E::Back,
                 KeyCode::Char('r') => E::Refresh,
-                KeyCode::Up | KeyCode::Char('k') => E::Select(view.selected.saturating_sub(1)),
-                KeyCode::Down | KeyCode::Char('j') => E::Select((view.selected + 1).min(last)),
-                KeyCode::Enter => E::Show,
+                KeyCode::Up | KeyCode::Char('k') if listed => {
+                    E::Select(view.selected.saturating_sub(1))
+                }
+                KeyCode::Down | KeyCode::Char('j') if listed => {
+                    E::Select((view.selected + 1).min(last))
+                }
+                KeyCode::Enter if listed => E::Show,
                 _ => return None,
             }
         }
@@ -818,13 +842,19 @@ pub(super) fn elections_key(
             KeyCode::Char('y') => E::Present,
             _ => E::Back,
         },
-        Screen::Detail => match key.code {
-            KeyCode::Esc => E::Back,
-            KeyCode::Char('r') => E::Refresh,
-            KeyCode::Char('t') => E::TakeTicket,
-            KeyCode::Char('v') => E::Vote,
-            _ => return None,
-        },
+        Screen::Detail => {
+            let idle = view.flow.is_none();
+            let shown = view.shown.as_ref();
+            match key.code {
+                KeyCode::Esc => E::Back,
+                KeyCode::Char('r') => E::Refresh,
+                KeyCode::Char('t') if idle && shown.is_some_and(|s| s.tickets_open()) => {
+                    E::TakeTicket
+                }
+                KeyCode::Char('v') if idle && shown.is_some_and(|s| s.voting_open()) => E::Vote,
+                _ => return None,
+            }
+        }
         Screen::Ballot => {
             let typing = view
                 .form
@@ -856,7 +886,12 @@ pub(super) fn elections_key(
         },
         Screen::Result => match key.code {
             KeyCode::Esc => E::Back,
-            KeyCode::Char('r') => E::Resend,
+            KeyCode::Char('r')
+                if view.flow.is_none()
+                    && matches!(view.result, Some(VoteResult::Failed { resend: true, .. })) =>
+            {
+                E::Resend
+            }
             _ => return None,
         },
     })

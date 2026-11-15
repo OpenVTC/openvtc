@@ -28,6 +28,7 @@ The `did-git-sign` commit signer lives in
 
 - [Quickstart](#quickstart)
 - [Core Concepts](#core-concepts)
+- [Glossary](#glossary)
 - [Decentralised Identity](#decentralised-identity)
 - [Decentralised Communication](#decentralised-communication)
 - [Profiles and Configurations](#profiles-and-configurations)
@@ -78,6 +79,23 @@ openvtc --help
 - **Verifiable Trust Agent (VTA)** - The service that holds your keys and creates your DIDs. OpenVTC connects to a VTA during setup; you authorise it from your Personal Network Manager (PNM).
 
 - **DIDComm Messaging Protocol** - An open standard for decentralised communication. Built on the foundation of Decentralised Identifiers (DIDs), it enables parties to exchange verifiable data such as credentials and establishes secure communication channels between parties without relying on centralised servers.
+
+## Glossary
+
+The TUI uses one name for each of these:
+
+- **Persona** — an identity you hold: a DID your VTA keeps the keys for. The
+  *My Identity* panel manages your personas (and their attributes, faces and
+  worlds).
+- **Community** — a Verifiable Trust Community (VTC) you belong to or are
+  joining. The UI says *community*; *VTC* names the service behind it.
+- **Unlock code** — the secret that protects your profile on this machine
+  (`--unlock-code`; *Settings → Protection*). An export file's *passphrase*
+  is a different secret, chosen per export.
+- **Inbox** — requests and credentials sent to you, waiting for an answer
+  (the docs' *tasks*).
+- **Help / Status** — connection status, your DIDs and the keyboard
+  shortcuts; `?` on any panel lists that panel's keys.
 
 ## Decentralised Identity
 
