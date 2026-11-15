@@ -92,7 +92,23 @@ pub(crate) fn cursor_spans(value: &str, focused: bool, style: Style) -> Vec<Span
         return vec![Span::styled(value.to_string(), style)];
     }
     let chars = value.chars().count();
-    let at = CURSOR.get().unwrap_or(chars).min(chars);
+    caret_at(value, CURSOR.get().unwrap_or(chars), style)
+}
+
+/// A field held as a `tui_input::Input` in the view state (the identity
+/// forms): its text, with the caret drawn at the input's own cursor when it
+/// has the focus.
+pub(crate) fn input_spans(input: &Input, focused: bool, style: Style) -> Vec<Span<'static>> {
+    if !focused {
+        return vec![Span::styled(input.value().to_string(), style)];
+    }
+    caret_at(input.value(), input.cursor(), style)
+}
+
+/// `value` split at character `at` (clamped to its end), with the caret
+/// between the halves.
+fn caret_at(value: &str, at: usize, style: Style) -> Vec<Span<'static>> {
+    let at = at.min(value.chars().count());
     let split = value.char_indices().nth(at).map_or(value.len(), |(i, _)| i);
     vec![
         Span::styled(value[..split].to_string(), style),

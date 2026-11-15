@@ -188,6 +188,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The identity forms draw the caret where the cursor is**
+  ([#578](https://github.com/OpenVTC/openvtc/issues/578)). It was always drawn at the end
+  of the text, though ←/→ moved the cursor; a choice (the value type) shows none.
 - **Ctrl+V pastes a ticket link into "Ask a vetter" again, and `y`/`u` copy the code and
   link on the full-screen ticket** ([#580](https://github.com/OpenVTC/openvtc/issues/580)).
   Both were listed but did nothing.
