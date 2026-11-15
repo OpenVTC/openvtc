@@ -1,6 +1,6 @@
 /*!
-*   Handles everything todo with openpgp-card tokens
-*/
+ *   Handles everything todo with openpgp-card tokens
+ */
 
 use crate::errors::OpenVTCError;
 use card_backend_pcsc::PcscBackend;

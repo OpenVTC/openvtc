@@ -1,6 +1,6 @@
 /*!
-*  Public [crate::config::Config] information that is stored in plaintext on disk
-*/
+ *  Public [crate::config::Config] information that is stored in plaintext on disk
+ */
 
 use crate::{
     config::{Config, ConfigProtectionType, protected_config::ProtectedConfig},

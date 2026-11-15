@@ -1,12 +1,12 @@
 /*!
-*  Secured [crate::config::Config] information that is stored in the OS Secure Storage
-*
-*  * If using hardware tokens, then the data is encrypted/decrypted using the hardware token
-*  * If no hardware token, then may be using a passphrase to protect the data
-*  * If no hardware token, and no passphrase, then is in plaintext in the OS Secure Store
-*
-*  Must intially save bip32_seed first before any keys can be stored
-*/
+ *  Secured [crate::config::Config] information that is stored in the OS Secure Storage
+ *
+ *  * If using hardware tokens, then the data is encrypted/decrypted using the hardware token
+ *  * If no hardware token, then may be using a passphrase to protect the data
+ *  * If no hardware token, and no passphrase, then is in plaintext in the OS Secure Store
+ *
+ *  Must intially save bip32_seed first before any keys can be stored
+ */
 
 #[cfg(feature = "openpgp-card")]
 use crate::config::TokenInteractions;
