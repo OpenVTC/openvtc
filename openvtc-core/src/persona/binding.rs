@@ -168,7 +168,7 @@ pub async fn get(
     let value = client
         .persona_binding_get(context_id, persona_did)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona binding read failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona binding read failed", &e))?;
 
     Ok(BindingSummary {
         bound: value
@@ -297,7 +297,7 @@ pub async fn list(client: &VtaClient, context_id: &str) -> Result<Vec<KnownHere>
     let value = client
         .persona_binding_list(context_id, None, None)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona binding list failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona binding list failed", &e))?;
     let mut rows: Vec<KnownHere> = value
         .get("personas")
         .and_then(Value::as_array)
@@ -335,7 +335,7 @@ pub async fn set_local(
     client
         .persona_local_binding_set(context_id, persona_did, profile_id, None, None, None)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona local binding write failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona local binding write failed", &e))?;
     Ok(())
 }
 
@@ -394,7 +394,7 @@ pub async fn set(
             None,
         )
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona binding write failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona binding write failed", &e))?;
     Ok(())
 }
 

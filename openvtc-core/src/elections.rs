@@ -83,7 +83,7 @@ pub use show::{
 };
 
 /// Every community task this module sends or reads starts with this.
-const TYPE_PREFIX: &str = "https://trusttasks.org/spec/vtc/elections/";
+pub(crate) const TYPE_PREFIX: &str = "https://trusttasks.org/spec/vtc/elections/";
 
 /// The prefix every refusal document's type carries.
 const ERROR_TYPE_PREFIX: &str = "https://trusttasks.org/spec/trust-task-error/";

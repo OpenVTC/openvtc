@@ -21,15 +21,14 @@ use openvtc_core::config::{
     Config,
     account::{CommunityRecord, PersonaId, VtcDid},
     community_context::{self, ContextKind, ContextOption},
-    context_path::{build_sub_context_id, parse_sub_context_id},
+    context_path::parse_sub_context_id,
 };
 use openvtc_core::didcomm::Messaging;
-use openvtc_core::health::ProbePolicy;
+use openvtc_core::join::sequence;
 use openvtc_core::logs::LogFamily;
 use openvtc_core::vetting::applicant::Application;
 use openvtc_core::vetting::book::Knowledge;
 use openvtc_core::vetting::disclosure::{Describe, DirectoryStatement};
-use openvtc_core::vetting::discover;
 use openvtc_core::vetting::guide::describe_requirements;
 use openvtc_core::vetting::queries::{CommunityAnswer, CommunityQuery, QueryKind};
 use openvtc_core::vetting::wire;
@@ -197,10 +196,6 @@ pub(crate) const CHALLENGE_WAIT: Duration = REQUIREMENTS_WAIT;
 
 /// How long sending the question may take before the page says so.
 const ASK_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// How long resolving a community's DID may take before its endpoint is given
-/// up on. Bounded by rule R1.2, like every other outbound step here.
-const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The entry a community's answer makes for the join waiting on it, if the
 /// answer is about that community's requirements.
@@ -709,7 +704,11 @@ fn application_contexts(
     persona: Option<PersonaId>,
 ) -> Vec<ContextOption> {
     let record = persona.and_then(|p| config.account.personas.get(&p));
-    community_context::context_options(&config.account, record, &suggested_context(config, vtc_did))
+    community_context::context_options(
+        &config.account,
+        record,
+        &sequence::suggested_context(config, vtc_did),
+    )
 }
 
 /// The invitation row's detail: how many are held, and when the longest-lived
@@ -1191,146 +1190,6 @@ fn show_unknown(
     state.join.page = JoinPage::Vetting;
 }
 
-/// Why a community could not be asked what it requires.
-///
-/// The distinction is not cosmetic: it decides whether "join anyway" is an
-/// offer at all. A community that resolves but will not answer is one you can
-/// still send a request to, and its moderators will see it. A DID that does not
-/// resolve names nothing — there is no document, no endpoint and no mediator
-/// route, so a join request addressed to it goes nowhere and waits for an
-/// answer nobody can send. Offering the same key for both told someone who had
-/// mistyped a DID that joining was "the way forward here" (rule R6.4).
-pub(super) enum NotLearned {
-    /// The identifier did not resolve to a DID document.
-    Unresolvable(String),
-    /// It resolved; the manifest could not be read from it.
-    Unanswered(String),
-}
-
-impl NotLearned {
-    /// The sentence the page shows.
-    pub(super) fn reason(&self) -> &str {
-        match self {
-            NotLearned::Unresolvable(why) | NotLearned::Unanswered(why) => why,
-        }
-    }
-
-    /// Whether there is something at this DID to send a join request to.
-    pub(super) fn resolvable(&self) -> bool {
-        matches!(self, NotLearned::Unanswered(_))
-    }
-}
-
-/// Read `vtc_did`'s manifest from the REST endpoint it publishes, and learn it.
-///
-/// The question a community answers about what it requires is a public read
-/// (`vetting-process.md` §6.1), and serving it over HTTPS is what makes it
-/// answerable on a first join: no mediator socket, no persona to ask as, and no
-/// loop that can hear a reply. `Err` is the sentence the page shows, already
-/// distinguishing the ways it can fail — rule R6.4.
-///
-/// Mirrors the DIDComm handler
-/// ([`openvtc_core::vetting::inbound`]): the book learns the manifest, and any
-/// application to this community adopts it, so a change to the requirements
-/// mid-application is detectable from either route rather than only from one.
-pub(super) async fn learn_over_http(
-    config: &mut Config,
-    tdk: &TDK,
-    vtc_did: &str,
-) -> Result<(), NotLearned> {
-    let resolver = tdk.did_resolver();
-    let resolved = tokio::time::timeout(RESOLVE_TIMEOUT, resolver.resolve(vtc_did))
-        .await
-        .map_err(|_| {
-            // A timeout is not "there is nothing there": the resolver may
-            // simply be slow or the host briefly down, and the DID is still
-            // worth sending to.
-            NotLearned::Unanswered(format!(
-                "it could not be resolved within {} seconds",
-                RESOLVE_TIMEOUT.as_secs()
-            ))
-        })?
-        .map_err(|e| NotLearned::Unresolvable(format!("it could not be resolved ({e})")))?;
-    let doc = serde_json::to_value(&resolved.doc)
-        .map_err(|e| NotLearned::Unanswered(format!("its DID document could not be read ({e})")))?;
-    let discover::FetchedManifest {
-        manifest,
-        raw,
-        protocol,
-        meta,
-    } = discover::fetch_manifest(&doc, vtc_did, resolver, ProbePolicy::PublicOnly)
-        .await
-        .map_err(|e| NotLearned::Unanswered(e.to_string()))?;
-
-    let now = Utc::now();
-    let before = config.private.vetting.vetter_mode(vtc_did).mode();
-    config
-        .private
-        .vetting
-        .learn_manifest_in(vtc_did, &manifest, Some(protocol), &meta, now);
-    // What its directory would show about the person joining, shown on the
-    // review page before anything is sent (`manifest/0.4`).
-    config.private.vetting.learn_directory(vtc_did, &raw);
-    // Whether it vets by PCS ZKP now, read from the same answer — so the badges, the vetter
-    // desk and this join agree on one reading, whichever route brought it.
-    config
-        .private
-        .vetting
-        .learn_mode(vtc_did, &raw, before, now);
-    // The document is in hand already, so how the community signs is free to
-    // learn — and before joining it is the only evidence there is.
-    note_signing(config, vtc_did, &resolved.doc);
-    let book = &mut config.private.vetting;
-    for application in book
-        .applications
-        .iter_mut()
-        .filter(|a| a.community == vtc_did)
-    {
-        if let Err(e) = application.adopt_manifest(&manifest, &raw) {
-            // Not debug-only: an application that cannot take up its criterion gathers
-            // evidence for the wrong one. The vetting page re-reads it (m) and says why.
-            warn!(community = %vtc_did, error = %e, "community manifest not adopted");
-        }
-    }
-    Ok(())
-}
-
-/// Record how `vtc_did` signs, from its resolved DID document: whether it lists
-/// a post-quantum signing key. The book keeps it only for a community it
-/// already knows, so this follows learning the manifest.
-fn note_signing(config: &mut Config, vtc_did: &str, doc: &affinidi_tdk::did_common::Document) {
-    config.private.vetting.note_post_quantum_key(
-        vtc_did,
-        openvtc_core::proof_check::publishes_post_quantum_key(doc),
-    );
-}
-
-/// Learn how `vtc_did` signs when the book does not know yet, by resolving its
-/// DID document — bounded by [`RESOLVE_TIMEOUT`] (rule R1.2).
-///
-/// Reading the manifest over HTTP resolves the document anyway and records
-/// this on the way; a manifest that arrived over DIDComm, or one already in the
-/// book from an earlier visit, never did, so the vetting page said "Signing:
-/// not checked" about a community whose document resolves perfectly well.
-/// Best-effort: a resolve that fails or runs out of time leaves it unknown,
-/// and the page says it could not be checked rather than guessing either way.
-async fn learn_signing(config: &mut Config, tdk: &TDK, vtc_did: &str) {
-    if config.private.vetting.post_quantum_key(vtc_did).is_some() {
-        return;
-    }
-    match tokio::time::timeout(RESOLVE_TIMEOUT, tdk.did_resolver().resolve(vtc_did)).await {
-        Ok(Ok(resolved)) => note_signing(config, vtc_did, &resolved.doc),
-        Ok(Err(e)) => {
-            debug!(community = %vtc_did, error = %e, "community DID not resolved; signing not checked");
-        }
-        Err(_) => debug!(
-            community = %vtc_did,
-            timeout_secs = RESOLVE_TIMEOUT.as_secs(),
-            "community DID resolve timed out; signing not checked"
-        ),
-    }
-}
-
 /// Ask `vtc_did` for its manifest, as the active persona, and show the page
 /// that waits for the answer. The answer reaches the caller's loop, not this
 /// one. `Err` means the page now says why the question could not be asked.
@@ -1619,7 +1478,7 @@ impl StateHandler {
                         if learned {
                             // The manifest came over DIDComm, which never
                             // resolved the community's DID document.
-                            learn_signing(config, tdk, &vtc_did).await;
+                            sequence::learn_signing(config, tdk, &vtc_did).await;
                         }
                         let shown = learned && show_vetting(state, config, &vtc_did);
                         if !shown
@@ -1808,7 +1667,7 @@ impl StateHandler {
                             ) {
                                 // Say what the wait is for: a name costs a
                                 // redirect, a resolve and a check (bounded by
-                                // IDENTIFIER_RESOLVE_TIMEOUT).
+                                // IDENTIFIER_sequence::RESOLVE_TIMEOUT).
                                 state.join.messages.push(MessageType::Info(format!(
                                     "Resolving {vtc_did}…"
                                 )));
@@ -2159,7 +2018,7 @@ impl StateHandler {
                                 match community_context::new_context_id(
                                     &config.account.top_context_id,
                                     &state.join.context_slug,
-                                    |id| context_taken(config, id),
+                                    |id| sequence::context_taken(config, id),
                                 ) {
                                     Ok(id) => id,
                                     Err(e) => {
@@ -2451,7 +2310,7 @@ impl StateHandler {
         // Only when the community cannot be reached does the stored copy stand
         // in, and the log says the page is showing an older answer.
         if knowledge.is_some() {
-            match learn_over_http(config, tdk, &vtc_did).await {
+            match sequence::learn_over_http(config, tdk, &vtc_did).await {
                 Ok(()) => knowledge = known(config),
                 Err(why) => {
                     debug!(community = %vtc_did, reason = %why.reason(), "manifest not re-read");
@@ -2468,7 +2327,7 @@ impl StateHandler {
             Some(true) => {
                 // The re-read above records how it signs; if it could not be
                 // made, the DID document may still resolve on its own.
-                learn_signing(config, tdk, &vtc_did).await;
+                sequence::learn_signing(config, tdk, &vtc_did).await;
                 show_vetting(state, config, &vtc_did);
                 None
             }
@@ -2477,7 +2336,7 @@ impl StateHandler {
                 // persona and no loop that can hear a reply, so it answers on a
                 // first join — where the DIDComm question cannot be asked at
                 // all — and it answers in one round trip everywhere else.
-                match learn_over_http(config, tdk, &vtc_did).await {
+                match sequence::learn_over_http(config, tdk, &vtc_did).await {
                     Ok(()) => {
                         if show_vetting(state, config, &vtc_did) {
                             return None;
@@ -3076,26 +2935,6 @@ fn open_invitation_choice(state: &mut State, config: &Config, persona_id: Person
     state.join.page = JoinPage::InvitationChoice;
 }
 
-/// Whether `context_id` is already claimed: by a membership, a persona's keys,
-/// or a vetting application's face.
-pub(crate) fn context_taken(config: &Config, context_id: &str) -> bool {
-    community_context::context_claimed(
-        &config.account,
-        &config.private.vetting.applications,
-        context_id,
-    )
-}
-
-/// The new sub-context to suggest for `vtc_did`: named after the community,
-/// and not yet claimed.
-pub(crate) fn suggested_context(config: &Config, vtc_did: &str) -> String {
-    let top = &config.account.top_context_id;
-    let taken = |id: &str| context_taken(config, id);
-    build_sub_context_id(top, config.agent_name_for(vtc_did), vtc_did, taken)
-        .or_else(|_| build_sub_context_id(top, Some("community"), vtc_did, taken))
-        .unwrap_or_else(|_| top.clone())
-}
-
 /// Offer the contexts `pick` can join `vtc_did` in.
 ///
 /// Returns the context when there is nothing to ask — a persona whose keys
@@ -3122,7 +2961,7 @@ fn offer_contexts(
         }
         IdentityPick::Mint => None,
     };
-    let suggested = suggested_context(config, vtc_did);
+    let suggested = sequence::suggested_context(config, vtc_did);
     let options = community_context::context_options(&config.account, persona, &suggested);
     if options.len() == 1 {
         return options.into_iter().next().map(|o| o.context_id);
@@ -3631,33 +3470,6 @@ fn is_duplicate_membership(config: &Config, vtc_did: &str, persona: PersonaId) -
     config.account.has_live_membership(vtc_did, persona)
 }
 
-/// Build the `Pending` [`CommunityRecord`] recorded on a successful submit.
-///
-/// Pure decision peeled out of step 9 of [`run_join_sequence`]; delegates to
-/// [`CommunityRecord::new_pending`] so the record shape stays defined in core.
-fn build_pending_record(
-    vtc_did: String,
-    display_name: Option<String>,
-    sub_context_id: String,
-    persona_id: PersonaId,
-    request_id: uuid::Uuid,
-    now: chrono::DateTime<Utc>,
-    submit_transport: openvtc_core::didcomm::MessagingTransport,
-) -> CommunityRecord {
-    let mut record = CommunityRecord::new_pending(
-        vtc_did,
-        display_name,
-        sub_context_id,
-        persona_id,
-        request_id,
-        now,
-    );
-    // Which transport carried the submit, so an unacknowledged join can name it
-    // rather than leaving every cause looking alike.
-    record.submit_transport = Some(submit_transport);
-    record
-}
-
 /// Run the automated mint → sub-context → join-submit → persist sequence.
 ///
 /// All progress and errors land in `state.join`. On success
@@ -3976,7 +3788,7 @@ async fn run_join_sequence(
     state.join.info("Submitting join request…");
     let _ = handler.state_tx.send(state.clone());
 
-    let Some(atm) = tdk.atm.as_ref() else {
+    if tdk.atm.is_none() {
         state
             .join
             .fail("Messaging (ATM) unavailable — cannot submit the join request.");
@@ -3984,14 +3796,10 @@ async fn run_join_sequence(
             rollback_minted_persona(config, persona_id, state, profile, prior_friendly_name);
         }
         return;
-    };
-    let (applicant_did, persona_profile, persona_mediator) = match config
-        .identities
-        .get(&persona_id)
-    {
+    }
+    let (applicant_did, persona_mediator) = match config.identities.get(&persona_id) {
         Some(ident) => (
             ident.persona_did().to_string(),
-            ident.profile().clone(),
             ident.mediator_did.clone().unwrap_or_default(),
         ),
         None => {
@@ -4281,84 +4089,38 @@ async fn run_join_sequence(
             ..vp.into()
         },
     };
-    // Settle the wire. TSP needs **both** legs, which is the workspace rule that
-    // the protocol is the highest-preference one present in *both* parties'
-    // documents — and here it is not a formality. A TSP send posts the raw CESR
-    // frame to *our* mediator's `/inbound`; the community's advertised mediator
-    // is only the hop the routing layer is sealed to and never sees the request.
-    // A mediator without its `tsp` feature therefore rejects the frame as an
-    // unparseable DIDComm envelope, and does so while the error names the *other*
-    // mediator — an hour of debugging for a question answerable up front.
-    //
-    // `None` at either end sends over DIDComm exactly as before, so a community
-    // that has not been flipped is unaffected.
-    let vtc_tsp_mediator = match openvtc_core::config::peer_tsp_mediator(&vtc_did).await {
-        None => None,
-        Some(peer_mediator) => {
-            match openvtc_core::config::our_mediator_carries_tsp(&persona_mediator).await {
-                Some(true) => Some(peer_mediator),
-                // Our mediator does not carry TSP. Prefer DIDComm where the
-                // community offers it — a working join beats a correct-looking
-                // one. With TSP the community's *only* transport there is
-                // nothing to fall back to, so send it and let the mediator
-                // answer; refusing here would only replace one failure with
-                // another, minus the evidence.
-                Some(false) if transports.didcomm_mediator.is_some() => {
-                    state.join.info(
-                        "Your mediator does not carry TSP — submitting over DIDComm instead.",
-                    );
-                    let _ = handler.state_tx.send(state.clone());
-                    None
-                }
-                Some(false) => {
-                    state.join.info(
-                        "This community offers TSP only, and your mediator does not \
-                         advertise it — attempting the submit over TSP anyway.",
-                    );
-                    let _ = handler.state_tx.send(state.clone());
-                    Some(peer_mediator)
-                }
-                // Could not ask. Unknown is not "no": take the community's
-                // preference where it has an alternative, since DIDComm is the
-                // transport that worked before TSP existed.
-                None if transports.didcomm_mediator.is_some() => None,
-                None => Some(peer_mediator),
-            }
-        }
-    };
-    let submit_transport = if vtc_tsp_mediator.is_some() {
-        openvtc_core::didcomm::MessagingTransport::Tsp
-    } else {
-        openvtc_core::didcomm::MessagingTransport::DidComm
-    };
+    // Settle the wire (TSP needs both legs; `choose_submit_route` says why).
+    let route =
+        openvtc_core::join::sequence::choose_submit_route(&vtc_did, &persona_mediator, &transports)
+            .await;
+    if let Some(note) = route.note {
+        state.join.info(note.describe());
+        let _ = handler.state_tx.send(state.clone());
+    }
+    let submit_transport = route.transport();
     // Last gate before the request goes out: the socket started above has had
     // the invitation + VP work to come up, so this is normally already true.
     let applicant_online = await_persona_online(handler, state, messaging, &applicant_did).await;
 
-    // The submit is signed: `join-requests/submit/0.2` declares `proof`
-    // REQUIRED, and a persona whose key cannot be read cannot apply — better
-    // said here than as a refusal from the community.
-    // The persona's authentication key: it signs the request document.
-    let signing_secret = match config.get_persona_keys_for(persona_id, tdk).await {
-        Ok(keys) => keys.authentication.secret.clone(),
-        Err(e) => {
+    let request_id = match openvtc_core::join::sequence::submit(
+        config,
+        tdk,
+        persona_id,
+        &vtc_did,
+        &route,
+        presentation,
+    )
+    .await
+    {
+        Ok(id) => id,
+        // A persona whose key cannot be read cannot apply. Nothing was sent;
+        // the persona is kept, as it always was on this path.
+        Err(openvtc_core::join::sequence::SubmitError::Signer(e)) => {
             state
                 .join
                 .fail(format!("Couldn't sign the application: {e}"));
             return;
         }
-    };
-    let route = openvtc_core::join::Applicant {
-        atm,
-        profile: &persona_profile,
-        persona_did: &applicant_did,
-        signer: &signing_secret,
-        vtc_did: &vtc_did,
-        mediator_did: &persona_mediator,
-        tsp_mediator_did: vtc_tsp_mediator.as_deref(),
-    };
-    let request_id = match openvtc_core::join::submit_join_request(&route, presentation).await {
-        Ok(id) => id,
         Err(e) => {
             state
                 .join
@@ -4388,7 +4150,7 @@ async fn run_join_sequence(
     }
 
     // 9. Record the pending membership and persist.
-    let record = build_pending_record(
+    let record = sequence::pending_record(
         vtc_did.clone(),
         display_name,
         sub_context_id,
@@ -5029,7 +4791,7 @@ fn rollback_minted_persona(
     profile: &str,
     prior_friendly_name: &str,
 ) {
-    forget_minted_persona(
+    sequence::forget_minted_persona(
         config,
         persona_id,
         state.setup.did_keys.as_ref(),
@@ -5038,27 +4800,6 @@ fn rollback_minted_persona(
     if let Err(e) = save_config(config, profile) {
         debug!("persona rollback re-save failed after a failed join: {e}");
     }
-}
-
-/// Remove a persona minted for a join that then failed, from the config only
-/// (the caller saves). Shared with `community join`.
-pub(crate) fn forget_minted_persona(
-    config: &mut Config,
-    persona_id: PersonaId,
-    keys: Option<&openvtc_core::config::PersonaDIDKeys>,
-    prior_friendly_name: &str,
-) {
-    config.account.personas.remove(&persona_id);
-    config.identities.remove(&persona_id);
-    if let Some(keys) = keys {
-        config.key_info.remove(&keys.signing.secret.id);
-        config.key_info.remove(&keys.authentication.secret.id);
-        config.key_info.remove(&keys.decryption.secret.id);
-    }
-    // `mint_persona_into` set `public.friendly_name` to the attempted community's
-    // persona name; restore the pre-mint value so a failed/cancelled join doesn't
-    // leave the self-display name pointing at a community we never joined.
-    config.public.friendly_name = prior_friendly_name.to_string();
 }
 
 fn save_config(config: &Config, profile: &str) -> Result<(), openvtc_core::errors::OpenVTCError> {
@@ -5236,8 +4977,8 @@ mod tests {
         assert!(!given.answered_for("did:web:another.example"));
     }
     use super::{
-        build_pending_record, is_duplicate_membership, joined_session, load_pasted_vic,
-        parse_pasted_vic, start_persona_listener, stash_verified_vic, validate_join_input,
+        is_duplicate_membership, joined_session, load_pasted_vic, parse_pasted_vic,
+        start_persona_listener, stash_verified_vic, validate_join_input,
     };
     use crate::Interrupted;
     use crate::state_handler::dispatch_util::test_config;
@@ -5409,7 +5150,7 @@ mod tests {
         let persona = PersonaId::new();
         let request_id = uuid::Uuid::new_v4();
         let now = chrono::Utc::now();
-        let rec = build_pending_record(
+        let rec = openvtc_core::join::sequence::pending_record(
             "did:vtc:c".to_string(),
             Some("Community".to_string()),
             "top/slug".to_string(),
@@ -5445,7 +5186,7 @@ mod tests {
 
         // A successful sequence leaves the record + persona did → a session.
         let persona = PersonaId::new();
-        let rec = build_pending_record(
+        let rec = openvtc_core::join::sequence::pending_record(
             "did:vtc:c".to_string(),
             None,
             "top/slug".to_string(),
@@ -6940,7 +6681,7 @@ mod vetting_tests {
                 .vetting
                 .learn_manifest(VTC, &manifest(true), now);
             assert_eq!(config.private.vetting.post_quantum_key(VTC), None);
-            note_signing(&mut config, VTC, &document(with_pq));
+            sequence::note_signing(&mut config, VTC, &document(with_pq));
             assert_eq!(config.private.vetting.post_quantum_key(VTC), Some(with_pq));
             let view = vetting_view(&config, VTC, &[], None, now).unwrap();
             let shown = crate::ui::pages::join_flow::vetting_requirements::body_lines(

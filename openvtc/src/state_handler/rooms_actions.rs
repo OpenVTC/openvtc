@@ -53,15 +53,9 @@ const KEYS: DispatchDomain = DispatchDomain::RoomsVta;
 /// How long a request waits for the community's answer (R1.2).
 pub(crate) const REPLY_WINDOW: Duration = Duration::from_secs(30);
 
-/// A `vtc/rooms/*` answer as it arrived.
-pub(crate) struct InboundReply {
-    /// The transport-authenticated sender.
-    pub(crate) from: String,
-    /// The document's `issuer`.
-    pub(crate) issuer: Option<String>,
-    pub(crate) thid: String,
-    pub(crate) reply: Reply,
-}
+/// A `vtc/rooms/*` answer as it arrived, threaded on the request it answers
+/// ([`openvtc_core::inbound::ThreadedReply`]).
+pub(crate) type InboundReply = openvtc_core::inbound::ThreadedReply<Reply>;
 
 fn did_part(did: &str) -> &str {
     did.split('#').next().unwrap_or(did)

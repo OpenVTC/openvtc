@@ -216,11 +216,15 @@ async fn timed<T>(
 ) -> Result<T, OpenVTCError> {
     match tokio::time::timeout(VTA_TIMEOUT, fut).await {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(OpenVTCError::Config(format!("{what}: {e}"))),
-        Err(_) => Err(OpenVTCError::Config(format!(
-            "{what}: the VTA did not answer within {} s",
-            VTA_TIMEOUT.as_secs()
-        ))),
+        Ok(Err(e)) => Err(OpenVTCError::vta(what, &e)),
+        Err(_) => Err(OpenVTCError::remote(
+            crate::errors::RemoteService::Vta,
+            crate::errors::RemoteKind::Timeout,
+            format!(
+                "{what}: the VTA did not answer within {} s",
+                VTA_TIMEOUT.as_secs()
+            ),
+        )),
     }
 }
 
@@ -309,10 +313,11 @@ async fn prove_remote_signing(
     let answer = tokio::time::timeout(VTA_TIMEOUT, sign_sshsig(client, &signer.vta_key_id, &hash))
         .await
         .map_err(|_| {
-            OpenVTCError::Config(format!(
-                "the VTA did not sign within {} s",
-                VTA_TIMEOUT.as_secs()
-            ))
+            OpenVTCError::remote(
+                crate::errors::RemoteService::Vta,
+                crate::errors::RemoteKind::Timeout,
+                format!("the VTA did not sign within {} s", VTA_TIMEOUT.as_secs()),
+            )
         })?
         .map_err(|e| OpenVTCError::Config(format!("the VTA refused to sign: {e}")))?;
     let raw = match answer {
@@ -403,11 +408,14 @@ pub async fn revoke_signer(
     match tokio::time::timeout(VTA_TIMEOUT, client.delete_acl(credential_did)).await {
         Ok(Ok(())) => Ok(true),
         Ok(Err(e)) if crate::vta_task::acl_subject_absent(&e) => Ok(false),
-        Ok(Err(e)) => Err(OpenVTCError::Config(format!(
-            "the VTA refused to revoke the signing credential: {e}"
-        ))),
-        Err(_) => Err(OpenVTCError::Config(
-            "the VTA did not answer the revocation in time".into(),
+        Ok(Err(e)) => Err(OpenVTCError::vta(
+            "the VTA refused to revoke the signing credential",
+            &e,
+        )),
+        Err(_) => Err(OpenVTCError::remote(
+            crate::errors::RemoteService::Vta,
+            crate::errors::RemoteKind::Timeout,
+            "the VTA did not answer the revocation in time",
         )),
     }
 }

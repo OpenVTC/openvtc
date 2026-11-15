@@ -28,7 +28,6 @@ use openvtc_core::config::{
 };
 use openvtc_core::errors::OpenVTCError;
 
-use crate::state_handler::join_flow;
 use crate::state_handler::setup_sequence::{
     SetupState,
     config::{ConfigExtension, NO_VTA_MEDIATOR, vta_mediator},
@@ -56,7 +55,7 @@ const FALLBACK_SLUG: &str = "persona";
 pub(crate) fn auto_context(config: &Config, label: &str) -> Result<String, String> {
     let top = &config.account.top_context_id;
     let suggested = community_context::suggested_context_id(top, label, FALLBACK_SLUG, |id| {
-        join_flow::context_taken(config, id)
+        openvtc_core::join::sequence::context_taken(config, id)
     })
     .map_err(|e| match e {
         OpenVTCError::Config(message) => message,

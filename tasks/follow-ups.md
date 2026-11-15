@@ -116,7 +116,7 @@ routes no longer exist. The current document endpoint resolves the proof's
 the vm-resolver work. Fix that comment when this is done.
 
 ### [x] Verify VTC trust-task reply proofs
-Done: `verification_job` in `openvtc/src/state_handler/message_dispatch.rs`
+Done: `verification_job` in `openvtc-core/src/inbound/mod.rs`
 routes join verdicts, receipts and status replies, removal notices, profile,
 capability, git-ns, rooms and election replies through `VerifyJob::Operational`
 (`openvtc_core::operational::verify_operational`); handlers refuse an unchecked

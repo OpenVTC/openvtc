@@ -194,9 +194,7 @@ pub async fn analyze(client: &VtaClient) -> Result<Vec<Finding>, OpenVTCError> {
         Ok(value) => value,
         Err(VtaError::UnsupportedTaskType { .. }) => return Ok(Vec::new()),
         Err(e) => {
-            return Err(OpenVTCError::Vta(format!(
-                "persona correlation analyze failed: {e}"
-            )));
+            return Err(OpenVTCError::vta("persona correlation analyze failed", &e));
         }
     };
 

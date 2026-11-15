@@ -283,7 +283,7 @@ pub async fn list(client: &VtaClient) -> Result<Vec<ProfileSummary>, OpenVTCErro
         // one back would undo the holder's decision.
         .persona_profile_list(None, None, false)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona profile list failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona profile list failed", &e))?;
 
     let mut profiles: Vec<ProfileSummary> = value
         .get("profiles")
@@ -307,7 +307,7 @@ pub async fn get(
     let value = client
         .persona_profile_get(profile_id, resolve)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona profile read failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona profile read failed", &e))?;
 
     let profile = value.get("profile").unwrap_or(&Value::Null).clone();
     let mut detail = ProfileDetail {
@@ -394,7 +394,7 @@ pub async fn put(
             expected_version,
         )
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona profile write failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona profile write failed", &e))?;
 
     Ok(response
         .get("profileId")
@@ -422,9 +422,7 @@ pub async fn delete(
         Ok(_) => Ok(Deleted::Done),
         Err(e) => match worn_by(&e.to_string()) {
             Some(n) if !unbind => Ok(Deleted::Worn(n)),
-            _ => Err(OpenVTCError::Vta(format!(
-                "persona profile delete failed: {e}"
-            ))),
+            _ => Err(OpenVTCError::vta("persona profile delete failed", &e)),
         },
     }
 }

@@ -225,12 +225,18 @@ pub async fn preview(
             Some(RCARD_RENDERER),
         )
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona disclosure preview failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona disclosure preview failed", &e))?;
     let preview_id = value
         .get("previewId")
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
-        .ok_or_else(|| OpenVTCError::Vta("the disclosure preview carried no previewId".into()))?
+        .ok_or_else(|| {
+            OpenVTCError::remote(
+                crate::errors::RemoteService::Vta,
+                crate::errors::RemoteKind::Contract,
+                "the disclosure preview carried no previewId",
+            )
+        })?
         .to_string();
     Ok(Preview {
         preview_id,
@@ -362,7 +368,7 @@ pub async fn renderers(client: &VtaClient) -> Result<Vec<Renderer>, OpenVTCError
     let value = client
         .persona_renderers_list()
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona renderers list failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona renderers list failed", &e))?;
     let mut rows: Vec<Renderer> = value
         .get("renderers")
         .and_then(Value::as_array)
@@ -420,7 +426,7 @@ pub async fn history(
     let value = client
         .persona_disclosure_history(None, None, None, None, Some(limit), None)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("persona disclosure history failed: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("persona disclosure history failed", &e))?;
 
     let mut rows: Vec<DisclosureRow> = value
         .get("disclosures")

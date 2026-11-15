@@ -54,7 +54,7 @@ pub(crate) enum Verb {
     },
     /// `members/personhood/challenge` — ask for the nonce an assertion must
     /// carry. The reply arrives asynchronously and lands via
-    /// [`crate::state_handler::message_dispatch`]; nothing here waits for it.
+    /// [`openvtc_core::inbound`]; nothing here waits for it.
     RequestPersonhoodChallenge { document_signer: Box<Secret> },
     /// `members/personhood/assert` — present the evidence over that nonce.
     ///
@@ -73,7 +73,7 @@ pub(crate) enum Verb {
     /// `members/renew` — ask the community to re-issue this membership's VMC
     /// and role VAC. The reply carries both and arrives asynchronously; it is
     /// verified, stored and acknowledged by
-    /// [`crate::state_handler::message_dispatch`].
+    /// [`openvtc_core::inbound`].
     ///
     /// `document_signer` is the persona's authentication key: the task
     /// declares `proof` REQUIRED.

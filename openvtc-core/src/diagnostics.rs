@@ -26,7 +26,7 @@
 
 use crate::{
     config::public_config::profile_dir,
-    errors::{OpenVTCError, SecureStoreFault},
+    errors::{ErrorClass, OpenVTCError, SecureStoreFault},
     secure_store::{self, EntryStatus},
 };
 
@@ -381,6 +381,44 @@ pub fn diagnose(err: &OpenVTCError, ctx: &DiagnosisContext) -> Diagnosis {
                     .to_string(),
                 "Then restart: OpenVTC will offer to delete the old config and run setup."
                     .to_string(),
+            ],
+        },
+
+        // A typed remote failure: credentials refused reads as the handshake
+        // rejection below; every other kind as a VTA/mediator fault, with the
+        // remedy for its own kind first (R6.4).
+        OpenVTCError::Remote { kind, detail, .. } if err.class() == ErrorClass::AuthRejected => {
+            Diagnosis {
+                headline: "The VTA rejected this identity.".to_string(),
+                error: err.to_string(),
+                cause: format!(
+                    "The VTA was reached, so the network is fine; it declined this \
+                     session's credentials ({kind}). ({detail})"
+                ),
+                context,
+                checks: vec![format!("openvtc health --profile {profile}")],
+                remedies: vec![
+                    "Confirm this profile's DID is still registered with that VTA.".to_string(),
+                    "Check the VTA's own logs for the rejection reason.".to_string(),
+                    "Do NOT reset the profile; the keys are intact.".to_string(),
+                ],
+            }
+        }
+        OpenVTCError::Remote { kind, detail, .. } => Diagnosis {
+            headline: format!("A remote service {kind}."),
+            error: err.to_string(),
+            cause: format!(
+                "Your local configuration and keys loaded fine; the failure is between this \
+                 machine and a remote service. ({detail})"
+            ),
+            context,
+            checks: vec![
+                format!("openvtc health --profile {profile}"),
+                "check DNS/proxy/VPN reachability to the VTA host".to_string(),
+            ],
+            remedies: vec![
+                err.class().remedy().to_string(),
+                "Run `openvtc health` for a per-DID resolution and transport map.".to_string(),
             ],
         },
 

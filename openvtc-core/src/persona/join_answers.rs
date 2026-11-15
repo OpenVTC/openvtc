@@ -90,7 +90,7 @@ pub async fn preview(
             None,
         )
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("could not preview the answers: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("could not preview the answers", &e))?;
     preview_from_response(&response, asked)
 }
 
@@ -102,7 +102,13 @@ pub fn preview_from_response(
     let preview_id = response
         .get("previewId")
         .and_then(Value::as_str)
-        .ok_or_else(|| OpenVTCError::Vta("the preview carried no previewId".into()))?
+        .ok_or_else(|| {
+            OpenVTCError::remote(
+                crate::errors::RemoteService::Vta,
+                crate::errors::RemoteKind::Contract,
+                "the preview carried no previewId",
+            )
+        })?
         .to_string();
     let claims: Vec<(String, Option<Value>)> = response
         .get("claims")
@@ -146,11 +152,17 @@ pub async fn present(
     let response = client
         .persona_disclosure_present(context_id, preview_id, None, None)
         .await
-        .map_err(|e| OpenVTCError::Vta(format!("could not release the answers: {e}")))?;
+        .map_err(|e| OpenVTCError::vta("could not release the answers", &e))?;
     let artifact = response
         .get("artifact")
         .and_then(Value::as_str)
-        .ok_or_else(|| OpenVTCError::Vta("the disclosure carried no artifact".into()))?;
+        .ok_or_else(|| {
+            OpenVTCError::remote(
+                crate::errors::RemoteService::Vta,
+                crate::errors::RemoteKind::Contract,
+                "the disclosure carried no artifact",
+            )
+        })?;
     attributes_from_artifact(artifact)
 }
 
@@ -162,8 +174,13 @@ pub async fn present(
 /// whatever the attribute's provenance, and a claim with no value (a
 /// predicate) is not an answer.
 pub fn attributes_from_artifact(artifact: &str) -> Result<Vec<JoinRequestAttribute>, OpenVTCError> {
-    let card: Value = serde_json::from_str(artifact)
-        .map_err(|e| OpenVTCError::Vta(format!("the disclosure artifact is not JSON: {e}")))?;
+    let card: Value = serde_json::from_str(artifact).map_err(|e| {
+        OpenVTCError::remote(
+            crate::errors::RemoteService::Vta,
+            crate::errors::RemoteKind::Contract,
+            format!("the disclosure artifact is not JSON: {e}"),
+        )
+    })?;
     let Some(claims) = card.get("claims").and_then(Value::as_object) else {
         return Ok(Vec::new());
     };

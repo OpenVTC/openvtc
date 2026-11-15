@@ -33,7 +33,6 @@ openvtc-core.workspace = true
 ratatui.workspace = true
 
 affinidi-tdk.workspace = true
-affinidi-data-integrity.workspace = true
 anyhow.workspace = true
 # did-git-sign's library reads and writes the signer's profiles, config and
 # commit-msg hook, so the Repos view and `openvtc repo sign` can set up and
@@ -93,6 +92,9 @@ libc.workspace = true
 # `test-util`: the paused clock (`start_paused`) for the save-debounce tests.
 # `net` / `io-util`: the loopback listener in the `health_cmd` tests.
 tokio = { workspace = true, features = ["io-util", "net", "test-util"] }
+# `test-support`: the inbound `VerifyJob`s that hang or panic, for the
+# verify-queue tests. Dev-only, so a release build never carries them.
+openvtc-core = { workspace = true, features = ["test-support"] }
 
 [[bin]]
 name = "openvtc"

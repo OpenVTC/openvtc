@@ -59,16 +59,9 @@ pub(crate) fn reply_window(purpose: &Purpose) -> Duration {
     }
 }
 
-/// A `git-ns` answer as it arrived: who sent it and who the document says
-/// issued it, besides the thread it answers.
-pub(crate) struct InboundReply {
-    /// The transport-authenticated sender.
-    pub(crate) from: String,
-    /// The document's `issuer`.
-    pub(crate) issuer: Option<String>,
-    pub(crate) thid: String,
-    pub(crate) reply: Reply,
-}
+/// A `git-ns` answer as it arrived, threaded on the request it answers
+/// ([`openvtc_core::inbound::ThreadedReply`]).
+pub(crate) type InboundReply = openvtc_core::inbound::ThreadedReply<Reply>;
 
 /// The DID part of a DID or DID URL.
 fn did_part(did: &str) -> &str {

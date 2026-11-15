@@ -43,6 +43,7 @@ pub mod git_signing;
 pub mod git_workspace;
 pub mod health;
 pub mod identity;
+pub mod inbound;
 pub mod issued_credential;
 pub mod join;
 pub mod logs;
@@ -88,6 +89,9 @@ pub mod vta_receive_leg;
 pub mod vta_sync;
 pub mod vta_task;
 pub mod witness;
+
+#[cfg(test)]
+mod test_support;
 
 /// Packs a DIDComm message with authenticated encryption and forwards it
 /// through the mediator to the recipient.

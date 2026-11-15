@@ -42,16 +42,16 @@
 //! process's politeness, and persisting it would let a stale on-disk backoff
 //! suppress the poll a fresh launch most wants to make.
 //!
-//! [`CommunityRecord::request_id_confirmed`]: openvtc_core::config::account::CommunityRecord::request_id_confirmed
+//! [`CommunityRecord::request_id_confirmed`]: crate::config::account::CommunityRecord::request_id_confirmed
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::config::Config;
+use crate::config::account::{PendingPoll, PersonaId, VtcDid};
+use crate::didcomm::MessagingTransport;
 use affinidi_tdk::TDK;
 use affinidi_tdk::messaging::ATM;
-use openvtc_core::config::Config;
-use openvtc_core::config::account::{PendingPoll, PersonaId, VtcDid};
-use openvtc_core::didcomm::MessagingTransport;
 use tracing::debug;
 
 /// Backoff after the n-th consecutive poll of one record: 1, 2, 4, 8 minutes,
@@ -61,10 +61,10 @@ const POLL_BACKOFF_BASE: Duration = Duration::from_secs(60);
 /// Ceiling on the per-record backoff. A join parked for human review can sit for
 /// days; a poll every quarter of an hour is enough to notice the outcome
 /// promptly without making this client a load source.
-const POLL_BACKOFF_CAP: Duration = Duration::from_secs(900);
+pub const POLL_BACKOFF_CAP: Duration = Duration::from_secs(900);
 
 /// How many polls one tick may send, across all records.
-const MAX_POLLS_PER_TICK: usize = 4;
+pub const MAX_POLLS_PER_TICK: usize = 4;
 
 /// Polls per record, for the life of the process, that may carry
 /// `resendCredentials`. The community rate-limits the flag itself, but a reply
@@ -96,7 +96,7 @@ fn poll_backoff(attempts: u32) -> Duration {
 
 /// Per-record poll pacing for the life of the process.
 #[derive(Debug, Default)]
-pub(crate) struct PollPacer {
+pub struct PollPacer {
     sent: HashMap<PollKey, Sent>,
 }
 
@@ -113,7 +113,7 @@ impl PollPacer {
     /// capped at [`MAX_POLLS_PER_TICK`]. Marks each returned record as polled, so
     /// a caller that then fails to send simply retries after the backoff rather
     /// than hammering an unreachable community.
-    pub(crate) fn due(&mut self, candidates: Vec<PendingPoll>, now: Instant) -> Vec<PendingPoll> {
+    pub fn due(&mut self, candidates: Vec<PendingPoll>, now: Instant) -> Vec<PendingPoll> {
         // Forget records that are no longer pending (resolved, left, expired), so
         // a long-lived process doesn't accumulate their pacing entries and a
         // community re-joined later starts from a clean first poll.
@@ -157,7 +157,7 @@ impl PollPacer {
 
 /// One poll, resolved against the account so the send needs no `Config` borrow
 /// and can therefore be moved into a spawned task.
-pub(crate) struct Poll {
+pub struct Poll {
     applicant_did: String,
     /// The persona's signing key: `join-requests/status/0.1` declares `proof`
     /// REQUIRED, so a poll is a signed document like the submit it chases.
@@ -182,7 +182,7 @@ pub(crate) struct Poll {
 /// A persona whose signing key cannot be read is dropped the same way: the poll
 /// is a signed document, and an unsigned one would be refused by a community
 /// enforcing the requirement rather than answered.
-pub(crate) async fn build(config: &Config, tdk: &TDK, due: Vec<PendingPoll>) -> Vec<Poll> {
+pub async fn build(config: &Config, tdk: &TDK, due: Vec<PendingPoll>) -> Vec<Poll> {
     let mut polls = Vec::new();
     for record in due {
         let Some(identity) = config.identities.get(&record.persona_ref) else {
@@ -226,17 +226,17 @@ pub(crate) async fn build(config: &Config, tdk: &TDK, due: Vec<PendingPoll>) -> 
 /// Sequential on purpose. The cap is four per tick, these are sends to
 /// potentially the same community, and a fan of concurrent sends buys nothing
 /// against a reply path that is asynchronous either way.
-pub(crate) async fn send_all(atm: ATM, polls: Vec<Poll>) {
+pub async fn send_all(atm: ATM, polls: Vec<Poll>) {
     for poll in polls {
         // TSP needs the community's *advertised* TSP mediator, resolved fresh:
         // it is the hop the routing layer seals to, and a document may have
         // changed since the submit.
         let tsp_mediator = if poll.over_tsp {
-            openvtc_core::config::peer_tsp_mediator(&poll.vtc_did).await
+            crate::config::peer_tsp_mediator(&poll.vtc_did).await
         } else {
             None
         };
-        let route = openvtc_core::join::Applicant {
+        let route = crate::join::Applicant {
             atm: &atm,
             profile: &poll.profile,
             persona_did: &poll.applicant_did,
@@ -245,8 +245,7 @@ pub(crate) async fn send_all(atm: ATM, polls: Vec<Poll>) {
             mediator_did: &poll.mediator_did,
             tsp_mediator_did: tsp_mediator.as_deref(),
         };
-        match openvtc_core::join::poll_join_status(&route, poll.request_id, poll.resend_credentials)
-            .await
+        match crate::join::poll_join_status(&route, poll.request_id, poll.resend_credentials).await
         {
             Ok(()) => debug!(
                 vtc = %poll.vtc_did,

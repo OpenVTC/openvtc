@@ -172,7 +172,7 @@ pub async fn submit_member_vmc(
     //
     // The reply type is unchanged either way: `MEMBER_VMC_RESPONSE_TYPE` is
     // exactly `MEMBER_VMC_TYPE#response`, which is what the spine's
-    // `success_response` produces, so `message_dispatch`'s arm for it keeps
+    // `success_response` produces, so `inbound`'s arm for it keeps
     // matching.
     let msg_id = Uuid::new_v4();
     let document_id = format!("urn:uuid:{msg_id}");

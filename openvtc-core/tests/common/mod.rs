@@ -238,6 +238,39 @@ pub async fn start_profile_messaging(
     routes: &[&'static str],
     inbound_tx: mpsc::UnboundedSender<Message>,
 ) -> Result<ProfileMessaging> {
+    let wanted: Vec<String> = routes.iter().map(|r| (*r).to_string()).collect();
+    start_profile(profile, move |received: Received| {
+        if wanted.contains(&received.message.typ) {
+            let _ = inbound_tx.send(received.message);
+        }
+    })
+    .await
+}
+
+/// A message as the transport delivered it: unpacked, with the sender the
+/// transport *verified* (authcrypt), or `None` when it could not.
+pub struct Received {
+    pub message: Message,
+    pub authenticated: Option<String>,
+}
+
+/// Like [`start_profile_messaging`], but every inbound message — whatever its
+/// type — goes to `inbound_tx` with its authenticated sender, so a test can put
+/// it through the inbound gate and the dispatcher exactly as the app does.
+pub async fn start_profile_inbound(
+    profile: TestProfile,
+    inbound_tx: mpsc::UnboundedSender<Received>,
+) -> Result<ProfileMessaging> {
+    start_profile(profile, move |received| {
+        let _ = inbound_tx.send(received);
+    })
+    .await
+}
+
+async fn start_profile(
+    profile: TestProfile,
+    sink: impl Fn(Received) + Send + 'static,
+) -> Result<ProfileMessaging> {
     let TestProfile {
         alias,
         did,
@@ -276,7 +309,6 @@ pub async fn start_profile_messaging(
         Duration::from_millis(200),
     ));
 
-    let wanted: Vec<String> = routes.iter().map(|r| (*r).to_string()).collect();
     let dispatcher = {
         let mut inbound = service.subscribe();
         tokio::spawn(async move {
@@ -287,9 +319,18 @@ pub async fn start_profile_messaging(
                 let Ok(message) = serde_json::from_slice::<Message>(&item.message.payload) else {
                     continue;
                 };
-                if wanted.contains(&message.typ) {
-                    let _ = inbound_tx.send(message);
-                }
+                // The delivery layer reports the hop it unwrapped (the
+                // mediator's forward) as `sender`, not the authcrypt sender of
+                // the inner message, and keeps the unpack metadata to itself.
+                // Every message in these tests is authcrypt-packed by the
+                // harness (`ProfileMessaging::send`), so the inner `from` is
+                // the sealing party; it stands in for what the app reads from
+                // `encrypted_from_kid`. A plaintext message gets none.
+                let authenticated = message.from.clone().filter(|_| item.message.encrypted);
+                sink(Received {
+                    message,
+                    authenticated,
+                });
             }
         })
     };

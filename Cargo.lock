@@ -6357,7 +6357,6 @@ dependencies = [
 name = "openvtc"
 version = "0.8.0"
 dependencies = [
- "affinidi-data-integrity",
  "affinidi-tdk",
  "anyhow",
  "arboard",
@@ -6443,7 +6442,6 @@ dependencies = [
  "openssl-sys",
  "pgp",
  "rand 0.8.8",
- "regex",
  "reqwest",
  "secrecy",
  "serde",

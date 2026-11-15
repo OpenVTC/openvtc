@@ -26,8 +26,8 @@ use tokio::sync::mpsc;
 
 use crate::colors::{CLI_ERROR, CLI_INFO, Themed};
 use crate::headless::{self, Admin, Membership, progress, save, warn};
-use crate::state_handler::join_cmd::apply_inbound;
 use crate::state_handler::{DeferredLoad, repos_actions};
+use openvtc_core::inbound::apply_inline as apply_inbound;
 
 /// How long a request waits for the community's answer (as the panel does).
 const REPLY_WINDOW: Duration = Duration::from_secs(30);

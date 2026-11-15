@@ -15,7 +15,6 @@ use super::dispatch::{back, page, persist, status};
 use super::jobs::Sent;
 use super::send::{abandon, begin, persona_did, sign_and_send};
 use super::words::community_display;
-use crate::state_handler::join_flow;
 use crate::state_handler::main_page::content::{
     DIRECTORY_LABELS, DIRECTORY_METHODS, DirectoryView, VettingMode, VettingTab, row_of,
 };
@@ -181,7 +180,7 @@ pub(super) fn refresh_application_contexts(ctx: &mut ActionCtx<'_>) {
         }],
         None => {
             let record = persona.and_then(|p| config.account.personas.get(&p));
-            let suggested = join_flow::suggested_context(config, &community);
+            let suggested = openvtc_core::join::sequence::suggested_context(config, &community);
             community_context::context_options(&config.account, record, &suggested)
         }
     };

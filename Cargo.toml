@@ -123,7 +123,6 @@ qrcode = { version = "0.14", default-features = false }
 # rand_core 0.6 traits; our `OsRng` is handed to it directly. Moves with `pgp`.
 rand = "0.8"
 ratatui = "0.30"
-regex = "1.12"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = "1.0"
 serde_json = "1.0"

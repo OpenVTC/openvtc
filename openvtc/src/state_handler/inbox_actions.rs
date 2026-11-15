@@ -325,7 +325,7 @@ pub(crate) struct AcceptJob {
     tdk: TDK,
     service: Messaging,
     /// `Some` ⇒ mint an R-DID first; `None` ⇒ use the persona DID directly.
-    rdid_plan: Option<crate::state_handler::relationship_actions::RDidPlan>,
+    rdid_plan: Option<openvtc_core::relationships::keys::RDidPlan>,
     persona_did: Arc<String>,
     /// The persona's authentication key, which signs the DID binding.
     persona_auth: Secret,
@@ -372,7 +372,7 @@ impl AcceptJob {
         // 2. Build + send the acceptance via the persona listener (handshake uses
         //    persona DIDs for routing; the R-DID is carried in the body).
         let built = async {
-            let did_signer = crate::state_handler::relationship_actions::relationship_did_signer(
+            let did_signer = openvtc_core::relationships::keys::relationship_did_signer(
                 &tdk,
                 &our_did,
                 &persona_did,
@@ -671,11 +671,9 @@ async fn prepare_accept_relationship(
     // creation runs in the task).
     let rdid_plan = if generate_r_did {
         let mediator = config.mediator_did().to_string();
-        Some(
-            crate::state_handler::relationship_actions::plan_relationship_did(
-                config, &mediator, admin_vta,
-            )?,
-        )
+        Some(openvtc_core::relationships::keys::plan_relationship_did(
+            config, &mediator, admin_vta,
+        )?)
     } else {
         None
     };
