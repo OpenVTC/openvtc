@@ -977,12 +977,12 @@ fn prompt_unlock_code(profile: &str) -> Result<UnlockCode, OpenVTCError> {
         // Wiped on drop. (dialoguer's own line buffer is beyond reach.)
         let input = zeroize::Zeroizing::new(
             Password::with_theme(&ColorfulTheme::default())
-                .with_prompt("Please enter unlock passphrase")
+                .with_prompt("Please enter your unlock code")
                 .allow_empty_password(false)
                 .interact()
                 .map_err(|e| {
-                    eprintln!("Failed to read passphrase input: {e}");
-                    OpenVTCError::Config(format!("Passphrase input failed: {e}"))
+                    eprintln!("Failed to read the unlock code: {e}");
+                    OpenVTCError::Config(format!("Unlock code input failed: {e}"))
                 })?,
         );
         let code = UnlockCode::for_existing(&input)?;

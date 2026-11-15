@@ -63,7 +63,7 @@ pub fn render(state: &InboxState, connection: &ConnectionState) -> Vec<Line<'sta
         ))
         .fg(COLOR_WARNING_ACCESSIBLE_RED),
         MediatorStatus::Initializing(step) => {
-            Line::from(format!("Initializing: {}", step)).fg(COLOR_ORANGE)
+            Line::from(format!("Initialising: {}", step)).fg(COLOR_ORANGE)
         }
         MediatorStatus::Unknown => Line::from("Not connected").fg(COLOR_ORANGE),
         MediatorStatus::NoActiveCommunity => Line::from("No active community").fg(COLOR_DARK_GRAY),

@@ -285,7 +285,7 @@ impl MainPageState {
                         TaskKind::Informational("Rejected".to_string())
                     }
                     TaskType::RelationshipRequestFinalized => {
-                        TaskKind::Informational("Finalized".to_string())
+                        TaskKind::Informational("Finalised".to_string())
                     }
                     TaskType::TrustPong => TaskKind::Informational("Pong received".to_string()),
                     TaskType::VRCRequestRejected => {

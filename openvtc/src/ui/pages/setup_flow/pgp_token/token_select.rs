@@ -259,7 +259,7 @@ impl TokenSelect {
                 ));
                 lines.push(Line::default());
                 lines.push(Line::styled(
-                    "If you have a token, ensure it is properly plugged in and recognized by your system, then rescan.",
+                    "If you have a token, ensure it is properly plugged in and recognised by your system, then rescan.",
                     Style::new().fg(COLOR_TEXT_DEFAULT).bold(),
                 ));
                 lines.push(Line::default());

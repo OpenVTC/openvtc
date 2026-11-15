@@ -843,7 +843,7 @@ impl ComponentRender<()> for MainPage {
             ]),
             MediatorStatus::Initializing(step) => Line::from(vec![
                 Span::styled(
-                    "Initializing: ",
+                    "Initialising: ",
                     ratatui::style::Style::default().fg(COLOR_ORANGE),
                 ),
                 Span::styled(

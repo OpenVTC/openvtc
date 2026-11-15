@@ -68,7 +68,7 @@ pub async fn set_passphrase(
     config.public.protection = ConfigProtectionType::Encrypted;
     config.private.logs.insert(
         LogFamily::Config,
-        "Config protection changed to passphrase encrypted".to_string(),
+        "Profile protection changed to an unlock code".to_string(),
     );
     save_config(config, profile)?;
     info!("config protection set to passphrase encrypted");
@@ -463,8 +463,8 @@ async fn handle_set_passphrase(
                 save,
                 dispatch_util::Persist::SyncOnly,
                 |mp| &mut mp.content_panel.settings.status_message,
-                "Passphrase protection enabled",
-                dispatch_util::SyncLog::Plain("Passphrase protection enabled".to_string()),
+                "Unlock code protection enabled",
+                dispatch_util::SyncLog::Plain("Unlock code protection enabled".to_string()),
             );
             // Setting a passphrase can move the secret to durable storage (the
             // file store only accepts an encrypted blob), so the volatile
@@ -476,7 +476,7 @@ async fn handle_set_passphrase(
             dispatch_util::record_error(
                 &mut state.main_page,
                 |mp| &mut mp.content_panel.settings.status_message,
-                "Failed to set passphrase",
+                "Failed to set the unlock code",
                 &e,
             );
         }
@@ -523,7 +523,7 @@ fn handle_remove_passphrase(
             dispatch_util::record_error(
                 &mut state.main_page,
                 |mp| &mut mp.content_panel.settings.status_message,
-                "Failed to remove passphrase",
+                "Failed to remove the unlock code",
                 &e,
             );
         }

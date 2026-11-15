@@ -303,7 +303,7 @@ fn render_status_help(
         }
         MediatorStatus::Initializing(step) => Line::from(vec![
             Span::styled("  Connection:   ", label_style),
-            Span::styled(format!("Initializing: {}", step), label_style),
+            Span::styled(format!("Initialising: {}", step), label_style),
         ]),
         MediatorStatus::Unknown => Line::from(vec![
             Span::styled("  Connection:   ", label_style),

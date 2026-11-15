@@ -784,19 +784,22 @@ fn render_change_protection(
 
     if active_field == PROTECTION_CONFIRM_REMOVE {
         lines.push(Line::from(
-            "Remove the passphrase? The configuration is then protected by the OS keyring only.",
+            "Remove the unlock code? The profile is then protected by the OS keyring only.",
         ));
         lines.push(Line::from(""));
         lines.push(
             Line::from(crate::ui::pages::main::confirm::prompt(
-                "Remove the passphrase?",
+                "Remove the unlock code?",
             ))
             .fg(COLOR_ORANGE)
             .bold(),
         );
     } else if active_field == 0 {
         // Option selection mode
-        let options = ["Set Passphrase", "Remove Passphrase (keyring only)"];
+        let options = [
+            "Set an unlock code",
+            "Remove the unlock code (keyring only)",
+        ];
         for (i, label) in options.iter().enumerate() {
             let is_selected = i == selected_option;
             let style = if is_selected {
@@ -831,7 +834,7 @@ fn render_change_protection(
                 }),
             ),
             Span::styled(
-                "Passphrase: ",
+                "Unlock code: ",
                 Style::new().fg(if active_field == 1 {
                     COLOR_SUCCESS
                 } else {
@@ -858,7 +861,7 @@ fn render_change_protection(
                 }),
             ),
             Span::styled(
-                "Confirm:    ",
+                "Confirm:     ",
                 Style::new().fg(if active_field == 2 {
                     COLOR_SUCCESS
                 } else {
@@ -879,7 +882,7 @@ fn render_change_protection(
             &mut lines,
             "",
             &[
-                k(keymap::TYPE, "passphrase"),
+                k(keymap::TYPE, "unlock code"),
                 k("Tab", "switch field"),
                 k(if active_field == 1 { "↓" } else { "↑" }, "switch field"),
                 k(
