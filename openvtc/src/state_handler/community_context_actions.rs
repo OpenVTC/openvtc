@@ -862,6 +862,54 @@ pub(crate) fn sweep_targets(config: &Config) -> Vec<String> {
         .collect()
 }
 
+/// One device-grant sweep, by [`sweep`].
+pub(crate) struct DeviceGrantSweepJob {
+    pub(crate) client: VtaClient,
+    pub(crate) contexts: Vec<String>,
+}
+
+impl crate::state_handler::background_dispatch::Job for DeviceGrantSweepJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        DispatchDomain::DeviceGrantSweep
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        sweep(self.client, self.contexts).await
+    }
+}
+
+/// Registering the contexts memberships name at the VTA: each is read, and
+/// created under `top_context_id` when missing.
+pub(crate) struct ContextRegistrationJob {
+    pub(crate) client: VtaClient,
+    pub(crate) top_context_id: String,
+    pub(crate) contexts: Vec<String>,
+}
+
+impl crate::state_handler::background_dispatch::Job for ContextRegistrationJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        DispatchDomain::CommunityContexts
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        let mut results = Vec::with_capacity(self.contexts.len());
+        for context_id in self.contexts {
+            let name = openvtc_core::config::context_path::parse_sub_context_id(&context_id)
+                .map_or(context_id.clone(), |(_, slug)| slug.to_string());
+            let result = community_context::ensure_context(
+                &self.client,
+                &self.top_context_id,
+                &context_id,
+                &name,
+            )
+            .await
+            .map_err(|e| e.to_string());
+            results.push((context_id, result));
+        }
+        DispatchOutcome::CommunityContexts(results)
+    }
+}
+
 /// Read the device grants of every context in `contexts`.
 pub(crate) async fn sweep(client: VtaClient, contexts: Vec<String>) -> DispatchOutcome {
     let mut results = Vec::with_capacity(contexts.len());

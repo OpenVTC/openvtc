@@ -344,10 +344,10 @@ impl CommunityLoop<'_> {
     /// whether it was dispatched — or failed in a way the view now shows; `false`
     /// only for a busy lane, with nothing armed.
     ///
-    /// Armed before the send is spawned, never from its outcome: a community
-    /// that answers at once can have its answer applied first — to find nothing
-    /// pending, be dropped, and leave the view to time out on a request that
-    /// was answered.
+    /// Armed in the same loop turn as the spawn, never from its outcome: a
+    /// community that answers at once could otherwise have its answer applied
+    /// first — to find nothing pending, be dropped, and leave the view to time
+    /// out on a request that was answered.
     pub(crate) fn spawn_send<F: CommunityFeature>(
         &mut self,
         sender: Sender,
@@ -364,7 +364,16 @@ impl CommunityLoop<'_> {
             );
             return true;
         };
-        if !self.in_flight.try_begin(F::SEND) {
+        let job = FeatureSend::<F> {
+            job: SendJob {
+                sender,
+                vtc_did: to.clone(),
+                persona,
+                doc,
+            },
+            feature: std::marker::PhantomData,
+        };
+        if !background_dispatch::dispatch(job, self.in_flight, self.dispatch_tx, |_| {}) {
             return false;
         }
         if F::RECORDS_THREAD {
@@ -377,19 +386,26 @@ impl CommunityLoop<'_> {
                 thid,
                 sent_at: Instant::now(),
                 purpose,
-                to: to.clone(),
+                to,
             });
         }
-        let job = SendJob {
-            sender,
-            vtc_did: to,
-            persona,
-            doc,
-        };
-        background_dispatch::spawn_dispatch(self.dispatch_tx.clone(), F::SEND, async move {
-            F::outcome(job.run().await)
-        });
         true
+    }
+}
+
+/// A [`SendJob`] on feature `F`'s lane, its outcome wrapped as `F`'s.
+struct FeatureSend<F> {
+    job: SendJob,
+    feature: std::marker::PhantomData<fn() -> F>,
+}
+
+impl<F: CommunityFeature> background_dispatch::Job for FeatureSend<F> {
+    fn domain(&self) -> DispatchDomain {
+        F::SEND
+    }
+
+    async fn execute(self) -> DispatchOutcome {
+        F::outcome(self.job.run().await)
     }
 }
 

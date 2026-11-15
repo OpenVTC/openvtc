@@ -2205,16 +2205,11 @@ fn spawn_persona_mint(
     let Some(job) = advance_persona_overlay(state, config, tdk, admin_vta, dispatch_tx) else {
         return;
     };
-    let domain = background_dispatch::DispatchDomain::Persona;
-    if !in_flight.try_begin(domain) {
+    background_dispatch::dispatch(job, in_flight, dispatch_tx, |busy| {
         if let Some(o) = state.main_page.create_persona.as_mut() {
             o.phase = main_page::content::CreatePersonaPhase::Path;
-            o.messages = vec![background_dispatch::InFlight::busy_message(domain)];
+            o.messages = vec![busy];
         }
-        return;
-    }
-    background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {
-        background_dispatch::DispatchOutcome::Persona(Box::new(job.run().await))
     });
 }
 
@@ -2327,15 +2322,8 @@ fn spawn_community_job(
     state: &mut State,
     job: community_actions::CommunityJob,
 ) {
-    let domain = background_dispatch::DispatchDomain::Community;
-    if !in_flight.try_begin(domain) {
-        state.main_page.content_panel.communities.status_message = Some(Status::warning(
-            background_dispatch::InFlight::busy_message(domain),
-        ));
-        return;
-    }
-    background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {
-        background_dispatch::DispatchOutcome::Community(job.run().await)
+    background_dispatch::dispatch(job, in_flight, dispatch_tx, |busy| {
+        state.main_page.content_panel.communities.status_message = Some(Status::warning(busy));
     });
 }
 
@@ -2383,29 +2371,26 @@ fn membership_over_tsp(
 /// governance documents at a community: the view is armed with exactly one
 /// pending thread id, and a second send would orphan the first.
 ///
-/// The view is armed here, before the spawn, not when the send reports back:
-/// the reply travels a different channel from the send's outcome and can be
-/// dispatched first.
+/// The view is armed here, in the same loop turn as the spawn, not when the
+/// send reports back: the reply travels a different channel from the send's
+/// outcome and can be dispatched first — but by this loop, so not before the
+/// arm below has run.
 fn spawn_capability_job(
     dispatch_tx: &tokio::sync::mpsc::UnboundedSender<background_dispatch::DispatchOutcome>,
     in_flight: &mut background_dispatch::InFlight,
     state: &mut State,
     job: capability_actions::CapabilityJob,
 ) {
-    let domain = background_dispatch::DispatchDomain::Capabilities;
-    if !in_flight.try_begin(domain) {
-        if let Some(view) = state.main_page.content_panel.capabilities.view.as_mut() {
-            view.status_message = Some(Status::warning(
-                background_dispatch::InFlight::busy_message(domain),
-            ));
-        }
-        return;
-    }
     let send = job.prepare();
-    send.arm(state);
-    background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {
-        background_dispatch::DispatchOutcome::Capabilities(send.run().await)
+    let arm = send.arming();
+    let started = background_dispatch::dispatch(send, in_flight, dispatch_tx, |busy| {
+        if let Some(view) = state.main_page.content_panel.capabilities.view.as_mut() {
+            view.status_message = Some(Status::warning(busy));
+        }
     });
+    if started {
+        arm(state);
+    }
 }
 
 /// Start a VIC vault mutation off the loop, shared by both loops.
@@ -2426,20 +2411,13 @@ fn spawn_vic_mutation(
     admin_vta: Option<&vta_sdk::client::VtaClient>,
     verb: vic::VicVerb,
 ) {
-    let domain = background_dispatch::DispatchDomain::Vic;
     let Some(admin_vta) = admin_vta else { return };
-    if !in_flight.try_begin(domain) {
-        state
-            .main_page
-            .log(background_dispatch::InFlight::busy_message(domain));
-        return;
-    }
     let job = vic::VicJob {
         admin_vta: admin_vta.clone(),
         verb,
     };
-    background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {
-        background_dispatch::DispatchOutcome::VicMutation(job.run().await)
+    background_dispatch::dispatch(job, in_flight, dispatch_tx, |busy| {
+        state.main_page.log(busy);
     });
 }
 
@@ -2523,7 +2501,6 @@ fn spawn_agent_name_job(
 ) {
     use main_page::content::AgentNameManagerPhase;
 
-    let domain = background_dispatch::DispatchDomain::AgentNameManage;
     let opening = matches!(verb, agent_name_actions::Verb::Open);
     let status = verb.status();
 
@@ -2535,10 +2512,17 @@ fn spawn_agent_name_job(
         }
         return;
     };
-    if !in_flight.try_begin(domain) {
+    let job = agent_name_actions::AgentNameJob {
+        vta: admin_vta.clone(),
+        persona_did,
+        verb,
+    };
+    let started = background_dispatch::dispatch(job, in_flight, dispatch_tx, |busy| {
         if let Some(o) = state.main_page.agent_names.as_mut() {
-            o.message = Some(background_dispatch::InFlight::busy_message(domain));
+            o.message = Some(busy);
         }
+    });
+    if !started {
         return;
     }
 
@@ -2553,38 +2537,6 @@ fn spawn_agent_name_job(
         // running; don't leave it armed over the refreshed list.
         o.confirm_remove = None;
     }
-
-    let job = agent_name_actions::AgentNameJob {
-        vta: admin_vta.clone(),
-        persona_did,
-        verb,
-    };
-    background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {
-        background_dispatch::DispatchOutcome::AgentNameManage(job.run().await)
-    });
-}
-
-/// Record what a refresh request does to the panel, and answer whether the
-/// caller should actually start a job. Split out from [`spawn_vic_refresh`]
-/// so the guard rules are testable without a live `VtaClient`.
-///
-/// The three outcomes, and why each is what it is, are documented on
-/// [`spawn_vic_refresh`].
-fn begin_vic_refresh(
-    in_flight: &mut background_dispatch::InFlight,
-    state: &mut State,
-    has_session: bool,
-) -> bool {
-    if !has_session {
-        state.main_page.content_panel.vta.vic_loading = false;
-        return false;
-    }
-    if !in_flight.try_begin(background_dispatch::DispatchDomain::Vic) {
-        state.main_page.content_panel.vta.vic_refresh_queued = true;
-        return false;
-    }
-    state.main_page.content_panel.vta.vic_loading = true;
-    true
 }
 
 /// Start a background VIC-list refresh, shared by both loops.
@@ -2615,20 +2567,20 @@ fn spawn_vic_refresh(
     state: &mut State,
     admin_vta: Option<&vta_sdk::client::VtaClient>,
 ) {
-    if !begin_vic_refresh(in_flight, state, admin_vta.is_some()) {
+    let Some(admin_vta) = admin_vta else {
+        state.main_page.content_panel.vta.vic_loading = false;
         return;
+    };
+    let job = vic::VicRefreshJob {
+        admin_vta: admin_vta.clone(),
+        include_inactive: state.main_page.content_panel.vta.vic_show_inactive,
+    };
+    let started = background_dispatch::dispatch(job, in_flight, dispatch_tx, |_| {
+        state.main_page.content_panel.vta.vic_refresh_queued = true;
+    });
+    if started {
+        state.main_page.content_panel.vta.vic_loading = true;
     }
-    let admin_vta = admin_vta.expect("checked by begin_vic_refresh").clone();
-    let include_inactive = state.main_page.content_panel.vta.vic_show_inactive;
-    background_dispatch::spawn_dispatch(
-        dispatch_tx.clone(),
-        background_dispatch::DispatchDomain::Vic,
-        async move {
-            background_dispatch::DispatchOutcome::Vic(
-                vic::VicRefreshOutcome::run(admin_vta, include_inactive).await,
-            )
-        },
-    );
 }
 
 /// Start the identity pane's network work off the loop, shared by both loops.
@@ -2659,7 +2611,6 @@ fn spawn_persona_effect(
 ) {
     use persona_actions::PersonaEffect;
 
-    let domain = background_dispatch::DispatchDomain::PersonaManage;
     if matches!(effect, PersonaEffect::None) {
         return;
     }
@@ -2679,18 +2630,6 @@ fn spawn_persona_effect(
         }
         return;
     };
-    if !in_flight.try_begin(domain) {
-        match effect {
-            PersonaEffect::Read => {
-                state.main_page.content_panel.identity.refresh_queued = true;
-            }
-            _ => persona_actions::release_form(
-                state,
-                background_dispatch::InFlight::busy_message(domain),
-            ),
-        }
-        return;
-    }
 
     match effect {
         PersonaEffect::None => unreachable!("returned above"),
@@ -2701,18 +2640,20 @@ fn spawn_persona_effect(
                 targets: persona_actions::PersonaReadJob::targets(state),
                 needs_claim_types: !state.main_page.content_panel.identity.claim_types_loaded,
             };
-            state.main_page.content_panel.identity.loading = true;
-            background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {
-                background_dispatch::DispatchOutcome::PersonaManage(job.run().await)
+            let started = background_dispatch::dispatch(job, in_flight, dispatch_tx, |_| {
+                state.main_page.content_panel.identity.refresh_queued = true;
             });
+            if started {
+                state.main_page.content_panel.identity.loading = true;
+            }
         }
         PersonaEffect::Job(job) => {
             let job = persona_actions::PersonaJobRun {
                 admin_vta: admin_vta.clone(),
                 job,
             };
-            background_dispatch::spawn_dispatch(dispatch_tx.clone(), domain, async move {
-                background_dispatch::DispatchOutcome::PersonaManage(job.run().await)
+            background_dispatch::dispatch(job, in_flight, dispatch_tx, |busy| {
+                persona_actions::release_form(state, busy);
             });
         }
     }
@@ -3327,18 +3268,13 @@ fn dispatch_binding_refresh(
         .collect();
     if !binding_targets.is_empty()
         && let Some(client) = admin_vta
-        && in_flight.try_begin(background_dispatch::DispatchDomain::PersonaBinding)
     {
-        let client = client.clone();
-        background_dispatch::spawn_dispatch(
-            dispatch_tx.clone(),
-            background_dispatch::DispatchDomain::PersonaBinding,
-            async move {
-                background_dispatch::DispatchOutcome::PersonaBinding(
-                    persona_binding_refresh::resolve_batch(client, binding_targets).await,
-                )
-            },
-        );
+        let job = persona_binding_refresh::BindingRefreshJob {
+            client: client.clone(),
+            targets: binding_targets,
+        };
+        // A sweep already running answers for this one too.
+        background_dispatch::dispatch(job, in_flight, dispatch_tx, |_| {});
     }
 }
 
@@ -4769,33 +4705,45 @@ mod tests {
     /// filter flip — so its answer is already stale, and discarding the new
     /// request would leave, say, a just-archived VIC rendered as active until
     /// someone refreshed by hand.
-    #[test]
-    fn vic_refresh_guard_defers_rather_than_drops() {
+    #[tokio::test]
+    async fn vic_refresh_guard_defers_rather_than_drops() {
         let mut state = State::default();
         let mut in_flight = background_dispatch::InFlight::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Nothing listens there: the job a refresh starts fails fast and its
+        // outcome is never applied, so the domain stays claimed until this
+        // test frees it by hand.
+        let vta = vta_sdk::client::VtaClient::new("http://127.0.0.1:1");
 
         // No admin session: nothing to query, and the panel must not be left
         // claiming a load is under way.
         state.main_page.content_panel.vta.vic_loading = true;
-        assert!(!begin_vic_refresh(&mut in_flight, &mut state, false));
+        spawn_vic_refresh(&tx, &mut in_flight, &mut state, None);
         assert!(!state.main_page.content_panel.vta.vic_loading);
         assert!(!in_flight.is_busy(background_dispatch::DispatchDomain::Vic));
 
         // First request with a session: claims the domain and starts loading.
-        assert!(begin_vic_refresh(&mut in_flight, &mut state, true));
+        spawn_vic_refresh(&tx, &mut in_flight, &mut state, Some(&vta));
         assert!(state.main_page.content_panel.vta.vic_loading);
         assert!(in_flight.is_busy(background_dispatch::DispatchDomain::Vic));
 
         // Second while that one is in flight: not started, but remembered.
-        assert!(!begin_vic_refresh(&mut in_flight, &mut state, true));
+        state.main_page.content_panel.vta.vic_loading = false;
+        spawn_vic_refresh(&tx, &mut in_flight, &mut state, Some(&vta));
         assert!(
             state.main_page.content_panel.vta.vic_refresh_queued,
             "a rejected refresh must be re-issued once the domain frees"
+        );
+        assert!(
+            !state.main_page.content_panel.vta.vic_loading,
+            "a deferred refresh starts no load"
         );
 
         // Once the outcome lands the domain is free and the queued request runs.
         in_flight.finish(background_dispatch::DispatchDomain::Vic);
         state.main_page.content_panel.vta.vic_refresh_queued = false;
-        assert!(begin_vic_refresh(&mut in_flight, &mut state, true));
+        spawn_vic_refresh(&tx, &mut in_flight, &mut state, Some(&vta));
+        assert!(state.main_page.content_panel.vta.vic_loading);
+        assert!(in_flight.is_busy(background_dispatch::DispatchDomain::Vic));
     }
 }

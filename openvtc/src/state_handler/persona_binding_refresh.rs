@@ -27,6 +27,24 @@ use vta_sdk::client::VtaClient;
 /// A `(sub_context_id, persona_did)` pair to ask about.
 pub type BindingTarget = (String, String);
 
+/// One sweep: every membership's persona, asked of the agent in one job.
+pub(crate) struct BindingRefreshJob {
+    pub(crate) client: VtaClient,
+    pub(crate) targets: Vec<BindingTarget>,
+}
+
+impl crate::state_handler::background_dispatch::Job for BindingRefreshJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::PersonaBinding
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::PersonaBinding(
+            resolve_batch(self.client, self.targets).await,
+        )
+    }
+}
+
 /// Resolve every target, in order, returning one entry per target.
 ///
 /// Sequential rather than concurrent on purpose: the count is bounded by the

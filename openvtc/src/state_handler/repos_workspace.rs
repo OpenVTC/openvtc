@@ -653,6 +653,16 @@ pub(crate) async fn set_up_identity(
 const INSTALL_BINARY: &str = "did-git-sign is not on PATH, and git runs it to sign every commit. \
      Install it (`cargo install did-git-sign`), then press e here.";
 
+impl background_dispatch::Job for WorkspaceJob {
+    fn domain(&self) -> DispatchDomain {
+        DOMAIN
+    }
+
+    async fn execute(self) -> DispatchOutcome {
+        DispatchOutcome::Workspace(self.run().await)
+    }
+}
+
 impl WorkspaceJob {
     async fn run(self) -> WorkspaceOutcome {
         let (vtc_did, persona) = (self.vtc_did.clone(), self.persona);
@@ -1410,15 +1420,14 @@ pub(crate) async fn dispatch(ctx: &mut ActionCtx<'_>, action: W) {
         settings: view.workspace.settings.clone(),
         settings_path: WorkspaceSettings::path(ctx.profile).ok(),
     };
-    if !ctx.in_flight.try_begin(DOMAIN) {
-        view.note(Severity::Warning, InFlight::busy_message(DOMAIN));
+    let started = background_dispatch::dispatch(job, ctx.in_flight, ctx.dispatch_tx, |msg| {
+        view.note(Severity::Warning, msg);
+    });
+    if !started {
         return;
     }
     view.note(Severity::Progress, format!("{}…", capitalise(&busy)));
     view.workspace.busy = Some(busy);
-    background_dispatch::spawn_dispatch(ctx.dispatch_tx.clone(), DOMAIN, async move {
-        DispatchOutcome::Workspace(job.run().await)
-    });
 }
 
 /// How a checkout reads, in a few words, for the list.

@@ -116,6 +116,16 @@ pub(crate) struct CommunityJob {
     pub(crate) over_tsp: bool,
 }
 
+impl crate::state_handler::background_dispatch::Job for CommunityJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::Community
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::Community(self.run().await)
+    }
+}
+
 impl CommunityJob {
     /// Do the send. I/O only.
     pub(crate) async fn run(self) -> CommunityOutcome {

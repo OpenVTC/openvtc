@@ -601,19 +601,33 @@ pub(crate) fn refresh_did_git_sign(
         settings.did_git_sign_wanted = false;
         return;
     }
-    if !in_flight.try_begin(DispatchDomain::DidGitSign) {
+    let job = DidGitSignJob { persona_did };
+    let started = background_dispatch::dispatch(job, in_flight, dispatch_tx, |_| {
         settings.did_git_sign_wanted = true;
-        return;
+    });
+    if started {
+        settings.did_git_sign_wanted = false;
     }
-    settings.did_git_sign_wanted = false;
-    background_dispatch::spawn_dispatch(
-        dispatch_tx.clone(),
-        DispatchDomain::DidGitSign,
-        async move {
-            let info = detect_did_git_sign_off_loop(persona_did.clone()).await;
-            DispatchOutcome::DidGitSign { persona_did, info }
-        },
-    );
+}
+
+/// One did-git-sign detection for `persona_did`, by
+/// [`detect_did_git_sign_off_loop`].
+struct DidGitSignJob {
+    persona_did: String,
+}
+
+impl background_dispatch::Job for DidGitSignJob {
+    fn domain(&self) -> DispatchDomain {
+        DispatchDomain::DidGitSign
+    }
+
+    async fn execute(self) -> DispatchOutcome {
+        let info = detect_did_git_sign_off_loop(self.persona_did.clone()).await;
+        DispatchOutcome::DidGitSign {
+            persona_did: self.persona_did,
+            info,
+        }
+    }
 }
 
 /// [`detect_did_git_sign_info`](crate::state_handler::main_page::detect_did_git_sign_info)
@@ -1114,8 +1128,7 @@ pub(crate) async fn dispatch(
         // remaining (explicit, operator-driven) way to ask for one.
         SettingsAction::SubmitEdit { value } => handle_submit_edit(config, state, save, &value),
         SettingsAction::ExportConfig { path, passphrase } => {
-            handle_export_config_action(config, state, state_tx, save, &path, passphrase)
-                .await
+            handle_export_config_action(config, state, state_tx, save, &path, passphrase).await
         }
         SettingsAction::ImportConfig { path, passphrase } => {
             handle_import_config_action(config, state, save, &path, &passphrase).await

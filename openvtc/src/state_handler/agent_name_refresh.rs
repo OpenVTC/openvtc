@@ -22,6 +22,24 @@ use tracing::debug;
 /// Maximum concurrent DID resolutions inside one batch job.
 const CONCURRENCY: usize = 4;
 
+/// One sweep: every uncached or stale DID, resolved by [`resolve_batch`].
+pub(crate) struct AgentNameRefreshJob {
+    pub(crate) resolver: DIDCacheClient,
+    pub(crate) dids: Vec<String>,
+}
+
+impl crate::state_handler::background_dispatch::Job for AgentNameRefreshJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::AgentName
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::AgentName(
+            resolve_batch(self.resolver, self.dids).await,
+        )
+    }
+}
+
 /// Resolve each DID to a verified agent name (or `None`), bounded to
 /// [`CONCURRENCY`] in flight. The result pairs each input DID with its verified
 /// name; order is not preserved (the caller keys by DID).

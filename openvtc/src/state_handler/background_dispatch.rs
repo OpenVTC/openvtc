@@ -487,6 +487,51 @@ pub(crate) fn spawn_dispatch<F>(
     });
 }
 
+/// One unit of off-loop work: the domain it serialises on, and the I/O that
+/// produces its [`DispatchOutcome`].
+///
+/// Every job is built on the loop thread from owned values (no borrow of
+/// `State` or `Config` survives into it), then handed to [`dispatch`], which
+/// is the one place a job is claimed and spawned. `execute` does I/O only; the
+/// outcome it returns is applied on the loop by [`apply_outcome`].
+pub(crate) trait Job: Send + 'static {
+    /// The domain this job holds while it runs.
+    fn domain(&self) -> DispatchDomain;
+
+    /// Run the job's I/O and wrap its result as the outcome the loop applies.
+    fn execute(self) -> impl std::future::Future<Output = DispatchOutcome> + Send;
+}
+
+/// Claim `job`'s domain and spawn it, or refuse it.
+///
+/// The single spawn shape for off-loop work:
+///
+/// * If the domain is free it is claimed ([`InFlight::try_begin`]) and the job
+///   is spawned through [`spawn_dispatch`] (so a panic still frees the
+///   domain); returns `true`.
+/// * If the domain is busy the job is dropped unrun, `on_busy` is called with
+///   the domain's [`InFlight::busy_message`] — each caller decides where that
+///   is shown, or whether a deferred retry is remembered instead — and it
+///   returns `false`.
+///
+/// Work the loop must do only once the claim has succeeded (locking an
+/// overlay, setting a loading flag) is done by the caller on `true`: the
+/// outcome is applied by the same loop, so it can never overtake that work.
+pub(crate) fn dispatch<J: Job>(
+    job: J,
+    in_flight: &mut InFlight,
+    dispatch_tx: &tokio::sync::mpsc::UnboundedSender<DispatchOutcome>,
+    on_busy: impl FnOnce(String),
+) -> bool {
+    let domain = job.domain();
+    if !in_flight.try_begin(domain) {
+        on_busy(InFlight::busy_message(domain));
+        return false;
+    }
+    spawn_dispatch(dispatch_tx.clone(), domain, job.execute());
+    true
+}
+
 /// Apply a completed [`DispatchOutcome`] to `state` and clear the domain's
 /// busy-flag. **Pure** over `(&mut State, &mut InFlight, outcome)` — no I/O — so
 /// it is unit-testable and is the single place the loop's outcome arm mutates
@@ -920,6 +965,102 @@ mod tests {
             outcome,
             DispatchOutcome::Panicked(DispatchDomain::Inbox)
         ));
+    }
+
+    /// A test job: holds `domain`, and answers with a `Panicked` outcome for it
+    /// (the simplest outcome that names a domain) once `release` fires.
+    struct TestJob {
+        domain: DispatchDomain,
+        release: tokio::sync::oneshot::Receiver<()>,
+    }
+
+    impl Job for TestJob {
+        fn domain(&self) -> DispatchDomain {
+            self.domain
+        }
+
+        async fn execute(self) -> DispatchOutcome {
+            let _ = self.release.await;
+            DispatchOutcome::Panicked(self.domain)
+        }
+    }
+
+    /// `dispatch` claims the job's own domain and spawns it: the domain is busy
+    /// until the outcome is applied, the outcome arrives on the channel, and
+    /// applying it frees the domain again.
+    #[tokio::test]
+    async fn dispatch_claims_the_jobs_domain_and_spawns_it() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DispatchOutcome>();
+        let mut in_flight = InFlight::default();
+        let (release, gate) = tokio::sync::oneshot::channel();
+
+        let mut busy = None;
+        let started = dispatch(
+            TestJob {
+                domain: DispatchDomain::Vic,
+                release: gate,
+            },
+            &mut in_flight,
+            &tx,
+            |msg| busy = Some(msg),
+        );
+        assert!(started);
+        assert!(busy.is_none(), "a free domain must not report busy");
+        assert!(in_flight.is_busy(DispatchDomain::Vic));
+        assert!(
+            !in_flight.is_busy(DispatchDomain::Community),
+            "only the job's own domain is claimed"
+        );
+
+        release.send(()).unwrap();
+        let outcome = rx.recv().await.expect("the spawned job reports back");
+        assert_eq!(outcome.domain(), DispatchDomain::Vic);
+
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = SaveScheduler::new("test");
+        apply_outcome(
+            &mut state,
+            &mut config,
+            &mut save,
+            &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
+            outcome,
+        );
+        assert!(!in_flight.is_busy(DispatchDomain::Vic));
+    }
+
+    /// A job for a busy domain is refused: not spawned, `on_busy` told why in
+    /// the domain's own words, and the running job's claim left untouched.
+    #[tokio::test]
+    async fn dispatch_rejects_a_job_for_a_busy_domain() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DispatchOutcome>();
+        let mut in_flight = InFlight::default();
+        assert!(in_flight.try_begin(DispatchDomain::Community));
+
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let mut busy = None;
+        let started = dispatch(
+            TestJob {
+                domain: DispatchDomain::Community,
+                release: gate,
+            },
+            &mut in_flight,
+            &tx,
+            |msg| busy = Some(msg),
+        );
+        assert!(!started);
+        assert_eq!(
+            busy.as_deref(),
+            Some(InFlight::busy_message(DispatchDomain::Community).as_str())
+        );
+        assert!(in_flight.is_busy(DispatchDomain::Community));
+
+        // The refused job never ran: its gate was dropped with it, and nothing
+        // reaches the channel.
+        assert!(release.send(()).is_err(), "a refused job is dropped unrun");
+        drop(tx);
+        assert!(rx.recv().await.is_none());
     }
 
     /// The busy message names the domain so the UI tells the user *what* is

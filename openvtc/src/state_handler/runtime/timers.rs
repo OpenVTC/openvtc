@@ -533,18 +533,12 @@ impl Runtime {
         // thread by `apply_outcome`. The busy-guard drops the tick if
         // a prior sweep is still running, so ticks never pile up.
         let targets = config.agent_name_refresh_targets(chrono::Utc::now());
-        if !targets.is_empty()
-            && in_flight.try_begin(background_dispatch::DispatchDomain::AgentName)
-        {
-            let resolver = tdk.did_resolver().clone();
-            background_dispatch::spawn_dispatch(
-                dispatch_tx.clone(),
-                background_dispatch::DispatchDomain::AgentName,
-                async move {
-                    let results = agent_name_refresh::resolve_batch(resolver, targets).await;
-                    background_dispatch::DispatchOutcome::AgentName(results)
-                },
-            );
+        if !targets.is_empty() {
+            let job = agent_name_refresh::AgentNameRefreshJob {
+                resolver: tdk.did_resolver().clone(),
+                dids: targets,
+            };
+            background_dispatch::dispatch(job, in_flight, dispatch_tx, |_| {});
         }
 
         // Ask what each persona presents. Shares this tick for the
@@ -572,32 +566,15 @@ impl Runtime {
             .collect();
         if !unchecked.is_empty()
             && let Some(client) = admin_vta.as_ref()
-            && in_flight.try_begin(background_dispatch::DispatchDomain::CommunityContexts)
         {
-            contexts_checked.extend(unchecked.iter().cloned());
-            let client = client.clone();
-            background_dispatch::spawn_dispatch(
-                dispatch_tx.clone(),
-                background_dispatch::DispatchDomain::CommunityContexts,
-                async move {
-                    let mut results = Vec::with_capacity(unchecked.len());
-                    for context_id in unchecked {
-                        let name =
-                            openvtc_core::config::context_path::parse_sub_context_id(&context_id)
-                                .map_or(context_id.clone(), |(_, slug)| slug.to_string());
-                        let result = openvtc_core::config::community_context::ensure_context(
-                            &client,
-                            &top_context_id,
-                            &context_id,
-                            &name,
-                        )
-                        .await
-                        .map_err(|e| e.to_string());
-                        results.push((context_id, result));
-                    }
-                    background_dispatch::DispatchOutcome::CommunityContexts(results)
-                },
-            );
+            let job = community_context_actions::ContextRegistrationJob {
+                client: client.clone(),
+                top_context_id,
+                contexts: unchecked.clone(),
+            };
+            if background_dispatch::dispatch(job, in_flight, dispatch_tx, |_| {}) {
+                contexts_checked.extend(unchecked);
+            }
         }
 
         // Read each membership context's device grants, once a run,
@@ -609,15 +586,14 @@ impl Runtime {
             && let Some(client) = admin_vta.as_ref()
         {
             let targets = community_context_actions::sweep_targets(config);
-            if !targets.is_empty()
-                && in_flight.try_begin(background_dispatch::DispatchDomain::DeviceGrantSweep)
-            {
-                *grants_swept = true;
-                background_dispatch::spawn_dispatch(
-                    dispatch_tx.clone(),
-                    background_dispatch::DispatchDomain::DeviceGrantSweep,
-                    community_context_actions::sweep(client.clone(), targets),
-                );
+            if !targets.is_empty() {
+                let job = community_context_actions::DeviceGrantSweepJob {
+                    client: client.clone(),
+                    contexts: targets,
+                };
+                if background_dispatch::dispatch(job, in_flight, dispatch_tx, |_| {}) {
+                    *grants_swept = true;
+                }
             }
         }
 
@@ -638,18 +614,11 @@ impl Runtime {
         if needs_probe
             && let openvtc_core::config::KeyBackend::Vta { vta_did, .. } = &config.key_backend
             && !vta_did.is_empty()
-            && in_flight.try_begin(background_dispatch::DispatchDomain::VtaTransports)
         {
-            let vta_did = vta_did.clone();
-            background_dispatch::spawn_dispatch(
-                dispatch_tx.clone(),
-                background_dispatch::DispatchDomain::VtaTransports,
-                async move {
-                    background_dispatch::DispatchOutcome::VtaTransports(
-                        vta_transports::probe(vta_did).await,
-                    )
-                },
-            );
+            let job = vta_transports::VtaTransportsProbe {
+                vta_did: vta_did.clone(),
+            };
+            background_dispatch::dispatch(job, in_flight, dispatch_tx, |_| {});
         }
     }
 }

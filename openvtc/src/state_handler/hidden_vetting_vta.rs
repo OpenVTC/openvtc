@@ -118,6 +118,18 @@ pub(crate) struct PcsJob {
     pub work: Vec<PcsWork>,
 }
 
+impl crate::state_handler::background_dispatch::Job for PcsJob {
+    fn domain(&self) -> crate::state_handler::background_dispatch::DispatchDomain {
+        crate::state_handler::background_dispatch::DispatchDomain::HiddenVetting
+    }
+
+    async fn execute(self) -> crate::state_handler::background_dispatch::DispatchOutcome {
+        crate::state_handler::background_dispatch::DispatchOutcome::HiddenVetting(Box::new(
+            self.run().await,
+        ))
+    }
+}
+
 impl PcsJob {
     pub(crate) async fn run(self) -> PcsOutcome {
         let mut results = Vec::with_capacity(self.work.len());

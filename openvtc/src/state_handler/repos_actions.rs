@@ -28,7 +28,7 @@ use openvtc_core::config::account::PersonaId;
 use openvtc_core::git_ns::{self, GitRight, Reply, Request};
 
 use crate::state_handler::actions::ReposAction as Act;
-use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome, InFlight};
+use crate::state_handler::background_dispatch::{self, DispatchDomain, DispatchOutcome};
 use crate::state_handler::main_page::repos::{
     AddPersonForm, ArmedChange, CreatedRepo, EXPIRY_CHOICES, LinkFlow, LinkPhase, LinkedAccount,
     NewRepoForm, Pending, Purpose, ReposPhase, ReposScreen, ReposView, Severity, Status,
@@ -524,6 +524,16 @@ pub(crate) struct ReposJob {
     purpose: Purpose,
 }
 
+impl background_dispatch::Job for ReposJob {
+    fn domain(&self) -> DispatchDomain {
+        DOMAIN
+    }
+
+    async fn execute(self) -> DispatchOutcome {
+        DispatchOutcome::Repos(self.run().await)
+    }
+}
+
 impl ReposJob {
     /// Sign and send. I/O only.
     pub(crate) async fn run(mut self) -> ReposOutcome {
@@ -712,30 +722,27 @@ async fn send(lp: &mut Loop<'_>, request: Request, purpose: Purpose, quiet: bool
             return false;
         }
     };
-    if !lp.in_flight.try_begin(DOMAIN) {
-        if !quiet && let Some(view) = view_mut(lp.state) {
-            view.note(Severity::Warning, InFlight::busy_message(DOMAIN));
-        }
-        return false;
-    }
-    if let Some(view) = view_mut(lp.state) {
-        arm(
-            view,
-            correlation_thread(&doc).to_string(),
-            purpose.clone(),
-            Instant::now(),
-        );
-    }
+    let thid = correlation_thread(&doc).to_string();
     let job = ReposJob {
         sender,
         vtc_did,
         persona,
         doc,
-        purpose,
+        purpose: purpose.clone(),
     };
-    background_dispatch::spawn_dispatch(lp.dispatch_tx.clone(), DOMAIN, async move {
-        DispatchOutcome::Repos(job.run().await)
+    let started = background_dispatch::dispatch(job, lp.in_flight, lp.dispatch_tx, |msg| {
+        if !quiet && let Some(view) = view_mut(lp.state) {
+            view.note(Severity::Warning, msg);
+        }
     });
+    if !started {
+        return false;
+    }
+    // Armed in the same loop turn as the spawn, so the answer — applied by
+    // this loop — always finds the view waiting on it.
+    if let Some(view) = view_mut(lp.state) {
+        arm(view, thid, purpose, Instant::now());
+    }
     true
 }
 
@@ -1472,6 +1479,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use crate::state_handler::background_dispatch::InFlight;
     use openvtc_core::git_ns::{Refusal, view};
     use openvtc_core::pending_replies::PendingReplies;
     use serde_json::json;

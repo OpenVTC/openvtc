@@ -103,11 +103,16 @@ or disk I/O parks the *whole* UI. Two mechanisms keep the loop live:
 for network-bound actions (mediator reconnect, relationship create/ping/remove,
 inbox accept/reject, context-DID delete):
 
-1. The action's loop arm claims a `DispatchDomain` via
-   `InFlight::try_begin` (a per-domain busy-guard; a second action on a busy
-   domain is rejected with a status, not queued).
-2. Cheap loop-thread prep builds a `…Job`; `spawn_dispatch` runs the job's **I/O
-   only** off-thread.
+1. Cheap loop-thread prep builds a `…Job` from owned values: a type
+   implementing `background_dispatch::Job`, which names its `DispatchDomain`
+   and its **I/O only** (`execute`, returning the `DispatchOutcome`).
+2. `background_dispatch::dispatch(job, in_flight, dispatch_tx, on_busy)` claims
+   the job's domain via `InFlight::try_begin` (a per-domain busy-guard) and
+   spawns it off-thread. A job for a busy domain is dropped unrun and
+   `on_busy` gets the busy message, to show or to remember as a deferred
+   retry — a second action is rejected or deferred, never run alongside. Work
+   due only once the claim succeeded (locking an overlay, arming a view on a
+   thread id) is done by the caller when `dispatch` returns `true`.
 3. The job returns a `DispatchOutcome` over an mpsc the loop owns. The dedicated
    `Some(outcome) = dispatch_rx.recv()` arm calls `apply_outcome`, which mutates
    `State`/`Config` **on the loop thread** and clears the busy-flag. Mutation
@@ -187,9 +192,12 @@ at each stage.
    - **Local business logic** → add an arm that calls into the matching
      `*_actions::dispatch`.
    - **Network/blocking work** → follow the background-dispatch pattern (§4):
-     claim a `DispatchDomain`, `spawn_dispatch` the I/O, and apply the result in
-     `apply_outcome` (extend `DispatchOutcome` if it is a new kind of work).
-4. If the handler mutates `Config`, call `save.mark_dirty()` (not an inline save).
+     implement `Job` for the work, hand it to `background_dispatch::dispatch`,
+     and apply the result in `apply_outcome` (extend `DispatchOutcome` if it is
+     a new kind of work).
+4. If the handler mutates `Config`, call `save.mark_dirty()` (not an inline
+   save); where the change must be on disk before success is reported, await
+   `save.flush(&config)`. Every TUI save goes through the `SaveScheduler`.
 
 ### Add a (DIDComm) message type
 
