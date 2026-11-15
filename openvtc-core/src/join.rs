@@ -31,6 +31,7 @@ use vta_sdk::protocols::join_requests::{
 
 use crate::errors::OpenVTCError;
 
+pub mod saga;
 pub mod sequence;
 pub mod status_poll;
 
