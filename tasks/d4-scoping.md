@@ -3,6 +3,11 @@
 Status: **scoping** (not scheduled). Closes the last deferred item from the
 multi-community spec (`docs/design/multi-community-support.md` §8, §10 Q1).
 
+> **Out of date.** The stub VP described in §1 is gone. Join step 4 now builds
+> its VP with `build_join_vp` (`openvtc-core/src/join.rs`), called from
+> `join_flow.rs` and `join_cmd.rs`. D4 needs re-scoping against that; the rest
+> of this document is the original scoping and has not been re-checked.
+
 ## 1. What D4 is
 
 Join step 4 currently submits a **stub VP**. The spec required the flow around

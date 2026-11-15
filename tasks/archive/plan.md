@@ -1,6 +1,6 @@
 # Implementation Plan — Multi-Community Support
 
-Source spec: [`docs/design/multi-community-support.md`](../docs/design/multi-community-support.md) (DRAFT v2).
+Source spec: [`docs/design/multi-community-support.md`](../../docs/design/multi-community-support.md) (DRAFT v2).
 This plan slices that spec into dependency-ordered, independently shippable PRs.
 
 > Companion: [`tasks/todo.md`](./todo.md) holds the live task checklist with

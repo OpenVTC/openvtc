@@ -4,6 +4,94 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+<<<<<<< HEAD
+=======
+## [Unreleased]
+
+### Changed
+
+- **`OpenVTCError` is now `#[non_exhaustive]`** (breaking for code that uses
+  `openvtc-core` as a library). A `match` on it outside `openvtc-core` needs a
+  wildcard arm. From now on a new error variant is not a breaking change, so a
+  fix that needs one can be backported to a release branch as it is.
+
+### Fixed
+
+- **Setup and backup import refuse an unlock code shorter than 8 characters**
+  ([#574](https://github.com/OpenVTC/openvtc/issues/574)). Every unlock path already
+  required 8, so a profile set up with a shorter code could never be opened again. A
+  profile that already has a short code now unlocks, with a prompt to set a longer
+  one under Settings -> Protection.
+- **Setting an unlock code no longer freezes the screen**
+  ([#563](https://github.com/OpenVTC/openvtc/issues/563)). The ~1 s key derivation in
+  setup and backup import now runs off the render task.
+- **Hardware-token Factory Reset asks first** ([#575](https://github.com/OpenVTC/openvtc/issues/575)).
+  It names the card (identifier and manufacturer), warns when that card protects the
+  profile, and erases it only after `RESET` is typed. With more than one card connected
+  it refuses rather than picking one.
+- **Failure messages are no longer drawn in success green**
+  ([#577](https://github.com/OpenVTC/openvtc/issues/577)). A status message worded as a
+  failure ("Couldn't …", "… unavailable", "… not available", …) is red; any other message
+  uses the plain text colour instead of green.
+- **Export asks for the passphrase twice; passphrase forms say why Enter did nothing**
+  ([#586](https://github.com/OpenVTC/openvtc/issues/586)). Export Config has a
+  confirmation field, and Export and Change Protection report an empty, short or
+  mismatched passphrase instead of ignoring Enter. The Import form's footer no longer
+  says "export".
+- **Startup diagnostics name commands that exist**
+  ([#581](https://github.com/OpenVTC/openvtc/issues/581)): `openvtc setup` (not
+  `--setup`), Restore Backup in setup, and Settings -> Protection. `--profile` is now
+  accepted after a subcommand too (`openvtc health --profile work`).
+- **`openvtc health --json` writes only JSON to stdout**
+  ([#583](https://github.com/OpenVTC/openvtc/issues/583)). The profile notices go to
+  stderr. The interactive interface no longer starts when stdin or stdout is not a
+  terminal; it points at the headless commands instead.
+- **SIGTERM and SIGHUP shut down like F10** ([#587](https://github.com/OpenVTC/openvtc/issues/587)):
+  the terminal is restored, the last change saved and the profile lock released. A panic
+  now also turns bracketed paste off and shows the cursor again. F10 is heard on the
+  join screen while a DID resolves. A quit you asked for no longer prints "exited per user
+  request"; other exits explain themselves on stderr.
+- **Peer messages are handled only as the sender the transport authenticated.** The
+  inbound dispatcher used to fall back to a message's `from` header when the transport
+  bound no sender to it (anoncrypt DIDComm, or an authcrypt whose `from` its sealing key
+  does not back). A VRC request, a VRC request rejection, a trust ping or pong, a
+  relationship rejection or finalize, and a notification are now acted on only when the
+  `from` header names the DID whose key sealed the message; anything else is dropped with
+  a log line before any handler runs. The same rule applies to messages handled by the
+  headless `join` and `repos` commands. A pong now closes only a ping we sent, on its
+  thread, to the party that answers it; a pong with no authenticated sender closes
+  nothing. The answer to a ping, and the receipt a notification is answered with, go only
+  to an authenticated sender. **Behaviour change:** a peer that sends these messages
+  anoncrypt, or a pong with no sender, is no longer answered or acted on; a ping task
+  answered that way stays in the inbox until dismissed. Every service in the stack already
+  sends authcrypt.
+- **A VRC received from a peer is checked in full before it is offered for storage.** Its
+  subject must be the DID we use in that relationship, it must be inside its validity
+  window (`validFrom` / `validUntil`), and where it names a `credentialStatus` the
+  issuer's status list must establish that it is not revoked or suspended — a status that
+  cannot be established refuses it, as for a credential a community issues. These join the
+  proof and issuer checks it already passed. Accepting one from the inbox checks its window
+  again, so one that lapsed while waiting is not stored. A received VRC is now filed under
+  the relationship's key (the peer's persona DID) rather than the relationship DID that
+  issued it, so the relationship view lists it and removing the relationship removes it;
+  ones filed the old way are moved at load, and when the account sync brings one in from
+  a device on an older build.
+
+- **A wrong unlock code now gets another try.** At start-up the unlock prompt only
+  rejected codes shorter than eight characters. A wrong code of full length left the
+  prompt on the first try and failed afterwards, while the secured config was being
+  decrypted, with a message about decryption and no second chance in that session.
+  The five-attempt limit and the delay after the third miss, listed under 0.2.0, never
+  applied to a wrong code. Each code is now checked against the stored config at the
+  prompt: a wrong one says "That unlock code didn't work" and asks again, with the limit
+  and delay applied. After the last attempt, or when a code given with `--unlock-code`
+  or `--unlock-code-file` is wrong, it says how to recover an account kept by a VTA if
+  the code is forgotten. The limit is there for typos and starts again when you restart.
+  It does not protect against guessing; the cost of Argon2id for each guess does that,
+  including for anyone who copies the stored config and guesses offline. Reported
+  through the security process.
+
+>>>>>>> 7b927be (docs: refresh user and contributor docs from the repository review (#599))
 ## [0.7.0] - 2026-11-05
 
 ### Added
@@ -305,8 +393,6 @@ community will receive before anything is sent, and asks whether it may
 publish your membership. Post-quantum signing and PCS zero-knowledge vetting
 are marked wherever they apply. The detailed entries follow the summary below.
 
-### Major changes
-
 - **Applicant and vetter journeys.** A full-width page per application and per
   desk request, with a step strip, a plain-language explanation of each step,
   and only the current step's keys.
@@ -317,7 +403,9 @@ are marked wherever they apply. The detailed entries follow the summary below.
 - **Hidden-vetting joins fetch their own challenge**, and never submit without
   the proof.
 
-### Breaking
+### Changed
+
+#### Breaking
 
 - **`openvtc_core::vetting::VettingBook::pending_enrolment` is now
   `pending_enrolments`** (one per request, see `remember_enrolment` /
@@ -975,8 +1063,6 @@ The vetted-admission release. A person can now join a community by being
 vetted by its existing members, and those members can run the vetting from
 OpenVTC. The detailed entries follow the summary below.
 
-### Major changes
-
 - **Vetted admission (peer identity vetting).** There is a new **Vetting**
   page with two tabs:
   - **Applications** (applicant side): read a community's requirements before
@@ -1026,7 +1112,9 @@ OpenVTC. The detailed entries follow the summary below.
   automatic light/dark, accessible themes and `NO_COLOR` (#299, #300).
   Network-bound checks no longer freeze the screen.
 
-### Breaking
+### Changed
+
+#### Breaking
 
 - **Credentials stored in a pre-v1 shape are set aside on load** and listed as
   retired. Ask the peer or community to issue fresh ones (#397).
@@ -3039,11 +3127,13 @@ waiting.
 - **Legacy `openvtc-cli` crate** — the original prompt-driven CLI was phased out in favour of the TUI. All ongoing work lives in `openvtc`.
 - **Dead `VtaAuthenticate` setup page** — online provisioning emits `VtaAuthCompleted` directly from `VtaProvisioning`, so the legacy authenticate screen was unreachable.
 
-### Post-release deep-review pass
+### Changed
+
+#### Post-release deep-review pass
 
 After cutting the v0.2.0 branch a multi-axis review (code quality, security, tests, docs) flagged a set of findings that landed on the same release branch before merge. They're listed separately so the diff between v0.1.x and v0.2.0 stays readable.
 
-#### Security
+##### Security
 
 - **Per-entry random Argon2 salt with transparent v1→v2 migration.** `derive_passphrase_key` previously used a deterministic salt = SHA-256(info), so two operators with the same passphrase produced the same KEK and exported backups were byte-comparable. The new `passphrase_encrypt_v2` / `passphrase_decrypt` API in `openvtc-core::config::secured_config` writes a magic-prefixed `[OPV2 | salt(16) | nonce(12) | ct+tag]` blob with a fresh random salt; the decrypt path auto-detects v1/v2 so existing exports keep opening. Argon2id parameters bumped to OWASP "high-value KEK" floor (m=128 MiB, t=4, p=1).
 - **`did-git-sign` signing policy.** The proxy now refuses to sign unless the parent process name starts with `git` or `ssh-keygen`, and writes every signing attempt — accepted or denied — to `~/.config/did-git-sign/audit.log` (mode 0600) with parent PID/name, namespace, buffer path and SHA-256. Blocks the "malicious build script obtains a signature with namespace=git over attacker-chosen content" pivot.
@@ -3055,7 +3145,7 @@ After cutting the v0.2.0 branch a multi-axis review (code quality, security, tes
 - **Dependabot:** transitive openssl/rustls-webpki/rand bumped via `cargo update` to clear nine open advisories. `pgp` was already at the patched 0.19.
 - **Tagged-variant downgrade defence on `SecuredConfigFormat`.** Switched the on-disk variant tag from `#[serde(untagged)]` to `#[serde(tag = "format")]` so every blob carries an explicit `"format"` discriminator. Without it, an attacker with write access to the OS keychain could substitute a `PasswordEncrypted` blob with `{"text": "<plaintext>"}` and serde would silently match it as `PlainText`, bypassing AES-256-GCM. New `assert_format_matches_intent` cross-validation gate adds a second defence layer — a tagged-but-weaker blob is rejected before any decrypt or re-save. Old (untagged) blobs migrate transparently on first load. Folded from @ojasshelke's PR #34; the PR's HKDF v2 fixed-salt variant is superseded by our random-per-entry-salt v2 (`OPV2` magic prefix) above.
 
-#### Community contributions
+##### Community contributions
 
 Three community PRs against `main` were assessed and folded into the release. Each PR's substantive value is preserved with `Co-authored-by:` trailers; the corresponding PRs are closed with a comment pointing here.
 
@@ -3063,7 +3153,7 @@ Three community PRs against `main` were assessed and folded into the release. Ea
 - **#51 — cross-platform config paths (@krsatyamthakur-droid, closes #47).** `profile_dir` and `get_lock_file` now use `dirs::config_dir()` on Windows (typically `%APPDATA%\openvtc`); Unix/macOS continues to use `~/.config/openvtc/` so existing installs don't move. `get_config_path` and `get_lock_file` return `PathBuf` instead of `String` end-to-end.
 - **#34 — `SecuredConfig` serde-format hardening (@ojasshelke).** Tagged-variant downgrade defence + intent-gate cross-validation, described under Security above. The PR's HKDF v2 fixed-salt scheme was superseded by our random-salt OPV2 v2 and intentionally not folded.
 
-#### Architecture & code quality
+##### Architecture & code quality
 
 - **State-handler split.** `state_handler/mod.rs` was 2,255 lines with a 500-line `tokio::select!` arm; it's now 813 lines (-64%). Each per-domain match (Inbox, Relationship, Credential, Settings, Contact) was extracted to a `dispatch(action, ctx).await` entry point in the corresponding sub-module.
 - **Layering:** moved `colors.rs` and the `dialoguer` passphrase prompt out of `openvtc-core` so the daemon (`openvtc-service`) and automation (`robotic-maintainers`) crates no longer pull in `ratatui` + `dialoguer` transitively.
@@ -3072,14 +3162,14 @@ Three community PRs against `main` were assessed and folded into the release. Ea
 - **Fixed silent failures** in the state handler: surfaced previously-swallowed `save_config` / `remove_listener` / inbox-task errors via `log_error`. Replaced four `.expect("valid route")` panics in DIDComm router init with `?`. Replaced `panic!("Cannot create log file …")` with stderr + continue.
 - **Fixed DIDComm-only VTA fallback** in `relationships.rs` (used `build_runtime_vta_client` instead of REST-only `challenge_response`).
 
-#### Tests & CI
+##### Tests & CI
 
 - **In-process mediator harness** (`openvtc-core/tests/common/mod.rs`): wraps the upstream `affinidi-messaging-test-mediator` 0.2 fixture via `TestMediator::with_users(["alice", "bob"])`, which boots a real `affinidi-messaging-mediator` on an ephemeral loopback port (memory-backed store, generated `did:peer` identity advertising `dm`/`#auth`/`#ws`, Ed25519 JWT signing keypair) and returns Alice + Bob as ALLOW_ALL accounts whose DIDComm service URI is the mediator's DID — the routing/2.0 shape required for forwards to short-circuit to local delivery instead of being enqueued for external forwarding. The previous in-tree harness predated the test-mediator crate; the migration drops ~400 lines of fixture code and four dev-deps (`affinidi-messaging-mediator`, `-mediator-common`, `-sdk`, `sha256`).
 - **End-to-end integration tests** (`relationship_e2e.rs`): drive a real Alice→Mediator→Bob DIDComm round-trip, a production `RelationshipRequestBody` round-trip, and a two-leg VRC request/reject round-trip — all in ~350ms once the mediator is up. Plus a smoke test (`mediator_smoke.rs`) that asserts the well-known endpoint serves a DID Document. Marked `#[ignore]` (each spawns the mediator, ~1s); CI's coverage job runs them with `--include-ignored`.
 - **38 new unit tests** across `setup_flow/navigation` (25 table-driven), BIP32 derivation (7 known-answer vectors), AES-GCM tampering (6) — locking the wizard flow, derivation contract, and AEAD failure modes before the v0.3.0 work begins.
 - **CI** adds a `cargo-deny` job (advisories + licenses + bans + sources, with documented `RUSTSEC-2023-0071` rsa Marvin-Attack and `RUSTSEC-2024-0370` proc-macro-error ignores) and a `cargo-llvm-cov` coverage job (uploads `lcov.info` artifact, runs ignored tests). MSRV check bumped 1.91 → 1.94 to match `Cargo.toml`.
 
-#### Dependency refresh
+##### Dependency refresh
 
 Picks up the May 2026 Affinidi-stack releases. All bumps cleared on crates.io; build, full test suite, and integration tests pass.
 
@@ -3088,7 +3178,7 @@ Picks up the May 2026 Affinidi-stack releases. All bumps cleared on crates.io; b
 - **`affinidi-messaging-test-mediator` 0.1 → 0.2** (dev-deps only) — `TestMediator::with_users(["alice", "bob"])` replaces our hand-rolled `MemoryStore` + ALLOW_ALL registration dance. Drops `affinidi-messaging-mediator`, `-mediator-common`, `-sdk` and `sha256` from dev-deps.
 - Working with the upstream maintainers, this branch's review of the May 2026 test-mediator changes also surfaced two follow-ups landing post-publication: an IPv6 routing-classification fix and `mediator-common` feature-gating to keep the SDK light. Neither is on the path used by openvtc tests (loopback over `127.0.0.1`).
 
-#### Docs
+##### Docs
 
 - README, CONTRIBUTING, SECURITY, CLAUDE.md aligned to the post-rename workspace shape (`openvtc` binary + `openvtc-core` lib).
 - CHANGELOG `[0.2.0]` entry above describes the release as it actually shipped.
@@ -3118,7 +3208,9 @@ Picks up the May 2026 Affinidi-stack releases. All bumps cleared on crates.io; b
 
 ## [0.1.4] - 2026-04-12
 
-### Breaking Changes
+### Changed
+
+#### Breaking changes
 
 - **Removed legacy SHA-256+HKDF encryption** — existing configs must be recreated with `openvtc setup`
 - **`UnlockCode::from_string()` now returns `Result`** and enforces minimum 8-character passphrase
@@ -3151,7 +3243,9 @@ Picks up the May 2026 Affinidi-stack releases. All bumps cleared on crates.io; b
 - All Clippy warnings (migrated deprecated Protocols API, collapsible-if, items-after-test-module)
 - Corrected valid-until prompt handling for VRC issuance in `openvtc-cli` (PR #23)
 
-### New: `did-git-sign` crate
+### Added
+
+#### New: `did-git-sign` crate
 
 A standalone CLI tool for signing git commits using DID Ed25519 keys managed by a VTA. Acts as a git SSH signing proxy — no private key material ever touches disk.
 
@@ -3166,7 +3260,9 @@ A standalone CLI tool for signing git commits using DID Ed25519 keys managed by 
 - Config validation: rejects non-HTTPS VTA URLs, empty credentials, non-Ed25519 keys
 - Retry logic for VTA authentication (up to 2 attempts on transient failures)
 
-### Dependency Updates
+### Changed
+
+#### Dependency updates
 
 - `didwebvh-rs` 0.1 &rarr; 0.4
 - `affinidi-tdk` 0.5 &rarr; 0.6 (`affinidi-messaging-didcomm` 0.12 &rarr; 0.13)
@@ -3175,13 +3271,17 @@ A standalone CLI tool for signing git commits using DID Ed25519 keys managed by 
 - `vta-sdk` updated to 0.3 (`health.version` is now `Option<String>`, `VtaClient::set_token` no longer requires `&mut self`, `CreateDidWebvhRequest` has new optional fields)
 - All transitive dependencies updated to latest compatible versions via `cargo update`
 
-### didwebvh-rs 0.4 Migration
+### Changed
+
+#### didwebvh-rs 0.4 migration
 
 - Replaced manual `DIDWebVHState::default()` + `create_log_entry()` pattern with the new `create_did(CreateDIDConfig)` API in both `openvtc-lib` and `openvtc-cli`
 - `create_initial_webvh_did()` is now async (required by `create_did`)
 - Added `LogEntryMethods` trait import for `get_did_document()` access
 
-### Breaking API Changes (from dependency updates)
+### Changed
+
+#### Breaking API changes (from dependency updates)
 
 - `DataIntegrityProof::sign_jcs_data()` is now async — added `.await` in `openvtc-cli`, `robotic-maintainers`, and `dtg-credentials`
 - `DTGCredential::sign()` is now async
@@ -3196,7 +3296,7 @@ A standalone CLI tool for signing git commits using DID Ed25519 keys managed by 
 - `VtaClient::set_token()` no longer requires `&mut self`
 - `HealthResponse.version` changed from `String` to `Option<String>`
 
-### Security Improvements
+### Security
 
 - Custom `Debug` implementations for `PersonaDIDKeys` and `KeyInfo` that redact secret material
 - Replaced debug logging of full `SecuredConfig` struct with safe summary
@@ -3205,14 +3305,18 @@ A standalone CLI tool for signing git commits using DID Ed25519 keys managed by 
 - Ed25519 key type validation when fetching signing keys from VTA
 - Empty access token rejection after VTA authentication
 
-### Code Quality
+### Changed
+
+#### Code quality
 
 - Extracted 11 hardcoded protocol URLs to `protocol_urls` constants module in `openvtc-lib`
 - Added `mediator_did()` and `org_did()` helper functions with environment variable overrides (`OPENVTC_MEDIATOR_DID`, `OPENVTC_ORG_DID`)
 - Updated `MessageType` `From`/`TryFrom` impls and VRC message builders to use protocol URL constants
 - Removed unused `console` and `crossterm` dependencies from `openvtc-lib`
 
-### Tests
+### Added
+
+#### Tests
 
 - **openvtc-lib**: Added 14 new tests (2 &rarr; 16 total)
   - Encrypt/decrypt roundtrip, wrong key rejection, empty data, large data, different key ciphertext divergence, corrupted data detection, zeroize verification
@@ -3220,7 +3324,9 @@ A standalone CLI tool for signing git commits using DID Ed25519 keys managed by 
 - **did-git-sign**: Added 6 new tests (5 &rarr; 11 total)
   - Config validation (empty URL, HTTP rejection, HTTPS acceptance, localhost exception, empty key ID rejection, seed material zeroization)
 
-### Documentation
+### Added
+
+#### Documentation
 
 - Added `did-git-sign/README.md` with setup instructions, architecture diagram, security model, and config format reference
 - Added workspace crates table and DID Git Signing section to root `README.md`

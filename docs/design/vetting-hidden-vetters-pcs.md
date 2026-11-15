@@ -6,7 +6,9 @@
 > **Since then (§13 C7):** the engine moved into the VTA. VTI's `vti-vetting-pcs` carries it,
 > the VTA serves it as the `vta/pcs/*` Trust Tasks, and OpenVTC drives it through
 > `openvtc_core::vetting::pcs_vta` — holding no PCS key itself. References below to this
-> repository's crate and example describe the prototype as it was.
+> repository's crate and example describe the prototype as it was. `openvtc-vetting-pcs`, its
+> examples, `openvtc-core/examples/zkp_reference_flow.rs` and the vendored library (with
+> `vendor/PROVENANCE.md`) are no longer in this repository.
 
 **Status:** research and integration proposal, 2026-09-22. A working prototype exists; see §14.
 **Second-pass review (same day):** §13 lists corrections that supersede parts of §3, §4.3 and
@@ -745,7 +747,8 @@ So a live hidden admission already mints the VMC against a revocation slot, the 
 granted role, and solicits the member's reciprocal VMC, exactly as a named one does. Nothing in
 the hidden branch had to be taught about credentials.
 
-The reference example (`openvtc-core/examples/zkp_reference_flow.rs`) now mints the same three
+The reference example (`openvtc-core/examples/zkp_reference_flow.rs`, no longer in this
+repository) now mints the same three
 in-process, and asserts each proof verifies, that the reciprocal's subject is the community, and
 that its `digestMultibase` matches a digest of the grant **as it arrived** — the wire-form rule
 `DTGCredential::new_member_vmc_for` exists to enforce. It also asserts no vetter DID appears in any
@@ -1124,7 +1127,8 @@ accepted any counter, so the new ticks work against both.
 
 ## 20. The protocol on its own
 
-`openvtc-vetting-pcs/examples/hidden_vetting.rs` runs the whole thing with no ceremony around it:
+`openvtc-vetting-pcs/examples/hidden_vetting.rs` runs the whole thing with no ceremony around it
+(the crate has left this workspace; the engine now lives in VTI's `vti-vetting-pcs`):
 
 ```sh
 cargo run --release -p openvtc-vetting-pcs --example hidden_vetting

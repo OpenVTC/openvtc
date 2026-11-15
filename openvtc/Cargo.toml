@@ -1,6 +1,10 @@
 [package]
 name = "openvtc"
-description = "OpenVTC CLI Tool"
+description = "Client for Open Verifiable Trust Communities: join communities, manage DID personas, relationships and verifiable credentials from a terminal UI"
+homepage = "https://github.com/OpenVTC/openvtc"
+documentation = "https://github.com/OpenVTC/openvtc/blob/main/docs/openvtc-tool-commands.md"
+keywords = ["did", "credentials", "didcomm", "trust", "tui"]
+categories = ["command-line-utilities", "cryptography", "authentication"]
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -32,10 +36,10 @@ aes-gcm.workspace = true
 affinidi-tdk.workspace = true
 affinidi-data-integrity.workspace = true
 anyhow.workspace = true
-# did-git-sign exposes init::install so the cli2 setup wizard can configure
-# git commit signing for the freshly-provisioned persona without having to
-# spawn the binary or re-run a VTA bootstrap. The signer now ships from its
-# own repo (OpenVTC/verifiable-git-infrastructure); openvtc is a downstream
+# did-git-sign's library reads and writes the signer's profiles, config and
+# commit-msg hook, so the Repos view and `openvtc repo sign` can set up and
+# check commit signing for a persona without re-running a VTA bootstrap. The
+# signer ships from its own repo (OpenVTC/verifiable-git-infrastructure); openvtc is a downstream
 # consumer of the published crate.
 #
 # Floor is 0.4.10 — the release VGI cut from `main` once it had taken `vta-sdk`

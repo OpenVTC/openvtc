@@ -1,12 +1,6 @@
 # Relationships and VRCs
 
-> **Note:** The command examples in this guide predate the TUI and are being
-> rewritten. The `openvtc relationships` and `openvtc vrcs` subcommands no
-> longer exist — relationships are managed from the Relationships panel and the
-> Inbox in the TUI. The flow and the concepts below are still accurate; only the
-> invocations are stale.
-
-The OpenVTC tool enables you to establish relationships with other DIDs (e.g., peers, coworkers, or community members) and communicate privately through the DIDComm protocol.
+OpenVTC lets you establish relationships with other DIDs (peers, co-workers, community members) and communicate privately over DIDComm. You do this in the TUI: run `openvtc` and use the **My Relationships**, **Inbox** and **My Credentials** panels from the main menu. There are no command-line subcommands for relationships or VRCs.
 
 Each relationship gets its own **relationship DID** by default — a pairwise identifier used only with that one contact. You can choose to use your **persona DID** instead; see [Choosing your identifier](#choosing-your-identifier) for what that costs.
 
@@ -16,7 +10,7 @@ What an identifier carries instead is a declared **correlation scope** —
 `pairwise`, `directed` or `public` — stated in the `issuerScope` of every
 credential issued under it. See [The scope a VRC declares](#the-scope-a-vrc-declares).
 
-Once a relationship is established, you can request a **Verifiable Relationship Credential (VRC)**, a peer-to-peer credential that attests to verifiable trust relationships between personhood credential holders.
+Once a relationship is established, you can request a **Verifiable Relationship Credential (VRC)**: a peer-to-peer credential that attests to a trust relationship between two parties.
 
 _The diagram below illustrates the typical flow of establishing a relationship and requesting a VRC. A relationship DID is generated to enable private channel communication between parties._
 
@@ -31,8 +25,8 @@ sequenceDiagram
     req->>res: Send Relationship Request
     Note over req, res: Requestor generates a relationship DID and<br/>sets Respondent's alias
     res->>req: Accept Relationship Request
-    Note over res, req: Respondent generates a relationship DID and<br/>sets Requestor's alias
-    req->>res: Finalize Relationship Request
+    Note over res, req: Respondent generates a relationship DID
+    req->>res: Finalize Relationship Request (automatic)
     Note over req, res: Updates status to "Established"
 
     create actor rdid-req as Requestor (relationship DID)
@@ -48,16 +42,9 @@ sequenceDiagram
 
 - [Choosing your identifier](#choosing-your-identifier)
   - [The scope a VRC declares](#the-scope-a-vrc-declares)
-- [Establish Relationship](#establish-relationship)
-  - [1. Send Relationship Request (Requestor)](#1-send-relationship-request-requestor)
-  - [2. Accept Relationship Request (Respondent)](#2-accept-relationship-request-respondent)
-  - [3. Finalise Relationship Request](#3-finalise-relationship-request)
-- [Request Verifiable Relationship Credential (VRC)](#request-verifiable-relationship-credential-vrc)
-  - [Prerequisite](#prerequisite)
-  - [1. Request VRC Issuance (Requestor)](#1-request-vrc-issuance-requestor)
-  - [2. Generate and Issue VRC (Respondent)](#2-generate-and-issue-vrc-respondent)
-  - [3. Claim and Store VRC (Requestor)](#3-claim-and-store-vrc-requestor)
-- [List and View VRCs](#list-and-view-vrcs)
+- [Establish a relationship](#establish-a-relationship)
+- [Request and issue a VRC](#request-and-issue-a-vrc)
+- [View your VRCs](#view-your-vrcs)
 - [Have a relationship witnessed](#have-a-relationship-witnessed)
 
 ## Choosing your identifier
@@ -117,157 +104,110 @@ contact's VRC back to you declares their own scope.
 
 The code is `openvtc_core::dtg::relationship_issuer_scope`.
 
-## Establish Relationship
+## Establish a relationship
 
-Follow these steps to establish a relationship with another Persona DID.
+### 1. Send the request (requestor)
 
-### 1. Send Relationship Request (Requestor)
-
-In the Relationships panel, start a new request and fill in:
+Open **My Relationships** from the main menu and press **`n`** for a new
+request. Fill in the form:
 
 | Field | Description |
 | --- | --- |
 | DID | The respondent's persona DID, or an agent name such as `example.com/@bob` |
 | Alias | A local name for this relationship |
 | Reason | Why you are asking |
-| Contact you as | `Pairwise relationship DID` (default) or `Your persona DID` — press Space to change |
+| Contact you as | `Pairwise R-DID` (the default) or `Your persona DID` |
 
-The last field is the choice described in [Choosing your identifier](#choosing-your-identifier).
-It defaults to minting a fresh relationship DID for this contact.
+**Tab** (or **↑**/**↓**) moves between fields. On the last field, **Space**
+changes the identifier and **Enter** sends the request. **Esc** cancels.
 
-**Note:** Initiating a relationship request automatically adds the respondent to your Contacts list.
+The last field is the choice described in
+[Choosing your identifier](#choosing-your-identifier). The form explains the
+trade-off for whichever option is selected.
 
-Refer to the sample response below:
+Sending the request adds the respondent to your contacts. The relationship
+appears in the list as **`[Request Sent]`**.
 
-```bash
-Generated new Relationship DID for contact FrancisP2 :: did:peer:2.Vz6Mkkop...
+### 2. Accept the request (respondent)
 
-✅ Successfully sent Relationship Request to did:webvh:QmQzm...
-```
+Incoming messages arrive in the **Inbox** while OpenVTC is connected to your
+mediator. A relationship request shows up as a task. Select it with **↑**/**↓**
+and press **Enter** to open it, then:
 
-For more details, see the [CLI documentation](./openvtc-tool-commands.md#openvtc-relationships).
+- **`a`** — accept with a pairwise relationship DID (the default, private path)
+- **`p`** — accept as your persona DID
+- **`r`** — reject
+- **`d`** — dismiss the task
+- **Esc** — back to the list
 
-### 2. Accept Relationship Request (Respondent)
+The detail view states both outcomes at the point of choice. The requestor is
+added to your contacts under the name they sent. To change it, open the
+relationship in **My Relationships** and press **`e`**.
 
-1. Fetch and process incoming requests:
+### 3. Finalisation (automatic)
 
-   ```bash
-   openvtc tasks interact
-   ```
+Nothing more is needed from either side. When the requestor's OpenVTC receives
+the acceptance, it marks the relationship **`Established`** and sends a
+finalise message. When the respondent's OpenVTC receives that, it marks its side
+**`Established`** too.
 
-   The tool fetches messages from the mediator. If you have a relationship request, you'll see a task with type **`Relationship Request`**.
+Once both sides show **`[Established]`** in **My Relationships**, you can
+request VRCs.
 
-   Open the task to see the request detail.
+### Managing a relationship
 
-2. Accept it with either identifier:
+In **My Relationships**, select a relationship and press **Enter** to see its
+detail: alias, agent name (if verified), both DIDs, state, and the VRCs issued
+and received. From the detail view:
 
-   - `a` — accept with a pairwise relationship DID (the default, private path)
-   - `p` — accept as your persona DID
+| Key | Action |
+| --- | --- |
+| `e` | Edit the alias |
+| `p` | Ping the other party |
+| `v` | Request a VRC from this relationship |
+| `w` | Have the relationship witnessed (see below) |
+| `d` | Remove the relationship (asks you to confirm with `y`) |
+| ↑/↓ | Browse the relationship's VRCs |
+| Esc | Back to the list |
 
-   See [Choosing your identifier](#choosing-your-identifier) for the trade-off.
-   The detail view states both outcomes at the point of choice.
+A relationship whose relationship-DID keys were lost is marked
+**⚠ needs re-establishment**. It can no longer send or receive; remove it and
+establish it again.
 
-3. Enter an alias for the requestor to easily identify this relationship.
+## Request and issue a VRC
 
-After entering the alias, the tool updates the relationship status to **`Request Accepted`** and notifies the requestor.
-
-Refer to the sample response below:
-
-```bash
-✅ Successfully sent Relationship Request Acceptance to did:webvh:Qmbea...
-```
-
-### 3. Finalise Relationship Request
-
-Both parties must complete finalisation:
-
-#### 1. Requestor
-
-Run `openvtc tasks interact` to fetch the acceptance message. This updates the relationship status from **`Request Sent`** to **`Established`** and sends a finalisation message to the respondent.
-
-Refer to the sample response below:
-
-```bash
-✅ Successfully sent Relationship Request Finalize to did:webvh:QmQzm...
-Task Id: 020bb98e-5460-4d42-b369-bf4a65b4909c Type: Relationship request accepted
-```
-
-#### 2. Respondent
-
-Run `openvtc tasks interact` to fetch the finalisation message. This updates the relationship status from **`Request Accepted`** to **`Established`**.
-
-Once both parties have **`Established`** status, you can communicate and request VRCs.
-
-Refer to the sample response below:
-
-```bash
-✅ Relationship successfully established did:webvh:Qmbea...
-  Remote: persona(did:webvh:Qmbea...) relationship(did:peer:2.Vz6Mkkop...)
-  Local: persona(did:webvh:QmQzm...) relationship(did:peer:2.Vz6Mkgt...)
-Task Id: 020bb98e-5460-4d42-b369-bf4a65b4909c Type: Relationship request finalized
-```
-
-## Request Verifiable Relationship Credential (VRC)
-
-A VRC is a peer-to-peer credential attesting to a verifiable trust relationship
-between two parties (coworkers, peers, community members). It names each side by
-the identifier that side uses in *this* relationship — the pairwise
-relationship DID by default, or the persona DID if that was chosen when the
-relationship was established — and declares that identifier's `issuerScope`
+A VRC is a peer-to-peer credential attesting to a trust relationship between
+two parties. It names each side by the identifier that side uses in *this*
+relationship — the pairwise relationship DID by default, or the persona DID if
+that was chosen when the relationship was established — and declares that
+identifier's `issuerScope`
 ([The scope a VRC declares](#the-scope-a-vrc-declares)).
 
-### Prerequisite
+You can only request a VRC over an established relationship.
 
-You must establish a relationship before requesting a VRC. To request for relationship, refer to the [Establish Relationship](#establish-relationship) section.
+### 1. Request a VRC (requestor)
 
-### 1. Request VRC Issuance (Requestor)
+Either:
 
-Request a VRC from an established relationship:
+- in **My Relationships**, open the relationship and press **`v`**; or
+- in **My Credentials**, press **`n`**, choose an established relationship with
+  **↑**/**↓**, optionally type a reason, and press **Enter**. **Esc** cancels.
 
-```bash
-openvtc vrcs request
-```
+The request appears in your Inbox as an outbound VRC request.
 
-1. Select the relationship from which you want to request a VRC.
+### 2. Issue the VRC (respondent)
 
-2. Fill in the following fields when prompted:
+The request arrives in the **Inbox** as an inbound VRC request. Open it and
+press **`a`** to issue the VRC, or **`r`** to reject it.
 
-   > **Important:** All values are suggestions. The issuer may modify them when generating the VRC.
+OpenVTC signs the VRC as the identifier your side uses in the relationship and
+sends it. It is valid from the moment it is issued and has no expiry date. A
+copy is kept in your **Issued** credentials.
 
-   | Field  | Description                           |
-   | ------ | ------------------------------------- |
-   | Reason | Explain why you are requesting a VRC. |
+A VRC has the DTG Credentials v1 shape: the v1 context second, a declared
+`issuerScope`, and exactly one concrete type:
 
-3. Review and submit the request. Refer to the sample response below:
-
-   ```bash
-   ✅ Successfully sent VRC Request. Remote DID: did:peer:2.Vz6Mkg...
-   ```
-
-### 2. Generate and Issue VRC (Respondent)
-
-1. Fetch and process VRC requests:
-
-   ```bash
-   openvtc tasks interact
-   ```
-
-   You'll see tasks with type `VRC Request`. Select the task and click **Accept this VRC request**.
-
-2. Fill in the following fields:
-
-   | Field                 | Description                                                                            |
-   | --------------------- | -------------------------------------------------------------------------------------- |
-   | Valid From Date       | VRC valid from date of relationship establishment, current date/time, custom date/time |
-   | Valid Until Timestamp | VRC valid until a specified date or select **no** if it won't expire                   |
-
-The tool generates and issues the VRC to the requestor, storing a record in your private configuration.
-
-Refer to the sample VRC below — the DTG Credentials v1 shape: the v1 context
-second, a declared `issuerScope`, and exactly one concrete type:
-
-```bash
-Issued VRC
+```json
 {
   "@context": [
     "https://www.w3.org/ns/credentials/v2",
@@ -282,7 +222,6 @@ Issued VRC
   "issuer": "did:peer:2.Vz6Mkgt...",
   "issuerScope": "pairwise",
   "validFrom": "2025-12-02T08:58:43Z",
-  "validUntil": "2026-12-02T00:00:00Z",
   "credentialSubject": {
     "id": "did:peer:2.Vz6Mksm..."
   },
@@ -299,41 +238,32 @@ Issued VRC
 
 For more details, see the [DTG Credentials specification](https://github.com/trustoverip/dtgwg-cred-spec) (§VRC and *Correlation Scope*).
 
+### 3. Store the VRC (requestor)
+
+The issued VRC arrives in the **Inbox** as a **VRC Issued** task. OpenVTC only
+accepts it from an established relationship. Open the task, review the
+credential, and press **`a`** to store it.
+
+## View your VRCs
+
+Open **My Credentials** from the main menu. **Tab** switches between the
+**Received**, **Issued**, **Membership** and **Vetting** tabs. Select a
+credential with **↑**/**↓** and press **Enter** to see its details and raw JSON.
+In the detail view:
+
+- **`c`** — copy the credential JSON to the clipboard
+- **`d`** — remove the credential (Received and Issued only; asks you to confirm
+  with `y`)
+- **Esc** — back to the list
+
+The VRCs of a single relationship are also listed in its detail view in
+**My Relationships**.
+
 **VRCs stored by an older build.** A VRC stored before OpenVTC moved to DTG
 Credentials v1 carries the retired pre-v1 context and no `issuerScope`, and no
 current verifier accepts it. On load such a VRC is dropped with a logged reason
-rather than kept or allowed to fail the config, and the Credentials panel says
-how many were set aside — request a fresh VRC from those relationships.
-
-### 3. Claim and Store VRC (Requestor)
-
-After the VRC is issued, claim it:
-
-```bash
-openvtc tasks interact
-```
-
-Select the task with type **`VRC Issued`**. Review the credential details and select **Accept this VRC** to store it locally.
-
-## List and View VRCs
-
-**List all VRCs:**
-
-```bash
-openvtc vrcs list
-```
-
-This displays all VRCs (issued or claimed) stored locally.
-
-**View a specific VRC:**
-
-```bash
-openvtc vrcs show <VRC_ID>
-```
-
-This displays the credential details on the screen.
-
-For more details, see the [CLI documentation](openvtc-tool-commands.md#openvtc-vrcs).
+rather than kept or allowed to fail the config, and the My Credentials panel
+says how many were set aside. Request a fresh VRC from those relationships.
 
 ## Have a relationship witnessed
 
@@ -349,7 +279,7 @@ DID's own connection, and hands its answers back to the VTA. Nothing is signed o
 this device. See VTI's
 [the VTA as a witnessed party](https://github.com/OpenVTC/verifiable-trust-infrastructure/blob/main/docs/02-vta/witness-party.md).
 
-**In the TUI:** open the relationship in the Relationships panel, press **`w`**,
+**In the TUI:** open the relationship in **My Relationships**, press **`w`**,
 type the witness's DID or agent name, and press **Enter**. To also present your
 community membership, press **Tab** before **Enter** (see below); it is off every
 time the prompt opens. The status line follows each step. When it completes, the relationship's detail lists the witnessing — the
@@ -409,7 +339,8 @@ only reappears in the relationship's detail and among the choices of a personhoo
 assertion — it is never presented on its own.
 
 **Personhood.** A personhood assertion presents **no** witness credential unless you
-choose it. When the persona has witnessed relationships, pressing **`P`** first lists
+choose it. When the persona has witnessed relationships, pressing **`P`** in the
+**Communities** panel (while a personhood challenge is live) first lists
 them — the other party, the witness, the date and the credential's digest — with
 none chosen, and says what the community learns from each one you include: that the
 relationship exists (both relationship DIDs), which witness attested it, and its
