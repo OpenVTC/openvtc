@@ -20,7 +20,12 @@ pub const MENU_WIDTH: u16 = 23;
 // ****************************************************************************
 impl MenuPanelState {
     /// Render the main menu based on current state
-    pub fn render(&self, frame: &mut Frame, rect: Rect, inbox_task_count: usize) {
+    pub fn render(
+        &self,
+        frame: &mut Frame,
+        rect: Rect,
+        badges: &crate::state_handler::main_page::MenuBadges,
+    ) {
         // The surrounding block for the menu
 
         let menu_block = if self.selected {
@@ -45,13 +50,16 @@ impl MenuPanelState {
                 COLOR_TEXT_DEFAULT
             };
 
-            if item == MainMenu::Inbox && inbox_task_count > 0 {
+            let badge = match item {
+                MainMenu::Inbox => badges.inbox,
+                MainMenu::Communities => badges.communities,
+                MainMenu::Vetting => badges.vetting,
+                _ => 0,
+            };
+            if badge > 0 {
                 lines.push(Line::from(vec![
-                    Span::styled("* Inbox ", base_color),
-                    Span::styled(
-                        format!("({})", inbox_task_count),
-                        COLOR_WARNING_ACCESSIBLE_RED,
-                    ),
+                    Span::styled(format!("* {item} "), base_color),
+                    Span::styled(format!("({badge})"), COLOR_WARNING_ACCESSIBLE_RED),
                 ]));
             } else {
                 lines

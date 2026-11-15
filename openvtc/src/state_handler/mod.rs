@@ -1914,6 +1914,14 @@ impl StateHandler {
                             let latency_str = ms
                                 .map(|v| format!(" ({v}ms)"))
                                 .unwrap_or_default();
+                            // The answer belongs where the ping was sent, not only
+                            // in the log (#584).
+                            if !sender_did.is_empty() {
+                                state.main_page.content_panel.relationships.status_message =
+                                    Some(Status::success(format!(
+                                        "Pong from {sender_display}{latency_str} — they are reachable."
+                                    )));
+                            }
                             state.main_page.log_detailed(
                                 format!("Pong from {sender_display}{latency_str}"),
                                 format!(
@@ -2331,6 +2339,31 @@ impl StateHandler {
                     {
                         awaiting_wallet = None;
                         join_entry = Some(entry);
+                    }
+                    // A ping has a reply window too (#584): past it, say so in
+                    // the panel that sent it and expire the outbound task, so
+                    // the Inbox does not keep a ping nobody will answer.
+                    if ping_sent_at.is_some_and(|t| t.elapsed() > PING_REPLY_WINDOW) {
+                        ping_sent_at = None;
+                        let cutoff = chrono::Utc::now()
+                            - chrono::Duration::from_std(PING_REPLY_WINDOW).unwrap_or_default();
+                        let before = config.private.tasks.tasks.len();
+                        config.private.tasks.tasks.retain(|_, t| {
+                            !(matches!(t.type_, openvtc_core::tasks::TaskType::TrustPing { .. })
+                                && t.created < cutoff)
+                        });
+                        if config.private.tasks.tasks.len() != before {
+                            save.mark_dirty();
+                            state.main_page.sync_from_config(&config);
+                        }
+                        let line = format!(
+                            "No reply to the ping after {} s — they may be offline, or not \
+                             listening on that DID.",
+                            PING_REPLY_WINDOW.as_secs()
+                        );
+                        state.main_page.content_panel.relationships.status_message =
+                            Some(Status::warning(line.clone()));
+                        state.main_page.log_warning(line);
                     }
                     // R4.3: a capability query has a defined reply window. The
                     // send was fire-and-forget; if no correlated reply arrived,
@@ -5212,6 +5245,10 @@ async fn install_persona_listener(
 //   relationship_actions::dispatch
 //   credential_actions::dispatch
 //   settings_actions::dispatch
+
+/// How long a trust-ping waits for its pong before the panel says there was
+/// none and the outbound task is expired (#584).
+const PING_REPLY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Build a DIDComm trust-pong message in response to a verified ping.
 /// Used inline by the trust-ping handler in the main loop.

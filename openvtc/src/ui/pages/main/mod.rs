@@ -907,11 +907,11 @@ impl ComponentRender<()> for MainPage {
         let content_area = if journey_open {
             main_middle
         } else {
-            let inbox_task_count = self.props.main_page.content_panel.inbox.tasks.len();
-            self.props
-                .main_page
-                .menu_panel
-                .render(frame, middle[0], inbox_task_count);
+            self.props.main_page.menu_panel.render(
+                frame,
+                middle[0],
+                &self.props.main_page.menu_badges(),
+            );
             middle[1]
         };
         let max_scroll = self.props.main_page.content_panel.render(
@@ -942,10 +942,27 @@ impl ComponentRender<()> for MainPage {
         } else {
             0
         };
+        // Each entry in its severity's colour, with a glyph so an error is
+        // told apart without colour too (#584).
         let log_lines: Vec<Line> = log
             .iter()
             .skip(skip)
-            .map(|entry| Line::from(entry.summary.clone()).dark_gray())
+            .map(|entry| {
+                use crate::state_handler::main_page::status::Severity;
+                let (glyph, style) = match entry.severity {
+                    Severity::Error => ("✗ ", components::status::severity_style(Severity::Error)),
+                    Severity::Warning => {
+                        ("! ", components::status::severity_style(Severity::Warning))
+                    }
+                    Severity::Success => {
+                        ("✓ ", components::status::severity_style(Severity::Success))
+                    }
+                    Severity::Info | Severity::Progress => {
+                        ("  ", ratatui::style::Style::default().fg(COLOR_DARK_GRAY))
+                    }
+                };
+                Line::from(Span::styled(format!("{glyph}{}", entry.summary), style))
+            })
             .collect();
         frame.render_widget(Paragraph::new(log_lines), log_inner);
 
