@@ -85,6 +85,9 @@ impl Diagnosis {
 
     /// Write the report beside the profile's config and return its path.
     ///
+    /// Written owner-only (`0600` on Unix) and atomically; a symlink in its
+    /// place is refused.
+    ///
     /// Best-effort: a profile whose directory is unwritable is already having a
     /// bad day, and failing to save the explanation must not replace the
     /// explanation. Overwrites any previous report *for this profile* — the
@@ -102,7 +105,9 @@ impl Diagnosis {
             format!("last-startup-failure-{profile}.txt")
         };
         let path = profile_dir(profile).ok()?.join(name);
-        std::fs::write(&path, self.render_plain()).ok()?;
+        // Owner-only and atomic, like the config beside it: the report
+        // describes the profile and where its secrets are kept.
+        crate::private_file::atomic_write_private(&path, self.render_plain().as_bytes()).ok()?;
         Some(path)
     }
 }

@@ -72,7 +72,7 @@ pub fn accept_vrc(config: &mut Config, task_id: &str) -> Result<()> {
     // Remove the task
     config.private.tasks.remove(&task_id);
 
-    config.public.logs.insert(
+    config.private.logs.insert(
         LogFamily::Task,
         format!("Accepted VRC from ({})", remote_p_did),
     );
@@ -517,7 +517,7 @@ impl InboxOutcome {
                             },
                         );
                         config.private.tasks.remove(&task_id);
-                        config.public.logs.insert(
+                        config.private.logs.insert(
                             LogFamily::Relationship,
                             format!("Accepted relationship request from ({from_did})"),
                         );
@@ -544,7 +544,7 @@ impl InboxOutcome {
             } => match self.result {
                 Ok(()) => {
                     config.private.tasks.remove(&task_id);
-                    config.public.logs.insert(
+                    config.private.logs.insert(
                         LogFamily::Relationship,
                         format!(
                             "Rejected relationship request from ({from_did}). Reason: {}",
@@ -583,7 +583,7 @@ impl InboxOutcome {
                         return;
                     }
                     config.private.tasks.remove(&task_id);
-                    config.public.logs.insert(
+                    config.private.logs.insert(
                         LogFamily::Task,
                         format!("Issued VRC to ({their_p_did}) Task ID ({task_id})"),
                     );
@@ -609,7 +609,7 @@ impl InboxOutcome {
             } => match self.result {
                 Ok(()) => {
                     config.private.tasks.remove(&task_id);
-                    config.public.logs.insert(
+                    config.private.logs.insert(
                         LogFamily::Task,
                         format!(
                             "Rejected VRC request from ({their_p_did}). Reason: {}",
@@ -686,18 +686,18 @@ async fn prepare_accept_relationship(
             config
                 .private
                 .contacts
-                .remove_contact(&mut config.public.logs, &from_did);
+                .remove_contact(&mut config.private.logs, &from_did);
             config
                 .private
                 .contacts
-                .add_contact(tdk, &from_did, sender_name, false, &mut config.public.logs)
+                .add_contact(tdk, &from_did, sender_name, false, &mut config.private.logs)
                 .await?;
         }
     } else {
         config
             .private
             .contacts
-            .add_contact(tdk, &from_did, sender_name, false, &mut config.public.logs)
+            .add_contact(tdk, &from_did, sender_name, false, &mut config.private.logs)
             .await?;
     }
 

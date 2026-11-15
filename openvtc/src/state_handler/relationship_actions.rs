@@ -348,7 +348,7 @@ fn insert_contact(config: &mut Config, did: &Arc<String>, alias: Option<String>)
             .aliases
             .insert(a.clone(), Arc::clone(&contact));
     }
-    config.public.logs.insert(
+    config.private.logs.insert(
         LogFamily::Contact,
         format!(
             "Added contact ({}) alias({})",
@@ -807,7 +807,7 @@ impl RelationshipOutcome {
                             },
                             our_persona,
                         );
-                        config.public.logs.insert(
+                        config.private.logs.insert(
                         LogFamily::Relationship,
                         format!(
                             "Relationship requested: remote DID({respondent_did}) Task ID({msg_id})"
@@ -882,7 +882,7 @@ impl RelationshipOutcome {
                 using_rdid,
             } => match self.result {
                 Ok(()) => {
-                    config.public.logs.insert(
+                    config.private.logs.insert(
                         LogFamily::Relationship,
                         format!("Sent ping to {remote_did} via {our_did}"),
                     );
@@ -955,7 +955,7 @@ impl RelationshipOutcome {
                         },
                         our_persona,
                     );
-                    config.public.logs.insert(
+                    config.private.logs.insert(
                         LogFamily::Relationship,
                         format!("Requested VRC from ({remote_p_did}) Task ID ({msg_id})"),
                     );
@@ -1005,8 +1005,8 @@ impl RelationshipOutcome {
                 config
                     .private
                     .contacts
-                    .remove_contact(&mut config.public.logs, &remote_p_did);
-                config.public.logs.insert(
+                    .remove_contact(&mut config.private.logs, &remote_p_did);
+                config.private.logs.insert(
                     LogFamily::Relationship,
                     format!("Removed relationship with ({remote_p_did})"),
                 );
@@ -1483,7 +1483,7 @@ fn handle_edit_alias(
     config
         .private
         .contacts
-        .remove_contact(&mut config.public.logs, remote_p_did);
+        .remove_contact(&mut config.private.logs, remote_p_did);
 
     let alias_opt = if alias.trim().is_empty() {
         None
@@ -1504,7 +1504,7 @@ fn handle_edit_alias(
         config.private.contacts.aliases.insert(a.clone(), contact);
     }
 
-    config.public.logs.insert(
+    config.private.logs.insert(
         openvtc_core::logs::LogFamily::Config,
         format!(
             "Alias updated for {}: {}",

@@ -145,10 +145,11 @@ pub fn cli() -> Command {
 ///
 /// An empty first line is an error rather than an empty passphrase: it almost
 /// always means the file was not written, or was written somewhere else.
-pub fn read_unlock_code_file(path: &str) -> anyhow::Result<String> {
+pub fn read_unlock_code_file(path: &str) -> anyhow::Result<zeroize::Zeroizing<String>> {
     use std::io::BufRead;
 
-    let mut first_line = String::new();
+    // Both buffers are wiped when dropped: this is the unlock passphrase.
+    let mut first_line = zeroize::Zeroizing::new(String::new());
     if path == "-" {
         std::io::stdin()
             .lock()
@@ -162,7 +163,7 @@ pub fn read_unlock_code_file(path: &str) -> anyhow::Result<String> {
             .with_context(|| format!("failed to read unlock passphrase file `{path}`"))?;
     }
 
-    let passphrase = first_line.trim().to_string();
+    let passphrase = zeroize::Zeroizing::new(first_line.trim().to_string());
     if passphrase.is_empty() {
         anyhow::bail!("no unlock passphrase on the first line of `{path}`");
     }
@@ -446,7 +447,9 @@ mod tests {
         std::fs::write(&path, b"  correct horse battery staple  \nignored\n")
             .expect("write the passphrase file");
         assert_eq!(
-            read_unlock_code_file(&path.to_string_lossy()).expect("the file reads"),
+            read_unlock_code_file(&path.to_string_lossy())
+                .expect("the file reads")
+                .as_str(),
             "correct horse battery staple"
         );
 

@@ -67,7 +67,7 @@ impl VrcRequestOutcome {
                     },
                     our_persona,
                 );
-                config.public.logs.insert(
+                config.private.logs.insert(
                     LogFamily::Relationship,
                     format!(
                         "Requested VRC from ({}) Task ID ({})",
@@ -140,7 +140,7 @@ pub fn remove_vrc(config: &mut Config, vrc_id: &str) -> Result<()> {
     config.private.vrcs_issued.remove_vrc(&vrc_id);
 
     config
-        .public
+        .private
         .logs
         .insert(LogFamily::Task, format!("Removed VRC ({})", vrc_id));
 

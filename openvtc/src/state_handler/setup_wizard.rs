@@ -15,8 +15,7 @@ use crate::{
 use anyhow::Result;
 use std::sync::Arc;
 
-use openvtc_core::config::{Config, derive_passphrase_key_blocking};
-use secrecy::{ExposeSecret, SecretBox, SecretString};
+use openvtc_core::config::{Config, UnlockKey};
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
 
 impl StateHandler {
@@ -52,8 +51,6 @@ impl StateHandler {
                 },
                 Action::ImportConfig(filename, import_unlock_passphrase, new_unlock_passphrase) => {
                     // Import a configuration backup
-                    let import_unlock_passphrase = SecretString::new(import_unlock_passphrase.into());
-                    let new_unlock_passphrase = SecretString::new(new_unlock_passphrase.into());
                     state.setup.active_page = SetupPage::ConfigImport;
                     // The import runs Argon2id twice (~1 s each). `block_in_place`
                     // hands this worker's other tasks — the render task among
@@ -94,12 +91,11 @@ impl StateHandler {
                     state.setup.active_page = SetupPage::FinalPage;
                     state.setup.final_page.messages.push(MessageType::Info("Deriving the encryption key from your unlock code...".to_string()));
                     let _ = self.state_tx.send(state.clone());
-                    match derive_passphrase_key_blocking(
-                        passphrase.expose_secret().as_bytes().to_vec(),
-                        b"openvtc-unlock-code-v1".to_vec(),
-                    ).await {
+                    // A fresh random salt per profile (#566), written beside
+                    // the ciphertext by the first save.
+                    match UnlockKey::derive_blocking(passphrase).await {
                         Ok(key) => {
-                            state.setup.protection = ConfigProtection::Passcode(Arc::new(SecretBox::new(Box::new(key.to_vec()))));
+                            state.setup.protection = ConfigProtection::Passcode(Arc::new(key));
                             if let Some(cfg) = self.create_account(state).await {
                                 config = Some(cfg);
                             }

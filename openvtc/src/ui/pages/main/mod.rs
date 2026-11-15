@@ -32,6 +32,9 @@ use std::cell::Cell;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub mod components;
+mod secret_buffer;
+
+use secret_buffer::SecretBuffer;
 
 /// MainPage handles the UI and the state of the primary openvtc interface
 pub struct MainPage {
@@ -41,10 +44,10 @@ pub struct MainPage {
     /// State Mapped MainPage Props
     props: Props,
 
-    /// Secure passphrase buffer — never cloned into State
-    passphrase_buffer: String,
-    /// Secure confirm passphrase buffer — never cloned into State
-    confirm_buffer: String,
+    /// Secure passphrase buffer — never cloned into State, wiped when cleared
+    passphrase_buffer: SecretBuffer,
+    /// Secure confirm passphrase buffer — never cloned into State, wiped when cleared
+    confirm_buffer: SecretBuffer,
     /// Logs panel selected index (local to UI, not in State)
     logs_selected: usize,
     /// Whether the logs panel is showing the detail view of a selected entry
@@ -86,8 +89,8 @@ impl Component for MainPage {
             action_tx: action_tx.clone(),
             // set the props
             props: Props::from(state),
-            passphrase_buffer: String::new(),
-            confirm_buffer: String::new(),
+            passphrase_buffer: SecretBuffer::default(),
+            confirm_buffer: SecretBuffer::default(),
             logs_selected: 0,
             logs_detail_view: false,
             content_scroll: 0,
@@ -2705,16 +2708,17 @@ impl MainPage {
                     KeyCode::Enter if active == 2 => {
                         // Submit passphrase — or say why not. An Enter that
                         // silently does nothing reads as a frozen form.
-                        let action =
-                            match passphrase_problem(&self.passphrase_buffer, &self.confirm_buffer)
-                            {
-                                Some(why) => SettingsAction::FormProblem(why),
-                                None => {
-                                    let passphrase = std::mem::take(&mut self.passphrase_buffer);
-                                    self.confirm_buffer.clear();
-                                    SettingsAction::SetPassphrase { passphrase }
-                                }
-                            };
+                        let action = match passphrase_problem(
+                            self.passphrase_buffer.as_str(),
+                            self.confirm_buffer.as_str(),
+                        ) {
+                            Some(why) => SettingsAction::FormProblem(why),
+                            None => {
+                                let passphrase = self.passphrase_buffer.take();
+                                self.confirm_buffer.clear();
+                                SettingsAction::SetPassphrase { passphrase }
+                            }
+                        };
                         let _ = self.action_tx.send(Action::Settings(action));
                         true
                     }
@@ -2929,7 +2933,7 @@ impl MainPage {
         active: usize,
         path: String,
         confirm: bool,
-        make_submit: impl FnOnce(String, String) -> SettingsAction,
+        make_submit: impl FnOnce(String, secrecy::SecretString) -> SettingsAction,
     ) -> bool {
         // The field Enter submits from: the confirmation on export, the
         // passphrase on import.
@@ -2959,14 +2963,17 @@ impl MainPage {
                 // A typo in an export passphrase makes a backup nobody can
                 // open, discovered only when it is needed.
                 let problem = if confirm {
-                    passphrase_problem(&self.passphrase_buffer, &self.confirm_buffer)
+                    passphrase_problem(
+                        self.passphrase_buffer.as_str(),
+                        self.confirm_buffer.as_str(),
+                    )
                 } else {
                     None
                 };
                 let action = match problem {
                     Some(why) => SettingsAction::FormProblem(why),
                     None => {
-                        let passphrase = std::mem::take(&mut self.passphrase_buffer);
+                        let passphrase = self.passphrase_buffer.take();
                         self.confirm_buffer.clear();
                         make_submit(path, passphrase)
                     }

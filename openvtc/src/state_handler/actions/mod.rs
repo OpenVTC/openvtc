@@ -192,17 +192,19 @@ pub enum SettingsAction {
         value: String,
     },
     CancelEdit,
+    // The passphrases below are `SecretString`s: they cross the action
+    // channel, and a plain `String` would leave copies in freed heap.
     ExportConfig {
         path: String,
-        passphrase: String,
+        passphrase: SecretString,
     },
     ImportConfig {
         path: String,
-        passphrase: String,
+        passphrase: SecretString,
     },
     ChangeProtection,
     SetPassphrase {
-        passphrase: String,
+        passphrase: SecretString,
     },
     RemovePassphrase,
     // Manual mediator-reconnect path: handler is live, but the Settings UI does
@@ -1127,7 +1129,7 @@ pub enum Action {
     // SETUP Pages
     /// Import existing Config
     /// Filename, config_unlock_passphrase, new_unlock_passphrase
-    ImportConfig(String, String, String),
+    ImportConfig(String, SecretString, SecretString),
 
     /// The unlock code chosen in the setup wizard, already checked against
     /// the minimum length. The handler derives the key on the blocking pool,

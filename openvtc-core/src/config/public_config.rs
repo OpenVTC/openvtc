@@ -3,14 +3,15 @@
  */
 
 use crate::{
-    config::{Config, ConfigProtectionType, protected_config::ProtectedConfig},
+    config::{
+        Config, ConfigProtectionType,
+        protected_config::{ProtectedBinding, ProtectedConfig},
+    },
     errors::OpenVTCError,
     logs::Logs,
 };
 use secrecy::SecretBox;
 use serde::{Deserialize, Serialize};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::{env, fs, path::PathBuf};
 use tracing::warn;
 
@@ -49,8 +50,14 @@ pub struct PublicConfig {
     /// Human friendly name to use when referring to ourself
     pub friendly_name: String,
 
-    #[serde(default)]
-    pub logs: Logs,
+    /// The activity log as configs written before #568 stored it, in clear.
+    ///
+    /// Read, never written: the log now lives in the encrypted
+    /// [`ProtectedConfig::logs`]. [`PublicConfig::migrate_logs_into`] moves
+    /// what an older config carried there, and the next save leaves this key
+    /// out of the file.
+    #[serde(rename = "logs", default, skip_serializing)]
+    pub legacy_logs: Logs,
 
     #[serde(default)]
     pub private: Option<String>,
@@ -132,47 +139,68 @@ fn get_config_path(profile: &str) -> Result<PathBuf, OpenVTCError> {
 }
 
 impl PublicConfig {
+    /// Move the activity log an older config kept in this plaintext tier into
+    /// the encrypted `private` tier, leaving none here. Returns how many
+    /// entries moved.
+    ///
+    /// Crash-safe because both tiers are in the one file: the save that
+    /// follows writes the moved entries (inside `private`) and drops them from
+    /// the plaintext part in a single atomic write. Until then the file is
+    /// unchanged and the move is simply repeated on the next load.
+    pub fn migrate_logs_into(&mut self, private: &mut ProtectedConfig) -> usize {
+        let moved = self.legacy_logs.messages.len();
+        if moved > 0 {
+            private.logs.absorb(std::mem::take(&mut self.legacy_logs));
+        }
+        moved
+    }
+
     /// Saves to disk the public configuration information
     /// Uses the default CONFIG_PATH const or ENV Variable OPENVTC_CONFIG_PATH
+    ///
+    /// `private` is encrypted under `private_seed` and bound to `profile`
+    /// ([`ProtectedBinding::Profile`]). The file is replaced atomically and is
+    /// owner-only from creation (`0600` on Unix); a missing profile directory
+    /// is created `0700`. A `config.json` that is a symlink is written where
+    /// it points, so a profile kept in another directory on purpose still
+    /// saves.
     pub fn save(
         &self,
         profile: &str,
         private: &ProtectedConfig,
         private_seed: &SecretBox<Vec<u8>>,
     ) -> Result<(), OpenVTCError> {
-        let path = get_config_path(profile)?;
+        let mut path = get_config_path(profile)?;
 
-        // Check that directory structure exists
-        if let Some(parent_path) = path.parent()
-            && !parent_path.exists()
-        {
-            // Create parent directories
-            fs::create_dir_all(parent_path).map_err(|e| {
+        if let Some(parent_path) = path.parent() {
+            crate::private_file::create_private_dir(parent_path).map_err(|e| {
                 OpenVTCError::Config(format!(
                     "Couldn't create parent directory ({}): {e}",
                     parent_path.to_string_lossy()
                 ))
             })?;
         }
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            path = fs::canonicalize(&path).map_err(|e| {
+                OpenVTCError::Config(format!(
+                    "Couldn't resolve the config file link ({}): {e}",
+                    path.to_string_lossy()
+                ))
+            })?;
+        }
 
         let public = PublicConfig {
             config_version: CONFIG_VERSION,
-            private: Some(private.save(private_seed)?),
+            private: Some(private.save(private_seed, ProtectedBinding::Profile(profile))?),
             ..self.clone()
         };
-        // Write config to disk
-        fs::write(&path, serde_json::to_string_pretty(&public)?).map_err(|e| {
+        crate::private_file::atomic_write_private(
+            &path,
+            serde_json::to_string_pretty(&public)?.as_bytes(),
+        )
+        .map_err(|e| {
             OpenVTCError::Config(format!(
                 "Couldn't write public config to file ({}): {e}",
-                path.to_string_lossy()
-            ))
-        })?;
-
-        // Restrict file permissions to owner-only on Unix systems
-        #[cfg(unix)]
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|e| {
-            OpenVTCError::Config(format!(
-                "Couldn't set permissions on config file ({}): {e}",
                 path.to_string_lossy()
             ))
         })?;
@@ -215,6 +243,9 @@ impl PublicConfig {
             })?;
             summary.removed_config_file = Some(path.to_string_lossy().into_owned());
         }
+
+        // Whatever happens below, the next save to this profile must write.
+        crate::config::secured_config::forget_written(profile);
 
         // Drop the SecuredConfig keyring entry if present. `delete_credential`
         // returns `NoEntry` when nothing is stored — swallow that case.
@@ -382,6 +413,84 @@ mod tests {
 
         let _ = fs::remove_file(dir.join("config.json"));
         unsafe { env::remove_var("OPENVTC_CONFIG_PATH") };
+    }
+
+    /// #568: an older config's plaintext log is read, moved into the
+    /// protected tier, and never written back out in clear.
+    #[test]
+    fn plaintext_logs_move_to_the_protected_tier() {
+        let old = r#"{
+            "config_version": 2,
+            "protection": "Plaintext",
+            "friendly_name": "me",
+            "logs": {"messages": [
+                {"created": "2026-01-01T00:00:00Z", "type_": "Contact",
+                 "message": "Added contact (did:example:bob) alias(bob)"}
+            ]},
+            "private": null
+        }"#;
+        let mut pc: PublicConfig = serde_json::from_str(old).unwrap();
+        assert_eq!(pc.legacy_logs.messages.len(), 1);
+
+        let mut private = ProtectedConfig::default();
+        assert_eq!(pc.migrate_logs_into(&mut private), 1);
+        assert!(pc.legacy_logs.is_empty());
+        assert_eq!(
+            private.logs.messages[0].message,
+            "Added contact (did:example:bob) alias(bob)"
+        );
+
+        // Even a stale in-memory copy never writes the log in clear.
+        pc.legacy_logs = private.logs.clone();
+        let json = serde_json::to_string(&pc).unwrap();
+        assert!(!json.contains("did:example:bob"), "{json}");
+        assert!(!json.contains("\"logs\""), "{json}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_writes_an_owner_only_file_atomically() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "openvtc-save-test-{}-{:x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let profile_dir = dir.join("nested");
+        unsafe { env::set_var("OPENVTC_CONFIG_PATH", &profile_dir) };
+
+        let seed = SecretBox::new(Box::new(vec![5u8; 32]));
+        let mut private = ProtectedConfig::default();
+        private
+            .logs
+            .insert(crate::logs::LogFamily::Contact, "did:example:carol".into());
+        let pc = PublicConfig {
+            config_version: CONFIG_VERSION,
+            protection: ConfigProtectionType::Plaintext,
+            ..PublicConfig::default()
+        };
+        let saved = pc.save("savetest", &private, &seed);
+        unsafe { env::remove_var("OPENVTC_CONFIG_PATH") };
+        saved.unwrap();
+
+        let file = profile_dir.join("config-savetest.json");
+        let mode = fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let dir_mode = fs::metadata(&profile_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(!text.contains("did:example:carol"), "log is encrypted");
+        let back: PublicConfig = serde_json::from_str(&text).unwrap();
+        let reopened = ProtectedConfig::load(
+            &seed,
+            back.private.as_deref().unwrap(),
+            ProtectedBinding::Profile("savetest"),
+        )
+        .unwrap();
+        assert_eq!(reopened.logs.messages.len(), 1);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

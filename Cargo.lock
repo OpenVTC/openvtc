@@ -6450,6 +6450,7 @@ dependencies = [
  "serde_json",
  "serde_json_canonicalizer 0.4.1",
  "sha2 0.11.1",
+ "subtle",
  "sysinfo 0.40.1",
  "tempfile",
  "thiserror 2.0.21",

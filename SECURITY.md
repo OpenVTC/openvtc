@@ -65,16 +65,26 @@ OpenVTC employs defense-in-depth for secret protection:
    store instead; it refuses to hold a profile that has no passphrase or
    hardware token. The secured config is encrypted under the unlock code or an
    OpenPGP hardware token, unless the user chooses plaintext protection after
-   a warning.
-3. **Protected Config** — The account, contacts, relationships and credentials,
-   encrypted at rest with AES-256-GCM.
-4. **Public Config** — Settings and the activity log, stored in plaintext. The
-   activity log can name contacts and DIDs.
+   a warning. Under an unlock code the key is derived with Argon2id and a
+   random salt of the profile's own, and the profile's name is bound to the
+   ciphertext as associated data.
+3. **Protected Config** — The account, contacts, relationships, credentials
+   and the activity log, encrypted at rest with AES-256-GCM and bound to the
+   profile's name as associated data.
+4. **Public Config** — Plaintext: the config version, the protection type (and
+   a hardware token's id), the friendly name, and the encrypted Protected
+   Config. The activity log, which names contacts and DIDs, is no longer here;
+   a config written by an earlier release has its log moved into the Protected
+   Config the next time it is opened.
+
+`config.json`, exports and startup-failure reports are written owner-only
+(`0600` on Unix) from the moment they are created, and atomically: a crash
+mid-save leaves the previous file, not a truncated one.
 
 Cryptographic primitives used:
 
 - **AES-256-GCM** for authenticated encryption
-- **HKDF-SHA256** for key derivation with domain separation
+- **HKDF-SHA256** for key derivation, with a separate label per kind of encrypted blob
 - **Argon2id** for passphrase-based key derivation
 - **Ed25519** for digital signatures
 - **X25519** for key agreement

@@ -4,7 +4,7 @@ use anyhow::Result;
 #[cfg(feature = "openpgp-card")]
 use openvtc_core::config::ConfigProtectionType;
 use openvtc_core::{config::Config, logs::LogFamily};
-use secrecy::{SecretBox, SecretString};
+use secrecy::{ExposeSecret, SecretString};
 use tracing::info;
 
 /// Save the config to disk using the profile name.
@@ -25,7 +25,7 @@ pub fn save_config(config: &Config, profile: &str) -> Result<()> {
 /// so coalescing is safe — the Exit force-flush guarantees it is persisted.
 pub fn update_friendly_name(config: &mut Config, name: &str) {
     config.public.friendly_name = name.to_string();
-    config.public.logs.insert(
+    config.private.logs.insert(
         LogFamily::Config,
         format!("Friendly name changed to '{}'", name),
     );
@@ -49,26 +49,23 @@ pub fn update_friendly_name(config: &mut Config, name: &str) {
 /// Set a passphrase to encrypt the config in the keyring.
 ///
 /// R12: the Argon2id unlock-key derivation (~0.5–1 s of pure CPU) runs on a
-/// `spawn_blocking` thread via `derive_passphrase_key_blocking` so it does
-/// not peg the async event-loop / render task. The passphrase bytes are owned
-/// by the blocking closure and zeroized there; the derived key is the only
-/// thing returned. The subsequent `save_config` does not run Argon2 (it
-/// AES-encrypts with the already-derived key), so this is the only KDF on this
-/// path.
-pub async fn set_passphrase(config: &mut Config, profile: &str, passphrase: &str) -> Result<()> {
-    use openvtc_core::config::{
-        ConfigProtectionType, derive_passphrase_key_blocking, validate_passphrase,
-    };
+/// `spawn_blocking` thread via `UnlockKey::derive_blocking` so it does not peg
+/// the async event-loop / render task. The key is derived under a fresh random
+/// salt (#566), which the save writes beside the ciphertext. The subsequent
+/// `save_config` does not run Argon2 (it AES-encrypts with the already-derived
+/// key), so this is the only KDF on this path.
+pub async fn set_passphrase(
+    config: &mut Config,
+    profile: &str,
+    passphrase: &SecretString,
+) -> Result<()> {
+    use openvtc_core::config::{ConfigProtectionType, UnlockKey, validate_passphrase};
 
-    validate_passphrase(passphrase)?;
-    let key = derive_passphrase_key_blocking(
-        passphrase.as_bytes().to_vec(),
-        b"openvtc-unlock-code-v1".to_vec(),
-    )
-    .await?;
-    config.unlock_code = Some(SecretBox::new(Box::new(key.to_vec())));
+    validate_passphrase(passphrase.expose_secret())?;
+    let key = UnlockKey::derive_blocking(passphrase.clone()).await?;
+    config.unlock_code = Some(key);
     config.public.protection = ConfigProtectionType::Encrypted;
-    config.public.logs.insert(
+    config.private.logs.insert(
         LogFamily::Config,
         "Config protection changed to passphrase encrypted".to_string(),
     );
@@ -83,7 +80,7 @@ pub fn remove_passphrase(config: &mut Config, profile: &str) -> Result<()> {
 
     config.unlock_code = None;
     config.public.protection = ConfigProtectionType::Plaintext;
-    config.public.logs.insert(
+    config.private.logs.insert(
         LogFamily::Config,
         "Config protection changed to keyring only (no additional encryption)".to_string(),
     );
@@ -107,10 +104,9 @@ fn validate_file_path(path: &str) -> Result<()> {
 ///
 /// R12: `Config::export` now derives its Argon2 export key off the runtime
 /// (`spawn_blocking`), so this awaits it instead of blocking the loop.
-pub async fn export_config(config: &Config, path: &str, passphrase: &str) -> Result<()> {
+pub async fn export_config(config: &Config, path: &str, passphrase: SecretString) -> Result<()> {
     validate_file_path(path)?;
-    let secret = SecretString::new(passphrase.to_string().into());
-    config.export(secret, path).await?;
+    config.export(passphrase, path).await?;
     info!(path = %path, "config exported");
     Ok(())
 }
@@ -121,7 +117,7 @@ pub async fn export_config(config: &Config, path: &str, passphrase: &str) -> Res
 /// and reconnecting messaging, so it is intentionally not performed from the
 /// Settings panel. The supported restore path lives in the setup wizard:
 /// run `openvtc setup` and choose "Import" / "Restore Backup".
-pub fn import_config(path: &str, _passphrase: &str) -> Result<String> {
+pub fn import_config(path: &str, _passphrase: &SecretString) -> Result<String> {
     validate_file_path(path)?;
     // Validate the file exists
     if !std::path::Path::new(path).exists() {
@@ -332,7 +328,7 @@ async fn handle_export_config_action(
     save: &mut SaveScheduler,
     profile: &str,
     path: &str,
-    passphrase: &str,
+    passphrase: SecretString,
 ) {
     // R12: surface a "deriving" status *before* the blocking Argon2 derive so
     // the user sees progress while the key is computed off the runtime. Push it
@@ -346,7 +342,7 @@ async fn handle_export_config_action(
     match export_config(config, path, passphrase).await {
         Ok(()) => {
             config
-                .public
+                .private
                 .logs
                 .insert(LogFamily::Config, format!("Config exported to {}", path));
             // R11 force-flush: export is durability-critical (the exported file
@@ -387,12 +383,12 @@ fn handle_import_config_action(
     save: &mut SaveScheduler,
     profile: &str,
     path: &str,
-    passphrase: &str,
+    passphrase: &SecretString,
 ) {
     match import_config(path, passphrase) {
         Ok(msg) => {
             config
-                .public
+                .private
                 .logs
                 .insert(LogFamily::Config, format!("Config imported from {}", path));
             // Force-flush the import-log entry (see export handler).
@@ -438,7 +434,7 @@ async fn handle_set_passphrase(
     state_tx: &watch::Sender<State>,
     save: &mut SaveScheduler,
     profile: &str,
-    passphrase: &str,
+    passphrase: &SecretString,
 ) {
     // R12: surface a "deriving" status *before* the blocking Argon2 derive so
     // the user sees progress while the unlock key is computed off the runtime.
@@ -1026,7 +1022,7 @@ pub(crate) async fn dispatch(
         // remaining (explicit, operator-driven) way to ask for one.
         SettingsAction::SubmitEdit { value } => handle_submit_edit(config, state, save, &value),
         SettingsAction::ExportConfig { path, passphrase } => {
-            handle_export_config_action(config, state, state_tx, save, profile, &path, &passphrase)
+            handle_export_config_action(config, state, state_tx, save, profile, &path, passphrase)
                 .await
         }
         SettingsAction::ImportConfig { path, passphrase } => {

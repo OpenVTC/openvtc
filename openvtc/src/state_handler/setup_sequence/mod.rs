@@ -7,7 +7,7 @@ use ::openpgp_card::{Card, state::Open};
 use affinidi_tdk::did_common::Document;
 use affinidi_tdk::secrets_resolver::secrets::Secret;
 use openvtc_core::config::PersonaDIDKeys;
-use secrecy::SecretBox;
+use openvtc_core::config::UnlockKey;
 use std::fmt;
 use std::sync::Arc;
 #[cfg(feature = "openpgp-card")]
@@ -141,7 +141,9 @@ pub struct VtaSetupState {
     pub vta_did: String,
     pub credential_did: String,
     pub authenticated: bool,
-    pub access_token: Option<String>,
+    /// The VTA session token from setup authentication. A secret: this state
+    /// is cloned on every render send.
+    pub access_token: Option<secrecy::SecretString>,
     pub messages: Vec<MessageType>,
     pub completed: Completion,
     pub context_id: Option<String>,
@@ -244,8 +246,8 @@ pub enum ConfigProtection {
     PlainText,
     #[cfg(feature = "openpgp-card")]
     Token(String),
-    /// Is a SHA256 digest of the input passcode
-    Passcode(Arc<SecretBox<Vec<u8>>>),
+    /// The unlock key derived from the chosen code, with its fresh salt.
+    Passcode(Arc<UnlockKey>),
 }
 
 impl std::fmt::Debug for ConfigProtection {

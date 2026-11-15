@@ -8,19 +8,19 @@ use ed25519_dalek_bip32::ExtendedSigningKey;
 use openvtc_core::{
     config::{
         Config, ConfigProtectionType, ExportedConfig, KeyBackend, KeyTypes, MIN_PASSPHRASE_LENGTH,
+        UnlockKey,
         account::{Account, KeyRef, PersonaId, PersonaRecord},
-        derive_passphrase_key,
         protected_config::ProtectedConfig,
         public_config::PublicConfig,
         secured_config::{KeyInfoConfig, ProtectionMethod, passphrase_decrypt},
         validate_passphrase,
     },
     identity::IdentityContext,
-    logs::{LogFamily, LogMessage, Logs},
+    logs::LogFamily,
 };
-use secrecy::{ExposeSecret, SecretBox, SecretString};
+use secrecy::{ExposeSecret, SecretString};
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap},
     fs,
 };
 use tokio::sync::watch;
@@ -167,10 +167,10 @@ impl ConfigExtension for Config {
             }
         };
 
-        // Exports are written by `passphrase_encrypt_v2` (v2: OPV2 magic +
-        // random Argon2 salt embedded in the blob). `passphrase_decrypt`
-        // auto-detects the format and falls back to the legacy v1
-        // deterministic-salt KDF for pre-v2 export files.
+        // Exports are written by `passphrase_encrypt` (v3: OPV3 magic, a
+        // random Argon2 salt embedded in the blob, the label below in the
+        // HKDF step). `passphrase_decrypt` auto-detects the format and also
+        // reads the v2 (OPV2) and legacy v1 exports of earlier releases.
         let decoded = passphrase_decrypt(
             import_unlock_passphrase.expose_secret().as_bytes(),
             b"openvtc-export-v1",
@@ -216,71 +216,64 @@ impl ConfigExtension for Config {
         )?;
         let private_seed = ProtectedConfig::get_seed(&bip32_root, "m/0'/0'/0'")?;
 
-        let private = if let Some(private) = &config.pc.private {
-            ProtectedConfig::load(&private_seed, private)?
+        // The protected tier: under the export's own key when it has one, else
+        // the BIP32-derived seed of exports made before it did. Saved under
+        // the same key, now bound to this profile.
+        let mut config = config;
+        let (mut private, save_seed) = config
+            .open_private(&private_seed)
+            .map_err(|e| anyhow::anyhow!("Couldn't decrypt the backup's protected data: {e}"))?;
+        // A backup made before #568 carries its activity log in clear.
+        config.pc.migrate_logs_into(&mut private);
+
+        // A fresh salt for this profile's unlock key (#566). Only a profile
+        // protected by an unlock code gets one: handing a key to a plaintext
+        // profile's save would seal a blob its next load refuses.
+        let unlock = match &config.pc.protection {
+            ConfigProtectionType::Encrypted => Some(UnlockKey::derive(
+                new_unlock_passphrase.expose_secret().as_bytes(),
+            )?),
+            _ => None,
+        };
+        let token = if let ConfigProtectionType::Token(token) = &config.pc.protection {
+            Some(token.clone())
         } else {
-            ProtectedConfig::default()
+            None
         };
 
-        config
-            .pc
-            .save(profile, &private, &private_seed)
-            .map_err(|e| anyhow::anyhow!("Couldn't save Public Config: {e}"))?;
-
+        // Secrets first, then the config file — the order `Config::save`
+        // keeps, for the same reason: a crash between the two leaves keys no
+        // config refers to, not a config whose keys are missing.
         #[cfg(feature = "openpgp-card")]
         {
             let state_clone = state.clone();
             let state_tx_clone = state_tx.clone();
             config
                 .sc
-                .save(
-                    profile,
-                    if let ConfigProtectionType::Token(token) = &config.pc.protection {
-                        Some(token)
-                    } else {
-                        None
-                    },
-                    Some(
-                        &derive_passphrase_key(
-                            new_unlock_passphrase.expose_secret().as_bytes(),
-                            b"openvtc-unlock-code-v1",
-                        )?
-                        .to_vec(),
-                    ),
-                    &move || {
-                        let mut state_mut = state_clone.clone();
-                        state_mut
-                            .setup
-                            .config_import
-                            .messages
-                            .push(MessageType::Info(
-                                "Please touch token hardware to unlock keys".to_string(),
-                            ));
-                        let _ = state_tx_clone.send(state_mut);
-                    },
-                )
+                .save(profile, token.as_ref(), unlock.as_ref(), &move || {
+                    let mut state_mut = state_clone.clone();
+                    state_mut
+                        .setup
+                        .config_import
+                        .messages
+                        .push(MessageType::Info(
+                            "Please touch token hardware to unlock keys".to_string(),
+                        ));
+                    let _ = state_tx_clone.send(state_mut);
+                })
                 .map_err(|e| anyhow::anyhow!("Couldn't save Secured Config: {e}"))?;
         }
 
         #[cfg(not(feature = "openpgp-card"))]
         config
             .sc
-            .save(
-                profile,
-                if let ConfigProtectionType::Token(token) = &config.pc.protection {
-                    Some(token)
-                } else {
-                    None
-                },
-                Some(
-                    &derive_passphrase_key(
-                        new_unlock_passphrase.expose_secret().as_bytes(),
-                        b"openvtc-unlock-code-v1",
-                    )?
-                    .to_vec(),
-                ),
-            )
+            .save(profile, token.as_ref(), unlock.as_ref())
             .map_err(|e| anyhow::anyhow!("Couldn't save Secured Config: {e}"))?;
+
+        config
+            .pc
+            .save(profile, &private, &save_seed)
+            .map_err(|e| anyhow::anyhow!("Couldn't save Public Config: {e}"))?;
 
         Ok(())
     }
@@ -450,7 +443,7 @@ fn build_state_a_config(state: &SetupState) -> Result<Config> {
         #[cfg(feature = "openpgp-card")]
         ConfigProtection::Token(token) => ConfigProtectionType::Token(token.to_string()),
         ConfigProtection::Passcode(unlock) => {
-            unlock_code = Some(SecretBox::new(Box::new(unlock.expose_secret().to_vec())));
+            unlock_code = Some(UnlockKey::clone(unlock));
             ConfigProtectionType::Encrypted
         }
     };
@@ -528,17 +521,16 @@ fn build_state_a_config(state: &SetupState) -> Result<Config> {
             config_version: openvtc_core::config::public_config::CONFIG_VERSION,
             protection,
             private: None,
-            logs: Logs {
-                messages: VecDeque::from([LogMessage {
-                    created: Utc::now(),
-                    type_: LogFamily::Config,
-                    message: "Account bootstrap completed".to_string(),
-                }]),
-                ..Default::default()
-            },
+            legacy_logs: Default::default(),
             friendly_name: String::new(),
         },
-        private: ProtectedConfig::default(),
+        private: {
+            let mut private = ProtectedConfig::default();
+            private
+                .logs
+                .insert(LogFamily::Config, "Account bootstrap completed".to_string());
+            private
+        },
         // Empty for a fresh account; for a recovery, the verification-method
         // → VTA-key mapping without which a rebuilt persona cannot sign.
         key_info,
@@ -592,7 +584,7 @@ mod tests {
             vta_did: "did:webvh:zVTASCID:vta.example.com".to_string(),
             vta_url: String::new(),
             mediator_did: mediator_did.map(str::to_string),
-            encryption_seed: SecretBox::new(Box::new(vec![0u8; 32])),
+            encryption_seed: secrecy::SecretBox::new(Box::new(vec![0u8; 32])),
         };
         config.key_backend = vta(Some("did:webvh:QmM:mediator.example.com"));
         assert_eq!(

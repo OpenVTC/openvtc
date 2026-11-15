@@ -18,7 +18,9 @@ The backup holds the public config (with the encrypted protected config inside
 it) and the secured config, including the key material from the credential
 store. It is encrypted with AES-256-GCM under a key derived from the passphrase
 with Argon2id, using a fresh random salt for each export. On Unix the file is
-written with mode `0600`.
+written with mode `0600` from the moment it is created, and a symlink at the
+chosen path is refused rather than followed. The backup is not tied to the
+profile it came from, so it can be restored under any profile name.
 
 Keep the backup and its passphrase somewhere safe. Anyone with both has the
 profile's secrets.

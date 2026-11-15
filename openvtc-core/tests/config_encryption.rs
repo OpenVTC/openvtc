@@ -4,9 +4,9 @@
 //! configuration data using the Argon2id KDF and AES-256-GCM.
 
 use openvtc_core::config::{
-    derive_passphrase_key,
+    derive_passphrase_key, derive_passphrase_key_v2,
     secured_config::{
-        passphrase_decrypt, passphrase_encrypt_v2, unlock_code_decrypt, unlock_code_encrypt,
+        passphrase_decrypt, passphrase_encrypt, unlock_code_decrypt, unlock_code_encrypt,
     },
 };
 
@@ -199,11 +199,12 @@ fn swapped_ciphertexts_fail_decryption() {
 }
 
 // ---------------------------------------------------------------------------
-// v2 passphrase-AEAD format with per-entry random Argon2 salt.
+// Passphrase-AEAD formats with a per-entry random Argon2 salt.
 //
 // Behavioural contract:
-//   * `passphrase_encrypt_v2` always writes a v2 blob (magic prefix + salt).
-//   * `passphrase_decrypt` auto-detects format and decrypts both v1 and v2.
+//   * `passphrase_encrypt` always writes a v3 blob (OPV3 magic + salt, `info`
+//     in the HKDF label, header bound as AAD).
+//   * `passphrase_decrypt` auto-detects the format and decrypts v1, v2 and v3.
 //   * Two encrypts of the same plaintext under the same passphrase produce
 //     different ciphertexts (random salt + random nonce).
 //   * Two operators with the same passphrase produce independent blobs —
@@ -211,16 +212,55 @@ fn swapped_ciphertexts_fail_decryption() {
 // ---------------------------------------------------------------------------
 
 const V2_MAGIC: &[u8; 4] = b"OPV2";
+const V3_MAGIC: &[u8; 4] = b"OPV3";
+
+/// A blob in the v2 (`OPV2`) format the previous `passphrase_encrypt_v2`
+/// wrote: `[OPV2 | salt(16) | nonce(12) | ct+tag]`, no AAD, `info` unused.
+fn opv2_encrypt(passphrase: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    let salt = [0x5au8; 16];
+    let key = derive_passphrase_key_v2(passphrase, &salt).unwrap();
+    let mut out = V2_MAGIC.to_vec();
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&unlock_code_encrypt(&key, plaintext).unwrap());
+    out
+}
 
 #[test]
-fn v2_roundtrip_succeeds() {
+fn v3_roundtrip_succeeds() {
     let pass = b"my-passphrase-2026";
     let info = b"openvtc-export-v1";
     let plaintext = b"sensitive config blob";
-    let blob = passphrase_encrypt_v2(pass, info, plaintext).expect("encrypt v2");
-    assert_eq!(&blob[..4], V2_MAGIC, "v2 blob must begin with OPV2 magic");
-    let recovered = passphrase_decrypt(pass, info, &blob).expect("decrypt v2");
+    let blob = passphrase_encrypt(pass, info, plaintext).expect("encrypt v3");
+    assert_eq!(&blob[..4], V3_MAGIC, "v3 blob must begin with OPV3 magic");
+    let recovered = passphrase_decrypt(pass, info, &blob).expect("decrypt v3");
     assert_eq!(recovered, plaintext);
+}
+
+/// #569: `info` is now domain separation in fact, not just in the docs — a
+/// v3 blob does not open under another purpose's label.
+#[test]
+fn v3_decrypt_with_wrong_info_fails() {
+    let blob = passphrase_encrypt(b"pass", b"openvtc-export-v1", b"data").unwrap();
+    assert!(passphrase_decrypt(b"pass", b"some-other-purpose", &blob).is_err());
+}
+
+/// The header is bound as associated data: a v3 blob relabelled as v2 (same
+/// salt, same body) does not open.
+#[test]
+fn v3_blob_relabelled_as_v2_fails() {
+    let mut blob = passphrase_encrypt(b"pass", b"info", b"data").unwrap();
+    blob[..4].copy_from_slice(V2_MAGIC);
+    assert!(passphrase_decrypt(b"pass", b"info", &blob).is_err());
+}
+
+/// Exports written by the previous release (OPV2) still import.
+#[test]
+fn v2_blob_still_decrypts() {
+    let blob = opv2_encrypt(b"pass", b"older export");
+    assert_eq!(
+        passphrase_decrypt(b"pass", b"openvtc-export-v1", &blob).unwrap(),
+        b"older export"
+    );
 }
 
 // ── R12: off-runtime (spawn_blocking) Argon2 wrappers ─────────────────────────
@@ -230,22 +270,27 @@ fn v2_roundtrip_succeeds() {
 // sync derive), and that the `spawn_blocking` derive runs without panicking
 // under a tokio runtime.
 
-/// `passphrase_encrypt_v2_blocking` must produce a v2 blob decryptable by the
-/// existing (sync) `passphrase_decrypt` — behaviour parity with
-/// `passphrase_encrypt_v2`, only the derive runs off the runtime.
+/// `passphrase_encrypt_blocking` must produce a v3 blob decryptable by the
+/// (sync) `passphrase_decrypt` — behaviour parity with `passphrase_encrypt`,
+/// only the derive runs off the runtime.
 #[tokio::test]
-async fn v2_blocking_roundtrip_decryptable_by_sync_decrypt() {
-    use openvtc_core::config::secured_config::passphrase_encrypt_v2_blocking;
+async fn v3_blocking_roundtrip_decryptable_by_sync_decrypt() {
+    use openvtc_core::config::secured_config::passphrase_encrypt_blocking;
+    use zeroize::Zeroizing;
     let pass = b"my-passphrase-2026";
     let info = b"openvtc-export-v1";
     let plaintext = b"sensitive config blob";
-    let blob = passphrase_encrypt_v2_blocking(pass.to_vec(), info.to_vec(), plaintext.to_vec())
-        .await
-        .expect("blocking encrypt v2 should not panic under a runtime");
+    let blob = passphrase_encrypt_blocking(
+        Zeroizing::new(pass.to_vec()),
+        info.to_vec(),
+        Zeroizing::new(plaintext.to_vec()),
+    )
+    .await
+    .expect("blocking encrypt should not panic under a runtime");
     assert_eq!(
         &blob[..4],
-        V2_MAGIC,
-        "blocking v2 blob must begin with OPV2 magic, same as sync"
+        V3_MAGIC,
+        "blocking blob must begin with OPV3 magic, same as sync"
     );
     let recovered = passphrase_decrypt(pass, info, &blob).expect("sync decrypt of blocking blob");
     assert_eq!(recovered, plaintext);
@@ -274,8 +319,8 @@ fn v2_two_encrypts_produce_distinct_blobs() {
     let pass = b"same-passphrase";
     let info = b"context";
     let plaintext = b"same plaintext";
-    let blob_a = passphrase_encrypt_v2(pass, info, plaintext).unwrap();
-    let blob_b = passphrase_encrypt_v2(pass, info, plaintext).unwrap();
+    let blob_a = passphrase_encrypt(pass, info, plaintext).unwrap();
+    let blob_b = passphrase_encrypt(pass, info, plaintext).unwrap();
     // Random salt + random nonce mean even identical inputs produce
     // unrelated ciphertext bytes — no determinism leak.
     assert_ne!(blob_a, blob_b);
@@ -294,14 +339,17 @@ fn v1_legacy_blob_decrypts_through_passphrase_decrypt() {
     let key = derive_passphrase_key(pass, info).unwrap();
     let v1_blob = unlock_code_encrypt(&key, plaintext).unwrap();
     assert_ne!(&v1_blob[..4], V2_MAGIC);
+    assert_ne!(&v1_blob[..4], V3_MAGIC);
     // The new auto-detecting decrypt must read it back.
     let recovered = passphrase_decrypt(pass, info, &v1_blob).expect("decrypt v1 via new API");
     assert_eq!(recovered, plaintext);
 }
 
 #[test]
-fn v2_decrypt_with_wrong_passphrase_fails() {
-    let blob = passphrase_encrypt_v2(b"correct", b"context", b"secret").expect("encrypt");
+fn v2_and_v3_decrypt_with_wrong_passphrase_fails() {
+    let blob = passphrase_encrypt(b"correct", b"context", b"secret").expect("encrypt");
+    assert!(passphrase_decrypt(b"wrong", b"context", &blob).is_err());
+    let blob = opv2_encrypt(b"correct", b"secret");
     assert!(passphrase_decrypt(b"wrong", b"context", &blob).is_err());
 }
 
@@ -318,19 +366,18 @@ fn v2_decrypt_with_wrong_info_for_v1_blob_fails() {
 
 #[test]
 fn v2_decrypt_with_wrong_info_for_v2_blob_still_succeeds() {
-    // For v2 the info label is no longer part of the salt — the salt is
-    // random and stored alongside the ciphertext. So as long as the
-    // passphrase is right, the info argument is currently advisory.
-    // (It's preserved in the API for future domain-separation use.)
+    // The v2 format never used the info label (the salt is random and
+    // stored alongside the ciphertext), so a v2 blob opens under any label.
+    // v3 feeds it into HKDF — see `v3_decrypt_with_wrong_info_fails`.
     let pass = b"pass";
-    let blob = passphrase_encrypt_v2(pass, b"info-a", b"data").unwrap();
+    let blob = opv2_encrypt(pass, b"data");
     let recovered = passphrase_decrypt(pass, b"info-b", &blob).expect("v2 ignores info");
     assert_eq!(recovered, b"data");
 }
 
 #[test]
-fn v2_blob_tampering_fails_decrypt() {
-    let mut blob = passphrase_encrypt_v2(b"pass", b"info", b"plaintext").expect("encrypt");
+fn v3_blob_tampering_fails_decrypt() {
+    let mut blob = passphrase_encrypt(b"pass", b"info", b"plaintext").expect("encrypt");
     // Flip a byte in the salt portion.
     blob[8] ^= 0x01;
     assert!(passphrase_decrypt(b"pass", b"info", &blob).is_err());
@@ -383,7 +430,7 @@ fn v2_blob_from_previous_release_still_decrypts() {
 // ---------------------------------------------------------------------------
 // Export → import round-trip (task R1).
 //
-// `Config::export` writes a v2 blob (`passphrase_encrypt_v2`, OPV2 magic +
+// `Config::export` writes a v3 blob (`passphrase_encrypt`, OPV3 magic +
 // random salt). The TUI import path must therefore decrypt through the
 // format-auto-detecting `passphrase_decrypt` with the same domain-separation
 // label. These tests pin that contract at the openvtc-core layer, exercising
@@ -421,7 +468,7 @@ mod export_import {
                 config_version: CONFIG_VERSION,
                 protection: ConfigProtectionType::Encrypted,
                 friendly_name: "R1 Round Trip".to_string(),
-                logs: Logs::default(),
+                legacy_logs: Logs::default(),
                 private: None,
             },
             private: ProtectedConfig::default(),
@@ -493,6 +540,74 @@ mod export_import {
         assert_eq!(imported_seed.expose_secret(), seed_b64);
     }
 
+    /// The export carries the live protected tier — including the activity
+    /// log, which now lives there — bound to no profile, so whichever profile
+    /// imports it can open it.
+    #[tokio::test]
+    async fn export_carries_the_live_protected_tier_unbound() {
+        use openvtc_core::{config::protected_config::ProtectedBinding, logs::LogFamily};
+        let seed_b64 = BASE64_URL_SAFE_NO_PAD.encode([8u8; 32]);
+        let mut config = populated_config(&seed_b64);
+        config
+            .private
+            .logs
+            .insert(LogFamily::Contact, "Added contact (did:example:x)".into());
+
+        let file = std::env::temp_dir().join(format!(
+            "openvtc-export-private-{}-{:x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let file = file.to_str().unwrap().to_string();
+        config
+            .export(SecretString::new("export-passphrase".into()), &file)
+            .await
+            .expect("export");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the export is owner-only");
+        }
+        let content = std::fs::read_to_string(&file).expect("read export file");
+        let _ = std::fs::remove_file(&file);
+
+        let imported = import_decrypt(&content, "export-passphrase").expect("decrypt");
+        let blob = imported
+            .pc
+            .private
+            .as_deref()
+            .expect("protected tier exported");
+        let legacy_seed = ProtectedConfig::get_seed(
+            &ExtendedSigningKey::from_seed(&[8u8; 32]).unwrap(),
+            "m/0'/0'/0'",
+        )
+        .unwrap();
+        assert!(
+            ProtectedConfig::load(&legacy_seed, blob, ProtectedBinding::Profile("default"))
+                .is_err(),
+            "an export is not bound to any profile"
+        );
+        let (private, _) = imported.open_private(&legacy_seed).expect("opens");
+        assert_eq!(private.logs.messages.len(), 1);
+    }
+
+    /// An export written by the previous release (OPV2 envelope) still
+    /// imports.
+    #[test]
+    fn opv2_export_still_imports() {
+        let seed_b64 = BASE64_URL_SAFE_NO_PAD.encode([10u8; 32]);
+        let config = populated_config(&seed_b64);
+        let serialized = serde_json::to_vec(&ExportedConfig {
+            pc: PublicConfig::from(&config),
+            sc: openvtc_core::config::secured_config::SecuredConfig::from(&config),
+        })
+        .unwrap();
+        let content = BASE64_URL_SAFE_NO_PAD.encode(opv2_encrypt(b"older-export", &serialized));
+        let imported = import_decrypt(&content, "older-export").expect("v2 exports still import");
+        assert_eq!(imported.pc.friendly_name, "R1 Round Trip");
+    }
+
     /// Pins the R1 root cause: the legacy v1 decrypt path the import used
     /// to hard-code (deterministic info-salt key + `unlock_code_decrypt`)
     /// cannot read a v2 export blob — it misreads the OPV2 header as the
@@ -500,8 +615,8 @@ mod export_import {
     #[test]
     fn v1_decrypt_path_cannot_read_v2_export() {
         let passphrase = b"round-trip-passphrase";
-        let blob = passphrase_encrypt_v2(passphrase, EXPORT_INFO, b"{\"any\":\"payload\"}")
-            .expect("encrypt v2");
+        let blob = passphrase_encrypt(passphrase, EXPORT_INFO, b"{\"any\":\"payload\"}")
+            .expect("encrypt v3");
         let v1_key = derive_passphrase_key(passphrase, EXPORT_INFO).unwrap();
         assert!(
             unlock_code_decrypt(&v1_key, &blob).is_err(),

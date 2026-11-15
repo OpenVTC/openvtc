@@ -3,8 +3,9 @@
 use crate::{
     config::{
         Config, ConfigProtectionType, ExportedConfig, KeyBackend,
+        protected_config::ProtectedBinding,
         public_config::PublicConfig,
-        secured_config::{SecuredConfig, passphrase_encrypt_v2_blocking},
+        secured_config::{SecuredConfig, passphrase_encrypt_blocking},
     },
     errors::OpenVTCError,
     logs::LogFamily,
@@ -12,9 +13,7 @@ use crate::{
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
 use ed25519_dalek_bip32::ExtendedSigningKey;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::{collections::BTreeMap, fs, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 use tracing::warn;
 
 /// Deep-clone a [`KeyBackend`] for a save snapshot.
@@ -143,10 +142,7 @@ impl Config {
             token_admin_pin: self.token_admin_pin.clone(),
             #[cfg(feature = "openpgp-card")]
             token_user_pin: self.token_user_pin.clone(),
-            unlock_code: self
-                .unlock_code
-                .as_ref()
-                .map(|s| SecretBox::new(Box::new(s.expose_secret().clone()))),
+            unlock_code: self.unlock_code.clone(),
             // The full account, INCLUDING personas that could not be loaded
             // this session. A degraded persona keeps its record: it is skipped,
             // never dropped, so a save taken while degraded does not turn a
@@ -198,6 +194,10 @@ impl Config {
         // without a real transaction across two stores. Only the second leaves
         // damage behind, so we take the first. `config::integrity` handles the
         // damage either way — this just stops manufacturing it.
+        //
+        // `SecuredConfig::save` skips the store write when the secured tier is
+        // unchanged since this process last wrote it (#564). That keeps the
+        // order: a skipped write means the stored secrets are already current.
         let sc = SecuredConfig::from(self);
         sc.save(
             profile,
@@ -206,7 +206,7 @@ impl Config {
             } else {
                 None
             },
-            self.unlock_code.as_ref().map(|s| s.expose_secret()),
+            self.unlock_code.as_ref(),
             #[cfg(feature = "openpgp-card")]
             touch_prompt,
         )?;
@@ -228,47 +228,49 @@ impl Config {
     ///   pulling in a CLI prompt library.
     /// - `file`: Destination file path for the base64url-encoded ciphertext.
     ///
+    /// The protected tier is written into the export as it is *now*, under the
+    /// profile's encryption key and bound to no profile
+    /// ([`ProtectedBinding::Export`]), since the export is imported into a
+    /// profile of the importer's choosing. The file is written atomically,
+    /// owner-only from creation; a symlink at `file` is refused, not followed.
+    ///
     /// # Errors
     ///
     /// Returns an error if passphrase derivation fails, serialization fails,
     /// encryption fails, or the file cannot be written.
     ///
-    /// R12: the Argon2id key derivation inside `passphrase_encrypt_v2` (~0.5–1 s
+    /// R12: the Argon2id key derivation inside `passphrase_encrypt` (~0.5–1 s
     /// of pure CPU) runs on a `spawn_blocking` thread via
-    /// [`passphrase_encrypt_v2_blocking`] so the export does not peg the async
-    /// event-loop / render task while the key is derived. The per-export random
-    /// salt and the resulting blob are unchanged from the sync path.
+    /// [`passphrase_encrypt_blocking`] so the export does not peg the async
+    /// event-loop / render task while the key is derived.
     pub async fn export(&self, passphrase: SecretString, file: &str) -> Result<(), OpenVTCError> {
-        let pc = PublicConfig::from(self);
+        let mut pc = PublicConfig::from(self);
         let sc = SecuredConfig::from(self);
 
-        let serialized = serde_json::to_vec(&ExportedConfig { pc, sc })?;
-        // v2: per-export random Argon2 salt, embedded in the magic-prefixed
-        // blob so two operators with the same passphrase produce
-        // independent ciphertexts (and the same operator exporting twice
-        // does too). Decrypt path auto-detects v1/v2 for backward compat
-        // with previously-exported files.
-        //
-        // Own the exposed passphrase bytes so they move into the blocking
-        // closure (and zeroize there); `serialized` is also moved in. Neither
-        // is logged or surfaced in an error.
-        let secured = passphrase_encrypt_v2_blocking(
-            passphrase.expose_secret().as_bytes().to_vec(),
+        // The live protected tier, not the blob read at start-up, which is
+        // bound to this profile's name and stale besides.
+        let mut private = self.private.clone();
+        private.account = self.account.clone();
+        pc.private = Some(private.save(&self.get_encryption_seed()?, ProtectedBinding::Export)?);
+
+        let serialized = zeroize::Zeroizing::new(serde_json::to_vec(&ExportedConfig { pc, sc })?);
+        // Per-export random Argon2 salt, embedded in the magic-prefixed blob so
+        // two operators with the same passphrase produce independent
+        // ciphertexts (and the same operator exporting twice does too). The
+        // decrypt path auto-detects v1/v2/v3 for older export files.
+        let secured = passphrase_encrypt_blocking(
+            zeroize::Zeroizing::new(passphrase.expose_secret().as_bytes().to_vec()),
             b"openvtc-export-v1".to_vec(),
             serialized,
         )
         .await?;
 
-        fs::write(file, BASE64_URL_SAFE_NO_PAD.encode(&secured)).map_err(|e| {
+        crate::private_file::atomic_write_private(
+            std::path::Path::new(file),
+            BASE64_URL_SAFE_NO_PAD.encode(&secured).as_bytes(),
+        )
+        .map_err(|e| {
             OpenVTCError::Config(format!("Couldn't write to file ({file}). Reason: {e}"))
-        })?;
-
-        // Restrict file permissions to owner-only on Unix systems
-        #[cfg(unix)]
-        fs::set_permissions(file, fs::Permissions::from_mode(0o600)).map_err(|e| {
-            OpenVTCError::Config(format!(
-                "Couldn't set permissions on export file ({file}): {e}"
-            ))
         })?;
 
         warn!("Successfully exported settings to file({file})");
@@ -288,7 +290,7 @@ impl Config {
             "NO REASON PROVIDED".to_string()
         };
 
-        self.public.logs.insert(
+        self.private.logs.insert(
             LogFamily::Relationship,
             format!(
                 "Removed VRC ({}) request as rejected by remote entity Reason: {}",
@@ -298,7 +300,7 @@ impl Config {
 
         self.private.tasks.remove(task_id);
 
-        self.public.logs.insert(
+        self.private.logs.insert(
             LogFamily::Task,
             format!(
                 "VRC request rejected by remote DID({}) Task ID({}) Reason({})",

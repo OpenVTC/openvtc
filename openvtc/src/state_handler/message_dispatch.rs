@@ -1181,7 +1181,7 @@ async fn process_inbound(
             let noticed = handled.notice.is_some();
             if let Some(notice) = handled.notice {
                 config
-                    .public
+                    .private
                     .logs
                     .insert(LogFamily::Community, notice.describe());
                 if let Some((id, task)) = notice.task() {
@@ -1260,7 +1260,7 @@ async fn process_inbound(
                 config
                     .account
                     .note_credential_refused(&from_did, Some(&e.to_string()));
-                config.public.logs.insert(
+                config.private.logs.insert(
                     LogFamily::Community,
                     format!("Refused a credential from community ({from_did}): {e}."),
                 );
@@ -1315,7 +1315,7 @@ async fn process_inbound(
                 .memberships_for(&from_did)
                 .iter()
                 .any(|m| m.status.is_active());
-            config.public.logs.insert(
+            config.private.logs.insert(
                 LogFamily::Community,
                 if now_active && !was_active {
                     format!("Admitted to community ({from_did}) — membership is now Active.")
@@ -1351,7 +1351,7 @@ async fn process_inbound(
                 .applications
                 .iter()
                 .any(|a| a.community == from_did.as_str() && a.hidden.is_some());
-            config.public.logs.insert(
+            config.private.logs.insert(
                 LogFamily::Community,
                 format!(
                     "Community ({from_did}) has not decided your join yet: {}.",
@@ -1382,7 +1382,7 @@ async fn process_inbound(
             on_pending_join = note.on_pending_join,
             "community reported a problem (unsigned — not acted on)"
         );
-        config.public.logs.insert(
+        config.private.logs.insert(
             LogFamily::Community,
             format!(
                 "Community ({from_did}) reported a problem [{}]: {} — unsigned, so nothing \
@@ -1419,7 +1419,7 @@ async fn process_inbound(
                         .account
                         .note_credential_refused(&from_did, Some(&e.to_string()));
                     let outcome = RenewalOutcome::Failed(e.to_string());
-                    config.public.logs.insert(
+                    config.private.logs.insert(
                         LogFamily::Community,
                         format!("Community ({from_did}): {}", outcome.describe()),
                     );
@@ -1497,7 +1497,7 @@ async fn process_inbound(
                     }
                 }
             };
-        config.public.logs.insert(
+        config.private.logs.insert(
             LogFamily::Community,
             format!("Community ({from_did}): {}", outcome.describe()),
         );
@@ -1528,7 +1528,7 @@ async fn process_inbound(
             openvtc_core::renewal::RenewalRefusal::read(&message.body),
         );
         warn!(vtc = %from_did, "renewal refused by the community");
-        config.public.logs.insert(
+        config.private.logs.insert(
             LogFamily::Community,
             format!("Community ({from_did}): {}", outcome.describe()),
         );
@@ -1688,7 +1688,7 @@ async fn process_inbound(
         // The send reports only that a frame was accepted locally. This is the
         // first and only evidence the community actually took the credential,
         // so it belongs where the member can see it rather than in a log file.
-        config.public.logs.insert(
+        config.private.logs.insert(
             LogFamily::Community,
             format!("Community ({from_did}) acknowledged your membership credential."),
         );
@@ -1774,7 +1774,7 @@ async fn process_inbound(
             Ok(notice) => notice,
             Err(e) => {
                 warn!(reason = %e, "refused a removal notice");
-                config.public.logs.insert(
+                config.private.logs.insert(
                     LogFamily::Community,
                     format!("Ignored a removal notice from community ({from_did}): {e}."),
                 );
@@ -1849,7 +1849,7 @@ async fn process_inbound(
             );
             config.private.tasks.remove(&task_id);
 
-            config.public.logs.insert(
+            config.private.logs.insert(
                 LogFamily::Relationship,
                 format!(
                     "Relationship request rejected by ({}). Reason: {}",
@@ -1896,7 +1896,7 @@ async fn process_inbound(
                 _ => Err(openvtc_core::relationships::DidBindingError::NotChecked),
             } {
                 warn!(reason = %e, "relationship accept refused");
-                config.public.logs.insert(
+                config.private.logs.insert(
                     LogFamily::Relationship,
                     format!("Refused a relationship acceptance from ({from_did}): {e}."),
                 );
@@ -1930,7 +1930,7 @@ async fn process_inbound(
             }
 
             config.private.tasks.remove(&task_id);
-            config.public.logs.insert(
+            config.private.logs.insert(
                 LogFamily::Relationship,
                 format!("Relationship established with ({})", from_did),
             );
@@ -1956,7 +1956,7 @@ async fn process_inbound(
             }
 
             config.private.tasks.remove(&task_id);
-            config.public.logs.insert(
+            config.private.logs.insert(
                 LogFamily::Relationship,
                 format!("Relationship finalized with ({})", from_did),
             );
@@ -1998,7 +1998,7 @@ async fn process_inbound(
             }
 
             config.private.tasks.remove(&task_id);
-            config.public.logs.insert(
+            config.private.logs.insert(
                 LogFamily::Task,
                 format!(
                     "VRC request rejected by ({}). Reason: {}",
@@ -2059,7 +2059,7 @@ async fn process_inbound(
                 recipient_persona,
             );
 
-            config.public.logs.insert(
+            config.private.logs.insert(
                 LogFamily::Task,
                 format!("Inbound relationship request from ({})", from_did),
             );
@@ -2099,7 +2099,7 @@ async fn process_inbound(
                 recipient_persona,
             );
 
-            config.public.logs.insert(
+            config.private.logs.insert(
                 LogFamily::Task,
                 format!("Inbound VRC request from ({})", from_did),
             );
@@ -2160,7 +2160,7 @@ async fn process_inbound(
                 recipient_persona,
             );
 
-            config.public.logs.insert(
+            config.private.logs.insert(
                 LogFamily::Task,
                 format!("VRC issued received from ({})", from_did),
             );

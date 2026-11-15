@@ -21,6 +21,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Padding, Paragraph},
 };
+use secrecy::SecretString;
 use tui_input::{Input, backend::crossterm::EventHandler};
 
 // ****************************************************************************
@@ -112,16 +113,8 @@ impl ConfigImport {
                     state.config_import.processing = true;
                     let _ = state.action_tx.send(Action::ImportConfig(
                         state.config_import.filename.value().to_string(),
-                        state
-                            .config_import
-                            .config_unlock_passphrase
-                            .value()
-                            .to_string(),
-                        state
-                            .config_import
-                            .new_unlock_passphrase
-                            .value()
-                            .to_string(),
+                        SecretString::from(state.config_import.config_unlock_passphrase.value()),
+                        SecretString::from(state.config_import.new_unlock_passphrase.value()),
                     ));
                     // The action carries SecretString copies; drop the
                     // plaintext from the tui_input buffers so it isn't

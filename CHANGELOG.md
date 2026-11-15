@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **The unlock-code key has a random salt of each profile's own**
+  ([#566](https://github.com/OpenVTC/openvtc/issues/566)). It used one fixed Argon2id
+  salt for every install, so the work of attacking one stored config was shared across
+  all users. A profile still in the old format is moved to the new one the first time it
+  is unlocked, in a single store write that cannot leave it unopenable. Once moved, it
+  cannot be opened by an earlier release.
+- **Encrypted config blobs are bound to their profile**
+  ([#569](https://github.com/OpenVTC/openvtc/issues/569)). The secured config and the
+  protected tier of `config.json` carry the profile name (and a format tag) as AES-GCM
+  associated data, and each kind of blob has its own HKDF label, so a blob copied into
+  another profile no longer opens there. Exports are bound to no profile and use the
+  export label in the key derivation, as the docs already claimed. Older blobs and
+  exports still open and are rewritten on the next save. Renaming a profile by hand now
+  makes it unopenable; move one with export and import.
+- **The activity log is encrypted** ([#568](https://github.com/OpenVTC/openvtc/issues/568)).
+  It names contacts, aliases and community DIDs and was stored in clear in `config.json`;
+  it now lives in the encrypted tier, and an older config's log moves there when it is
+  next opened. Every entry is stripped of control, bidi and zero-width characters and
+  capped at 1024 characters as it is added, since many quote what a peer sent.
+- **`config.json`, exports and startup-failure reports are written atomically and
+  owner-only from creation** ([#567](https://github.com/OpenVTC/openvtc/issues/567)). A
+  crash mid-save leaves the previous file instead of a truncated one; a new profile
+  directory is created `0700`; an export refuses to write through a symlink.
+- **Secrets are held in wiping types on more paths**
+  ([#570](https://github.com/OpenVTC/openvtc/issues/570)): the Settings passphrase
+  forms and their actions, the unlock code typed or read at start-up, the VTA session
+  token from setup, and decrypted config plaintext. A vetting ticket's `Debug` output
+  no longer shows its code or secret, and ticket codes are compared with `subtle`.
+
 ### Changed
 
 - **Faster startup, sends and `health`** ([#557](https://github.com/OpenVTC/openvtc/issues/557),
@@ -16,6 +47,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   are built once. `openvtc health` resolves and probes up to 4 parties at once, and still
   prints them one at a time.
 
+- **The OS keyring is written only when the secured config changed**
+  ([#564](https://github.com/OpenVTC/openvtc/issues/564)), not on every save: fewer
+  Keychain prompts, Secret Service round trips and, on token profiles, card touches.
+- **Library API** (breaking for code that uses `openvtc-core` as a library):
+  `UnlockCode` now holds the code and derives against the stored salt, and
+  `Config::unlock_code` is the new `UnlockKey`; `SecuredConfig::save` takes an
+  `UnlockKey`; `ProtectedConfig::save`/`load` take a `ProtectedBinding`;
+  `PublicConfig::logs` is now the read-only `legacy_logs`, with the log in
+  `ProtectedConfig::logs`; `passphrase_encrypt_v2` and its `_blocking` form are
+  replaced by `passphrase_encrypt` and `passphrase_encrypt_blocking`, which write the
+  `OPV3` format.
+- **Backup import writes the secured config before the config file, and only gives a
+  profile an unlock key when it is protected by an unlock code.** An import of a
+  plaintext-protected backup used to write a passphrase-sealed secret the next load
+  refused.
 - **`OpenVTCError` is now `#[non_exhaustive]`** (breaking for code that uses
   `openvtc-core` as a library). A `match` on it outside `openvtc-core` needs a
   wildcard arm. From now on a new error variant is not a breaking change, so a

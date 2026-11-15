@@ -33,7 +33,6 @@ use std::{
     any::Any,
     collections::HashMap,
     fs,
-    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -162,22 +161,9 @@ impl CredentialApi for Cred {
 
         // Write-then-rename so a crash mid-write cannot truncate a good secret
         // into an unreadable one — the failure mode this whole change exists to
-        // stop. The temp file is created in the same directory so the rename is
-        // atomic rather than a cross-filesystem copy.
-        let tmp = self.path.with_extension(format!("{SECRET_EXT}.tmp"));
-        {
-            let mut f = fs::File::create(&tmp).map_err(io_err)?;
-            // Tighten before the bytes land, not after: between create and
-            // write the file would otherwise be readable at the umask default.
-            set_mode(&tmp, 0o600).map_err(io_err)?;
-            f.write_all(secret).map_err(io_err)?;
-            f.sync_all().map_err(io_err)?;
-        }
-        fs::rename(&tmp, &self.path).map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            io_err(e)
-        })?;
-        Ok(())
+        // stop. The shared routine creates the temporary file 0600 in the same
+        // directory, syncs it, and renames it over the secret.
+        crate::private_file::atomic_write_private(&self.path, secret).map_err(io_err)
     }
 
     fn get_secret(&self) -> Result<Vec<u8>> {

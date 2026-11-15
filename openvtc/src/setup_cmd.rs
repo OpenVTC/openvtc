@@ -25,7 +25,6 @@ use openvtc_core::{
     context_probe::ProbeOutcome,
     errors::OpenVTCError,
 };
-use secrecy::SecretBox;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -101,16 +100,13 @@ pub async fn run(args: &ArgMatches, profile: &str) -> Result<()> {
 
     // 1. Unlock code (the wizard's unlock_code_set page). Validated here
     // because loading refuses anything shorter.
-    let passphrase = zeroize::Zeroizing::new(crate::cli::read_unlock_code_file(unlock_path)?);
+    let passphrase = crate::cli::read_unlock_code_file(unlock_path)?;
     openvtc_core::config::validate_passphrase(&passphrase)?;
-    let key = openvtc_core::config::derive_passphrase_key(
-        passphrase.as_bytes(),
-        b"openvtc-unlock-code-v1",
-    )?;
+    // Salted per profile (#566); the salt is written beside the ciphertext.
+    let key = openvtc_core::config::UnlockKey::derive(passphrase.as_bytes())?;
 
     let mut state = State::default();
-    state.setup.protection =
-        ConfigProtection::Passcode(Arc::new(SecretBox::new(Box::new(key.to_vec()))));
+    state.setup.protection = ConfigProtection::Passcode(Arc::new(key));
     // Nothing renders state here; sends to a closed channel are ignored.
     let (state_tx, _) = watch::channel(State::default());
 

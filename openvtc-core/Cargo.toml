@@ -84,6 +84,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_json_canonicalizer.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

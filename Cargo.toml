@@ -131,6 +131,8 @@ serde_json_canonicalizer = "0.4"
 sha2 = "0.11"
 strum = "0.28"
 strum_macros = "0.28"
+# Constant-time comparison of admission tickets (`vetting::tickets`).
+subtle = "2.6"
 # Two call sites: `System::host_name` and a single-PID liveness check
 # (`process_lock`). Both need only the `system` feature.
 sysinfo = { version = "0.40", default-features = false, features = ["system"] }

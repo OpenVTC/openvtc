@@ -33,12 +33,11 @@ Plaintext JSON on disk. It holds:
 - how the secured config is protected (`protection`: `Encrypted`, `Token`
   with the token ID, or `Plaintext`);
 - the profile's friendly name;
-- the activity log (`logs`);
 - the encrypted protected config (`private`).
 
-The activity log is plaintext. Its entries can name contacts and DIDs. Log
-entries belong to a `LogFamily`: `Relationship`, `Contact`, `Task`, `Config`
-or `Community`.
+Configs written by earlier releases also kept the activity log (`logs`) here,
+in plaintext. It is read and moved into the protected config the next time the
+profile is opened, and is no longer written to this layer.
 
 ### Protected config
 
@@ -74,7 +73,12 @@ Alongside the account, the protected config holds:
 - `deferred_inbound` — inbound messages set aside for a check, kept across a
   restart;
 - `vta_sync` — sync state with the VTA's application-state store;
-- `witnessings` — witnessings completed through the VTA.
+- `witnessings` — witnessings completed through the VTA;
+- `logs` — the activity log. Its entries can name contacts and DIDs, which is
+  why it is encrypted here. Entries belong to a `LogFamily`: `Relationship`,
+  `Contact`, `Task`, `Config` or `Community`. Each message is stripped of
+  control, bidi and zero-width characters and capped at 1024 characters as it
+  is added, since many quote text a peer sent.
 
 The payload carries a `schema_version`. Fields written by a newer build are
 kept in `extra` so an older build does not drop them on save.
@@ -119,7 +123,13 @@ carries the encrypted session key (ESK) that the token decrypts.
   generator, created on first save and stored in the secured config.
 - Each save uses a fresh random 12-byte nonce. An AES-256-GCM key is derived
   from `protected_key` with HKDF-SHA256 (nonce as salt, info
-  `openvtc-key-v2`). The stored blob is `nonce | ciphertext + tag`.
+  `openvtc/protected-config/v2`). The stored blob is
+  `"OPC2" | nonce | ciphertext + tag`, with
+  `openvtc/protected-config/v2\0profile\0{profile}` as associated data, so it
+  opens only as the profile it was written for. In an export the associated
+  data names `export` instead, so the export imports into any profile.
+- Blobs written before that format (no `OPC2` prefix, info `openvtc-key-v2`,
+  no associated data) are still read, and rewritten by the next save.
 - Because the key is stored, not derived from the VTA credential, the
   credential can be rotated without losing access to the protected config.
 - Configs written before `protected_key` existed were encrypted with a key

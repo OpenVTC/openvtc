@@ -125,11 +125,10 @@ Each profile has three layers of configuration. See
 [Config Data Structure](./docs/openvtc-config-data-structure.md) for detail.
 
 - **Public configuration** — a JSON file on disk with non-secret settings,
-  the protection mode, the activity log, and the encrypted protected
-  configuration.
+  the protection mode, and the encrypted protected configuration.
 - **Protected configuration** — encrypted, stored inside the public file. It
   holds your account (personas and community memberships), contacts,
-  relationships and credentials.
+  relationships, credentials and the activity log.
 - **Secured configuration** — key material in the OS credential store: macOS
   Keychain, Linux Secret Service or Windows Credential Manager. On a headless
   Linux machine you can choose an encrypted file store instead with

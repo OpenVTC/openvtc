@@ -9,7 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{
     agent_name::CachedAgentName,
     config::account::Account,
-    config::secured_config::{unlock_code_decrypt, unlock_code_encrypt},
+    config::secured_config::{aead_open, open, seal},
     errors::OpenVTCError,
     logs::{LogFamily, Logs},
     relationships::Relationships,
@@ -25,6 +25,7 @@ use ed25519_dalek_bip32::{DerivationPath, ExtendedSigningKey};
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, warn};
+use zeroize::Zeroizing;
 
 /// Current schema version of the encrypted [`ProtectedConfig`] payload.
 /// Increment when the shape changes in a way `#[serde(default)]` can't absorb
@@ -325,6 +326,14 @@ pub struct ProtectedConfig {
     #[serde(default, skip_serializing_if = "Witnessings::is_empty")]
     pub witnessings: Witnessings,
 
+    /// The activity log (contacts added, relationships formed, credentials
+    /// accepted, community lifecycle). Encrypted here because its entries
+    /// name the DIDs and aliases this tier exists to hide (#568). Configs
+    /// written before this field kept it in the plaintext `PublicConfig`;
+    /// `Config::load_step2` moves those entries in.
+    #[serde(default)]
+    pub logs: Logs,
+
     /// Fields written by a newer build, preserved verbatim (D19).
     ///
     /// The protected tier is where the account lives, so an older build
@@ -393,48 +402,112 @@ impl Default for ProtectedConfig {
             deferred_inbound: Vec::new(),
             vta_sync: SyncState::default(),
             witnessings: Witnessings::default(),
+            logs: Logs::default(),
         }
     }
 }
 
-impl ProtectedConfig {
-    /// Converts ProtectedConfig to an encrypted BASE64 string for saving to disk
-    pub fn save(&self, seed_bytes: &SecretBox<Vec<u8>>) -> Result<String, OpenVTCError> {
-        let bytes = serde_json::to_vec(self)?;
+/// Magic prefix of the current protected-blob format (`"OPC2"`). The legacy
+/// format has none: it starts with its random nonce.
+const PROTECTED_MAGIC: &[u8; 4] = b"OPC2";
+/// HKDF label of the current protected-blob format.
+const PROTECTED_INFO: &[u8] = b"openvtc/protected-config/v2";
+/// Associated-data prefix of the current protected-blob format; the binding
+/// ([`ProtectedBinding`]) follows it.
+const PROTECTED_AAD: &[u8] = b"openvtc/protected-config/v2\0";
 
-        match unlock_code_encrypt(
-            seed_bytes
-                .expose_secret()
-                .first_chunk::<32>()
-                .ok_or_else(|| {
-                    OpenVTCError::Encrypt("Seed bytes are not at least 32 bytes".to_string())
-                })?,
-            &bytes,
-        ) {
-            Ok(result) => Ok(BASE64_URL_SAFE_NO_PAD.encode(&result)),
-            Err(e) => Err(e),
+/// What an encrypted [`ProtectedConfig`] blob is bound to, as associated data.
+///
+/// A blob opens only in the context it was written for, so one copied into
+/// another profile's `config.json` (or substituted from an export) fails
+/// authentication instead of loading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtectedBinding<'a> {
+    /// The `private` blob of this profile's `config.json`.
+    Profile(&'a str),
+    /// The `private` blob inside an export file. Deliberately bound to no
+    /// profile: an export is imported into a profile of the importer's
+    /// choosing, usually not the one it came from.
+    Export,
+}
+
+impl ProtectedBinding<'_> {
+    fn aad(self) -> Vec<u8> {
+        let mut aad = PROTECTED_AAD.to_vec();
+        match self {
+            ProtectedBinding::Profile(profile) => {
+                aad.extend_from_slice(b"profile\0");
+                aad.extend_from_slice(profile.as_bytes());
+            }
+            ProtectedBinding::Export => aad.extend_from_slice(b"export"),
         }
+        aad
+    }
+}
+
+impl ProtectedConfig {
+    /// Encrypts this config into the BASE64 string stored in `config.json`.
+    ///
+    /// Format: `"OPC2" | nonce(12) | ct+tag`, AES-256-GCM under an HKDF key
+    /// labelled `openvtc/protected-config/v2`, with `binding` as associated
+    /// data.
+    pub fn save(
+        &self,
+        seed_bytes: &SecretBox<Vec<u8>>,
+        binding: ProtectedBinding<'_>,
+    ) -> Result<String, OpenVTCError> {
+        let bytes = Zeroizing::new(serde_json::to_vec(self)?);
+        let key = seed_bytes
+            .expose_secret()
+            .first_chunk::<32>()
+            .ok_or_else(|| {
+                OpenVTCError::Encrypt("Seed bytes are not at least 32 bytes".to_string())
+            })?;
+        let mut out = PROTECTED_MAGIC.to_vec();
+        out.extend_from_slice(&seal(key, PROTECTED_INFO, &binding.aad(), &bytes)?);
+        Ok(BASE64_URL_SAFE_NO_PAD.encode(&out))
     }
 
+    /// Decrypts a blob written by [`ProtectedConfig::save`] for `binding`, or
+    /// one in the legacy format (no magic, no associated data, the shared
+    /// `openvtc-key-v2` label), which is rewritten in the current format by
+    /// the next save.
+    ///
+    /// A blob carrying the magic is tried in the current format first; a
+    /// legacy blob whose random nonce happens to begin with the magic still
+    /// opens, because the legacy format is tried whenever that fails.
     pub fn load(
         seed_bytes: &SecretBox<Vec<u8>>,
         input: &str,
+        binding: ProtectedBinding<'_>,
     ) -> Result<ProtectedConfig, OpenVTCError> {
         let bytes = BASE64_URL_SAFE_NO_PAD.decode(input)?;
+        let key = seed_bytes
+            .expose_secret()
+            .first_chunk::<32>()
+            .ok_or_else(|| {
+                OpenVTCError::Decrypt("Seed bytes are not at least 32 bytes".to_string())
+            })?;
 
-        let bytes = unlock_code_decrypt(
-            seed_bytes
-                .expose_secret()
-                .first_chunk::<32>()
-                .ok_or_else(|| {
-                    OpenVTCError::Decrypt("Seed bytes are not at least 32 bytes".to_string())
-                })?,
-            &bytes,
-        )?;
+        if let Some(body) = bytes.strip_prefix(PROTECTED_MAGIC.as_slice())
+            && body.len() > 12
+            && let Some(plaintext) = open(key, PROTECTED_INFO, &binding.aad(), body)?
+        {
+            return Self::parse(&plaintext);
+        }
 
-        Self::parse(&bytes)
+        match aead_open(key, &bytes)? {
+            Some(plaintext) => Self::parse(&plaintext),
+            None => {
+                error!("Couldn't decrypt data. Likely due to incorrect unlock code!");
+                Err(OpenVTCError::Decrypt(
+                    "Couldn't decrypt the protected config: wrong key, or a blob written \
+                     for another profile"
+                        .to_string(),
+                ))
+            }
+        }
     }
-
     /// Deserialize a [`ProtectedConfig`] from already-decrypted plaintext JSON —
     /// the post-decrypt half of [`load`](Self::load), split out so the
     /// deserializer can be exercised directly (e.g. by fuzz harnesses) without a
@@ -560,10 +633,13 @@ mod tests {
         let config = ProtectedConfig::default();
         let seed = test_seed();
 
-        let saved = config.save(&seed).unwrap();
+        let saved = config
+            .save(&seed, ProtectedBinding::Profile("default"))
+            .unwrap();
         assert!(!saved.is_empty());
 
-        let loaded = ProtectedConfig::load(&seed, &saved).unwrap();
+        let loaded =
+            ProtectedConfig::load(&seed, &saved, ProtectedBinding::Profile("default")).unwrap();
         assert!(loaded.contacts.is_empty());
     }
 
@@ -597,8 +673,11 @@ mod tests {
         );
 
         let seed = test_seed();
-        let saved = config.save(&seed).unwrap();
-        let loaded = ProtectedConfig::load(&seed, &saved).unwrap();
+        let saved = config
+            .save(&seed, ProtectedBinding::Profile("default"))
+            .unwrap();
+        let loaded =
+            ProtectedConfig::load(&seed, &saved, ProtectedBinding::Profile("default")).unwrap();
 
         assert_eq!(loaded.account.vta_did, "did:webvh:vta.example");
         assert_eq!(loaded.account.personas.len(), 1);
@@ -611,9 +690,79 @@ mod tests {
         let seed = test_seed();
         let wrong_seed = SecretBox::new(Box::new(vec![99u8; 32]));
 
-        let saved = config.save(&seed).unwrap();
-        let result = ProtectedConfig::load(&wrong_seed, &saved);
+        let saved = config
+            .save(&seed, ProtectedBinding::Profile("default"))
+            .unwrap();
+        let result =
+            ProtectedConfig::load(&wrong_seed, &saved, ProtectedBinding::Profile("default"));
         assert!(result.is_err());
+    }
+
+    /// #569: the blob is bound to its profile. One copied into another
+    /// profile's config, or presented as an export, does not open.
+    #[test]
+    fn a_blob_bound_to_one_profile_does_not_open_in_another() {
+        let seed = test_seed();
+        let saved = ProtectedConfig::default()
+            .save(&seed, ProtectedBinding::Profile("alice"))
+            .unwrap();
+        let raw = BASE64_URL_SAFE_NO_PAD.decode(&saved).unwrap();
+        assert_eq!(&raw[..4], PROTECTED_MAGIC);
+
+        assert!(ProtectedConfig::load(&seed, &saved, ProtectedBinding::Profile("alice")).is_ok());
+        assert!(ProtectedConfig::load(&seed, &saved, ProtectedBinding::Profile("bob")).is_err());
+        assert!(ProtectedConfig::load(&seed, &saved, ProtectedBinding::Export).is_err());
+
+        let export = ProtectedConfig::default()
+            .save(&seed, ProtectedBinding::Export)
+            .unwrap();
+        assert!(ProtectedConfig::load(&seed, &export, ProtectedBinding::Export).is_ok());
+        assert!(ProtectedConfig::load(&seed, &export, ProtectedBinding::Profile("alice")).is_err());
+    }
+
+    /// A blob written before the AAD format (no magic, shared HKDF label, no
+    /// associated data) still opens under any binding, so existing profiles
+    /// and older exports load; the next save rewrites it.
+    #[test]
+    fn a_legacy_blob_still_opens() {
+        let seed = test_seed();
+        let mut cfg = ProtectedConfig::default();
+        cfg.logs
+            .insert(LogFamily::Config, "from before".to_string());
+        let plaintext = serde_json::to_vec(&cfg).unwrap();
+        let legacy = BASE64_URL_SAFE_NO_PAD.encode(
+            crate::config::secured_config::unlock_code_encrypt(
+                seed.expose_secret().first_chunk::<32>().unwrap(),
+                &plaintext,
+            )
+            .unwrap(),
+        );
+        for binding in [
+            ProtectedBinding::Profile("default"),
+            ProtectedBinding::Export,
+        ] {
+            let loaded = ProtectedConfig::load(&seed, &legacy, binding).expect("legacy opens");
+            assert_eq!(loaded.logs.messages.len(), 1);
+        }
+        let wrong = SecretBox::new(Box::new(vec![1u8; 32]));
+        assert!(ProtectedConfig::load(&wrong, &legacy, ProtectedBinding::Export).is_err());
+    }
+
+    /// A config written before `logs` moved here has no such key.
+    #[test]
+    fn parse_tolerates_config_without_logs() {
+        let mut value = serde_json::to_value(ProtectedConfig::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("logs")
+            .expect("logs serialised");
+        let parsed = ProtectedConfig::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(parsed.logs.messages.is_empty());
+        assert!(
+            parsed.extra.is_empty(),
+            "logs is a field, not an unknown key"
+        );
     }
 
     #[test]
@@ -650,8 +799,11 @@ mod tests {
 
         // Encrypted save/load round-trip preserves the field too.
         let seed = test_seed();
-        let saved = config.save(&seed).unwrap();
-        let loaded = ProtectedConfig::load(&seed, &saved).unwrap();
+        let saved = config
+            .save(&seed, ProtectedBinding::Profile("default"))
+            .unwrap();
+        let loaded =
+            ProtectedConfig::load(&seed, &saved, ProtectedBinding::Profile("default")).unwrap();
         assert_eq!(loaded.schema_version, PROTECTED_SCHEMA_VERSION);
     }
 
