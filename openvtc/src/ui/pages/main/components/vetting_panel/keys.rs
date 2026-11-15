@@ -21,6 +21,11 @@ impl MainPage {
         let vetting = &self.props.main_page.content_panel.vetting;
         if !matches!(vetting.mode, VettingMode::List) {
             let text = vetting.mode.focused_text().map(str::to_string);
+            // Tab/↑/↓, ←/→ and Space are taken only where they do something
+            // on this form (and its footer lists them only there).
+            let moves = vetting.form_moves();
+            let cycles = vetting.form_cycles();
+            let ticks = vetting.form_ticks();
             let confirming = matches!(vetting.mode, VettingMode::ConfirmDecline { .. });
             // Abandon, delete-ticket and withdraw are committed by `y` alone
             // (#579): Enter opened this view, and a key held a moment too long
@@ -50,16 +55,46 @@ impl MainPage {
             // restart.
             // `f` chooses the face wherever a missing or wrong one is what the
             // page is reporting: the grant page, and the card it reads from.
-            let chooses_face = matches!(
-                vetting.mode,
-                VettingMode::HolderGrant { .. } | VettingMode::SendCard { .. }
+            // A card for an application that is gone has nothing to act on.
+            let card_gone = matches!(
+                &vetting.mode,
+                VettingMode::SendCard { application_id, .. }
+                    if !vetting.applications.iter().any(|a| &a.id == application_id)
             );
+            let chooses_face = !card_gone
+                && matches!(
+                    vetting.mode,
+                    VettingMode::HolderGrant { .. } | VettingMode::SendCard { .. }
+                );
             let on_result = matches!(&vetting.mode, VettingMode::Directory(view) if view.result_index().is_some());
             let on_event = matches!(
                 &vetting.mode,
                 VettingMode::Profile(form) if form.event.is_none() && form.event_index().is_some()
             );
-            let on_hidden = matches!(vetting.mode, VettingMode::HiddenVetting { .. });
+            let hidden_row = match vetting.mode {
+                VettingMode::HiddenVetting { index } => vetting.hidden.get(index),
+                _ => None,
+            };
+            let on_hidden = hidden_row.is_some();
+            let rechecks = hidden_row.is_some_and(|row| !row.key.is_empty());
+            // Nothing to do on a hidden-vetting view with no community, or on
+            // a card whose preview found a problem — except choose the face.
+            let no_enter = card_gone
+                || matches!(vetting.mode, VettingMode::HiddenVetting { .. }) && !on_hidden
+                || matches!(
+                    &vetting.mode,
+                    VettingMode::SendCard { preview: Some(p), .. } if p.problem.is_some()
+                );
+            let shown_ticket = match vetting.mode {
+                VettingMode::ShowTicket { index } => vetting.tickets.get(index),
+                _ => None,
+            };
+            if let Some(ticket) = shown_ticket
+                && let Some(status) = copy_ticket(ticket, key.code)
+            {
+                let _ = self.action_tx.send(Action::Vetting(V::Status(status)));
+                return true;
+            }
             // Ctrl+V on the one field whose whole content is something pasted.
             // Ahead of the text handler, which would otherwise type a literal
             // `v` into the ticket link. Bracketed paste still works and is the
@@ -87,12 +122,12 @@ impl MainPage {
                 // then declines. On the other y-committed views Enter does
                 // nothing.
                 KeyCode::Enter if confirming && text.is_some() => Some(V::NextField),
-                KeyCode::Enter if y_commits => None,
+                KeyCode::Enter if y_commits || no_enter => None,
                 KeyCode::Enter => Some(V::Submit),
-                KeyCode::Tab | KeyCode::Down => Some(V::NextField),
-                KeyCode::BackTab | KeyCode::Up => Some(V::PrevField),
-                KeyCode::Left => Some(V::Cycle(false)),
-                KeyCode::Right => Some(V::Cycle(true)),
+                KeyCode::Tab | KeyCode::Down if moves => Some(V::NextField),
+                KeyCode::BackTab | KeyCode::Up if moves => Some(V::PrevField),
+                KeyCode::Left if cycles => Some(V::Cycle(false)),
+                KeyCode::Right if cycles => Some(V::Cycle(true)),
                 code => match text {
                     // Typing is the field's (`text_input`).
                     Some(_) => None,
@@ -108,8 +143,8 @@ impl MainPage {
                         Some(V::RemoveEvent)
                     }
                     None if on_hidden && code == KeyCode::Char('d') => Some(V::DrawNow),
-                    None if on_hidden && code == KeyCode::Char('r') => Some(V::CheckHiddenKey),
-                    None if code == KeyCode::Char(' ') => Some(V::Toggle),
+                    None if rechecks && code == KeyCode::Char('r') => Some(V::CheckHiddenKey),
+                    None if ticks && code == KeyCode::Char(' ') => Some(V::Toggle),
                     None => None,
                 },
             };
@@ -201,6 +236,13 @@ impl MainPage {
             return true;
         }
 
+        // The list takes exactly the keys its footer lists.
+        if !crate::ui::pages::main::components::vetting_panel::list_keys(vetting)
+            .iter()
+            .any(|b| b.matches(&key))
+        {
+            return false;
+        }
         let selected = vetting.selected;
         let len = vetting.tab_len();
         let view = vetting.desk_view;
@@ -214,8 +256,8 @@ impl MainPage {
             (_, KeyCode::Tab) => V::SwitchTab,
             (VettingTab::Desk, KeyCode::Left) => V::SwitchDeskView(false),
             (VettingTab::Desk, KeyCode::Right) => V::SwitchDeskView(true),
-            (_, KeyCode::Up) if selected > 0 => V::Select(selected - 1),
-            (_, KeyCode::Down) if selected + 1 < len => V::Select(selected + 1),
+            (_, KeyCode::Up) => V::Select(selected.saturating_sub(1)),
+            (_, KeyCode::Down) => V::Select((selected + 1).min(len.saturating_sub(1))),
             (VettingTab::Applications, KeyCode::Char('n')) => V::StartApplication,
             (VettingTab::Applications, KeyCode::Char('f')) => V::ChooseFace,
             (VettingTab::Applications, KeyCode::Char('r')) => V::RequestVetter,
@@ -259,27 +301,13 @@ impl MainPage {
             (VettingTab::Desk, KeyCode::Char('t')) if view == DeskView::Tickets => V::NewTicket,
             (VettingTab::Desk, KeyCode::Enter) if view == DeskView::Tickets => V::ShowTicket,
             (VettingTab::Desk, KeyCode::Char('d')) if view == DeskView::Tickets => V::DeleteTicket,
-            (VettingTab::Desk, KeyCode::Char('u')) if view == DeskView::Tickets => {
-                let Some(uri) = vetting.tickets.get(selected).and_then(|t| t.uri.clone()) else {
+            (VettingTab::Desk, KeyCode::Char('u' | 'y')) if view == DeskView::Tickets => {
+                let Some(status) = vetting
+                    .tickets
+                    .get(selected)
+                    .and_then(|ticket| copy_ticket(ticket, key.code))
+                else {
                     return true;
-                };
-                let status = match crate::clipboard::copy_to_clipboard(&uri) {
-                    Ok(method) => {
-                        Status::success(format!("Ticket link copied via {}.", method.label()))
-                    }
-                    Err(e) => Status::error(format!("Could not copy the link: {e}")),
-                };
-                V::Status(status)
-            }
-            (VettingTab::Desk, KeyCode::Char('y')) if view == DeskView::Tickets => {
-                let Some(ticket) = vetting.tickets.get(selected) else {
-                    return true;
-                };
-                let status = match crate::clipboard::copy_to_clipboard(&ticket.code) {
-                    Ok(method) => {
-                        Status::success(format!("Ticket code copied via {}.", method.label()))
-                    }
-                    Err(e) => Status::error(format!("Could not copy the code: {e}")),
                 };
                 V::Status(status)
             }
@@ -289,4 +317,21 @@ impl MainPage {
         let _ = self.action_tx.send(Action::Vetting(action));
         true
     }
+}
+
+/// `y` copies a ticket's code and `u` its link; the status says how it went.
+/// `None` for another key, or `u` on a ticket with no link.
+fn copy_ticket(
+    ticket: &crate::state_handler::main_page::content::TicketRow,
+    code: KeyCode,
+) -> Option<Status> {
+    let (text, what) = match code {
+        KeyCode::Char('y') => (ticket.code.clone(), "code"),
+        KeyCode::Char('u') => (ticket.uri.clone()?, "link"),
+        _ => return None,
+    };
+    Some(match crate::clipboard::copy_to_clipboard(&text) {
+        Ok(method) => Status::success(format!("Ticket {what} copied via {}.", method.label())),
+        Err(e) => Status::error(format!("Could not copy the {what}: {e}")),
+    })
 }

@@ -145,30 +145,15 @@ impl Component for MainPage {
             return;
         }
 
-        // Create-persona overlay: while open it owns all input.
-        if self.props.main_page.create_persona.is_some() {
-            self.handle_create_persona_key(key);
+        // An open overlay owns all input; a key it does not take says so.
+        if let Some(taken) = self.handle_overlay_key(key) {
+            if !taken {
+                self.key_feedback = Some(Self::unused(&key));
+            }
             return;
         }
-
-        // Agent-name manager overlay: while open it owns all input.
-        if self.props.main_page.agent_names.is_some() {
-            self.handle_agent_name_manager_key(key);
-            return;
-        }
-
-        // Add-VIC (import invitation) overlay: while open it owns all input.
-        if self.props.main_page.add_vic.is_some() {
-            self.handle_add_vic_key(key);
-            return;
-        }
-
-        // Community switcher overlay (R-C-7): while open it owns all input; while
-        // closed, Ctrl+K opens it from anywhere on the main page.
-        if self.props.main_page.switcher.is_some() {
-            self.handle_switcher_key(key);
-            return;
-        }
+        // Ctrl+K opens the community switcher (R-C-7) from anywhere on the
+        // main page.
         if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
             let _ = self.action_tx.send(Action::OpenCommunitySwitcher);
             return;
@@ -193,6 +178,16 @@ impl Component for MainPage {
         if typing && key.code != KeyCode::F(10) {
             self.key_feedback = Some(format!(
                 "{} does nothing in this field — Esc leaves it, ? lists the keys",
+                keymap::describe(&key)
+            ));
+            return;
+        }
+        // Nor on an open vetting form: it takes Tab and the arrows only where
+        // they do something, and one it does not take must not move the
+        // focus off the form.
+        if content_selected && self.vetting_form_open() && key.code != KeyCode::F(10) {
+            self.key_feedback = Some(format!(
+                "{} does nothing on this form — Esc leaves it, ? lists the keys",
                 keymap::describe(&key)
             ));
             return;
@@ -340,6 +335,15 @@ impl MainPage {
             .borrow()
             .iter()
             .any(keymap::Binding::is_typing)
+    }
+
+    /// Whether the Vetting page has a form or view open over its lists.
+    fn vetting_form_open(&self) -> bool {
+        self.props.main_page.menu_panel.selected_menu == MainMenu::Vetting
+            && !matches!(
+                self.props.main_page.content_panel.vetting.mode,
+                crate::state_handler::main_page::content::VettingMode::List
+            )
     }
 
     /// Feedback for a key the focused view does not take.
@@ -506,30 +510,47 @@ impl MainPage {
         }
     }
 
+    /// The open overlay's handling of `key` — whether it took it — or `None`
+    /// when no overlay is open. Each overlay takes exactly the keys its key
+    /// line lists.
+    pub(super) fn handle_overlay_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if self.props.main_page.create_persona.is_some() {
+            Some(self.handle_create_persona_key(key))
+        } else if self.props.main_page.agent_names.is_some() {
+            Some(self.handle_agent_name_manager_key(key))
+        } else if self.props.main_page.add_vic.is_some() {
+            Some(self.handle_add_vic_key(key))
+        } else if self.props.main_page.switcher.is_some() {
+            Some(self.handle_switcher_key(key))
+        } else {
+            None
+        }
+    }
+
     /// Create-persona overlay keys. Label phase: Enter goes on to the path
     /// choice, Esc cancels, other keys edit the label. Path phase: ↑/↓ choose
     /// server-assigned or typed, typing edits the path (and picks the typed
     /// row), Enter goes on to the context choice, Esc goes back. Context phase:
     /// ↑/↓ choose, typing names a new sub-context, Enter mints, Esc goes back to
-    /// the path. Working phase swallows input. Done/Failed:
-    /// `c` re-copies the DID (Done only), Enter/Esc close. Called only while the
-    /// overlay is open, where it owns all input.
-    fn handle_create_persona_key(&mut self, key: KeyEvent) {
+    /// the path. Working phase takes no keys. Done/Failed:
+    /// `c` re-copies the DID (Done only), any other key closes. Called only
+    /// while the overlay is open, where it owns all input.
+    fn handle_create_persona_key(&mut self, key: KeyEvent) -> bool {
         let Some(overlay) = self.props.main_page.create_persona.as_ref() else {
-            return;
+            return false;
         };
-        crate::ui::pages::create_persona_overlay::handle_key(overlay, key, &self.action_tx);
+        crate::ui::pages::create_persona_overlay::handle_key(overlay, key, &self.action_tx)
     }
 
     /// Agent-name manager overlay keys. `Ready` phase: Enter claims the typed
     /// name, ↑/↓ move the row selection, Space parks/resumes the selected name,
-    /// `d`/Delete removes it, Esc closes, other keys edit the input. `Loading`
-    /// and `Working` swallow input (a mutation is in flight). Called only while
+    /// `d`/Delete removes it, Esc closes, text keys edit the input. `Loading`
+    /// and `Working` take no keys (a mutation is in flight). Called only while
     /// the overlay is open, where it owns all input.
-    fn handle_agent_name_manager_key(&mut self, key: KeyEvent) {
+    fn handle_agent_name_manager_key(&mut self, key: KeyEvent) -> bool {
         use crate::state_handler::main_page::content::AgentNameManagerPhase;
         let Some(overlay) = self.props.main_page.agent_names.as_ref() else {
-            return;
+            return false;
         };
         // A remove is armed: it owns all input — only y/Enter confirms (releasing
         // the name, which anyone can then reclaim); anything else backs out.
@@ -542,7 +563,7 @@ impl MainPage {
                     let _ = self.action_tx.send(Action::AgentNameManagerCancelRemove);
                 }
             }
-            return;
+            return true;
         }
         match overlay.phase {
             AgentNameManagerPhase::Ready => match key.code {
@@ -566,22 +587,24 @@ impl MainPage {
                 KeyCode::Char('d') | KeyCode::Delete if !overlay.names.is_empty() => {
                     let _ = self.action_tx.send(Action::AgentNameManagerConfirmRemove);
                 }
-                _ => {
+                _ if keymap::is_text_edit(&key) => {
                     let _ = self.action_tx.send(Action::AgentNameManagerInput(key));
                 }
+                _ => return false,
             },
             // A list load or mutation is in flight: lock input.
-            AgentNameManagerPhase::Loading | AgentNameManagerPhase::Working => {}
+            AgentNameManagerPhase::Loading | AgentNameManagerPhase::Working => return false,
         }
+        true
     }
 
     /// Add-VIC overlay keys. Input phase: Enter stores, Esc cancels, other keys
-    /// edit the paste field. Working swallows input. Done/Failed: any key closes.
+    /// edit the paste field. Working takes no keys. Done/Failed: any key closes.
     /// Called only while the overlay is open, where it owns all input.
-    fn handle_add_vic_key(&mut self, key: KeyEvent) {
+    fn handle_add_vic_key(&mut self, key: KeyEvent) -> bool {
         use crate::state_handler::main_page::content::AddVicPhase;
         let Some(overlay) = self.props.main_page.add_vic.as_ref() else {
-            return;
+            return false;
         };
         match overlay.phase {
             AddVicPhase::Input => match key.code {
@@ -591,23 +614,25 @@ impl MainPage {
                 KeyCode::Esc => {
                     let _ = self.action_tx.send(Action::AddVicClose);
                 }
-                _ => {
+                _ if keymap::is_text_edit(&key) => {
                     let _ = self.action_tx.send(Action::AddVicInput(key));
                 }
+                _ => return false,
             },
-            AddVicPhase::Working => {}
+            AddVicPhase::Working => return false,
             AddVicPhase::Done | AddVicPhase::Failed => {
                 let _ = self.action_tx.send(Action::AddVicClose);
             }
         }
+        true
     }
 
     /// Community switcher overlay keys (R-C-7): ↑/↓ move the highlight, Enter
     /// switches the working community, Esc (or Ctrl+K again) dismisses. Called
     /// only while the overlay is open, where it owns all input.
-    fn handle_switcher_key(&mut self, key: KeyEvent) {
+    fn handle_switcher_key(&mut self, key: KeyEvent) -> bool {
         let Some(switcher) = self.props.main_page.switcher.as_ref() else {
-            return;
+            return false;
         };
         let count = switcher.items.len();
         let selected = switcher.selected;
@@ -631,8 +656,9 @@ impl MainPage {
             KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let _ = self.action_tx.send(Action::CloseCommunitySwitcher);
             }
-            _ => {}
+            _ => return false,
         }
+        true
     }
 }
 
@@ -1661,17 +1687,91 @@ mod key_handler_tests {
         }
     }
 
+    /// A vetting page with a row in every list: a persona to apply as, an
+    /// application, a request at the desk, a ticket (with no link) and a
+    /// signed statement — so each list's verbs have something to act on.
+    pub(super) fn vetting_rows(s: &mut State) {
+        use crate::state_handler::main_page::content::{
+            ApplicationRow, DeskRow, DeskStage, IssuedRow, TicketRow, VettingPersona,
+        };
+        let v = &mut s.main_page.content_panel.vetting;
+        v.personas = vec![VettingPersona {
+            persona: openvtc_core::config::account::PersonaId::new(),
+            did: "did:key:zP".into(),
+            label: "p".into(),
+        }]
+        .into();
+        v.applications = vec![ApplicationRow {
+            id: "a".into(),
+            community: "did:web:kernel".into(),
+            community_name: None,
+            accent: None,
+            pcs_zkp: false,
+            next_step: None,
+            join_did: "did:key:zA".into(),
+            requirements: None,
+            criterion: None,
+            progress: None,
+            satisfied: false,
+            face: None,
+            identity: Vec::new(),
+            requests: Vec::new(),
+            statements: 0,
+        }]
+        .into();
+        v.desk = vec![DeskRow {
+            request_id: "r1".into(),
+            applicant: "did:example:applicant".into(),
+            applicant_name: None,
+            community: "did:example:community".into(),
+            pcs_zkp: false,
+            pcs_tokens: None,
+            pcs_events: false,
+            state: "accepted".into(),
+            stage: DeskStage::Accepted,
+            method: None,
+            match_code: None,
+            claims: Vec::new(),
+            required_claims: Vec::new(),
+            message: None,
+        }]
+        .into();
+        v.tickets = vec![TicketRow {
+            id: "t1".into(),
+            code: "ABCD".into(),
+            community: "c".into(),
+            uses_left: 1,
+            expires: "soon".into(),
+            live: true,
+            uri: None,
+            mode_note: None,
+        }]
+        .into();
+        v.issued = vec![IssuedRow {
+            id: "st1".into(),
+            applicant: "did:example:applicant".into(),
+            community: "c".into(),
+            method: "in person".into(),
+            issued: "today".into(),
+            valid_until: "next year".into(),
+            withdrawal: None,
+            withdrawal_recorded: false,
+        }]
+        .into();
+    }
+
     #[test]
     fn vetting_list_keys_follow_the_tab() {
         use crate::state_handler::actions::VettingAction as V;
         use crate::state_handler::main_page::content::VettingTab;
 
-        let (mut page, mut rx) = page_for(MainMenu::Vetting, |_| {});
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, vetting_rows);
         page.handle_key_event(press(KeyCode::Char('n')));
         assert!(matches!(vetting_action(&mut rx), V::StartApplication));
 
         // The same key means nothing on the desk…
         let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
+            vetting_rows(s);
             s.main_page.content_panel.vetting.tab = VettingTab::Desk;
         });
         page.handle_key_event(press(KeyCode::Char('n')));
@@ -1847,19 +1947,31 @@ mod key_handler_tests {
         page.handle_key_event(press(KeyCode::Char('Q')));
         assert!(matches!(vetting_action(&mut rx), V::Input(text) if text == "vetting-ticket:abcQ"));
 
-        // In the checklist, Space ticks and the arrows cycle.
-        let (mut page, mut rx) = page_for(MainMenu::Vetting, |s| {
-            s.main_page.content_panel.vetting.mode = VettingMode::Attest {
-                request_id: "r1".into(),
-                form: AttestForm::default(),
-            };
-        });
+        // In the checklist, the arrows cycle a choice and Space ticks a box —
+        // each only on a row where it does something.
+        let attest_on = |field: usize| {
+            page_for(MainMenu::Vetting, move |s| {
+                s.main_page.content_panel.vetting.mode = VettingMode::Attest {
+                    request_id: "r1".into(),
+                    form: AttestForm {
+                        field,
+                        ..AttestForm::default()
+                    },
+                };
+            })
+        };
+        let (mut page, mut rx) = attest_on(0);
+        page.handle_key_event(press(KeyCode::Right));
+        assert!(matches!(vetting_action(&mut rx), V::Cycle(true)));
+        page.handle_key_event(press(KeyCode::Char(' ')));
+        assert!(rx.try_recv().is_err(), "the method is not a box to tick");
+        page.handle_key_event(press(KeyCode::Enter));
+        assert!(matches!(vetting_action(&mut rx), V::Submit));
+        let (mut page, mut rx) = attest_on(4);
         page.handle_key_event(press(KeyCode::Char(' ')));
         assert!(matches!(vetting_action(&mut rx), V::Toggle));
         page.handle_key_event(press(KeyCode::Right));
-        assert!(matches!(vetting_action(&mut rx), V::Cycle(true)));
-        page.handle_key_event(press(KeyCode::Enter));
-        assert!(matches!(vetting_action(&mut rx), V::Submit));
+        assert!(rx.try_recv().is_err(), "the attestation is not a choice");
 
         // A decline is confirmed with y, and n keeps the request — while the
         // reason has focus. On the note, both are letters of what is typed.
@@ -1968,6 +2080,7 @@ mod key_handler_tests {
 
         let desk_on = |view: DeskView| {
             page_for(MainMenu::Vetting, move |s| {
+                vetting_rows(s);
                 s.main_page.content_panel.vetting.tab = VettingTab::Desk;
                 s.main_page.content_panel.vetting.desk_view = view;
             })
@@ -1995,7 +2108,7 @@ mod key_handler_tests {
         assert!(matches!(vetting_action(&mut rx), V::ShowTicket));
         page.handle_key_event(press(KeyCode::Char('x')));
         assert!(rx.try_recv().is_err(), "declining is the Requests view's");
-        // No ticket selected: copying the link does nothing.
+        // A ticket with no link: copying the link does nothing.
         page.handle_key_event(press(KeyCode::Char('u')));
         assert!(rx.try_recv().is_err());
 
@@ -2014,7 +2127,7 @@ mod key_handler_tests {
 
         // Applications has no desk views, so ←/→ fall through to the page and
         // move panel focus, as they do on every other panel.
-        let (mut page, mut rx) = page_for(MainMenu::Vetting, |_| {});
+        let (mut page, mut rx) = page_for(MainMenu::Vetting, vetting_rows);
         page.handle_key_event(press(KeyCode::Right));
         assert!(
             matches!(rx.try_recv(), Ok(Action::MainPanelSwitch(_))),
@@ -2165,6 +2278,7 @@ mod key_handler_tests {
 
         let (mut page, mut rx) = page_for(MainMenu::Vetting, |s: &mut State| {
             s.main_page.content_panel.vetting.tab = VettingTab::Desk;
+            s.main_page.content_panel.vetting.hidden = vec![Default::default()].into();
             s.main_page.content_panel.vetting.mode = VettingMode::HiddenVetting { index: 0 };
         });
         page.handle_key_event(press(KeyCode::Char('d')));
@@ -2180,6 +2294,7 @@ mod key_handler_tests {
         use crate::state_handler::actions::VettingAction as V;
         use crate::state_handler::main_page::content::VettingMode;
         let (mut page, mut rx) = page_for(MainMenu::Vetting, |s: &mut State| {
+            vetting_rows(s);
             s.main_page.content_panel.vetting.mode = VettingMode::SendCard {
                 application_id: "a".into(),
                 session_id: "s".into(),
@@ -2379,7 +2494,7 @@ mod key_handler_tests {
         assert!(rx.try_recv().is_err());
     }
 
-    fn repos_view() -> crate::state_handler::main_page::repos::ReposView {
+    pub(super) fn repos_view() -> crate::state_handler::main_page::repos::ReposView {
         crate::state_handler::main_page::repos::ReposView::new(
             "did:webvh:vtc".into(),
             openvtc_core::config::account::PersonaId(uuid::Uuid::nil()),
@@ -4219,7 +4334,7 @@ mod key_handler_tests {
         )
     }
 
-    fn with_elections(
+    pub(super) fn with_elections(
         screen: crate::state_handler::main_page::elections::Screen,
     ) -> impl FnOnce(&mut State) {
         with_elections_releasing_at(screen, 10)

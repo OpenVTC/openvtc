@@ -2466,6 +2466,73 @@ pub struct EventOffer {
 }
 
 impl VettingState {
+    /// Whether Tab, Shift+Tab and ↑/↓ move anywhere on the open form: it has
+    /// another field or row to move to. Mirrors the vetting reducer's
+    /// `move_field`, so a key the form takes always does something.
+    #[must_use]
+    pub fn form_moves(&self) -> bool {
+        match &self.mode {
+            VettingMode::NewApplication { .. }
+            | VettingMode::NewTicket { .. }
+            | VettingMode::Attest { .. }
+            | VettingMode::ConfirmDecline { .. } => true,
+            VettingMode::Directory(view) => view.rows() > 1,
+            VettingMode::Profile(form) => form.event.is_some() || form.rows() > 1,
+            VettingMode::ChooseFace { faces, .. } => !faces.is_empty(),
+            VettingMode::NewFace(form) => form.movable(),
+            _ => false,
+        }
+    }
+
+    /// Whether ←/→ change the focused field of the open form: it is a choice
+    /// between more than one thing. Mirrors the vetting reducer's `cycle`.
+    #[must_use]
+    pub fn form_cycles(&self) -> bool {
+        let several = |n: usize| n > 1;
+        match &self.mode {
+            VettingMode::HiddenVetting { .. } => several(self.hidden.len()),
+            VettingMode::Directory(view) => match view.field {
+                0 => several(self.directory_communities.len()),
+                5 => several(DIRECTORY_METHODS.len()),
+                _ => false,
+            },
+            VettingMode::Profile(form) => {
+                form.event.is_none() && form.field == 0 && several(self.memberships.len())
+            }
+            VettingMode::Resend { .. } => several(self.resend_candidates.len()),
+            VettingMode::EventMode { .. } => several(self.event_offers.len()),
+            VettingMode::NewApplication { field: 1, .. } => several(self.personas.len()),
+            VettingMode::NewTicket { field: 0, .. } => several(self.memberships.len()),
+            VettingMode::NewTicket { field: 1, .. } => several(VETTING_TICKET_USES.len()),
+            VettingMode::OpenSession { .. } => several(VETTING_METHODS.len()),
+            VettingMode::Attest { form, .. } => match form.field {
+                0 => several(VETTING_METHODS.len()),
+                1 => several(self.documentation.len()),
+                2 => several(VETTING_RELATIONSHIPS.len()),
+                _ => false,
+            },
+            VettingMode::Withdraw { .. } => several(VETTING_WITHDRAWAL_REASONS.len()),
+            VettingMode::ConfirmDecline { field: 0, .. } => several(DECLINE_REASONS.len()),
+            VettingMode::ChooseFace { faces, .. } => !faces.is_empty(),
+            VettingMode::NewFace(form) => form.can_pick(),
+            _ => false,
+        }
+    }
+
+    /// Whether Space ticks something on the open form: the focus is on a box
+    /// to tick. Mirrors the vetting reducer's `Toggle`.
+    #[must_use]
+    pub fn form_ticks(&self) -> bool {
+        match &self.mode {
+            VettingMode::NewFace(form) => form.can_toggle(),
+            VettingMode::Attest { form, .. } => matches!(form.field, 3 | 4),
+            VettingMode::Profile(form) => {
+                form.event.is_none() && matches!(form.field, 1 | 7 | 8 | 9)
+            }
+            _ => false,
+        }
+    }
+
     /// Rows in the list currently showing.
     #[must_use]
     pub fn tab_len(&self) -> usize {
@@ -2739,6 +2806,30 @@ impl NewFaceForm {
             .chain((0..self.asked().len()).map(NewFaceFocus::Asked))
             .chain((0..self.extras().len()).map(NewFaceFocus::Extra))
             .collect()
+    }
+
+    /// Whether there is another row to move to.
+    #[must_use]
+    pub fn movable(&self) -> bool {
+        self.rows().len() > 1
+    }
+
+    /// Whether ←/→ choose between attributes on the focused row: it asks for
+    /// a claim type the pool holds an attribute of.
+    #[must_use]
+    pub fn can_pick(&self) -> bool {
+        self.focused_claim()
+            .is_some_and(|(claim_type, _)| !self.candidates(&claim_type).is_empty())
+    }
+
+    /// Whether Space ticks or chooses something on the focused row.
+    #[must_use]
+    pub fn can_toggle(&self) -> bool {
+        match self.focus {
+            NewFaceFocus::Name => false,
+            NewFaceFocus::Asked(_) => self.can_pick(),
+            NewFaceFocus::Extra(i) => i < self.extras().len(),
+        }
     }
 
     /// Move to the next (or previous) row, wrapping.

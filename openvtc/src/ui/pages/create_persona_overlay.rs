@@ -29,8 +29,9 @@ pub fn handle_key(
     overlay: &CreatePersonaState,
     key: KeyEvent,
     action_tx: &UnboundedSender<Action>,
-) {
+) -> bool {
     use crate::state_handler::main_page::content::CreatePersonaPhase;
+    use crate::ui::pages::main::keymap::is_text_edit;
     match overlay.phase {
         CreatePersonaPhase::Label => match key.code {
             KeyCode::Enter => {
@@ -39,9 +40,10 @@ pub fn handle_key(
             KeyCode::Esc => {
                 let _ = action_tx.send(Action::CreatePersonaClose);
             }
-            _ => {
+            _ if is_text_edit(&key) => {
                 let _ = action_tx.send(Action::CreatePersonaInput(key));
             }
+            _ => return false,
         },
         // Two screens behind one phase. The default one asks nothing — the
         // server picks the path — so its only keys are "create" and the one
@@ -63,14 +65,14 @@ pub fn handle_key(
                     Action::CreatePersonaPathChoice(PersonaPathChoice::Custom)
                 }
                 KeyCode::Char('m') if !typing => Action::CreatePersonaMethodCycle,
-                _ if typing => Action::CreatePersonaPathInput(key),
-                _ => return,
+                _ if typing && is_text_edit(&key) => Action::CreatePersonaPathInput(key),
+                _ => return false,
             };
             let _ = action_tx.send(action);
         }
         // Mint in progress: lock input (no cancel — the sequence is short and
         // persists atomically).
-        CreatePersonaPhase::Working => {}
+        CreatePersonaPhase::Working => return false,
         CreatePersonaPhase::Done => match key.code {
             KeyCode::Char('c') => {
                 let _ = action_tx.send(Action::CreatePersonaCopy);
@@ -83,6 +85,7 @@ pub fn handle_key(
             let _ = action_tx.send(Action::CreatePersonaClose);
         }
     }
+    true
 }
 
 pub fn render(frame: &mut Frame, overlay: &CreatePersonaState) {

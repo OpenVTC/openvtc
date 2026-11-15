@@ -88,6 +88,7 @@ pub(crate) fn screen_bindings(view: &ReposView) -> Vec<keymap::Binding> {
                 ]);
                 if !view.drift(resource).is_empty() {
                     keys.push(k("v", "revert drift"));
+                    keys.push(k("o", "adopt drift (says where)"));
                 }
             } else {
                 keys.push(k("x/Del", "resign your right"));
