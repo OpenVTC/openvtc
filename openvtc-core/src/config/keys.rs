@@ -320,7 +320,7 @@ impl Config {
     /// them apart. Previously both were `OpenVTCError::Config` and either one
     /// failed the entire profile load.
     pub(crate) async fn regenerate_persona_keys(
-        tdk: &mut TDK,
+        tdk: &TDK,
         sc: &SecuredConfig,
         key_backend: &KeyBackend,
         doc: &Document,
