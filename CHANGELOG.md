@@ -39,6 +39,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **One confirmation rule** ([#579](https://github.com/OpenVTC/openvtc/issues/579)). A destructive or outward-facing action
+  is armed by its key and committed by `y` alone; Enter — the key that opened the view —
+  now cancels like any other key. Every prompt ends "y: confirm · any other key:
+  cancel". Affected: community delete/leave/cancel-join, device-access revoke, Inbox
+  dismiss/clear-all, relationship and credential remove, invitation credential
+  delete/purge, agent-name remove, persona deletions, capability toggle, vetting
+  abandon/delete-ticket/withdraw/decline, local-face delete, make-reusable and
+  forget-contact. Typed-word confirmation stays for WIPE, RESET and context deletion.
+- **Now confirmed** ([#579](https://github.com/OpenVTC/openvtc/issues/579)): Inbox `r` (the rejection is sent to the peer),
+  Settings "Remove the unlock code", and Communities `m` (issue VMC) and `R` (renew).
+- **A key table per view, a `?` overlay, feedback for unused keys**
+  ([#580](https://github.com/OpenVTC/openvtc/issues/580)). Every main-page footer is drawn from the view's key table in one
+  format (`key: does · key: does`, one key vocabulary); `?` lists exactly the focused
+  view's keys and the global ones; a key a view does not take says "x does nothing here
+  — ? lists this panel's keys" in the footer row. Help / Status's shortcut list comes
+  from the same table.
+- **Consistent keys** ([#580](https://github.com/OpenVTC/openvtc/issues/580)): archive is `x` on the VTA invitation list (was
+  `r`), show archived is `v` there (was `i`), refresh is `r` (was Tab); Communities
+  joins with `n` (was `j`), and `j`/`k` move there and in the menu, as in rooms and
+  elections. TSP Relationships takes ↑/↓ and Esc.
+- **Text fields have a cursor** ([#578](https://github.com/OpenVTC/openvtc/issues/578)). Every main-page form field is edited
+  through `tui_input`: ←/→, Ctrl+←/→ and Home/End move within the field (they no longer
+  switch panels), Backspace/Del delete either side, Ctrl+A/E/U/W/K edit, and no Ctrl or
+  Alt chord types its letter. A paste is inserted at the cursor (it was appended); the
+  typed WIPE/RESET/DELETE words still take no paste.
+- **The header names the class of a messaging failure** ([#585](https://github.com/OpenVTC/openvtc/issues/585)): "✗ mediator
+  unreachable", "mediator refused us", "mediator incompatible", "mediator not answering"
+  … with "see Help". Help / Status shows the class, the full reason and what to do,
+  and `r` there reconnects; so does Enter on the Settings mediator row. "Messaging
+  unavailable" messages name the class and the remedy. The identity pane offers the
+  holder-grant command only for a refusal, never for an unreachable agent.
+- **Notifications** ([#584](https://github.com/OpenVTC/openvtc/issues/584)): the Inbox badge counts what was sent to you, not
+  your own pings and requests; Communities and Vetting carry badges of their own; the
+  activity log draws errors and warnings in colour with a glyph.
+- **Setup: Esc goes back** ([#588](https://github.com/OpenVTC/openvtc/issues/588)) on every wizard page that has a page before
+  it, keeping what was typed (it used to clear the field); choice pages say so. The
+  setup DID is kept for the whole run, so going back and forward does not invalidate a
+  PNM grant. The boxes no longer carry their own "Step x/y" counters beside the
+  header's sections.
+- **Wording** ([#554](https://github.com/OpenVTC/openvtc/issues/554)): British spelling in the UI strings that were American;
+  the profile's secret is the "unlock code" in Settings and the CLI as in setup; README
+  glossary and CONTRIBUTING wording convention.
+- **Status lines are typed** ([#577](https://github.com/OpenVTC/openvtc/issues/577)): every panel's status carries a severity
+  set by the code that produced it; the colour no longer comes from the wording.
+
 - **Inbound dispatch and the join protocol live in `openvtc-core`**
   ([#530](https://github.com/OpenVTC/openvtc/issues/530)). `process_inbound_message` and
   what it reports (`InboundEffects`, the off-loop `VerifyJob`s) moved from the CLI to
@@ -103,6 +148,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fix that needs one can be backported to a release branch as it is.
 
 ### Fixed
+
+- **Nothing essential is clipped at 80x24** ([#576](https://github.com/OpenVTC/openvtc/issues/576)): all twelve menu items fit
+  (the activity log shrinks to 4 rows below 32 rows; the menu scrolls to the selection
+  on anything shorter, and is wide enough for its longest item); the footer row leads
+  with `F10: quit` and `?: keys` and keeps only whole hints; setup step 1 scrolls to
+  every PNM command and shows the copy result in its footer row.
+- **A ping reports its result** ([#584](https://github.com/OpenVTC/openvtc/issues/584)) in the Relationships panel — the pong
+  and its latency, or "No reply to the ping after 30 s" — and an unanswered ping's
+  outbound task is expired instead of sitting in the Inbox.
+- **Keys that did nothing silently now say so, and keys a footer did not list are gone
+  or listed** ([#580](https://github.com/OpenVTC/openvtc/issues/580)): e.g. Inbox `a` on a task with nothing to accept, `d` on
+  a membership credential, VTA `u` on an active invitation, persona `d` on a persona in
+  use, letters in the identity pane's read-only views and pickers.
+- **The masked passphrase length counts characters**, not bytes ([#578](https://github.com/OpenVTC/openvtc/issues/578)).
 
 - **Setup and backup import refuse an unlock code shorter than 8 characters**
   ([#574](https://github.com/OpenVTC/openvtc/issues/574)). Every unlock path already
