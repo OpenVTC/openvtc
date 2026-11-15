@@ -29,8 +29,11 @@ permissions:
 jobs:
   verify-trust:
     name: commit signatures vs Trust Registry
+    # Skips silently when the variable is unset. Not a required check yet; once
+    # dogfooded, make it required and fail when unconfigured instead (#572).
     if: vars.TRUST_REGISTRY_URL != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,6 +60,9 @@ jobs:
           # `github.repository_owner`.
           fallback-resource: github.com/openvtc
           exempt-keyring: .github/trusted-platform-keys.asc
-          # Download the binary from the same release as the action pinned above,
-          # rather than whatever `latest` resolves to at run time.
+          # The `verify-trust` binary release to download (pinned, never
+          # `latest`). NOT the same release as the action above (v0.29.0): it
+          # has lagged while this workflow is dormant. Before enabling it, move
+          # this to the action's release in the same change, and check the
+          # registry's grants use the `github.com/...` resource form.
           version: v0.16.0

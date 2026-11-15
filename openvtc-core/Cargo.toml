@@ -1,7 +1,6 @@
 [package]
 name = "openvtc-core"
 description = "Core library for OpenVTC (Open Verifiable Trust Communities): configuration, DID personas, VTA client, DIDComm/TSP messaging and verifiable credentials"
-homepage = "https://github.com/OpenVTC/openvtc"
 documentation = "https://docs.rs/openvtc-core"
 keywords = ["did", "credentials", "didcomm", "trust", "identity"]
 categories = ["cryptography", "authentication"]
@@ -20,6 +19,8 @@ openpgp-card = [
   "dep:openpgp-card",
   "dep:card-backend-pcsc",
   "dep:openpgp-card-rpgp",
+  "dep:pgp",
+  "dep:byteorder",
 ]
 # Derives `Arbitrary` on the pure parse-surface config/message/credential
 # types so the cargo-fuzz harnesses can do structure-aware fuzzing
@@ -30,12 +31,11 @@ arbitrary = ["dep:arbitrary", "chrono/arbitrary"]
 [dependencies]
 # The commit signer the Repos panel sets up for a persona (`git_signing`): its
 # library writes the keyring entry, profile and include file exactly as
-# `did-git-sign init --profile` does. Kept on the same release as the
-# `openvtc` crate's dependency, and on this workspace's `vta-sdk` line.
-did-git-sign = "0.33.0"
+# `did-git-sign init --profile` does. Version rule: see the root manifest.
+did-git-sign.workspace = true
 # The SSHSIG encoding did-git-sign signs with, to check the VTA's proof
 # signature (`git_signing::verify_signer`). Same release as did-git-sign.
-vgi-core = "0.33.0"
+vgi-core.workspace = true
 
 aes-gcm.workspace = true
 anyhow.workspace = true
@@ -58,22 +58,17 @@ affinidi-did-web.workspace = true
 affinidi-net-guard.workspace = true
 # `CancellationToken`, for `start_service`'s shutdown hook.
 tokio-util = { workspace = true }
-# The delivery layer this module now runs on (#189): `-delivery` is the durable
-# outbox + `MessagingService`, `-core` the `MessageTransport` contract, `-sdk` the
-# `DidCommTransport` implementing it over DIDComm (and surfacing inbound TSP off
-# the same multiplexed pickup socket).
+# The delivery layer (see the root manifest).
 affinidi-messaging-delivery = { workspace = true }
 affinidi-messaging-core = { workspace = true }
 affinidi-messaging-sdk = { workspace = true }
 futures-util = { workspace = true }
 # The inbound dispatcher compiles `OPENVTC_CATCH_ALL_PATTERN` to decide which
-# message types reach the state handler — the delivery layer has no type-routed
-# dispatch, so this replaces the framework's `route_regex`.
+# message types reach the state handler; the delivery layer has no type routing.
 regex = { workspace = true }
 agent-names.workspace = true
 base64.workspace = true
 bip39.workspace = true
-byteorder.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 didwebvh-rs.workspace = true
@@ -83,7 +78,6 @@ hkdf.workspace = true
 hex.workspace = true
 keyring-core.workspace = true
 multibase.workspace = true
-pgp.workspace = true
 rand.workspace = true
 secrecy.workspace = true
 serde.workspace = true
@@ -98,14 +92,15 @@ trust-tasks-rs.workspace = true
 trust-tasks-capability-client.workspace = true
 url.workspace = true
 uuid.workspace = true
-x25519-dalek.workspace = true
 vta-sdk.workspace = true
 zeroize.workspace = true
 
-# Openpgp-Card Support
+# OpenPGP card support (the default `openpgp-card` feature).
 openpgp-card = { workspace = true, optional = true }
 card-backend-pcsc = { workspace = true, optional = true }
 openpgp-card-rpgp = { workspace = true, optional = true }
+pgp = { workspace = true, optional = true }
+byteorder = { workspace = true, optional = true }
 
 [build-dependencies]
 trust-tasks-build.workspace = true
@@ -114,130 +109,31 @@ trust-tasks-build.workspace = true
 # Scratch directories for the git-workspace tests (a real clone, read back).
 tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }
-# In-process mediator for integration tests. `memory-backend` keeps the
-# whole mediator (config + queue + secrets) in RAM — no Redis sidecar,
-# no on-disk fixtures — so `cargo test` stays self-contained. Slow tests
-# that spawn the mediator are marked `#[ignore]`; run them with
-# `cargo test -- --ignored`.
-# Test-mediator fixture: spawns a real `affinidi-messaging-mediator`
-# embedded in the test process with the JWT keys, DID document, ACL
-# defaults, and local-DID whitelisting set up. Replaces the hand-rolled
-# harness that did the same dance manually.
-#
-# Track this with `affinidi-messaging-sdk`, for the same reason `vta-service`
-# below tracks `vta-sdk`: 0.5 is the line built on messaging-sdk 0.22 / TDK 0.12
-# / trust-tasks 0.18, and the 0.4 line declares `^0.21.0` / `^0.11` / `^0.17`.
-# 0.7 is the line built on messaging-sdk 0.24 / TDK 0.14 / trust-tasks 0.20.
-# Leaving it behind puts a second copy of each in the **dev** graph — including
-# `trust-tasks-rs`, whose types the messaging sdk carries in its own API.
-#
-# 0.14.0 is the line built on the same `vta-sdk` 0.56 the root manifest now
-# pins, so the dev graph keeps one copy of it too. 0.16.0 is on
-# `affinidi-tdk` 0.22 / messaging-sdk 0.32, matching `vta-sdk` 0.61; 0.17.0
-# (affinidi-tdk-rs #920) is the same line built on `vta-sdk` ^0.61. 0.18.0 is on
-# `affinidi-tdk` 0.23 / messaging-sdk 0.33, matching `vta-sdk` 0.63. 0.20.1 is on
-# `affinidi-tdk` 0.24 / messaging-sdk 0.34, matching `vta-sdk` 0.65. 0.22.0 is on
-# `affinidi-tdk` 0.26 / messaging-sdk 0.36, matching `vta-sdk` 0.68. 0.42 is the
-# line `vta-service` 0.61's `transport-harness` declares (VTI #2089). 0.45 is on
-# `affinidi-tdk` 0.32 / messaging-sdk 0.40, matching `vta-sdk` 0.73. 0.46 is on
-# `affinidi-tdk` 0.33 / messaging-sdk 0.41 / trust-tasks 0.35. 0.48 is on
-# `affinidi-tdk` 0.36 / messaging-sdk 0.44 / trust-tasks 0.36. 0.50 is on
-# `affinidi-tdk` 0.37 / messaging-sdk 0.45 / trust-tasks 0.37.
+# In-process mediator for integration tests (in-memory backend: no Redis, no
+# on-disk fixtures). Tests that spawn it are `#[ignore]`; run them with
+# `cargo test -- --ignored`. Must be the line built on the root manifest's
+# `affinidi-tdk` / `affinidi-messaging-sdk` / `trust-tasks-rs`, or the dev graph
+# holds a second copy of each.
 affinidi-messaging-test-mediator = "0.50"
-# In-process MockVta for the bootstrap e2e (VTI#406/#427 test-support seams).
-# `vta-service` is the VTA server crate; it carries the credential-vault
-# lifecycle tasks (receive/query/archive/delete/restore/purge) + the
-# `MockVta::start_provisionable` seams used by the e2e tests. Track this with
-# the vta-sdk major: **0.27 is the line built against 0.38**, and it is published,
-# so this resolves from crates.io again rather than through the patch block the
-# 0.36 line needed. 0.25 was the line built against 0.35, as 0.24 was
-# against 0.34, 0.23 against 0.32, 0.19 against 0.27, 0.17 against 0.25, 0.15
-# against 0.23 and 0.14 against 0.21. An older line pulls an older sdk into the test build and the two
-# disagree about the wire types the e2e tests assert on — and on this line those
-# wire types are generated, so a mismatch is a type error rather than a silent
-# shape difference.
-#
-# 0.27 also declares `trust-tasks-rs ^0.20.4` and `affinidi-tdk ^0.14`, which is
-# what keeps the **dev** graph from growing the second copy of each that the
-# root manifest's notes warn about.
-#
-# The move from 0.26 to 0.27 is that warning coming true rather than a routine
-# refresh. 0.26 requires `vta-sdk ^0.37` and `didwebvh-rs ^0.6`; with the
-# workspace on `vta-sdk` 0.38 that dev edge alone held a third sdk node (0.37.0)
-# in the graph and kept `didwebvh-rs` 0.6.1 beside the 0.7 the resolver uses.
-# 0.27 requires `^0.38` and `^0.7`, so raising this floor is what collapses both.
-# The shipped graph looked clean throughout — this is exactly the dev-only edge
-# the note above says gets forgotten.
-#
-# Its `affinidi-messaging-sdk` edge is still on `^0.21` upstream, one line
-# behind the runtime graph — but it sits behind the non-default `tsp` feature,
-# which the feature list below does not enable, so it pulls nothing in. If
-# `tsp` is ever added here, check `cargo tree -d` before assuming it is free.
-#
-# Moving to 0.15 is what collapsed the *second* vta-sdk this workspace grew when
-# the runtime dependency went to 0.23 (#213): 0.14.37 asks for `vta-sdk ^0.21`,
-# so `cargo tree -i vta-sdk` reported both 0.21.12 and 0.23.0 and the dev-only
-# copy sat one major behind everything it is meant to test against. It is not
-# merely untidy — `vti-common` re-exports `vta_sdk::acl::{ActScope,
-# ApproveScope, ContextDirection}` as its own public API, so a graph holding two
-# sdks has two distinct `ApproveScope` types that do not unify. VTI republished
-# this crate for exactly this reason (see its Cargo.toml note on `publish`).
-#
-# **0.45.0, on the same stack as the rest of this workspace.** 0.44.0 was
-# skipped: it came from a half-published VTI release whose subcrates disagreed
-# on `vti-common` (`^0.26` vs `^0.27`), so it does not build on a fresh
-# resolve and never will. 0.45.0 is the republished family on `vta-sdk ^0.56` /
-# `vti-common ^0.29`, matching the root manifest. `cargo tree -i vti-common`
-# is the check: one row means the family agrees.
-#
-# **0.46.0** is the family on `vta-sdk` 0.57 (DTG Credentials v1); **0.48.0**
-# is the family on `vta-sdk` 0.59 / `vti-common` 0.32; **0.49.0** on `vta-sdk`
-# 0.61 / `vti-common` 0.34; **0.50.0** adds VTI #1894 (a TSP reply reaches a
-# sender on another mediator); **0.53.0** is the family on `vta-sdk` 0.63 /
-# `vti-common` 0.37.
-# 0.54.0: the first release that serves `keys/sign-sshsig/0.1`. did-git-sign's grant
-# narrows to `sign-sshsig` since #475, and the 0.53 mock refused that task
-# (`unsupportedType`), failing `git_signing_e2e` under coverage.
-# 0.57.0 is the family on `vta-sdk` 0.65 and the first whose app-state `list`
-# omits `highWatermark` on an unwritten namespace (VTI #2029), so the sync e2e
-# needs no seed record. 0.60.0 is on `vta-sdk` 0.68 and serves `vta/pcs/*`, the
-# hidden-vetting engine (VTI #2056). 0.61.0 is on `vta-sdk` 0.69 and serves
-# `vta/witness/*`, the VTA as witnessed party (VTI #2123). 0.62.0 is on `vta-sdk`
-# 0.70 and serves the witness tasks at 0.2 only, plus `vta/witness/list/0.1`
-# (VTI #2147). 0.63.0 is on `vta-sdk` 0.71 and serves `rooms/keys/act/0.5` and
-# `rooms/keys/key-package/0.2` (VTI #2186). 0.64.0 is on `vta-sdk` 0.72
-# (trust-tasks 0.32). 0.65.0 is on `vta-sdk` 0.73 (did:scid, trust-tasks 0.34).
-# 0.66.0 is on `vta-sdk` 0.74 (trust-tasks 0.35, VTI #2300). 0.67.0 is on
-# `vta-sdk` 0.75 (trust-tasks 0.36) and serves `vta/witness/list/0.2`. 0.70.0 is on
-# `vta-sdk` 0.78 and serves `vta/pcs/voter/register/0.3`, `vote/0.3` and
-# `vote-encrypted/0.4`, over the voting/_shared/0.3 manifest whose
-# `textReleaseThreshold` may be as low as 1 (VTI-VOT-065, VTI #2379), which
-# `tests/elections_vote_e2e.rs` sends. 0.71.0 is on `vta-sdk` 0.79 and serves the
-# credential-roll versions (`vta/pcs/voter/register/0.5`, `read/0.6`, `vote/0.4`,
-# `vote-encrypted/0.5`, over voting/_shared/0.4) and `vta/notifications/*`. 0.73.0 is
-# on `vta-sdk` 0.80 and serves `vta/collection/*/0.1` (VTI #2421), which the persona
-# connect path claims through.
+# In-process `MockVta` for the e2e tests. Must be the family built on the root
+# manifest's `vta-sdk` line: an older one pulls a second sdk into the dev graph
+# and the generated wire types the tests assert on stop unifying. Check:
+# `cargo tree -i vti-common` and `-i vta-sdk` (one node each).
 vta-service = { version = "0.73.0", default-features = false, features = ["test-support", "rest", "didcomm", "transport-harness"] }
-# The community's half of hidden vetting, in process (`vtc::Vtc`, feature `harness`), for the
-# end-to-end run against `MockVta` (`tests/hidden_vetting_onboarding.rs`). The engine itself is
-# the VTA's: this client holds no PCS key and runs no PCS operation.
-# 0.8 is the release on `vta-sdk` 0.75, so the dev graph keeps one `vta-sdk`;
-# 0.11 is the one on 0.78, 0.12 the one on 0.79, 0.13 the one on 0.80.
+# The community's half of hidden vetting, in process (`vtc::Vtc`, feature
+# `harness`), for `tests/hidden_vetting_onboarding.rs`. The PCS engine is the
+# VTA's; this client holds no PCS key. Same `vta-sdk` line as `vta-service`.
 vti-vetting-pcs = { version = "0.13", features = ["harness"] }
-# The community's and the ballot box's halves of an election, in process (`registrar::Registrar`,
-# `service::BallotBox`), for the end-to-end vote against `MockVta` (`tests/elections_vote_e2e.rs`).
-# The voter's keys are the VTA's: this client holds none. 0.4 is the line `vta-service` 0.67
-# itself runs, so the dev graph keeps one. 0.7 is `vta-service` 0.70's, and reads the
-# voting/_shared/0.3 manifest (a `textReleaseThreshold` from 1, VTI-VOT-065). 0.8 is
-# `vta-service` 0.71's, and reads voting/_shared/0.4 (credential rolls). 0.9 is
-# `vta-service` 0.73's.
+# The registrar and ballot box of an election, in process, for
+# `tests/elections_vote_e2e.rs`. The line `vta-service` itself runs.
 vti-voting = "0.9"
 base64 = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 secrecy = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# `net`: the loopback listener in the `health` tests.
+tokio = { workspace = true, features = ["net"] }
 # Mock HTTP server for the agent-name resolve→verify e2e: it serves the
 # `/@name` → 302 → DID redirect the `HttpRedirectResolver` follows, so the whole
 # chain is exercised without a live host.

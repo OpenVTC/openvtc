@@ -1,0 +1,19 @@
+name: Add swap
+description: >-
+  Adds a 16 GiB swap file on a Linux runner. A whole-workspace build (vta-sdk,
+  trust-tasks-rs and the TDK stack) can outgrow the hosted runner's memory, and
+  the OOM killer then ends the job with exit code 143 and no compiler error.
+  Swap lets the peaks spill to disk. Linux only: guard the step with
+  `if: runner.os == 'Linux'` in a cross-OS job.
+runs:
+  using: composite
+  steps:
+    - name: Add swap
+      shell: bash
+      run: |
+        sudo swapoff -a || true
+        sudo fallocate -l 16G /swapfile-build
+        sudo chmod 600 /swapfile-build
+        sudo mkswap /swapfile-build > /dev/null
+        sudo swapon /swapfile-build
+        free -h

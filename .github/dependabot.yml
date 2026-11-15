@@ -29,21 +29,24 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "chore(deps)"
+    # These three move with the OpenPGP stack, never alone. Re-check them
+    # together at least quarterly and on every `pgp` / `openpgp-card-rpgp`
+    # release: two ignored RUSTSEC advisories (rsa, crypto-bigint 0.5) enter
+    # through `pgp`.
+    # Last checked 2026-11-15: `pgp` 0.21.1 and `openpgp-card-rpgp` 0.9.1
+    # (`pgp ^0.21.1`) are out; both still need `rand ^0.8` and `x25519-dalek ^2`,
+    # so a coordinated `pgp` + `openpgp-card-rpgp` move is possible and the other
+    # two holds remain.
     ignore:
-      # `rand` is held at 0.8 by the OpenPGP stack, not by inattention: `pgp`
-      # 0.20 declares `rand ^0.8.6` and takes an
-      # `R: CryptoRng + Rng` from that trait set, and `openpgp-card-rpgp` pins
-      # `pgp ^0.20`. A 0.10 bump merged once and stopped `main` compiling,
-      # because 0.10 removes `OsRng` and splits `RngCore`. The manifest entry
-      # explains the pin; lift both together when the OpenPGP stack moves.
+      # `pgp` (0.20 and 0.21) takes an `R: CryptoRng + Rng` from the rand 0.8
+      # trait set, and we hand it our `OsRng`. A 0.10 bump merged once and
+      # stopped `main` compiling (0.10 removes `OsRng`, splits `RngCore`).
       - dependency-name: "rand"
-      # Held at 2.x for the same reason, and bumped to 3.0 in the same commit:
-      # our `StaticSecret` goes straight to pgp's `ecdh::Curve25519Legacy`, and
-      # a 3.x secret is a different type there. The graph carries a 3.x copy
-      # too, reached only through the vta-sdk crypto stack, and no type crosses.
+      # Our `StaticSecret` goes straight to pgp's `ecdh::Curve25519Legacy`, and
+      # a 3.x secret is a different type there. The 3.x copy in the graph comes
+      # from the TDK crypto stack and no type crosses.
       - dependency-name: "x25519-dalek"
-      # `openpgp-card-rpgp` 0.8.1 (its latest) still pins `pgp ^0.20`. A 0.21
-      # bump puts two `pgp`s in the graph, and the card's `CardSlot` implements
-      # the 0.20 key traits, not ours — `openpgp_card::crypt` stops compiling.
-      # Lift with `rand` and `x25519-dalek` when the card crate moves.
+      # Must stay on the line `openpgp-card-rpgp` requires: the card's
+      # `CardSlot` implements that line's key traits, so a lone `pgp` bump puts
+      # two `pgp`s in the graph and `openpgp_card::crypt` stops compiling.
       - dependency-name: "pgp"

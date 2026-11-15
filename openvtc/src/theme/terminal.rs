@@ -147,9 +147,12 @@ fn read_reply(tty: &std::fs::File, timeout: Duration) -> Vec<u8> {
             revents: 0,
         };
         let millis = libc::c_int::try_from(left.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
+        // The workspace denies `unsafe_code`; this is its one exception.
         // SAFETY: one initialised pollfd, for a descriptor `tty` keeps open
         // for the whole call.
-        if unsafe { libc::poll(&raw mut fd, 1, millis) } <= 0 {
+        #[allow(unsafe_code)]
+        let ready = unsafe { libc::poll(&raw mut fd, 1, millis) };
+        if ready <= 0 {
             break;
         }
         match (&*tty).read(&mut chunk) {
