@@ -47,7 +47,10 @@ pub const MAX_WRONG_CODES_PER_SENDER: usize = 5;
 pub const MAX_WRONG_CODES: usize = 60;
 
 /// One ticket, as the vetter keeps it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand and redacts `code` and `secret`: both are bearer
+/// admission secrets, and a `{:?}` in a log line must not hand them out.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ticket {
     /// `ticketId` in the scanned form.
     pub id: String,
@@ -77,6 +80,24 @@ pub struct Ticket {
     /// this was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<super::mode::VetterMode>,
+}
+
+impl std::fmt::Debug for Ticket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ticket")
+            .field("id", &self.id)
+            .field("code", &"****")
+            .field("secret", &"****")
+            .field("community", &self.community)
+            .field("persona", &self.persona)
+            .field("methods", &self.methods)
+            .field("uses_left", &self.uses_left)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("label", &self.label)
+            .field("mode", &self.mode)
+            .finish()
+    }
 }
 
 impl Ticket {
@@ -210,13 +231,12 @@ pub fn normalise_code(input: &str) -> Option<String> {
     (chars.len() == 8).then(|| format!("{}-{}", &chars[..4], &chars[4..]))
 }
 
-/// Equal-length comparison that does not stop at the first difference.
+/// Comparison whose time does not depend on where the inputs differ (only on
+/// their lengths, which are not secret: a code is `XXXX-XXXX`, a secret 32
+/// bytes in base64url).
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    a.len() == b.len()
-        && a.bytes()
-            .zip(b.bytes())
-            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-            == 0
+    use subtle::ConstantTimeEq;
+    a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
 /// Recent wrong codes.

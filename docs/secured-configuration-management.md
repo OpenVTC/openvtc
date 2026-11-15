@@ -83,25 +83,47 @@ configuration. It must be at least 8 characters.
 The unlock code is not stored. To save the configuration, the tool:
 
 1. Derives a 32-byte key from the unlock code with Argon2id (128 MiB of
-   memory, 4 iterations, 1 lane). The salt is fixed: the SHA-256 hash of the
-   label `openvtc-unlock-code-v1`. The same unlock code therefore always gives
-   the same key (`derive_passphrase_key` in `openvtc-core/src/config/mod.rs`).
+   memory, 4 iterations, 1 lane), salted with 16 random bytes drawn for this
+   profile when the code is set. The salt is stored beside the ciphertext, so
+   two profiles with the same code have unrelated keys.
 
 2. Generates a random 12-byte nonce and derives an AES-256-GCM key from the
-   Argon2id key with HKDF-SHA256 (nonce as salt).
+   Argon2id key with HKDF-SHA256 (nonce as salt, info
+   `openvtc/secured-config/v2`).
 
-3. Encrypts the configuration with AES-256-GCM and stores
-   `nonce | ciphertext + tag`.
+3. Encrypts the configuration with AES-256-GCM, with
+   `openvtc/secured-config/v2\0profile\0{profile}` as associated data, and
+   stores it as `{"format":"PasswordSealed","salt":…,"sealed":…}`. The blob
+   opens only as the profile it was written for.
 
 To read the configuration later, the tool asks for the unlock code, derives
 the same Argon2id key, and decrypts. A wrong unlock code fails the AES-GCM
 authentication check. The tool checks the code at the prompt, so a wrong code
 can be entered again.
 
-Exported config files use a different format: a random 16-byte Argon2id salt
-is generated for each export and stored in the file
-(`derive_passphrase_key_v2` and `passphrase_encrypt_v2`). Imports still
-accept the older fixed-salt export format.
+Exported config files use the `OPV3` format: a random 16-byte Argon2id salt
+per export stored in the file, the export label in the HKDF step, and the
+header bound as associated data (`passphrase_encrypt`). Imports still accept
+the `OPV2` and older fixed-salt export formats.
+
+### Format versions and migration
+
+| `format` | Written by | Key | Associated data |
+| --- | --- | --- | --- |
+| `PasswordSealed` | current releases | Argon2id, per-profile random salt | `openvtc/secured-config/v2\0profile\0{profile}` |
+| `PasswordEncrypted` | earlier releases (read only) | Argon2id, one fixed salt for every install | none |
+
+A profile still in `PasswordEncrypted` is rewritten as `PasswordSealed` the
+first time it is unlocked. That is one store write replacing one entry: the
+new envelope is decrypted in memory before it is written and read back after,
+and the original is put back if the read-back fails. Either version opens with
+the same unlock code, so a crash at any point leaves a profile that opens.
+Once migrated, a profile cannot be opened by a release that predates
+`PasswordSealed`; that release reports the stored blob as unrecognised.
+
+Because the profile name is bound into the blob, renaming a profile by hand
+(moving its keyring entry or `config-{profile}.json`) makes it unopenable
+under the new name. Move a profile with export and import instead.
 
 ## Plaintext
 

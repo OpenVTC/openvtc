@@ -4443,7 +4443,7 @@ async fn run_join_sequence(
     // comes up — but it is the one that takes the slow path, and an operator
     // reading this log later cannot otherwise tell that from a community that
     // never answered.
-    config.public.logs.insert(
+    config.private.logs.insert(
         LogFamily::Community,
         format!(
             "Join request sent to ({}) as persona ({}) over {} — Pending, not yet acknowledged.{}",

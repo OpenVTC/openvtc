@@ -11,21 +11,27 @@
 #[cfg(feature = "openpgp-card")]
 use crate::config::TokenInteractions;
 use crate::{
-    config::{Config, KeyBackend, KeyTypes, UnlockCode},
+    config::{Config, KeyBackend, KeyTypes, UNLOCK_SALT_LEN, UnlockCode, UnlockKey},
     errors::OpenVTCError,
 };
-use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+use aes_gcm::{
+    Aes256Gcm, KeyInit,
+    aead::{Aead, Payload},
+};
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use hkdf::Hkdf;
 use keyring_core::Entry;
 use rand::{RngCore, rngs::OsRng};
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::collections::HashMap;
-use tracing::{error, info, warn};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{LazyLock, Mutex},
+};
+use tracing::{debug, error, info, warn};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Constants for storing secure info in the OS Secure Store
 const SERVICE: &str = "openvtc";
@@ -62,6 +68,7 @@ pub fn new_protected_key() -> SecretString {
 pub fn require_encrypted_blob(bytes: &[u8]) -> Result<(), String> {
     match serde_json::from_slice::<SecuredConfigFormat>(bytes) {
         Ok(SecuredConfigFormat::PasswordEncrypted { .. })
+        | Ok(SecuredConfigFormat::PasswordSealed { .. })
         | Ok(SecuredConfigFormat::TokenEncrypted { .. }) => Ok(()),
         Ok(SecuredConfigFormat::PlainText { .. }) => Err(
             "this profile has no passphrase, so its secret would be written to disk \
@@ -169,16 +176,22 @@ impl From<SecuredConfigFormat> for ProtectionMethod {
     fn from(format: SecuredConfigFormat) -> Self {
         match format {
             SecuredConfigFormat::TokenEncrypted { .. } => ProtectionMethod::TokenEncrypted,
-            SecuredConfigFormat::PasswordEncrypted { .. } => ProtectionMethod::PasswordEncrypted,
+            SecuredConfigFormat::PasswordEncrypted { .. }
+            | SecuredConfigFormat::PasswordSealed { .. } => ProtectionMethod::PasswordEncrypted,
             SecuredConfigFormat::PlainText { .. } => ProtectionMethod::PlainText,
         }
     }
 }
 
-/// Three possible formats to store [SecuredConfig]:
+/// The formats [SecuredConfig] is stored in:
 /// 1. TokenEncrypted — encrypted using a hardware token
-/// 2. PasswordEncrypted — encrypted from a key derived from a password/PIN
-/// 3. PlainText — no encryption at all (use at your own risk)
+/// 2. PasswordSealed — encrypted under a key derived from the unlock code with
+///    a per-profile random Argon2id salt, profile bound as associated data.
+///    The only passphrase format written.
+/// 3. PasswordEncrypted — the legacy passphrase format (fixed Argon2id salt,
+///    no associated data). Read, and rewritten as `PasswordSealed` on the
+///    next successful unlock; never written.
+/// 4. PlainText — no encryption at all (use at your own risk)
 ///
 /// All string payloads are BASE64URL (no-pad) encoded.
 ///
@@ -198,6 +211,13 @@ impl From<SecuredConfigFormat> for ProtectionMethod {
 ///
 /// Old (untagged) blobs are migrated transparently in [`SecuredConfig::load`]
 /// via [`LegacySecuredConfigFormat`].
+///
+/// `PasswordSealed` deliberately names its payload `sealed`, not `data`: a
+/// build that predates it falls back to the untagged legacy parse on an
+/// unknown variant, and a `data` field would let that parse match it as a
+/// legacy `PasswordEncrypted` blob — reporting the right unlock code as wrong.
+/// With no field in common, an older build rejects the blob as unrecognised
+/// instead of misreading it.
 #[derive(Serialize, Deserialize, Debug, Zeroize)]
 #[serde(tag = "format")]
 enum SecuredConfigFormat {
@@ -209,10 +229,21 @@ enum SecuredConfigFormat {
         data: String,
     },
 
-    /// Password/PIN Protected data
+    /// Legacy Password/PIN protected data: key from the fixed-salt Argon2id
+    /// derivation, no associated data. Read-only.
     PasswordEncrypted {
         /// Encrypted data using AES-256 from derived key
         data: String,
+    },
+
+    /// Password/PIN protected data, salted and bound to its profile.
+    PasswordSealed {
+        /// The profile's random 16-byte Argon2id salt.
+        salt: String,
+        /// `[nonce(12) | ct+tag]`, AES-256-GCM under an HKDF key with label
+        /// `openvtc/secured-config/v2` and associated data
+        /// `openvtc/secured-config/v2\0profile\0{profile}`.
+        sealed: String,
     },
 
     /// Plaintext data - dangerous!
@@ -264,7 +295,8 @@ impl From<LegacySecuredConfigFormat> for SecuredConfigFormat {
 ///
 /// Mapping from caller intent to expected format:
 /// - `has_token == true`               → must be [`SecuredConfigFormat::TokenEncrypted`]
-/// - `has_unlock == true`              → must be [`SecuredConfigFormat::PasswordEncrypted`]
+/// - `has_unlock == true`              → must be [`SecuredConfigFormat::PasswordSealed`]
+///   or the legacy [`SecuredConfigFormat::PasswordEncrypted`]
 /// - neither token nor unlock present  → must be [`SecuredConfigFormat::PlainText`]
 fn assert_format_matches_intent(
     format: &SecuredConfigFormat,
@@ -275,6 +307,7 @@ fn assert_format_matches_intent(
         (format, has_token, has_unlock),
         (SecuredConfigFormat::TokenEncrypted { .. }, true, _)
             | (SecuredConfigFormat::PasswordEncrypted { .. }, false, true)
+            | (SecuredConfigFormat::PasswordSealed { .. }, false, true)
             | (SecuredConfigFormat::PlainText { .. }, false, false)
     ) {
         return Ok(());
@@ -282,7 +315,8 @@ fn assert_format_matches_intent(
 
     let stored = match format {
         SecuredConfigFormat::TokenEncrypted { .. } => "token-encrypted",
-        SecuredConfigFormat::PasswordEncrypted { .. } => "password-encrypted",
+        SecuredConfigFormat::PasswordEncrypted { .. }
+        | SecuredConfigFormat::PasswordSealed { .. } => "password-encrypted",
         SecuredConfigFormat::PlainText { .. } => "plaintext",
     };
     let expected = if has_token {
@@ -316,43 +350,115 @@ pub enum UnlockCodeCheck {
     NotApplicable,
 }
 
+/// Decode a stored `PasswordSealed` salt.
+fn decode_salt(salt: &str) -> Result<[u8; UNLOCK_SALT_LEN], OpenVTCError> {
+    BASE64_URL_SAFE_NO_PAD
+        .decode(salt)?
+        .as_slice()
+        .try_into()
+        .map_err(|_| OpenVTCError::Decrypt(format!("Stored salt is not {UNLOCK_SALT_LEN} bytes")))
+}
+
+/// Seal `plaintext` as the `PasswordSealed` envelope of `profile`.
+fn seal_password(
+    key: &UnlockKey,
+    profile: &str,
+    plaintext: &[u8],
+) -> Result<SecuredConfigFormat, OpenVTCError> {
+    Ok(SecuredConfigFormat::PasswordSealed {
+        salt: BASE64_URL_SAFE_NO_PAD.encode(key.salt()),
+        sealed: BASE64_URL_SAFE_NO_PAD.encode(seal(
+            key.key(),
+            SECURED_SEALED_INFO,
+            &secured_aad(profile),
+            plaintext,
+        )?),
+    })
+}
+
 impl SecuredConfigFormat {
+    /// Open a passphrase blob with `unlock`, or `Ok(None)` when the code (or,
+    /// for a sealed blob, the profile it is bound to) does not match.
+    ///
+    /// Derives with the blob's own salt — the legacy fixed salt for
+    /// `PasswordEncrypted`, the stored random one for `PasswordSealed`. The
+    /// derived key is cached on `unlock`, so the load that follows the unlock
+    /// prompt's check does not run Argon2 a second time.
+    ///
+    /// # Errors
+    ///
+    /// Only for a blob that could not be tried at all (bad base64, a
+    /// malformed salt) — never for a code that is simply wrong. Also errors
+    /// when called on a blob that is not passphrase-protected.
+    fn open_password(
+        &self,
+        unlock: &UnlockCode,
+        profile: &str,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, OpenVTCError> {
+        match self {
+            SecuredConfigFormat::PasswordEncrypted { data } => {
+                let decoded = BASE64_URL_SAFE_NO_PAD.decode(data)?;
+                let key = unlock.legacy_key()?;
+                aead_open(&key, &decoded)
+            }
+            SecuredConfigFormat::PasswordSealed { salt, sealed } => {
+                let salt = decode_salt(salt)?;
+                let decoded = BASE64_URL_SAFE_NO_PAD.decode(sealed)?;
+                let key = unlock.key_for_salt(&salt)?;
+                let opened = open(
+                    key.key(),
+                    SECURED_SEALED_INFO,
+                    &secured_aad(profile),
+                    &decoded,
+                )?;
+                if opened.is_none() {
+                    // A wrong code: don't keep its key as the profile's.
+                    unlock.forget_salted();
+                }
+                Ok(opened)
+            }
+            _ => Err(OpenVTCError::Config(
+                "not a passphrase-protected SecuredConfig".to_string(),
+            )),
+        }
+    }
+
     /// Whether `unlock` opens this blob, decided by the AEAD tag alone. The
     /// plaintext is zeroed and dropped; it is never parsed or returned.
     ///
     /// # Errors
     ///
     /// Only for a blob that could not be tried at all (bad base64, a
-    /// malformed key) — never for a code that is simply wrong.
-    pub fn check_unlock_code(&self, unlock: &UnlockCode) -> Result<UnlockCodeCheck, OpenVTCError> {
-        let SecuredConfigFormat::PasswordEncrypted { data } = self else {
+    /// malformed salt) — never for a code that is simply wrong.
+    pub fn check_unlock_code(
+        &self,
+        unlock: &UnlockCode,
+        profile: &str,
+    ) -> Result<UnlockCodeCheck, OpenVTCError> {
+        if !matches!(
+            self,
+            SecuredConfigFormat::PasswordEncrypted { .. }
+                | SecuredConfigFormat::PasswordSealed { .. }
+        ) {
             return Ok(UnlockCodeCheck::NotApplicable);
-        };
-        let decoded = BASE64_URL_SAFE_NO_PAD.decode(data)?;
-        let key = unlock
-            .0
-            .expose_secret()
-            .first_chunk::<32>()
-            .ok_or_else(|| OpenVTCError::Decrypt("Unlock code is not 32 bytes".to_string()))?;
-        Ok(match aead_open(key, &decoded)? {
-            Some(plaintext) => {
-                drop(zeroize::Zeroizing::new(plaintext));
-                UnlockCodeCheck::Accepted
-            }
+        }
+        Ok(match self.open_password(unlock, profile)? {
+            Some(_plaintext) => UnlockCodeCheck::Accepted,
             None => UnlockCodeCheck::Rejected,
         })
     }
 
-    /// Loads secret info from the OS Secure Store
+    /// Decrypts this blob into a [`SecuredConfig`].
     #[cfg_attr(not(feature = "openpgp-card"), allow(unused_variables))]
     pub fn unlock(
         &self,
+        profile: &str,
         #[cfg(feature = "openpgp-card")] user_pin: &SecretString,
         token: Option<&String>,
         unlock: Option<&UnlockCode>,
         #[cfg(feature = "openpgp-card")] touch_prompt: &impl TokenInteractions,
     ) -> Result<SecuredConfig, OpenVTCError> {
-        let raw_bytes = match self {
+        let raw_bytes: Zeroizing<Vec<u8>> = match self {
             SecuredConfigFormat::TokenEncrypted { esk, data } => {
                 // Token Encrypted format
                 if let Some(token) = token {
@@ -360,13 +466,13 @@ impl SecuredConfigFormat {
                     {
                         use crate::openpgp_card::crypt::token_decrypt;
 
-                        token_decrypt(
+                        Zeroizing::new(token_decrypt(
                             user_pin,
                             token,
                             &BASE64_URL_SAFE_NO_PAD.decode(esk)?,
                             &BASE64_URL_SAFE_NO_PAD.decode(data)?,
                             touch_prompt,
-                        )?
+                        )?)
                     }
                     #[cfg(not(feature = "openpgp-card"))]
                     {
@@ -382,38 +488,40 @@ impl SecuredConfigFormat {
                     return Err(OpenVTCError::Config("Secured Config is Token Encrypted, but no token identifier has been provided!".to_string()));
                 }
             }
-            SecuredConfigFormat::PasswordEncrypted { data } => {
-                // Password Encrypted format
-                if let Some(unlock) = unlock {
-                    let decoded = BASE64_URL_SAFE_NO_PAD.decode(data)?;
-                    let key = unlock
-                        .0
-                        .expose_secret()
-                        .first_chunk::<32>()
-                        .ok_or_else(|| {
-                            OpenVTCError::Decrypt("Unlock code is not 32 bytes".to_string())
-                        })?;
-
-                    unlock_code_decrypt(key, &decoded).map_err(|e| {
-                        OpenVTCError::Decrypt(format!(
-                            "Couldn't decrypt password encrypted SecuredConfig. Reason: {e}"
-                        ))
-                    })?
-                } else {
+            SecuredConfigFormat::PasswordEncrypted { .. }
+            | SecuredConfigFormat::PasswordSealed { .. } => {
+                let Some(unlock) = unlock else {
                     return Err(OpenVTCError::Config(
                         "Secured Config is Password Encrypted, but no unlock code has been provided!".to_string()
                     ));
-                }
+                };
+                self.open_password(unlock, profile)?.ok_or_else(|| {
+                    error!("Couldn't decrypt data. Likely due to incorrect unlock code!");
+                    OpenVTCError::Decrypt(
+                        "Couldn't decrypt password encrypted SecuredConfig. Reason: \
+                         Couldn't decrypt data, likely due to incorrect unlock code!"
+                            .to_string(),
+                    )
+                })?
             }
             SecuredConfigFormat::PlainText { text } => {
                 // Plaintext format - no checks needed
-
-                BASE64_URL_SAFE_NO_PAD.decode(text)?
+                Zeroizing::new(BASE64_URL_SAFE_NO_PAD.decode(text)?)
             }
         };
 
         Ok(serde_json::from_slice(raw_bytes.as_slice())?)
     }
+}
+
+/// Serialize a `HashMap` in key order, so the same contents always produce the
+/// same bytes. The keyring-write skip ([`SecuredConfig::save`]) compares
+/// serialized plaintexts, and a `HashMap`'s iteration order is not stable.
+fn serialize_sorted<S: serde::Serializer, V: Serialize>(
+    map: &HashMap<String, V>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    map.iter().collect::<BTreeMap<_, _>>().serialize(s)
 }
 
 /// Secured Configuration information for openvtc tool
@@ -489,7 +597,10 @@ pub struct SecuredConfig {
 
     /// Key information containing path info
     /// key is the DID VerificationMethod ID
+    ///
+    /// Written in key order, so equal contents serialize to equal bytes.
     #[zeroize(skip)] // chrono doesn't support zeroize
+    #[serde(serialize_with = "serialize_sorted")]
     pub key_info: HashMap<String, KeyInfoConfig>,
 
     #[serde(skip, default)]
@@ -539,23 +650,86 @@ impl From<&Config> for SecuredConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Skipping redundant keyring writes (#564)
+//
+// The secured tier (key material) changes far less often than the rest of the
+// config, but every `Config::save` used to rewrite it — and the keyring write
+// is the slowest, most failure-prone step (Secret Service over D-Bus, a
+// Keychain prompt, a card touch on token profiles).
+//
+// The skip compares a fingerprint of what *would* be sealed with what this
+// process last wrote. Not the ciphertext: its nonce changes on every write.
+// The fingerprint covers the plaintext and everything that decides the stored
+// envelope (protection mode, the unlock key's salt, the token id), so changing
+// or removing the passphrase always writes.
+//
+// The record is in memory only and starts empty, so the first save after
+// start-up always writes. Any write this module did not make through `save`
+// (migration, a failed write, a profile delete) clears it.
+// ---------------------------------------------------------------------------
+
+/// Profile → fingerprint of the secured blob this process last wrote there.
+static LAST_WRITTEN: LazyLock<Mutex<HashMap<String, [u8; 32]>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn last_written() -> std::sync::MutexGuard<'static, HashMap<String, [u8; 32]>> {
+    LAST_WRITTEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Forget what was last written for `profile`, so the next save writes.
+pub(crate) fn forget_written(profile: &str) {
+    last_written().remove(profile);
+}
+
+/// Fingerprint of a secured-tier write: protection mode, the parameters that
+/// shape the envelope, and the plaintext.
+fn write_fingerprint(mode: &[u8], param: &[u8], plaintext: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = Sha256::new();
+    h.update(b"openvtc/secured-write-fingerprint/v1\0");
+    h.update((mode.len() as u64).to_be_bytes());
+    h.update(mode);
+    h.update((param.len() as u64).to_be_bytes());
+    h.update(param);
+    h.update(plaintext);
+    h.finalize().into()
+}
+
 impl SecuredConfig {
-    /// Internal private function that saves a SecuredConfig to the OS Secure Store
-    /// Encrypts the secret info as needed based on token/unlock parameters
-    /// Converts to BASE64 then saves to OS Secure Store
+    /// Saves this SecuredConfig to the OS Secure Store.
+    ///
+    /// Encrypts with the hardware token when `token` is set, else seals under
+    /// `unlock` (the profile's salted unlock key) when set, else stores it as
+    /// plaintext. A passphrase profile is always written in the salted,
+    /// profile-bound `PasswordSealed` format.
+    ///
+    /// Skips the keyring write entirely when this process last wrote exactly
+    /// this content, under the same protection, to the same profile (#564).
     #[cfg_attr(not(feature = "openpgp-card"), allow(unused_variables))]
     pub fn save(
         &self,
         profile: &str,
         token: Option<&String>,
-        unlock: Option<&Vec<u8>>,
+        unlock: Option<&UnlockKey>,
         #[cfg(feature = "openpgp-card")] touch_prompt: &(dyn Fn() + Send + Sync),
     ) -> Result<(), OpenVTCError> {
-        let entry =
-            Entry::new(SERVICE, profile).map_err(|e| OpenVTCError::from_keyring(&e, profile))?;
+        // Serialize SecuredConfig to byte array; wiped on drop.
+        let input = Zeroizing::new(serde_json::to_vec(&self)?);
 
-        // Serialize SecuredConfig to byte array
-        let input = serde_json::to_vec(&self)?;
+        let fingerprint = if let Some(token) = token {
+            write_fingerprint(b"token", token.as_bytes(), &input)
+        } else if let Some(unlock) = unlock {
+            write_fingerprint(b"password-sealed", unlock.salt(), &input)
+        } else {
+            write_fingerprint(b"plaintext", b"", &input)
+        };
+        if last_written().get(profile) == Some(&fingerprint) {
+            debug!("secured config unchanged since the last write; keyring write skipped");
+            return Ok(());
+        }
 
         let formatted = if let Some(token) = token {
             #[cfg(feature = "openpgp-card")]
@@ -571,26 +745,25 @@ impl SecuredConfig {
             #[cfg(not(feature = "openpgp-card"))]
             return Err(OpenVTCError::Config( "Token has been configured, but no openpgp-card feature-flag has been enabled! exiting...".to_string()));
         } else if let Some(unlock) = unlock {
-            SecuredConfigFormat::PasswordEncrypted {
-                data: BASE64_URL_SAFE_NO_PAD.encode(unlock_code_encrypt(
-                    unlock.first_chunk::<32>().ok_or_else(|| {
-                        OpenVTCError::Encrypt("Unlock code is not 32 bytes".to_string())
-                    })?,
-                    &input,
-                )?),
-            }
+            seal_password(unlock, profile, &input)?
         } else {
             // Plain-text
             SecuredConfigFormat::PlainText {
-                text: BASE64_URL_SAFE_NO_PAD.encode(input),
+                text: BASE64_URL_SAFE_NO_PAD.encode(input.as_slice()),
             }
         };
 
-        // Save this to the OS Secure Store
-        entry
-            .set_secret(&encode_blob(&formatted)?)
-            .map_err(|e| OpenVTCError::from_keyring(&e, profile))?;
-        Ok(())
+        match write_format(profile, &formatted) {
+            Ok(()) => {
+                last_written().insert(profile.to_string(), fingerprint);
+                Ok(())
+            }
+            Err(e) => {
+                // The store may hold either version now; write next time.
+                forget_written(profile);
+                Err(e)
+            }
+        }
     }
 
     /// Deserialize the stored `SecuredConfig` wire blob from raw bytes — the
@@ -638,41 +811,41 @@ impl SecuredConfig {
         Self::parse_format(bytes, "").map(|_| ())
     }
 
-    /// Loads secret info from the OS Secure Store
-    /// token: Hardware token identifier if being used
-    /// unlock: Use a Password/PIN to unlock secret storage if no hardware token
-    /// If token is None and unlock is false, assumes no protection apart from the OS Secure Store
-    /// itself
-    /// Reads and parses the stored wire blob from the OS secure store, without
-    /// decrypting it. The `bool` is "needs migration" (see [`parse_format`](Self::parse_format)).
-    fn read_format(profile: &str) -> Result<(SecuredConfigFormat, bool), OpenVTCError> {
+    /// Reads the stored wire blob's raw bytes from the OS secure store.
+    fn read_raw(profile: &str) -> Result<Zeroizing<Vec<u8>>, OpenVTCError> {
         let entry =
             Entry::new(SERVICE, profile).map_err(|e| OpenVTCError::from_keyring(&e, profile))?;
 
-        let secret = match entry.get_secret() {
-            Ok(s) => s,
+        match entry.get_secret() {
+            Ok(s) => Ok(Zeroizing::new(s)),
             Err(e) => {
                 // Typed, not stringly: `NoEntry` (the credential is gone) and
                 // `NoStorageAccess` (the store is locked) need opposite advice,
                 // and the old single `Config` string made them look identical.
                 error!("Couldn't read the SecuredConfig from the OS secure store: {e}");
-                return Err(OpenVTCError::from_keyring(&e, profile));
+                Err(OpenVTCError::from_keyring(&e, profile))
             }
-        };
+        }
+    }
 
+    /// Reads and parses the stored wire blob from the OS secure store, without
+    /// decrypting it. The `bool` is "needs migration" (see [`parse_format`](Self::parse_format)).
+    fn read_format(profile: &str) -> Result<(SecuredConfigFormat, bool), OpenVTCError> {
         // Try the current tagged format first, falling back to the legacy
         // untagged shape (flagged for migration). Anything that fails both is
         // genuinely invalid.
-        Self::parse_format(secret.as_slice(), profile)
+        Self::parse_format(Self::read_raw(profile)?.as_slice(), profile)
     }
 
     /// Checks an unlock code against the stored secured config without loading
     /// it: nothing is parsed, migrated or re-saved.
     ///
-    /// [`UnlockCode::from_string`] only derives a key, so it accepts any code of
+    /// [`UnlockCode::from_string`] does no crypto, so it accepts any code of
     /// the minimum length. This is how the unlock prompt finds out a code is
     /// wrong while it can still ask again — rather than at [`load`](Self::load),
-    /// after the prompt has gone.
+    /// after the prompt has gone. Works for both the salted and the legacy
+    /// passphrase formats; the key it derives is kept on `unlock`, so the load
+    /// that follows does not derive again.
     ///
     /// # Errors
     ///
@@ -684,9 +857,20 @@ impl SecuredConfig {
         unlock: &UnlockCode,
     ) -> Result<UnlockCodeCheck, OpenVTCError> {
         let (format, _) = Self::read_format(profile)?;
-        format.check_unlock_code(unlock)
+        format.check_unlock_code(unlock, profile)
     }
 
+    /// Loads secret info from the OS Secure Store
+    /// token: Hardware token identifier if being used
+    /// unlock: Use a Password/PIN to unlock secret storage if no hardware token
+    /// If token is None and unlock is false, assumes no protection apart from the OS Secure Store
+    /// itself
+    ///
+    /// A legacy (fixed-salt) passphrase blob is rewritten in the salted
+    /// `PasswordSealed` format before this returns, in a single store write
+    /// that is built and checked first and read back after, so it can never
+    /// leave the profile unopenable. A failed upgrade is logged and the
+    /// load still succeeds; the next save writes the new format anyway.
     pub fn load(
         profile: &str,
         #[cfg(feature = "openpgp-card")] user_pin: &SecretString,
@@ -694,13 +878,19 @@ impl SecuredConfig {
         unlock: Option<&UnlockCode>,
         #[cfg(feature = "openpgp-card")] touch_prompt: &impl TokenInteractions,
     ) -> Result<Self, OpenVTCError> {
-        let (raw_secured_config, needs_migration) = Self::read_format(profile)?;
+        let original = Self::read_raw(profile)?;
+        let (raw_secured_config, needs_migration) =
+            Self::parse_format(original.as_slice(), profile)?;
+        // What is stored is what was just read, whoever wrote it; the next
+        // save must not assume it is what this process last wrote.
+        forget_written(profile);
 
         // Layer-2 downgrade defence: cross-check the stored variant against
         // the caller's credentials before any decryption or re-save.
         assert_format_matches_intent(&raw_secured_config, token.is_some(), unlock.is_some())?;
 
         let sc = raw_secured_config.unlock(
+            profile,
             #[cfg(feature = "openpgp-card")]
             user_pin,
             token,
@@ -709,15 +899,26 @@ impl SecuredConfig {
             touch_prompt,
         )?;
 
-        // If we just loaded a legacy untagged blob, re-save it in the tagged
-        // format so future loads take the fast path. Failures are logged but
-        // not fatal — the in-memory config is already valid.
-        if needs_migration {
-            let unlock_vec = unlock.map(|uc| uc.0.expose_secret().clone());
+        if let (SecuredConfigFormat::PasswordEncrypted { .. }, Some(unlock)) =
+            (&raw_secured_config, unlock)
+        {
+            // Legacy fixed-salt blob (tagged or not): move it to the salted,
+            // profile-bound format now that the code is known to be right.
+            match sc.upgrade_password_blob(profile, unlock, &original) {
+                Ok(()) => info!("Migrated SecuredConfig to the salted passphrase format"),
+                Err(e) => warn!(
+                    "SecuredConfig is still in the legacy passphrase format ({e}); \
+                     the next save rewrites it"
+                ),
+            }
+        } else if needs_migration {
+            // If we just loaded a legacy untagged blob, re-save it in the
+            // tagged format so future loads take the fast path. Failures are
+            // logged but not fatal — the in-memory config is already valid.
             if let Err(e) = sc.save(
                 profile,
                 token,
-                unlock_vec.as_ref(),
+                None,
                 #[cfg(feature = "openpgp-card")]
                 &|| {},
             ) {
@@ -729,6 +930,75 @@ impl SecuredConfig {
 
         Ok(sc)
     }
+
+    /// Rewrite a legacy passphrase blob as `PasswordSealed`, under a key
+    /// derived from the same code with a fresh random salt.
+    ///
+    /// # Why this cannot lock the profile out
+    ///
+    /// The upgrade is **one** store write, replacing one entry: before it the
+    /// legacy blob is stored, after it the sealed one, and [`load`](Self::load)
+    /// opens either with the same unlock code because it dispatches on the
+    /// stored variant. The protected tier in `config.json` is encrypted under
+    /// `protected_key`, carried *inside* this blob, not under the unlock key,
+    /// so it does not change and needs no second write. In order:
+    ///
+    /// 1. The new envelope is built and opened again in memory; nothing is
+    ///    written unless it round-trips.
+    /// 2. The store write. A failure (or a crash) here leaves whichever whole
+    ///    blob the store kept — every backend replaces an entry as a unit (the
+    ///    file store by write-to-temp and rename).
+    /// 3. The stored blob is read back and opened with the new key. If that
+    ///    fails, the original bytes are written back.
+    fn upgrade_password_blob(
+        &self,
+        profile: &str,
+        unlock: &UnlockCode,
+        original: &[u8],
+    ) -> Result<(), OpenVTCError> {
+        let key = unlock.salted_key()?;
+        let plaintext = Zeroizing::new(serde_json::to_vec(self)?);
+        let sealed = seal_password(&key, profile, &plaintext)?;
+
+        // 1. In-memory round trip before anything is replaced.
+        if sealed
+            .open_password(unlock, profile)?
+            .as_ref()
+            .map(|p| p.as_slice())
+            != Some(plaintext.as_slice())
+        {
+            return Err(OpenVTCError::Encrypt(
+                "the upgraded SecuredConfig did not round-trip; left as it was".to_string(),
+            ));
+        }
+
+        // 2. The one write.
+        forget_written(profile);
+        write_format(profile, &sealed)?;
+
+        // 3. Read back and confirm.
+        let confirmed = Self::read_format(profile)
+            .and_then(|(stored, _)| stored.open_password(unlock, profile))
+            .map(|opened| opened.as_ref().map(|p| p.as_slice()) == Some(plaintext.as_slice()));
+        if matches!(confirmed, Ok(true)) {
+            return Ok(());
+        }
+        error!("the upgraded SecuredConfig did not read back; restoring the original blob");
+        Entry::new(SERVICE, profile)
+            .and_then(|entry| entry.set_secret(original))
+            .map_err(|e| OpenVTCError::from_keyring(&e, profile))?;
+        Err(OpenVTCError::Encrypt(
+            "the upgraded SecuredConfig did not read back; the original was restored".to_string(),
+        ))
+    }
+}
+
+/// Write an envelope to the OS secure store entry of `profile`.
+fn write_format(profile: &str, format: &SecuredConfigFormat) -> Result<(), OpenVTCError> {
+    let blob = encode_blob(format)?;
+    Entry::new(SERVICE, profile)
+        .and_then(|entry| entry.set_secret(&blob))
+        .map_err(|e| OpenVTCError::from_keyring(&e, profile))
 }
 
 /// Information that is required for each key stored
@@ -772,25 +1042,42 @@ pub enum KeySourceMaterial {
 
 /// AES-256-GCM nonce size in bytes
 const NONCE_SIZE: usize = 12;
-/// HKDF info label for key derivation (v2 format)
+/// HKDF info label for key derivation (v2 format). Shared by every blob
+/// written before the per-blob labels below existed; kept so those blobs
+/// still open.
 const HKDF_INFO: &[u8] = b"openvtc-key-v2";
 
-/// Derives an AES-256-GCM key from the unlock code and nonce using HKDF-SHA256.
-fn derive_key(unlock: &[u8; 32], nonce: &[u8]) -> Result<Aes256Gcm, OpenVTCError> {
-    let hk = Hkdf::<Sha256>::new(Some(nonce), unlock);
-    let mut key_bytes = [0u8; 32];
-    hk.expand(HKDF_INFO, &mut key_bytes)
+/// HKDF info label for the passphrase-sealed `SecuredConfig` envelope
+/// ([`SecuredConfigFormat::PasswordSealed`]).
+const SECURED_SEALED_INFO: &[u8] = b"openvtc/secured-config/v2";
+/// Associated-data prefix for the sealed `SecuredConfig` envelope. The keyring
+/// account (the profile name) follows it.
+const SECURED_SEALED_AAD: &[u8] = b"openvtc/secured-config/v2\0profile\0";
+
+/// Derives an AES-256-GCM key from `ikm` and the nonce using HKDF-SHA256 with
+/// the given `info` label.
+fn derive_key(ikm: &[u8; 32], nonce: &[u8], info: &[u8]) -> Result<Aes256Gcm, OpenVTCError> {
+    let hk = Hkdf::<Sha256>::new(Some(nonce), ikm);
+    let mut key_bytes = Zeroizing::new([0u8; 32]);
+    hk.expand(info, key_bytes.as_mut())
         .map_err(|e| OpenVTCError::Encrypt(format!("HKDF key derivation failed: {e}")))?;
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-        .map_err(|e| OpenVTCError::Encrypt(format!("Invalid AES key: {e}")))?;
-    key_bytes.zeroize();
-    Ok(cipher)
+    Aes256Gcm::new_from_slice(key_bytes.as_ref())
+        .map_err(|e| OpenVTCError::Encrypt(format!("Invalid AES key: {e}")))
 }
 
-/// Encrypts data using AES-256-GCM with HKDF-derived key and random nonce.
+/// AES-256-GCM seal with an HKDF-derived per-write key and bound associated
+/// data. Output: `[12-byte nonce | ciphertext + tag]`.
 ///
-/// Output format: `[12-byte nonce | ciphertext + auth tag]`
-pub fn unlock_code_encrypt(unlock: &[u8; 32], input: &[u8]) -> Result<Vec<u8>, OpenVTCError> {
+/// `info` separates the key per blob kind (so one input key never yields the
+/// same AES key for two different kinds of blob); `aad` binds the ciphertext
+/// to its context (format tag, profile), so a blob copied into another context
+/// fails authentication instead of opening.
+pub(crate) fn seal(
+    ikm: &[u8; 32],
+    info: &[u8],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, OpenVTCError> {
     // Fill the nonce from `rand`'s OsRng rather than aes-gcm's own
     // `AeadCore::generate_nonce`: that helper wants an RNG from the rand_core
     // 0.9 trait set, and this crate is pinned to rand 0.8 by the OpenPGP stack
@@ -799,9 +1086,15 @@ pub fn unlock_code_encrypt(unlock: &[u8; 32], input: &[u8]) -> Result<Vec<u8>, O
     let mut nonce_bytes = [0u8; NONCE_SIZE];
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = aes_gcm::Nonce::from(nonce_bytes);
-    let cipher = derive_key(unlock, &nonce)?;
+    let cipher = derive_key(ikm, &nonce, info)?;
 
-    match cipher.encrypt(&nonce, input) {
+    match cipher.encrypt(
+        &nonce,
+        Payload {
+            msg: plaintext,
+            aad,
+        },
+    ) {
         Ok(ciphertext) => {
             let mut result = nonce.to_vec();
             result.extend_from_slice(&ciphertext);
@@ -816,22 +1109,15 @@ pub fn unlock_code_encrypt(unlock: &[u8; 32], input: &[u8]) -> Result<Vec<u8>, O
     }
 }
 
-/// Decrypts data using AES-256-GCM with HKDF-derived key.
-///
-/// Expected input format: `[12-byte nonce | ciphertext + auth tag]`
-pub fn unlock_code_decrypt(unlock: &[u8; 32], input: &[u8]) -> Result<Vec<u8>, OpenVTCError> {
-    aead_open(unlock, input)?.ok_or_else(|| {
-        error!("Couldn't decrypt data. Likely due to incorrect unlock code!");
-        OpenVTCError::Decrypt(
-            "Couldn't decrypt data, likely due to incorrect unlock code!".to_string(),
-        )
-    })
-}
-
-/// The AEAD half of [`unlock_code_decrypt`], with the two failures kept apart:
-/// `Err` for input that cannot be ciphertext at all, `Ok(None)` for ciphertext
-/// this key does not open — the wrong-code case.
-fn aead_open(unlock: &[u8; 32], input: &[u8]) -> Result<Option<Vec<u8>>, OpenVTCError> {
+/// The inverse of [`seal`], with the two failures kept apart: `Err` for input
+/// that cannot be ciphertext at all, `Ok(None)` for ciphertext this key (or
+/// this associated data) does not open — the wrong-code / wrong-context case.
+pub(crate) fn open(
+    ikm: &[u8; 32],
+    info: &[u8],
+    aad: &[u8],
+    input: &[u8],
+) -> Result<Option<Zeroizing<Vec<u8>>>, OpenVTCError> {
     if input.len() <= NONCE_SIZE {
         return Err(OpenVTCError::Decrypt(
             "Ciphertext too short (missing nonce)".to_string(),
@@ -846,74 +1132,136 @@ fn aead_open(unlock: &[u8; 32], input: &[u8]) -> Result<Option<Vec<u8>>, OpenVTC
         .try_into()
         .map_err(|_| OpenVTCError::Decrypt("Nonce is not 12 bytes".to_string()))?;
     let nonce: &aes_gcm::Nonce<_> = nonce_arr.into();
-    let cipher = derive_key(unlock, nonce_bytes)?;
+    let cipher = derive_key(ikm, nonce_bytes, info)?;
 
     // aes-gcm's error is opaque by design: a failed tag check is the only
     // thing it reports here.
-    Ok(cipher.decrypt(nonce, ciphertext).ok())
+    Ok(cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .ok()
+        .map(Zeroizing::new))
+}
+
+/// Encrypts data using AES-256-GCM with HKDF-derived key and random nonce.
+///
+/// Output format: `[12-byte nonce | ciphertext + auth tag]`. This is the
+/// pre-AAD format — no associated data, and the shared `openvtc-key-v2` HKDF
+/// label. Kept for the hardware-token envelope and for callers outside the
+/// config store; the config store's own blobs are now written with per-kind
+/// labels and bound associated data.
+pub fn unlock_code_encrypt(unlock: &[u8; 32], input: &[u8]) -> Result<Vec<u8>, OpenVTCError> {
+    seal(unlock, HKDF_INFO, b"", input)
+}
+
+/// Decrypts data using AES-256-GCM with HKDF-derived key.
+///
+/// Expected input format: `[12-byte nonce | ciphertext + auth tag]` — the
+/// output of [`unlock_code_encrypt`].
+pub fn unlock_code_decrypt(unlock: &[u8; 32], input: &[u8]) -> Result<Vec<u8>, OpenVTCError> {
+    aead_open(unlock, input)?
+        .map(|pt| pt.to_vec())
+        .ok_or_else(|| {
+            error!("Couldn't decrypt data. Likely due to incorrect unlock code!");
+            OpenVTCError::Decrypt(
+                "Couldn't decrypt data, likely due to incorrect unlock code!".to_string(),
+            )
+        })
+}
+
+/// The AEAD half of [`unlock_code_decrypt`], with the two failures kept apart:
+/// `Err` for input that cannot be ciphertext at all, `Ok(None)` for ciphertext
+/// this key does not open — the wrong-code case.
+pub(crate) fn aead_open(
+    unlock: &[u8; 32],
+    input: &[u8],
+) -> Result<Option<Zeroizing<Vec<u8>>>, OpenVTCError> {
+    open(unlock, HKDF_INFO, b"", input)
+}
+
+/// Associated data for the sealed `SecuredConfig` envelope of `profile`.
+fn secured_aad(profile: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(SECURED_SEALED_AAD.len() + profile.len());
+    aad.extend_from_slice(SECURED_SEALED_AAD);
+    aad.extend_from_slice(profile.as_bytes());
+    aad
 }
 
 // ---------------------------------------------------------------------------
-// v2 passphrase-AEAD format with random per-entry Argon2 salt
+// Passphrase-AEAD blobs with a random per-blob Argon2 salt (exports)
 //
-// The legacy `unlock_code_encrypt` / `unlock_code_decrypt` API takes a
-// pre-derived AEAD key. Migrating to a per-entry random Argon2 salt
-// requires the salt to travel with the ciphertext, so the encrypt/decrypt
-// pair below take the *passphrase* directly and produce / consume a
-// versioned blob:
+// The encrypt/decrypt pair below take the *passphrase* directly and produce /
+// consume a versioned blob, so the salt travels with the ciphertext:
 //
-//   v1 (legacy):  [nonce(12) | ciphertext+tag(N)]
-//   v2 (current): [magic(4)="OPV2" | salt(16) | nonce(12) | ciphertext+tag(N)]
+//   v1 (legacy):  [nonce(12) | ct+tag]                       fixed info-salt
+//   v2 (legacy):  ["OPV2" | salt(16) | nonce(12) | ct+tag]   no AAD, info unused
+//   v3 (current): ["OPV3" | salt(16) | nonce(12) | ct+tag]
+//                 HKDF info = "openvtc/passphrase-blob/v3\0" || info,
+//                 AAD = "OPV3" || salt
 //
-// `passphrase_decrypt_with_info` auto-detects the format. Encrypted blobs
-// in keyring entries / on disk roll forward to v2 the next time the
-// caller writes them — transparent migration for the user.
+// `passphrase_decrypt` reads all three; only v3 is written.
 // ---------------------------------------------------------------------------
 
 const V2_MAGIC: &[u8; 4] = b"OPV2";
-const V2_SALT_SIZE: usize = 16;
-const V2_HEADER_SIZE: usize = V2_MAGIC.len() + V2_SALT_SIZE;
+const V3_MAGIC: &[u8; 4] = b"OPV3";
+const PASSPHRASE_SALT_SIZE: usize = 16;
+const PASSPHRASE_HEADER_SIZE: usize = 4 + PASSPHRASE_SALT_SIZE;
+/// Prefix of the v3 HKDF label; the caller's `info` follows it.
+const V3_INFO_PREFIX: &[u8] = b"openvtc/passphrase-blob/v3\0";
 
-/// Encrypt `plaintext` under `passphrase` using a fresh random Argon2id
-/// salt and AES-256-GCM nonce. `info` provides domain separation in the
-/// KDF so the same passphrase produces different keys for, e.g., the
-/// SecuredConfig keyring entry vs. an exported config blob.
+fn v3_info(info: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(V3_INFO_PREFIX.len() + info.len());
+    out.extend_from_slice(V3_INFO_PREFIX);
+    out.extend_from_slice(info);
+    out
+}
+
+/// Encrypt `plaintext` under `passphrase` with a fresh random Argon2id salt
+/// and AES-256-GCM nonce.
 ///
-/// Output is a v2 blob: `[OPV2 | salt(16) | nonce(12) | ct+tag]`.
-pub fn passphrase_encrypt_v2(
+/// `info` is the domain-separation label (e.g. `b"openvtc-export-v1"`): it is
+/// fed into the HKDF step, so a blob written for one purpose does not open
+/// under another purpose's label even with the right passphrase. The header
+/// (magic and salt) is bound as associated data.
+///
+/// Output is a v3 blob: `[OPV3 | salt(16) | nonce(12) | ct+tag]`. Read it back
+/// with [`passphrase_decrypt`] and the same `info`.
+///
+/// # Errors
+///
+/// When Argon2 or AES-GCM fails.
+pub fn passphrase_encrypt(
     passphrase: &[u8],
-    _info: &[u8],
+    info: &[u8],
     plaintext: &[u8],
 ) -> Result<Vec<u8>, OpenVTCError> {
-    use rand::RngCore;
-    let mut salt = [0u8; V2_SALT_SIZE];
+    let mut salt = [0u8; PASSPHRASE_SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
 
-    let key = crate::config::derive_passphrase_key_v2(passphrase, &salt)?;
-    let inner = unlock_code_encrypt(&key, plaintext)?;
+    let key = Zeroizing::new(crate::config::derive_passphrase_key_v2(passphrase, &salt)?);
+    let mut header = Vec::with_capacity(PASSPHRASE_HEADER_SIZE);
+    header.extend_from_slice(V3_MAGIC);
+    header.extend_from_slice(&salt);
+    let inner = seal(&key, &v3_info(info), &header, plaintext)?;
 
-    let mut out = Vec::with_capacity(V2_HEADER_SIZE + inner.len());
-    out.extend_from_slice(V2_MAGIC);
-    out.extend_from_slice(&salt);
+    let mut out = header;
     out.extend_from_slice(&inner);
     Ok(out)
 }
 
-/// Async wrapper for [`passphrase_encrypt_v2`] that runs the (CPU-bound,
+/// Async wrapper for [`passphrase_encrypt`] that runs the (CPU-bound,
 /// ~0.5–1 s) Argon2id key derivation on `tokio::task::spawn_blocking` instead
 /// of inline on the async runtime (R12).
 ///
-/// `passphrase_encrypt_v2` derives a fresh-salt Argon2 key before AES-GCM
-/// encrypting; at the config-export site that derive runs on the event-loop
-/// thread and freezes the UI for ~1 s. This helper owns its inputs (so the
-/// closure is `Send + 'static`) and moves the whole encrypt — including the
-/// random per-call salt generation — onto the blocking pool. The salt is still
-/// generated fresh per call inside the closure (not weakened), and the
-/// resulting v2 blob is byte-for-byte the same shape as the sync path: a blob
-/// produced here is decryptable by [`passphrase_decrypt`].
-///
-/// `passphrase` is taken by value so the secret bytes are moved into the
-/// closure and dropped there.
+/// At the config-export site the derive would otherwise run on the event-loop
+/// thread and freeze the UI for ~1 s. The inputs are owned (so the closure is
+/// `Send + 'static`) and the secret ones are wiped when the closure ends. The
+/// blob has exactly the shape the sync path writes.
 ///
 /// # Errors
 ///
@@ -921,67 +1269,96 @@ pub fn passphrase_encrypt_v2(
 /// [`OpenVTCError::Encrypt`] if the blocking task panics. The `JoinError`
 /// carries only the panic location — never the passphrase, derived key, or
 /// plaintext.
-pub async fn passphrase_encrypt_v2_blocking(
-    passphrase: Vec<u8>,
+pub async fn passphrase_encrypt_blocking(
+    passphrase: Zeroizing<Vec<u8>>,
     info: Vec<u8>,
-    plaintext: Vec<u8>,
+    plaintext: Zeroizing<Vec<u8>>,
 ) -> Result<Vec<u8>, OpenVTCError> {
-    // Wrap the moved secret copies in `Zeroizing` so the transient plaintext
-    // passphrase and config bytes are wiped when the closure scope ends.
-    let passphrase = zeroize::Zeroizing::new(passphrase);
-    let plaintext = zeroize::Zeroizing::new(plaintext);
-    tokio::task::spawn_blocking(move || passphrase_encrypt_v2(&passphrase, &info, &plaintext))
+    tokio::task::spawn_blocking(move || passphrase_encrypt(&passphrase, &info, &plaintext))
         .await
         .map_err(|e| OpenVTCError::Encrypt(format!("Argon2 encrypt task panicked: {e}")))?
 }
 
-/// Decrypt a passphrase-protected blob written by either:
-///   * `passphrase_encrypt_v2` (v2: random salt embedded in the blob), or
-///   * the legacy v1 path where the caller derived a key with the
-///     deterministic info-based salt and called `unlock_code_encrypt`.
+/// Decrypt a passphrase-protected blob written by:
+///   * [`passphrase_encrypt`] (v3: `OPV3` magic, random salt, `info` in the
+///     HKDF label, header bound as AAD),
+///   * the earlier `passphrase_encrypt_v2` (v2: `OPV2` magic, random salt,
+///     `info` unused), or
+///   * the legacy v1 path, where the key was derived with the deterministic
+///     `info`-based salt and the blob written by [`unlock_code_encrypt`].
 ///
-/// Format selection is by magic prefix: blobs that start with `b"OPV2"`
-/// are decoded as v2, anything else falls back to v1.
+/// Format selection is by magic prefix; anything without one is read as v1.
+///
+/// # Errors
+///
+/// [`OpenVTCError::Decrypt`] when the passphrase (or, for v1 and v3, the
+/// `info` label) is wrong or the blob was altered.
 pub fn passphrase_decrypt(
     passphrase: &[u8],
     info: &[u8],
     blob: &[u8],
 ) -> Result<Vec<u8>, OpenVTCError> {
-    if blob.len() >= V2_HEADER_SIZE && &blob[..V2_MAGIC.len()] == V2_MAGIC {
-        let salt = &blob[V2_MAGIC.len()..V2_HEADER_SIZE];
-        let inner = &blob[V2_HEADER_SIZE..];
-        let key = crate::config::derive_passphrase_key_v2(passphrase, salt)?;
-        return unlock_code_decrypt(&key, inner);
+    if blob.len() >= PASSPHRASE_HEADER_SIZE {
+        let (header, inner) = blob.split_at(PASSPHRASE_HEADER_SIZE);
+        let salt = &header[4..];
+        if &header[..4] == V3_MAGIC {
+            let key = Zeroizing::new(crate::config::derive_passphrase_key_v2(passphrase, salt)?);
+            return open(&key, &v3_info(info), header, inner)?
+                .map(|pt| pt.to_vec())
+                .ok_or_else(|| {
+                    OpenVTCError::Decrypt(
+                        "Couldn't decrypt data, likely due to an incorrect passphrase".to_string(),
+                    )
+                });
+        }
+        if &header[..4] == V2_MAGIC {
+            let key = Zeroizing::new(crate::config::derive_passphrase_key_v2(passphrase, salt)?);
+            return unlock_code_decrypt(&key, inner);
+        }
     }
     // Legacy v1 — deterministic Argon2 salt derived from `info`.
-    let key = crate::config::derive_passphrase_key(passphrase, info)?;
+    let key = Zeroizing::new(crate::config::derive_passphrase_key(passphrase, info)?);
     unlock_code_decrypt(&key, blob)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::ExposeSecret;
+
+    const PROFILE: &str = "default";
+
+    /// A blob in the legacy fixed-salt passphrase format, as releases before
+    /// #566 wrote it.
+    fn legacy_blob(code: &str, plaintext: &[u8]) -> SecuredConfigFormat {
+        let key = derive_passphrase_key_for_test(code);
+        SecuredConfigFormat::PasswordEncrypted {
+            data: BASE64_URL_SAFE_NO_PAD.encode(unlock_code_encrypt(&key, plaintext).unwrap()),
+        }
+    }
+
+    fn derive_passphrase_key_for_test(code: &str) -> [u8; 32] {
+        crate::config::derive_passphrase_key(code.as_bytes(), b"openvtc-unlock-code-v1").unwrap()
+    }
 
     fn password_blob(code: &str) -> SecuredConfigFormat {
-        let unlock = UnlockCode::from_string(code).unwrap();
-        let key = unlock.0.expose_secret().first_chunk::<32>().unwrap();
-        SecuredConfigFormat::PasswordEncrypted {
-            data: BASE64_URL_SAFE_NO_PAD.encode(unlock_code_encrypt(key, b"{}").unwrap()),
-        }
+        legacy_blob(code, b"{}")
+    }
+
+    /// A blob in the current salted, profile-bound format.
+    fn sealed_blob(code: &str, profile: &str, plaintext: &[u8]) -> SecuredConfigFormat {
+        let key = UnlockKey::derive(code.as_bytes()).unwrap();
+        seal_password(&key, profile, plaintext).unwrap()
     }
 
     /// A short code set by a release that did not enforce the minimum still
     /// opens its profile; `from_string` refuses it before trying.
     #[test]
     fn a_short_existing_code_still_unlocks() {
-        let unlock = UnlockCode::for_existing("hunter").unwrap();
-        let key = unlock.0.expose_secret().first_chunk::<32>().unwrap();
-        let blob = SecuredConfigFormat::PasswordEncrypted {
-            data: BASE64_URL_SAFE_NO_PAD.encode(unlock_code_encrypt(key, b"{}").unwrap()),
-        };
+        let blob = password_blob("hunter");
         assert!(UnlockCode::from_string("hunter").is_err());
         assert_eq!(
-            blob.check_unlock_code(&UnlockCode::for_existing("hunter").unwrap())
+            blob.check_unlock_code(&UnlockCode::for_existing("hunter").unwrap(), PROFILE)
                 .unwrap(),
             UnlockCodeCheck::Accepted
         );
@@ -990,19 +1367,111 @@ mod tests {
     /// The unlock prompt relies on this to count a wrong code of full length
     /// as a failed attempt. `UnlockCode::from_string` accepts any such code,
     /// so without it the prompt's attempt limit and backoff never applied.
+    /// Pinned for both the legacy and the salted format.
     #[test]
     fn check_unlock_code_tells_right_from_wrong() {
-        let blob = password_blob("correct horse");
-        let right = UnlockCode::from_string("correct horse").unwrap();
-        let wrong = UnlockCode::from_string("correct house").unwrap();
+        for blob in [
+            password_blob("correct horse"),
+            sealed_blob("correct horse", PROFILE, b"{}"),
+        ] {
+            let right = UnlockCode::from_string("correct horse").unwrap();
+            let wrong = UnlockCode::from_string("correct house").unwrap();
+            assert_eq!(
+                blob.check_unlock_code(&right, PROFILE).unwrap(),
+                UnlockCodeCheck::Accepted
+            );
+            assert_eq!(
+                blob.check_unlock_code(&wrong, PROFILE).unwrap(),
+                UnlockCodeCheck::Rejected
+            );
+        }
+    }
+
+    /// #569: the sealed blob is bound to its profile. Copied into another
+    /// profile's keyring entry, it does not open even with the right code.
+    #[test]
+    fn a_sealed_blob_does_not_open_under_another_profile() {
+        let blob = sealed_blob("correct horse", "alice", b"{}");
+        let code = UnlockCode::from_string("correct horse").unwrap();
         assert_eq!(
-            blob.check_unlock_code(&right).unwrap(),
+            blob.check_unlock_code(&code, "alice").unwrap(),
             UnlockCodeCheck::Accepted
         );
         assert_eq!(
-            blob.check_unlock_code(&wrong).unwrap(),
+            blob.check_unlock_code(&code, "bob").unwrap(),
             UnlockCodeCheck::Rejected
         );
+    }
+
+    /// #566: the salt is the profile's own, stored beside the ciphertext, and
+    /// the sealed envelope round-trips into a `SecuredConfig`.
+    #[test]
+    fn a_sealed_blob_round_trips_and_carries_its_salt() {
+        let sc = SecuredConfig {
+            bip32_seed: None,
+            credential_bundle: Some(SecretString::new("bundle".into())),
+            protected_key: None,
+            vta_url: None,
+            vta_did: Some("did:example:vta".into()),
+            mediator_did: None,
+            key_info: HashMap::new(),
+            protection_method: ProtectionMethod::default(),
+        };
+        let key = UnlockKey::derive(b"correct horse").unwrap();
+        let blob = seal_password(&key, PROFILE, &serde_json::to_vec(&sc).unwrap()).unwrap();
+        let SecuredConfigFormat::PasswordSealed { salt, .. } = &blob else {
+            panic!("not sealed");
+        };
+        assert_eq!(&decode_salt(salt).unwrap(), key.salt());
+
+        let code = UnlockCode::from_string("correct horse").unwrap();
+        let opened = blob
+            .unlock(
+                PROFILE,
+                #[cfg(feature = "openpgp-card")]
+                &SecretString::new("".into()),
+                None,
+                Some(&code),
+                #[cfg(feature = "openpgp-card")]
+                &NoTouch,
+            )
+            .unwrap();
+        assert_eq!(opened.vta_did.as_deref(), Some("did:example:vta"));
+        // The key the blob opened with is the one later saves use.
+        assert_eq!(code.salted_key().unwrap().salt(), key.salt());
+
+        let wrong = UnlockCode::from_string("correct house").unwrap();
+        assert!(
+            blob.unlock(
+                PROFILE,
+                #[cfg(feature = "openpgp-card")]
+                &SecretString::new("".into()),
+                None,
+                Some(&wrong),
+                #[cfg(feature = "openpgp-card")]
+                &NoTouch,
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(feature = "openpgp-card")]
+    struct NoTouch;
+    #[cfg(feature = "openpgp-card")]
+    impl TokenInteractions for NoTouch {
+        fn touch_notify(&self) {}
+        fn touch_completed(&self) {}
+    }
+
+    /// An older build that meets a sealed blob must reject it as unrecognised
+    /// — not fall back to its untagged legacy parse and try the right code as
+    /// a legacy `PasswordEncrypted` blob, which would report it as wrong.
+    #[test]
+    fn a_sealed_blob_shares_no_shape_with_the_legacy_formats() {
+        let bytes = encode_blob(&sealed_blob("correct horse", PROFILE, b"{}")).unwrap();
+        assert!(serde_json::from_slice::<LegacySecuredConfigFormat>(&bytes).is_err());
+        assert!(SecuredConfig::parse(&bytes).is_ok());
+        assert!(require_encrypted_blob(&bytes).is_ok());
     }
 
     /// Damage to the stored blob is not a wrong code: it must surface as an
@@ -1014,11 +1483,16 @@ mod tests {
         let truncated = SecuredConfigFormat::PasswordEncrypted {
             data: BASE64_URL_SAFE_NO_PAD.encode([0u8; 4]),
         };
-        assert!(truncated.check_unlock_code(&code).is_err());
+        assert!(truncated.check_unlock_code(&code, PROFILE).is_err());
         let not_base64 = SecuredConfigFormat::PasswordEncrypted {
             data: "*not base64*".into(),
         };
-        assert!(not_base64.check_unlock_code(&code).is_err());
+        assert!(not_base64.check_unlock_code(&code, PROFILE).is_err());
+        let short_salt = SecuredConfigFormat::PasswordSealed {
+            salt: BASE64_URL_SAFE_NO_PAD.encode([0u8; 4]),
+            sealed: BASE64_URL_SAFE_NO_PAD.encode([0u8; 64]),
+        };
+        assert!(short_salt.check_unlock_code(&code, PROFILE).is_err());
     }
 
     #[test]
@@ -1026,8 +1500,52 @@ mod tests {
         let code = UnlockCode::from_string("correct horse").unwrap();
         let plain = SecuredConfigFormat::PlainText { text: "p".into() };
         assert_eq!(
-            plain.check_unlock_code(&code).unwrap(),
+            plain.check_unlock_code(&code, PROFILE).unwrap(),
             UnlockCodeCheck::NotApplicable
+        );
+    }
+
+    /// The write fingerprint changes with anything that changes the stored
+    /// envelope — so changing or removing the passphrase always writes.
+    #[test]
+    fn the_write_fingerprint_covers_mode_parameters_and_content() {
+        let a = write_fingerprint(b"password-sealed", &[1; 16], b"{}");
+        assert_eq!(a, write_fingerprint(b"password-sealed", &[1; 16], b"{}"));
+        assert_ne!(a, write_fingerprint(b"password-sealed", &[2; 16], b"{}"));
+        assert_ne!(a, write_fingerprint(b"plaintext", &[1; 16], b"{}"));
+        assert_ne!(a, write_fingerprint(b"password-sealed", &[1; 16], b"{ }"));
+    }
+
+    /// The skip compares serialized plaintexts, so the same contents must
+    /// always serialize to the same bytes, whatever the map's iteration order.
+    #[test]
+    fn key_info_serializes_in_key_order() {
+        let info = |p: &str| KeyInfoConfig {
+            path: KeySourceMaterial::Derived { path: p.into() },
+            create_time: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            purpose: KeyTypes::default(),
+        };
+        let mut a = HashMap::new();
+        let mut b = HashMap::new();
+        for k in ["z", "a", "m", "q", "c"] {
+            a.insert(format!("did:example:{k}#key-1"), info(k));
+        }
+        for k in ["c", "q", "m", "a", "z"] {
+            b.insert(format!("did:example:{k}#key-1"), info(k));
+        }
+        let sc = |key_info| SecuredConfig {
+            bip32_seed: None,
+            credential_bundle: None,
+            protected_key: None,
+            vta_url: None,
+            vta_did: None,
+            mediator_did: None,
+            key_info,
+            protection_method: ProtectionMethod::default(),
+        };
+        assert_eq!(
+            serde_json::to_vec(&sc(a)).unwrap(),
+            serde_json::to_vec(&sc(b)).unwrap()
         );
     }
 
@@ -1101,6 +1619,10 @@ mod tests {
             },
             SecuredConfigFormat::PasswordEncrypted {
                 data: BASE64_URL_SAFE_NO_PAD.encode(vec![0x00u8; 512]),
+            },
+            SecuredConfigFormat::PasswordSealed {
+                salt: BASE64_URL_SAFE_NO_PAD.encode([0xfeu8; UNLOCK_SALT_LEN]),
+                sealed: BASE64_URL_SAFE_NO_PAD.encode(vec![0x0du8; 512]),
             },
             SecuredConfigFormat::TokenEncrypted {
                 esk: BASE64_URL_SAFE_NO_PAD.encode([7u8; 32]),
@@ -1311,6 +1833,7 @@ mod protected_key_tests {
     //! the admin credential. These pin the properties that make the credential
     //! safe to rotate and re-issue.
     use super::*;
+    use secrecy::ExposeSecret;
 
     #[test]
     fn a_minted_key_is_32_bytes_and_unique() {

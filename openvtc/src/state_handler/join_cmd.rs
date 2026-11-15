@@ -451,7 +451,7 @@ impl Job<'_> {
         record.submit_transport = Some(submit_transport);
         record.directory_statement_digest = directory_statement_digest;
         config.account.add_membership(record);
-        config.public.logs.insert(
+        config.private.logs.insert(
             LogFamily::Community,
             format!(
                 "Join request sent to ({vtc_did}) as persona ({persona_did}) over \

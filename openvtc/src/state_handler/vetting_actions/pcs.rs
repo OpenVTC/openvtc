@@ -139,7 +139,7 @@ fn inbound_work(config: &Config, item: &PcsInbound) -> PcsWork {
 /// it asks something of the person.
 fn pcs_notice(ctx: &mut ActionCtx<'_>, notice: Notice, persona: Option<PersonaId>) {
     ctx.config
-        .public
+        .private
         .logs
         .insert(LogFamily::Community, notice.describe());
     if let Some((id, task)) = notice.task() {

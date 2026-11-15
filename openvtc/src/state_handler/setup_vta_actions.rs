@@ -530,7 +530,9 @@ pub(crate) async fn handle_vta_start_provision(
             .await
             {
                 Ok(token_result) => {
-                    state.setup.vta.access_token = Some(token_result.access_token.clone());
+                    state.setup.vta.access_token = Some(secrecy::SecretString::from(
+                        token_result.access_token.clone(),
+                    ));
                     state.setup.vta.authenticated = true;
                     state.setup.vta.admin_credential = Some(admin.clone());
                     state.setup.vta.messages.push(MessageType::Info(

@@ -5,7 +5,7 @@ use crate::{
         Config, ConfigProtectionType, KeyBackend, UnlockCode,
         account::{Account, PersonaId},
         integrity::{DegradedPersona, DegradedReason, LoadIntegrity, StrandedMembership},
-        protected_config::ProtectedConfig,
+        protected_config::{ProtectedBinding, ProtectedConfig},
         public_config::PublicConfig,
         secured_config::SecuredConfig,
     },
@@ -45,6 +45,10 @@ pub type ProgressFn<'a> = &'a (dyn Fn(&str, &str) + Send + Sync);
 /// Anything but (1) sets the re-key flag, and the next save rewrites the blob
 /// under the stored key.
 ///
+/// Each key is tried in the current format bound to `binding` and in the
+/// legacy unbound one ([`ProtectedConfig::load`]); a blob bound to another
+/// profile opens under none of them.
+///
 /// Extracted from `load_step2` so this decision is testable without a TDK, a
 /// keyring, or a network — it is the one place a wrong answer locks a user out
 /// of their own profile.
@@ -53,9 +57,10 @@ fn decrypt_protected_with_fallback(
     legacy: &SecretBox<Vec<u8>>,
     oldest: Option<&SecretBox<Vec<u8>>>,
     blob: &str,
+    binding: ProtectedBinding<'_>,
 ) -> Result<(ProtectedConfig, bool), OpenVTCError> {
     if let Some(seed) = stored {
-        match ProtectedConfig::load(seed, blob) {
+        match ProtectedConfig::load(seed, blob, binding) {
             Ok(cfg) => return Ok((cfg, false)),
             Err(e) => {
                 debug!("stored config key did not decrypt ({e}); trying older seeds");
@@ -63,7 +68,7 @@ fn decrypt_protected_with_fallback(
         }
     }
 
-    match ProtectedConfig::load(legacy, blob) {
+    match ProtectedConfig::load(legacy, blob, binding) {
         Ok(cfg) => {
             if stored.is_none() {
                 info!("config predates its own encryption key; re-keying on next save (D12)");
@@ -79,7 +84,7 @@ fn decrypt_protected_with_fallback(
             let Some(oldest) = oldest else {
                 return Err(legacy_err);
             };
-            match ProtectedConfig::load(oldest, blob) {
+            match ProtectedConfig::load(oldest, blob, binding) {
                 Ok(cfg) => {
                     warn!(
                         "config was encrypted with the pre-0.1.4 seed — re-encrypting on next save"
@@ -301,6 +306,7 @@ impl Config {
         //   3. the pre-0.1.4 BIP32 seed, which used the verifying key.
         // Succeeding on anything but (1) sets `needs_rekey`, and the next save
         // writes the blob back under the stored key.
+        let mut public_config = public_config;
         let (mut private_cfg, needs_rekey) = match &public_config.private {
             Some(blob) => {
                 let stored_seed = stored_key
@@ -318,6 +324,7 @@ impl Config {
                     &legacy_seed,
                     oldest_seed.as_ref(),
                     blob,
+                    ProtectedBinding::Profile(profile),
                 )?
             }
             // A profile with no protected blob yet still gets a key, so its
@@ -333,6 +340,15 @@ impl Config {
         } else {
             stored_key
         };
+
+        // #568: the activity log moved from the plaintext tier into this one.
+        // An older config's entries are carried across here; the next save
+        // writes them encrypted and drops them from the plaintext part of the
+        // file, in the one atomic write.
+        let moved = public_config.migrate_logs_into(&mut private_cfg);
+        if moved > 0 {
+            info!("Moving {moved} activity-log entries into the encrypted config tier");
+        }
 
         // Cached "this DID has no verifiable name" results do not survive a
         // restart — see `prune_agent_name_negatives`. The first refresh sweep
@@ -755,8 +771,9 @@ impl Config {
                 #[cfg(feature = "openpgp-card")]
                 token_user_pin: token_user_pin.clone(),
                 protection_method: sc.protection_method.clone(),
-                unlock_code: unlock_passphrase
-                    .map(|uc| SecretBox::new(Box::new(uc.0.expose_secret().to_owned()))),
+                // The key the secured blob was opened (or upgraded) with,
+                // salt included, so saves seal without running Argon2.
+                unlock_code: unlock_passphrase.map(UnlockCode::salted_key).transpose()?,
             },
             // PERF #1: hand the still-open admin session back to the caller for
             // reuse (context-name fetch, relationships, joins). `vta_client` is
@@ -863,6 +880,8 @@ mod protected_key_fallback_tests {
     use super::*;
     use crate::config::secured_config::new_protected_key;
 
+    const BOUND: ProtectedBinding<'static> = ProtectedBinding::Profile("default");
+
     fn seed(byte: u8) -> SecretBox<Vec<u8>> {
         SecretBox::new(Box::new(vec![byte; 32]))
     }
@@ -870,7 +889,8 @@ mod protected_key_fallback_tests {
     fn blob_under(seed: &SecretBox<Vec<u8>>) -> String {
         let mut cfg = ProtectedConfig::default();
         cfg.account.top_context_id = "marker".to_string();
-        cfg.save(seed).expect("encrypt")
+        cfg.save(seed, ProtectedBinding::Profile("default"))
+            .expect("encrypt")
     }
 
     /// The normal, migrated case: stored key decrypts, nothing to re-key.
@@ -879,7 +899,8 @@ mod protected_key_fallback_tests {
         let stored = seed(1);
         let blob = blob_under(&stored);
         let (cfg, rekey) =
-            decrypt_protected_with_fallback(Some(&stored), &seed(2), None, &blob).expect("decrypt");
+            decrypt_protected_with_fallback(Some(&stored), &seed(2), None, &blob, BOUND)
+                .expect("decrypt");
         assert_eq!(cfg.account.top_context_id, "marker");
         assert!(!rekey);
     }
@@ -891,7 +912,7 @@ mod protected_key_fallback_tests {
         let legacy = seed(2);
         let blob = blob_under(&legacy);
         let (cfg, rekey) =
-            decrypt_protected_with_fallback(None, &legacy, None, &blob).expect("decrypt");
+            decrypt_protected_with_fallback(None, &legacy, None, &blob, BOUND).expect("decrypt");
         assert_eq!(cfg.account.top_context_id, "marker");
         assert!(rekey, "a pre-D12 config must be re-keyed");
     }
@@ -906,8 +927,9 @@ mod protected_key_fallback_tests {
         // The new key was persisted; the blob was not rewritten.
         let stored = crate::config::decode_protected_key(&new_protected_key()).expect("decode");
 
-        let (cfg, rekey) = decrypt_protected_with_fallback(Some(&stored), &legacy, None, &blob)
-            .expect("an interrupted re-key must not lock the user out");
+        let (cfg, rekey) =
+            decrypt_protected_with_fallback(Some(&stored), &legacy, None, &blob, BOUND)
+                .expect("an interrupted re-key must not lock the user out");
         assert_eq!(cfg.account.top_context_id, "marker");
         assert!(
             rekey,
@@ -921,7 +943,7 @@ mod protected_key_fallback_tests {
         let oldest = seed(3);
         let blob = blob_under(&oldest);
         let (cfg, rekey) =
-            decrypt_protected_with_fallback(Some(&seed(1)), &seed(2), Some(&oldest), &blob)
+            decrypt_protected_with_fallback(Some(&seed(1)), &seed(2), Some(&oldest), &blob, BOUND)
                 .expect("decrypt");
         assert_eq!(cfg.account.top_context_id, "marker");
         assert!(rekey);
@@ -933,8 +955,24 @@ mod protected_key_fallback_tests {
     #[test]
     fn an_undecryptable_blob_is_an_error_not_an_empty_config() {
         let blob = blob_under(&seed(9));
-        let err = decrypt_protected_with_fallback(Some(&seed(1)), &seed(2), Some(&seed(3)), &blob);
+        let err =
+            decrypt_protected_with_fallback(Some(&seed(1)), &seed(2), Some(&seed(3)), &blob, BOUND);
         assert!(err.is_err(), "must not fabricate an empty account");
+    }
+
+    /// #569: a blob written for another profile does not open under any key,
+    /// even the right one — it is not this profile's data.
+    #[test]
+    fn a_blob_bound_to_another_profile_is_refused() {
+        let stored = seed(1);
+        let mut cfg = ProtectedConfig::default();
+        cfg.account.top_context_id = "marker".to_string();
+        let other = cfg
+            .save(&stored, ProtectedBinding::Profile("other"))
+            .expect("encrypt");
+        assert!(
+            decrypt_protected_with_fallback(Some(&stored), &seed(2), None, &other, BOUND).is_err()
+        );
     }
 
     /// A VTA-backed profile has no pre-0.1.4 form, so the legacy failure is
@@ -942,8 +980,8 @@ mod protected_key_fallback_tests {
     #[test]
     fn a_vta_profile_reports_the_legacy_failure() {
         let blob = blob_under(&seed(9));
-        let err =
-            decrypt_protected_with_fallback(None, &seed(2), None, &blob).expect_err("should fail");
+        let err = decrypt_protected_with_fallback(None, &seed(2), None, &blob, BOUND)
+            .expect_err("should fail");
         assert!(
             matches!(err, OpenVTCError::Decrypt(_)),
             "unexpected error: {err}"

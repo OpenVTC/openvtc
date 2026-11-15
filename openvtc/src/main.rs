@@ -521,9 +521,8 @@ async fn main() -> Result<()> {
         }),
         None => matches
             .get_one::<String>("unlock-code")
-            .cloned()
             .map(|passphrase| SuppliedUnlockCode {
-                passphrase,
+                passphrase: zeroize::Zeroizing::new(passphrase.clone()),
                 from_argv: true,
             }),
     };
@@ -939,7 +938,8 @@ const MAX_UNLOCK_ATTEMPTS: usize = 5;
 /// to avoid that. Warning about the safe route as well is how a warning gets
 /// trained out of people.
 struct SuppliedUnlockCode {
-    passphrase: String,
+    /// Wiped on drop.
+    passphrase: zeroize::Zeroizing<String>,
     from_argv: bool,
 }
 
@@ -962,14 +962,17 @@ fn prompt_unlock_code(profile: &str) -> Result<UnlockCode, OpenVTCError> {
             let delay = std::time::Duration::from_secs(1 << (attempt - 3).min(3));
             std::thread::sleep(delay);
         }
-        let input = Password::with_theme(&ColorfulTheme::default())
-            .with_prompt("Please enter unlock passphrase")
-            .allow_empty_password(false)
-            .interact()
-            .map_err(|e| {
-                eprintln!("Failed to read passphrase input: {e}");
-                OpenVTCError::Config(format!("Passphrase input failed: {e}"))
-            })?;
+        // Wiped on drop. (dialoguer's own line buffer is beyond reach.)
+        let input = zeroize::Zeroizing::new(
+            Password::with_theme(&ColorfulTheme::default())
+                .with_prompt("Please enter unlock passphrase")
+                .allow_empty_password(false)
+                .interact()
+                .map_err(|e| {
+                    eprintln!("Failed to read passphrase input: {e}");
+                    OpenVTCError::Config(format!("Passphrase input failed: {e}"))
+                })?,
+        );
         let code = UnlockCode::for_existing(&input)?;
         let problem = if !unlock_code_rejected(profile, &code) {
             warn_if_short_unlock_code(&input);
@@ -1103,6 +1106,14 @@ fn load_fast(
     } else {
         None
     };
+
+    // Derive the salted unlock key here, where blocking is expected, rather
+    // than inside the async load. For a profile already in the salted format
+    // the check above derived it and this is a cache hit; for one still in the
+    // legacy format it is the fresh-salt key the load migrates the profile to.
+    if let Some(code) = &unlock_passphrase {
+        code.salted_key()?;
+    }
 
     Ok(DeferredLoad {
         profile: profile.to_string(),

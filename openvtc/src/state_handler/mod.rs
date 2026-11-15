@@ -5337,7 +5337,7 @@ fn queue_for_check(
         Err(refused) => {
             warn!(%typ, reason = %refused, "inbound message not queued for verification — dropped");
             if lane == verify_queue::Lane::Priority {
-                config.public.logs.insert(
+                config.private.logs.insert(
                     openvtc_core::logs::LogFamily::Community,
                     format!("Dropped a message from community ({sender}): {refused}."),
                 );

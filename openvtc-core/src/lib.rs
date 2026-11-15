@@ -58,6 +58,7 @@ pub mod operational;
 pub mod persona;
 pub mod personhood;
 pub mod presentation;
+pub mod private_file;
 pub mod process_lock;
 pub mod proof_check;
 pub mod rebuild;

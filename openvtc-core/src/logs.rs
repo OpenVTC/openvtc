@@ -93,16 +93,57 @@ impl Default for Logs {
     }
 }
 
+/// Longest message a log entry keeps, in characters. Entries routinely quote
+/// text a peer chose (a rejection reason, an error message); the cap keeps one
+/// peer from filling the persisted config with it.
+pub const MAX_LOG_MESSAGE_CHARS: usize = 1024;
+
 impl Logs {
     /// Appends a new log entry, evicting the oldest entry if the limit is exceeded.
+    ///
+    /// The message is sanitised here, so no caller can forget: ANSI escapes,
+    /// control characters and bidi / zero-width characters are stripped
+    /// ([`crate::display::sanitize_display`]) and it is cut to
+    /// [`MAX_LOG_MESSAGE_CHARS`]. Many entries quote peer-supplied text, and
+    /// this log is persisted and rendered in the TUI.
     pub fn insert(&mut self, type_: LogFamily, message: String) {
         self.messages.push_back(LogMessage {
             created: Utc::now(),
             type_,
-            message,
+            message: crate::display::sanitize_display(&message, MAX_LOG_MESSAGE_CHARS),
         });
 
-        if self.messages.len() > self.limit {
+        self.trim();
+    }
+
+    /// Takes in the entries of an older log (the plaintext `PublicConfig` log
+    /// of a config written before the log moved to the encrypted tier),
+    /// sanitising them as [`Logs::insert`] would, and keeps the newest
+    /// [`Logs::limit`] of the combined set in time order.
+    pub fn absorb(&mut self, older: Logs) {
+        let mut combined: Vec<LogMessage> = older
+            .messages
+            .into_iter()
+            .map(|mut m| {
+                m.message = crate::display::sanitize_display(&m.message, MAX_LOG_MESSAGE_CHARS);
+                m
+            })
+            .chain(self.messages.drain(..))
+            .collect();
+        // Stable: entries with the same timestamp keep their order.
+        combined.sort_by_key(|m| m.created);
+        self.messages = combined.into();
+        self.trim();
+    }
+
+    /// Whether the log holds no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
+    fn trim(&mut self) {
+        while self.messages.len() > self.limit {
             self.messages.pop_front();
         }
     }
@@ -151,6 +192,45 @@ mod tests {
             "Oldest message should have been removed"
         );
         assert_eq!(logs.messages[2].message, "fourth");
+    }
+
+    /// #568: peer-supplied text is cleaned and capped on the way in, whoever
+    /// the caller is.
+    #[test]
+    fn insert_strips_bidi_and_control_characters_and_caps_length() {
+        let mut logs = Logs::default();
+        logs.insert(
+            LogFamily::Relationship,
+            "Rejected: \u{202E}evil\u{2066}\x1b[31mred\x1b[0m\nnext\u{200B}".to_string(),
+        );
+        assert_eq!(logs.messages[0].message, "Rejected: evilrednext");
+
+        logs.insert(LogFamily::Task, "x".repeat(MAX_LOG_MESSAGE_CHARS * 4));
+        assert_eq!(
+            logs.messages[1].message.chars().count(),
+            MAX_LOG_MESSAGE_CHARS
+        );
+    }
+
+    #[test]
+    fn absorb_merges_in_time_order_sanitises_and_keeps_the_newest() {
+        let t = |s: i64| chrono::DateTime::<Utc>::from_timestamp(s, 0).unwrap();
+        let entry = |s: i64, m: &str| LogMessage {
+            created: t(s),
+            type_: LogFamily::Contact,
+            message: m.to_string(),
+        };
+        let older = Logs {
+            messages: VecDeque::from([entry(1, "one"), entry(3, "three\u{202E}")]),
+            limit: 200,
+        };
+        let mut logs = Logs {
+            messages: VecDeque::from([entry(2, "two"), entry(4, "four")]),
+            limit: 3,
+        };
+        logs.absorb(older);
+        let got: Vec<_> = logs.messages.iter().map(|m| m.message.as_str()).collect();
+        assert_eq!(got, ["two", "three", "four"]);
     }
 
     #[test]

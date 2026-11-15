@@ -86,9 +86,10 @@ pub fn derive_passphrase_key(passphrase: &[u8], info: &[u8]) -> Result<[u8; 32],
     // OpenVTC users — which is the H2 finding from the v0.2.0 review.
     //
     // New ciphertext is always written via `derive_passphrase_key_v2`
-    // (random per-entry salt) and the v2 magic-prefix format. The
-    // unlock-code path auto-detects the format and reaches for this
-    // legacy KDF only when consuming pre-migration data.
+    // (random per-entry salt): exports in the OPV3 format, the secured
+    // config as a `PasswordSealed` envelope with the salt beside it. Both
+    // read paths auto-detect the format and reach for this legacy KDF only
+    // when consuming pre-migration data.
     let salt = Sha256::digest(info);
     derive_argon2_key(passphrase, &salt)
 }
@@ -165,12 +166,113 @@ pub fn validate_passphrase(passphrase: &str) -> Result<(), OpenVTCError> {
     Ok(())
 }
 
-/// A 32-byte symmetric key derived from a user-provided passphrase via Argon2id.
-/// Used to encrypt/decrypt the secured configuration on disk.
-pub struct UnlockCode(pub(crate) SecretBox<Vec<u8>>);
+/// Length of the per-profile random Argon2id salt of the unlock key.
+pub const UNLOCK_SALT_LEN: usize = 16;
+
+/// Argon2id info label of the legacy, fixed-salt unlock key. Read-only: a
+/// profile still under it is moved to a salted key on its next unlock.
+const LEGACY_UNLOCK_INFO: &[u8] = b"openvtc-unlock-code-v1";
+
+/// The key that seals a profile's [`secured_config::SecuredConfig`]: Argon2id
+/// over the unlock code with the profile's own random salt.
+///
+/// Carried by [`Config::unlock_code`] so a save seals without running Argon2;
+/// the salt travels with the key because it is written beside the ciphertext.
+/// A fresh salt is drawn whenever a code is *set* (setup, import, changing it
+/// in Settings), so two profiles — or two users — with the same code never
+/// share a key.
+#[derive(Clone)]
+pub struct UnlockKey {
+    salt: [u8; UNLOCK_SALT_LEN],
+    key: zeroize::Zeroizing<[u8; 32]>,
+}
+
+impl std::fmt::Debug for UnlockKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("UnlockKey(****)")
+    }
+}
+
+impl UnlockKey {
+    /// Derive a key for `passphrase` under a fresh random salt. Runs Argon2id
+    /// (~0.5–1 s); from async code use [`UnlockKey::derive_blocking`].
+    ///
+    /// # Errors
+    ///
+    /// When Argon2 fails.
+    pub fn derive(passphrase: &[u8]) -> Result<Self, OpenVTCError> {
+        use rand::RngCore;
+        let mut salt = [0u8; UNLOCK_SALT_LEN];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+        Self::derive_with_salt(passphrase, salt)
+    }
+
+    /// Derive the key for `passphrase` under a known salt.
+    pub(crate) fn derive_with_salt(
+        passphrase: &[u8],
+        salt: [u8; UNLOCK_SALT_LEN],
+    ) -> Result<Self, OpenVTCError> {
+        Ok(UnlockKey {
+            salt,
+            key: zeroize::Zeroizing::new(derive_passphrase_key_v2(passphrase, &salt)?),
+        })
+    }
+
+    /// [`UnlockKey::derive`] on `tokio::task::spawn_blocking`, so the Argon2id
+    /// run does not stall the async runtime (R12).
+    ///
+    /// # Errors
+    ///
+    /// When Argon2 fails, or the blocking task panics. The `JoinError` carries
+    /// only the panic location, never the passphrase or the key.
+    pub async fn derive_blocking(passphrase: SecretString) -> Result<Self, OpenVTCError> {
+        tokio::task::spawn_blocking(move || Self::derive(passphrase.expose_secret().as_bytes()))
+            .await
+            .map_err(|e| OpenVTCError::Config(format!("Argon2 derivation task panicked: {e}")))?
+    }
+
+    /// The salt this key was derived with.
+    pub(crate) fn salt(&self) -> &[u8; UNLOCK_SALT_LEN] {
+        &self.salt
+    }
+
+    /// The key itself.
+    pub(crate) fn key(&self) -> &[u8; 32] {
+        &self.key
+    }
+}
+
+/// Keys already derived for an [`UnlockCode`].
+#[derive(Default)]
+struct UnlockCache {
+    /// The legacy fixed-salt key.
+    legacy: Option<zeroize::Zeroizing<[u8; 32]>>,
+    /// The salted key last derived — the stored blob's, once one was read.
+    salted: Option<UnlockKey>,
+}
+
+/// An unlock code the user typed, to be tried against a stored profile.
+///
+/// Holds the code itself rather than a key: since #566 each profile seals its
+/// secured config under its own random salt, stored beside the ciphertext, so
+/// the key can only be derived once the stored blob has been read.
+/// [`secured_config::SecuredConfig::check_unlock_code`] and
+/// [`secured_config::SecuredConfig::load`] do that, and the keys they derive
+/// are kept here, so the unlock prompt's check and the load after it run
+/// Argon2 once between them, not twice.
+pub struct UnlockCode {
+    passphrase: SecretString,
+    cache: std::sync::Mutex<UnlockCache>,
+}
+
+impl std::fmt::Debug for UnlockCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("UnlockCode(****)")
+    }
+}
 
 impl UnlockCode {
-    /// Derives an unlock code from a plaintext passphrase string using Argon2id.
+    /// An unlock code being *set*: checked against [`MIN_PASSPHRASE_LENGTH`].
     ///
     /// # Errors
     ///
@@ -180,8 +282,8 @@ impl UnlockCode {
         Self::for_existing(s)
     }
 
-    /// Derives the key for a code that was set earlier, without the length
-    /// check [`UnlockCode::from_string`] applies to a new one.
+    /// A code that was set earlier, without the length check
+    /// [`UnlockCode::from_string`] applies to a new one.
     ///
     /// The minimum length governs *setting* a code. Releases before 0.8 let the
     /// setup wizard and config import set a shorter one, and refusing it at
@@ -190,13 +292,72 @@ impl UnlockCode {
     ///
     /// # Errors
     ///
-    /// Returns an error if Argon2 key derivation fails.
+    /// None today: no key is derived until the code is tried against a stored
+    /// blob. The `Result` is kept so callers need not change if that moves.
     pub fn for_existing(s: &str) -> Result<Self, OpenVTCError> {
-        let key = derive_passphrase_key(s.as_bytes(), b"openvtc-unlock-code-v1")?;
-        Ok(UnlockCode(SecretBox::new(Box::new(key.to_vec()))))
+        Ok(UnlockCode {
+            passphrase: SecretString::new(s.into()),
+            cache: std::sync::Mutex::new(UnlockCache::default()),
+        })
+    }
+
+    fn cache(&self) -> std::sync::MutexGuard<'_, UnlockCache> {
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The legacy fixed-salt key for this code (cached).
+    pub(crate) fn legacy_key(&self) -> Result<zeroize::Zeroizing<[u8; 32]>, OpenVTCError> {
+        let mut cache = self.cache();
+        if let Some(key) = &cache.legacy {
+            return Ok(key.clone());
+        }
+        let key = zeroize::Zeroizing::new(derive_passphrase_key(
+            self.passphrase.expose_secret().as_bytes(),
+            LEGACY_UNLOCK_INFO,
+        )?);
+        cache.legacy = Some(key.clone());
+        Ok(key)
+    }
+
+    /// The key for this code under `salt` (cached).
+    pub(crate) fn key_for_salt(
+        &self,
+        salt: &[u8; UNLOCK_SALT_LEN],
+    ) -> Result<UnlockKey, OpenVTCError> {
+        let mut cache = self.cache();
+        if let Some(key) = cache.salted.as_ref().filter(|k| k.salt() == salt) {
+            return Ok(key.clone());
+        }
+        let key = UnlockKey::derive_with_salt(self.passphrase.expose_secret().as_bytes(), *salt)?;
+        cache.salted = Some(key.clone());
+        Ok(key)
+    }
+
+    /// Drop the cached salted key (it belonged to a code that did not open
+    /// the blob).
+    pub(crate) fn forget_salted(&self) {
+        self.cache().salted = None;
+    }
+
+    /// The salted key a save should seal with: the stored blob's own when
+    /// one was opened with this code, otherwise a fresh salt (a profile still
+    /// in the legacy format, being moved off it).
+    ///
+    /// # Errors
+    ///
+    /// When Argon2 fails.
+    pub fn salted_key(&self) -> Result<UnlockKey, OpenVTCError> {
+        let mut cache = self.cache();
+        if let Some(key) = &cache.salted {
+            return Ok(key.clone());
+        }
+        let key = UnlockKey::derive(self.passphrase.expose_secret().as_bytes())?;
+        cache.salted = Some(key.clone());
+        Ok(key)
     }
 }
-
 /// Describes how the configuration secrets are protected at rest.
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -313,12 +474,12 @@ pub struct Config {
     #[cfg(feature = "openpgp-card")]
     pub token_user_pin: SecretString,
 
-    /// Argon2id-derived 32-byte symmetric key used to encrypt/decrypt `SecuredConfig`.
+    /// The salted unlock key `SecuredConfig` is sealed under, with its salt.
     ///
-    /// Wrapped in `SecretBox` to ensure the key material is zeroed on drop and
-    /// never accidentally logged or compared in constant time.  Set when the
-    /// user provides an unlock passphrase; `None` for plaintext or token flows.
-    pub unlock_code: Option<SecretBox<Vec<u8>>>,
+    /// Zeroed on drop and redacted in `Debug`. Set when the user provides an
+    /// unlock passphrase; `None` for plaintext or token flows. Saves seal with
+    /// it directly, so no save runs Argon2.
+    pub unlock_code: Option<UnlockKey>,
 
     /// Config v2 multi-community account model (personas + communities).
     ///
@@ -399,6 +560,49 @@ pub struct ExportedConfig {
     pub pc: public_config::PublicConfig,
     /// The secured (secret key material) portion of the configuration.
     pub sc: secured_config::SecuredConfig,
+}
+
+impl ExportedConfig {
+    /// Decrypt the protected tier this export carries, and pick the key the
+    /// importing profile should keep it under.
+    ///
+    /// Tries the export's own `protected_key` (exports made since that key
+    /// existed), then `legacy_seed` (the BIP32-derived seed older exports
+    /// used); each in the current format bound to
+    /// [`ProtectedBinding::Export`](protected_config::ProtectedBinding::Export)
+    /// and in the legacy unbound one. The returned key is the export's own key
+    /// when it has one, so the imported profile's first load needs no
+    /// fallback.
+    ///
+    /// # Errors
+    ///
+    /// When the export's key is malformed, or neither key opens the blob.
+    pub fn open_private(
+        &self,
+        legacy_seed: &SecretBox<Vec<u8>>,
+    ) -> Result<(ProtectedConfig, SecretBox<Vec<u8>>), OpenVTCError> {
+        use protected_config::ProtectedBinding;
+        let stored = self
+            .sc
+            .protected_key
+            .as_ref()
+            .map(decode_protected_key)
+            .transpose()?;
+        let save_seed = match &stored {
+            Some(key) => SecretBox::new(Box::new(key.expose_secret().clone())),
+            None => SecretBox::new(Box::new(legacy_seed.expose_secret().clone())),
+        };
+        let Some(blob) = &self.pc.private else {
+            return Ok((ProtectedConfig::default(), save_seed));
+        };
+        if let Some(key) = &stored
+            && let Ok(private) = ProtectedConfig::load(key, blob, ProtectedBinding::Export)
+        {
+            return Ok((private, save_seed));
+        }
+        let private = ProtectedConfig::load(legacy_seed, blob, ProtectedBinding::Export)?;
+        Ok((private, save_seed))
+    }
 }
 
 /// How much of the persona DID a messaging-profile label carries. Matches the
@@ -1827,7 +2031,6 @@ mod membership_profile_label_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secrecy::ExposeSecret;
 
     #[test]
     fn test_derive_passphrase_key_deterministic() {
@@ -1857,25 +2060,45 @@ mod tests {
     }
 
     #[test]
-    fn test_unlock_code_from_string_deterministic() {
+    fn test_unlock_code_legacy_key_deterministic() {
         let uc1 = UnlockCode::from_string("my-unlock-phrase").unwrap();
         let uc2 = UnlockCode::from_string("my-unlock-phrase").unwrap();
         assert_eq!(
-            uc1.0.expose_secret(),
-            uc2.0.expose_secret(),
-            "Same input string must produce the same unlock code"
+            *uc1.legacy_key().unwrap(),
+            *uc2.legacy_key().unwrap(),
+            "the legacy fixed-salt key is a function of the code alone"
         );
     }
 
     #[test]
-    fn test_unlock_code_from_string_different_inputs_differ() {
+    fn test_unlock_code_legacy_keys_differ_per_code() {
         let uc1 = UnlockCode::from_string("phrase-alpha-long").unwrap();
         let uc2 = UnlockCode::from_string("phrase-beta-long").unwrap();
-        assert_ne!(
-            uc1.0.expose_secret(),
-            uc2.0.expose_secret(),
-            "Different input strings must produce different unlock codes"
-        );
+        assert_ne!(*uc1.legacy_key().unwrap(), *uc2.legacy_key().unwrap());
+    }
+
+    /// #566: a key being set is salted at random, so the same code set twice
+    /// (two profiles, two users) yields unrelated keys.
+    #[test]
+    fn a_set_unlock_key_is_salted_per_derivation() {
+        let a = UnlockKey::derive(b"same unlock code").unwrap();
+        let b = UnlockKey::derive(b"same unlock code").unwrap();
+        assert_ne!(a.salt(), b.salt());
+        assert_ne!(a.key(), b.key());
+        // ...and the same salt reproduces the same key.
+        let again = UnlockKey::derive_with_salt(b"same unlock code", *a.salt()).unwrap();
+        assert_eq!(a.key(), again.key());
+        assert_eq!(format!("{a:?}"), "UnlockKey(****)");
+    }
+
+    /// The prompt's check and the load after it share one derivation.
+    #[test]
+    fn an_unlock_code_reuses_the_key_it_derived_for_a_salt() {
+        let code = UnlockCode::for_existing("cached code").unwrap();
+        let first = code.key_for_salt(&[3u8; UNLOCK_SALT_LEN]).unwrap();
+        assert_eq!(code.salted_key().unwrap().key(), first.key());
+        code.forget_salted();
+        assert_ne!(code.salted_key().unwrap().salt(), first.salt());
     }
 
     #[test]
