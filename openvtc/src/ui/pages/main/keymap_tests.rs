@@ -460,3 +460,61 @@ fn the_cursor_is_drawn_in_the_field() {
         .collect();
     assert!(drawn.contains("A▏l"), "{drawn}");
 }
+
+// ----- 80x24 (#576) ------------------------------------------------------
+
+fn screen(page: &MainPage, width: u16, height: u16) -> Vec<String> {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+    terminal
+        .draw(|frame| page.render(frame, ()))
+        .expect("render");
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(width as usize)
+        .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect())
+        .collect()
+}
+
+/// At the default terminal size every menu item is drawn whole — Quit
+/// included — and the footer row keeps the quit and help hints.
+#[test]
+fn at_80x24_the_menu_and_the_quit_hint_are_whole() {
+    let (page, _rx) = page_for(MainMenu::Communities, |s| {
+        s.main_page.content_panel.selected = false;
+        s.main_page.menu_panel.selected = true;
+    });
+    let rows = screen(&page, 80, 24);
+    let all = rows.join("\n");
+    for item in [
+        "Communities",
+        "My Relationships",
+        "TSP Relationships",
+        "My Credentials",
+        "Help / Status",
+        "Quit",
+    ] {
+        assert!(all.contains(item), "{item} is cut at 80x24:\n{all}");
+    }
+    let footer = rows.last().expect("a footer row");
+    assert!(footer.contains("F10: quit"), "{footer}");
+    assert!(footer.contains("?: keys"), "{footer}");
+    assert!(
+        !footer.trim_end().ends_with('·'),
+        "the footer keeps whole hints: {footer}"
+    );
+}
+
+/// With the Quit item selected on a short terminal, the menu scrolls so the
+/// selection is on screen.
+#[test]
+fn a_short_terminal_scrolls_the_menu_to_the_selection() {
+    let (page, _rx) = page_for(MainMenu::Quit, |s| {
+        s.main_page.content_panel.selected = false;
+        s.main_page.menu_panel.selected = true;
+    });
+    let all = screen(&page, 80, 16).join("\n");
+    assert!(all.contains("Quit"), "{all}");
+}

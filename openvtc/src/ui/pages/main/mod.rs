@@ -787,12 +787,18 @@ impl ComponentRender<()> for MainPage {
     fn render(&self, frame: &mut Frame, _props: ()) {
         keymap::begin_frame();
         text_input::set_cursor(self.focused_field().map(|f| self.field_cursor(&f)));
+        // On a short terminal the activity log gives up rows so the whole
+        // menu fits; on a narrow one the menu keeps the width its longest
+        // item needs (#576).
+        let area = frame.area();
+        let log_rows = if area.height < 32 { 4 } else { 8 };
         let [main_top, main_middle, main_log, main_bottom] =
-            Layout::vertical([Length(2), Min(0), Length(8), Length(1)]).areas(frame.area());
+            Layout::vertical([Length(2), Min(0), Length(log_rows), Length(1)]).areas(area);
 
         let top =
             Layout::horizontal([Percentage(35), Percentage(30), Percentage(35)]).split(main_top);
-        let middle = Layout::horizontal([Percentage(20), Min(0)]).split(main_middle);
+        let menu_width = components::menu_panel::MENU_WIDTH.max(area.width / 5);
+        let middle = Layout::horizontal([Length(menu_width), Min(0)]).split(main_middle);
 
         // Top-left: the working community name with a ▾ switcher affordance
         // (R-C-7a), or the dashboard title when there's no active community.
@@ -964,7 +970,19 @@ impl ComponentRender<()> for MainPage {
                 format!(" {feedback}"),
                 ratatui::style::Style::default().fg(COLOR_ORANGE),
             )),
-            None => bottom.extend(keymap::line(" ", &keymap::global()).spans),
+            None => {
+                // Quit and `?` lead, and the rest is kept only while it fits,
+                // so the row is never cut off mid-hint.
+                let mut keys = Vec::new();
+                for b in keymap::global() {
+                    keys.push(b);
+                    if keymap::line(" ", &keys).width() > usize::from(main_bottom.width) {
+                        keys.pop();
+                        break;
+                    }
+                }
+                bottom.extend(keymap::line(" ", &keys).spans);
+            }
         }
         frame.render_widget(
             Paragraph::new(Line::from(bottom)).alignment(Alignment::Left),

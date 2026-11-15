@@ -12,6 +12,9 @@ use ratatui::{
 };
 use strum::IntoEnumIterator;
 
+/// Columns the menu needs: its longest item, a marker and the border.
+pub const MENU_WIDTH: u16 = 23;
+
 // ****************************************************************************
 // Render the Main Menu panel
 // ****************************************************************************
@@ -56,10 +59,18 @@ impl MenuPanelState {
             }
         }
 
+        // Scroll so the selection is always on screen when the menu is
+        // taller than its panel (#576).
+        let inner = menu_block.inner(rect).height as usize;
+        let selected = MainMenu::iter()
+            .position(|m| m == self.selected_menu)
+            .unwrap_or(0);
+        let offset = selected.saturating_sub(inner.saturating_sub(1));
         frame.render_widget(
             Paragraph::new(lines)
                 .dark_gray()
                 .alignment(Alignment::Left)
+                .scroll((offset as u16, 0))
                 .block(menu_block),
             rect,
         );

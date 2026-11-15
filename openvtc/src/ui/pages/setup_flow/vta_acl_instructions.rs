@@ -103,6 +103,11 @@ pub struct VtaAclInstructions {
     /// The transport to force, or `None` for the runner's automatic choice.
     /// Only ever one the VTA advertises: `[TAB]` cycles through those.
     pub transport: Option<Protocol>,
+    /// How far the actions-and-commands body is scrolled. On a 24-row
+    /// terminal the commands do not fit below the intro (#576).
+    pub body_scroll: u16,
+    /// The furthest the body can scroll, from the last frame.
+    pub body_scroll_max: std::cell::Cell<u16>,
 }
 
 /// A failed step 2, as carried back to step 1.
@@ -140,6 +145,8 @@ impl Default for VtaAclInstructions {
             copy_status: None,
             retry_reason: None,
             transport: None,
+            body_scroll: 0,
+            body_scroll_max: std::cell::Cell::new(0),
         }
     }
 }
@@ -201,6 +208,20 @@ impl VtaAclInstructions {
                         Err(e) => CopyStatus::Failed(e),
                     });
             }
+            // The body scrolls; the context id is one line, so ↑/↓ are free.
+            KeyCode::PageDown | KeyCode::Down => {
+                let page = &mut state.vta_acl_instructions;
+                let step = if key.code == KeyCode::PageDown { 5 } else { 1 };
+                page.body_scroll = page
+                    .body_scroll
+                    .saturating_add(step)
+                    .min(page.body_scroll_max.get());
+            }
+            KeyCode::PageUp | KeyCode::Up => {
+                let page = &mut state.vta_acl_instructions;
+                let step = if key.code == KeyCode::PageUp { 5 } else { 1 };
+                page.body_scroll = page.body_scroll.saturating_sub(step);
+            }
             KeyCode::Tab => {
                 let advertised = &state.props.state.vta.advertised;
                 if offers_choice(advertised) {
@@ -251,7 +272,8 @@ impl VtaAclInstructions {
 
         let commands = PnmCommands::build(state, self.context_id.value());
 
-        let area = middle.inner(Margin::new(3, 2));
+        // A short terminal gives the margins back to the body.
+        let area = middle.inner(Margin::new(3, if middle.height < 24 { 1 } else { 2 }));
         let banner = self
             .retry_reason
             .as_ref()
@@ -365,23 +387,55 @@ impl VtaAclInstructions {
             .retry_reason
             .as_ref()
             .is_some_and(|r| matches!(r.failure, ProvisionFailure::GrantSpent(_)));
+        let body = self.body_lines(&commands, regrant);
+        let max_scroll = wrapped_height(&body, rest.width).saturating_sub(rest.height);
+        self.body_scroll_max.set(max_scroll);
+        let offset = self.body_scroll.min(max_scroll);
         frame.render_widget(
-            Paragraph::new(self.body_lines(&commands, regrant)).wrap(Wrap { trim: false }),
+            Paragraph::new(body)
+                .wrap(Wrap { trim: false })
+                .scroll((offset, 0)),
             rest,
         );
 
+        // The copy result takes the footer row, where it is seen whatever the
+        // body's scroll; the keys come back with the next key.
         let key = |k: &'static str| Span::styled(k, Style::new().fg(COLOR_BORDER).bold());
         let text = |t: &'static str| Span::styled(t, Style::new().fg(COLOR_TEXT_DEFAULT));
-        let bottom_line = Line::from(vec![
-            key("[F2-F4]"),
-            text(" copy  |  "),
-            key("[ESC]"),
-            text(" reset context  |  "),
-            key("[ENTER]"),
-            text(" I've run it  |  "),
-            key("[F10]"),
-            text(" quit"),
-        ]);
+        let bottom_line = match &self.copy_status {
+            Some(CopyStatus::Copied(method)) => Line::styled(
+                format!("✓ Copied via {method}. Now run it in your PNM session."),
+                Style::new().fg(COLOR_SUCCESS).bold(),
+            ),
+            Some(CopyStatus::Failed(reason)) => Line::styled(
+                format!("Could not copy to clipboard: {reason}"),
+                Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
+            ),
+            // Quit first; when the body scrolls, the labels shorten so the
+            // scroll hint fits an 80-column terminal too.
+            None if max_scroll > 0 => Line::from(vec![
+                key("[F10]"),
+                text(" quit · "),
+                key("[ENTER]"),
+                text(" done · "),
+                key("[F2-F4]"),
+                text(" copy · "),
+                key("[PgUp/PgDn]"),
+                text(" scroll · "),
+                key("[ESC]"),
+                text(" reset"),
+            ]),
+            None => Line::from(vec![
+                key("[F10]"),
+                text(" quit  |  "),
+                key("[F2-F4]"),
+                text(" copy  |  "),
+                key("[ENTER]"),
+                text(" I've run it  |  "),
+                key("[ESC]"),
+                text(" reset context"),
+            ]),
+        };
         frame.render_widget(
             Paragraph::new(bottom_line).block(Block::new().padding(Padding::new(2, 0, 1, 0))),
             bottom,
@@ -482,23 +536,6 @@ impl VtaAclInstructions {
             "     ",
         ));
 
-        match &self.copy_status {
-            Some(CopyStatus::Copied(method)) => {
-                lines.push(Line::default());
-                lines.push(Line::styled(
-                    format!("✓ Copied via {method}. Now run it in your PNM session."),
-                    Style::new().fg(COLOR_SUCCESS).bold(),
-                ));
-            }
-            Some(CopyStatus::Failed(reason)) => {
-                lines.push(Line::default());
-                lines.push(Line::styled(
-                    format!("Could not copy to clipboard: {reason}"),
-                    Style::new().fg(COLOR_WARNING_ACCESSIBLE_RED),
-                ));
-            }
-            None => {}
-        }
         lines
     }
 }
@@ -981,6 +1018,40 @@ mod tests {
         let text = rows.join(" ");
         assert!(text.contains("didn't accept"), "{text}");
         assert!(text.contains("3. When PNM prints"), "{text}");
+    }
+
+    /// At 80x24 the commands do not fit under the intro: the body scrolls to
+    /// the last of them (F4's), and the footer keeps quit and says so (#576).
+    #[test]
+    fn at_80x24_the_body_scrolls_to_every_command() {
+        let mut page = VtaAclInstructions::default();
+        let first = rows(&page, 80, 24).join("\n");
+        assert!(first.contains("[F10] quit"), "{first}");
+        assert!(first.contains("[PgUp/PgDn] scroll"), "{first}");
+        let max = page.body_scroll_max.get();
+        assert!(max > 0, "the body is taller than its space at 80x24");
+        page.body_scroll = max;
+        let last = rows(&page, 80, 24).join("\n");
+        assert!(last.contains("F4"), "the last command is reachable: {last}");
+    }
+
+    /// The copy result takes the footer row, where it is seen whatever the
+    /// body's scroll.
+    #[test]
+    fn the_copy_result_is_in_the_footer_row() {
+        let page = VtaAclInstructions {
+            copy_status: Some(CopyStatus::Copied("system clipboard".into())),
+            ..Default::default()
+        };
+        let rows = rows(&page, 80, 24);
+        let footer = rows
+            .iter()
+            .rev()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(footer.contains("Copied via system clipboard"), "{footer}");
     }
 
     fn press(flow: &mut SetupFlow, code: KeyCode) {
