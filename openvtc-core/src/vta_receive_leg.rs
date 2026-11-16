@@ -13,15 +13,14 @@
 //! launch-time context fetch, and the probe sent on a rebuilt session. The
 //! tracker is shared by clone, so every observer counts into the same leg.
 //!
-//! TODO(vta-sdk 0.64): replace this module with the SDK's own receive-leg
-//! health — `VtaClient::receive_health()` / `ReceiveLegHealth` and
+//! TODO: replace this module with the SDK's own receive-leg health —
+//! `VtaClient::receive_health()` / `ReceiveLegHealth` and
 //! `VtaError::RepliesNotArriving` (VTI #1978) — which counts every request on
-//! every clone of the session, not only the ones wrapped here. Blocked: OpenVTC
-//! cannot take vta-sdk 0.64 until `did-git-sign` (VGI) releases on it, and that
-//! release is blocked on a `trql-client` (affinidi-trust-registry-rs) release on
-//! trust-tasks 0.27 / TDK 0.23. [`ReceiveHealth`] mirrors `ReceiveLegHealth`
-//! field for field and [`REPLY_TIMEOUT_BREAKER`] mirrors the SDK's constant, so
-//! the switch is local to this module and its callers' `observe` lines.
+//! every clone of the session, not only the ones wrapped here. Nothing blocks
+//! it: the pinned vta-sdk (0.80) has all three. [`ReceiveHealth`] mirrors
+//! `ReceiveLegHealth` field for field and [`REPLY_TIMEOUT_BREAKER`] mirrors the
+//! SDK's constant, so the switch is local to this module and its callers'
+//! `observe` lines.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

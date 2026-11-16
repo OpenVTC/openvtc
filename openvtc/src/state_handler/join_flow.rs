@@ -2548,7 +2548,7 @@ mod tests {
         assert!(why.contains("asdasd"), "{why}");
         assert!(why.contains("did:webvh"), "and what one looks like: {why}");
     }
-    /// `is_duplicate_membership` mirrors `Account::live_community`: live
+    /// `is_duplicate_membership` mirrors `Account::has_live_membership`: live
     /// (Active/Pending) memberships are duplicates; inactive ones and unknown
     /// DIDs are not. Table-driven over the membership status.
     #[test]

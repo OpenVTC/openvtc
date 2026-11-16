@@ -1151,7 +1151,7 @@ fn prepare_remove(
 
 /// Loop-thread preparation for `RequestVrc`. Builds the VRC-request message +
 /// resolves the listener; the task sends it and `apply` records the task on
-/// success. Mirrors the pre-R14 `credential_actions::send_vrc_request` split.
+/// success. The same split as `credential_actions::prepare_vrc_request`.
 fn prepare_request_vrc(
     config: &mut Box<Config>,
     service: &Messaging,

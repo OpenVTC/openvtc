@@ -17,10 +17,9 @@
  * re-export it). The mirrored definitions are kept byte-for-byte faithful to
  * their `vti-common` originals to avoid drift on these security-relevant rules.
  *
- * TODO(VTI#392): the pure validators are being lifted into `vta-sdk` (the
- * lowest common dependency of server and clients). Once that lands and this
- * workspace bumps `vta-sdk`, delete this mirror and re-export from `vta-sdk`
- * instead — see OpenVTC/verifiable-trust-infrastructure#392.
+ * TODO(VTI#392): the pure validators now ship in `vta-sdk` (the pinned 0.80
+ * has `context_path` and `identifier`). Diff this mirror against them, then
+ * delete it and re-export from `vta-sdk` instead.
  *
  * The ancestry/ACL helper (`is_ancestor_or_self`) is deliberately **not**
  * mirrored: this client never makes authorization decisions — the VTA owns the

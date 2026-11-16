@@ -54,8 +54,8 @@
 //! - **`sensitivity: high`** means the value is *withheld from a listing that
 //!   did not explicitly ask for sensitive values* — a read-path control, not a
 //!   cosmetic one. It exists on the wire (`persona_attribute_list`'s
-//!   `include_sensitive`), and this pane still has one escalation where the
-//!   control needs two. See `pool::list`.
+//!   `include_sensitive`), and the identity pane makes it as a second
+//!   escalation of its own, separate from showing values. See `pool::list`.
 //!
 //! `release` is carried but not acted on: nothing in this client releases
 //! anything. It is read so that a caller can *say* what a type would require,

@@ -59,10 +59,9 @@ pub trait ConfigExtension {
     /// join flow (Stage 4) once a community has been chosen.
     ///
     /// The persona label/username is read from `state.username` — a name the
-    /// *operator* chose (the setup wizard via `Action::SetUsername`, or the
-    /// create-persona overlay). This replaces the previous
-    /// `setup_flow.username.username` read so the join flow needn't construct a
-    /// full `SetupFlow` UI component just to carry one string.
+    /// *operator* chose in the create-persona overlay; the join flow clears it
+    /// before minting, so it never needs a `SetupFlow` UI component just to
+    /// carry one string.
     ///
     /// An **empty** `username` mints the persona unlabelled and leaves
     /// `public.friendly_name` alone: the join flow has no operator-chosen name

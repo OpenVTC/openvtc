@@ -29,13 +29,6 @@ pub(crate) fn log_did(did: &str) -> std::borrow::Cow<'_, str> {
     openvtc_core::display::shorten_for_display(did, 30)
 }
 
-/// Resolve a DID to a human-readable display name.
-///
-/// Precedence: **user alias → verified agent name → truncated DID.** The user's
-/// own alias wins — it is unspoofable by definition and an explicit labelling
-/// choice; a verified agent name (`example.com/@alice`, already round-tripped
-/// before caching) comes next; the truncated DID is the last resort. The same
-/// order applies when a remote R-DID resolves through to its persona DID.
 /// What to call a community on screen.
 ///
 /// Precedence: the user's explicit display name, then the community's verified
@@ -62,18 +55,6 @@ pub(crate) fn community_label(
         })
 }
 
-/// Render a listener lifecycle event for the activity log.
-///
-/// A listener is identified by its DID, so every message here runs the
-/// identifier through [`resolve_did_to_display`] — the operator sees
-/// `webvh.storm.ws/@magic-depart` rather than 90 characters of `did:webvh:`.
-/// The logger task cannot do this itself: it is detached and has no `Config`,
-/// which is exactly why these lines showed raw DIDs.
-///
-/// Only the *display* changes. The listener id remains the DID everywhere it is
-/// used as an identity — it is a map key for cycling detection and reconnect
-/// matching, and DIDs sharing a trailing path segment across hosts would
-/// collide if it were shortened.
 /// A lifecycle line for the activity log: what the operator reads, plus the
 /// diagnostic detail behind `Enter`.
 pub(crate) struct LifecycleLine {
@@ -84,6 +65,16 @@ pub(crate) struct LifecycleLine {
 }
 
 /// Render a listener lifecycle event for the activity log.
+///
+/// A listener is identified by its DID, so every message here runs the
+/// identifier through [`resolve_did_to_display`] — the operator sees
+/// `webvh.storm.ws/@magic-depart` rather than 90 characters of `did:webvh:`.
+/// The logger task cannot do this itself: it is detached and has no `Config`.
+///
+/// Only the *display* changes. The listener id remains the DID everywhere it is
+/// used as an identity — it is a map key for cycling detection and reconnect
+/// matching, and DIDs sharing a trailing path segment across hosts would
+/// collide if it were shortened.
 ///
 /// The summary names the listener the way the rest of the UI names identities —
 /// alias, else verified agent name, else truncated DID — but a name **alone is
@@ -236,6 +227,13 @@ pub(crate) fn format_lifecycle_log(
     }
 }
 
+/// Resolve a DID to a human-readable display name.
+///
+/// Precedence: **user alias → verified agent name → truncated DID.** The user's
+/// own alias wins — it is unspoofable by definition and an explicit labelling
+/// choice; a verified agent name (`example.com/@alice`, already round-tripped
+/// before caching) comes next; the truncated DID is the last resort. The same
+/// order applies when a remote R-DID resolves through to its persona DID.
 pub(crate) fn resolve_did_to_display(config: &openvtc_core::config::Config, did: &str) -> String {
     // 1. User alias on the DID directly.
     if let Some(contact) = config.private.contacts.find_contact(did)
