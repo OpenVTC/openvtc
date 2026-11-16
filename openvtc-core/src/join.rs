@@ -1,21 +1,19 @@
-/*!
- * VTC join-ceremony client helpers.
- *
- * Sends the applicant side of the join ceremony to a VTC over DIDComm or,
- * when the community advertises `#tsp`, over TSP (#185 item 2f).
- *
- * The payload is the same either way: a Trust Task **document**, which is
- * what the VTC's `dispatch_trust_task_core` reads on every transport.
- * DIDComm wraps that document in an authcrypt envelope; TSP carries it bare
- * and seals it in the routing layer. So the transport choice changes the
- * wire, not the ceremony.
- *
- * Either way the sender is cryptographically proven — the authcrypt sender
- * over DIDComm, the sender VID over TSP — so no separate holder-binding
- * signature is needed. **REST remains unusable** for a `did:webvh` persona
- * regardless: the VTC's REST holder-binding verification accepts `did:key`
- * applicants only.
- */
+//! VTC join-ceremony client helpers.
+//!
+//! Sends the applicant side of the join ceremony to a VTC over DIDComm or,
+//! when the community advertises `#tsp`, over TSP (#185 item 2f).
+//!
+//! The payload is the same either way: a Trust Task **document**, which is
+//! what the VTC's `dispatch_trust_task_core` reads on every transport.
+//! DIDComm wraps that document in an authcrypt envelope; TSP carries it bare
+//! and seals it in the routing layer. So the transport choice changes the
+//! wire, not the ceremony.
+//!
+//! Either way the sender is cryptographically proven — the authcrypt sender
+//! over DIDComm, the sender VID over TSP — so no separate holder-binding
+//! signature is needed. **REST remains unusable** for a `did:webvh` persona
+//! regardless: the VTC's REST holder-binding verification accepts `did:key`
+//! applicants only.
 
 use std::sync::Arc;
 
@@ -60,7 +58,9 @@ pub const COMMUNITY_PROFILE_SHOW_RESPONSE_TYPE: &str = <crate::specs::vtc::commu
 /// and a sixth positional `&str` is how one call ends up with two of them
 /// swapped.
 pub struct Applicant<'a> {
+    /// The messaging client the documents are sent through.
     pub atm: &'a ATM,
+    /// The applicant's messaging profile.
     pub profile: &'a Arc<ATMProfile>,
     /// The persona applying — the authcrypt sender / TSP sender VID, and the
     /// `issuer` of every document sent through this route.
@@ -646,6 +646,7 @@ pub fn invitation_is_expired(vic: &Value, now: DateTime<Utc>) -> bool {
 /// client and the library cannot disagree about them. The pre-v1 DTG context
 /// is refused, with no alias.
 pub use dtg_credentials::{DTG_CONTEXT_V1 as DTG_CONTEXT, W3C_VC_V2_CONTEXT};
+/// The base `type` every DTG credential carries.
 pub const DTG_BASE_TYPE: &str = "DTGCredential";
 /// The `issuerScope` a community's invitation declares. The VIC a joining
 /// client presents is issued by the community itself

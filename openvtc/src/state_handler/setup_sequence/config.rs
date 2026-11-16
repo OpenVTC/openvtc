@@ -1,4 +1,4 @@
-/*! Contains specific Config extensions for the CLI Application. */
+//! Contains specific Config extensions for the CLI Application.
 
 use crate::state_handler::state::PublishState;
 

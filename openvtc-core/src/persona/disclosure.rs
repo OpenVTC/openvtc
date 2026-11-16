@@ -46,6 +46,7 @@ pub struct DisclosedClaim {
 /// One release, already reduced to what a panel row needs.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisclosureRow {
+    /// The release's identifier at the agent.
     pub disclosure_id: String,
     /// The trust context it happened in.
     pub context_id: String,
@@ -53,6 +54,7 @@ pub struct DisclosureRow {
     pub verifier_did: String,
     /// The persona it was made as.
     pub persona_did: String,
+    /// The attributes released, each with how strongly it was hidden.
     pub claims: Vec<DisclosedClaim>,
     /// What the verifier said it was for, if they said.
     pub purpose: Option<String>,
@@ -60,6 +62,7 @@ pub struct DisclosureRow {
     /// still live and still revocable, which is why it is named rather than
     /// folded in with the rest.
     pub durable_credential_id: Option<String>,
+    /// When the release was made, as the agent spells it.
     pub disclosed_at: String,
 }
 
@@ -199,7 +202,9 @@ impl ReleasedClaim {
 pub struct Preview {
     /// Single use; [`present`] consumes it.
     pub preview_id: String,
+    /// The claims that would leave.
     pub claims: Vec<ReleasedClaim>,
+    /// When the agent drops the preview, as the agent spells it.
     pub expires_at: String,
 }
 
@@ -256,7 +261,9 @@ pub async fn preview(
 /// What a present released.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Presented {
+    /// The release's identifier at the agent.
     pub disclosure_id: String,
+    /// The claims the artifact carried, in the renderer's order.
     pub claims: Vec<ReleasedClaim>,
 }
 
@@ -338,15 +345,12 @@ fn artifact_claims(artifact: &Value) -> Result<Vec<ReleasedClaim>, String> {
         .collect())
 }
 
-/// Every release, newest first, across every context.
-///
-/// `limit` caps the read: a history is append-only and unbounded, and a panel
-/// that asked for all of it would grow slower for the whole life of the
-/// account.
 /// One output format the agent can produce, and what it cannot carry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Renderer {
+    /// The renderer's identifier, as a disclosure names it.
     pub id: String,
+    /// The agent's description of the format, if it gives one.
     pub description: Option<String>,
     /// What this format discards. A renderer that drops provenance turns
     /// "my employer attested this" into something the holder merely said.
@@ -419,6 +423,11 @@ pub async fn renderers(client: &VtaClient) -> Result<Vec<Renderer>, OpenVTCError
     Ok(rows)
 }
 
+/// Every release, newest first, across every context.
+///
+/// `limit` caps the read: a history is append-only and unbounded, and a panel
+/// that asked for all of it would grow slower for the whole life of the
+/// account.
 pub async fn history(
     client: &VtaClient,
     limit: std::num::NonZeroU64,

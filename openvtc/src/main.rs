@@ -1,3 +1,12 @@
+//! The `openvtc` binary: argument parsing, profile and keyring selection,
+//! unlocking the config, and running the TUI or a headless command.
+//!
+//! `main` resolves the profile, loads (or offers to set up) the config, then
+//! either dispatches a subcommand (`health`, `join`, `repos`, `setup`, …) or
+//! starts the two TUI tasks — the state handler and the UI — joined until a
+//! terminate signal. Protocol and storage logic belong in `openvtc-core`, not
+//! here.
+
 #[cfg(feature = "openpgp-card")]
 use crate::cli::get_user_pin;
 use crate::colors::{CLI_CAUTION, CLI_ERROR, CLI_EXAMPLE, CLI_INFO, Themed};

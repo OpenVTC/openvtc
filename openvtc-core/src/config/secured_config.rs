@@ -1,12 +1,10 @@
-/*!
- *  Secured [crate::config::Config] information that is stored in the OS Secure Storage
- *
- *  * If using hardware tokens, then the data is encrypted/decrypted using the hardware token
- *  * If no hardware token, then may be using a passphrase to protect the data
- *  * If no hardware token, and no passphrase, then is in plaintext in the OS Secure Store
- *
- *  Must intially save bip32_seed first before any keys can be stored
- */
+//!  Secured [crate::config::Config] information that is stored in the OS Secure Storage
+//!
+//!  * If using hardware tokens, then the data is encrypted/decrypted using the hardware token
+//!  * If no hardware token, then may be using a passphrase to protect the data
+//!  * If no hardware token, and no passphrase, then is in plaintext in the OS Secure Store
+//!
+//!  Must intially save bip32_seed first before any keys can be stored
 
 #[cfg(feature = "openpgp-card")]
 use crate::config::TokenInteractions;
@@ -165,9 +163,13 @@ mod serde_opt_secret_str {
 /// Methods of protecting [SecuredConfig]
 #[derive(Clone, Debug, Default)]
 pub enum ProtectionMethod {
+    /// Encrypted under a hardware token.
     TokenEncrypted,
+    /// Encrypted under a key derived from a password or PIN.
     PasswordEncrypted,
+    /// Stored unencrypted.
     PlainText,
+    /// Not yet known: the config has not been read from storage.
     #[default]
     Unknown,
 }
@@ -603,6 +605,7 @@ pub struct SecuredConfig {
     #[serde(serialize_with = "serialize_sorted")]
     pub key_info: HashMap<String, KeyInfoConfig>,
 
+    /// How the config was protected when read. Never serialised.
     #[serde(skip, default)]
     #[zeroize(skip)]
     pub protection_method: ProtectionMethod,
@@ -1013,6 +1016,7 @@ pub struct KeyInfoConfig {
     #[zeroize(skip)] // chrono doesn't support zeroize
     pub create_time: DateTime<Utc>,
 
+    /// What the key is for.
     #[zeroize(skip)]
     #[serde(default)]
     pub purpose: KeyTypes,
@@ -1021,7 +1025,10 @@ pub struct KeyInfoConfig {
 #[derive(Clone, Serialize, Deserialize, Debug, Zeroize, ZeroizeOnDrop)]
 pub enum KeySourceMaterial {
     /// Sourced from BIP32 derivative, Path for this key
-    Derived { path: String },
+    Derived {
+        /// The BIP32 derivation path.
+        path: String,
+    },
 
     /// Sourced from an external Key Import
     /// multiencoded private key
@@ -1030,6 +1037,7 @@ pub enum KeySourceMaterial {
     /// `#[zeroize(skip)]`: `Secret<String>` zeroes itself on drop; the outer
     /// `Zeroize` derive cannot call `.zeroize()` on it directly.
     Imported {
+        /// The imported private key, multiencoded.
         #[serde(with = "serde_secret_str")]
         #[zeroize(skip)]
         seed: SecretString,
@@ -1037,7 +1045,10 @@ pub enum KeySourceMaterial {
 
     /// Managed by VTA service - key_id is VTA's opaque identifier
     /// No derivation paths are stored in openvtc for VTA-managed keys
-    VtaManaged { key_id: String },
+    VtaManaged {
+        /// The VTA's opaque identifier for the key.
+        key_id: String,
+    },
 }
 
 /// AES-256-GCM nonce size in bytes

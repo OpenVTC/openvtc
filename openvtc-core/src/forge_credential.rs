@@ -77,7 +77,9 @@ pub const AUTHOR_MARKER_KEY: &str = "openvtc.forgeAuthor";
 /// Who commits made in a checkout are authored as.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitAuthor {
+    /// The `user.name` commits carry.
     pub name: String,
+    /// The `user.email` commits carry.
     pub email: String,
 }
 
@@ -92,12 +94,17 @@ pub enum ForgeCredential {
     /// Whatever this machine's git config does — openvtc writes nothing.
     GitDefault,
     /// This SSH private key, and no other.
-    SshKey { path: PathBuf },
+    SshKey {
+        /// The key file's path.
+        path: PathBuf,
+    },
     /// This account of the `gh` CLI, over HTTPS. Commits are authored as the
     /// account too (its `users.noreply` address), unless `keep_author`: then
     /// the member's own git identity stays.
     GhAccount {
+        /// The gh account's login.
         login: String,
+        /// Keep the member's own git identity as the commit author.
         #[serde(default, skip_serializing_if = "is_false")]
         keep_author: bool,
     },
@@ -525,7 +532,9 @@ pub fn apply_to_checkout(
 /// One account the gh CLI holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GhAccount {
+    /// The forge host the account is logged in to.
     pub host: String,
+    /// The account's login on that host.
     pub login: String,
     /// The one gh uses for this host when no account is named.
     pub active: bool,
@@ -534,8 +543,11 @@ pub struct GhAccount {
 /// Why gh's accounts could not be listed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GhError {
+    /// No `gh` executable on `PATH`.
     NotInstalled,
+    /// gh did not answer within the timeout.
     TimedOut,
+    /// gh ran and failed; carries why.
     Failed(String),
 }
 

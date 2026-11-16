@@ -47,15 +47,21 @@ pub enum RDidPlan {
     /// task derives the keys from a clone of the root. The root is boxed to keep
     /// the enum compact (it is the largest field by far).
     Bip32 {
+        /// The BIP32 root the keys derive from.
         root: Box<ed25519_dalek_bip32::ExtendedSigningKey>,
+        /// Reserved derivation path for the verification (signing) key.
         v_path: String,
+        /// Reserved derivation path for the encryption (key-agreement) key.
         e_path: String,
+        /// The mediator DID the relationship DID routes through.
         mediator: String,
     },
     /// VTA: the task creates the keys on the always-on admin session (cloned —
     /// cheap, shares the connection pool).
     Vta {
+        /// The admin VTA session the keys are created on.
         admin_vta: vta_sdk::client::VtaClient,
+        /// The mediator DID the relationship DID routes through.
         mediator: String,
     },
 }
@@ -65,7 +71,9 @@ pub enum RDidPlan {
 /// the (shared, `Arc`-based) TDK resolver inside the task, so they are visible to
 /// the loop's TDK; only the `Config` bookkeeping is left for `apply`.
 pub struct CreatedRDid {
+    /// The new relationship DID (a did:peer).
     pub r_did: String,
+    /// `key_info` entries keyed by the did:peer verification-method secret id.
     pub key_info: Vec<(String, KeyInfoConfig)>,
 }
 

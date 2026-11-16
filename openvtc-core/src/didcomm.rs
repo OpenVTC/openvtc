@@ -65,7 +65,12 @@ use tracing::debug;
 pub enum MessagingError {
     /// The identity's ATM / profile / websocket could not be established.
     #[error("could not bring up listener {listener_id}: {reason}")]
-    Listener { listener_id: String, reason: String },
+    Listener {
+        /// The listener that failed to come up.
+        listener_id: String,
+        /// Why it failed.
+        reason: String,
+    },
     /// A send named a listener that is not installed. Distinct from a transport
     /// failure: this is a caller bug or a torn-down listener, not the network
     /// (R6.4 — the operator must be able to tell them apart).
@@ -73,7 +78,12 @@ pub enum MessagingError {
     UnknownListener(String),
     /// Packing the message for the recipient failed.
     #[error("could not pack message for {recipient}: {reason}")]
-    Pack { recipient: String, reason: String },
+    Pack {
+        /// The DID the message was for.
+        recipient: String,
+        /// Why packing failed.
+        reason: String,
+    },
     /// The delivery layer rejected the send or the outbox enqueue.
     #[error("send failed: {0}")]
     Send(String),
@@ -386,10 +396,14 @@ pub struct Messaging {
 /// the *same* transitions rather than each sampling independently and disagreeing.
 #[derive(Debug, Clone)]
 pub enum ListenerStatus {
+    /// The listener's connection is up.
     Connected {
+        /// The listener whose connection came up.
         listener_id: String,
     },
+    /// The listener's connection is down.
     Disconnected {
+        /// The listener whose connection went down.
         listener_id: String,
         /// Always `None` on the delivery layer: a transport surfaces a *state*,
         /// not a cause, and the framework's socket error has no equivalent here.
@@ -983,7 +997,10 @@ impl std::fmt::Display for MessagingTransport {
 pub enum DIDCommEvent {
     /// An inbound message that needs business-logic processing.
     InboundMessage {
+        /// The unpacked message.
         message: Box<Message>,
+        /// The sender as a routing hint: the transport's sender, else the
+        /// plaintext `from` header.
         #[allow(dead_code)]
         from: Option<String>,
         /// The sender the transport itself bound to the frame (the authcrypt
@@ -1060,11 +1077,14 @@ pub const DIDCOMM_EVENT_CHANNEL_CAPACITY: usize = 256;
 /// state. Returned to the caller so it can update the State accordingly
 /// without this helper having to know about the outer state shape.
 pub enum ReconnectOutcome {
+    /// The listener reconnected.
     Connected,
     /// The reconnect failed: why, and which class of failure (R6.4) — so the
     /// caller can tell an unreachable mediator from a refused one.
     Failed {
+        /// Why the reconnect failed.
         reason: String,
+        /// The class of failure.
         class: crate::errors::ErrorClass,
     },
 }
@@ -2202,10 +2222,15 @@ pub async fn send_message_via(
 #[derive(Debug, Clone)]
 pub enum LifecycleLog {
     /// A listener established its connection.
-    Connected { listener_id: String },
+    Connected {
+        /// The listener.
+        listener_id: String,
+    },
     /// A listener's connection dropped, with the transport error if there was one.
     Disconnected {
+        /// The listener.
         listener_id: String,
+        /// The transport error, if there was one.
         error: Option<String>,
     },
     /// A listener dropped and came back quickly — reported as the single event
@@ -2214,6 +2239,7 @@ pub enum LifecycleLog {
     // linking to it fails `rustdoc -D warnings`.
     /// The window is `RECONNECT_GRACE`.
     Reconnected {
+        /// The listener.
         listener_id: String,
         /// How long it was down, so the line is evidence rather than a claim
         /// about why.
@@ -2221,26 +2247,41 @@ pub enum LifecycleLog {
     },
     /// A listener dropped again within the cycling window — usually a duplicate
     /// connection fighting itself.
-    CyclingRapidly { listener_id: String },
+    CyclingRapidly {
+        /// The listener.
+        listener_id: String,
+    },
     /// A listener is being restarted after a backoff.
     Restarting {
+        /// The listener.
         listener_id: String,
+        /// Which consecutive rebuild attempt this is, from 1.
         attempt: u32,
+        /// The backoff that precedes this attempt.
         delay: std::time::Duration,
     },
     /// A rebuild attempt failed; the supervisor will try again after `retry_in`.
     RestartFailed {
+        /// The listener.
         listener_id: String,
+        /// Which consecutive rebuild attempt failed, from 1.
         attempt: u32,
+        /// Why the rebuild failed.
         error: String,
+        /// How long until the next attempt.
         retry_in: std::time::Duration,
     },
     /// The event stream lagged and dropped `count` events.
-    Missed { count: u64 },
+    Missed {
+        /// How many events were dropped.
+        count: u64,
+    },
     /// What a persona's collection claim came to, when it leaves the socket closed or open
     /// without a claim (VTI-NTF-083).
     Collection {
+        /// The persona listener.
         listener_id: String,
+        /// What the claim came to, in the member's terms.
         notice: crate::collection::CollectionNotice,
     },
 }

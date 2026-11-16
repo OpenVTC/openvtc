@@ -90,9 +90,11 @@ pub struct PersonaSigner {
 /// How to reach the VTA, from openvtc's own backend.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VtaEndpoint {
+    /// The VTA's DID.
     pub vta_did: String,
     /// Empty for a VTA reached only over DIDComm.
     pub vta_url: String,
+    /// The mediator the VTA is reached through over DIDComm, if any.
     pub mediator_did: Option<String>,
 }
 
@@ -119,7 +121,9 @@ impl VtaEndpoint {
 
 /// The signer's credential: a `did:key` and its private key.
 pub struct SignerCredential {
+    /// The signer's `did:key`.
     pub did: String,
+    /// Its private key, multibase-encoded.
     pub private_key_mb: SecretString,
 }
 
@@ -465,8 +469,11 @@ pub fn profile_name(label: &str, did_key_id: &str, profiles: &Profiles) -> Strin
 /// What [`install_identity`] wrote.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstalledIdentity {
+    /// The did-git-sign profile name the identity is stored under.
     pub profile: String,
+    /// The git config include file holding the identity's signing settings.
     pub include: PathBuf,
+    /// The identity's SSH public key, as did-git-sign wrote it.
     pub ssh_public_key: String,
     /// The credential this identity held before, if it was replaced — the
     /// caller revokes it.
@@ -543,8 +550,11 @@ pub fn install_identity(
 pub struct RemovedIdentity {
     /// The credential it held, for the caller to revoke.
     pub credential_did: Option<String>,
+    /// The did-git-sign profile names removed.
     pub profiles_removed: Vec<String>,
+    /// How many git config lines including the identity's files were removed.
     pub include_lines_removed: usize,
+    /// What could not be removed or updated, in words.
     pub warnings: Vec<String>,
 }
 
@@ -667,11 +677,14 @@ pub fn hook_file() -> Option<PathBuf> {
 /// The `did-git-sign` git will run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BinaryStatus {
+    /// Found, and new enough.
     Found {
+        /// The version it reports.
         version: String,
     },
     /// Older than [`MIN_BINARY`]: it cannot `enable --profile`.
     TooOld {
+        /// The version it reports.
         version: String,
     },
     /// Not on `PATH` — git cannot sign with it.
@@ -779,15 +792,20 @@ pub enum CheckoutSigning {
     /// includes the settings (`enable`); otherwise they come from a directory
     /// or global include.
     On {
+        /// The DID key id commits are signed as.
         did_key_id: String,
+        /// The did-git-sign profile naming that key, if any.
         profile: Option<String>,
+        /// Whether the checkout's own config includes the settings.
         here: bool,
     },
     /// Signed, but another tool's `core.hooksPath` replaces did-git-sign's
     /// hooks, so no `Signed-by-DID:` claim is written and CI fails the commit
     /// as `noSignerDid`.
     NoClaim {
+        /// The DID key id commits are signed as.
         did_key_id: String,
+        /// The `core.hooksPath` that replaces did-git-sign's hooks, as configured.
         hooks_path: String,
     },
 }

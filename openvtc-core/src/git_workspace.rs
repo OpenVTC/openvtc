@@ -48,8 +48,11 @@ pub const CLONE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// the top-level owner: `platform/tools/cli`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoCoords {
+    /// The forge host: `github.com`.
     pub host: String,
+    /// The top-level owner: `acme`.
     pub owner: String,
+    /// The repository's path under the owner: `widgets`.
     pub repo: String,
 }
 
@@ -241,6 +244,7 @@ impl CloneProtocol {
         }
     }
 
+    /// The protocol's display name: `HTTPS` or `SSH`.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -249,6 +253,7 @@ impl CloneProtocol {
         }
     }
 
+    /// The other protocol.
     #[must_use]
     pub fn toggled(self) -> Self {
         match self {
@@ -432,6 +437,7 @@ pub enum CredentialScope {
 /// Which credential a repository uses, and where that came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CredentialChoice {
+    /// The forge credential the repository uses.
     pub credential: ForgeCredential,
     /// `None`: nothing chosen, so the git default.
     pub scope: Option<CredentialScope>,
@@ -661,7 +667,9 @@ fn git_read(dir: &Path, args: &[&str]) -> Option<String> {
 /// The commit at `HEAD`, and whether it would pass as signed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeadCommit {
+    /// The abbreviated commit hash (`%h`).
     pub short: String,
+    /// The commit's subject line (`%s`).
     pub subject: String,
     /// git's `%G?`: `G` good, `U` good but unknown validity, `N` unsigned,
     /// `B` bad, `E` could not be checked, and the rest.
@@ -674,6 +682,7 @@ pub struct HeadCommit {
 /// they mean for signing.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct CheckoutFacts {
+    /// The checkout inspected.
     pub path: PathBuf,
     /// A git work tree at all.
     pub is_repo: bool,
@@ -683,8 +692,11 @@ pub struct CheckoutFacts {
     pub origin_matches: bool,
     /// The checked-out branch; `None` when detached.
     pub branch: Option<String>,
+    /// Whether the branch has an upstream.
     pub upstream: bool,
+    /// Commits ahead of the upstream.
     pub ahead: u32,
+    /// Commits behind the upstream.
     pub behind: u32,
     /// Changed or untracked paths.
     pub changed: u32,
@@ -698,10 +710,12 @@ pub struct CheckoutFacts {
     pub gpgsign: bool,
     /// The `core.hooksPath` in effect, from any scope.
     pub hooks_path: Option<String>,
+    /// The commit at `HEAD`; `None` when there is none to read.
     pub head: Option<HeadCommit>,
     /// `user.name` and `user.email` as git will author a commit here, from any
     /// scope.
     pub author_name: Option<String>,
+    /// `user.email` as git will author a commit here, from any scope.
     pub author_email: Option<String>,
     /// The forge account openvtc set this checkout to use
     /// ([`forge_credential::MARKER_KEY`]); `None` when it set none.

@@ -67,6 +67,7 @@ pub enum ContextKind {
 pub struct ContextOption {
     /// The full context path.
     pub context_id: String,
+    /// What kind of context this is.
     pub kind: ContextKind,
     /// The communities already in it, by VTC DID.
     pub communities: Vec<String>,
@@ -368,7 +369,9 @@ pub fn suggested_context_id(
 pub enum ContextUse {
     /// A membership lives in it.
     Membership {
+        /// The community's VTC DID.
         vtc_did: String,
+        /// The persona holding the membership.
         persona: PersonaId,
         /// The community's display name, or its DID.
         name: String,
@@ -376,13 +379,16 @@ pub enum ContextUse {
     /// A persona's keys and DID were minted in it; deleting the context
     /// deletes them.
     PersonaKeys {
+        /// The persona whose keys were minted there.
         persona: PersonaId,
         /// The persona's label, or its DID.
         name: String,
     },
     /// A vetting application wears its face there.
     VettingApplication {
+        /// The community's VTC DID.
         community: String,
+        /// The persona applying.
         persona: PersonaId,
     },
 }
@@ -440,6 +446,7 @@ pub fn context_uses(
 /// live there, and the finished membership being cleaned up was its only use.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PersonaTakenAlong {
+    /// The persona deleted.
     pub persona: PersonaId,
     /// The persona's `did:webvh`.
     pub did: String,
@@ -493,7 +500,10 @@ pub enum PersonaUse {
         name: String,
     },
     /// A vetting application, wherever its face is worn.
-    VettingApplication { community: String },
+    VettingApplication {
+        /// The community's VTC DID.
+        community: String,
+    },
     /// It is the persona OpenVTC is acting as.
     Active,
 }
@@ -528,6 +538,7 @@ pub enum DeletionRefusal {
     PersonaInUse {
         /// The persona's label, or its DID.
         name: String,
+        /// What uses the persona.
         uses: Vec<PersonaUse>,
     },
 }

@@ -1,6 +1,4 @@
-/*!
- *  Public [crate::config::Config] information that is stored in plaintext on disk
- */
+//!  Public [crate::config::Config] information that is stored in plaintext on disk
 
 use crate::{
     config::{
@@ -59,6 +57,8 @@ pub struct PublicConfig {
     #[serde(rename = "logs", default, skip_serializing)]
     pub legacy_logs: Logs,
 
+    /// The [`ProtectedConfig`] sealed by [`ProtectedConfig::save`], `None` before one
+    /// has been written.
     #[serde(default)]
     pub private: Option<String>,
 }

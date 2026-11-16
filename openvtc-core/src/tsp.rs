@@ -1,60 +1,58 @@
-/*!
- * The TSP send leg for VTC-facing ceremonies (#185 item 2f).
- *
- * ## Carriage
- *
- * A Trust Task goes out in the TSP binding envelope
- * (`{"type": ".../binding/tsp/0.1/envelope", "document": …}`), applied by
- * `vta_sdk::tsp_binding::wrap_envelope` — the same function `vta-service` and
- * the VTI SDK's own sessions use, so there is one implementation of the
- * binding rather than one per sender. See [`send_trust_task`].
- *
- * ## Why this is send-only
- *
- * Inbound TSP is **already arriving**. `DidCommTransport` owns the one mediator
- * websocket and surfaces both protocols off it, unpacking each TSP frame with
- * `atm.tsp().unpack` — which authenticates the sender VID — and tagging it
- * `Protocol::TSP`. So receiving needed no new transport, only routing: see
- * `didcomm::tsp_frame_to_message`, where those frames used to be dropped.
- *
- * What was missing is the other direction. `ATM::forward_and_send_message` — the
- * send half of [`crate::pack_and_send`] — builds a DIDComm `routing/2.0` forward
- * unconditionally, so it cannot carry a Trust Task document as TSP. This module
- * is that one missing call and nothing more.
- *
- * ## The peer is not on our mediator
- *
- * A community is addressed by the mediator *it* advertises, which is only our
- * own in a single-mediator deployment. Everywhere else the send is a federated
- * one: we post to our mediator, it forwards to theirs, theirs delivers. That is
- * carried entirely by the hop list — see `hops` (not an intra-doc link: it is
- * private) — and it is the part this module got wrong for as long as every
- * deployment shared one mediator.
- *
- * Send-only is also why there is **no second websocket**. The mediator permits
- * one channel per DID and evicts a second as `duplicate-channel`; a TSP send is
- * an HTTP post through the mediator, holding no socket of its own, so it cannot
- * duel with the DIDComm one. Same shape as the VTA leg
- * (`enable_tsp_trust_tasks`) and for the same reason.
- *
- * ## Why this is not a `MessageTransport`
- *
- * The delivery layer would take one — `MessagingService` holds any number of
- * transports over a single outbox, which is what `OutboxEntry::via` exists for —
- * and an earlier draft of this change registered a TSP leg that way.
- *
- * It was the wrong fit *here*. The ceremony sends do not go through the delivery
- * layer at all: [`crate::pack_and_send`] posts straight through the ATM, so a
- * TSP leg on the outbox would have given TSP joins durability that DIDComm joins
- * do not have, and would have meant threading a `Messaging` handle down into
- * `join_flow.rs`. Matching the transport this change is *about* — same call
- * shape, same failure semantics, only the wire differs — keeps the swap
- * reviewable and the two paths comparable.
- *
- * Putting the ceremony sends behind the outbox is worth doing, but for **both**
- * transports at once and as its own change; doing it here would have hidden a
- * durability change inside a transport change.
- */
+//! The TSP send leg for VTC-facing ceremonies (#185 item 2f).
+//!
+//! ## Carriage
+//!
+//! A Trust Task goes out in the TSP binding envelope
+//! (`{"type": ".../binding/tsp/0.1/envelope", "document": …}`), applied by
+//! `vta_sdk::tsp_binding::wrap_envelope` — the same function `vta-service` and
+//! the VTI SDK's own sessions use, so there is one implementation of the
+//! binding rather than one per sender. See [`send_trust_task`].
+//!
+//! ## Why this is send-only
+//!
+//! Inbound TSP is **already arriving**. `DidCommTransport` owns the one mediator
+//! websocket and surfaces both protocols off it, unpacking each TSP frame with
+//! `atm.tsp().unpack` — which authenticates the sender VID — and tagging it
+//! `Protocol::TSP`. So receiving needed no new transport, only routing: see
+//! `didcomm::tsp_frame_to_message`, where those frames used to be dropped.
+//!
+//! What was missing is the other direction. `ATM::forward_and_send_message` — the
+//! send half of [`crate::pack_and_send`] — builds a DIDComm `routing/2.0` forward
+//! unconditionally, so it cannot carry a Trust Task document as TSP. This module
+//! is that one missing call and nothing more.
+//!
+//! ## The peer is not on our mediator
+//!
+//! A community is addressed by the mediator *it* advertises, which is only our
+//! own in a single-mediator deployment. Everywhere else the send is a federated
+//! one: we post to our mediator, it forwards to theirs, theirs delivers. That is
+//! carried entirely by the hop list — see `hops` (not an intra-doc link: it is
+//! private) — and it is the part this module got wrong for as long as every
+//! deployment shared one mediator.
+//!
+//! Send-only is also why there is **no second websocket**. The mediator permits
+//! one channel per DID and evicts a second as `duplicate-channel`; a TSP send is
+//! an HTTP post through the mediator, holding no socket of its own, so it cannot
+//! duel with the DIDComm one. Same shape as the VTA leg
+//! (`enable_tsp_trust_tasks`) and for the same reason.
+//!
+//! ## Why this is not a `MessageTransport`
+//!
+//! The delivery layer would take one — `MessagingService` holds any number of
+//! transports over a single outbox, which is what `OutboxEntry::via` exists for —
+//! and an earlier draft of this change registered a TSP leg that way.
+//!
+//! It was the wrong fit *here*. The ceremony sends do not go through the delivery
+//! layer at all: [`crate::pack_and_send`] posts straight through the ATM, so a
+//! TSP leg on the outbox would have given TSP joins durability that DIDComm joins
+//! do not have, and would have meant threading a `Messaging` handle down into
+//! `join_flow.rs`. Matching the transport this change is *about* — same call
+//! shape, same failure semantics, only the wire differs — keeps the swap
+//! reviewable and the two paths comparable.
+//!
+//! Putting the ceremony sends behind the outbox is worth doing, but for **both**
+//! transports at once and as its own change; doing it here would have hidden a
+//! durability change inside a transport change.
 
 use std::sync::Arc;
 

@@ -132,6 +132,7 @@ pub struct PoolAttribute {
     /// The value, present only when the read asked for values **and** the store
     /// could produce one.
     pub value: Option<Value>,
+    /// Where the value comes from, which decides whether the holder may retype it.
     pub provenance: ProvenanceKind,
     /// A credential-backed value that could not be re-derived. Distinct from an
     /// absent [`value`](Self::value), which usually just means the read did not
@@ -144,6 +145,7 @@ pub struct PoolAttribute {
     /// Optimistic-concurrency token, passed back on edit so two editors cannot
     /// silently overwrite each other.
     pub version: u64,
+    /// When the attribute was last written, as the VTA wrote it.
     pub updated_at: String,
     /// Vault ids of credentials in which someone endorses this value.
     /// Inventory, not evidence: it never changes the provenance. Carried so an
@@ -294,9 +296,13 @@ pub struct AttributeDraft {
     /// The version the editor was opened against, so a concurrent edit is
     /// refused rather than silently overwritten. `None` when creating.
     pub expected_version: Option<u64>,
+    /// Vocabulary token: `name.legal`, `phone.mobile`.
     pub claim_type: String,
+    /// The holder's own words for their own picker. Never disclosed.
     pub label: Option<String>,
+    /// The value to store.
     pub value: Value,
+    /// The type of `value`.
     pub value_type: ValueType,
     /// The endorsements the attribute already has, sent back unchanged. This
     /// editor has no control for them; dropping them would lose a vouch by

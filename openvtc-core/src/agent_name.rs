@@ -281,15 +281,26 @@ pub enum IdentifierError {
     /// An agent name failed to resolve or verify. The message distinguishes the
     /// cause (not-found / not-a-DID / not-claimed-back / blocked address).
     #[error("agent name '{input}' could not be resolved: {detail}")]
-    AgentName { input: String, detail: String },
+    AgentName {
+        /// The input, as given.
+        input: String,
+        /// Why it did not resolve or verify, in words.
+        detail: String,
+    },
 
     /// The resolver could not reach the network (timeout or transport failure).
     #[error("could not reach the network resolving '{input}'")]
-    Unreachable { input: String },
+    Unreachable {
+        /// The input, as given.
+        input: String,
+    },
 
     /// It was not an agent name, and it is not a resolvable DID either.
     #[error("'{input}' is not a resolvable DID")]
-    InvalidDid { input: String },
+    InvalidDid {
+        /// The input, as given.
+        input: String,
+    },
 }
 
 /// Resolve user input that may be a DID **or** an agent name to a DID string.

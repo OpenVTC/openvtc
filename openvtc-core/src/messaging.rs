@@ -77,6 +77,7 @@ impl SeenMessages {
         Self::with_capacity(1024)
     }
 
+    /// New LRU holding at most `cap` entries.
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             cap,
@@ -108,6 +109,7 @@ impl Default for SeenMessages {
     }
 }
 
+/// The current time in seconds since the Unix epoch; 0 if the clock is before it.
 pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -244,6 +246,7 @@ pub struct CredentialIssueOutcome {
 }
 
 impl CredentialIssueOutcome {
+    /// Nothing changed and no join closed.
     pub const NONE: CredentialIssueOutcome = CredentialIssueOutcome {
         changed: false,
         closed_join: None,
@@ -941,12 +944,16 @@ pub fn handle_join_trust_task_error(
 /// notice's contents or a DID.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RemovalNoticeError {
+    /// The notice failed the operational-document checks.
     #[error("the notice {0}")]
     Document(#[from] crate::operational::OperationalError),
+    /// The notice's payload does not parse.
     #[error("the notice's payload is malformed")]
     Malformed,
+    /// The notice is addressed to one persona but names another.
     #[error("the notice is addressed to one persona but names another")]
     WrongRecipient,
+    /// No membership with that community is held for the persona named.
     #[error("the notice is for a membership we do not hold with that community")]
     NoMembership,
 }

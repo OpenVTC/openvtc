@@ -1,13 +1,12 @@
-/*! Contains the OpenVTC CLI Tool Configuration
- *
- * Configuration is spread across four different contexts:
- * 1. [Config]: Represents the active in-memory application config
- * 2. [secured_config::SecuredConfig]: Represents [Config] info that is stored securely (key info)
- * 3. [public_config::PublicConfig]: Represents [Config] info that is stored in plaintext on disk
- * 4. [protected_config::ProtectedConfig]: Represents [Config] info that is encryoted and stored on disk
- *
- * NOTE: Secure Config information is saved item by item as needed to the secure storage
- */
+//! Contains the OpenVTC CLI Tool Configuration
+//!
+//! Configuration is spread across four different contexts:
+//! 1. [Config]: Represents the active in-memory application config
+//! 2. [secured_config::SecuredConfig]: Represents [Config] info that is stored securely (key info)
+//! 3. [public_config::PublicConfig]: Represents [Config] info that is stored in plaintext on disk
+//! 4. [protected_config::ProtectedConfig]: Represents [Config] info that is encryoted and stored on disk
+//!
+//! NOTE: Secure Config information is saved item by item as needed to the secure storage
 
 use crate::{
     config::{
@@ -1662,8 +1661,11 @@ impl Display for KeyTypes {
 /// Implements [`Drop`] to zeroize contained key material when the struct goes out of scope.
 #[derive(Clone)]
 pub struct PersonaDIDKeys {
+    /// The signing key (the document's assertion method).
     pub signing: KeyInfo,
+    /// The authentication key.
     pub authentication: KeyInfo,
+    /// The decryption key (the document's key agreement).
     pub decryption: KeyInfo,
 }
 
@@ -1689,6 +1691,7 @@ pub struct KeyInfo {
 
     /// Section 5.5.2 of RFC 4880 - Expiry time if set is # of days since creation
     pub expiry: Option<TimeDelta>,
+    /// When the key was first created.
     pub created: DateTime<Utc>,
 }
 

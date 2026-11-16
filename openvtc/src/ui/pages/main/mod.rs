@@ -1,3 +1,18 @@
+//! The main page: the menu, the content panel and the header, and the keys
+//! that drive them.
+//!
+//! [`MainPage`] renders a read-only snapshot of `State` and turns key events
+//! into `Action`s; it never mutates `State` or touches `Config`. Each panel's
+//! drawing lives in `components/`, and its key handling in the panel's own
+//! `keys.rs` (or beside its renderer). This file holds the page-level router
+//! (`handle_key_event`: overlays first, then `?`, then the focused panel, then
+//! the global keys), the overlays (create persona, agent names, add VIC,
+//! community switcher) and the frame layout.
+//!
+//! Start with `handle_key_event` and `render`. Every view's keys are a
+//! `keymap::Binding` table, and `keymap_tests.rs` checks each handler against
+//! its footer.
+
 use crate::colors::{
     COLOR_BORDER, COLOR_DARK_GRAY, COLOR_ORANGE, COLOR_SOFT_PURPLE, COLOR_SUCCESS,
     COLOR_TEXT_DEFAULT, COLOR_WARNING_ACCESSIBLE_RED,

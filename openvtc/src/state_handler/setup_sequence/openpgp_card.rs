@@ -1,6 +1,4 @@
-/*!
- *   Handles writing of data to the OpenPGP Card
- */
+//!   Handles writing of data to the OpenPGP Card
 
 use crate::state_handler::state::PublishState;
 

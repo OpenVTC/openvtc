@@ -1,4 +1,4 @@
-/*! VTA client wrapper functions for the setup flow */
+//! VTA client wrapper functions for the setup flow
 
 use affinidi_tdk::TDK;
 use affinidi_tdk::did_common::Document;

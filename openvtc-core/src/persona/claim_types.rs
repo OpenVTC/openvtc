@@ -248,8 +248,11 @@ impl Release {
 /// What one claim type says about showing and releasing its value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ClaimTypeDefaults {
+    /// How carefully the value is shown to its holder.
     pub sensitivity: Sensitivity,
+    /// How the value is reduced when shown masked.
     pub mask: MaskStyle,
+    /// What it takes to let the value leave.
     pub release: Release,
 }
 
@@ -346,6 +349,7 @@ pub struct UnappliedClaimType {
 /// somebody can be told, and this is the half that tells them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UnappliedReport {
+    /// The declared claim types the agent refused, one row each.
     pub rejected: Vec<UnappliedClaimType>,
     /// Set when the extension file itself could not be read — a different
     /// sentence from a rejected row, because then *nothing* the deployment

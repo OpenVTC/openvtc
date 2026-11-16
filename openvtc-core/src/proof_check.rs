@@ -87,30 +87,43 @@ fn accepted_suites() -> Vec<CryptoSuite> {
 /// the document or its parties.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProofError {
+    /// The document carries no proof.
     #[error("no proof is attached")]
     NoProof,
+    /// The proof at this index does not parse as a Data Integrity proof.
     #[error("proof {0} is not a well-formed Data Integrity proof")]
     MalformedProof(usize),
+    /// The proof at this index has a `proofPurpose` the caller does not accept.
     #[error("proof {0} has a purpose this message does not accept")]
     WrongPurpose(usize),
+    /// The proof at this index uses a cryptosuite not checked here.
     #[error("proof {0} uses a cryptosuite this client does not accept")]
     UnsupportedSuite(usize),
+    /// The proof at this index names a verification method outside the signer's DID.
     #[error("proof {0} is signed by a key that does not belong to the signer")]
     ForeignVerificationMethod(usize),
+    /// The proof at this index names a key its purpose's relationship does not list.
     #[error("proof {0} is signed by a key the signer does not list for that purpose")]
     NotInRelationship(usize),
+    /// The proof at this index names a key absent from `verificationMethod`.
     #[error("proof {0} names a key the signer's DID document does not publish")]
     KeyNotPublished(usize),
+    /// The proof at this index names a key whose controller is not the signer.
     #[error("proof {0} names a key controlled by someone other than the signer")]
     ForeignController(usize),
+    /// The proof at this index names a key marked `revoked`.
     #[error("proof {0} names a key the signer has revoked")]
     KeyRevoked(usize),
+    /// The proof at this index names a key whose type does not fit its cryptosuite.
     #[error("proof {0} names a key of a type that does not match its cryptosuite")]
     KeyTypeMismatch(usize),
+    /// The proof at this index does not verify.
     #[error("proof {0} did not verify")]
     Invalid(usize),
+    /// The signer's DID document could not be resolved, or not in time.
     #[error("the signer's DID document could not be resolved")]
     SignerUnresolved,
+    /// The DID document's `id` is not the signer's DID.
     #[error("the resolved DID document is not the signer's")]
     DocumentMismatch,
 }

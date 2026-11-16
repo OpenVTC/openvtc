@@ -1,3 +1,13 @@
+//! The main page's state: [`MainPageState`] and how it is rebuilt from
+//! `Config`.
+//!
+//! `sync_from_config` maps the account (personas, memberships, credentials,
+//! relationships, vetting, tasks) to the display rows each panel shows; it
+//! reads `Config` and never writes it, and does no I/O. The activity log, the
+//! menu badges and the display helpers (`shorten_did`, `sanitize_display`)
+//! live here too. Per-panel view state is in [`content`] and the feature
+//! submodules.
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 

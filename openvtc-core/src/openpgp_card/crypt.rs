@@ -1,5 +1,4 @@
-/*! Encrypt/Decrypt functions using the openpgp-card
- */
+//! Encrypt/Decrypt functions using the openpgp-card
 
 use crate::{
     config::{

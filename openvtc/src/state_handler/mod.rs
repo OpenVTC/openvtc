@@ -1,3 +1,16 @@
+//! The state handler: the one task that owns and mutates `State` and `Config`.
+//!
+//! This module holds the start-up path (`StateHandler::main_loop` picks the
+//! setup wizard, the degraded State-A loop for an account with no persona, or
+//! the runtime), the degraded loop itself, the nav reducer both loops share
+//! (`handle_nav_action`) and the helpers the feature modules spawn work
+//! through. The runtime loop is [`runtime`]; its action handling is
+//! [`runtime_actions`]; feature logic is in the `*_actions` modules.
+//!
+//! Nothing here may block the loop on network or disk: off-loop work goes
+//! through `background_dispatch::dispatch`, saves through the
+//! `SaveScheduler`. See `docs/design/tui-architecture.md`.
+
 use crate::state_handler::main_page::status::Status;
 #[allow(unused_imports)]
 use crate::state_handler::state::PublishState;

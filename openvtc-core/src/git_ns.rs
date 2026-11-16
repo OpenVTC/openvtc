@@ -201,12 +201,15 @@ impl ConsentClass {
 /// Repository visibility on the forge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Visibility {
+    /// Visible to everyone.
     #[default]
     Public,
+    /// Visible only to those given access on the forge.
     Private,
 }
 
 impl Visibility {
+    /// The wire string.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -220,12 +223,19 @@ impl Visibility {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
     /// `git-ns/view/0.6` — what the caller may see, optionally narrowed.
-    View { resource: Option<String> },
+    View {
+        /// Narrow the answer to this namespace or repository resource.
+        resource: Option<String>,
+    },
     /// `git-ns/repo/create/0.4`.
     Create {
+        /// The namespace to create the repository in.
         namespace: String,
+        /// The repository name; sent lowercased.
         name: String,
+        /// Its visibility on the forge.
         visibility: Visibility,
+        /// A description for the forge; blank sends none.
         description: Option<String>,
         /// Who owns the new repository: other members' DIDs. Absent, the
         /// requester alone — which the VTC accepts only when the requester
@@ -238,30 +248,51 @@ pub enum Request {
     },
     /// `git-ns/right/grant/0.4`.
     Grant {
+        /// The DID to hold the right.
         subject: String,
+        /// The right granted.
         right: GitRight,
+        /// The namespace or repository resource it is granted on.
         resource: String,
+        /// When the grant lapses; `None` for never.
         expires_at: Option<DateTime<Utc>>,
+        /// Why, for the record; blank sends none.
         reason: Option<String>,
     },
     /// `git-ns/right/revoke/0.4`.
     Revoke {
+        /// The DID whose right is revoked.
         subject: String,
+        /// The right revoked.
         right: GitRight,
+        /// The namespace or repository resource it was granted on.
         resource: String,
+        /// Why, for the record; blank sends none.
         reason: Option<String>,
     },
     /// `git-ns/repo/transfer/0.3` — hand the caller's ownership to `to`.
-    Transfer { resource: String, to: String },
+    Transfer {
+        /// The repository to transfer.
+        resource: String,
+        /// The DID of the new owner.
+        to: String,
+    },
     /// `git-ns/repo/archive/0.3`.
-    Archive { resource: String },
+    Archive {
+        /// The repository to archive.
+        resource: String,
+    },
     /// `git-ns/drift/resolve/0.4` — answer one drift item the bridge
     /// reported on a repository: adopt the forge-side role as a right, or
     /// have the bridge revert the forge to the VTC's projection.
     DriftResolve {
+        /// The repository the drift item is on.
         resource: String,
+        /// Adopt the forge-side state or revert it.
         action: DriftAction,
+        /// The item, as the view reported it.
         item: DriftRef,
+        /// Why, for the record.
         reason: Option<String>,
         /// The right whose grant (adopt) or revocation (revert) the VTC gates
         /// this as, which is what its consent class follows — from
@@ -269,9 +300,15 @@ pub enum Request {
         weighs_as: GitRight,
     },
     /// `git-ns/account/link/0.1` — begin linking a forge account.
-    Link { forge: String },
+    Link {
+        /// The forge host whose account to link.
+        forge: String,
+    },
     /// `git-ns/account/link-status/0.1`.
-    LinkStatus { link_id: String },
+    LinkStatus {
+        /// The `linkId` `account/link` answered with.
+        link_id: String,
+    },
 }
 
 fn opt_text(s: Option<&String>) -> Option<&str> {
@@ -563,14 +600,23 @@ pub async fn build_signed(
 /// The VTC's answer to one request.
 #[derive(Clone, Debug)]
 pub enum Reply {
+    /// Answer to `view`.
     View(Box<view::Response>),
+    /// Answer to `repo/create`.
     Created(Box<create::Response>),
+    /// Answer to `right/grant`.
     Granted(Box<grant::Response>),
+    /// Answer to `right/revoke`.
     Revoked(Box<revoke::Response>),
+    /// Answer to `repo/transfer`.
     Transferred(Box<transfer::Response>),
+    /// Answer to `repo/archive`.
     Archived(Box<archive::Response>),
+    /// Answer to `drift/resolve`.
     DriftResolved(Box<resolve::Response>),
+    /// Answer to `account/link`.
     LinkStarted(Box<link::Response>),
+    /// Answer to `account/link-status`.
     LinkStatus(Box<link_status::Response>),
     /// A `trust-task-error`.
     Refused(Refusal),
@@ -578,7 +624,9 @@ pub enum Reply {
     /// was built against — a contract mismatch between client and VTC, which
     /// is neither a refusal nor a transport failure (R6.4).
     Unreadable {
+        /// The task whose response could not be read.
         task: String,
+        /// What the schema refused, sanitised for display.
         detail: String,
     },
 }
@@ -941,8 +989,11 @@ impl DriftAction {
 /// display only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DriftAccount {
+    /// The forge host.
     pub forge: String,
+    /// The account's forge id — authoritative.
     pub id: String,
+    /// The account's login, as last seen — display only.
     pub login: String,
 }
 
@@ -955,8 +1006,11 @@ pub struct DriftRef {
     /// `roleAdded`, `roleRemoved`, `roleChanged`, `requiredCheckMissing`,
     /// `protectionWeakened` or `bootstrapMissing`.
     pub kind: String,
+    /// The account, for the role types.
     pub account: Option<DriftAccount>,
+    /// What the forge shows, in its own vocabulary; `None` when nothing is there.
     pub observed: Option<String>,
+    /// What the projection calls for; `None` when it calls for nothing.
     pub expected: Option<String>,
 }
 
@@ -1084,18 +1138,23 @@ pub enum RepoStatus {
     /// Reserved; the bridge (or a person) is still creating it.
     /// `done` of `total` steps.
     Creating {
+        /// Steps complete.
         done: usize,
+        /// Steps in all.
         total: usize,
     },
     /// Active and matching the forge.
     Ok,
     /// Active, and the forge differs from the record in `count` ways.
     Drift {
+        /// How many drift items the view reported.
         count: usize,
     },
     /// Active; not yet compared with the forge.
     Checking,
+    /// Archived through `git-ns/repo/archive`; commit rights on it are revoked.
     Archived,
+    /// No longer governed: its namespace was unbound, or it moved outside it.
     Detached,
     /// Its last owner left; namespace admins hold it until they name one.
     Orphaned,
@@ -1168,10 +1227,12 @@ pub fn creation_steps(repo: &view::RepoSummary) -> Vec<(&'static str, bool)> {
 /// One of the caller's repositories, for the *My repos* list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MyRepo {
+    /// The repository's resource, `<forge>/<owner>/<name>`.
     pub resource: String,
     /// The strongest right the caller holds on it, explicitly or by
     /// implication.
     pub right: GitRight,
+    /// Where it is, for the row.
     pub status: RepoStatus,
 }
 
@@ -1230,9 +1291,11 @@ pub fn my_repos(resp: &view::Response, me: &str) -> Vec<MyRepo> {
 /// A namespace `me` may create repositories in, and who said so.
 #[derive(Clone, Debug)]
 pub struct Creatable {
+    /// The namespace.
     pub namespace: view::GitNamespace,
     /// `grantedBy` of the right that allows it.
     pub granted_by: String,
+    /// `grantedAt` of the right that allows it.
     pub granted_at: DateTime<Utc>,
 }
 
@@ -1275,13 +1338,18 @@ pub fn namespace_of<'a>(
 /// One person's right on a repository, as the repository view lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Person {
+    /// The DID holding the right.
     pub did: String,
+    /// The right held.
     pub right: GitRight,
     /// `None` for an owner the view names without a record the caller may
     /// see (owners are visible to every member; their records are not).
     pub granted_by: Option<String>,
+    /// When it was granted; `None` when no record is visible.
     pub granted_at: Option<DateTime<Utc>>,
+    /// When it lapses; `None` for never, or when no record is visible.
     pub expires_at: Option<DateTime<Utc>>,
+    /// The reason recorded with the grant, if any.
     pub reason: Option<String>,
     /// Whether the record is on the namespace rather than the repository —
     /// a namespace-wide committer, shown but not revocable from here.
@@ -1392,6 +1460,7 @@ pub enum BreakGlassState {
 }
 
 impl BreakGlassState {
+    /// Read a break-glass record: ratified once anyone has ratified it.
     #[must_use]
     pub fn of(bg: &view::BreakGlass) -> Self {
         if bg.ratified_by.is_some() {
@@ -1414,12 +1483,15 @@ impl BreakGlassState {
 /// One unratified break-glass record, as the banner shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BreakGlassAlert {
+    /// The DID that gave itself the right.
     pub subject: String,
     /// The right's wire string, as recorded.
     pub right: String,
+    /// The resource it is on.
     pub resource: String,
     /// `breakGlass.at` — what a ratification names (`breakGlassAt`).
     pub at: DateTime<Utc>,
+    /// The justification recorded with it.
     pub justification: String,
     /// When a policy delay lets it take effect, if that is still ahead.
     pub pending_until: Option<DateTime<Utc>>,

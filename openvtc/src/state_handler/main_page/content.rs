@@ -1,3 +1,12 @@
+//! The content panel's view state: one struct per panel and per overlay,
+//! with the forms, modes and rows each renders.
+//!
+//! These are plain data built by `MainPageState::sync_from_config` and the
+//! feature reducers, and read by the UI's renderers; they hold no `Config` and
+//! do no I/O. Small methods here answer questions about a view (which field is
+//! focused, which keys apply — e.g. `VettingState::form_moves`) so the
+//! renderer and the key handler ask the same function.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

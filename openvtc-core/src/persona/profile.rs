@@ -43,6 +43,7 @@ use crate::persona::pool::ProvenanceKind;
 /// A profile as a list row.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProfileSummary {
+    /// The profile's identifier at the VTA.
     pub profile_id: String,
     /// The holder's name for it — "Work", "Gaming". Never disclosed.
     pub name: String,
@@ -59,7 +60,9 @@ pub struct ProfileSummary {
     /// Credentials listed as this profile's inventory — what the persona can
     /// prove, as distinct from the evidence behind a credential-backed value.
     pub credential_ref_count: usize,
+    /// The profile's version as the VTA reports it.
     pub version: u64,
+    /// When the profile was last written, as the VTA spells it.
     pub updated_at: String,
     /// Retired: worn nowhere, out of every picker, kept with its history.
     pub retired: bool,
@@ -133,9 +136,13 @@ impl ProfileSummary {
 /// where it lives.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResolvedClaim {
+    /// Vocabulary token: `name.legal`, `phone.mobile`.
     pub claim_type: String,
+    /// The value the profile would present, if any.
     pub value: Option<Value>,
+    /// `string` / `number` / `boolean` / `date` / `object`, as the VTA spells it.
     pub value_type: String,
+    /// Where the value came from.
     pub provenance: ProvenanceKind,
     /// A credential-backed value that could not be re-derived.
     pub stale: bool,
@@ -220,6 +227,7 @@ impl ResolvedClaim {
 /// One profile, read in full.
 #[derive(Clone, Debug, Default)]
 pub struct ProfileDetail {
+    /// The profile as a list row.
     pub summary: ProfileSummary,
     /// Pool attributes referenced live — the set this build's editor owns.
     pub live_refs: Vec<String>,
@@ -427,6 +435,7 @@ pub async fn delete(
 /// What a [`delete`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Deleted {
+    /// The profile was deleted.
     Done,
     /// Refused because this many personas still wear the face, and the delete
     /// did not say to take it off them.

@@ -155,17 +155,29 @@ const DEFAULT_TICK_TEXT: &str = "P3D";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttestationMeta {
+    /// The community the attestation is for.
     pub community: String,
+    /// The `requirementsDigest` of the manifest the vetter attested against.
     pub requirements_digest: String,
+    /// How the vetter vetted.
     pub method: vta_sdk::protocols::vetting::VettingMethod,
+    /// Claim types the vetter verified.
     pub claims_verified: Vec<String>,
+    /// The vetter confirmed liveness.
     pub liveness_confirmed: bool,
+    /// The relationship the vetter declared with the applicant.
     pub declared_relationship: vta_sdk::protocols::vetting::VettingRelationship,
+    /// The applicant's identity commitment, as the vetter attested it.
     pub identity_commitment: String,
+    /// The `digestMultibase` of the card the vetter checked.
     pub card_digest_multibase: String,
+    /// First day of validity.
     pub valid_from: chrono::NaiveDate,
+    /// Last day of validity.
     pub valid_until: chrono::NaiveDate,
+    /// The label of the token the vetter attested with (`token/2026-09`).
     pub token_label: String,
+    /// That token's serial.
     pub token_serial: String,
 }
 
@@ -187,7 +199,9 @@ pub struct ApplicationView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DrawView {
+    /// The token label drawn under.
     pub label: String,
+    /// The tick of the drip drawn for.
     pub tick: u32,
 }
 

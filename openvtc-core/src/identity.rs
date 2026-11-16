@@ -1,18 +1,16 @@
-/*!
- * Active-identity resolution over the config v2 [`Account`] model.
- *
- * A community presents a persona; many communities may present the **same**
- * persona (D1 reuse). Because the DIDComm layer keys connections by DID and a
- * reused persona must share one connection, the **session key is the persona**,
- * not the community (see `docs/design/t1-active-identity-api.md`).
- *
- * This is the metadata-only routing layer: it resolves communities → personas
- * and groups them by the persona session that serves them. The runtime-heavy
- * `IdentityContext` (resolved DID Document, ATM messaging profile, key/secret
- * loading) is layered on during config load in a later T1 commit; this module
- * gives the session manager the persona-keyed routing it needs without runtime
- * state.
- */
+//! Active-identity resolution over the config v2 [`Account`] model.
+//!
+//! A community presents a persona; many communities may present the **same**
+//! persona (D1 reuse). Because the DIDComm layer keys connections by DID and a
+//! reused persona must share one connection, the **session key is the persona**,
+//! not the community (see `docs/design/t1-active-identity-api.md`).
+//!
+//! This is the metadata-only routing layer: it resolves communities → personas
+//! and groups them by the persona session that serves them. The runtime-heavy
+//! `IdentityContext` (resolved DID Document, ATM messaging profile, key/secret
+//! loading) is layered on during config load in a later T1 commit; this module
+//! gives the session manager the persona-keyed routing it needs without runtime
+//! state.
 
 use crate::config::account::{Account, CommunityRecord, PersonaId, PersonaRecord, VtcDid};
 use affinidi_tdk::{did_common::Document, messaging::profiles::ATMProfile};

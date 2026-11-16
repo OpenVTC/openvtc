@@ -63,9 +63,13 @@ impl Severity {
 /// actually using it — stays invisible unless something names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Remedy {
+    /// Hold a different value for one of the linked personas.
     UseDifferentValue,
+    /// Have the credential re-issued to the persona that uses it.
     ReissueCredentialToThisDid,
+    /// Accept the link as intended.
     CorrelateDeliberately,
+    /// Go ahead, and have the agent record the decision.
     ProceedAndRecord,
 }
 
@@ -102,12 +106,15 @@ impl Remedy {
 pub struct Finding {
     /// The attribute this is about, when the finding is about one.
     pub attribute_id: Option<String>,
+    /// How serious the agent judges the link.
     pub severity: Severity,
     /// Plain-language cause, in the agent's words.
     ///
     /// Shown rather than summarised: a severity with no explanation is a
     /// warning a holder learns to dismiss.
     pub why: String,
+    /// What the holder can do about it, as the agent listed them; remedies this build does not know
+    /// are dropped.
     pub remedies: Vec<Remedy>,
     /// Whether this link spans two or more worlds.
     ///

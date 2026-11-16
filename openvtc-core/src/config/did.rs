@@ -1,3 +1,13 @@
+//! The persona's `did:webvh`: creating it, and reading what its document
+//! advertises (mediator, TSP).
+//!
+//! [`normalize_webvh_url`] is the canonical entry point for turning what an
+//! operator types into a `did:webvh` URL; it delegates to `didwebvh-rs` and
+//! must stay that way — never hand-roll DID/URL mapping here (see
+//! `CLAUDE.md`). [`create_initial_webvh_did`] mints the first DID of a
+//! persona; [`validate_custom_path`] and [`explicit_path_mode`] check a path
+//! the operator chose.
+
 use affinidi_tdk::{
     did_common::{
         Document,

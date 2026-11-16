@@ -98,38 +98,55 @@ impl OperationalKind {
 /// document or a DID.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OperationalError {
+    /// The payload is not a Trust Task document.
     #[error("it is not a Trust Task document")]
     NotADocument,
+    /// The document has no `id`.
     #[error("it has no id")]
     NoId,
+    /// The signed `type` differs from the type the message was handled as.
     #[error("its signed type is not the one this message was handled as")]
     WrongType,
+    /// The `id` is longer than the replay record accepts.
     #[error("its id is too long")]
     IdTooLong,
+    /// The issuer already has as many live documents recorded as it may.
     #[error("too many recent documents from this community to take another yet")]
     QuotaExceeded,
+    /// The `issuer` is not the DID the message came from.
     #[error("it is not issued by the community it came from")]
     IssuerNotSender,
+    /// The document has no `recipient`.
     #[error("it names no recipient")]
     NoRecipient,
+    /// The `recipient` is none of our DIDs.
     #[error("it is addressed to someone else")]
     WrongRecipient,
+    /// The document has no readable `issuedAt`.
     #[error("it has no valid issuedAt")]
     NoIssuedAt,
+    /// The `issuedAt` is later than clock skew allows.
     #[error("it is dated in the future")]
     FromTheFuture,
+    /// The `issuedAt` is older than the kind's freshness window.
     #[error("it is too old to act on")]
     TooOld,
+    /// The `expiresAt` has passed or cannot be read.
     #[error("it has expired")]
     Expired,
+    /// The issuer's document with this `id` was already acted on.
     #[error("it was already acted on (replay)")]
     Replayed,
+    /// The issuer is a community we hold no membership with.
     #[error("it is from a community we hold no membership with")]
     NoStanding,
+    /// The document's proof failed to verify.
     #[error("its proof: {0}")]
     Proof(#[from] ProofError),
+    /// No off-loop check result exists for the document.
     #[error("it was not checked")]
     NotChecked,
+    /// The off-loop check timed out or failed before it finished.
     #[error("its check did not finish (timed out or failed)")]
     CheckUnfinished,
 }

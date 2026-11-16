@@ -93,7 +93,10 @@ impl ReplyKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Purpose {
     /// A renewal `member_did` asked for.
-    Renewal { member_did: String },
+    Renewal {
+        /// The member DID the renewal was asked for.
+        member_did: String,
+    },
     /// A question for the community's profile.
     CommunityProfile,
     /// An election request.

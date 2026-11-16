@@ -1,6 +1,5 @@
-/*! Configuration information that needs to be protected
- *   but is not as critical as private key information which is stored in the OS Secure Store
- */
+//! Configuration information that needs to be protected
+//!   but is not as critical as private key information which is stored in the OS Secure Store
 
 use crate::operational::SeenDocuments;
 use crate::witness::Witnessings;
@@ -91,6 +90,7 @@ pub struct Contacts {
     pub aliases: HashMap<String, Arc<Contact>>,
 }
 impl Contacts {
+    /// True when no contacts are held.
     pub fn is_empty(&self) -> bool {
         self.contacts.is_empty()
     }
@@ -527,6 +527,8 @@ impl ProtectedConfig {
         Ok(config)
     }
 
+    /// Derives the seed at BIP32 `path` below `bip32`: the derived signing key's
+    /// private bytes. The profile's pre-D12 encryption seed comes from `m/0'/0'/0'`.
     pub fn get_seed(
         bip32: &ExtendedSigningKey,
         path: &str,

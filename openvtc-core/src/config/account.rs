@@ -1,18 +1,16 @@
-/*!
- * Multi-community account model (config v2).
- *
- * Replaces the single-persona / single-VTA singleton with an `Account` that
- * owns a collection of [`PersonaRecord`]s and a collection of
- * [`CommunityRecord`]s. See `docs/design/multi-community-support.md` and
- * `docs/design/t1-active-identity-api.md`.
- *
- * Scope note: this module defines the **persisted metadata** model, stored
- * encrypted in the `ProtectedConfig` tier and treated by `Config::load_step2`
- * as the source of truth for the active persona. The account admin credential
- * (a secret) stays in `SecuredConfig`/keyring; persona key material is
- * VTA-managed (`key_refs` are non-secret ids, D12). Runtime resolution lives in
- * [`crate::identity`] (`IdentityContext` / `IdentityRegistry`).
- */
+//! Multi-community account model (config v2).
+//!
+//! Replaces the single-persona / single-VTA singleton with an `Account` that
+//! owns a collection of [`PersonaRecord`]s and a collection of
+//! [`CommunityRecord`]s. See `docs/design/multi-community-support.md` and
+//! `docs/design/t1-active-identity-api.md`.
+//!
+//! Scope note: this module defines the **persisted metadata** model, stored
+//! encrypted in the `ProtectedConfig` tier and treated by `Config::load_step2`
+//! as the source of truth for the active persona. The account admin credential
+//! (a secret) stays in `SecuredConfig`/keyring; persona key material is
+//! VTA-managed (`key_refs` are non-secret ids, D12). Runtime resolution lives in
+//! [`crate::identity`] (`IdentityContext` / `IdentityRegistry`).
 
 use crate::CredentialKind;
 use crate::config::KeyTypes;
@@ -1065,7 +1063,9 @@ impl CommunityRecord {
 /// across the network I/O.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingPoll {
+    /// The community the join was sent to.
     pub vtc_did: VtcDid,
+    /// The persona that applied.
     pub persona_ref: PersonaId,
     /// The **community's** request id when we hold it, `None` when we still
     /// hold our own submit-time placeholder (see
@@ -1105,11 +1105,17 @@ pub struct CredentialDelivery {
 #[serde(tag = "answer", rename_all = "camelCase")]
 pub enum CredentialResendAnswer {
     /// A re-delivery was queued at `at`.
-    Queued { at: DateTime<Utc> },
+    Queued {
+        /// When the community queued the re-delivery.
+        at: DateTime<Utc>,
+    },
     /// Too soon; `retry_after` is when to ask again, `None` once the
     /// community's limit is spent.
     #[serde(rename_all = "camelCase")]
-    RateLimited { retry_after: Option<DateTime<Utc>> },
+    RateLimited {
+        /// When to ask again; `None` once the community's limit is spent.
+        retry_after: Option<DateTime<Utc>>,
+    },
     /// The community says delivery is already acknowledged.
     NotNeeded,
 }

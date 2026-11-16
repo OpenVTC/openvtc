@@ -1,7 +1,13 @@
-/*! Library interface for OpenVTC
- *! Allows for other applications to use the same data structures and routines
- */
+//! OpenVTC's core library: the account configuration and its encrypted
+//! storage, DIDs and keys, the DIDComm and TSP messaging layers, the
+//! community protocols (join, vetting, elections, rooms, repos, witnessing)
+//! and inbound dispatch.
+//!
+//! The `openvtc` TUI is its consumer, and nothing here depends on a UI: every
+//! protocol decision is testable on its own. Heavy lifting for the trust
+//! infrastructure itself (VTA, credentials) is in `vta-sdk`.
 #![deny(unsafe_code)]
+#![deny(missing_docs)]
 
 use crate::errors::OpenVTCError;
 #[cfg(feature = "openpgp-card")]
