@@ -1739,7 +1739,9 @@ impl StateHandler {
                                 }
                             }
                         }
-                        None => in_flight.finish(outcome.domain()),
+                        // Freed only for a job that claimed it (#609).
+                        None if outcome.claimed() => in_flight.finish(outcome.domain()),
+                        None => {}
                     }
                     if minted_persona {
                         state

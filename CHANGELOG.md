@@ -200,6 +200,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A vetting send no longer starts alongside one already running**
+  ([#609](https://github.com/OpenVTC/openvtc/issues/609)). A vetting step the app sends on
+  its own (a refresh, a hidden-vetting step, a grant check) freed the vetting busy-guard
+  when it finished, even while a send the person started still held it, so a second
+  press could start a second send. Background work the app starts on its own now frees
+  only what it claimed.
 - **Headless commands say what the `OPENVTC_*` trust-anchor overrides did**
   ([#611](https://github.com/OpenVTC/openvtc/issues/611)). `community join`, `repo …`,
   `signing …` and `setup --vta-did` applied the overrides silently; they now print each

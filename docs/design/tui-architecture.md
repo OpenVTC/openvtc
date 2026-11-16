@@ -126,7 +126,9 @@ inbox accept/reject, context-DID delete):
    claim `dispatch` then makes cannot be lost in between.
    `background_dispatch::spawn_unclaimed` runs a job without claiming: for
    work the client starts on its own (a revocation check, a step of hidden
-   vetting) that must never be refused or block a person's job.
+   vetting) that must never be refused or block a person's job. Its outcome
+   comes back as `DispatchOutcome::Unclaimed` and is applied like any other,
+   but frees no domain: a person's job may hold it.
 3. The job returns a `DispatchOutcome` over an mpsc the loop owns. The dedicated
    `Some(outcome) = dispatch_rx.recv()` arm calls `apply_outcome`, which mutates
    `State`/`Config` **on the loop thread** and clears the busy-flag. Mutation

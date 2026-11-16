@@ -30,6 +30,8 @@ pub(crate) use answers::{
 };
 pub(crate) use desk::{desk_open, refresh_stale_modes};
 pub(crate) use dispatch::dispatch;
+#[cfg(test)]
+pub(crate) use jobs::Sent;
 pub(crate) use outcome::VettingOutcome;
 pub(crate) use pcs::{apply_pcs_outcome, pcs_work_due, start_pcs_work};
 pub(crate) use tickets::settle_pending_tickets;

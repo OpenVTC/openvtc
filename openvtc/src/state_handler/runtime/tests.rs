@@ -181,6 +181,77 @@ async fn a_dispatch_outcome_frees_its_domain() {
     assert!(!rt.in_flight.is_busy(domain));
 }
 
+/// A vetting job the client starts on its own, finishing while a person's
+/// send holds the `Vetting` domain, leaves the domain held: the person's
+/// second send is still refused as busy (#609).
+#[tokio::test]
+async fn an_unclaimed_vetting_job_does_not_free_a_persons_send() {
+    use crate::state_handler::actions::VettingAction;
+    use crate::state_handler::vetting_actions::{Sent, VettingOutcome};
+    use background_dispatch::{DispatchDomain, DispatchOutcome, InFlight, Job};
+
+    /// The client's own vetting send: holds nothing, reports a sent manifest.
+    struct UnheldSend;
+    impl Job for UnheldSend {
+        fn domain(&self) -> DispatchDomain {
+            DispatchDomain::Vetting
+        }
+        async fn execute(self) -> DispatchOutcome {
+            DispatchOutcome::Vetting(VettingOutcome::Sent {
+                sent: Box::new(Sent::Manifest {
+                    community: "did:web:vtc.example".into(),
+                }),
+                error: None,
+            })
+        }
+    }
+
+    let (mut rt, _h) = runtime().await;
+    let app = openvtc_core::vetting::applicant::Application::new(
+        "did:web:vtc.example",
+        openvtc_core::config::account::PersonaId::new(),
+        "did:key:zApplicant",
+        chrono::Utc::now(),
+    )
+    .expect("application");
+    rt.config.private.vetting.applications.push(app);
+    rt.state.main_page.sync_from_config(&rt.config);
+    assert_eq!(
+        rt.state.main_page.content_panel.vetting.applications.len(),
+        1
+    );
+
+    // The person's send is in flight: it holds the domain.
+    assert!(rt.in_flight.try_begin(DispatchDomain::Vetting));
+
+    // The client's own send finishes first, through the loop's outcome arm.
+    background_dispatch::spawn_unclaimed(UnheldSend, &rt.dispatch_tx);
+    let outcome = tokio::time::timeout(Duration::from_secs(10), rt.dispatch_rx.recv())
+        .await
+        .expect("the unclaimed job reports back")
+        .expect("the channel is open");
+    assert!(!outcome.claimed());
+    rt.on_dispatch_outcome(outcome).await;
+    assert!(
+        rt.in_flight.is_busy(DispatchDomain::Vetting),
+        "the person's claim survives an unclaimed outcome"
+    );
+
+    // A second send the person starts is refused as busy.
+    rt.state.main_page.content_panel.vetting.status_message = None;
+    rt.on_action(Action::Vetting(VettingAction::RefreshRequirements))
+        .await;
+    let status = rt
+        .state
+        .main_page
+        .content_panel
+        .vetting
+        .status_message
+        .as_ref()
+        .expect("the refusal is shown");
+    assert_eq!(status.text, InFlight::busy_message(DispatchDomain::Vetting));
+}
+
 #[tokio::test]
 async fn a_vta_sync_tick_without_a_session_starts_nothing() {
     let (mut rt, _h) = runtime().await;

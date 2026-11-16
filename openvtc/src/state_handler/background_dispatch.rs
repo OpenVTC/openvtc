@@ -386,6 +386,10 @@ pub(crate) enum DispatchOutcome {
     ),
     /// A witnessing finished (or failed).
     Witness(crate::state_handler::witness_actions::WitnessOutcome),
+    /// The outcome of a job spawned with [`spawn_unclaimed`]. Applied like the
+    /// outcome it wraps, but frees no domain: the job never held one, and a
+    /// person's job may hold it now.
+    Unclaimed(Box<DispatchOutcome>),
     /// A join-flow job finished. The owning loop hands it to its
     /// [`JoinDriver`](crate::state_handler::join_flow::JoinDriver) before
     /// [`apply_outcome`] sees it; reaching `apply_outcome` it only frees the
@@ -433,7 +437,14 @@ impl DispatchOutcome {
             DispatchOutcome::Witness(_) => DispatchDomain::Witness,
             DispatchOutcome::Join(_) => DispatchDomain::Join,
             DispatchOutcome::Panicked(domain) => *domain,
+            DispatchOutcome::Unclaimed(inner) => inner.domain(),
         }
+    }
+
+    /// Whether the job behind this outcome claimed its domain, so applying it
+    /// frees the domain. `false` only for [`DispatchOutcome::Unclaimed`].
+    pub(crate) fn claimed(&self) -> bool {
+        !matches!(self, DispatchOutcome::Unclaimed(_))
     }
 }
 
@@ -470,9 +481,14 @@ impl ProgressUpdate {
 /// [`DispatchOutcome::Panicked`] so `apply_outcome` always clears the flag.
 ///
 /// Private: every job reaches it through [`dispatch`] or [`spawn_unclaimed`].
+///
+/// `claimed` says whether the job holds `domain`; an unclaimed job's outcome
+/// (a synthesised `Panicked` included) is wrapped in
+/// [`DispatchOutcome::Unclaimed`] so applying it frees nothing.
 fn spawn_dispatch<F>(
     tx: tokio::sync::mpsc::UnboundedSender<DispatchOutcome>,
     domain: DispatchDomain,
+    claimed: bool,
     fut: F,
 ) where
     F: std::future::Future<Output = DispatchOutcome> + Send + 'static,
@@ -484,6 +500,11 @@ fn spawn_dispatch<F>(
                 tracing::error!(domain = ?domain, error = %e, "dispatch job panicked/cancelled");
                 DispatchOutcome::Panicked(domain)
             }
+        };
+        let outcome = if claimed {
+            outcome
+        } else {
+            DispatchOutcome::Unclaimed(Box::new(outcome))
         };
         let _ = tx.send(outcome);
     });
@@ -530,7 +551,7 @@ pub(crate) fn dispatch<J: Job>(
         on_busy(InFlight::busy_message(domain));
         return false;
     }
-    spawn_dispatch(dispatch_tx.clone(), domain, job.execute());
+    spawn_dispatch(dispatch_tx.clone(), domain, true, job.execute());
     true
 }
 
@@ -540,13 +561,15 @@ pub(crate) fn dispatch<J: Job>(
 /// an inbound message asked for, a step a background exchange owes — which
 /// must never be refused because a person's job holds the same domain, and
 /// must never stop that person starting one. Everything else goes through
-/// [`dispatch`]. The outcome is applied by [`apply_outcome`] like any other.
+/// [`dispatch`]. The outcome arrives as [`DispatchOutcome::Unclaimed`] and is
+/// applied by [`apply_outcome`] like any other, except that it frees no domain:
+/// a person's job may hold that domain while this one runs (#609).
 pub(crate) fn spawn_unclaimed<J: Job>(
     job: J,
     dispatch_tx: &tokio::sync::mpsc::UnboundedSender<DispatchOutcome>,
 ) {
     let domain = job.domain();
-    spawn_dispatch(dispatch_tx.clone(), domain, job.execute());
+    spawn_dispatch(dispatch_tx.clone(), domain, false, job.execute());
 }
 
 /// Apply a completed [`DispatchOutcome`] to `state` and clear the domain's
@@ -608,6 +631,13 @@ pub(crate) fn apply_outcome(
     outcome: DispatchOutcome,
 ) -> AfterApply {
     let domain = outcome.domain();
+    // An unclaimed job's outcome is applied as the outcome it wraps, but the
+    // domain is freed only for a job that claimed it.
+    let (outcome, claimed) = match outcome {
+        DispatchOutcome::Unclaimed(inner) => (*inner, false),
+        outcome => (outcome, true),
+    };
+    let mut in_flight = Release { in_flight, claimed };
 
     // Progress is the one outcome that leaves its domain busy: the job is still
     // running. Handled before the match so the `finish` at the end cannot be
@@ -787,6 +817,8 @@ pub(crate) fn apply_outcome(
         // Handled above, before the domain is finished. Listed because the
         // match must stay exhaustive.
         DispatchOutcome::Progress(_) => unreachable!("progress returns before this match"),
+        // Unwrapped above; `spawn_dispatch` never nests one in another.
+        DispatchOutcome::Unclaimed(_) => unreachable!("unwrapped before this match"),
         DispatchOutcome::Panicked(domain) => {
             // The job panicked and produced no real outcome. Surface a generic
             // failure so the user isn't left staring at a stuck "in progress"; the
@@ -811,6 +843,21 @@ pub(crate) fn apply_outcome(
     }
     in_flight.finish(domain);
     AfterApply::Nothing
+}
+
+/// [`InFlight::finish`] for [`apply_outcome`], which frees the domain only
+/// when the outcome's job claimed it.
+struct Release<'a> {
+    in_flight: &'a mut InFlight,
+    claimed: bool,
+}
+
+impl Release<'_> {
+    fn finish(&mut self, domain: DispatchDomain) {
+        if self.claimed {
+            self.in_flight.finish(domain);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -965,6 +1012,41 @@ mod tests {
         );
     }
 
+    /// An unclaimed job's outcome — a panic included — is applied without
+    /// freeing the domain a claimed job holds (#609).
+    #[test]
+    fn an_unclaimed_outcome_leaves_a_held_domain_held() {
+        let mut state = State::default();
+        let mut config = test_config();
+        let mut save = crate::state_handler::save_coalesce::SaveScheduler::new("test");
+        let mut in_flight = InFlight::default();
+        assert!(in_flight.try_begin(DispatchDomain::Vetting));
+
+        let outcome = DispatchOutcome::Unclaimed(Box::new(DispatchOutcome::Panicked(
+            DispatchDomain::Vetting,
+        )));
+        assert!(!outcome.claimed());
+        assert_eq!(outcome.domain(), DispatchDomain::Vetting);
+        apply_outcome(
+            &mut state,
+            &mut config,
+            &mut save,
+            &mut in_flight,
+            &mut openvtc_core::pending_replies::PendingReplies::default(),
+            outcome,
+        );
+
+        assert!(in_flight.is_busy(DispatchDomain::Vetting));
+        assert!(
+            state
+                .main_page
+                .activity_log
+                .iter()
+                .any(|e| e.summary.contains("Vetting send failed")),
+            "the wrapped outcome is still applied"
+        );
+    }
+
     /// `spawn_dispatch` converts a panicking job into a synthetic
     /// [`DispatchOutcome::Panicked`] for the right domain, rather than silently
     /// dropping the outcome (which would leave the domain busy forever).
@@ -972,7 +1054,7 @@ mod tests {
     async fn spawn_dispatch_panic_yields_panicked_outcome() {
         use tokio::sync::mpsc;
         let (tx, mut rx) = mpsc::unbounded_channel::<DispatchOutcome>();
-        spawn_dispatch(tx, DispatchDomain::Inbox, async {
+        spawn_dispatch(tx, DispatchDomain::Inbox, true, async {
             panic!("boom");
             #[allow(unreachable_code)]
             DispatchOutcome::Panicked(DispatchDomain::Inbox)
