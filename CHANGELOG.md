@@ -39,6 +39,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The admin VTA session's receive health and context-path validation come from
+  vta-sdk** ([#610](https://github.com/OpenVTC/openvtc/issues/610)). The health check
+  reads `VtaClient::receive_health()`, which counts every request on every clone of the
+  session rather than only the calls OpenVTC wrapped; the breaker (two reply timeouts in
+  a row) and the panel's wording are unchanged. A session whose VTA does not advertise
+  TSP is not counted by the SDK, so its receive health stays at rest. Context paths are
+  validated by `vta_sdk::context_path` and `vta_sdk::identifier`, which accept and refuse
+  exactly what the local copy did, with the same messages.
 - **The UI says *community* for a community and *VTC* only for the service behind it**
   ([#554](https://github.com/OpenVTC/openvtc/issues/554)), as the README's glossary has
   it: the Communities and TSP panels label the community's DID "community", and the CLI
